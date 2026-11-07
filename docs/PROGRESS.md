@@ -7,7 +7,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 
 ## In progress
 - Phase 0 step 1: answers received. Pending: worker host (Scaleway proposed, explained), golden examples timing (explained).
-- Drafting CHANNELS.md, COMPLIANCE.md, CALCULATION_RULES.md (no dependency on blocked downloads).
+- Drafted CHANNELS.md (policy sources partly unverified: brevo.com, business.whatsapp.com blocked). Drafting COMPLIANCE.md, CALCULATION_RULES.md.
 
 ## Next
 - Step 2: download EU NPL template sources (blocked: network allowlist, see below).
