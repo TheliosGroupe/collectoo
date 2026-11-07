@@ -189,7 +189,7 @@ The adapter interface (send, inbound, status webhook, proof, cost) is in `docs/A
 
 ## 8. Open questions
 
-**For the founder:**
+**For the founder** (answered 2026-11-07: Brevo → declare the use case in writing + standby email/SMS provider; WhatsApp → one WABA per client brand):
 - **Brevo flags debt collection in its anti-spam policy.** Default: keep Brevo, declare the use case to them in writing before go-live, and build a standby provider from day one. Alternative: pick a provider that explicitly accepts collection.
 - **WhatsApp:** one WABA per client brand, or one Collectoo WABA? Default: per brand where the client agrees.
 

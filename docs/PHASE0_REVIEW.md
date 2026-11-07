@@ -25,7 +25,7 @@ _2026-11-07. Answers go back into `docs/PROGRESS.md` (decisions) and the relevan
 | 1M-row benchmark | Keep it, but as a manual benchmark script, not a CI job. |
 | Rule packs | M3 order for the first segment: B2B invoice → B2C invoice → professional loan → consumer loan. |
 
-## C. Founder questions (answer "1 ok, 2 b…")
+## C. Founder questions (answered, see §D)
 
 1. **PSP (A1):** SEPA transfer to the dedicated account first; Stripe in test mode until it confirms in writing. Default: ok
 2. **R124-4 letter in M4 (A2).** Default: ok
@@ -41,3 +41,23 @@ _2026-11-07. Answers go back into `docs/PROGRESS.md` (decisions) and the relevan
 12. **Vercel + DPF (A5).** Default: ok
 
 Questions for counsel (no need to answer now; rule packs ship conservative defaults): `COMPLIANCE.md` §9 OQ-1…OQ-17, `CHANNELS.md` §8, `ARCHITECTURE.md` §17. Other domain questions with proposed defaults: end of `DOMAIN.md`.
+
+## D. Founder decisions (2026-11-07)
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Payment rail | **Stripe as main rail** (founder's call, despite A1). Before go-live: written approval from Stripe. The payment layer stays provider-agnostic, so a fallback PSP or SEPA transfer can be added without rework. |
+| 2 | R124-4 first letter | **Built in M4** as a guardrail. M6 keeps registered mail/LRE and bailiffs. |
+| 3 | Phase A bank scope | **Purchased claims accepted too** (founder's call, despite A3). Licence question stays open for counsel; `claim_ownership_period.mandate_type` records the case so it can be restricted later. |
+| 4 | Invoices | One account per (client, debtor); invoices are items. |
+| 5 | Co-debtors | One dossier per loan, all parties attached. |
+| 6 | Bank tape opening balance | Components 3.09–3.11 + balancing line up to 3.12, flagged in the data-quality report. |
+| 7 | Holds from tape flags | **Deceased:** collectible against heirs → stop contacting the deceased, open an estate task (heirs/notary); no account hold. **Insolvency:** a hold needs proof: the Banque de France admissibility decision (surendettement, hold starts at admissibility) or the court judgment (procédure collective). A tape flag alone opens an ops task to get the proof. |
+| 8 | Broken plan | 10 days' grace, configurable per client. |
+| 9 | Recalled claims | Receive late payments, issue a receipt, forward in the next remittance. |
+| 10 | Template-mandatory fields | Warnings; blocking only for a regulatory-grade tape. |
+| 11 | WhatsApp | One WABA per client brand. |
+| 12 | Vercel | Vercel EU region + DPF/SCCs. |
+| — | Brevo | Keep; declare the use case in writing; standby email/SMS provider wired. |
+| — | CNIL délibération | Cite Loi 78-17 art. 82 only. |
+| — | PR #1 | Claude watches the PR. |

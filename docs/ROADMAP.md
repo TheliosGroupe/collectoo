@@ -136,8 +136,8 @@ _Phase 0 draft, 2026-11-07. Each task fits in under one day. 🔒 = blocked on f
 
 ## M4–M9 outline (detailed later)
 
-- **M4 Flows + channels:** flow state table (`next_run_at`), pg_cron tick → pgmq, idempotent step executor; React Flow builder (draft/publish, versions, migration of in-flight accounts, simulation with cost); channel adapter interface + capability descriptors; email/SMS (Brevo + standby), WhatsApp (Meta Cloud API sandbox), simple letter (hybrid-mail sandbox); guardrails (holds, consent, mandatory mentions); fallback on restriction. **Proposed:** pull the R124-4 locked first-letter template and validator (CPCE-04/05) into M4 so flows can't send a later message before it.
-- **M5 Debtor portal:** unique link + OTP + light identity check, *décompte*, Stripe test-mode payments, plans inside the envelope, disputes with upload, preferences, portal chat (mock assistant).
+- **M4 Flows + channels:** flow state table (`next_run_at`), pg_cron tick → pgmq, idempotent step executor; React Flow builder (draft/publish, versions, migration of in-flight accounts, simulation with cost); channel adapter interface + capability descriptors; email/SMS (Brevo + standby), WhatsApp (Meta Cloud API sandbox), simple letter (hybrid-mail sandbox); guardrails (holds, consent, mandatory mentions); fallback on restriction. **Decided (founder, 2026-11-07):** the R124-4 locked first-letter template and validator (CPCE-04/05) are built in M4, so flows can't send any message before it.
+- **M5 Debtor portal:** unique link + OTP + light identity check, *décompte*, Stripe test-mode payments (founder chose Stripe as main rail; written approval from Stripe needed before go-live, since Stripe lists debt collection agencies as prohibited/restricted), plans inside the envelope, disputes with upload, preferences, portal chat (mock assistant).
 - **M6 Legal-grade comms:** R124-4 letter archive and proof, LRAR + LRE (consent check, LRE-01), bailiff escalation package (export), prescription alerts.
 - **M7 Back-office + client portal:** collector workspace and queues, unified inbox, client portal (claims submission, statements, reporting), SMB self-serve onboarding with online mandate, API + webhooks.
 - **M8 Analytics + decisioning:** event store, dashboards (liquidation, curves, contact rate, promise-kept, cost-to-collect), Thompson-sampling bandits with holdouts (⚖️ OQ-14 before any propensity model).
@@ -161,4 +161,4 @@ _Phase 0 draft, 2026-11-07. Each task fits in under one day. 🔒 = blocked on f
 
 - **OCR and structured extraction** in M1 (BRIEF §3.2 bulk documents) is heavy for a boarding slice. Proposed: M1 links documents by reference; extraction moves to "Later" with the AI features.
 - **Order of M3 rule packs** follows the first segment: B2B invoice, B2C invoice, professional loan, consumer loan.
-- **R124-4 first letter** is a precondition for any outbound message to a real debtor; see the M4 proposal above.
+- **R124-4 first letter** is a precondition for any outbound message to a real debtor; decided: built in M4.

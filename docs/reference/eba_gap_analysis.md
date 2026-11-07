@@ -27,7 +27,7 @@ Legend: **Partial** = the template has a related field, cited. Table names are L
 | Counterparty identity | Partial: `1.02`, `1.03`, `1.06` (Households / NFC-SME / NFC-other), `1.07` DOB, `1.10`–`1.13` identifiers | No first/last name split; no birth place; no **consumer vs professional capacity per contract** (FINREP sector `1.06` puts sole traders under *Households*) | `party(kind: natural_person \| legal_entity)`, `party_identifier(scheme: siren \| siret \| lei \| national_id \| seller_ref, value, source)`; `account_party.capacity(consumer \| professional \| legal_entity)` because capacity is per contract, not per person |
 | Groups | `1.00`, `1.01` | — | `party_group`, `party.party_group_id` |
 | Roles on a claim | Partial: `1.05` (Borrower / Protection provider), `3.04` count of joint counterparties | No liability type (joint and several, guarantor cap), no co-borrower vs borrower | `account_party(role: borrower \| co_borrower \| guarantor \| protection_provider, liability: joint_several \| several \| capped, cap_minor)` |
-| Deceased | `1.09` (optional, individuals) | Date of death, estate/heirs, notary | `party_life_event(kind: deceased, date, evidence_document_id)` → proposes a `deceased` hold (human-confirmed) |
+| Deceased | `1.09` (optional, individuals) | Date of death, estate/heirs, notary | `party_life_event(kind: deceased, date, evidence_document_id)` → stops outbound to the deceased party and opens an estate task (identify heirs/notary); collection continues against heirs (founder 2026-11-07) |
 
 ### 2.2 Data model and portfolio boarding (§3.2)
 

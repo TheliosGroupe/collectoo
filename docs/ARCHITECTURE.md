@@ -419,6 +419,6 @@ Migrations: forward-only SQL, each passes on the local stack and in CI before th
 ## 17. Open questions (architecture)
 
 1. **PSP and R124-2:** debtor card/SEPA DD payments sit in the Stripe balance before payout. Must the payout always go to the dedicated client-funds account, and who bears Stripe fees (client per mandate, or Collectoo)? Default: payouts only to the client-funds account; fees booked to Collectoo (`6270`) unless the mandate says otherwise. To validate with counsel/bank.
-2. **Vercel is a US company:** debtor portal requests transit Vercel (EU region). Needs a transfer basis under GDPR ch. V (DPF/SCCs) in the sub-processor register (GDPR-07). Alternative if refused: host Next.js on Scaleway too.
+2. **Vercel is a US company** (decided 2026-11-07: keep Vercel EU region + DPF/SCCs in the sub-processor register): debtor portal requests transit Vercel (EU region). Needs a transfer basis under GDPR ch. V (DPF/SCCs) in the sub-processor register (GDPR-07). Alternative if refused: host Next.js on Scaleway too.
 3. **Scaleway Serverless limits** (request timeout for `/v1/drain`, job duration, memory for 1M-row tapes) to verify against current docs before M1; fallback is a small Scaleway instance running the same image.
 4. **VAT on commissions** in remittance statements: rates and invoicing rules to confirm with the accountant.

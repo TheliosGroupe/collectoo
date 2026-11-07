@@ -981,7 +981,7 @@ stateDiagram-v2
 |---|---|
 | Outbound in `awaiting_first_letter` | Only the R124-4 first letter (CPCE-04). Every later step carries the first-letter reference (CPCE-05) |
 | Guardrail | Any blocking `account_hold` stops all outbound actions; flows cannot override (CHANNELS §4.1) |
-| Hold scopes | `dispute`, `deceased`, `wrong_party`, `recalled`: outbound. `surendettement` (after admissibility): outbound **and** payment requests, plan instalments suspended (HOLD-01, L722-5). `collective_proceeding`: outbound, payment requests, accruals per rule pack (HOLD-02, INT-10) |
+| Hold scopes | `dispute`, `wrong_party`, `recalled`: outbound. `deceased`: **not an account hold** (founder 2026-11-07): outbound to the deceased party's own contact points stops; collection continues against the estate/heirs (`party_role = heir`, notary), so the account moves to an estate workflow. `surendettement` (after admissibility): outbound **and** payment requests, plan instalments suspended (HOLD-01, L722-5). `collective_proceeding`: outbound, payment requests, accruals per rule pack (HOLD-02, INT-10) |
 | On-hold return | `on_hold` returns to the state implied by the guards, not blindly to the previous one; plans suspended during a hold resume or are cancelled (Payment Plan machine) |
 | Accruals | The engine keeps accruing in every non-closed state unless a hold scope or rule pack says otherwise |
 | Ownership change | Not a state: a new `claim_ownership_period` row. A sale to a new owner with another servicer closes servicing via `closed_recalled` |
@@ -1087,6 +1087,8 @@ stateDiagram-v2
 | Mandatory fields | Severity from the catalogue and `conformance` (gap analysis §3.3) |
 
 ## 5. Open questions (❓ founder)
+
+**Answered by the founder on 2026-11-07** (see `docs/PHASE0_REVIEW.md` §D): Q1 one account per (client, debtor) with invoices as items; Q2 components + balancing line up to `3.12`; Q4 deceased → collect against heirs, insolvency hold only on proof of the Banque de France admissibility decision (or court judgment); Q5 receive and forward; Q7 10 days, per client; Q8 one dossier per loan. Still open: Q3, Q6 and below.
 
 1. **Account grain for invoices:** one account per (client, debtor) with invoices as `claim_item`s (proposed), or one account per invoice?
 2. **Opening balance for bank tapes:** collect on `3.12` legal balance, or on `3.09 + 3.10 + 3.11`? (gap analysis Q1)
