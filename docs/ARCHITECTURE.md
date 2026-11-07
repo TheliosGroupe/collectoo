@@ -205,7 +205,7 @@ sequenceDiagram
   W->>DB: insert parties, accounts, contacts, documents from staging (batch_id on every row)
   W->>DB: ledger: opening entries per account and component (idempotency key = batch:account:component)
   W->>DB: claim_ownership rows, account_event(boarded)
-  W->>DB: batch.status = committed; commit
+  W->>DB: batch.status = committed, commit
   W-->>Ops: summary + DQ report link
   Note over Ops,DB: Until "confirmed": rollback = reversal entries + soft-delete of batch rows.<br/>After "confirmed": corrections only through normal reversal.
 ```

@@ -4,22 +4,25 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 
 ## Done
 - Phase 0 step 0: brief saved verbatim in `docs/BRIEF.md`.
-- `main` created from the brief commit (founder approval). Personal cloud environment `collectoo` created with EU/BAN hosts allowed.
+- `main` created from the brief commit (founder approval). Personal cloud environment `collectoo`: EU/BAN hosts allowed, setup script + `SUPABASE_INTERNAL_IMAGE_REGISTRY=docker.io` saved (unproven until a fresh session starts on it).
 - Step 2: EU NPL sources downloaded (EUR-Lex EN/FR HTML+PDF, EBA Excel annexes + final report), see `docs/reference/SOURCES.md`.
-- Field catalogue: 135 fields (`docs/reference/eba_field_catalogue.csv`), JSON Schema model, Excel-vs-EUR-Lex diff; builder `tools/eba_catalogue/build_catalogue.py`.
-- Drafts: `docs/CHANNELS.md`, `docs/COMPLIANCE.md`, `docs/CALCULATION_RULES.md`.
+- Step 3: field catalogue (135 fields), JSON Schema model, Excel-vs-EUR-Lex diff (`tools/eba_catalogue/build_catalogue.py`); gap analysis; PRODUCT, DOMAIN, CALCULATION_RULES, CHANNELS, ARCHITECTURE, COMPLIANCE, ADRs 0001–0011, CLAUDE.md, ROADMAP, CLOUD_ENV.
+- Step 4: flags and over-scope in `docs/PHASE0_REVIEW.md`. All 22 Mermaid diagrams validated with mermaid-cli 11.4.2.
+- Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- Step 3: gap analysis, PRODUCT, DOMAIN, ARCHITECTURE, ADRs, CLAUDE.md, ROADMAP, CLOUD_ENV.
+- Step 5: PR "Phase 0 — design docs" → waiting for founder review/merge and answers to `docs/PHASE0_REVIEW.md` §C.
 
 ## Next
-- Step 4: flag contradictions/over-scope. Step 5: PR "Phase 0 — design docs".
+- After merge: M0 (ROADMAP M0-01…), then M1. One PR per slice.
 
 ## Decisions
-- Work branch is `claude/loving-clarke-u1b205` (the branch this cloud session is allowed to push to) instead of `phase-0`.
-- Kickoff answers (2026-11-07): frontend on Vercel (EU region); first segment SMB B2B invoices; M3 rule packs = consumer instalment loan, professional loan, B2B invoice, B2C invoice; MVP digital-first with minimal collector workspace; PSP = Stripe (test mode); email/SMS via Brevo (cheaper than Twilio for FR SMS: ~EUR 0.045 vs ~USD 0.08); pace = as fast as possible; worker on Scaleway (Paris); golden examples later (engine examples marked TO VALIDATE meanwhile).
+- Work branch is `claude/loving-clarke-u1b205` (the branch this cloud session can push to) instead of `phase-0`.
+- Kickoff answers (2026-11-07): frontend Vercel (EU region); worker Scaleway (fr-par); first segment SMB B2B invoices; M3 rule packs = consumer instalment loan, professional loan, B2B invoice, B2C invoice; MVP digital-first with minimal collector workspace; PSP = Stripe (test mode); email/SMS via Brevo (cheaper than Twilio for FR SMS: ~EUR 0.045 vs ~USD 0.08); golden examples later (worked examples TO VALIDATE meanwhile); pace = as fast as possible.
+- Supabase CLI pinned to 2.122.1 (3.0.0 too new). Images pulled from Docker Hub (ECR/GHCR blob hosts blocked).
+- EU template catalogue built from EUR-Lex only; Excel used for the diff.
 
 ## Open questions
-- Default branch on GitHub is still `claude/loving-clarke-u1b205`; founder to switch it to `main` in Settings.
-- Brevo/Mailjet/Viber policies flag debt collection (see CHANNELS.md): declare use case to Brevo + standby provider?
-- 17 legal open questions in COMPLIANCE.md / CALCULATION_RULES.md.
+- `docs/PHASE0_REVIEW.md` §C (12 founder questions; notably Stripe prohibits/restricts debt collection agencies).
+- Counsel: `docs/COMPLIANCE.md` §9 (OQ-1…17), `docs/CHANNELS.md` §8, `docs/ARCHITECTURE.md` §17; domain questions at the end of `docs/DOMAIN.md`.
+- GitHub default branch is still `claude/loving-clarke-u1b205`: switch it to `main` in Settings → Branches.
