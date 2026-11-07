@@ -13,8 +13,8 @@
 | Layer | Meaning |
 |---|---|
 | **DB** | Postgres constraint, trigger or `SECURITY DEFINER` function. Cannot be bypassed by any client. |
-| **Engine** | Calculation engine in the worker (`worker/collectoo/engine/`). Driven by rule packs. |
-| **Guardrail** | Pre-send check in the worker (`worker/collectoo/comms/guardrails.py`), run before every outbound action. Flows cannot skip it. |
+| **Engine** | Calculation engine in the worker (`worker/src/collectoo_worker/engine/`). Driven by rule packs. |
+| **Guardrail** | Pre-send check in the worker (`worker/src/collectoo_worker/guardrails/.py`), run before every outbound action. Flows cannot skip it. |
 | **Template** | Locked legal blocks in the template system (`template_block.locked = true`) plus a render-time validator. |
 | **Ops** | Business/organisational obligation. Not code. Tracked here so it isn't forgotten. |
 
