@@ -729,6 +729,7 @@ Plus:
 - A civil account's currency is the currency of its first staged item (EUR when it has none), so a row without an amount never sets it.
 - `duplicate_eba_table` (blocking): two files of a batch for the same EU template table (staging and the cross-file references read one file per table).
 - `negative_amount` (blocking) also covers a negative amount paid and a negative legal balance 3.12 (both rejected by `claim_item` checks at commit).
+- Every NOT NULL value the commit writes is required at validation: the debtor's name (`private_loan`, `judgment_debt`; EU 1.03 in every conformance mode), 3.01 and 3.12 for every EU loan whatever its claim type, and the T5 `month_offset` column (missing → `missing_required`, not a whole number ≥ 1 → `bad_month_offset`).
 - `validation.v1.yaml` → **v2** (spec version recorded in `dq_report.spec_versions`).
 - DQ adds `balancing` per currency for EU tapes: Σ 3.09 / 3.10 / 3.11 / balancing, the number of loans with a non-zero balancing line, the number negative, and the number with missing components. A negative balancing line also raises the warning `components_exceed_legal_balance`. This is the "flagged in the DQ report" part of founder decision #6.
 

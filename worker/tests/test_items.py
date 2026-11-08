@@ -381,6 +381,7 @@ def test_validation_spec_v2_is_the_default_and_v1_is_kept() -> None:
         "file_not_boarded",
         "duplicate_eba_table",
         "negative_amount",
+        "bad_month_offset",
     ):
         assert v2[code] == "blocking", code
     for code in ("sub_cent_amount", "components_exceed_legal_balance", "duplicate_document"):
@@ -508,3 +509,72 @@ def test_a_superset_t3_file_is_blocking() -> None:
     superset = _copy(t3, "superset", pl.concat([t3.raw, extra]))
     log = _validate([*files, superset], {**profiles, "superset": profiles[t3.file_id]})
     assert codes(log, "duplicate_eba_table") == [("superset", None, "blocking")]
+
+
+# --- NOT NULL columns of the commit: a validated tape never leaves them empty ------------------
+
+
+def _missing(log: IssueLog) -> list[tuple[str, int | None, str | None, str]]:
+    return [
+        (i.file_id, i.row, i.target, i.severity) for i in log.issues if i.code == "missing_required"
+    ]
+
+
+@pytest.mark.parametrize("claim_type", ["private_loan", "judgment_debt"])
+def test_a_civil_debtor_needs_a_name(claim_type: str) -> None:
+    # party.display_name is NOT NULL.
+    f = civil_file("f1", [row(piece="P1", nom=None), row("A2", piece="P2")])
+    log = validate(f, portfolio_default=claim_type)
+    assert _missing(log) == [("f1", 1, "party.display_name", "blocking")]
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [{}, {"conformance": "regulatory"}, {"art4_exempt": True}],
+    ids=["servicing", "regulatory", "art4_exempt"],
+)
+def test_an_eu_counterparty_needs_a_name_in_every_mode(mode: dict[str, Any]) -> None:
+    files, profiles = _eba_files(5)
+    t1 = next(f for f in files if f.eba_table == "t1_counterparty")
+    _set(t1, "f1_03_name_of_counterparty", 1, None)  # 1.03 becomes party.display_name
+    log = _validate(files, profiles, **mode)
+    assert _missing(log) == [(t1.file_id, 2, "eba.f1_03_name_of_counterparty", "blocking")]
+
+
+def test_eu_loans_need_their_identifier_and_balance_whatever_their_claim_type() -> None:
+    # Without instrument or asset class, a loan takes the portfolio's (civil) default type: it
+    # still needs 3.01 (account.external_ref) and 3.12, not the civil file's columns.
+    files, profiles = _eba_files(5)
+    t3 = _loans(files)
+    for i in (0, 1):
+        _set(t3, "f3_05_asset_class", i, None)
+        _set(t3, "f3_06_type_of_instrument", i, None)
+    _set(t3, "f3_01_loan_identifier", 1, None)
+    log = _validate(files, profiles, portfolio_default="private_loan")
+    assert t3.claim_types[:2] == ["private_loan", "private_loan"]
+    assert _missing(log) == [(t3.file_id, 2, "eba.f3_01_loan_identifier", "blocking")]
+
+
+def _history(files: list[FileResult]) -> FileResult:
+    return next(f for f in files if f.eba_table == "t5_collection")
+
+
+def test_eu_collection_history_needs_a_month_offset_column() -> None:
+    # eba.t5_collection.month_offset is NOT NULL (staged from the `month_offset` column).
+    files, profiles = _eba_files(5)
+    t5 = _history(files)
+    t5.raw = t5.raw.drop("month_offset")
+    t5.mapping.pop("month_offset")
+    log = _validate(files, profiles)
+    assert _missing(log) == [(t5.file_id, None, None, "blocking")]
+
+
+def test_eu_collection_history_month_offsets_are_positive_integers() -> None:
+    files, profiles = _eba_files(5)
+    t5 = _history(files)
+    for i, value in ((0, None), (1, "x"), (2, "0"), (3, "-1"), (4, "1.5")):
+        _set(t5, "month_offset", i, value)
+    log = _validate(files, profiles)
+    assert _missing(log) == [(t5.file_id, 1, None, "blocking")]
+    assert codes(log, "bad_month_offset") == [(t5.file_id, r, "blocking") for r in (2, 3, 4, 5)]
+    assert log.blocking == 5
