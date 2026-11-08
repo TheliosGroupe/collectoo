@@ -316,11 +316,15 @@ def assign_rows(result: FileResult, portfolio_default: str | None, log: IssueLog
 
 
 def _rule_keys(result: FileResult) -> pl.Series:
-    """Per row, the key of the `required` / `recommended` lists: its civil claim type, else
-    `bank_credit` (null when the claim type is unassigned)."""
+    """Per row, the key of the `required` / `recommended` lists: the table of an EU file without
+    claims; for a row with a claim type, `bank_credit` for an EU loan (whatever its type) or a
+    non-civil type, else its civil claim type (null when the claim type is unassigned)."""
+    if result.eba_table not in (None, "t3_loan"):
+        return pl.repeat(result.eba_table, result.rows, eager=True, dtype=pl.Utf8)
+    civil = result.eba_table is None
     return pl.Series(
         [
-            None if ct is None else (ct if ct in CIVIL_CLAIM_TYPES else "bank_credit")
+            None if ct is None else (ct if civil and ct in CIVIL_CLAIM_TYPES else "bank_credit")
             for ct in result.claim_types
         ],
         dtype=pl.Utf8,
@@ -350,6 +354,41 @@ def _required(result: FileResult, log: IssueLog) -> None:
                     column=col,
                     target=target,
                 )
+
+
+def _months(result: FileResult, log: IssueLog) -> None:
+    """EU collection history (T5): staging reads `month_offset` (NOT NULL, > 0) from the column of
+    that name, as an integer."""
+    if result.eba_table != "t5_collection":
+        return
+    if "month_offset" not in result.raw.columns:
+        log.add_rows(
+            result.file_id,
+            [],
+            code="missing_required",
+            message="month_offset column is missing (month of each collection row, 1 = the month "
+            "before the cut-off date)",
+            file_level=True,
+        )
+        return
+    raw = result.raw["month_offset"]
+    month = raw.cast(pl.Int32, strict=False)  # what staging casts (strictly)
+    log.add_rows(
+        result.file_id,
+        _rows(raw.is_null() | (raw.str.strip_chars() == "")),
+        code="missing_required",
+        message="month_offset is missing",
+        column="month_offset",
+    )
+    rows = _rows(raw.is_not_null() & (raw.str.strip_chars() != "") & ~(month > 0).fill_null(False))
+    log.add_rows(
+        result.file_id,
+        rows,
+        code="bad_month_offset",
+        message="month_offset must be a whole number of months, 1 or more",
+        column="month_offset",
+        values={i: raw[i] for i in rows[:MAX_DETAILS_PER_CODE]},
+    )
 
 
 def _duplicates(result: FileResult, log: IssueLog) -> None:
@@ -713,6 +752,7 @@ def validate_batch(  # noqa: PLR0913 - the batch's inputs
         transform_file(result, profiles.get(result.file_id, {}), log, spec)
         assign_rows(result, portfolio_default, log)
         _required(result, log)
+        _months(result, log)
         _duplicates(result, log)
         _amounts(result, log)
         _contacts(result, log)

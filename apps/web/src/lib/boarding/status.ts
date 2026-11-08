@@ -88,6 +88,7 @@ const ISSUE_LABEL: Record<string, string> = {
   duplicate_loan: "Identifiant de prêt en double avec des valeurs différentes",
   duplicate_eba_table:
     "Plusieurs fichiers pour la même table du modèle UE : refaire la reprise avec un seul fichier par table",
+  bad_month_offset: "Mois de l'historique de recouvrement invalide (nombre entier de mois, 1 ou plus)",
   sub_cent_amount: "Montant avec plus de 2 décimales (arrondi au centime)",
   components_exceed_legal_balance: "Principal, intérêts et autres soldes supérieurs au solde légal (3.12)",
   unassigned_claim_type: "Type de créance non déterminé",

@@ -1,13 +1,16 @@
 # Validation rules (M1-15; v2 for M2-05 opening balances, docs/design/m2a-ledger.md §7.4).
 # Blocking issues stop the batch (needs_fix); warnings are reported. v1 is kept for history.
 version: 2
-required:              # blocking when the value is missing, per claim type
+# blocking when the value is missing: per claim type of a civil file's rows, `bank_credit` for
+# EU loans (T3), per EU table for the tables without claims (every NOT NULL value of the commit)
+required:
   b2b_invoice: [account.external_ref, party.display_name, claim_item.ref, claim_item.due_date, claim_item.amount]
   b2c_invoice: [account.external_ref, party.display_name, claim_item.ref, claim_item.due_date, claim_item.amount]
   rent: [account.external_ref, party.display_name, claim_item.due_date, claim_item.amount]
-  private_loan: [account.external_ref]   # an item also needs a ref, period or due date (missing_required)
-  judgment_debt: [account.external_ref]
+  private_loan: [account.external_ref, party.display_name]   # an item also needs a ref, period or due date
+  judgment_debt: [account.external_ref, party.display_name]
   bank_credit: [eba.f3_01_loan_identifier, eba.f3_12_legal_balance]
+  t1_counterparty: [eba.f1_03_name_of_counterparty]   # the debtor's name, in every conformance mode
 recommended:           # warning when missing
   b2b_invoice: [party.siren]
 severity:
@@ -43,5 +46,6 @@ severity:
   eba_mandatory_missing: warning   # becomes blocking for a regulatory-grade tape
   duplicate_loan: blocking          # the same EU loan identifier (3.01) on two different rows
   duplicate_eba_table: blocking     # two files of the batch for the same EU template table
+  bad_month_offset: blocking        # EU T5 history: month_offset is not a positive integer
   sub_cent_amount: warning          # EU amount 3.09-3.12 below the cent: rounded half-up
   components_exceed_legal_balance: warning  # 3.09 + 3.10 + 3.11 > 3.12: negative balancing line
