@@ -59,18 +59,34 @@ def make_tenant() -> dict[str, Any]:
             " values (%s, %s, 'client_admin')",
             (user, client),
         )
-    return {"client": client, "portfolio": portfolio, "user": str(user)}
+        staff = uuid.uuid4()
+        conn.execute(
+            "insert into auth.users (id, email, aud, role)"
+            " values (%s, %s, 'authenticated', 'authenticated')",
+            (staff, f"{staff}@s.test"),
+        )
+        conn.execute(
+            "insert into public.membership (user_id, organization_id, role)"
+            " values (%s, %s, 'ops_manager')",
+            (staff, servicer),
+        )
+    return {
+        "servicer": servicer,
+        "client": client,
+        "portfolio": portfolio,
+        "user": str(user),
+        "staff": str(staff),
+    }
 
 
-def as_user(conn: psycopg.Connection[Any], user: str) -> None:
-    claims = json.dumps({"sub": user, "role": "authenticated", "aal": "aal1"})
+def as_user(conn: psycopg.Connection[Any], user: str, aal: str = "aal1") -> None:
+    claims = json.dumps({"sub": user, "role": "authenticated", "aal": aal})
     conn.execute("select set_config('request.jwt.claims', %s, true)", (claims,))
     conn.execute("set local role authenticated")
 
 
-def board(tenant: dict[str, Any], storage: SupabaseStorage, path: Path) -> str:
-    """Create a batch, upload the file and submit, as the client admin (through the commands)."""
-    data = path.read_bytes()
+def board(tenant: dict[str, Any], storage: SupabaseStorage, *paths: Path) -> str:
+    """Create a batch, upload the files and submit, as the client admin (through the commands)."""
     with psycopg.connect(DB) as conn, conn.transaction():
         as_user(conn, tenant["user"])
         batch = one(
@@ -78,12 +94,17 @@ def board(tenant: dict[str, Any], storage: SupabaseStorage, path: Path) -> str:
             "select public.create_boarding_batch(%s, %s)",
             (str(uuid.uuid4()), tenant["portfolio"]),
         )
-        reg = one(
-            conn,
-            "select public.add_boarding_file(%s, %s, %s, %s)",
-            (batch, path.name, hashlib.sha256(data).hexdigest(), len(data)),
-        )
-    storage.upload("boarding-uploads", reg["storage_path"], data, "text/csv")
+        regs = []
+        for path in paths:
+            data = path.read_bytes()
+            reg = one(
+                conn,
+                "select public.add_boarding_file(%s, %s, %s, %s)",
+                (batch, path.name, hashlib.sha256(data).hexdigest(), len(data)),
+            )
+            regs.append((reg["storage_path"], data))
+    for storage_path, data in regs:
+        storage.upload("boarding-uploads", storage_path, data, "application/octet-stream")
     with psycopg.connect(DB) as conn, conn.transaction():
         as_user(conn, tenant["user"])
         conn.execute("select public.submit_boarding_batch(%s)", (batch,))

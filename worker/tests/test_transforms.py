@@ -131,5 +131,6 @@ def test_transform_column_reports_errors_by_row() -> None:
     values, errors = transform_column(
         pl.Series(["05/03/2026", None, "31/02/2026", "05/03/2026"]), chain
     )
-    assert values == [dt.date(2026, 3, 5), None, None, dt.date(2026, 3, 5)]
+    assert values.to_list() == [dt.date(2026, 3, 5), None, None, dt.date(2026, 3, 5)]
+    assert values.dtype == pl.Date
     assert list(errors) == [2] and errors[2].code == "impossible_date"

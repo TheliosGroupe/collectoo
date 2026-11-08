@@ -64,7 +64,7 @@ jobs:
   db:
     name: Database (migrations, pgTAP)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - uses: supabase/setup-cli@v1
@@ -81,7 +81,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
-      - name: Worker integration tests (queue, storage, profiling)
+      - name: Worker integration tests (queue, storage, commit, 50k-loan scale run)
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen && uv run pytest -m integration

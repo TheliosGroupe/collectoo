@@ -3,6 +3,7 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
+- PR #9 M1c merged 2026-11-08 (transformation DSL, validators, BAN adapter, claim types, validation rules, DQ report).
 - PR #8 M1b merged 2026-11-08 (mapping proposals, LLM gateway + mock, eval 167/167, mapping profiles).
 - PR #7 M1a merged 2026-11-08 (boarding upload, queue runtime, readers, profiling).
 - M0 complete 2026-11-08: PRs #2–#6 merged (tooling/CI, tenancy/RLS, auth/MFA, two-layer schema, synth + seed).
@@ -17,12 +18,13 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- PR "M1c — transformations, validators, BAN, claim types, validation rules, DQ report" (M1-11…M1-16): versioned transformation DSL (French dates/decimals → dates and integer cents, E.164 phones, SIREN/SIRET/IBAN checks, lookups), claim type + legal regime rules (CCD2 by contract date), declarative validation (blocking vs warning; EU-template mandatory fields blocking only for regulatory-grade tapes; Art. 4(1) exemptions), data-quality report (completeness, contactability, duplicates, reconciliation to the cent), BAN adapter with cache (99/100 real messy addresses normalised in a manual run; mock in CI); transform job after approval → `validated` / `needs_fix`.
+- PR "M1d — staging, commit/rollback/confirm, documents zip, 50k CI run, 1M benchmark" (M1-17, 18, 20, 21, 22): validation reworked to whole-column operations (Polars) so 1M-row tapes fit in memory; staging rows per entity in `private.boarding_staging` (identical digest on re-run); `commit_boarding_batch` writes Layer 2 (parties, identifiers, contacts, accounts `staged`, debtor links, claim items, ownership periods) and Layer 1 EU-template rows in one transaction, a reason is required when totals don't reconcile; `rollback_boarding_batch` removes everything before confirmation, including documents linked from the batch's zip (files purged by the worker; change log keeps the trail); `confirm_boarding_batch` needs servicer staff with two-factor and an active mandate (R124-3), accounts become `awaiting_first_letter`; zip of PDFs/images linked to accounts by the reference in the file name, stored in the `documents` bucket and indexed; 50k-loan EU tape boarded end to end in the CI `db` job; `make bench-boarding`: 1M loans in 57 s, peak memory 2.9 GB (< 4 GB target), see `docs/benchmarks/boarding.md`.
 
 ## Next
-- M1d: staging, commit/rollback/confirm into Layer 2 (+ Layer 1 for EU tapes), review UI with screenshots, bulk document zip, 50k-row CI boarding, 1M-row benchmark.
+- M1e: back-office review UI (M1-19): batch list, upload, profile, mapping review (accept/override, confidence, rationale), DQ report, commit/rollback/confirm; Playwright flow + mobile/desktop screenshots. Then M1 report to the founder, then M2a ledger.
 
 ## Decisions
+- M1d: the R124-3 mandate check sits on batch confirmation (accounts become workable), not on commit (data loaded for review, reversible); COMPLIANCE CPCE-03 aligned with DOMAIN §4.4. Re-boarding an account reference already in the portfolio is skipped at staging (listed in the DQ report); updates of existing accounts come with M2 reconciliation.
 - Debtor data is scoped per client organization (party.client_organization_id): no cross-client debtor merge, each client stays controller of its data. Template fields without an operational column live in `source_attributes` so tapes can be regenerated.
 - Login = email one-time code only (no magic link) for all users; accounts created by invitation (`shouldCreateUser: false`). Next.js `cacheComponents` turned off (simpler per-user auth pages).
 - 2026-11-08: Claude merges its own PRs when all CI jobs are green (founder approval); founder reviews afterwards.

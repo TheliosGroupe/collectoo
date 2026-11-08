@@ -18,6 +18,12 @@ export type Database = {
                   }
                   Relationships: [
                     {
+      foreignKeyName: "account_boarding_batch_fk"
+      columns: ["boarding_batch_id"]
+isOneToOne: false
+      referencedRelation: "boarding_batch"
+      referencedColumns: ["id"]
+    },{
       foreignKeyName: "account_claim_type_code_fkey"
       columns: ["claim_type_code"]
 isOneToOne: false
@@ -85,14 +91,14 @@ isOneToOne: false
                   ]
                 },"boarding_batch": {
                   Row: {
-                    "art4_exemptions": NonNullable<Json>,"claim_type_spec_version": number | null,"client_organization_id": string,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"dq_report": Json | null,"id": string,"join_keys": NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"status": string,"transform_spec_version": number | null,"updated_at": string,"validation_spec_version": number | null,"version": number
+                    "art4_exemptions": NonNullable<Json>,"claim_type_spec_version": number | null,"client_organization_id": string,"commit_override_reason": string | null,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"dq_report": Json | null,"id": string,"join_keys": NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"staging_digest": Json | null,"status": string,"transform_spec_version": number | null,"updated_at": string,"validation_spec_version": number | null,"version": number
                   }
                   ComputedFields: never
                   Insert: {
-                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id": string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version": number
+                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id": string,"commit_override_reason"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version": number
                   }
                   Update: {
-                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id"?: string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version"?: number
+                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id"?: string,"commit_override_reason"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version"?: number
                   }
                   Relationships: [
                     {
@@ -169,14 +175,14 @@ isOneToOne: false
                   ]
                 },"claim_item": {
                   Row: {
-                    "account_id": string,"created_at": string,"currency": string,"due_date": string | null,"id": string,"issue_date": string | null,"kind": string,"original_minor": number,"ref": string
+                    "account_id": string,"created_at": string,"currency": string,"due_date": string | null,"id": string,"issue_date": string | null,"kind": string,"original_minor": number,"ref": string,"seller_paid_minor": number
                   }
                   ComputedFields: never
                   Insert: {
-                    "account_id": string,"created_at"?: string,"currency"?: string,"due_date"?: string | null,"id"?: string,"issue_date"?: string | null,"kind": string,"original_minor": number,"ref": string
+                    "account_id": string,"created_at"?: string,"currency"?: string,"due_date"?: string | null,"id"?: string,"issue_date"?: string | null,"kind": string,"original_minor": number,"ref": string,"seller_paid_minor"?: number
                   }
                   Update: {
-                    "account_id"?: string,"created_at"?: string,"currency"?: string,"due_date"?: string | null,"id"?: string,"issue_date"?: string | null,"kind"?: string,"original_minor"?: number,"ref"?: string
+                    "account_id"?: string,"created_at"?: string,"currency"?: string,"due_date"?: string | null,"id"?: string,"issue_date"?: string | null,"kind"?: string,"original_minor"?: number,"ref"?: string,"seller_paid_minor"?: number
                   }
                   Relationships: [
                     {
@@ -275,14 +281,14 @@ isOneToOne: false
                   ]
                 },"document": {
                   Row: {
-                    "account_id": string | null,"client_organization_id": string,"created_at": string,"id": string,"kind": string,"mime_type": string,"organization_id": string,"party_id": string | null,"sha256": string,"storage_bucket": string,"storage_path": string
+                    "account_id": string | null,"boarding_batch_id": string | null,"client_organization_id": string,"created_at": string,"id": string,"kind": string,"mime_type": string,"organization_id": string,"party_id": string | null,"sha256": string,"storage_bucket": string,"storage_path": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "account_id"?: string | null,"client_organization_id": string,"created_at"?: string,"id"?: string,"kind": string,"mime_type": string,"organization_id": string,"party_id"?: string | null,"sha256": string,"storage_bucket"?: string,"storage_path": string
+                    "account_id"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id": string,"created_at"?: string,"id"?: string,"kind": string,"mime_type": string,"organization_id": string,"party_id"?: string | null,"sha256": string,"storage_bucket"?: string,"storage_path": string
                   }
                   Update: {
-                    "account_id"?: string | null,"client_organization_id"?: string,"created_at"?: string,"id"?: string,"kind"?: string,"mime_type"?: string,"organization_id"?: string,"party_id"?: string | null,"sha256"?: string,"storage_bucket"?: string,"storage_path"?: string
+                    "account_id"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string,"created_at"?: string,"id"?: string,"kind"?: string,"mime_type"?: string,"organization_id"?: string,"party_id"?: string | null,"sha256"?: string,"storage_bucket"?: string,"storage_path"?: string
                   }
                   Relationships: [
                     {
@@ -290,6 +296,12 @@ isOneToOne: false
       columns: ["account_id"]
 isOneToOne: false
       referencedRelation: "account"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "document_boarding_batch_id_fkey"
+      columns: ["boarding_batch_id"]
+isOneToOne: false
+      referencedRelation: "boarding_batch"
       referencedColumns: ["id"]
     },{
       foreignKeyName: "document_client_organization_id_fkey"
@@ -469,17 +481,23 @@ isOneToOne: false
                   ]
                 },"party": {
                   Row: {
-                    "birth_date": string | null,"client_organization_id": string,"created_at": string,"display_name": string,"first_name": string | null,"id": string,"kind": string,"last_name": string | null,"legal_form": string | null,"organization_id": string,"seller_ref": string | null,"source_attributes": NonNullable<Json>,"updated_at": string
+                    "birth_date": string | null,"boarding_batch_id": string | null,"client_organization_id": string,"created_at": string,"display_name": string,"first_name": string | null,"id": string,"kind": string,"last_name": string | null,"legal_form": string | null,"organization_id": string,"seller_ref": string | null,"source_attributes": NonNullable<Json>,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "birth_date"?: string | null,"client_organization_id": string,"created_at"?: string,"display_name": string,"first_name"?: string | null,"id"?: string,"kind": string,"last_name"?: string | null,"legal_form"?: string | null,"organization_id": string,"seller_ref"?: string | null,"source_attributes"?: NonNullable<Json>,"updated_at"?: string
+                    "birth_date"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id": string,"created_at"?: string,"display_name": string,"first_name"?: string | null,"id"?: string,"kind": string,"last_name"?: string | null,"legal_form"?: string | null,"organization_id": string,"seller_ref"?: string | null,"source_attributes"?: NonNullable<Json>,"updated_at"?: string
                   }
                   Update: {
-                    "birth_date"?: string | null,"client_organization_id"?: string,"created_at"?: string,"display_name"?: string,"first_name"?: string | null,"id"?: string,"kind"?: string,"last_name"?: string | null,"legal_form"?: string | null,"organization_id"?: string,"seller_ref"?: string | null,"source_attributes"?: NonNullable<Json>,"updated_at"?: string
+                    "birth_date"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string,"created_at"?: string,"display_name"?: string,"first_name"?: string | null,"id"?: string,"kind"?: string,"last_name"?: string | null,"legal_form"?: string | null,"organization_id"?: string,"seller_ref"?: string | null,"source_attributes"?: NonNullable<Json>,"updated_at"?: string
                   }
                   Relationships: [
                     {
+      foreignKeyName: "party_boarding_batch_id_fkey"
+      columns: ["boarding_batch_id"]
+isOneToOne: false
+      referencedRelation: "boarding_batch"
+      referencedColumns: ["id"]
+    },{
       foreignKeyName: "party_client_organization_id_fkey"
       columns: ["client_organization_id"]
 isOneToOne: false
@@ -609,6 +627,12 @@ isOneToOne: false
 "approve_mapping":
 { Args: { "p_batch_id": string,"p_overrides"?: Json }; Returns: undefined
                            },
+"commit_boarding_batch":
+{ Args: { "p_batch_id": string,"p_override_reason"?: string }; Returns: undefined
+                           },
+"confirm_boarding_batch":
+{ Args: { "p_batch_id": string }; Returns: undefined
+                           },
 "create_boarding_batch":
 { Args: { "p_conformance"?: string,"p_cut_off_date"?: string,"p_idempotency_key": string,"p_portfolio_id": string }; Returns: string
                            },
@@ -617,6 +641,9 @@ isOneToOne: false
                            },
 "custom_access_token_hook":
 { Args: { "event": Json }; Returns: Json
+                           },
+"rollback_boarding_batch":
+{ Args: { "p_batch_id": string,"p_reason": string }; Returns: undefined
                            },
 "set_control_totals":
 { Args: { "p_batch_id": string,"p_rows": number,"p_total_minor": number }; Returns: undefined

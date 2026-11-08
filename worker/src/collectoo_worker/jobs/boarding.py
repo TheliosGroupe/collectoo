@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +32,15 @@ from collectoo_worker.boarding.mapping import (
 )
 from collectoo_worker.boarding.profile import profile_frame
 from collectoo_worker.boarding.readers import read_xlsx, scan_csv
+from collectoo_worker.boarding.stage import stage_rows, write_staging
 from collectoo_worker.boarding.transforms import load_spec
-from collectoo_worker.boarding.validate import FileResult, detect_eba_table, rules, validate_batch
+from collectoo_worker.boarding.validate import (
+    FileResult,
+    IssueLog,
+    detect_eba_table,
+    rules,
+    validate_batch,
+)
 from collectoo_worker.runtime.storage import Storage
 
 ACTOR = "worker:boarding"
@@ -50,6 +58,12 @@ def make_handler(storage: Storage, provider: Provider, normaliser: Normaliser | 
             propose_batch(conn, Gateway(provider, conn), batch_id)
         elif kind == "transform":
             transform_batch(conn, storage, addresses, batch_id)
+        elif kind == "stage":
+            stage_batch(conn, storage, batch_id)
+        elif kind == "documents":
+            documents_batch(conn, storage, batch_id)
+        elif kind == "purge_documents":
+            purge_documents(storage, payload.get("objects") or [])
         else:
             raise ValueError(f"unknown boarding job type: {kind!r}")
 
@@ -180,32 +194,43 @@ def _address_stats(
 ) -> dict[str, Any]:
     queries = []
     for f in files:
-        lines, codes = f.values.get("contact.address_line"), f.values.get("contact.postcode")
-        if lines is None:
+        if "contact.address_line" not in f.values:
             continue
-        codes = codes or [None] * f.rows
+        lines = f.col("contact.address_line").to_list()
+        codes = f.col("contact.postcode").to_list()
         queries += [(str(line), codes[i]) for i, line in enumerate(lines) if line]
     if not queries:
         return {}
     results = normalise_cached(normaliser, queries, conn)
     ok = sum(r.normalised for r in results)
-    return {"provider": normaliser.name, "addresses": len(results), "normalised": ok,
-            "normalised_pct": round(ok / len(results), 4)}  # fmt: skip
+    return {
+        "provider": normaliser.name,
+        "addresses": len(results),
+        "normalised": ok,
+        "normalised_pct": round(ok / len(results), 4),
+    }
 
 
-def transform_batch(
-    conn: psycopg.Connection[Any], storage: Storage, normaliser: Normaliser, batch_id: str
-) -> None:
+@dataclass
+class Loaded:
+    files: list[FileResult]
+    log: IssueLog
+    control: dict[str, Any]
+    portfolio_id: str
+
+
+def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) -> Loaded:
+    """Read the batch's files with their approved mapping, then transform and validate them."""
     batch = conn.execute(
         """select p.default_claim_type, b.conformance, b.art4_exemptions, b.seller_control_totals,
-                  b.join_keys
+                  b.join_keys, b.portfolio_id
            from public.boarding_batch b join public.portfolio p on p.id = b.portfolio_id
            where b.id = %s""",
         (batch_id,),
     ).fetchone()
     if batch is None:
         raise ValueError(f"unknown batch {batch_id}")
-    default_type, conformance, art4, control, keys = batch
+    default_type, conformance, art4, control, keys, portfolio_id = batch
     files = conn.execute(
         """select id, file_name, storage_bucket, storage_path, format, profile
            from public.boarding_file where batch_id = %s order by created_at""",
@@ -243,6 +268,14 @@ def transform_batch(
         art4_exempt=any(bool(v) for v in (art4 or {}).values()),
         join_keys=keys or [],
     )
+    return Loaded(results, log, control or {}, str(portfolio_id))
+
+
+def transform_batch(
+    conn: psycopg.Connection[Any], storage: Storage, normaliser: Normaliser, batch_id: str
+) -> None:
+    loaded = load_and_validate(conn, storage, batch_id)
+    results, log, control = loaded.files, loaded.log, loaded.control
     versions = {
         "transform": load_spec().version,
         "validation": int(rules()["version"]),
@@ -298,3 +331,109 @@ def transform_batch(
     conn.execute(
         "select private.transition_batch(%s, %s, %s, %s)", (batch_id, outcome, reason, ACTOR)
     )
+
+
+def stage_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) -> None:
+    """Validated batch -> rows in staging. Accounts already boarded in the portfolio are skipped."""
+    loaded = load_and_validate(conn, storage, batch_id)
+    staged = stage_rows(loaded.files, loaded.log)
+    skipped = 0
+    if "account" in staged:
+        refs = staged["account"]["key"].to_list()
+        existing = {
+            r[0]
+            for r in conn.execute(
+                "select external_ref from public.account"
+                " where portfolio_id = %s and external_ref = any(%s)",
+                (loaded.portfolio_id, refs),
+            ).fetchall()
+        }
+        if existing:
+            skipped = len(existing)
+            known = pl.Series(sorted(existing), dtype=pl.Utf8).implode()
+            for entity in ("account", "claim_item", "account_party"):
+                if entity in staged:
+                    staged[entity] = staged[entity].filter(~pl.col("key").is_in(known))
+    digest = write_staging(conn, batch_id, staged)
+    conn.execute(
+        """update public.boarding_batch
+           set staging_digest = %s,
+               dq_report = jsonb_set(coalesce(dq_report, '{}'), '{staging}', %s)
+           where id = %s""",
+        (
+            Jsonb(digest),
+            Jsonb({"already_boarded_accounts_skipped": skipped, "entities": digest}),
+            batch_id,
+        ),
+    )
+    conn.execute(
+        "select private.transition_batch(%s, 'staged', 'rows staged', %s)", (batch_id, ACTOR)
+    )
+
+
+def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) -> None:
+    """After commit: link the documents of the batch's zip files to their accounts."""
+    from collectoo_worker.boarding.documents import read_zip  # noqa: PLC0415
+
+    # Shared lock: a rollback waits for this job, and a batch rolled back first is skipped.
+    row = conn.execute(
+        "select status from public.boarding_batch where id = %s for share", (batch_id,)
+    ).fetchone()
+    if row is None or row[0] not in ("committed", "confirmed"):
+        return
+    accounts = dict(
+        conn.execute(
+            "select a.external_ref, a.id from public.account a"
+            " join public.boarding_batch b on b.portfolio_id = a.portfolio_id where b.id = %s",
+            (batch_id,),
+        ).fetchall()
+    )
+    org, client = conn.execute(
+        "select organization_id, client_organization_id from public.boarding_batch where id = %s",
+        (batch_id,),
+    ).fetchone() or (None, None)
+    zips = conn.execute(
+        "select id, storage_bucket, storage_path from public.boarding_file"
+        " where batch_id = %s and format = 'zip'",
+        (batch_id,),
+    ).fetchall()
+    linked = 0
+    unmatched: list[str] = []
+    unsupported: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for file_id, bucket, path in zips:
+            result = read_zip(
+                storage.download(bucket, path, Path(tmp) / str(file_id)), set(accounts)
+            )
+            for doc in result.matched:
+                account_id = accounts[doc.account_ref]
+                object_path = f"{client}/{account_id}/{doc.sha256[:16]}-{doc.name}"
+                storage.upload(
+                    "documents", object_path, doc.data, doc.mime or "application/octet-stream"
+                )
+                conn.execute(
+                    """insert into public.document (organization_id, client_organization_id,
+                         account_id, kind, storage_bucket, storage_path, sha256, mime_type,
+                         boarding_batch_id)
+                       values (%s, %s, %s, 'boarding', 'documents', %s, %s, %s, %s)
+                       on conflict (storage_bucket, storage_path) do nothing""",
+                    (org, client, account_id, object_path, doc.sha256, doc.mime, batch_id),
+                )
+                linked += 1
+            unmatched += result.unmatched
+            unsupported += result.unsupported
+    summary = {"linked": linked, "unmatched": unmatched, "unsupported": unsupported}
+    conn.execute(
+        "update public.boarding_batch"
+        " set dq_report = jsonb_set(coalesce(dq_report, '{}'), '{documents}', %s) where id = %s",
+        (Jsonb(summary), batch_id),
+    )
+
+
+def purge_documents(storage: Storage, objects: list[dict[str, str]]) -> None:
+    """After a rollback: delete the files whose index rows the rollback removed."""
+    by_bucket: dict[str, list[str]] = {}
+    for obj in objects:
+        by_bucket.setdefault(obj["bucket"], []).append(obj["path"])
+    for bucket, paths in sorted(by_bucket.items()):
+        storage.remove(bucket, paths)

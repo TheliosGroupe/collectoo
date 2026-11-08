@@ -6,6 +6,8 @@ from collections import Counter
 from decimal import Decimal
 from typing import Any
 
+import polars as pl
+
 from collectoo_worker.boarding.validate import FileResult, IssueLog
 
 
@@ -14,10 +16,10 @@ def _pct(n: int, d: int) -> float:
 
 
 def _minor(v: Any) -> int:
-    """Amounts are minor units (int) for civil files, Decimal major units for EU tapes."""
-    if isinstance(v, Decimal):
-        return int((v * 100).to_integral_value())
-    return int(v)
+    """Civil amounts are integer minor units; EU-tape amounts are exact decimal strings."""
+    if isinstance(v, int):
+        return v
+    return int((Decimal(str(v)) * 100).to_integral_value())
 
 
 def build_report(
@@ -38,8 +40,7 @@ def build_report(
     email = phone = mobile = postal = reachable = contact_rows = 0
     for f in files:
         completeness = {
-            t: _pct(sum(v is not None for v in vals), f.rows)
-            for t, vals in sorted(f.values.items())
+            t: _pct(f.rows - vals.null_count(), f.rows) for t, vals in sorted(f.values.items())
         }
         file_reports.append(
             {
@@ -53,24 +54,25 @@ def build_report(
         claim_types.update(c for c in f.claim_types if c)
         regimes.update(r for r in f.legal_regimes if r)
         if f.eba_table in (None, "t3_loan"):
-            dup = set()
-            for issue in log.issues:
-                if issue.file_id == f.file_id and issue.code == "duplicate_row" and issue.row:
-                    dup.add(issue.row - 1)
-            amounts = (
-                f.values.get("claim_item.amount") or f.values.get("eba.f3_12_legal_balance") or []
+            # Duplicate rows are boarded once: recomputed here (issue details are capped).
+            dup = (~f.first_distinct()).to_list()
+            key = (
+                "claim_item.amount"
+                if "claim_item.amount" in f.values
+                else "eba.f3_12_legal_balance"
             )
-            paids = f.values.get("claim_item.amount_paid", [None] * f.rows)
+            amounts: list[Any] = f.col(key).to_list() if key in f.values else []
+            paids = f.col("claim_item.amount_paid", pl.Int64()).to_list()
             for i, a in enumerate(amounts):
-                if a is None or i in dup:
+                if a is None or dup[i]:
                     continue
                 rows += 1
                 total += _minor(a)
                 paid += _minor(paids[i]) if paids[i] is not None else 0
         if f.eba_table is None:
-            em = f.values.get("contact.email", [None] * f.rows)
-            ph = f.values.get("contact.phone", [None] * f.rows)
-            pc = f.values.get("contact.postcode", [None] * f.rows)
+            em = f.col("contact.email").to_list()
+            ph = f.col("contact.phone").to_list()
+            pc = f.col("contact.postcode").to_list()
             for i in range(f.rows):
                 contact_rows += 1
                 e, p, post = em[i] is not None, ph[i] is not None, pc[i] is not None
