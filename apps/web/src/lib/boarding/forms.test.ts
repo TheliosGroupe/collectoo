@@ -67,6 +67,9 @@ describe("labels", () => {
     );
     expect(commandErrorCode("a reason is required")).toBe("reason_required");
     expect(commandErrorCode("another file with this name is already in the batch")).toBe("name_taken");
+    expect(commandErrorCode("control totals can only change before the mapping is approved (batch is abandoned)")).toBe(
+      "already_submitted",
+    );
     expect(commandErrorCode('duplicate key value violates unique constraint "x"')).toBe("unknown");
     expect(errorText("not_allowed")).toMatch(/non autorisée/);
   });

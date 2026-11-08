@@ -81,7 +81,8 @@ export function commandErrorCode(message: string): ErrorCode {
   if (message.includes("CPCE R124-3")) return "mandate_missing";
   if (message.includes("same target")) return "duplicate_target";
   if (message.includes("another file with this name")) return "name_taken";
-  if (message.includes("only be added to a draft batch")) return "already_submitted";
+  if (message.includes("only be added to a draft batch") || message.includes("control totals can only change"))
+    return "already_submitted";
   if (message.includes("unsupported file type")) return "unsupported_type";
   if (message.includes("not uploaded yet")) return "missing_upload";
   if (message.includes("expected") || message.includes("cannot be abandoned") || message.includes("only a committed"))

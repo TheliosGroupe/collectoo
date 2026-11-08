@@ -108,12 +108,16 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
           fichier (format, encodage), puis abandonnez ce lot et déposez-en un nouveau. Détail technique :{" "}
           <span className="font-mono text-xs break-all">{b.failed_job.error}</span>
         </ErrorNote>
-      ) : b.failed_job && b.failed_job.type === "documents" && ["committed", "confirmed"].includes(b.status) ? (
+      ) : b.failed_job &&
+        ((b.failed_job.type === "documents" && ["committed", "confirmed"].includes(b.status)) ||
+          (b.failed_job.type === "purge_documents" && b.status === "rolled_back")) ? (
+        // Failures that still matter after the batch moved on: documents not linked after commit,
+        // or files not deleted from storage after a rollback (personal data to erase).
         <ErrorNote>
           L&apos;étape « {JOB_FR[b.failed_job.type] ?? b.failed_job.type} » a échoué après plusieurs tentatives
           {b.failed_job.type === "documents"
             ? " : les pièces jointes n'ont pas été rattachées. Déposez le zip dans un nouveau lot (par exemple en plusieurs zips plus petits)."
-            : "."}{" "}
+            : " : les fichiers des pièces sont encore dans le stockage alors que le lot est annulé. Contactez le support pour les effacer."}{" "}
           Détail technique : <span className="font-mono text-xs break-all">{b.failed_job.error}</span>
         </ErrorNote>
       ) : isProcessing(b.status) ? (
