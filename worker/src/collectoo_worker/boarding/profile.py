@@ -62,9 +62,7 @@ def profile_frame(lf: pl.LazyFrame) -> dict[str, Any]:
         exprs.append(col.str.contains(r"^-").sum().alias(f"{c}|negatives"))
     stats = lf.select(exprs).collect(engine="streaming").row(0, named=True)
     rows = int(stats["__rows"])
-    # Extra copies of an identical row (a row present 3 times counts 2).
-    distinct_rows = lf.select(pl.struct(names).n_unique()).collect(engine="streaming").item()
-    duplicate_rows = rows - int(distinct_rows)
+    duplicate_rows = _duplicate_rows(lf, names)
     columns = []
     for c in names:
         non_null = rows - int(stats[f"{c}|nulls"])
@@ -92,6 +90,21 @@ def profile_frame(lf: pl.LazyFrame) -> dict[str, Any]:
         "columns": columns,
         "sample": sample,
     }
+
+
+def _duplicate_rows(lf: pl.LazyFrame, names: list[str]) -> int:
+    """Extra copies of an identical row (a row present 3 times counts 2).
+
+    Exact: rows are hashed, and only rows whose hash repeats are compared in full.
+    """
+    hashes = lf.select(pl.struct(names).hash().alias("h")).collect(engine="streaming")["h"]
+    candidates = hashes.is_duplicated()
+    if not candidates.any():
+        return 0
+    idx = candidates.arg_true().implode()
+    rows = lf.with_row_index("__row").filter(pl.col("__row").is_in(idx)).drop("__row")
+    counts = rows.select(pl.len(), pl.struct(names).n_unique()).collect().row(0)
+    return int(counts[0]) - int(counts[1])
 
 
 def _column_checks(lf: pl.LazyFrame, info: dict[str, Any], negatives: int) -> None:

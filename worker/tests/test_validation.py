@@ -82,7 +82,7 @@ def test_a_clean_file_has_no_blocking_issue(tmp_path: Path, kind: str) -> None:
     log = _validate([result], {"f1": profile})
     assert log.blocking == 0, [i for i in log.issues if i.severity == "blocking"][:3]
     # Amounts became integer cents, dates real dates.
-    assert all(isinstance(a, int) for a in result.values["claim_item.amount"] if a is not None)
+    assert result.values["claim_item.amount"].dtype == pl.Int64
 
 
 def test_portfolio_default_wins_over_file_signals(tmp_path: Path) -> None:
@@ -149,7 +149,7 @@ def test_consumer_loans_need_a_contract_date_for_the_legal_regime() -> None:
 def test_dq_report_reconciles_to_the_cent(tmp_path: Path) -> None:
     result, profile, _ = _civil(tmp_path, "b2b_invoice", "fr_semicolon", 0.0)
     log = _validate([result], {"f1": profile})
-    expected = sum(a for a in result.values["claim_item.amount"] if a is not None)
+    expected = int(result.values["claim_item.amount"].sum())
     report = build_report(
         [result], log, control={"total_minor": expected - 1, "rows": 400}, spec_versions={}
     )

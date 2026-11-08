@@ -85,7 +85,7 @@ def test_clean_file_is_validated_with_a_full_report(tenant: dict[str, Any], tmp_
             " where batch_id = %s and severity = 'blocking'",
             (batch,),
         )
-    assert status == "validated" and blocking == 0
+    assert status == "staged" and blocking == 0  # validated, then staged automatically
     rec = report["reconciliation"]
     assert (
         rec["status"] == "mismatch"

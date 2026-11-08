@@ -276,18 +276,41 @@ def apply_chain(chain: list[Step], value: str | None) -> tuple[Any, TransformErr
     return (None if v == "" else v), None
 
 
+def _dtype(sample: Any) -> pl.DataType:
+    if isinstance(sample, bool):
+        return pl.Boolean()
+    if isinstance(sample, int):
+        return pl.Int64()
+    if isinstance(sample, dt.date):
+        return pl.Date()
+    return pl.Utf8()  # text, and Decimal amounts in major units kept as exact strings
+
+
 def transform_column(
     series: pl.Series, chain: list[Step]
-) -> tuple[list[Any], dict[int, TransformError]]:
-    """Transform a column; returns values (None where empty or invalid) and errors by row index."""
-    cache_: dict[str | None, tuple[Any, TransformError | None]] = {}
-    out: list[Any] = []
+) -> tuple[pl.Series, dict[int, TransformError]]:
+    """Transform a column once per distinct value.
+
+    Returns a typed series (null where empty or invalid) and the errors by row index. Memory
+    stays proportional to the column, not to Python objects per row.
+    """
+    uniques = series.unique().to_list()
+    results = {raw: apply_chain(chain, raw) for raw in uniques}
+    sample = next((v for v, _ in results.values() if v is not None), None)
+    dtype = _dtype(sample)
+    keys = [k for k in results if k is not None]
+    values = [
+        str(results[k][0]) if isinstance(results[k][0], Decimal) else results[k][0] for k in keys
+    ]
+    if dtype == pl.Utf8 and series.dtype == pl.Utf8 and keys == values:
+        out = series  # already clean text: share the column instead of copying it
+    elif keys:
+        out = series.replace_strict(keys, values, default=None, return_dtype=dtype)
+    else:
+        out = pl.Series(series.name, [None] * len(series), dtype=dtype)
     errors: dict[int, TransformError] = {}
-    for i, raw in enumerate(series.to_list()):
-        if raw not in cache_:
-            cache_[raw] = apply_chain(chain, raw)
-        value, err = cache_[raw]
-        out.append(value)
-        if err is not None:
-            errors[i] = err
+    bad = {k: err for k, (_, err) in results.items() if err is not None}
+    if bad:
+        for i in series.is_in(list(bad)).arg_true().to_list():
+            errors[i] = bad[series[i]]
     return out, errors

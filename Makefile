@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 export SUPABASE_INTERNAL_IMAGE_REGISTRY ?= docker.io
 
-.PHONY: setup up down reset seed synth worker test-integration types test test-py test-web test-db e2e lint lint-py lint-web typecheck build catalogue
+.PHONY: setup up down reset seed synth worker test-integration bench-boarding eval types test test-py test-web test-db e2e lint lint-py lint-web typecheck build catalogue
 
 setup:            ## Install all dependencies
 	cd worker && uv sync --frozen
@@ -46,6 +46,9 @@ test-web:
 
 test-db:          ## pgTAP (needs `make up`)
 	supabase test db
+
+bench-boarding:   ## 1M-loan boarding benchmark (time + peak memory); results: docs/benchmarks/boarding.md
+	cd worker && uv run python -m collectoo_worker.bench --loans 1000000 --out ../tmp/bench
 
 eval:             ## AI eval suites (golden datasets in worker/evals)
 	cd worker && uv run python -m collectoo_worker.ai.evals mapping

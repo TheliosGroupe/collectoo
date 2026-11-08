@@ -187,7 +187,9 @@ def _history(rng: random.Random, loan_ref: str) -> list[Row]:
     return rows
 
 
-def generate_eba(loans: int, seed: int, cutoff: dt.date = dt.date(2026, 9, 30)) -> Tape:
+def generate_eba(
+    loans: int, seed: int, cutoff: dt.date = dt.date(2026, 9, 30), *, id_offset: int = 0
+) -> Tape:
     """A tape with `loans` loans: ~30 % SME loans, ~10 % of household loans with a co-borrower."""
     rng = random.Random(seed)
     fake = Faker("fr_FR")
@@ -198,8 +200,8 @@ def generate_eba(loans: int, seed: int, cutoff: dt.date = dt.date(2026, 9, 30)) 
         "t3_loan": [],
         "t5_collection": [],
     }
-    cpty_n = 0
-    for n in range(1, loans + 1):
+    cpty_n = 2 * id_offset  # room for co-borrowers
+    for n in range(id_offset + 1, id_offset + loans + 1):
         corporate = rng.random() < 0.3
         cpty_n += 1
         borrower = _counterparty(fake, rng, cpty_n, corporate, cutoff)

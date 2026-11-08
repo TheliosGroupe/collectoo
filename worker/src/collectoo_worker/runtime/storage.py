@@ -12,6 +12,10 @@ import httpx
 class Storage(Protocol):
     def download(self, bucket: str, path: str, dest: Path) -> Path: ...
 
+    def upload(self, bucket: str, path: str, data: bytes, content_type: str = ...) -> None: ...
+
+    def remove(self, bucket: str, paths: list[str]) -> None: ...
+
 
 class SupabaseStorage:
     def __init__(self, url: str, secret_key: str, timeout_s: float = 120.0) -> None:
@@ -39,3 +43,15 @@ class SupabaseStorage:
             timeout=self._timeout,
         )
         resp.raise_for_status()
+
+    def remove(self, bucket: str, paths: list[str]) -> None:
+        """Delete objects; paths already gone are ignored (safe to retry)."""
+        for start in range(0, len(paths), 1000):
+            resp = httpx.request(
+                "DELETE",
+                f"{self._base}/{quote(bucket)}",
+                headers=self._headers,
+                json={"prefixes": paths[start : start + 1000]},
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
