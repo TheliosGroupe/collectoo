@@ -121,6 +121,58 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"bank_statement": {
+                  Row: {
+                    "bank_account_id": string,"bank_check": Json | null,"closing_booked_minor": number | null,"counts": Json | null,"created_at": string,"created_by": string | null,"currency": string,"electronic_seq_no": number | null,"error": string | null,"error_code": string | null,"file_name": string,"file_sha256": string,"finished_at": string | null,"format": string,"format_version": string | null,"from_date": string | null,"id": string,"idempotency_key": string | null,"opening_booked_minor": number | null,"organization_id": string,"sections": Json | null,"size_bytes": number,"status": string,"stmt_id": string | null,"storage_bucket": string,"storage_path": string,"to_date": string | null,"updated_at": string,"uploaded_at": string | null,"warnings": NonNullable<Json>
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "bank_account_id": string,"bank_check"?: Json | null,"closing_booked_minor"?: number | null,"counts"?: Json | null,"created_at"?: string,"created_by"?: string | null,"currency": string,"electronic_seq_no"?: number | null,"error"?: string | null,"error_code"?: string | null,"file_name": string,"file_sha256": string,"finished_at"?: string | null,"format": string,"format_version"?: string | null,"from_date"?: string | null,"id"?: string,"idempotency_key"?: string | null,"opening_booked_minor"?: number | null,"organization_id": string,"sections"?: Json | null,"size_bytes": number,"status"?: string,"stmt_id"?: string | null,"storage_bucket"?: string,"storage_path": string,"to_date"?: string | null,"updated_at"?: string,"uploaded_at"?: string | null,"warnings"?: NonNullable<Json>
+                  }
+                  Update: {
+                    "bank_account_id"?: string,"bank_check"?: Json | null,"closing_booked_minor"?: number | null,"counts"?: Json | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"electronic_seq_no"?: number | null,"error"?: string | null,"error_code"?: string | null,"file_name"?: string,"file_sha256"?: string,"finished_at"?: string | null,"format"?: string,"format_version"?: string | null,"from_date"?: string | null,"id"?: string,"idempotency_key"?: string | null,"opening_booked_minor"?: number | null,"organization_id"?: string,"sections"?: Json | null,"size_bytes"?: number,"status"?: string,"stmt_id"?: string | null,"storage_bucket"?: string,"storage_path"?: string,"to_date"?: string | null,"updated_at"?: string,"uploaded_at"?: string | null,"warnings"?: NonNullable<Json>
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "bank_statement_bank_fk"
+      columns: ["bank_account_id","organization_id","currency"]
+isOneToOne: false
+      referencedRelation: "bank_account"
+      referencedColumns: ["id","organization_id","currency"]
+    },{
+      foreignKeyName: "bank_statement_created_by_fkey"
+      columns: ["created_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "bank_statement_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"bank_transaction": {
+                  Row: {
+                    "acct_svcr_ref": string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code": string | null,"batch_entry_ref": string | null,"booking_date": string,"counterparty_iban": string | null,"counterparty_name": string | null,"created_at": string,"creditor_reference": string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id": string | null,"entry_ref": string | null,"id": string,"kind": string,"line_no": number,"mandate_ref": string | null,"organization_id": string,"original_end_to_end_id": string | null,"remittance_text": string | null,"return_reason": string | null,"reversal_indicator": boolean,"statement_id": string,"tx_id": string | null,"ultimate_counterparty_name": string | null,"value_date": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "acct_svcr_ref"?: string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date": string,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind": string,"line_no": number,"mandate_ref"?: string | null,"organization_id": string,"original_end_to_end_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id": string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"value_date"?: string | null
+                  }
+                  Update: {
+                    "acct_svcr_ref"?: string | null,"amount_minor"?: number,"bank_account_id"?: string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date"?: string,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency"?: string,"dedup_key"?: string,"direction"?: string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind"?: string,"line_no"?: number,"mandate_ref"?: string | null,"organization_id"?: string,"original_end_to_end_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id"?: string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"value_date"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "bank_transaction_statement_fk"
+      columns: ["statement_id","organization_id","bank_account_id","currency"]
+isOneToOne: false
+      referencedRelation: "bank_statement"
+      referencedColumns: ["id","organization_id","bank_account_id","currency"]
+    }
+                  ]
                 },"boarding_batch": {
                   Row: {
                     "art4_exemptions": NonNullable<Json>,"claim_type_spec_version": number | null,"client_organization_id": string,"commit_override_reason": string | null,"commit_requested_at": string | null,"commit_requested_by": string | null,"confirm_requested_at": string | null,"confirm_requested_by": string | null,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"dq_report": Json | null,"failed_job": Json | null,"id": string,"join_keys": NonNullable<Json>,"opening_plan": Json | null,"opening_summary": Json | null,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"staging_digest": Json | null,"status": string,"transform_spec_version": number | null,"updated_at": string,"validation_spec_version": number | null,"version": number
@@ -764,6 +816,12 @@ isOneToOne: false
       referencedRelation: "bank_account"
       referencedColumns: ["id","organization_id","currency"]
     },{
+      foreignKeyName: "payment_bank_transaction_fk"
+      columns: ["bank_transaction_id","organization_id","bank_account_id","currency","amount_minor","booking_date"]
+isOneToOne: false
+      referencedRelation: "bank_transaction"
+      referencedColumns: ["id","organization_id","bank_account_id","currency","amount_minor","booking_date"]
+    },{
       foreignKeyName: "payment_currency_fkey"
       columns: ["currency"]
 isOneToOne: false
@@ -921,6 +979,9 @@ isOneToOne: false
 "create_portfolio":
 { Args: { "p_client_organization_id": string,"p_default_claim_type"?: string,"p_idempotency_key": string,"p_name": string }; Returns: string
                            },
+"create_statement_upload":
+{ Args: { "p_bank_account_id": string,"p_file_name": string,"p_idempotency_key": string,"p_sha256": string,"p_size_bytes": number }; Returns: Json
+                           },
 "custom_access_token_hook":
 { Args: { "event": Json }; Returns: Json
                            },
@@ -941,6 +1002,9 @@ isOneToOne: false
                            },
 "submit_boarding_batch":
 { Args: { "p_batch_id": string }; Returns: number
+                           },
+"submit_statement_import":
+{ Args: { "p_idempotency_key": string,"p_statement_id": string }; Returns: string
                            }
           }
           Enums: {

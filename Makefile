@@ -56,8 +56,8 @@ eval:             ## AI eval suites (golden datasets in worker/evals)
 test-integration: ## Worker tests against the local stack (needs `make up`)
 	eval "$$(./scripts/local-env.sh)" && cd worker && uv run pytest -m integration
 
-worker:           ## Run the boarding queue consumer against the local stack
-	eval "$$(./scripts/local-env.sh)" && cd worker && uv run collectoo-worker consume boarding
+worker:           ## Run the boarding and payments queue consumers against the local stack
+	eval "$$(./scripts/local-env.sh)" && cd worker && uv run collectoo-worker consume boarding payments
 
 e2e:              ## Playwright against the local stack (needs make up; builds the web app first)
 	./scripts/e2e.sh

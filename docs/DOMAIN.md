@@ -578,15 +578,29 @@ erDiagram
     bank_statement {
         uuid id PK
         uuid bank_account_id FK
-        date statement_date
-        text camt053_sha256
+        text format "camt053|csv (= the bank account's feed)"
+        text file_sha256 "one statement per file and bank account"
+        text status "awaiting_upload|uploaded|imported|rejected|failed"
+        date from_date
+        date to_date
+        bigint opening_booked_minor
+        bigint closing_booked_minor
+        jsonb counts "what the import did (amounts as text)"
+        jsonb bank_check "I9 at import"
+        jsonb warnings "missing statement, overlap"
     }
     bank_transaction {
         uuid id PK
         uuid statement_id FK
-        text dedup_key UK
-        bigint amount_minor
+        text dedup_key UK "per bank account: t: e:<entry>#n c: h:"
+        text entry_ref "camt.053 entry reference (Ntry/AcctSvcrRef)"
+        text direction "credit|debit"
+        bigint amount_minor "> 0"
+        date booking_date
+        text kind "debtor_credit|batch_unsplit|return|refund_out|other_debit|suspected_duplicate|psp_payout"
+        text counterparty_name
         text remittance_text
+        text creditor_reference
     }
     payment_match {
         uuid payment_id FK
@@ -616,6 +630,33 @@ erDiagram
         text source_ref "arrete or ECB link"
     }
 ```
+
+**Bank statements (M2b-2, ADR-0013).** A statement of a `client_funds` account is uploaded by an admin or ops manager (« Relevés »), then imported by the worker in one transaction. Each line is kept as the bank reported it (`bank_transaction`, append-only), once per bank account: the same file, or the lines an overlapping statement repeats, add nothing; a known bank reference reported with another amount, direction or date refuses the file. A camt.053 entry is booked once at the level of detail of its first import: the same entry coming back split another way (unsplit, then with its details, or the reverse) refuses the file. A file, or a CSV bank operation (same id, day, amount and direction), already imported for another bank account of the servicer is refused; a CSV line whose fingerprint is on another account is held. Every credit a debtor paid (`debtor_credit`, and an unsplit batch credit) becomes one `payment` (`unmatched`), and each booking day of the statement is booked by one `cash_in` entry (5120 / 4710 pool). Debits (`other_debit`, `refund_out`), `return` lines and CSV `suspected_duplicate` lines are recorded but not booked (M2b-3, M2b-6); the page shows the gap they explain between the bank's closing balance and the ledger cash (I9).
+
+**Line kinds:** `debtor_credit` a debtor's transfer, direct debit, card or cheque credit; `batch_unsplit` a batch booking whose details do not add up (a credit is still one payment); `return` the bank undoes an earlier movement (return reason, reversal indicator, return bank transaction code; either direction; also a batch that cannot be split, when the entry or any of its details says so); `refund_out` our refund (end-to-end id `RFD…`); `other_debit` fees and anything else debited; `suspected_duplicate` a CSV line with the day, amount and direction of an earlier line and a similar label (held for ops); `psp_payout` M5.
+
+**« Relevé CSV » — the documented column set** (manual import when the bank sends no camt.053; one format per bank account). Headers are matched without case, accents or punctuation; the header row may follow up to 19 preamble lines; separator `;`, `,`, tab or `|`. What the reader cannot read one way only refuses the file before anything is written, with a stable code:
+
+- **Encoding**, decided over the whole file: UTF-8 from the first byte to the last (a BOM is allowed and dropped), otherwise Windows-1252. UTF-16, a NUL byte, a byte Windows-1252 does not define (0x81, 0x8D, 0x8F, 0x90, 0x9D), or a non-UTF-8 byte in a file that starts with a UTF-8 BOM: `csv_encoding`, with the line.
+- **Quoting:** a field may be enclosed in double quotes (to hold the separator; `""` is a quote inside it). No field holds a line break: a row spread over several lines (a quote left open swallows the following rows) is refused (`csv_row`), as is a field over 131,072 characters.
+- **Row shape:** each row has the cells of the booking date, the label and the amounts; optional cells missing at the end of a row are empty; cells beyond the header must be empty (an unquoted separator in a label moves the amounts): otherwise `csv_row`.
+- **Size:** at most **250,000 lines** (preamble, header and blank lines included) and **64 MiB**, checked before parsing (`file_too_large`; 2.5 times the 100k-line target: the worker holds the parsed lines in memory, about 0.7 KB each, in the process that also runs boarding). A longer export is cut by period.
+- **Line numbers:** « ligne N » in a refusal is the line of the file as a text editor or a spreadsheet numbers it (the first line is 1; preamble, header and blank lines count), and each imported line keeps that number (`line_no`), so the SQL refusals name the same line.
+
+| Field | Accepted headers | Required | Format |
+|---|---|---|---|
+| Booking date | `Date de comptabilisation`, `Date comptable`, then `Date opération`, `Date` | yes | `JJ/MM/AAAA` (also `JJ-MM-AAAA`, `JJ.MM.AAAA`, `AAAA-MM-JJ`). A file with a header of each rank (BPCE exports: `Date de comptabilisation` and `Date opération`) reads the first rank; two of the same rank are refused (`csv_header`) |
+| Label | `Libellé`, `Libellé opération`, `Description`, `Intitulé` | yes | text; markers `/DE <payer>`, `/MOTIF <text>`, `/REF <reference>` are read |
+| Amount | `Montant` (signed) — or `Débit` and `Crédit` | yes | `1 234,56`, `1.234,56`, `-50,00`, `50,00-`; more decimals than the currency has: refused, never rounded. A `Débit` may be printed negative or positive; a negative `Crédit` is refused |
+| Value date | `Date valeur`, `Date de valeur` | no | as the booking date |
+| Bank's operation id | `Référence opération`, `Référence banque`, `Réf banque`, `Id opération`, `Identifiant opération`, `Numéro d'opération` | no (recommended) | exact dedup key; a plain `Référence` is not trusted |
+| Counterparty | `Contrepartie`, `Nom contrepartie`, `Tiers`, `Émetteur bénéficiaire`; else `/DE` | no | |
+| Counterparty IBAN | `IBAN contrepartie`, `IBAN` | no | |
+| Currency | `Devise` | no | must be the account's |
+| Creditor reference | `Référence créancier`, `Référence RF`; else a valid RF after `/REF` | no | |
+| End-to-end id | `Référence de bout en bout`, `End to end`; else a non-RF `/REF` | no | |
+
+A bank account's `csv_profile` names its own headers (`{"columns": {"booking_date": "Date opé"}, "decimal": ","}`). A line is a `return` only when its label **starts** with the bank's operation type and a return word, in either order: `RETOUR`, `RETOURNÉ`, `REJET`, `REJETÉ`, `IMPAYÉ` or `ANNULATION` (optionally followed by `DE`/`DU`) with `VIR`, `VIREMENT`, `PRLV`, `PRÉLÈVEMENT`, `SEPA`, `CHQ`, `CHÈQUE`, `REM`, `REMISE`, `CB` or `CARTE` (« RETOUR VIR SEPA », « REJET DE PRLV », « PRLV SEPA REJETÉ », « IMPAYÉ CHQ »). Words further in the label may be the payer's (« REGLEMENT IMPAYE ») and are never read for this: a debtor's credit is never turned into a non-payment by its motif. A CSV proves no balance: no opening/closing check.
 
 ### 3.6 Plans, promises, disputes, holds, legal
 
@@ -1123,6 +1164,29 @@ stateDiagram-v2
 | Abandon | Any step before commit (not while the commit job runs); prepared staging rows are deleted |
 | Versioning | Re-boarding the same tape creates `version + 1`; mapping profiles are versioned and reused per seller/client |
 | Mandatory fields | Severity from the catalogue and `conformance` (gap analysis §3.3) |
+
+### 4.5 Bank statement (M2b-2)
+
+```mermaid
+stateDiagram-v2
+    [*] --> awaiting_upload : admin or ops manager registers the file (SHA-256, size, account)
+    awaiting_upload --> uploaded : file stored, import queued
+    uploaded --> imported : worker books new lines (one transaction)
+    uploaded --> rejected : file too large, unreadable or inexact, wrong account or currency, unbalanced, closed account, reference conflict
+    uploaded --> failed : technical error after the retries
+    imported --> [*]
+    rejected --> [*]
+    failed --> [*]
+```
+
+| Rule | Detail |
+|---|---|
+| Same file | The same SHA-256 for the same bank account is one statement: uploading it again opens the existing one (a rejected or failed file can be sent again) |
+| Same lines | Lines already reported for the bank account are skipped (counted as « déjà importées »); nothing is booked twice |
+| Same entry | A camt.053 entry keeps its key with or without a single detail (`e:<ref>#1`); an entry already imported that comes back split another way refuses the file (`entry_detail_differs`) |
+| Other account | A file already sent for another bank account of the servicer is refused at upload and at import; so is a CSV whose bank operation (id, day, amount, direction) is on another account (`imported_on_other_account`) |
+| Refusal | Nothing of the import is written; the statement keeps a stable code, worded in French on the page |
+| Warnings | Opening balance ≠ the closing of the statement covering the day before, or a sequence gap: « relevé manquant ? » (not checked when an imported statement already covers that day); dates overlapping an imported statement |
 
 ## 5. Open questions (❓ founder)
 

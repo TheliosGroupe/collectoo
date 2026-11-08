@@ -131,6 +131,15 @@ class QueueConsumer:
             conn.execute("select pgmq.archive(%s, %s::bigint)", (self.queue, msg.msg_id))
 
 
+def run_all(consumers: list[QueueConsumer], idle_sleep_s: float = 1.0) -> None:  # pragma: no cover
+    """One process, several queues: poll each in turn, sleep when all are empty."""
+    for consumer in consumers:
+        log.info("consumer started", extra={"queue": consumer.queue})
+    while True:
+        if sum(consumer.poll_once() for consumer in consumers) == 0:
+            time.sleep(idle_sleep_s)
+
+
 def json_log_formatter() -> logging.Formatter:
     """Structured logs: one JSON object per line with the extra fields."""
 

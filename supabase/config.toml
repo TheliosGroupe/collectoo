@@ -131,6 +131,11 @@ file_size_limit = "50MiB"
 public = false
 file_size_limit = "500MiB"
 
+# Bank statements (camt.053 / CSV) of the client-funds accounts, read by the worker (M2b-2).
+[storage.buckets.bank-statements]
+public = false
+file_size_limit = "500MiB"
+
 [storage.buckets.documents]
 public = false
 file_size_limit = "50MiB"
