@@ -1,0 +1,24 @@
+# Transformation spec v1 (M1-11). Default step chains per target type; overrides per target.
+# The boarding job adapts date formats and the decimal mark from the column profile.
+version: 1
+defaults:
+  text: [trim]
+  date: [trim, {parse_date: {formats: auto}}]
+  amount: [trim, {parse_decimal: {decimal: auto}}, {to_minor: {exponent: 2}}]
+  siren: [digits_only, {check: siren}]
+  siret: [digits_only, {check: siret}]
+  iban: [no_spaces, upper, {check: iban}]
+  email: [trim, lower, {check: email}]
+  phone: [trim, {e164: {region: FR}}]
+  postcode: [digits_only, {zero_pad: {width: 5}}, {check: postcode_fr}]
+  currency: [trim, upper, {check: currency}]
+  # EU-template field types (Annex III formats): kept as values, amounts stay in major units.
+  alphanumeric: [trim]
+  choice: [trim]
+  unspecified: [trim]
+  number: [trim, {parse_decimal: {decimal: "."}}]
+  percentage: [trim, {parse_decimal: {decimal: "."}}]
+  boolean: [trim, {lookup: {table: yes_no}}]
+overrides:
+  claim_item.kind: [trim, {lookup: {table: document_kind}}]
+  claim_item.currency: [trim, upper, {default: EUR}, {check: currency}]

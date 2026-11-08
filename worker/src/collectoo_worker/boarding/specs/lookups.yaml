@@ -1,0 +1,16 @@
+# Lookup tables used by transformations. Keys are matched upper-cased.
+document_kind:
+  FACTURE: invoice
+  FAC: invoice
+  INVOICE: invoice
+  AVOIR: credit_note
+  CREDIT NOTE: credit_note
+  CREDIT_NOTE: credit_note
+  AV: credit_note
+yes_no:
+  "YES": true
+  "NO": false
+  "OUI": true
+  "NON": false
+  "Y": true
+  "N": false

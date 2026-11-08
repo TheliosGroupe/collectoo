@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collectoo_worker.ai.gateway import Provider
+    from collectoo_worker.boarding.address import Normaliser
 
 __version__ = "0.1.0"
 
@@ -21,6 +22,13 @@ def _provider(name: str) -> Provider:
     if name != "mock":
         raise SystemExit(f"LLM_PROVIDER={name!r} is not configured; only 'mock' is available")
     return MockProvider()
+
+
+def _normaliser(name: str) -> Normaliser:
+    """`mock` (default, CI) or `ban` (api-adresse.data.gouv.fr, must be allowed by the network)."""
+    from collectoo_worker.boarding.address import BanNormaliser, MockNormaliser  # noqa: PLC0415
+
+    return BanNormaliser() if name == "ban" else MockNormaliser()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,8 +49,8 @@ def main(argv: list[str] | None = None) -> int:
 
     storage = SupabaseStorage(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SECRET_KEY"])
     provider = _provider(os.environ.get("LLM_PROVIDER", "mock"))
+    addresses = _normaliser(os.environ.get("ADDRESS_NORMALISER", "mock"))
     if args.cmd == "consume":
-        QueueConsumer(
-            os.environ["DATABASE_URL"], args.queue, make_handler(storage, provider)
-        ).run_forever()
+        handler = make_handler(storage, provider, addresses)
+        QueueConsumer(os.environ["DATABASE_URL"], args.queue, handler).run_forever()
     return 0
