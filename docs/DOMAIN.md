@@ -172,6 +172,7 @@ Diagrams are split by area. Attribute lists are abridged to keys and the fields 
 
 ```mermaid
 erDiagram
+    organization ||--o{ organization : "serves (servicer_organization_id)"
     organization ||--o{ membership : "has members"
     auth_user ||--o{ membership : "belongs to"
     auth_user ||--o{ portfolio_access : "is granted"
@@ -184,6 +185,7 @@ erDiagram
     organization {
         uuid id PK
         text kind "servicer|creditor_client|fund|fct|management_company|depositary"
+        uuid servicer_organization_id FK "null only for the servicer (tenant root)"
         text legal_name
         text siren
     }

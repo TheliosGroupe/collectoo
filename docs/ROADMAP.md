@@ -16,7 +16,7 @@ _Phase 0 draft, 2026-11-07. Each task fits in under one day. 🔒 = blocked on f
 |---|---|---|
 | PR-0 | Phase 0 — design docs | (this PR) |
 | PR-1 | M0a Repo, tooling, CI, session hook | M0-01 … M0-05 |
-| PR-2 | M0b Supabase, auth, tenancy, RLS | M0-06 … M0-11 |
+| PR-2 | M0b Supabase, auth, tenancy, RLS | M0-06 … M0-11 (split: M0b-db = M0-06, 07, 09, 10, 11; M0b-auth = M0-08) |
 | PR-3 | M0c Two-layer canonical schema | M0-12 … M0-15 |
 | PR-4 | M0d Synthetic generator and seed | M0-16 … M0-18 |
 | PR-5 | M1a Upload, ingestion, profiling | M1-01 … M1-05 |
