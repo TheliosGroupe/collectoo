@@ -9,6 +9,7 @@ dependencies = [
     "fastexcel>=0.21.0",
     "httpx>=0.28.1",
     "jsonschema>=4.26.0",
+    "phonenumbers>=9.0.43",
     "polars>=2.1.0",
     "psycopg[binary]>=3.3.8",
     "pyyaml>=6.0.3",

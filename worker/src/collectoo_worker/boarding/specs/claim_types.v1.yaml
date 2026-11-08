@@ -1,0 +1,36 @@
+# Claim type and legal regime assignment (M1-14). Declarative, versioned.
+# Order: EU-template row values (instrument, then asset class) > portfolio default > file signals.
+version: 1
+eba:
+  by_instrument:   # template 3.06 Type of instrument
+    Overdraft: overdraft
+    Credit card debt: revolving_credit
+    Revolving credit other than overdrafts and credit card debt: revolving_credit
+  by_asset_class:  # template 3.05 Asset Class
+    Consumer: consumer_instalment_loan
+    Automobile: consumer_instalment_loan
+    Credit card: revolving_credit
+    Residential real estate: consumer_mortgage
+    Corporate: professional_loan
+    Commercial real estate: professional_loan
+    Leasing: professional_loan
+file_signals:      # first matching mapped target decides (no portfolio default)
+  - {target: claim_item.period, claim_type: rent}
+  - {target: party.siren, claim_type: b2b_invoice}
+  - {target: party.siret, claim_type: b2b_invoice}
+  - {target: claim_item.ref, claim_type: b2c_invoice}
+# Legal regime (docs/CALCULATION_RULES.md): consumer credit depends on the contract date (CCD2,
+# ordonnance 2025-880, applicable to contracts concluded from 2026-11-20).
+ccd2_from: 2026-11-20
+legal_regime:
+  consumer_instalment_loan: by_contract_date
+  revolving_credit: by_contract_date
+  overdraft: by_contract_date
+  bnpl: by_contract_date
+  consumer_mortgage: consumer_mortgage
+  professional_loan: professional_credit
+  b2b_invoice: commercial_b2b
+  b2c_invoice: consumer_b2c
+  rent: civil
+  private_loan: civil
+  judgment_debt: judgment

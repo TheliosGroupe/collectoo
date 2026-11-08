@@ -3,6 +3,7 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
+- PR #8 M1b merged 2026-11-08 (mapping proposals, LLM gateway + mock, eval 167/167, mapping profiles).
 - PR #7 M1a merged 2026-11-08 (boarding upload, queue runtime, readers, profiling).
 - M0 complete 2026-11-08: PRs #2–#6 merged (tooling/CI, tenancy/RLS, auth/MFA, two-layer schema, synth + seed).
 - PR #4 M0b-auth merged 2026-11-08 (email-code login, TOTP MFA, route gating, E2E vs local stack in CI).
@@ -16,10 +17,10 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- PR "M1b — mapping proposals, LLM gateway + mock, eval suite, mapping profiles" (M1-06…M1-10): target registry (20 operational + 135 EU-template targets with aliases and value types), provider-agnostic gateway (versioned prompts, JSON-Schema-validated outputs, every call logged in `private.llm_call`), deterministic mock provider, proposals with confidence/rationale/needs_review, join keys across files, `approve_mapping` with overrides saving versioned mapping profiles per client and file layout, reused at confidence 1.0; eval suite 167 golden columns, 100 % (threshold 0.98) in CI.
+- PR "M1c — transformations, validators, BAN, claim types, validation rules, DQ report" (M1-11…M1-16): versioned transformation DSL (French dates/decimals → dates and integer cents, E.164 phones, SIREN/SIRET/IBAN checks, lookups), claim type + legal regime rules (CCD2 by contract date), declarative validation (blocking vs warning; EU-template mandatory fields blocking only for regulatory-grade tapes; Art. 4(1) exemptions), data-quality report (completeness, contactability, duplicates, reconciliation to the cent), BAN adapter with cache (99/100 real messy addresses normalised in a manual run; mock in CI); transform job after approval → `validated` / `needs_fix`.
 
 ## Next
-- M1c transformations, validators, BAN adapter (mock in CI), claim-type assignment, validation rules, data-quality report; then M1d staging/commit/review UI/50k CI/1M benchmark.
+- M1d: staging, commit/rollback/confirm into Layer 2 (+ Layer 1 for EU tapes), review UI with screenshots, bulk document zip, 50k-row CI boarding, 1M-row benchmark.
 
 ## Decisions
 - Debtor data is scoped per client organization (party.client_organization_id): no cross-client debtor merge, each client stays controller of its data. Template fields without an operational column live in `source_attributes` so tapes can be regenerated.

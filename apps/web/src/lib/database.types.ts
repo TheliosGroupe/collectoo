@@ -85,14 +85,14 @@ isOneToOne: false
                   ]
                 },"boarding_batch": {
                   Row: {
-                    "art4_exemptions": NonNullable<Json>,"client_organization_id": string,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"id": string,"join_keys": NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"status": string,"updated_at": string,"version": number
+                    "art4_exemptions": NonNullable<Json>,"claim_type_spec_version": number | null,"client_organization_id": string,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"dq_report": Json | null,"id": string,"join_keys": NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"status": string,"transform_spec_version": number | null,"updated_at": string,"validation_spec_version": number | null,"version": number
                   }
                   ComputedFields: never
                   Insert: {
-                    "art4_exemptions"?: NonNullable<Json>,"client_organization_id": string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"updated_at"?: string,"version": number
+                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id": string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version": number
                   }
                   Update: {
-                    "art4_exemptions"?: NonNullable<Json>,"client_organization_id"?: string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"updated_at"?: string,"version"?: number
+                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id"?: string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version"?: number
                   }
                   Relationships: [
                     {
@@ -571,6 +571,32 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"validation_issue": {
+                  Row: {
+                    "batch_id": string,"code": string,"created_at": string,"file_id": string,"id": number,"message": string,"raw_value": string | null,"row_number": number | null,"severity": string,"source_column": string | null,"target": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "batch_id": string,"code": string,"created_at"?: string,"file_id": string,"id"?: never,"message": string,"raw_value"?: string | null,"row_number"?: number | null,"severity": string,"source_column"?: string | null,"target"?: string | null
+                  }
+                  Update: {
+                    "batch_id"?: string,"code"?: string,"created_at"?: string,"file_id"?: string,"id"?: never,"message"?: string,"raw_value"?: string | null,"row_number"?: number | null,"severity"?: string,"source_column"?: string | null,"target"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "validation_issue_batch_id_fkey"
+      columns: ["batch_id"]
+isOneToOne: false
+      referencedRelation: "boarding_batch"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "validation_issue_file_id_fkey"
+      columns: ["file_id"]
+isOneToOne: false
+      referencedRelation: "boarding_file"
+      referencedColumns: ["id"]
+    }
+                  ]
                 }
           }
           Views: {
@@ -591,6 +617,9 @@ isOneToOne: false
                            },
 "custom_access_token_hook":
 { Args: { "event": Json }; Returns: Json
+                           },
+"set_control_totals":
+{ Args: { "p_batch_id": string,"p_rows": number,"p_total_minor": number }; Returns: undefined
                            },
 "submit_boarding_batch":
 { Args: { "p_batch_id": string }; Returns: number

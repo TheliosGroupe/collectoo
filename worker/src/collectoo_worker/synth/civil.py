@@ -173,7 +173,10 @@ def _inject(kind: Kind, rec: dict[str, object], defect: str, rng: random.Random)
             rec["amount"] = -abs(Decimal(str(rec["amount"])))
             if "document_type" in rec:
                 rec["document_type"] = "FACTURE"
-        case "overpaid":
+        case "overpaid":  # on an invoice (a credit note cannot be overpaid)
+            rec["amount"] = abs(Decimal(str(rec["amount"])))
+            if "document_type" in rec:
+                rec["document_type"] = "FACTURE"
             rec["amount_paid"] = Decimal(str(rec["amount"])) + Decimal(rng.randint(100, 5000)) / 100
 
 

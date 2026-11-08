@@ -1,0 +1,35 @@
+# Validation rules (M1-15). Blocking issues stop the batch (needs_fix); warnings are reported.
+version: 1
+required:              # blocking when the value is missing, per claim type
+  b2b_invoice: [account.external_ref, party.display_name, claim_item.ref, claim_item.due_date, claim_item.amount]
+  b2c_invoice: [account.external_ref, party.display_name, claim_item.ref, claim_item.due_date, claim_item.amount]
+  rent: [account.external_ref, party.display_name, claim_item.due_date, claim_item.amount]
+  bank_credit: [eba.f3_01_loan_identifier, eba.f3_12_legal_balance]
+recommended:           # warning when missing
+  b2b_invoice: [party.siren]
+severity:
+  # transformation errors
+  impossible_date: blocking
+  bad_date: blocking
+  bad_amount: blocking
+  unknown_value: blocking
+  invalid_siren: warning
+  invalid_siret: warning
+  invalid_iban: warning
+  invalid_email: warning
+  bad_phone: warning
+  invalid_postcode_fr: warning
+  invalid_currency: blocking
+  # row and file rules
+  missing_required: blocking
+  missing_recommended: warning
+  missing_contact: warning
+  duplicate_row: warning
+  duplicate_document: warning
+  mixed_date_format: warning
+  negative_amount: blocking
+  overpaid: warning
+  unassigned_claim_type: blocking
+  unknown_legal_regime: blocking
+  broken_reference: blocking
+  eba_mandatory_missing: warning   # becomes blocking for a regulatory-grade tape
