@@ -19,7 +19,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- PR "M1e — back-office boarding review UI" (M1-19): `/backoffice/reprises` (batch list), `/nouveau` (upload: files hashed in the browser, stored under ASCII keys built from ids, retry-safe registration, optional seller control totals parsed to cents without floats), `/[id]` (file profiles incl. Excel/zip/fixed-width, mapping review with confidence/rationale and per-column override, data-quality report, integrate / confirm / roll back / abandon, history; refreshes itself while the worker runs and shows a dead-lettered job instead of waiting forever). A 32-finding multi-agent review was addressed before the PR (fixes in migration `20261108160000_boarding_review_fixes`, worker DLQ hook, reconciliation rules). Playwright flows (board + abandon) with the boarding worker, locally and in CI; screenshots `docs/screenshots/m1-boarding-*`.
+- PR "M1e — back-office boarding review UI" (M1-19): `/backoffice/reprises` (batch list), `/nouveau` (upload: files hashed in the browser, stored under ASCII keys built from ids, retry-safe registration, optional seller control totals parsed to cents without floats), `/[id]` (file profiles incl. Excel/zip/fixed-width, mapping review with confidence/rationale and per-column override, data-quality report, integrate / confirm / roll back / abandon, history; refreshes itself while the worker runs and shows a dead-lettered job instead of waiting forever). Two multi-agent review rounds were addressed before merging (32 findings, then 4 partial + 5 new: mixed CSV + fixed-width batches now end in needs_fix instead of dropping the file, Excel sheet order kept explicitly, empty Excel sheets no longer crash the reader, French mapping rationale from the mock) (fixes in migration `20261108160000_boarding_review_fixes`, worker DLQ hook, reconciliation rules). Playwright flows (board + abandon) with the boarding worker, locally and in CI; screenshots `docs/screenshots/m1-boarding-*`.
 
 ## Next
 - M1 report to the founder, then M2a ledger (M2-01 … M2-05).
@@ -39,6 +39,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - EU template catalogue built from EUR-Lex only; Excel used for the diff.
 
 ## Open questions
+- When a real LLM key is provided: the mapping prompt (v1) must ask for the rationale in French (back-office copy); bump it to v2 then.
 - Hosted Supabase: enable the custom access token hook, TOTP MFA and the French code-only `magic_link` email template (`supabase/templates/magic_link.html`) in the dashboard, or `supabase config push`; migrations alone don't set Auth config.
 - Counsel: `docs/COMPLIANCE.md` §9 (OQ-1…17), `docs/CHANNELS.md` §8, `docs/ARCHITECTURE.md` §17; domain questions at the end of `docs/DOMAIN.md`.
 - GitHub default branch is still `claude/loving-clarke-u1b205`: switch it to `main` in Settings → Branches.

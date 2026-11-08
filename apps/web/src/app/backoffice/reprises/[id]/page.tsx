@@ -78,6 +78,8 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
 
   const fileRows = (files ?? []) as unknown as FileRow[];
   const fileNames = Object.fromEntries(fileRows.map((f) => [f.id, f.file_name]));
+  // A job that failed for good: blocks the page while processing; after commit (documents job)
+  // it is shown as a warning, the batch itself being integrated.
   const failed = b.failed_job !== null && isProcessing(b.status);
   // "yyyy-mm-dd" is a calendar date: format it without a timezone shift.
   const cutOff = b.cut_off_date ? b.cut_off_date.split("-").reverse().join("/") : null;
@@ -104,6 +106,14 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
           L&apos;étape « {JOB_FR[b.failed_job.type] ?? b.failed_job.type} » a échoué après plusieurs tentatives. Vérifiez le
           fichier (format, encodage), puis abandonnez ce lot et déposez-en un nouveau. Détail technique :{" "}
           <span className="font-mono text-xs break-all">{b.failed_job.error}</span>
+        </ErrorNote>
+      ) : b.failed_job ? (
+        <ErrorNote>
+          L&apos;étape « {JOB_FR[b.failed_job.type] ?? b.failed_job.type} » a échoué après plusieurs tentatives
+          {b.failed_job.type === "documents"
+            ? " : les pièces jointes n'ont pas été rattachées. Déposez le zip dans un nouveau lot (par exemple en plusieurs zips plus petits)."
+            : "."}{" "}
+          Détail technique : <span className="font-mono text-xs break-all">{b.failed_job.error}</span>
         </ErrorNote>
       ) : isProcessing(b.status) ? (
         <InfoNote>Traitement en cours ({statusLabel(b.status).toLowerCase()})… la page se met à jour seule.</InfoNote>

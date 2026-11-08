@@ -82,6 +82,7 @@ const ISSUE_LABEL: Record<string, string> = {
   unknown_legal_regime: "Régime juridique non déterminé (date du contrat manquante)",
   broken_reference: "Référence vers un autre fichier introuvable",
   eba_mandatory_missing: "Champ obligatoire du modèle UE manquant",
+  file_not_boarded: "Fichier non repris : largeur fixe sans description des colonnes, ou classeur vide",
 };
 
 export function issueLabel(code: string): string {

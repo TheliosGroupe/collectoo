@@ -236,3 +236,28 @@ def test_jobs_of_an_abandoned_batch_do_nothing(tenant: dict[str, Any], tmp_path:
             (batch,),
         )
     assert status == "abandoned" and profiled == 0
+
+
+def test_a_file_that_cannot_be_read_as_a_table_blocks_the_batch(
+    tenant: dict[str, Any], tmp_path: Path
+) -> None:
+    """A fixed-width file without layout next to a CSV is never dropped silently."""
+    dat = tmp_path / "historique.dat"
+    dat.write_text("C0001  0000012345 20260115\n", encoding="utf-8")
+    store = storage()
+    batch = board(tenant, store, _clean_file(tmp_path, rows=20), dat)
+    drain(store)
+    with psycopg.connect(DB) as conn, conn.transaction():
+        as_user(conn, tenant["user"])
+        conn.execute("select public.approve_mapping(%s, %s)", (batch, json.dumps({})))
+    drain(store)
+    with psycopg.connect(DB) as conn:
+        status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
+        issues = conn.execute(
+            """select f.file_name, i.severity from public.validation_issue i
+               join public.boarding_file f on f.id = i.file_id
+               where i.batch_id = %s and i.code = 'file_not_boarded'""",
+            (batch,),
+        ).fetchall()
+    assert status == "needs_fix"
+    assert issues == [("historique.dat", "blocking")]

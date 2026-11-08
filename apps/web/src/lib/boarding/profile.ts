@@ -33,7 +33,11 @@ export function readProfile(raw: unknown): FileProfile {
   if (isTable(raw)) return { kind: "table", table: raw };
   const obj = raw as Record<string, unknown>;
   if (obj.sheets && typeof obj.sheets === "object") {
-    for (const [sheet, table] of Object.entries(obj.sheets as Record<string, unknown>)) {
+    const sheets = obj.sheets as Record<string, unknown>;
+    // jsonb sorts keys: the workbook order is in sheet_order (same sheet as the worker reads).
+    const order = Array.isArray(obj.sheet_order) ? (obj.sheet_order as string[]) : Object.keys(sheets);
+    for (const sheet of order) {
+      const table = sheets[sheet];
       if (isTable(table) && table.row_count > 0) return { kind: "table", table, sheet };
     }
     return { kind: "empty_workbook" };

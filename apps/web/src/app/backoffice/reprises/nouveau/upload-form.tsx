@@ -46,7 +46,8 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
       return setError("Encours annoncé illisible (ex. 12 345,67).");
     if (rowsText && !/^\d{1,9}$/.test(rowsText)) return setError("Nombre de lignes illisible.");
 
-    const signature = JSON.stringify([portfolio, cutOff, totalText, rowsText, files.map((f) => [f.name, f.size, f.lastModified])]);
+    // Totals are not part of it: set_control_totals overwrites them on the same draft batch.
+    const signature = JSON.stringify([portfolio, cutOff, files.map((f) => [f.name, f.size, f.lastModified])]);
     if (attempt.current?.signature !== signature) attempt.current = { signature, key: crypto.randomUUID() };
 
     const supabase = createClient();

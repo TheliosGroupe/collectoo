@@ -90,7 +90,8 @@ def scan_csv(path: Path, dialect: CsvDialect | None = None) -> tuple[pl.LazyFram
 
 def read_xlsx(path: Path) -> dict[str, pl.DataFrame]:
     """Every sheet, all columns as text."""
-    sheets = pl.read_excel(path, sheet_id=0, infer_schema_length=0)
+    # Empty sheets (notes, covers) are common: read them as empty tables instead of failing.
+    sheets = pl.read_excel(path, sheet_id=0, infer_schema_length=0, raise_if_empty=False)
     return {name: df.with_columns(pl.all().cast(pl.Utf8)) for name, df in sheets.items()}
 
 

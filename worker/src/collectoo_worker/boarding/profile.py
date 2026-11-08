@@ -53,6 +53,8 @@ def _impossible_dates(values: list[str], fmt: str) -> int:
 def profile_frame(lf: pl.LazyFrame) -> dict[str, Any]:
     lf = _clean(lf)
     names = lf.collect_schema().names()
+    if not names:  # an empty sheet: nothing to profile
+        return {"row_count": 0, "duplicate_rows": 0, "columns": [], "sample": []}
     exprs: list[pl.Expr] = [pl.len().alias("__rows")]
     for c in names:
         col = pl.col(c)

@@ -112,6 +112,7 @@ class QueueConsumer:
 
     def _dead_letter(self, msg: Message) -> None:
         with psycopg.connect(self.conninfo) as conn, conn.transaction():
+            conn.execute("select set_config('app.actor', %s, true)", (f"worker:{self.queue}",))
             body = {**msg.payload, "_dead_letter": {"queue": self.queue, "msg_id": msg.msg_id}}
             conn.execute("select pgmq.send(%s, %s)", (self.dlq, Jsonb(body)))
             conn.execute(

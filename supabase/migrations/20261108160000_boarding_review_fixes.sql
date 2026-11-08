@@ -51,7 +51,7 @@ begin
   select f.id into v_dup
   from public.boarding_file f join public.boarding_batch b on b.id = f.batch_id
   where f.sha256 = lower(p_sha256) and b.client_organization_id = v_batch.client_organization_id
-    and b.status not in ('rolled_back', 'abandoned')
+    and b.status not in ('draft', 'rolled_back', 'abandoned')  -- unsubmitted attempts do not count
   order by f.created_at limit 1;
   v_path := v_batch.client_organization_id || '/' || p_batch_id || '/' || v_id || '.' || v_ext;
   insert into public.boarding_file (id, batch_id, file_name, format, storage_path, sha256, size_bytes, duplicate_of_file_id)

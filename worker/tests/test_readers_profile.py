@@ -132,3 +132,33 @@ def test_profile_detects_every_injected_defect(tmp_path: Path, kind: str, dialec
     assert cols[h["amount"]]["type_guess"] == (
         "decimal_dot" if dialect == "en_comma" else "decimal_comma"
     )
+
+
+def test_mapped_sheet_follows_workbook_order_not_jsonb_key_order(tmp_path: Path) -> None:
+    """jsonb sorts keys (by length, then bytes): the stored profile keeps the sheet order."""
+    import json  # noqa: PLC0415
+
+    import xlsxwriter  # noqa: PLC0415
+
+    from collectoo_worker.jobs.boarding import mappable_profile, profile_file, read_table  # noqa: PLC0415
+
+    path = tmp_path / "tape.xlsx"
+    with xlsxwriter.Workbook(path) as wb:
+        wb.add_worksheet("Notes")  # empty
+        factures = wb.add_worksheet("Factures")
+        for r, row in enumerate([["Réf", "Montant"], ["F1", "10,00"], ["F2", "20,00"]]):
+            factures.write_row(r, 0, row)
+        annexe = wb.add_worksheet("Annexe")
+        for r, row in enumerate([["Code"], ["A"]]):
+            annexe.write_row(r, 0, row)
+    profile, rows = profile_file(path, "xlsx")
+    as_jsonb = json.loads(json.dumps(profile))
+    as_jsonb["sheets"] = dict(
+        sorted(as_jsonb["sheets"].items(), key=lambda kv: (len(kv[0].encode()), kv[0].encode()))
+    )
+    assert list(as_jsonb["sheets"]) == ["Notes", "Annexe", "Factures"]
+    chosen = mappable_profile(as_jsonb)
+    table = read_table(path, "xlsx")
+    assert chosen is not None and table is not None
+    assert [c["name"] for c in chosen["columns"]] == table.columns == ["Réf", "Montant"]
+    assert rows == 3

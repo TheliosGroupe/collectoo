@@ -36,9 +36,11 @@ from collectoo_worker.boarding.stage import stage_rows, write_staging
 from collectoo_worker.boarding.transforms import load_spec
 from collectoo_worker.boarding.validate import (
     FileResult,
+    Issue,
     IssueLog,
     detect_eba_table,
     rules,
+    severity,
     validate_batch,
 )
 from collectoo_worker.runtime.storage import Storage
@@ -106,7 +108,9 @@ def profile_file(path: Path, file_format: str) -> tuple[dict[str, Any], int | No
         return profile, int(profile["row_count"])
     if file_format == "xlsx":
         sheets = {name: profile_frame(df.lazy()) for name, df in read_xlsx(path).items()}
-        return {"sheets": sheets}, sum(int(p["row_count"]) for p in sheets.values())
+        # jsonb sorts object keys: the workbook order is kept explicitly.
+        profile = {"sheets": sheets, "sheet_order": list(sheets)}
+        return profile, sum(int(p["row_count"]) for p in sheets.values())
     if file_format == "fixed_width":
         return {"needs_layout": True}, None
     return {"not_profiled": file_format}, None  # zip: documents, handled in M1-20
@@ -116,8 +120,11 @@ def mappable_profile(profile: dict[str, Any]) -> dict[str, Any] | None:
     """The tabular profile to map: the file itself, or the first non-empty sheet of a workbook."""
     if "columns" in profile:
         return profile
-    for sheet in profile.get("sheets", {}).values():
-        if sheet["row_count"]:
+    sheets = profile.get("sheets", {})
+    # Same sheet as read_table: the first non-empty one in workbook order.
+    for name in profile.get("sheet_order") or list(sheets):
+        sheet = sheets.get(name)
+        if sheet and sheet["row_count"]:
             return dict(sheet)
     return None
 
@@ -274,13 +281,18 @@ def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id:
 
     results: list[FileResult] = []
     profiles: dict[str, dict[str, Any]] = {}
+    not_boarded: list[str] = []  # tabular files that cannot be read: never dropped silently
     with tempfile.TemporaryDirectory() as tmp:
         for file_id, name, bucket, path, file_format, profile in files:
             fid = str(file_id)
+            if file_format == "zip":
+                continue  # documents: linked after commit
             if fid not in mappings:
+                not_boarded.append(fid)
                 continue
             table = read_table(storage.download(bucket, path, Path(tmp) / fid), file_format)
             if table is None:
+                not_boarded.append(fid)
                 continue
             mapping = mappings[fid]
             results.append(
@@ -296,6 +308,18 @@ def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id:
         art4_exempt=any(bool(v) for v in (art4 or {}).values()),
         join_keys=keys or [],
     )
+    for fid in not_boarded:
+        log.add(
+            Issue(
+                fid,
+                None,
+                None,
+                None,
+                "file_not_boarded",
+                severity("file_not_boarded"),
+                "file cannot be read as a table (fixed width without layout, or empty workbook)",
+            )
+        )
     return Loaded(results, log, control or {}, str(portfolio_id))
 
 

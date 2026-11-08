@@ -132,7 +132,11 @@ export function FilesSection({ files }: { files: FileRow[] }) {
                     <span className="font-medium break-all">{f.file_name}</span>
                     <span className="text-sm text-zinc-600 dark:text-zinc-400">
                       {f.format.toUpperCase()}
-                      {f.row_count !== null ? ` · ${count(f.row_count)} lignes` : ""}
+                      {profile.kind === "table" && profile.sheet
+                        ? ` · ${count(profile.table.row_count)} lignes`
+                        : f.row_count !== null
+                          ? ` · ${count(f.row_count)} lignes`
+                          : ""}
                       {summary ? ` · ${summary}` : ""}
                     </span>
                     {f.duplicate_of_file_id ? <Badge tone="action">Déjà reçu</Badge> : null}
@@ -214,7 +218,8 @@ export function MappingSection({
     if (p?.kind !== "table") continue;
     for (const c of p.table.columns) examples.set(`${f.id}:${c.name}`, c.top_values?.[0]?.value);
   }
-  const blocked = proposals.length === 0 && files.some((f) => {
+  // A tabular file that cannot be read as a table would be left out: never approve around it.
+  const unreadable = files.filter((f) => {
     const kind = profiles.get(f.id)?.kind;
     return kind === "needs_layout" || kind === "empty_workbook";
   });
@@ -267,12 +272,13 @@ export function MappingSection({
       </div>
     ));
 
-  if (editable && blocked) {
+  if (editable && unreadable.length > 0) {
     return (
       <Section title="Mapping des colonnes" testId="mapping">
         <InfoNote>
-          Aucun tableau à mapper : un fichier à largeur fixe demande la description de ses colonnes, ce que l&apos;interface ne
-          gère pas encore, ou le classeur est vide. Abandonnez ce lot et déposez un fichier CSV ou Excel.
+          {unreadable.map((f) => f.file_name).join(", ")} : pas de tableau lisible (fichier à largeur fixe dont la
+          description des colonnes n&apos;est pas encore gérée par l&apos;interface, ou classeur vide). Ces données ne seraient
+          pas reprises : abandonnez ce lot et déposez-les en CSV ou Excel.
         </InfoNote>
       </Section>
     );
@@ -366,12 +372,20 @@ function Reconciliation({ report, amounts }: { report: DqReport; amounts: Money 
         ) : rec.status === "mismatch" ? (
           <>
             {rec.currency_mismatch ? (
-              <Badge tone="error">Plusieurs devises : pas de rapprochement possible avec un total en euros</Badge>
+              <Badge tone="error">
+                {rec.currency_mismatch.length > 1
+                  ? "Plusieurs devises"
+                  : `Montants en ${rec.currency_mismatch[0]}`}{" "}
+                : pas de rapprochement possible avec un total en euros
+              </Badge>
             ) : amounts.difference_minor !== null && amounts.difference_minor !== "0" ? (
-              <Badge tone="error">Écart d&apos;encours de {money(amounts.difference_minor, "EUR")}</Badge>
+              <Badge tone="error">Écart d&apos;encours de {money(amounts.difference_minor, "EUR")} (fichier − annoncé)</Badge>
             ) : null}
             {rec.difference_rows ? (
-              <Badge tone="error">Écart de {count(rec.difference_rows)} ligne(s)</Badge>
+              <Badge tone="error">
+                {count(Math.abs(rec.difference_rows))} ligne(s) {rec.difference_rows > 0 ? "de plus" : "de moins"} que
+                l&apos;annonce
+              </Badge>
             ) : null}
           </>
         ) : (
@@ -459,7 +473,7 @@ export function QualitySection({
                 <thead className="text-xs text-zinc-600 dark:text-zinc-400">
                   <tr>
                     <th className="p-2">Fichier</th>
-                    <th className="p-2">Ligne (hors en-tête)</th>
+                    <th className="p-2">N° de ligne de données</th>
                     <th className="p-2">Colonne</th>
                     <th className="p-2">Anomalie</th>
                     <th className="p-2">Valeur</th>
@@ -478,6 +492,10 @@ export function QualitySection({
                 </tbody>
               </table>
             </div>
+            <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">
+              N° 1 = première ligne après l&apos;en-tête (ligne 2 du fichier CSV). Dans un classeur Excel, les lignes vides ne
+              sont pas comptées.
+            </p>
           </details>
         ) : null}
         {report.documents ? (

@@ -83,6 +83,9 @@ describe("readProfile", () => {
     const sheet = readProfile({ sheets: { Vide: { ...table, row_count: 0 }, Factures: table } });
     expect(sheet).toMatchObject({ kind: "table", sheet: "Factures" });
     expect(readProfile({ sheets: { Vide: { ...table, row_count: 0 } } }).kind).toBe("empty_workbook");
+    // jsonb key order (by length) differs from the workbook order kept in sheet_order.
+    const ordered = readProfile({ sheets: { Annexe: table, Factures: table }, sheet_order: ["Factures", "Annexe"] });
+    expect(ordered).toMatchObject({ kind: "table", sheet: "Factures" });
     expect(readProfile({ not_profiled: "zip" }).kind).toBe("documents");
     expect(readProfile({ needs_layout: true }).kind).toBe("needs_layout");
     expect(readProfile(null).kind).toBe("pending");
