@@ -47,10 +47,13 @@ Notes:
 
 ## Per-session start (SessionStart hook)
 
-`.claude/settings.json` runs `scripts/session-start.sh` (added in M0). Guarded by `CLAUDE_CODE_REMOTE=true`, it is idempotent and:
-1. starts `dockerd` if it isn't running;
-2. runs `uv sync` in `worker/` and `npm ci` in `apps/web/` when lockfiles changed;
-3. does **not** start Supabase (≈ 35 s from cached images). Run `supabase start` when you need the DB.
+`.claude/settings.json` runs `scripts/session-start.sh` synchronously at every session start/resume. It exits at once unless `CLAUDE_CODE_REMOTE=true`, and:
+1. installs the pinned Supabase CLI if missing, and starts `dockerd` if it isn't running;
+2. runs `npm install` in `apps/web/` and `uv sync --frozen` in `worker/` **only when** their manifests/lockfiles (or the script) changed: hashes are kept in `apps/web/node_modules/.session-start.sha256` and `worker/.venv/.session-start.sha256`;
+3. exports `SUPABASE_INTERNAL_IMAGE_REGISTRY=docker.io` and `UV_SYSTEM_CERTS=1` for the session;
+4. does **not** start Supabase (≈ 35–60 s from cached images): run `make up` when you need the DB.
+
+Measured 2026-11-08: no-change run ≈ 0.5 s.
 
 ## Running services
 
