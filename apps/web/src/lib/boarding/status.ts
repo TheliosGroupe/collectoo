@@ -10,6 +10,7 @@ export type BatchStatus =
   | "validated"
   | "staged"
   | "committed"
+  | "confirming"
   | "confirmed"
   | "rolled_back"
   | "abandoned";
@@ -25,6 +26,7 @@ export const STATUS_LABEL: Record<BatchStatus, string> = {
   validated: "Contrôles passés",
   staged: "Prêt à intégrer",
   committed: "Intégré, à confirmer",
+  confirming: "Confirmation en cours",
   confirmed: "Confirmé",
   rolled_back: "Annulé",
   abandoned: "Abandonné",
@@ -37,6 +39,7 @@ const PROCESSING: ReadonlySet<string> = new Set([
   "mapping_approved",
   "transformed",
   "validated",
+  "confirming",
 ]);
 
 export function statusLabel(status: string): string {

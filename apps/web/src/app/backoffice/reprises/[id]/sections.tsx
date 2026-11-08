@@ -58,6 +58,47 @@ export type DqReport = {
   staging?: { already_boarded_accounts_skipped: number; entities: Record<string, { rows: number }> };
   documents?: { linked: number; unmatched: string[]; unsupported: string[] };
 };
+/** Opening balances per currency, amounts as text (dq_report.staging.opening, opening_plan). */
+export type OpeningTotals = {
+  currencies: Record<
+    string,
+    { accounts: number; accounts_without_balance: number; outstanding_minor: string; components: Record<string, string> }
+  >;
+};
+
+const COMPONENT_FR: Record<string, string> = {
+  principal: "Principal",
+  accrued_interest: "Intérêts échus déclarés",
+  other_balances: "Autres sommes déclarées",
+  balancing_line: "Écart au solde légal",
+};
+
+function OpeningTable({ totals, testId }: { totals: OpeningTotals; testId: string }) {
+  return (
+    <div className="flex flex-col gap-3" data-testid={testId}>
+      {Object.entries(totals.currencies).map(([currency, t]) => (
+        <div key={currency}>
+          <Stats
+            items={[
+              { label: "Encours total", value: money(t.outstanding_minor, currency), testId: `${testId}-total` },
+              { label: "Comptes avec solde", value: count(t.accounts) },
+              { label: "Comptes soldés", value: count(t.accounts_without_balance) },
+              { label: "Devise", value: currency },
+            ]}
+          />
+          <ul className="mt-2 text-sm">
+            {Object.entries(t.components).map(([c, v]) => (
+              <li key={c}>
+                {COMPONENT_FR[c] ?? c} : {money(v, currency)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** Amounts read with ->> (text): integer minor units, never JS numbers. */
 export type Money = {
   total_minor: string | null;
@@ -516,10 +557,14 @@ export function IntegrationSection({
   batchId,
   status,
   report,
+  openingPlan,
+  openingSummary,
 }: {
   batchId: string;
   status: string;
   report: DqReport | null;
+  openingPlan: OpeningTotals | null;
+  openingSummary: { entries: number; totals: OpeningTotals } | null;
 }) {
   const hidden = <input type="hidden" name="batch_id" value={batchId} />;
   const staged = report?.staging?.entities ?? {};
@@ -565,8 +610,15 @@ export function IntegrationSection({
       <Section title="Intégration" testId="integration">
         <InfoNote>
           Le lot est intégré mais aucun débiteur ne sera contacté avant confirmation par un responsable (mandat actif
-          requis). Avant confirmation, l&apos;intégration peut être annulée.
+          requis). Avant confirmation, l&apos;intégration peut être annulée. La confirmation comptabilise les soldes
+          d&apos;ouverture ci-dessous, à la date d&apos;arrêté.
         </InfoNote>
+        {openingPlan ? (
+          <div className="mt-4">
+            <h3 className="mb-2 text-sm font-medium">Soldes d&apos;ouverture prévus</h3>
+            <OpeningTable totals={openingPlan} testId="opening-plan" />
+          </div>
+        ) : null}
         <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-end">
           <ActionForm action={confirmBatch} submitLabel="Confirmer le lot" pendingLabel="Confirmation…" buttonClassName={inlineButtonClass}>
             {hidden}
@@ -588,6 +640,13 @@ export function IntegrationSection({
       </Section>
     );
   }
+  if (status === "confirming") {
+    return (
+      <Section title="Intégration" testId="integration">
+        <InfoNote>Confirmation en cours : comptabilisation des soldes d&apos;ouverture… la page se met à jour seule.</InfoNote>
+      </Section>
+    );
+  }
   if (status === "confirmed") {
     return (
       <Section title="Intégration" testId="integration">
@@ -595,6 +654,14 @@ export function IntegrationSection({
           Lot confirmé : les comptes attendent la première lettre au débiteur (art. R124-4 CPCE), seule action possible à ce
           stade.
         </p>
+        {openingSummary ? (
+          <div className="mt-4">
+            <h3 className="mb-2 text-sm font-medium">
+              Soldes d&apos;ouverture comptabilisés ({count(openingSummary.entries)} écritures)
+            </h3>
+            <OpeningTable totals={openingSummary.totals} testId="opening-summary" />
+          </div>
+        ) : null}
       </Section>
     );
   }

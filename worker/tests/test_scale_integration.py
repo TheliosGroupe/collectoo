@@ -36,10 +36,52 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
         status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
         report = one(conn, "select dq_report from public.boarding_batch where id = %s", (batch,))
     assert status == "staged", report["totals"]
+    commit_started = time.monotonic()
     with psycopg.connect(DB) as conn, conn.transaction():
         as_user(conn, tenant["user"])
         conn.execute("select public.commit_boarding_batch(%s)", (batch,))
+    commit_s = time.monotonic() - commit_started
+    # M2-05: confirmation (staff at aal2, active mandate) queues the job that posts the openings.
+    with psycopg.connect(DB) as conn, conn.transaction():
+        mandate = one(
+            conn,
+            "insert into public.mandate (organization_id, client_organization_id, reference,"
+            " mandate_type, signed_on)"
+            " values (%s, %s, %s, 'mandate_amicable', '2026-01-01') returning id",
+            (tenant["servicer"], tenant["client"], f"M-{batch}"),
+        )
+        conn.execute(
+            "insert into public.mandate_terms (mandate_id, valid_from, commission_rate)"
+            " values (%s, '2026-01-01', 0.15)",
+            (mandate,),
+        )
+        conn.execute(
+            "update public.portfolio set mandate_id = %s where id = %s",
+            (mandate, tenant["portfolio"]),
+        )
+    with psycopg.connect(DB) as conn, conn.transaction():
+        as_user(conn, tenant["staff"], aal="aal2")
+        conn.execute("set local statement_timeout = '8s'")  # what the API allows a request
+        conn.execute("select public.confirm_boarding_batch(%s)", (batch,))
+    confirm_started = time.monotonic()
+    drain(store)
+    confirm_s = time.monotonic() - confirm_started
     with psycopg.connect(DB) as conn:
+        status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
+        openings = one(
+            conn,
+            "select count(*) from public.ledger_entry where boarding_batch_id = %s"
+            " and entry_type = 'opening'",
+            (batch,),
+        )
+        posted = one(
+            conn,
+            """select coalesce(sum(p.amount_minor), 0)::bigint from public.ledger_entry e
+               join public.ledger_posting p on p.entry_id = e.id
+               join public.ledger_account la on la.id = p.ledger_account_id
+               where la.book = 'debtor_receivable' and e.boarding_batch_id = %s""",
+            (batch,),
+        )
         accounts = one(
             conn, "select count(*) from public.account where boarding_batch_id = %s", (batch,)
         )
@@ -48,7 +90,10 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
             conn, "select count(*) from public.party where boarding_batch_id = %s", (batch,)
         )
     elapsed = time.monotonic() - started
-    print(f"\n50k boarding: {elapsed:.0f}s, accounts={accounts}, parties={parties}, rows={counts}")
+    print(
+        f"\n50k boarding: {elapsed:.0f}s (commit {commit_s:.1f}s, confirm job {confirm_s:.1f}s),"
+        f" accounts={accounts}, parties={parties}, openings={openings}, rows={counts}"
+    )
     assert accounts == loans == LOANS
     assert parties == counts["t1_counterparty"]
     assert report["claim_types"] == {
@@ -57,4 +102,6 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
         if k in ("consumer_instalment_loan", "professional_loan")
     }
     assert report["reconciliation"]["computed"]["rows"] == LOANS
+    assert status == "confirmed" and openings == LOANS
+    assert posted == int(report["reconciliation"]["computed"]["outstanding_minor"])  # M2-05
     assert elapsed < 300

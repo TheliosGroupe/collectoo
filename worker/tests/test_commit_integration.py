@@ -155,6 +155,7 @@ def test_confirm_needs_staff_and_an_active_mandate(tenant: dict[str, Any], tmp_p
             (mandate, tenant["portfolio"]),
         )
     _call(tenant["staff"], "select public.confirm_boarding_batch(%s)", (batch,), aal="aal2")
+    drain(storage())  # the confirmation job posts the opening balances (M2-05)
     total = _count("select count(*) from public.account where boarding_batch_id = %s", (batch,))
     waiting = _count(
         "select count(*) from public.account where boarding_batch_id = %s"
@@ -162,6 +163,25 @@ def test_confirm_needs_staff_and_an_active_mandate(tenant: dict[str, Any], tmp_p
         (batch,),
     )
     assert total > 0 and waiting == total  # first possible contact: the R124-4 letter
+    # M2-05: Σ opening balances = the data-quality report's reconciled outstanding total.
+    with psycopg.connect(DB) as conn:
+        outstanding = one(
+            conn,
+            "select (dq_report #>> '{reconciliation,computed,outstanding_minor}')::bigint"
+            " from public.boarding_batch where id = %s",
+            (batch,),
+        )
+        posted = one(
+            conn,
+            """select coalesce(sum(p.amount_minor), 0)::bigint from public.ledger_entry e
+               join public.ledger_posting p on p.entry_id = e.id
+               join public.ledger_account la on la.id = p.ledger_account_id
+               where la.book = 'debtor_receivable'
+                 and e.boarding_batch_id = %s and e.entry_type = 'opening'""",
+            (batch,),
+        )
+        status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
+    assert status == "confirmed" and posted == outstanding > 0
     with pytest.raises(psycopg.errors.CheckViolation, match="committed, unconfirmed"):
         _call(tenant["user"], "select public.rollback_boarding_batch(%s, %s)", (batch, "too late"))
 

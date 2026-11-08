@@ -55,6 +55,9 @@ export type ErrorCode =
   | "unsupported_type"
   | "missing_upload"
   | "state_changed"
+  | "cut_off_required"
+  | "opening_mismatch"
+  | "ledger_rejected"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -70,12 +73,19 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   unsupported_type: "Type de fichier non pris en charge (CSV, Excel, largeur fixe ou zip).",
   missing_upload: "Un fichier n'a pas été envoyé. Réessayez.",
   state_changed: "Le lot a changé d'état entre-temps. Rechargez la page.",
+  cut_off_required: "La date d'arrêté du portefeuille est obligatoire et ne peut pas être dans le futur.",
+  opening_mismatch:
+    "Les soldes d'ouverture ne correspondent pas au rapport qualité : abandonnez ce lot et déposez à nouveau le fichier.",
+  ledger_rejected: "La comptabilité a refusé l'opération. Contactez le support.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 
 /** Code for an error raised by a boarding command (order matters: most specific first). */
 export function commandErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
+  if (message.includes("cut-off date is required")) return "cut_off_required";
+  if (message.includes("opening balances do not reconcile") || message.includes("without an opening plan"))
+    return "opening_mismatch";
   if (message.includes("do not reconcile")) return "totals_mismatch";
   if (message.includes("reason is required")) return "reason_required";
   if (message.includes("CPCE R124-3")) return "mandate_missing";
@@ -87,6 +97,7 @@ export function commandErrorCode(message: string): ErrorCode {
   if (message.includes("not uploaded yet")) return "missing_upload";
   if (message.includes("expected") || message.includes("cannot be abandoned") || message.includes("only a committed"))
     return "state_changed";
+  if (message.startsWith("ledger:")) return "ledger_rejected";
   return "unknown";
 }
 

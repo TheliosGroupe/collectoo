@@ -66,6 +66,8 @@ def make_handler(storage: Storage, provider: Provider, normaliser: Normaliser | 
             stage_batch(conn, storage, batch_id)
         elif kind == "documents":
             documents_batch(conn, storage, batch_id)
+        elif kind == "confirm":
+            confirm_batch(conn, batch_id)
         elif kind == "purge_documents":
             purge_documents(storage, payload.get("objects") or [])
         else:
@@ -92,6 +94,13 @@ def record_dead_job(payload: dict[str, Any], error: str, conn: psycopg.Connectio
            where id = %s""",
         (str(payload.get("type")), error[:500], str(batch_id)),
     )
+    if payload.get("type") == "confirm":
+        # The confirmation could not post: back to committed, so staff can retry or roll back.
+        conn.execute(
+            """select private.transition_batch(id, 'committed', %s, 'worker:boarding')
+               from public.boarding_batch where id = %s and status = 'confirming'""",
+            (f"échec de la confirmation : {error[:300]}", str(batch_id)),
+        )
     if payload.get("type") == "profile":
         conn.execute(
             "update public.boarding_file set status = 'failed', error = %s"
@@ -492,6 +501,13 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
         " set dq_report = jsonb_set(coalesce(dq_report, '{}'), '{documents}', %s) where id = %s",
         (Jsonb(summary), batch_id),
     )
+
+
+def confirm_batch(conn: psycopg.Connection[Any], batch_id: str) -> str:
+    """Post the opening balances and confirm (M2-05): one SQL call, inside the job's transaction,
+    so it happens exactly once; a redelivered job finds the batch confirmed and does nothing."""
+    row = conn.execute("select private.complete_batch_confirmation(%s)", (batch_id,)).fetchone()
+    return str(row[0]) if row else "skipped"
 
 
 def _safe_suffix(name: str) -> str:

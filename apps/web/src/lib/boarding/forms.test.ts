@@ -72,6 +72,11 @@ describe("labels", () => {
     );
     expect(commandErrorCode('duplicate key value violates unique constraint "x"')).toBe("unknown");
     expect(errorText("not_allowed")).toMatch(/non autorisée/);
+    expect(commandErrorCode("ledger: opening balances do not reconcile with the data-quality report (x vs y)")).toBe(
+      "opening_mismatch",
+    );
+    expect(commandErrorCode("the cut-off date is required and cannot be in the future")).toBe("cut_off_required");
+    expect(commandErrorCode("ledger: batch x has ledger entries; correct them with reversals")).toBe("ledger_rejected");
   });
 
   it("formats percentages the French way", () => {

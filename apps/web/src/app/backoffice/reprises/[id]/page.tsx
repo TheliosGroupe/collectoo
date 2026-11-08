@@ -13,6 +13,7 @@ import {
   type IssueRow,
   MappingSection,
   type Money,
+  type OpeningTotals,
   type ProposalRow,
   QualitySection,
 } from "./sections";
@@ -23,6 +24,7 @@ const JOB_FR: Record<string, string> = {
   transform: "transformation et contrôles",
   stage: "préparation de l'intégration",
   documents: "rattachement des pièces",
+  confirm: "confirmation et soldes d'ouverture",
   purge_documents: "suppression des pièces",
 };
 
@@ -34,7 +36,8 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
   const { data: batch } = await supabase
     .from("boarding_batch")
     .select(
-      "id, version, status, cut_off_date, dq_report, failed_job, portfolio:portfolio_id(name), client:client_organization_id(legal_name)," +
+      "id, version, status, cut_off_date, dq_report, failed_job, opening_plan, opening_summary," +
+        " portfolio:portfolio_id(name), client:client_organization_id(legal_name)," +
         // Amounts as text: integer minor units never pass through a JS number.
         " total_minor:dq_report->reconciliation->computed->>total_minor," +
         " paid_minor:dq_report->reconciliation->computed->>paid_minor," +
@@ -52,6 +55,8 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
     cut_off_date: string | null;
     dq_report: DqReport | null;
     failed_job: { type: string; error: string; at: string } | null;
+    opening_plan: OpeningTotals | null;
+    opening_summary: { entries: number; totals: OpeningTotals } | null;
     portfolio: { name: string } | null;
     client: { legal_name: string } | null;
   } & Money;
@@ -141,7 +146,13 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
           fileNames={fileNames}
         />
       ) : null}
-      <IntegrationSection batchId={b.id} status={b.status} report={b.dq_report} />
+      <IntegrationSection
+        batchId={b.id}
+        status={b.status}
+        report={b.dq_report}
+        openingPlan={b.opening_plan}
+        openingSummary={b.opening_summary}
+      />
       <HistorySection events={events ?? []} />
       <AbandonSection batchId={b.id} status={b.status} />
     </WidePage>
