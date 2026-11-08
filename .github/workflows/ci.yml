@@ -81,7 +81,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: make catalogue
       - name: Generated files match the committed ones
-        run: git diff --exit-code -- docs/reference
+        run: git diff --exit-code -- docs/reference supabase/migrations/20261108110100_eba_layer1.sql
 
   e2e:
     name: E2E (Playwright against the local stack, mobile + desktop)

@@ -241,7 +241,9 @@ erDiagram
     party ||--o{ insolvency_proceeding : "subject to"
     party {
         uuid id PK
-        uuid organization_id FK
+        uuid organization_id FK "servicer tenant"
+        uuid client_organization_id FK "each client's debtor data stays separate"
+        jsonb source_attributes "template fields kept for re-export"
         text kind "natural_person|legal_entity"
         text display_name
         text first_name
@@ -331,8 +333,10 @@ erDiagram
     account ||--o{ limitation_event : "interrupts/suspends"
     account {
         uuid id PK
-        uuid organization_id FK
+        uuid organization_id FK "derived from portfolio"
+        uuid client_organization_id FK "derived from portfolio"
         uuid portfolio_id FK
+        jsonb source_attributes "template fields kept for re-export"
         uuid claim_type_id FK
         text external_ref "template 3.01"
         text currency

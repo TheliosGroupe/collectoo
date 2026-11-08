@@ -48,3 +48,4 @@ build:
 catalogue:        ## Regenerate the EU NPL template catalogue from the committed sources
 	uv run --python 3.12 --with beautifulsoup4==4.14.2 --with lxml==6.0.2 --with openpyxl==3.1.5 \
 		python -I tools/eba_catalogue/build_catalogue.py .
+	python3 -I tools/eba_catalogue/gen_sql.py .
