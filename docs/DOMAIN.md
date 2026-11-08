@@ -1074,8 +1074,11 @@ stateDiagram-v2
     needs_fix --> mapping_proposed : mapping or files changed
     validated --> staged : DQ report produced, rows in staging
     staged --> committed : ops commits [reconciliation within tolerance or override with reason]
-    committed --> confirmed : ops_manager confirms
+    committed --> confirming : ops_manager confirms [active mandate]
+    confirming --> confirmed : worker posts the opening balances
+    confirming --> committed : mandate inactive or posting failed
     committed --> rolled_back : ops rolls back
+    draft --> abandoned
     uploaded --> abandoned
     needs_fix --> abandoned
     staged --> abandoned
@@ -1086,9 +1089,10 @@ stateDiagram-v2
 
 | Rule | Detail |
 |---|---|
-| Commit | Writes Layer-2 rows with `boarding_batch_id`; accounts in `staged`; no outbound activity, no accruals posted beyond the opening entry |
-| Rollback | Allowed only before confirmation; posts reversal entries and deletes or invalidates the batch's Layer-2 rows (no other activity can exist yet) |
-| Confirm | Requires an active `mandate` covering the portfolio (R124-3, CPCE-03); moves accounts to `awaiting_first_letter` and starts flows |
+| Commit | Writes Layer-2 rows with `boarding_batch_id`; accounts in `staged`; computes the opening plan and checks it against the DQ report (`opening_plan`); nothing reaches the ledger; no outbound activity |
+| Rollback | Allowed only before confirmation; deletes the batch's Layer-2 rows (no ledger row exists yet) |
+| Confirm | Requires an active `mandate` covering the portfolio (R124-3, CPCE-03), at the request and again when the worker runs; the worker posts one opening entry per account (components, effective date = cut-off; Σ = DQ reconciled outstanding), moves accounts to `awaiting_first_letter` and starts flows (ADR-0012) |
+| Abandon | Any step before commit; prepared staging rows are deleted |
 | Versioning | Re-boarding the same tape creates `version + 1`; mapping profiles are versioned and reused per seller/client |
 | Mandatory fields | Severity from the catalogue and `conformance` (gap analysis §3.3) |
 
