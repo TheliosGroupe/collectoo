@@ -45,8 +45,25 @@ The largest remaining peak is profiling the 330 MB T3 file.
 
 `worker/tests/test_scale_integration.py` boards 50,000 loans (53,533 counterparties) through the
 real stack: upload to Storage, queue, profile, mock mapping proposal, approval, transform and
-validation, staging, commit into Layer 2 and Layer 1. It runs in the CI `db` job and must finish
-in under 5 minutes. Local time: see the PR for the latest figure.
+validation, staging, commit into Layer 2 and Layer 1, then (M2-05) confirmation by the worker,
+which posts one opening entry per loan. It runs in the CI `db` job and must finish in under
+5 minutes.
+
+Local run, 2026-11-08 (M2a-2): 72 s in total; commit 19.7 s; confirmation job 23.0 s
+(50,000 opening entries, about 300,000 ledger lines, Σ posted = DQ outstanding to the cent).
+
+Two traps found on the way, both fixed:
+
+- `(jsonb_populate_record(...)).*` in a select list calls the function once per output column
+  (49 times per EU loan): 65 s of the commit. In `FROM ... cross join lateral` it runs once.
+- `LIMIT 1` on a check that normally finds nothing makes the planner bet on an early match and
+  pick nested loops. It cost 48 s in the source check at commit, and more than 10 minutes in
+  the ledger posting guard when a second 50k batch was confirmed before autovacuum had
+  analysed the first one. Checks now use aggregates (`min(...)`), and the per-entry balance
+  check runs with `enable_seqscan = off` (key lookups only).
+
+Commit still takes ~20 s at 50k, above the 8 s limit of a request through the API: the next
+slice (M2a-3) runs it as a background job, like confirmation.
 
 ## Reproduce
 

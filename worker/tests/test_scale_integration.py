@@ -1,7 +1,8 @@
 """M1-21: a 50,000-loan synthetic EU-template tape boarded end to end (needs `make up`).
 
 Upload -> profile -> mapping proposal (mock) -> approval -> transform + validate -> staging ->
-commit. Runs in the CI database job; target: well under 5 minutes.
+commit -> confirmation (opening balances posted by the worker, M2-05). Runs in the CI database
+job; target: well under 5 minutes (72 s locally, docs/benchmarks/boarding.md).
 """
 
 import json
