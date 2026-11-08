@@ -93,9 +93,19 @@ select is(
 insert into public.bank_account (id, organization_id, iban, currency, label, feed, opened_on) values
   ('80000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'FR3430001007940000000001001', 'EUR',
    'Fonds de tiers', 'camt053', '2026-01-01');
-insert into public.payment (id, organization_id, bank_account_id, channel, method, amount_minor, currency, booking_date) values
+insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                   size_bytes, storage_path) values
+  ('a0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
+   'EUR', 'camt053', 'releve.xml', repeat('a', 64), 1, 'test/releve.xml');
+update public.bank_statement set status = 'uploaded', uploaded_at = now();
+insert into public.bank_transaction (id, organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+                                     amount_minor, currency, booking_date, kind) values
+  ('b0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
+   'a0000000-0000-0000-0000-000000000001', 1, 't:P1', 'credit', 100, 'EUR', '2026-03-10', 'debtor_credit');
+insert into public.payment (id, organization_id, bank_account_id, bank_transaction_id, channel, method, amount_minor, currency,
+                            booking_date) values
   ('90000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
-   'camt053', 'sct', 100, 'EUR', '2026-03-10');
+   'b0000000-0000-0000-0000-000000000001', 'camt053', 'sct', 100, 'EUR', '2026-03-10');
 create or replace function pg_temp.post1(p_type text, p_date date, p_key text, p_lines jsonb, p_meta jsonb)
 returns uuid language plpgsql as $$
 declare v uuid;

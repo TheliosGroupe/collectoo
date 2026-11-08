@@ -578,15 +578,28 @@ erDiagram
     bank_statement {
         uuid id PK
         uuid bank_account_id FK
-        date statement_date
-        text camt053_sha256
+        text format "camt053|csv (= the bank account's feed)"
+        text file_sha256 "one statement per file and bank account"
+        text status "awaiting_upload|uploaded|imported|rejected|failed"
+        date from_date
+        date to_date
+        bigint opening_booked_minor
+        bigint closing_booked_minor
+        jsonb counts "what the import did (amounts as text)"
+        jsonb bank_check "I9 at import"
+        jsonb warnings "missing statement, overlap"
     }
     bank_transaction {
         uuid id PK
         uuid statement_id FK
-        text dedup_key UK
-        bigint amount_minor
+        text dedup_key UK "per bank account: t: e: c: h:"
+        text direction "credit|debit"
+        bigint amount_minor "> 0"
+        date booking_date
+        text kind "debtor_credit|batch_unsplit|return|refund_out|other_debit|suspected_duplicate|psp_payout"
+        text counterparty_name
         text remittance_text
+        text creditor_reference
     }
     payment_match {
         uuid payment_id FK
@@ -616,6 +629,27 @@ erDiagram
         text source_ref "arrete or ECB link"
     }
 ```
+
+**Bank statements (M2b-2, ADR-0013).** A statement of a `client_funds` account is uploaded by an admin or ops manager (« Relevés »), then imported by the worker in one transaction. Each line is kept as the bank reported it (`bank_transaction`, append-only), once per bank account: the same file, or the lines an overlapping statement repeats, add nothing; a known bank reference reported with another amount, direction or date refuses the file. Every credit a debtor paid (`debtor_credit`, and an unsplit batch credit) becomes one `payment` (`unmatched`), and each booking day of the statement is booked by one `cash_in` entry (5120 / 4710 pool). Debits (`other_debit`, `refund_out`), `return` lines and CSV `suspected_duplicate` lines are recorded but not booked (M2b-3, M2b-6); the page shows the gap they explain between the bank's closing balance and the ledger cash (I9).
+
+**Line kinds:** `debtor_credit` a debtor's transfer, direct debit, card or cheque credit; `batch_unsplit` a batch booking whose details do not add up (a credit is still one payment); `return` the bank undoes an earlier movement (return reason, reversal indicator, return bank transaction code; either direction); `refund_out` our refund (end-to-end id `RFD…`); `other_debit` fees and anything else debited; `suspected_duplicate` a CSV line with the day, amount and direction of an earlier line and a similar label (held for ops); `psp_payout` M5.
+
+**« Relevé CSV » — the documented column set** (manual import when the bank sends no camt.053; one format per bank account). Headers are matched without case, accents or punctuation; the header row may follow up to 19 preamble lines; separator `;`, `,`, tab or `|`; UTF-8 or Windows-1252.
+
+| Field | Accepted headers | Required | Format |
+|---|---|---|---|
+| Booking date | `Date`, `Date opération`, `Date comptable`, `Date de comptabilisation` | yes | `JJ/MM/AAAA` (also `JJ-MM-AAAA`, `JJ.MM.AAAA`, `AAAA-MM-JJ`) |
+| Label | `Libellé`, `Libellé opération`, `Description`, `Intitulé` | yes | text; markers `/DE <payer>`, `/MOTIF <text>`, `/REF <reference>` are read |
+| Amount | `Montant` (signed) — or `Débit` and `Crédit` | yes | `1 234,56`, `1.234,56`, `-50,00`, `50,00-`; more decimals than the currency has: refused, never rounded |
+| Value date | `Date valeur`, `Date de valeur` | no | as the booking date |
+| Bank's operation id | `Référence opération`, `Référence banque`, `Réf banque`, `Id opération`, `Identifiant opération`, `Numéro d'opération` | no (recommended) | exact dedup key; a plain `Référence` is not trusted |
+| Counterparty | `Contrepartie`, `Nom contrepartie`, `Tiers`, `Émetteur bénéficiaire`; else `/DE` | no | |
+| Counterparty IBAN | `IBAN contrepartie`, `IBAN` | no | |
+| Currency | `Devise` | no | must be the account's |
+| Creditor reference | `Référence créancier`, `Référence RF`; else a valid RF after `/REF` | no | |
+| End-to-end id | `Référence de bout en bout`, `End to end`; else a non-RF `/REF` | no | |
+
+A bank account's `csv_profile` names its own headers (`{"columns": {"booking_date": "Date opé"}, "decimal": ","}`). Lines whose bank part of the label (before `/DE`, `/MOTIF`, `/REF`) contains `RETOUR`, `REJET`, `IMPAYÉ` or `ANNULATION` are `return` (the payer's words are not read for this). A CSV proves no balance: no opening/closing check.
 
 ### 3.6 Plans, promises, disputes, holds, legal
 
@@ -1123,6 +1157,27 @@ stateDiagram-v2
 | Abandon | Any step before commit (not while the commit job runs); prepared staging rows are deleted |
 | Versioning | Re-boarding the same tape creates `version + 1`; mapping profiles are versioned and reused per seller/client |
 | Mandatory fields | Severity from the catalogue and `conformance` (gap analysis §3.3) |
+
+### 4.5 Bank statement (M2b-2)
+
+```mermaid
+stateDiagram-v2
+    [*] --> awaiting_upload : admin or ops manager registers the file (SHA-256, size, account)
+    awaiting_upload --> uploaded : file stored, import queued
+    uploaded --> imported : worker books new lines (one transaction)
+    uploaded --> rejected : file unreadable or inexact, wrong account or currency, unbalanced, closed account, reference conflict
+    uploaded --> failed : technical error after the retries
+    imported --> [*]
+    rejected --> [*]
+    failed --> [*]
+```
+
+| Rule | Detail |
+|---|---|
+| Same file | The same SHA-256 for the same bank account is one statement: uploading it again opens the existing one (a rejected or failed file can be sent again) |
+| Same lines | Lines already reported for the bank account are skipped (counted as « déjà importées »); nothing is booked twice |
+| Refusal | Nothing of the import is written; the statement keeps a stable code, worded in French on the page |
+| Warnings | Opening balance ≠ previous closing or a sequence gap: « relevé manquant ? »; dates overlapping an imported statement |
 
 ## 5. Open questions (❓ founder)
 

@@ -66,14 +66,30 @@ insert into public.bank_account (id, organization_id, iban, currency, label, fee
    'Fonds de tiers USD', 'camt053', '2026-01-01');
 update public.bank_account set status = 'closed', closed_on = '2026-02-01', closed_reason = 'replaced'
 where id = '80000000-0000-0000-0000-000000000002';
-insert into public.payment (id, organization_id, bank_account_id, channel, method, amount_minor, currency, booking_date,
-                            payer_name, remittance_text) values
+-- A payment is the bank line it comes from (M2b-2): statements being imported, their lines, then the payments.
+insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                   size_bytes, storage_path) values
+  ('a0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
+   'EUR', 'camt053', 'releve-eur.xml', repeat('a', 64), 1, 'test/releve-eur.xml'),
+  ('a0000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000004',
+   'USD', 'camt053', 'releve-usd.xml', repeat('b', 64), 1, 'test/releve-usd.xml');
+update public.bank_statement set status = 'uploaded', uploaded_at = now();
+insert into public.bank_transaction (id, organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+                                     amount_minor, currency, booking_date, kind) values
+  ('b0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
+   'a0000000-0000-0000-0000-000000000001', 1, 't:P1', 'credit', 50000, 'EUR', '2026-03-10', 'debtor_credit'),
+  ('b0000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
+   'a0000000-0000-0000-0000-000000000001', 2, 't:P2', 'credit', 30000, 'EUR', '2026-03-12', 'debtor_credit'),
+  ('b0000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000004',
+   'a0000000-0000-0000-0000-000000000004', 1, 't:P3', 'credit', 700, 'USD', '2026-03-12', 'debtor_credit');
+insert into public.payment (id, organization_id, bank_account_id, bank_transaction_id, channel, method, amount_minor, currency,
+                            booking_date, payer_name, remittance_text) values
   ('90000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
-   'camt053', 'sct', 50000, 'EUR', '2026-03-10', 'Martin SAS', 'REGLT F-101'),
+   'b0000000-0000-0000-0000-000000000001', 'camt053', 'sct', 50000, 'EUR', '2026-03-10', 'Martin SAS', 'REGLT F-101'),
   ('90000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
-   'camt053', 'sct', 30000, 'EUR', '2026-03-12', 'Inconnu', 'REMBOURSEMENT'),
+   'b0000000-0000-0000-0000-000000000002', 'camt053', 'sct', 30000, 'EUR', '2026-03-12', 'Inconnu', 'REMBOURSEMENT'),
   ('90000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000004',
-   'camt053', 'sct', 700, 'USD', '2026-03-12', 'Inconnu', 'USD');
+   'b0000000-0000-0000-0000-000000000003', 'camt053', 'sct', 700, 'USD', '2026-03-12', 'Inconnu', 'USD');
 
 create temporary table t (k text primary key, v uuid) on commit drop;
 grant all on t to authenticated;
@@ -467,10 +483,10 @@ select lives_ok($$ set constraints all immediate $$, 'every entry written in thi
 
 -- Payments --------------------------------------------------------------------------------------------
 select throws_ok($$ insert into public.payment (organization_id, bank_account_id, channel, method, amount_minor, currency, booking_date)
-  values ('00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001', 'csv', 'sct', 0, 'EUR', '2026-03-01') $$,
+  values ('00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001', 'psp', 'card', 0, 'EUR', '2026-03-01') $$,
   '23514', null, 'a payment is a positive amount');
 select throws_ok($$ insert into public.payment (organization_id, bank_account_id, channel, method, amount_minor, currency, booking_date)
-  values ('00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001', 'csv', 'sct', 100, 'USD', '2026-03-01') $$,
+  values ('00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001', 'psp', 'card', 100, 'USD', '2026-03-01') $$,
   '23503', null, 'in the bank account''s currency');
 select throws_ok($$ update public.payment set amount_minor = 49999 where id = '90000000-0000-0000-0000-000000000001' $$,
   '23514', null, 'the bank facts of a payment never change');

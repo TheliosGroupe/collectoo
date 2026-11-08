@@ -90,7 +90,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
-      - name: Worker integration tests (queue, storage, commit, 50k-loan scale run)
+      - name: Worker integration tests (queue, storage, commit, statements, 50k-loan and 50k-line scale runs)
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen && uv run pytest -m integration
@@ -149,11 +149,11 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
-      - name: Start the boarding worker (mock LLM, mock addresses)
+      - name: Start the worker on the boarding and payments queues (mock LLM, mock addresses)
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen
-          LLM_PROVIDER=mock ADDRESS_NORMALISER=mock nohup uv run collectoo-worker consume boarding > ../worker.log 2>&1 &
+          LLM_PROVIDER=mock ADDRESS_NORMALISER=mock nohup uv run collectoo-worker consume boarding payments > ../worker.log 2>&1 &
       - run: npm run build
         working-directory: apps/web
       - run: npm run e2e

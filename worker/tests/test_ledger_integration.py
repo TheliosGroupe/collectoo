@@ -101,11 +101,39 @@ def _bank_account(conn: psycopg.Connection[Any], org: UUID, bank: UUID) -> None:
 
 
 def _payment(conn: psycopg.Connection[Any], org: UUID, bank: UUID, payment: Payment) -> None:
+    """A payment is the bank line it comes from (M2b-2): a statement being imported, its line, the
+    payment (the import job does the same set-based)."""
+    statement, line = uuid4(), uuid4()
     conn.execute(
-        """insert into public.payment (id, organization_id, bank_account_id, channel, method, amount_minor,
-             currency, booking_date)
-           values (%s, %s, %s, 'camt053', 'sct', %s, %s, %s)""",
-        (payment.id, org, bank, payment.amount_minor, payment.currency, payment.booking_date),
+        """insert into public.bank_statement (id, organization_id, bank_account_id, currency, format,
+             file_name, file_sha256, size_bytes, storage_path)
+           values (%s, %s, %s, %s, 'camt053', 'releve.xml', %s, 1, %s)""",
+        (statement, org, bank, payment.currency, uuid4().hex * 2, f"test/{statement}.xml"),
+    )
+    conn.execute(
+        "update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = %s",
+        (statement,),
+    )
+    conn.execute(
+        """insert into public.bank_transaction (id, organization_id, bank_account_id, statement_id,
+             line_no, dedup_key, direction, amount_minor, currency, booking_date, kind)
+           values (%s, %s, %s, %s, 1, %s, 'credit', %s, %s, %s, 'debtor_credit')""",
+        (
+            line,
+            org,
+            bank,
+            statement,
+            f"t:{line}",
+            payment.amount_minor,
+            payment.currency,
+            payment.booking_date,
+        ),
+    )
+    conn.execute(
+        """insert into public.payment (id, organization_id, bank_account_id, bank_transaction_id,
+             channel, method, amount_minor, currency, booking_date)
+           values (%s, %s, %s, %s, 'camt053', 'sct', %s, %s, %s)""",
+        (payment.id, org, bank, line, payment.amount_minor, payment.currency, payment.booking_date),
     )
 
 

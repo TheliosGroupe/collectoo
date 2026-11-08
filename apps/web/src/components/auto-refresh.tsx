@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { InfoNote } from "@/components/ui";
 
 /**
- * While the worker processes the batch, reload the server data every few seconds. Stops after
+ * While the worker processes a batch or a statement, reload the server data every few seconds. Stops after
  * `maxMs` so a stalled worker does not keep the page polling forever.
  */
 export function AutoRefresh({

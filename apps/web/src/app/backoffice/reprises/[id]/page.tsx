@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { Badge, ErrorNote, InfoNote, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { isProcessing, statusLabel, statusTone } from "@/lib/boarding/status";
-import { AutoRefresh } from "./auto-refresh";
+import { AutoRefresh } from "@/components/auto-refresh";
 import {
   AbandonSection,
   type DqReport,
