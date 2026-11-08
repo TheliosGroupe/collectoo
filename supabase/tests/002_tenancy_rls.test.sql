@@ -21,7 +21,7 @@ insert into auth.users (id, email, aud, role) values
   ('10000000-0000-0000-0000-000000000006', 'admin@s2.test', 'authenticated', 'authenticated'),
   ('10000000-0000-0000-0000-000000000007', 'nobody@x.test', 'authenticated', 'authenticated');
 
-select is((select count(*)::int from public.app_user where email like '%.test'), 7,
+select is((select count(*)::int from public.app_user where id::text like '10000000-0000-0000-0000-00000000000_'), 7,
   'an app_user profile is created for every auth user');
 
 insert into public.membership (user_id, organization_id, role) values
