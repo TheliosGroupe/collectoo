@@ -67,7 +67,11 @@ def test_duplicates_are_staged_once(tmp_path: Path) -> None:
     items = _data(staged, "claim_item")
     assert dups > 0
     assert len(items) <= 300 - dups
-    assert {i["kind"] for i in items} == {"rent_period"}
+    # A negative amount is a credit note (blocking `negative_amount` without a document kind).
+    negative = sum(1 for d in manifest["defects"] if d["type"] == "negative_amount")
+    assert negative > 0
+    assert {i["kind"] for i in items} == {"rent_period", "credit_note"}
+    assert sum(i["kind"] == "credit_note" for i in items) == negative
 
 
 def test_restaging_gives_identical_rows_and_hashes(tmp_path: Path) -> None:

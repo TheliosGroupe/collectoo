@@ -26,3 +26,4 @@ node_modules/
 # Local output
 /tmp/
 *.log
+.claude/worktrees/

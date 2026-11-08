@@ -13,9 +13,12 @@ export default async function NewBatchPage() {
     label: `${p.client?.legal_name ?? "?"} · ${p.name}`,
   }));
 
+  // The cut-off date cannot be in the future (business calendar: Europe/Paris), as yyyy-mm-dd.
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(new Date());
+
   return (
     <WidePage title="Nouveau lot" back={{ href: "/backoffice/reprises", label: "Reprises" }}>
-      <UploadForm portfolios={options} />
+      <UploadForm portfolios={options} maxCutOff={today} />
     </WidePage>
   );
 }

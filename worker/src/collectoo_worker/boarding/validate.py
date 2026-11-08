@@ -18,6 +18,8 @@ import polars as pl
 import yaml
 
 from collectoo_worker.boarding import assign
+from collectoo_worker.boarding.items import EBA_AMOUNTS, civil_items, eba_loans, has_sub_cent
+from collectoo_worker.boarding.opening import loan_components
 from collectoo_worker.boarding.transforms import (
     _DATE_SHAPES,
     TransformSpec,
@@ -29,6 +31,11 @@ from collectoo_worker.eba.catalogue import fields
 
 MAX_DETAILS_PER_CODE = 1000  # per file and code; counts stay exact
 CIVIL_CLAIM_TYPES = {"b2b_invoice", "b2c_invoice", "rent", "private_loan", "judgment_debt"}
+# Claim currencies accepted when public.currency cannot be read (it lists exponent-2 codes).
+DEFAULT_CURRENCIES = frozenset({"EUR", "USD", "GBP", "CHF"})
+VALIDATION_SPEC_VERSION = 2
+REF_BASIS = ("claim_item.ref", "claim_item.period", "claim_item.due_date")  # an item's ref
+_NULL_DTYPES: dict[str, pl.DataType] = {"amount": pl.Int64(), "date": pl.Date()}
 
 
 @dataclass(frozen=True)
@@ -151,7 +158,7 @@ class IssueLog:
 
 
 @cache
-def rules(version: int = 1) -> dict[str, Any]:
+def rules(version: int = VALIDATION_SPEC_VERSION) -> dict[str, Any]:
     text = (
         resources.files("collectoo_worker.boarding.specs")
         .joinpath(f"validation.v{version}.yaml")
@@ -217,6 +224,9 @@ def transform_file(
         col_profile = by_name.get(column)
         raw = result.raw[column]
         values, errors = transform_column(raw, _chain_for(spec, target, col_profile))
+        dtype = _NULL_DTYPES.get(spec.target_types.get(target, ""))
+        if dtype is not None and values.dtype == pl.Utf8 and values.null_count() == len(values):
+            values = values.cast(dtype)  # every cell empty or invalid: keep the target's type
         result.values[target] = values
         by_code: dict[str, list[int]] = {}
         messages: dict[str, str] = {}
@@ -305,15 +315,25 @@ def assign_rows(result: FileResult, portfolio_default: str | None, log: IssueLog
 # --- Row and file rules -----------------------------------------------------------------
 
 
-def _required(result: FileResult, log: IssueLog) -> None:
-    req, rec = rules()["required"], rules()["recommended"]
-    keys = pl.Series(
+def _rule_keys(result: FileResult) -> pl.Series:
+    """Per row, the key of the `required` / `recommended` lists: the table of an EU file without
+    claims; for a row with a claim type, `bank_credit` for an EU loan (whatever its type) or a
+    non-civil type, else its civil claim type (null when the claim type is unassigned)."""
+    if result.eba_table not in (None, "t3_loan"):
+        return pl.repeat(result.eba_table, result.rows, eager=True, dtype=pl.Utf8)
+    civil = result.eba_table is None
+    return pl.Series(
         [
-            None if ct is None else (ct if ct in CIVIL_CLAIM_TYPES else "bank_credit")
+            None if ct is None else (ct if civil and ct in CIVIL_CLAIM_TYPES else "bank_credit")
             for ct in result.claim_types
         ],
         dtype=pl.Utf8,
     )
+
+
+def _required(result: FileResult, log: IssueLog) -> None:
+    req, rec = rules()["required"], rules()["recommended"]
+    keys = _rule_keys(result)
     for code, spec in (("missing_required", req), ("missing_recommended", rec)):
         for key, targets in spec.items():
             applies = keys == key
@@ -336,38 +356,250 @@ def _required(result: FileResult, log: IssueLog) -> None:
                 )
 
 
-def _duplicates(result: FileResult, log: IssueLog) -> pl.Series:
-    dup = ~result.first_distinct()
+def _months(result: FileResult, log: IssueLog) -> None:
+    """EU collection history (T5): staging reads `month_offset` (NOT NULL, > 0) from the column of
+    that name, as an integer."""
+    if result.eba_table != "t5_collection":
+        return
+    if "month_offset" not in result.raw.columns:
+        log.add_rows(
+            result.file_id,
+            [],
+            code="missing_required",
+            message="month_offset column is missing (month of each collection row, 1 = the month "
+            "before the cut-off date)",
+            file_level=True,
+        )
+        return
+    raw = result.raw["month_offset"]
+    month = raw.cast(pl.Int32, strict=False)  # what staging casts (strictly)
     log.add_rows(
         result.file_id,
-        _rows(dup),
+        _rows(raw.is_null() | (raw.str.strip_chars() == "")),
+        code="missing_required",
+        message="month_offset is missing",
+        column="month_offset",
+    )
+    rows = _rows(raw.is_not_null() & (raw.str.strip_chars() != "") & ~(month > 0).fill_null(False))
+    log.add_rows(
+        result.file_id,
+        rows,
+        code="bad_month_offset",
+        message="month_offset must be a whole number of months, 1 or more",
+        column="month_offset",
+        values={i: raw[i] for i in rows[:MAX_DETAILS_PER_CODE]},
+    )
+
+
+def _duplicates(result: FileResult, log: IssueLog) -> None:
+    log.add_rows(
+        result.file_id,
+        _rows(~result.first_distinct()),
         code="duplicate_row",
         message="identical to an earlier row; boarded once",
     )
-    if {"account.external_ref", "claim_item.ref"} <= set(result.values):
-        frame = pl.DataFrame(
-            {"a": result.values["account.external_ref"], "d": result.values["claim_item.ref"]}
-        )
-        repeated = ~frame.select(pl.struct("a", "d").is_first_distinct()).to_series()
-        complete = frame["a"].is_not_null() & frame["d"].is_not_null()
-        rows = _rows(repeated & complete & ~dup)
+
+
+def _details(rows: list[int], values: pl.Series) -> dict[int, Any]:
+    """Issue values by row, for the rows whose details are kept."""
+    n = MAX_DETAILS_PER_CODE
+    return dict(zip(rows[:n], values.head(n).to_list(), strict=True))
+
+
+def _item_rows(
+    log: IssueLog,
+    files: dict[str, FileResult],
+    flagged: pl.DataFrame,
+    value: str,
+    **issue: Any,
+) -> None:
+    """Record an item rule on the flagged rows of `civil_items`, file by file."""
+    for (file_id,), part in flagged.group_by("file_id", maintain_order=True):
+        f = files[str(file_id)]
+        rows = part["row"].to_list()
+        target = issue.get("target")
         log.add_rows(
-            result.file_id,
+            f.file_id,
             rows,
-            code="duplicate_document",
-            message="the same document appears twice for this account",
-            column=result.column_for("claim_item.ref"),
-            target="claim_item.ref",
-            values={i: frame["d"][i] for i in rows[:MAX_DETAILS_PER_CODE]},
+            column=f.column_for(target) if target else None,
+            values=_details(rows, part[value]),
+            **issue,
         )
-    return dup
+
+
+def _items(files: list[FileResult], log: IssueLog, currencies: frozenset[str]) -> None:
+    """Rules on the claim items of all civil files (`boarding.items`): identity, credit notes,
+    one currency per account, accepted currencies."""
+    civil = [f for f in files if f.eba_table is None]
+    if not civil:
+        return
+    by_id = {f.file_id: f for f in civil}
+    items = civil_items(civil)
+    complete = pl.col("account_key").is_not_null() & pl.col("ref").is_not_null()
+    _item_rows(
+        log,
+        by_id,
+        items.filter(pl.col("duplicate") & complete),
+        "ref",
+        code="duplicate_document",
+        message="the same document appears again for this account, identical; boarded once",
+        target="claim_item.ref",
+    )
+    _item_rows(
+        log,
+        by_id,
+        items.filter(pl.col("conflict") & complete),
+        "ref",
+        code="conflicting_document",
+        message="the same document appears again for this account with another amount, "
+        "amount paid, currency or due date",
+        target="claim_item.ref",
+    )
+    _item_rows(
+        log,
+        by_id,
+        items.filter((pl.col("kind") == "credit_note") & (pl.col("seller_paid_minor") != 0)),
+        "seller_paid_minor",
+        code="credit_note_paid",
+        message="an amount paid on a credit note",
+        target="claim_item.amount_paid",
+    )
+    # No document number, period or due date: no ref (claim_item.ref is NOT NULL). Claim types
+    # requiring one of these already report the row (`_required`, or the value's own error).
+    reported = pl.Series(
+        [k for k, targets in rules()["required"].items() if set(targets) & set(REF_BASIS)],
+        dtype=pl.Utf8,
+    ).implode()
+    for (file_id,), part in items.filter(pl.col("ref").is_null()).group_by(
+        "file_id", maintain_order=True
+    ):
+        f = by_id[str(file_id)]
+        rows = part["row"]
+        if f.claim_types:
+            rows = rows.filter(~_rule_keys(f).gather(rows).is_in(reported).fill_null(False))
+        log.add_rows(
+            f.file_id,
+            rows.to_list(),
+            code="missing_required",
+            message="claim_item.ref is missing: no document number, period or due date",
+            column=f.column_for("claim_item.ref"),
+            target="claim_item.ref",
+        )
+    staged = items.filter(pl.col("first"))
+    account_currency = pl.col("currency").first().over("account_key")
+    _item_rows(
+        log,
+        by_id,
+        staged.filter(pl.col("currency") != account_currency),
+        "currency",
+        code="mixed_currency_account",
+        message="this account already has items in another currency (one currency per account)",
+        target="claim_item.currency",
+    )
+    _item_rows(
+        log,
+        by_id,
+        items.filter(~pl.col("currency").is_in(sorted(currencies))),
+        "currency",
+        code="unsupported_currency",
+        message=f"currency not accepted for claims ({', '.join(sorted(currencies))})",
+        target="claim_item.currency",
+    )
+
+
+def _loans(files: list[FileResult], log: IssueLog, currencies: frozenset[str]) -> None:
+    """Rules on EU-template loans: one row per loan identifier, accepted currencies, amounts
+    below the cent, components above the legal balance."""
+    for t3 in (f for f in files if f.eba_table == "t3_loan"):
+        loans = eba_loans(t3)
+        repeated = loans.filter(~pl.col("first") & pl.col("loan_id").is_not_null())
+        rows = repeated["row"].to_list()
+        log.add_rows(
+            t3.file_id,
+            rows,
+            code="duplicate_loan",
+            message="another row has the same loan identifier with different values",
+            column=t3.column_for("eba.f3_01_loan_identifier"),
+            target="eba.f3_01_loan_identifier",
+            values=_details(rows, repeated["loan_id"]),
+        )
+        unsupported = loans.filter(~pl.col("currency").is_in(sorted(currencies)))
+        rows = unsupported["row"].to_list()
+        log.add_rows(
+            t3.file_id,
+            rows,
+            code="unsupported_currency",
+            message=f"currency not accepted for claims ({', '.join(sorted(currencies))})",
+            column=t3.column_for("eba.f3_08_currency"),
+            target="eba.f3_08_currency",
+            values=_details(rows, unsupported["currency"]),
+        )
+        for target in EBA_AMOUNTS.values():
+            if target not in t3.values:
+                continue
+            values = t3.values[target]
+            rounded = [v for v in values.drop_nulls().unique().to_list() if has_sub_cent(v)]
+            rows = _rows(values.is_in(rounded)) if rounded else []
+            log.add_rows(
+                t3.file_id,
+                rows,
+                code="sub_cent_amount",
+                message="amount below the cent: rounded half-up to the cent",
+                column=t3.column_for(target),
+                target=target,
+                values={i: values[i] for i in rows[:MAX_DETAILS_PER_CODE]},
+            )
+        with_balance = loans.filter(pl.col("p312").is_not_null())
+        negative: list[int] = []
+        below_zero: dict[int, str] = {}  # claim_item.original_minor >= 0
+        for r, legal, components in zip(
+            with_balance["row"].to_list(),
+            with_balance["p312"].to_list(),
+            loan_components(with_balance),
+            strict=True,
+        ):
+            if components.get("balancing_line", 0) < 0:
+                negative.append(r)
+            if sum(components.values()) < 0:  # the components add up to 3.12 in minor units
+                below_zero[r] = legal
+        log.add_rows(
+            t3.file_id,
+            list(below_zero),
+            code="negative_amount",
+            message="negative legal balance (3.12)",
+            column=t3.column_for("eba.f3_12_legal_balance"),
+            target="eba.f3_12_legal_balance",
+            values=below_zero,
+        )
+        log.add_rows(
+            t3.file_id,
+            negative,
+            code="components_exceed_legal_balance",
+            message="principal + accrued interest + other balances exceed the legal balance "
+            "(3.12): negative balancing line",
+            column=t3.column_for("eba.f3_12_legal_balance"),
+            target="eba.f3_12_legal_balance",
+        )
 
 
 def _amounts(result: FileResult, log: IssueLog) -> None:
+    paid = result.col("claim_item.amount_paid", pl.Int64())
+    paid_col = result.column_for("claim_item.amount_paid")
+    rows = _rows(paid < 0)  # claim_item.seller_paid_minor >= 0
+    log.add_rows(
+        result.file_id,
+        rows,
+        code="negative_amount",
+        message="negative amount paid",
+        column=paid_col,
+        target="claim_item.amount_paid",
+        values={i: result.raw[paid_col][i] for i in rows[:MAX_DETAILS_PER_CODE]}
+        if paid_col
+        else None,
+    )
     if "claim_item.amount" not in result.values:
         return
     amount = result.values["claim_item.amount"]
-    paid = result.col("claim_item.amount_paid", pl.Int64())
     kind = result.col("claim_item.kind")
     col = result.column_for("claim_item.amount")
     negative = (amount < 0) & (kind.is_null() | (kind != "credit_note"))
@@ -485,6 +717,24 @@ def _references(files: list[FileResult], join_keys: list[dict[str, Any]], log: I
             )
 
 
+def _eba_tables(files: list[FileResult], log: IssueLog) -> None:
+    """One file per EU-template table: staging and the cross-file references read one."""
+    seen: set[str] = set()
+    for f in files:
+        if f.eba_table is None:
+            continue
+        if f.eba_table in seen:
+            log.add_rows(
+                f.file_id,
+                [],
+                code="duplicate_eba_table",
+                message=f"another file of this batch is already the EU template table "
+                f"{f.eba_table}: one file per table",
+                file_level=True,
+            )
+        seen.add(f.eba_table)
+
+
 def validate_batch(  # noqa: PLR0913 - the batch's inputs
     files: list[FileResult],
     profiles: dict[str, dict[str, Any]],
@@ -493,16 +743,22 @@ def validate_batch(  # noqa: PLR0913 - the batch's inputs
     conformance: str,
     art4_exempt: bool,
     join_keys: list[dict[str, Any]],
+    currencies: frozenset[str] = DEFAULT_CURRENCIES,
 ) -> IssueLog:
+    """`currencies`: the claim currencies accepted (public.currency with exponent 2)."""
     log = IssueLog(conformance=conformance)
     spec = load_spec()
     for result in files:
         transform_file(result, profiles.get(result.file_id, {}), log, spec)
         assign_rows(result, portfolio_default, log)
         _required(result, log)
+        _months(result, log)
         _duplicates(result, log)
         _amounts(result, log)
         _contacts(result, log)
         _eba_mandatory(result, log, art4_exempt)
+    _eba_tables(files, log)
+    _items(files, log, currencies)
+    _loans(files, log, currencies)
     _references(files, join_keys, log)
     return log

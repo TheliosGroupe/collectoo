@@ -10,6 +10,7 @@ export type BatchStatus =
   | "validated"
   | "staged"
   | "committed"
+  | "confirming"
   | "confirmed"
   | "rolled_back"
   | "abandoned";
@@ -25,6 +26,7 @@ export const STATUS_LABEL: Record<BatchStatus, string> = {
   validated: "Contrôles passés",
   staged: "Prêt à intégrer",
   committed: "Intégré, à confirmer",
+  confirming: "Confirmation en cours",
   confirmed: "Confirmé",
   rolled_back: "Annulé",
   abandoned: "Abandonné",
@@ -37,6 +39,7 @@ const PROCESSING: ReadonlySet<string> = new Set([
   "mapping_approved",
   "transformed",
   "validated",
+  "confirming",
 ]);
 
 export function statusLabel(status: string): string {
@@ -57,7 +60,7 @@ export function statusTone(status: string): Tone {
   return "neutral";
 }
 
-/** Validation issue codes (worker/src/collectoo_worker/boarding/specs/validation.v1.yaml). */
+/** Validation issue codes (worker/src/collectoo_worker/boarding/specs/validation.v2.yaml). */
 const ISSUE_LABEL: Record<string, string> = {
   impossible_date: "Date impossible",
   bad_date: "Date illisible",
@@ -75,9 +78,19 @@ const ISSUE_LABEL: Record<string, string> = {
   missing_contact: "Ni e-mail ni téléphone (courrier seulement)",
   duplicate_row: "Ligne en double (reprise une fois)",
   duplicate_document: "Pièce en double pour le même compte",
+  conflicting_document: "Même pièce pour le même compte avec un autre montant, réglé, devise ou échéance",
   mixed_date_format: "Format de date différent du reste de la colonne",
   negative_amount: "Montant négatif",
   overpaid: "Payé supérieur au montant",
+  credit_note_paid: "Montant réglé sur un avoir",
+  mixed_currency_account: "Plusieurs devises pour un même compte",
+  unsupported_currency: "Devise non acceptée",
+  duplicate_loan: "Identifiant de prêt en double avec des valeurs différentes",
+  duplicate_eba_table:
+    "Plusieurs fichiers pour la même table du modèle UE : refaire la reprise avec un seul fichier par table",
+  bad_month_offset: "Mois de l'historique de recouvrement invalide (nombre entier de mois, 1 ou plus)",
+  sub_cent_amount: "Montant avec plus de 2 décimales (arrondi au centime)",
+  components_exceed_legal_balance: "Principal, intérêts et autres soldes supérieurs au solde légal (3.12)",
   unassigned_claim_type: "Type de créance non déterminé",
   unknown_legal_regime: "Régime juridique non déterminé (date du contrat manquante)",
   broken_reference: "Référence vers un autre fichier introuvable",

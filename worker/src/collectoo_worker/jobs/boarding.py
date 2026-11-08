@@ -30,11 +30,13 @@ from collectoo_worker.boarding.mapping import (
     join_keys,
     propose,
 )
+from collectoo_worker.boarding.opening import check_bridge
 from collectoo_worker.boarding.profile import profile_frame
 from collectoo_worker.boarding.readers import read_xlsx, scan_csv
-from collectoo_worker.boarding.stage import stage_rows, write_staging
+from collectoo_worker.boarding.stage import split_skipped, stage_rows, write_staging
 from collectoo_worker.boarding.transforms import load_spec
 from collectoo_worker.boarding.validate import (
+    DEFAULT_CURRENCIES,
     FileResult,
     Issue,
     IssueLog,
@@ -66,6 +68,8 @@ def make_handler(storage: Storage, provider: Provider, normaliser: Normaliser | 
             stage_batch(conn, storage, batch_id)
         elif kind == "documents":
             documents_batch(conn, storage, batch_id)
+        elif kind == "confirm":
+            confirm_batch(conn, batch_id)
         elif kind == "purge_documents":
             purge_documents(storage, payload.get("objects") or [])
         else:
@@ -85,6 +89,9 @@ def record_dead_job(payload: dict[str, Any], error: str, conn: psycopg.Connectio
     """A boarding job failed for good: show it on the batch (the back-office stops waiting)."""
     batch_id = payload.get("batch_id")
     if not batch_id:
+        return
+    if payload.get("type") == "confirm":
+        fail_confirmation(conn, str(batch_id), error)
         return
     conn.execute(
         """update public.boarding_batch
@@ -246,6 +253,16 @@ def _address_stats(
     }
 
 
+def claim_currencies(conn: psycopg.Connection[Any]) -> frozenset[str]:
+    """Currencies accepted for claims: public.currency with exponent 2 (boarding converts with
+    x100). Before the ledger migration that table does not exist: the default set."""
+    row = conn.execute("select to_regclass('public.currency') is not null").fetchone()
+    if not (row and row[0]):
+        return DEFAULT_CURRENCIES
+    rows = conn.execute("select code from public.currency where minor_exponent = 2").fetchall()
+    return frozenset(str(r[0]).strip() for r in rows)
+
+
 @dataclass
 class Loaded:
     files: list[FileResult]
@@ -308,6 +325,7 @@ def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id:
         conformance=conformance,
         art4_exempt=any(bool(v) for v in (art4 or {}).values()),
         join_keys=keys or [],
+        currencies=claim_currencies(conn),
     )
     for fid in not_boarded:
         log.add(
@@ -388,12 +406,24 @@ def transform_batch(
 
 
 def stage_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) -> None:
-    """Validated batch -> rows in staging. Accounts already boarded in the portfolio are skipped."""
+    """Validated batch -> rows in staging. Accounts already boarded in the portfolio are skipped.
+
+    Records the opening balances of the staged accounts and of the skipped ones, and fails the
+    job (-> failed_job) unless, per currency, the DQ report's computed outstanding equals their
+    sum (M2-05, docs/design/m2a-ledger.md §7.3): a mismatch is a bug, never a seller difference.
+    """
+    computed_row = conn.execute(
+        "select dq_report #> '{reconciliation,computed,currencies}'"
+        " from public.boarding_batch where id = %s",
+        (batch_id,),
+    ).fetchone()
+    if computed_row is None or computed_row[0] is None:
+        raise ValueError(f"batch {batch_id} has no data-quality report: transform it first")
     loaded = load_and_validate(conn, storage, batch_id)
     staged = stage_rows(loaded.files, loaded.log)
-    skipped = 0
+    existing: set[str] = set()
     if "account" in staged:
-        refs = staged["account"]["key"].to_list()
+        refs = staged["account"]["key"].drop_nulls().to_list()
         existing = {
             r[0]
             for r in conn.execute(
@@ -402,12 +432,8 @@ def stage_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) 
                 (loaded.portfolio_id, refs),
             ).fetchall()
         }
-        if existing:
-            skipped = len(existing)
-            known = pl.Series(sorted(existing), dtype=pl.Utf8).implode()
-            for entity in ("account", "claim_item", "account_party"):
-                if entity in staged:
-                    staged[entity] = staged[entity].filter(~pl.col("key").is_in(known))
+    staged, opening, skipped = split_skipped(staged, existing)
+    check_bridge(computed_row[0], opening, skipped)
     digest = write_staging(conn, batch_id, staged)
     conn.execute(
         """update public.boarding_batch
@@ -416,7 +442,14 @@ def stage_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) 
            where id = %s""",
         (
             Jsonb(digest),
-            Jsonb({"already_boarded_accounts_skipped": skipped, "entities": digest}),
+            Jsonb(
+                {
+                    "already_boarded_accounts_skipped": len(existing),
+                    "entities": digest,
+                    "opening": opening,
+                    "skipped": skipped,
+                }
+            ),
             batch_id,
         ),
     )
@@ -433,7 +466,9 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
     row = conn.execute(
         "select status from public.boarding_batch where id = %s for share", (batch_id,)
     ).fetchone()
-    if row is None or row[0] not in ("committed", "confirmed"):
+    # Confirming is fine too: documents only link to accounts, and the confirmation job takes
+    # the batch row FOR UPDATE, so the two jobs run one after the other.
+    if row is None or row[0] not in ("committed", "confirming", "confirmed"):
         return
     accounts = dict(
         conn.execute(
@@ -492,6 +527,48 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
         " set dq_report = jsonb_set(coalesce(dq_report, '{}'), '{documents}', %s) where id = %s",
         (Jsonb(summary), batch_id),
     )
+
+
+def fail_confirmation(conn: psycopg.Connection[Any], batch_id: str, error: str) -> None:
+    """The confirmation could not post: record why and go back to committed, so staff see it and
+    can retry or roll back. Nothing was posted (the posting is one transaction). A documents
+    failure already shown stays (the history keeps the confirmation's reason)."""
+    conn.execute(
+        """update public.boarding_batch
+           set failed_job = jsonb_build_object('type', 'confirm', 'error', %s::text, 'at', now())
+           where id = %s and status = 'confirming'
+             and coalesce(failed_job ->> 'type', '') not in ('documents', 'purge_documents')""",
+        (error[:500], batch_id),
+    )
+    conn.execute(
+        """select private.transition_batch(id, 'committed', %s, 'worker:boarding')
+           from public.boarding_batch where id = %s and status = 'confirming'""",
+        (f"échec de la confirmation : {error[:300]}", batch_id),
+    )
+
+
+def _deterministic(exc: psycopg.Error) -> bool:
+    """Ledger and check errors fail the same way on every retry; other errors may be transient."""
+    state = exc.sqlstate or ""
+    return state.startswith("LG") or state == "23514"
+
+
+def confirm_batch(conn: psycopg.Connection[Any], batch_id: str) -> str:
+    """Post the opening balances and confirm (M2-05): one SQL call, inside the job's transaction,
+    so it happens exactly once; a redelivered job finds the batch confirmed and does nothing.
+    A ledger or check error is recorded on the batch at once (retrying would only redo the work)."""
+    try:
+        with conn.transaction():  # savepoint: a failed posting leaves nothing behind
+            row = conn.execute(
+                "select private.complete_batch_confirmation(%s)", (batch_id,)
+            ).fetchone()
+    except psycopg.Error as exc:
+        if not _deterministic(exc):
+            raise
+        message = exc.diag.message_primary or str(exc)
+        fail_confirmation(conn, batch_id, f"{exc.sqlstate}: {message}")
+        return "failed"
+    return str(row[0]) if row else "skipped"
 
 
 def _safe_suffix(name: str) -> str:

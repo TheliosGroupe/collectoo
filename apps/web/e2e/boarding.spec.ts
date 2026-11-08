@@ -69,10 +69,15 @@ test("ops board a client file: upload, mapping review, quality report, commit, c
 
   await page.getByRole("button", { name: "Intégrer le lot" }).click();
   await expect(status).toHaveText("Intégré, à confirmer");
+  // The opening balances that confirmation will post = the outstanding of the quality report.
+  await expect(page.getByTestId("opening-plan-total")).toHaveText("212 186,29 €");
   await reviewShot(page, testInfo, "m1-boarding-committed");
 
+  // Confirmation runs in the background (M2-05): the worker posts the opening balances.
   await page.getByRole("button", { name: "Confirmer le lot" }).click();
-  await expect(status).toHaveText("Confirmé");
+  await expect(status).toHaveText("Confirmé", { timeout: 60_000 });
+  await expect(page.getByTestId("opening-summary-total")).toHaveText("212 186,29 €");
+  await reviewShot(page, testInfo, "m2-opening-confirmed");
   await expect(page.getByTestId("history")).toContainText("Confirmé");
 
   await page.getByRole("link", { name: "Reprises" }).click();

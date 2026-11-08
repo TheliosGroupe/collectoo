@@ -9,18 +9,27 @@ Rows are built column-wise with Polars and kept typed (a `key` column plus the d
 they are JSON-encoded chunk by chunk while being loaded with COPY into
 `private.boarding_staging`, so a 1M-loan tape never holds its JSON in memory at once.
 Duplicate rows are staged once. Re-running gives identical rows.
+
+Claim items come from `boarding.items` (the definition the DQ report also uses): one item per
+(account, kind, ref) across all civil files; an account appearing in several civil files is
+staged once, in the currency of its first staged item (EUR when it has none). The opening
+balances of the staged accounts (`boarding.opening`) are computed here and must reconcile with
+the DQ report (M2-05).
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from collections.abc import Set as AbstractSet
 from typing import Any
 
 import polars as pl
 import psycopg
 
+from collectoo_worker.boarding.items import DEFAULT_CURRENCY, eba_loans, minor_units, staged_items
+from collectoo_worker.boarding.opening import opening_totals
 from collectoo_worker.boarding.validate import FileResult, IssueLog
 
 EBA_TABLES = (
@@ -74,14 +83,6 @@ def _civil(f: FileResult) -> dict[str, pl.DataFrame]:
                 c("contact.address_line"),
                 c("contact.postcode"),
                 c("contact.city"),
-                c("claim_item.kind").rename("doc_kind"),
-                c("claim_item.ref").rename("doc_ref"),
-                c("claim_item.issue_date", pl.Date()),
-                c("claim_item.due_date", pl.Date()),
-                c("claim_item.amount", pl.Int64()),
-                c("claim_item.amount_paid", pl.Int64()),
-                c("claim_item.currency"),
-                c("claim_item.period"),
                 claim_types,
                 pl.Series("legal_regime", f.legal_regimes or [None] * n, dtype=pl.Utf8),
             ]
@@ -103,7 +104,6 @@ def _civil(f: FileResult) -> dict[str, pl.DataFrame]:
             .alias("display_name"),
             pl.col("external_ref").alias("seller_ref"),
             pl.col("claim_type").replace_strict(CAPACITY, default="consumer").alias("capacity"),
-            pl.col("currency").fill_null("EUR"),
         )
     )
     party = _json(
@@ -114,7 +114,7 @@ def _civil(f: FileResult) -> dict[str, pl.DataFrame]:
     account = _json(
         parties,
         pl.col("external_ref"),
-        ["external_ref", "claim_type", "legal_regime", "currency", "capacity"],
+        ["external_ref", "claim_type", "legal_regime", "capacity"],  # currency: `_with_currency`
     )
     contacts = []
     for typ, col in (("email", "email"), ("phone", "phone")):
@@ -139,20 +139,12 @@ def _civil(f: FileResult) -> dict[str, pl.DataFrame]:
         .unique(maintain_order=True)
     )
     contact = _json(pl.concat(contacts), pl.col("party_key"), ["party_key", "type", "value"])
-    items = df.with_columns(
-        pl.col("external_ref").alias("account_key"),
-        pl.when(pl.col("period").is_not_null())
-        .then(pl.lit("rent_period"))
-        .when(pl.col("doc_kind") == "credit_note")
-        .then(pl.lit("credit_note"))
-        .otherwise(pl.lit("invoice"))
-        .alias("kind"),
-        pl.coalesce("doc_ref", "period", pl.col("due_date").cast(pl.Utf8)).alias("ref"),
-        pl.col("amount").abs().alias("original_minor"),
-        pl.col("amount_paid").fill_null(0).alias("seller_paid_minor"),
-        pl.col("currency").fill_null("EUR"),
-    ).filter(pl.col("original_minor").is_not_null())
-    claim_item = _json(
+    return {"party": party, "contact": contact, "account": account}
+
+
+def _claim_items(items: pl.DataFrame) -> pl.DataFrame:
+    """One claim item per (account, kind, ref) across the civil files (`boarding.items`)."""
+    return _json(
         items,
         pl.col("account_key"),
         [
@@ -166,7 +158,22 @@ def _civil(f: FileResult) -> dict[str, pl.DataFrame]:
             "currency",
         ],
     )
-    return {"party": party, "contact": contact, "account": account, "claim_item": claim_item}
+
+
+def _with_currency(accounts: pl.DataFrame, items: pl.DataFrame) -> pl.DataFrame:
+    """Civil accounts in the currency of their first staged item, EUR when they have none: a row
+    without an amount never sets it, so the account and its items always agree (LG006)."""
+    first = items.group_by("account_key", maintain_order=True).agg(pl.col("currency").first())
+    return accounts.join(
+        first, left_on="key", right_on="account_key", how="left", maintain_order="left"
+    ).select(
+        "key",
+        "external_ref",
+        "claim_type",
+        "legal_regime",
+        pl.col("currency").fill_null(DEFAULT_CURRENCY),
+        "capacity",
+    )
 
 
 def _eba(files: list[FileResult]) -> dict[str, pl.DataFrame]:
@@ -201,19 +208,25 @@ def _eba(files: list[FileResult]) -> dict[str, pl.DataFrame]:
         ).unique("seller_ref", keep="first", maintain_order=True)
         out["party"] = _json(p, pl.col("seller_ref"), p.columns)
     if t3 is not None:
+        # One account per loan identifier: its first distinct row (`boarding.items`).
+        loans = eba_loans(t3).filter(pl.col("first"))
+        picked = loans["row"]
+        n = t3.rows
         a = pl.DataFrame(
             {
-                "external_ref": t3.col("eba.f3_01_loan_identifier"),
-                "claim_type": pl.Series(t3.claim_types, dtype=pl.Utf8),
-                "legal_regime": pl.Series(t3.legal_regimes, dtype=pl.Utf8),
-                "currency": t3.col("eba.f3_08_currency").fill_null("EUR"),
-                "contract_date": t3.col("eba.f3_02_inception_date", pl.Date()),
+                "external_ref": loans["loan_id"],
+                "claim_type": pl.Series(t3.claim_types or [None] * n, dtype=pl.Utf8).gather(picked),
+                "legal_regime": pl.Series(t3.legal_regimes or [None] * n, dtype=pl.Utf8).gather(
+                    picked
+                ),
+                "currency": loans["currency"],
+                "contract_date": t3.col("eba.f3_02_inception_date", pl.Date()).gather(picked),
                 "seller_limitation_date": t3.col(
                     "eba.f3_29_statute_of_limitations_date", pl.Date()
-                ),
-                "legal_balance": t3.col("eba.f3_12_legal_balance"),
+                ).gather(picked),
+                "legal_balance": pl.Series(minor_units(loans["p312"]), dtype=pl.Int64),
             }
-        ).unique("external_ref", keep="first", maintain_order=True)
+        )
         out["account"] = _json(
             a,
             pl.col("external_ref"),
@@ -230,9 +243,7 @@ def _eba(files: list[FileResult]) -> dict[str, pl.DataFrame]:
             pl.col("external_ref").alias("account_key"),
             pl.lit("loan_principal").alias("kind"),
             pl.col("external_ref").alias("ref"),
-            (pl.col("legal_balance").cast(pl.Decimal(38, 2)) * 100)
-            .cast(pl.Int64)
-            .alias("original_minor"),
+            pl.col("legal_balance").alias("original_minor"),  # 3.12, half-up to the cent
             pl.lit(0).alias("seller_paid_minor"),
             pl.col("currency"),
         )
@@ -265,20 +276,59 @@ def _eba(files: list[FileResult]) -> dict[str, pl.DataFrame]:
     return out
 
 
+def _concat(dfs: list[pl.DataFrame]) -> pl.DataFrame:
+    return pl.concat(dfs, how="diagonal_relaxed") if len(dfs) > 1 else dfs[0]
+
+
 def stage_rows(files: list[FileResult], log: IssueLog) -> dict[str, pl.DataFrame]:
     """Typed rows to stage per entity (`key` + data columns)."""
     del log  # blocking issues stop the batch before staging; warnings do not remove rows
     staged: dict[str, list[pl.DataFrame]] = {}
     civil = [f for f in files if f.eba_table is None]
-    for f in civil:
-        for entity, df in _civil(f).items():
-            staged.setdefault(entity, []).append(df)
+    if civil:
+        per_file: dict[str, list[pl.DataFrame]] = {}
+        for f in civil:
+            for entity, df in _civil(f).items():
+                per_file.setdefault(entity, []).append(df)
+        for entity, dfs in per_file.items():
+            df = _concat(dfs)
+            if len(dfs) > 1:  # a debtor or account in several files is staged once
+                df = (
+                    df.unique(maintain_order=True)
+                    if entity == "contact"
+                    else df.unique("key", keep="first", maintain_order=True)
+                )
+            staged[entity] = [df]
+        items = staged_items(civil)
+        staged["account"] = [_with_currency(staged["account"][0], items)]
+        staged["claim_item"] = [_claim_items(items)]
     for entity, df in _eba([f for f in files if f.eba_table]).items():
         staged.setdefault(entity, []).append(df)
-    return {
-        entity: pl.concat(dfs, how="diagonal_relaxed") if len(dfs) > 1 else dfs[0]
-        for entity, dfs in staged.items()
+    return {entity: _concat(dfs) for entity, dfs in staged.items()}
+
+
+SKIPPABLE = ("account", "claim_item", "account_party")  # rows keyed by the account reference
+
+
+def split_skipped(
+    staged: Mapping[str, pl.DataFrame], already_boarded: AbstractSet[str]
+) -> tuple[dict[str, pl.DataFrame], dict[str, Any], dict[str, Any]]:
+    """Drop the accounts already boarded in the portfolio.
+
+    Returns the rows to stage, their opening (`dq_report.staging.opening`) and the opening of the
+    skipped accounts (`dq_report.staging.skipped`), both in the `opening_totals` shape.
+    """
+    if not already_boarded:
+        return dict(staged), opening_totals(staged), {"currencies": {}}
+    skipped = opening_totals(staged, already_boarded)
+    known = pl.Series(sorted(already_boarded), dtype=pl.Utf8).implode()
+    kept = {
+        entity: df.filter(~pl.col("key").is_in(known).fill_null(False))
+        if entity in SKIPPABLE
+        else df
+        for entity, df in staged.items()
     }
+    return kept, opening_totals(kept), skipped
 
 
 def _chunks(staged: dict[str, pl.DataFrame]) -> Iterator[tuple[str, pl.DataFrame]]:

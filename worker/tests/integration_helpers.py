@@ -15,6 +15,7 @@ from collectoo_worker.runtime.queue import QueueConsumer
 from collectoo_worker.runtime.storage import SupabaseStorage
 
 DB = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@127.0.0.1:54322/postgres")
+CUT_OFF = "2026-09-30"  # sellers always stop the portfolio at a cut-off date (founder, 2026-11-08)
 
 
 def storage() -> SupabaseStorage:
@@ -91,8 +92,8 @@ def board(tenant: dict[str, Any], storage: SupabaseStorage, *paths: Path) -> str
         as_user(conn, tenant["user"])
         batch = one(
             conn,
-            "select public.create_boarding_batch(%s, %s)",
-            (str(uuid.uuid4()), tenant["portfolio"]),
+            "select public.create_boarding_batch(%s, %s, %s)",
+            (str(uuid.uuid4()), tenant["portfolio"], CUT_OFF),
         )
         regs = []
         for path in paths:
