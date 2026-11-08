@@ -220,6 +220,17 @@ def test_reboarding_skips_accounts_already_in_the_portfolio(
     with psycopg.connect(DB) as conn:
         report = one(conn, "select dq_report from public.boarding_batch where id = %s", (second,))
     assert report["staging"]["already_boarded_accounts_skipped"] > 0
+    # M2-05 bridge: computed = opening of the staged accounts + opening of the skipped ones.
+    staging, computed = report["staging"], report["reconciliation"]["computed"]["currencies"]
+    skipped = staging["skipped"]["currencies"]["EUR"]
+    assert (
+        skipped["accounts"] + skipped["accounts_without_balance"]
+        == (staging["already_boarded_accounts_skipped"])
+    )
+    opening = staging["opening"]["currencies"].get("EUR", {"outstanding_minor": "0"})
+    assert int(computed["EUR"]["outstanding_minor"]) == int(opening["outstanding_minor"]) + int(
+        skipped["outstanding_minor"]
+    )
     _call(tenant["user"], "select public.commit_boarding_batch(%s)", (second,))
     assert (
         _count("select count(*) from public.account where boarding_batch_id = %s", (second,)) == 0

@@ -30,11 +30,13 @@ from collectoo_worker.boarding.mapping import (
     join_keys,
     propose,
 )
+from collectoo_worker.boarding.opening import check_bridge
 from collectoo_worker.boarding.profile import profile_frame
 from collectoo_worker.boarding.readers import read_xlsx, scan_csv
-from collectoo_worker.boarding.stage import stage_rows, write_staging
+from collectoo_worker.boarding.stage import split_skipped, stage_rows, write_staging
 from collectoo_worker.boarding.transforms import load_spec
 from collectoo_worker.boarding.validate import (
+    DEFAULT_CURRENCIES,
     FileResult,
     Issue,
     IssueLog,
@@ -255,6 +257,16 @@ def _address_stats(
     }
 
 
+def claim_currencies(conn: psycopg.Connection[Any]) -> frozenset[str]:
+    """Currencies accepted for claims: public.currency with exponent 2 (boarding converts with
+    x100). Before the ledger migration that table does not exist: the default set."""
+    row = conn.execute("select to_regclass('public.currency') is not null").fetchone()
+    if not (row and row[0]):
+        return DEFAULT_CURRENCIES
+    rows = conn.execute("select code from public.currency where minor_exponent = 2").fetchall()
+    return frozenset(str(r[0]).strip() for r in rows)
+
+
 @dataclass
 class Loaded:
     files: list[FileResult]
@@ -317,6 +329,7 @@ def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id:
         conformance=conformance,
         art4_exempt=any(bool(v) for v in (art4 or {}).values()),
         join_keys=keys or [],
+        currencies=claim_currencies(conn),
     )
     for fid in not_boarded:
         log.add(
@@ -397,12 +410,24 @@ def transform_batch(
 
 
 def stage_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) -> None:
-    """Validated batch -> rows in staging. Accounts already boarded in the portfolio are skipped."""
+    """Validated batch -> rows in staging. Accounts already boarded in the portfolio are skipped.
+
+    Records the opening balances of the staged accounts and of the skipped ones, and fails the
+    job (-> failed_job) unless, per currency, the DQ report's computed outstanding equals their
+    sum (M2-05, docs/design/m2a-ledger.md §7.3): a mismatch is a bug, never a seller difference.
+    """
+    computed_row = conn.execute(
+        "select dq_report #> '{reconciliation,computed,currencies}'"
+        " from public.boarding_batch where id = %s",
+        (batch_id,),
+    ).fetchone()
+    if computed_row is None or computed_row[0] is None:
+        raise ValueError(f"batch {batch_id} has no data-quality report: transform it first")
     loaded = load_and_validate(conn, storage, batch_id)
     staged = stage_rows(loaded.files, loaded.log)
-    skipped = 0
+    existing: set[str] = set()
     if "account" in staged:
-        refs = staged["account"]["key"].to_list()
+        refs = staged["account"]["key"].drop_nulls().to_list()
         existing = {
             r[0]
             for r in conn.execute(
@@ -411,12 +436,8 @@ def stage_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) 
                 (loaded.portfolio_id, refs),
             ).fetchall()
         }
-        if existing:
-            skipped = len(existing)
-            known = pl.Series(sorted(existing), dtype=pl.Utf8).implode()
-            for entity in ("account", "claim_item", "account_party"):
-                if entity in staged:
-                    staged[entity] = staged[entity].filter(~pl.col("key").is_in(known))
+    staged, opening, skipped = split_skipped(staged, existing)
+    check_bridge(computed_row[0], opening, skipped)
     digest = write_staging(conn, batch_id, staged)
     conn.execute(
         """update public.boarding_batch
@@ -425,7 +446,14 @@ def stage_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) 
            where id = %s""",
         (
             Jsonb(digest),
-            Jsonb({"already_boarded_accounts_skipped": skipped, "entities": digest}),
+            Jsonb(
+                {
+                    "already_boarded_accounts_skipped": len(existing),
+                    "entities": digest,
+                    "opening": opening,
+                    "skipped": skipped,
+                }
+            ),
             batch_id,
         ),
     )
