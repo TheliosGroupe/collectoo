@@ -237,13 +237,14 @@ flowchart LR
 
 Double-entry, append-only, integer minor units (ADR-0006).
 
-**Tables:** `ledger_entry` (header: id, `client_org_id`, `entry_type`, `value_date`, `booked_at`, `idempotency_key` unique, `reverses_entry_id`, `source_type/source_id`, `engine_version`, `rule_pack_version`) and `ledger_line` (entry_id, `ledger_account_code`, `account_id` nullable, `component` nullable, `amount_minor` signed (+debit / −credit), `currency`).
+**Tables** (ADR-0012): `ledger_entry` (header: `organization_id`, `client_organization_id`, `portfolio_id`, `account_id`, `entry_type`, `effective_date`, `posted_at`, `line_count`, `idempotency_key` unique per organization + `request_hash`, `reverses_entry_id`, `boarding_batch_id`, `source_type/source_id`, `reason`, `engine_version`, `rule_pack_version_id`, `inputs_hash`, actor), `ledger_posting` (`entry_id`, `line_no`, `ledger_account_id`, `amount_minor` signed (+debit / −credit), `currency`, `effective_date`) and `ledger_account` (book + dimensions: receivable per claim item × component, owner claim pooled per owner × portfolio × component, client books per client). Writes only through `private.ledger_post` / `private.ledger_reverse` (service_role).
 
-**Invariants (in the DB):**
-- Lines of an entry sum to zero per currency (deferred constraint trigger).
-- No `UPDATE`/`DELETE` on ledger tables (trigger raises; privileges revoked). Corrections = a reversal entry (negated lines, `reverses_entry_id`), then a new entry.
-- `recovery_fee` lines on a debtor receivable require `account.enforceable_title_id` (CPCE-09). Consumer-credit accounts only accept whitelisted components (INT-05).
-- Debtor cash can only land on a `client_funds` bank ledger account (CPCE-02).
+**Invariants (in the DB, `ENABLE ALWAYS` triggers: they hold for the owner role too):**
+- Lines of an entry sum to zero per currency, their number equals `line_count`, and the receivable (1100) and owner claim (3100) move by opposite amounts per component (deferred check at commit, `LG001`). A closed entry cannot take another line.
+- No `UPDATE`/`DELETE`/`TRUNCATE` on ledger tables (`LG000`; DELETE/TRUNCATE also revoked from the owner). Corrections = a reversal entry (negated lines, `reverses_entry_id`, at most one per entry, never reversed itself), then a new entry.
+- Set-based guards: book allowed for the entry type, tenant/client/portfolio/account coherence, line currency and date = ledger account's and entry's (`LG002`).
+- `recovery_fee` lines on a debtor receivable require `account.enforceable_title_id` (CPCE-09, M3). Consumer-credit accounts only accept whitelisted components (INT-05, M3).
+- Debtor cash can only land on a `client_funds` bank ledger account (CPCE-02, M2b).
 
 **Chart of accounts (minimal):**
 

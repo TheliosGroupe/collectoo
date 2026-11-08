@@ -13,3 +13,4 @@
 | [0009](0009-two-layer-data-model.md) | Two-layer data model (EU NPL template layer + operational layer) | Accepted |
 | [0010](0010-ai-gateway.md) | Provider-agnostic AI gateway with mocks and eval suites | Accepted |
 | [0011](0011-security-model.md) | Security model — RLS everywhere, writes via the worker or SECURITY DEFINER functions | Accepted |
+| [0012](0012-ledger-implementation.md) | Ledger implementation: names, grain, ALWAYS triggers, openings at confirmation (amends 0006) | Accepted |

@@ -1,6 +1,6 @@
 # ADR-0006: Double-entry, append-only ledger in integer minor units
 
-- Status: Accepted
+- Status: Accepted; implemented and amended by ADR-0012 (names `ledger_entry` / `ledger_posting` / `ledger_account`, grain, enforcement)
 - Date: 2026-11-07
 
 ## Context

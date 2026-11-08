@@ -20,12 +20,13 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- Nothing in flight. M1 complete.
+- PR "M2a-1 — ledger core" (M2-01 … M2-04, ADR-0012, design `docs/design/m2a-ledger.md`): `ledger_entry` / `ledger_posting` / `ledger_account` + chart of accounts, components, entry types, currencies; deferred per-entry check at commit (balanced per currency, line count, receivable/owner-claim mirror, reversal mirror); append-only and coherence guards as `ENABLE ALWAYS` triggers (hold for the owner role); `private.ledger_post` (idempotency key + request hash, scope derived from the account and ownership history) and `private.ledger_reverse`; balances as of a date (and as known at a time) with access-checked public twins; read-only RLS. Python `collectoo_worker.ledger` (model, db API, error mapping) with Hypothesis properties and a state machine run against an in-memory oracle and against Postgres.
 
 ## Next
-- M2a ledger (M2-01 … M2-05): double-entry, append-only ledger, chart of accounts per claim component, opening balances from committed batches (sum = reconciled outstanding).
+- M2a-2: opening balances at batch confirmation (background `confirming` job), the six boarding fixes that make Σ opening = DQ reconciled total, review-screen state, E2E.
 
 ## Decisions
+- 2026-11-08 ledger (founder: all defaults accepted, ADR-0012): openings posted at confirmation, in the background; blocking anomalies (conflicting duplicate documents, duplicate EU loan ids, paid credit notes, several currencies in one account, unsupported currencies); EU amounts with more than 2 decimals rounded half-up with a warning; consumer credit 3.11 and balancing line booked, flagged, kept out of the first letter (counsel OQ-18); credit notes and overpaid invoices stay negative items; same-month rent lines without a number stay separate.
 - M1e reconciliation (founder confirmed 2026-11-08: sellers always stop the portfolio at a cut-off date): the seller's control total is the **outstanding balance at cut-off** (invoice/loan amounts minus what the seller reports as already paid), compared to the cent, plus the number of data rows in the claim files. Totals are kept per currency; a tape with non-euro amounts cannot be reconciled against a euro total (mismatch, reason required to commit). Batches can be abandoned at any step before commit. The upload form requires the cut-off date.
 - M1e: back-office copy in French; mapping targets offered in the review come from the worker's registry (`apps/web/src/lib/boarding/targets.json`, a pytest fails if it drifts). Batch amounts are read from the DQ report as text (`->>`) so integer cents never pass through a JS number.
 - M1d: the R124-3 mandate check sits on batch confirmation (accounts become workable), not on commit (data loaded for review, reversible); COMPLIANCE CPCE-03 aligned with DOMAIN §4.4. Re-boarding an account reference already in the portfolio is skipped at staging (listed in the DQ report); updates of existing accounts come with M2 reconciliation.

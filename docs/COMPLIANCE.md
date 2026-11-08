@@ -124,3 +124,4 @@ Credit-servicer authorisation (Directive (EU) 2021/2167 as transposed), governan
 | OQ-15 | AI Act art. 50 application date and current wording (Légifrance shows a version from 2026-07-27, suggesting an amendment). | Portal assistant disclosure. |
 | OQ-16 | R124-6 "délai d'un mois" — calendar month from effective collection (date funds are value-dated on the client account)? | Remittance scheduler. |
 | OQ-17 | Liquidation judiciaire: confirm L641-3 makes L622-7/L622-21 apply; not read yet. | HOLD-02 legal basis. |
+| OQ-18 | Consumer credit boarded from an EU template tape: the seller's 3.11 "other balances" and the balancing line up to the legal balance 3.12 are booked as declared and flagged, and kept out of the R124-4 first letter until ops classify them (founder default 2026-11-08). Counsel: is that enough under INT-05 (only listed charges) and R124-4 3° (the basis of each amount)? | Opening balances (ADR-0012), first letter (M4). |
