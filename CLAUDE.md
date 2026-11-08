@@ -56,7 +56,7 @@ make up / down    # local Supabase stack (export SUPABASE_INTERNAL_IMAGE_REGISTR
 make reset        # supabase db reset: migrations + seed
 make lint         # ruff, ruff format --check, mypy --strict, eslint, tsc
 make test         # pytest (+hypothesis), vitest, pgTAP (needs make up)
-make e2e          # next build + Playwright (desktop + mobile); screenshots -> docs/screenshots/
+make e2e          # needs make up; next build + Playwright vs local stack (desktop + mobile); screenshots -> docs/screenshots/
 make catalogue    # regenerate the EU NPL template catalogue (CI checks it is unchanged)
 ```
 

@@ -84,23 +84,39 @@ jobs:
         run: git diff --exit-code -- docs/reference
 
   e2e:
-    name: E2E (Playwright, mobile + desktop)
+    name: E2E (Playwright against the local stack, mobile + desktop)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: apps/web
+    timeout-minutes: 20
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - uses: actions/checkout@v5
+      - uses: supabase/setup-cli@v1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
       - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
+      - run: supabase start
+      - name: Export local Supabase settings
+        run: |
+          eval "$(supabase status -o env)"
+          {
+            echo "NEXT_PUBLIC_SUPABASE_URL=$API_URL"
+            echo "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=$PUBLISHABLE_KEY"
+            echo "SUPABASE_SECRET_KEY=$SECRET_KEY"
+            echo "MAILPIT_URL=$MAILPIT_URL"
+          } >> "$GITHUB_ENV"
       - run: npm ci
+        working-directory: apps/web
       - run: npx playwright install --with-deps chromium
+        working-directory: apps/web
       - run: npm run build
+        working-directory: apps/web
       - run: npm run e2e
+        working-directory: apps/web
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4

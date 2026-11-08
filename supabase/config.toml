@@ -214,10 +214,11 @@ sms_sent = 30
 anonymous_users = 30
 # Number of sessions that can be refreshed in a 5 minute interval per IP address.
 token_refresh = 150
+# Local/CI only (hosted limits are set in the dashboard). Raised so E2E runs can log in repeatedly.
 # Number of sign up and sign-in requests that can be made in a 5 minute interval per IP address (excludes anonymous users).
-sign_in_sign_ups = 30
+sign_in_sign_ups = 300
 # Number of OTP / Magic link verifications that can be made in a 5 minute interval per IP address.
-token_verifications = 30
+token_verifications = 300
 # Number of Web3 logins that can be made in a 5 minute interval per IP address.
 web3 = 30
 
@@ -253,6 +254,11 @@ otp_expiry = 3600
 # pass = "env(SENDGRID_API_KEY)"
 # admin_email = "admin@email.com"
 # sender_name = "Admin"
+
+# Login emails carry a one-time code only (no link). Hosted: copy this template in the dashboard.
+[auth.email.template.magic_link]
+subject = "Votre code de connexion Collectoo"
+content_path = "./supabase/templates/magic_link.html"
 
 # Uncomment to customize email template
 # [auth.email.template.invite]

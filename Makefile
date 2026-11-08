@@ -39,8 +39,8 @@ test-web:
 test-db:          ## pgTAP (needs `make up`)
 	supabase test db
 
-e2e:              ## Playwright (builds the web app first)
-	cd apps/web && npm run build && npm run e2e
+e2e:              ## Playwright against the local stack (needs make up; builds the web app first)
+	./scripts/e2e.sh
 
 build:
 	cd apps/web && npm run build
