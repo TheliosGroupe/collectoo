@@ -97,6 +97,10 @@ export default async function BankAccountsPage() {
                       Motif de la clôture
                       <input name="reason" required maxLength={2000} className={inputClass} />
                     </label>
+                    <label className="flex flex-col gap-1 text-sm">
+                      La clôture est définitive : saisissez les 4 derniers caractères de l&apos;IBAN
+                      <input name="confirm_iban" required maxLength={8} autoComplete="off" className={inputClass} />
+                    </label>
                   </ActionForm>
                 </details>
               ) : null}

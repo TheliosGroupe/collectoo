@@ -27,7 +27,8 @@ test("an admin registers the client-funds account, then closes an account opened
   await form.getByRole("button", { name: "Ajouter le compte" }).click();
   await expect(form.getByRole("alert")).toContainText("IBAN invalide");
 
-  await form.getByLabel("IBAN").fill("fr76 3000 4000 0312 3456 7890 143");
+  // Pasted from a bank PDF: non-breaking spaces between the groups.
+  await form.getByLabel("IBAN").fill("fr76\u00a03000\u00a04000\u00a00312 3456 7890 143");
   await form.getByRole("button", { name: "Ajouter le compte" }).click();
   const list = page.getByTestId("bank-accounts");
   await expect(list.getByTestId("iban")).toHaveText("FR76 3000 4000 0312 3456 7890 143");
@@ -51,6 +52,10 @@ test("an admin registers the client-funds account, then closes an account opened
   const mistaken = list.getByRole("listitem").filter({ hasText: "Compte ouvert par erreur" });
   await mistaken.getByText("Clôturer ce compte").click();
   await mistaken.getByLabel("Motif de la clôture").fill("Ouvert par erreur");
+  await mistaken.getByLabel(/4 derniers caractères/).fill("0000");
+  await mistaken.getByRole("button", { name: "Clôturer le compte" }).click();
+  await expect(mistaken.getByRole("alert")).toContainText("4 derniers caractères");
+  await mistaken.getByLabel(/4 derniers caractères/).fill("2606");
   await mistaken.getByRole("button", { name: "Clôturer le compte" }).click();
   await expect(mistaken).toContainText("Clôturé");
   await expect(mistaken.getByTestId("closed-on")).toContainText("Ouvert par erreur");

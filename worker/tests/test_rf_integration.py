@@ -7,7 +7,14 @@ import psycopg
 import pytest
 from integration_helpers import DB
 
-from collectoo_worker.payments.rf import iban_valid, mod97, rf_make, rf_normalise, rf_valid
+from collectoo_worker.payments.rf import (
+    IBAN_LENGTHS,
+    iban_valid,
+    mod97,
+    rf_make,
+    rf_normalise,
+    rf_valid,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -16,8 +23,10 @@ NOISE = ALNUM + "rfab -\n\t.é" + chr(0xA0)  # a no-break space is kept, then re
 
 
 def _iban(rng: random.Random) -> str:
-    country = rng.choice(["FR", "DE", "BE", "MC", "ES"])
-    bban = "".join(rng.choice(ALNUM) for _ in range(rng.randint(11, 30)))
+    """Mostly a registry country at its exact length; sometimes one character off."""
+    country = rng.choice(["FR", "DE", "BE", "MC", "ES", "ZZ"])
+    length = IBAN_LENGTHS.get(country, 20) + rng.choice([0, 0, 0, 0, -1, 1])
+    bban = "".join(rng.choice(ALNUM) for _ in range(length - 4))
     return f"{country}{98 - mod97(bban + country + '00'):02d}{bban}"
 
 
@@ -68,7 +77,7 @@ def test_sql_and_python_agree_on_10k_random_strings() -> None:
         assert sql_iban == iban_valid(x), x
     valid = sum(1 for r in rows if r[1])
     assert 2000 <= valid <= 4000, valid  # a real mix of valid and invalid references
-    assert sum(1 for r in rows if r[3]) >= 500
+    assert sum(1 for r in rows if r[3]) >= 300  # registry countries at their exact length
 
 
 def test_sql_and_python_make_the_same_references() -> None:

@@ -238,6 +238,14 @@ def test_payment_entry_rules() -> None:
             replace(REC_CR, claim_item_id=ITEMS[1], amount_minor=100),
             OWN_DR,
         ).validate_set()
+    with pytest.raises(UnbalancedEntryError):  # the debt goes down by the money allocated
+        _set(
+            EntryType.ALLOCATION,
+            POOL_DR,
+            PAY_CR,
+            replace(REC_CR, amount_minor=REC_CR.amount_minor + 1),  # a rounding gap of 1 cent
+            replace(OWN_DR, amount_minor=OWN_DR.amount_minor - 1),
+        ).validate_set()
     with pytest.raises(UnbalancedEntryError):  # a cash_in is one debit and one credit
         _set(
             EntryType.CASH_IN,

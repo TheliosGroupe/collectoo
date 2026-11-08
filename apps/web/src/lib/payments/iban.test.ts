@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { groupsOfFour, ibanValid, mod97, normaliseCode, rfValid } from "./iban";
+import { cleanTypedCode, groupsOfFour, ibanValid, mod97, normaliseCode, rfValid } from "./iban";
 
 describe("IBAN and RF helpers (same rules as private.iban_valid / rf_valid)", () => {
   it("validates IBANs mod 97 once normalised", () => {
     expect(ibanValid(normaliseCode("fr76 3000 4000 0312 3456 7890 143"))).toBe(true);
     expect(ibanValid("FR1420041010050500013M02606")).toBe(true);
+    expect(ibanValid("RF18539007547034")).toBe(false); // an RF reference is not an IBAN
+    expect(ibanValid("BE68539007547034")).toBe(true); // 16 characters in Belgium
+    expect(ibanValid("FR68539007547034")).toBe(false); // the same body is too short for France
+    expect(cleanTypedCode("fr76\u00a03000\u202f4000 0312 3456 7890 143")).toBe("FR7630004000031234567890143");
     expect(ibanValid("FR7630004000031234567890144")).toBe(false); // one digit changed
     expect(ibanValid("FR7630004000031234567890134")).toBe(false); // two digits swapped
     expect(ibanValid("FR76 3000 4000 0312 3456 7890 143")).toBe(false); // not normalised

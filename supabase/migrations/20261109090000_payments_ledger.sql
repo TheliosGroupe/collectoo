@@ -87,7 +87,33 @@ as $$
                % 1000000000000)::text, 12, '0');
 $$;
 
--- IBAN (ISO 13616): country, check digits 02-98, 11 to 30 characters; ≡ 1 (mod 97) once rearranged.
+-- ISO 13616 IBAN length per country (SWIFT IBAN registry); identical to the Python and TypeScript
+-- tables (worker/tests/test_iban_lengths.py).
+create or replace function private.iban_length(p_country text)
+returns integer
+language sql
+immutable
+parallel safe
+set search_path = ''
+as $$
+  select l from (values
+    ('AD', 24), ('AE', 23), ('AL', 28), ('AT', 20), ('AZ', 28), ('BA', 20), ('BE', 16), ('BG', 22),
+    ('BH', 22), ('BI', 27), ('BR', 29), ('BY', 28), ('CH', 21), ('CR', 22), ('CY', 28), ('CZ', 24),
+    ('DE', 22), ('DJ', 27), ('DK', 18), ('DO', 28), ('EE', 20), ('EG', 29), ('ES', 24), ('FI', 18),
+    ('FK', 18), ('FO', 18), ('FR', 27), ('GB', 22), ('GE', 22), ('GI', 23), ('GL', 18), ('GR', 27),
+    ('GT', 28), ('HN', 28), ('HR', 21), ('HU', 28), ('IE', 22), ('IL', 23), ('IQ', 23), ('IS', 26),
+    ('IT', 27), ('JO', 30), ('KW', 30), ('KZ', 20), ('LB', 28), ('LC', 32), ('LI', 21), ('LT', 20),
+    ('LU', 20), ('LV', 21), ('LY', 25), ('MC', 27), ('MD', 24), ('ME', 22), ('MK', 19), ('MN', 20),
+    ('MR', 27), ('MT', 31), ('MU', 30), ('NI', 28), ('NL', 18), ('NO', 15), ('OM', 23), ('PK', 24),
+    ('PL', 28), ('PS', 29), ('PT', 25), ('QA', 29), ('RO', 24), ('RS', 22), ('RU', 33), ('SA', 24),
+    ('SC', 31), ('SD', 18), ('SE', 24), ('SI', 19), ('SK', 24), ('SM', 27), ('SO', 23), ('ST', 25),
+    ('SV', 28), ('TL', 23), ('TN', 24), ('TR', 26), ('UA', 29), ('VA', 22), ('VG', 24), ('XK', 20),
+    ('YE', 30)
+  ) t (c, l) where c = p_country;
+$$;
+
+-- IBAN (ISO 13616): a registry country, check digits 02-98, that country's exact length;
+-- ≡ 1 (mod 97) once rearranged. (Without the length, every RF reference would pass as an IBAN.)
 create or replace function private.iban_valid(p text)
 returns boolean
 language sql
@@ -96,6 +122,7 @@ parallel safe
 set search_path = ''
 as $$
   select case when p ~ '^[A-Z]{2}(0[2-9]|[1-8][0-9]|9[0-8])[0-9A-Z]{11,30}$'
+                   and length(p) = private.iban_length(substr(p, 1, 2))
               then private.mod97(substr(p, 5) || substr(p, 1, 4)) = 1
               else false end;
 $$;
@@ -363,6 +390,8 @@ create table public.payment_reference (
 );
 create unique index payment_reference_one_active_uq on public.payment_reference (account_id) where status = 'active';
 create index payment_reference_portfolio_idx on public.payment_reference (portfolio_id);
+-- The FK check run for each account a rollback deletes needs all of an account's references.
+create index payment_reference_account_idx on public.payment_reference (account_id);
 comment on table public.payment_reference is
   'RF creditor references (RF + 2 check digits + 12 random digits). One active per account; retired ones keep resolving.';
 
@@ -702,7 +731,9 @@ begin
            count(*) filter (where x.book = 'debtor_receivable' and x.amount_minor < 0) as rec_cr,
            count(*) filter (where x.book = 'debtor_receivable' and x.amount_minor > 0) as rec_dr,
            count(*) filter (where x.book = 'owner_claim' and x.amount_minor > 0) as own_dr,
-           count(*) filter (where x.component is distinct from 'principal') as not_principal
+           count(*) filter (where x.component is distinct from 'principal') as not_principal,
+           coalesce(sum(x.amount_minor) filter (where x.book = 'unallocated_payment'), 0) as s_pool,
+           coalesce(sum(x.amount_minor) filter (where x.book = 'debtor_receivable'), 0) as s_rec
     into v_shape
     from (select p.amount_minor, la.book, la.client_organization_id, la.component
           from public.ledger_posting p
@@ -715,6 +746,8 @@ begin
       when 'forward' then v_shape.n = 2 and v_shape.pool_dr = 1 and v_shape.pay_cr = 1
       when 'allocation' then v_shape.pool_n = 1 and v_shape.pool_dr = 1 and v_shape.pay_n = 1 and v_shape.pay_cr = 1 and v_shape.rec_cr >= 1
         and v_shape.rec_dr = 0 and v_shape.n = 2 + v_shape.rec_cr + v_shape.own_dr
+        -- the debt goes down by exactly the money allocated (no rounding gap, no free extinction)
+        and v_shape.s_rec = -v_shape.s_pool
       when 'netting' then v_shape.not_principal = 0
     end;
     if not v_ok then
@@ -939,8 +972,10 @@ begin
     raise exception 'ledger: entry breaks the receivable/owner-claim mirror (%)', v_bad using errcode = 'LG001';
   end if;
 
-  -- A correction that lowers a receivable waits for running allocations of this servicer (§5.2).
-  if exists (select 1 from pg_temp._ledger_lines where book = 'debtor_receivable' and amount_minor < 0) then
+  -- A correction of a receivable, up or down, waits for running allocations and nettings of this
+  -- servicer (§5.2): lowering one can overdraw an allocated item, raising one can push a netted
+  -- credit item above zero (I6), and two uncommitted checks would miss each other.
+  if exists (select 1 from pg_temp._ledger_lines where book = 'debtor_receivable') then
     perform pg_advisory_xact_lock(hashtext('payments:' || p_organization_id::text));
   end if;
 
@@ -1061,6 +1096,19 @@ begin
   end if;
   if v_date > private.paris_today() then
     raise exception 'ledger: effective date % is in the future', v_date using errcode = 'LG006';
+  end if;
+  -- Cash lines go back to the same bank accounts: they must still be active (a closed account
+  -- holds no money). Bank rows first, then the advisory lock, as in ledger_post_set.
+  perform 1 from public.bank_account b
+  where b.id in (select la.bank_account_id from public.ledger_posting p
+                 join public.ledger_account la on la.id = p.ledger_account_id
+                 where p.entry_id = p_entry_id and la.bank_account_id is not null)
+  order by b.id for share;
+  if exists (select 1 from public.ledger_posting p
+             join public.ledger_account la on la.id = p.ledger_account_id
+             join public.bank_account b on b.id = la.bank_account_id
+             where p.entry_id = p_entry_id and b.status <> 'active') then
+    raise exception 'ledger: entry % moved money on a bank account that is now closed', p_entry_id using errcode = 'LG002';
   end if;
   -- A reversal can lower a receivable (reversing a debit): serialised with allocations (§5.2).
   perform pg_advisory_xact_lock(hashtext('payments:' || v_target.organization_id::text));
@@ -1836,14 +1884,14 @@ create policy payment_reference_read on public.payment_reference for select to a
 ------------------------------------------------------------------------------------------
 
 revoke execute on function private.mod97(text), private.rf_valid(text), private.rf_normalise(text), private.rf_make(text),
-  private.rf_random_body(), private.iban_valid(text), private.money_staff_org_ids(),
+  private.rf_random_body(), private.iban_valid(text), private.iban_length(text), private.money_staff_org_ids(),
   private.command_replay(text, text, jsonb), private.command_record(text, text, jsonb, jsonb),
   private.issue_payment_references(uuid), private.ledger_post_set_begin(), private.ledger_post_set()
   from public, anon, authenticated, service_role;
 grant execute on function private.money_staff_org_ids() to authenticated;
 -- The worker (service_role) validates references and IBANs read from statements (M2b-2, M2b-3).
 grant execute on function private.mod97(text), private.rf_valid(text), private.rf_normalise(text),
-  private.iban_valid(text) to service_role;
+  private.iban_valid(text), private.iban_length(text) to service_role;
 revoke execute on function public.register_bank_account(text, uuid, text, text, text, text, text, date),
   public.close_bank_account(text, uuid, text), public.retire_payment_reference(text, uuid, text) from public, anon;
 grant execute on function public.register_bank_account(text, uuid, text, text, text, text, text, date),

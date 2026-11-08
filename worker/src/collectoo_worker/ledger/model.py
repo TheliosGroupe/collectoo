@@ -286,6 +286,9 @@ def has_payment_shape(entry_type: EntryType, lines: Iterable[Line]) -> bool:
             and count(rec, -1) >= 1
             and count(rec, 1) == 0
             and len(ls) == 2 + count(rec, -1) + count(own, 1)
+            # the debt goes down by exactly the money allocated
+            and sum(x.amount_minor for x in ls if x.book is rec)
+            == -sum(x.amount_minor for x in ls if x.book is pool)
         )
     if entry_type is EntryType.NETTING:
         return all(x.component is Component.PRINCIPAL for x in ls)

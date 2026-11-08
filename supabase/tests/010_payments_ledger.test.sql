@@ -2,7 +2,7 @@
 -- Design docs/design/m2b-payments.md §5–§6, §13; ADR-0013. pgTAP never commits: payment entries go
 -- through private.ledger_post_set, which runs the commit-time checks itself (SET CONSTRAINTS ... IMMEDIATE).
 begin;
-select plan(125);
+select plan(129);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -189,6 +189,11 @@ select is((select count(*)::int from (
                    union all select private.rf_make(private.rf_random_body()) from generate_series(1, 1000)) r) y
            where y.inline_check <> (y.x ~ '^RF[0-9]{14}$' and private.rf_valid(y.x))), 0,
   'the inline check of payment_reference.rf says what rf_valid says (6000 strings)');
+select ok(not private.iban_valid('RF18539007547034') and private.iban_valid('BE68539007547034')
+          and not private.iban_valid('FR68539007547034') and not private.iban_valid('ZZ68539007547034'),
+  'an IBAN has a registry country and that country''s length (an RF reference is not an IBAN)');
+select has_index('public', 'payment_reference', 'payment_reference_account_idx',
+  'references are found by account (the FK check when a rollback deletes accounts)');
 select ok(private.iban_valid('FR3430001007940000000001001') and not private.iban_valid('FR3430001007940000000001002')
           and not private.iban_valid('FR34 3000 1007 9400 0000 0001 001'), 'IBANs are checked mod 97 (normalised first)');
 
@@ -313,6 +318,13 @@ select throws_ok($$ select pg_temp.post1('allocation', '2026-03-12', 'alloc:rece
     {"book": "owner_claim", "amount_minor": 100, "currency": "EUR", "component": "principal"}]',
   '{"account_id": "30000000-0000-0000-0000-0000000000a1", "payment_id": "90000000-0000-0000-0000-000000000002"}') $$,
   'LG001', null, 'an allocation only credits receivables (shape)');
+select throws_ok($$ select pg_temp.post1('allocation', '2026-03-12', 'alloc:rounding-gap',
+  '[{"book": "unallocated_payment", "amount_minor": 100, "currency": "EUR"},
+    {"book": "client_payable", "amount_minor": -100, "currency": "EUR"},
+    {"book": "debtor_receivable", "amount_minor": -99, "currency": "EUR", "claim_item_id": "40000000-0000-0000-0000-0000000000f2", "component": "principal"},
+    {"book": "owner_claim", "amount_minor": 99, "currency": "EUR", "component": "principal"}]',
+  '{"account_id": "30000000-0000-0000-0000-0000000000a1", "payment_id": "90000000-0000-0000-0000-000000000002"}') $$,
+  'LG001', null, 'an allocation lowers the debt by exactly the money allocated (no rounding gap)');
 select throws_ok($$ select pg_temp.post1('allocation', '2026-03-12', 'alloc:usd-payment',
   '[{"book": "unallocated_payment", "amount_minor": 100, "currency": "EUR"},
     {"book": "client_payable", "amount_minor": -100, "currency": "EUR"},
@@ -414,6 +426,13 @@ end $d$ $$, (select v from t where k = 'f1')), 'LG003', null, 'a reversal that d
 select lives_ok($$ select pg_temp.alloc('90000000-0000-0000-0000-000000000001', '2026-03-10', 'alloc:run4:p1:m0042',
   '{"40000000-0000-0000-0000-0000000000f2": 10000}') $$,
   'after the reversal P1 can be allocated again, at its original date (up to what was not refunded)');
+
+select throws_ok(format($$ do $d$ begin
+  update public.bank_account set status = 'closed', closed_on = '2026-03-21', closed_reason = 'test'
+  where id = '80000000-0000-0000-0000-000000000001';
+  perform private.ledger_reverse(%L, 'reverse-refund-closed', 'refund bounced');
+end $d$ $$, (select v from t where k = 'r1')), 'LG002', null,
+  'money never comes back onto a closed bank account (reversing a refund)');
 
 -- Client-money closure backstop (I2): a type allowed to reach 7060 would still have to close ------------
 update public.ledger_entry_type set allowed_books = allowed_books || array['servicer_revenue'] where code = 'forward';

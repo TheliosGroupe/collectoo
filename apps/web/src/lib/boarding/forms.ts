@@ -64,6 +64,7 @@ export type ErrorCode =
   | "opening_plan_missing"
   | "ledger_rejected"
   | "iban_invalid"
+  | "close_confirmation"
   | "bic_invalid"
   | "iban_taken"
   | "label_required"
@@ -94,6 +95,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Ce lot a été intégré avant la comptabilisation des soldes d'ouverture : annulez l'intégration, puis déposez à nouveau le fichier.",
   ledger_rejected: "La comptabilité a refusé l'opération. Contactez le support.",
   iban_invalid: "IBAN invalide : vérifiez la saisie (27 caractères pour un compte en France).",
+  close_confirmation: "Pour confirmer la clôture, saisissez les 4 derniers caractères de l'IBAN de ce compte.",
   bic_invalid: "BIC invalide : 8 ou 11 caractères (lettres et chiffres).",
   iban_taken: "Cet IBAN est déjà enregistré dans cette devise.",
   label_required: "Indiquez un libellé (100 caractères au plus).",

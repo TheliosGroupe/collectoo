@@ -496,3 +496,52 @@ def replace_org(draft: EntryDraft, org: UUID, bank: UUID) -> EntryDraft:
         source_type=draft.source_type,
         source_id=draft.source_id,
     )
+
+
+def test_a_correction_raising_a_receivable_waits_for_running_allocations() -> None:
+    """Raising a receivable can push a netted credit item above zero (I6): such a correction
+    takes the allocation lock too, so its commit-time check sees the running netting."""
+    org, client, account, items = _confirmed_account()
+    bank, payment = uuid4(), Payment(uuid4(), 100_000, date(2026, 3, 1))
+    with psycopg.connect(DB) as conn, conn.transaction():
+        _bank_account(conn, org, bank)
+        _payment(conn, org, bank, payment)
+        post_set(conn, replace_org(cash_in(payment), org, bank))
+        ledger.post(
+            conn, _draft(org, account, items[0], 80_000, f"open-{uuid4()}", date(2026, 2, 1))
+        )
+    allocation = EntryDraft(
+        organization_id=org,
+        entry_type=EntryType.ALLOCATION,
+        effective_date=date(2026, 3, 1),
+        idempotency_key=f"alloc-{uuid4()}",
+        lines=(
+            Line(Book.UNALLOCATED_PAYMENT, 10_000, "EUR"),
+            Line(Book.CLIENT_PAYABLE, -10_000, "EUR", client_organization_id=client),
+            Line(Book.DEBTOR_RECEIVABLE, -10_000, "EUR", items[0], Component.PRINCIPAL),
+            Line(Book.OWNER_CLAIM, 10_000, "EUR", component=Component.PRINCIPAL),
+        ),
+        account_id=account,
+        payment_id=payment.id,
+    )
+    done: list[str] = []
+    first = psycopg.connect(DB)
+    try:
+        post_set(first, allocation)  # holds the servicer's allocation lock until it commits
+
+        def second() -> None:
+            with psycopg.connect(DB) as conn, conn.transaction():
+                ledger.post(
+                    conn, _draft(org, account, items[1], 500, f"fix-{uuid4()}", date(2026, 3, 2))
+                )
+                done.append("posted")
+
+        thread = threading.Thread(target=second)
+        thread.start()
+        time.sleep(0.5)
+        assert thread.is_alive() and done == []  # waiting for the lock
+        first.commit()
+        thread.join(timeout=30)
+    finally:
+        first.close()
+    assert done == ["posted"]
