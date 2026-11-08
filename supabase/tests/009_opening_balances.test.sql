@@ -1,6 +1,6 @@
 -- Opening balances (M2-05, ADR-0012): planned at commit, posted at confirmation by the worker job.
 begin;
-select plan(43);
+select plan(46);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -84,13 +84,17 @@ select pg_temp.stage_tape('30000000-0000-0000-0000-000000000004', '-4');
 select set_config('request.jwt.claims',
   '{"sub": "10000000-0000-0000-0000-000000000003", "role": "authenticated", "aal": "aal1"}', true);
 set local role authenticated;
-select throws_ok($$select public.commit_boarding_batch('30000000-0000-0000-0000-000000000002')$$, 'LG005', null,
-  'a plan that does not reconcile with the data-quality report is refused (nothing committed)');
+select lives_ok($$select public.commit_boarding_batch('30000000-0000-0000-0000-000000000002')$$,
+  'the commit of a tampered batch is requested');
 select throws_ok($$select public.commit_boarding_batch('30000000-0000-0000-0000-000000000003')$$, '23514', null,
   'a batch without cut-off date cannot be committed');
-select lives_ok($$select public.commit_boarding_batch('30000000-0000-0000-0000-000000000001')$$, 'the batch is committed');
+select lives_ok($$select public.commit_boarding_batch('30000000-0000-0000-0000-000000000001')$$, 'the commit is requested');
 select lives_ok($$select public.commit_boarding_batch('30000000-0000-0000-0000-000000000004')$$, 'and another one');
 reset role;
+select throws_ok($$select private.complete_batch_commit('30000000-0000-0000-0000-000000000002')$$, 'LG005', null,
+  'the job refuses a plan that does not reconcile with the data-quality report (nothing committed)');
+select is(private.complete_batch_commit('30000000-0000-0000-0000-000000000001'), 'committed', 'the job commits the batch');
+select is(private.complete_batch_commit('30000000-0000-0000-0000-000000000004'), 'committed', 'and the other one');
 select is(private.opening_normal((select opening_plan from public.boarding_batch where id = '30000000-0000-0000-0000-000000000001')),
   private.opening_normal((select v from t where k = 'opening')), 'commit stores the opening plan = the staged report');
 select is((select count(*)::int from public.ledger_entry where organization_id = '00000000-0000-0000-0000-00000000000a'), 0,

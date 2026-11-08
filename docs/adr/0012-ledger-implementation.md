@@ -70,6 +70,7 @@ ADR-0006 fixed the principles: double-entry, append-only, integer minor units, c
 
 ### Opening balances (M2-05, PR M2a-2)
 - Posted **at batch confirmation, not at commit**, by a background worker job (new batch state `confirming`). This avoids the 8 s API limit at 50k+ accounts.
+- The commit itself also runs as a worker job since M2a-3 (state `committing`), for the same reason: ~20 s at 50k loans. The command only checks the request.
 - Before confirmation a batch is undone by the existing hard delete, so the books only ever hold claims under an active mandate (CPCE R124-3).
 - `effective_date` = the batch cut-off date.
 - Σ opening balances = the DQ report's reconciled outstanding total, minus the accounts of the tape already in the portfolio (skipped at staging, shown on the batch page). Checked at staging (DQ outstanding = opening + skipped, per currency), at commit (plan = staged opening) and at posting (posted = plan = staged opening).

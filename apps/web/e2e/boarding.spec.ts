@@ -67,8 +67,9 @@ test("ops board a client file: upload, mapping review, quality report, commit, c
   await expect(page.getByTestId("files")).toContainText("Créances août 2026.csv");
   await reviewShot(page, testInfo, "m1-boarding-quality");
 
+  // The commit runs in the background too (M2a-3): the page refreshes until it is done.
   await page.getByRole("button", { name: "Intégrer le lot" }).click();
-  await expect(status).toHaveText("Intégré, à confirmer");
+  await expect(status).toHaveText("Intégré, à confirmer", { timeout: 60_000 });
   // The opening balances that confirmation will post = the outstanding of the quality report.
   await expect(page.getByTestId("opening-plan-total")).toHaveText("212 186,29 €");
   await reviewShot(page, testInfo, "m1-boarding-committed");

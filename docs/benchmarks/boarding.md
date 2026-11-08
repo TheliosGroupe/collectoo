@@ -62,8 +62,8 @@ Two traps found on the way, both fixed:
   analysed the first one. Checks now use aggregates (`min(...)`), and the per-entry balance
   check runs with `enable_seqscan = off` (key lookups only).
 
-Commit still takes ~20 s at 50k, above the 8 s limit of a request through the API: the next
-slice (M2a-3) runs it as a background job, like confirmation.
+Since M2a-3 the commit runs as a background job, like the confirmation: the request (checks
+only) fits the API's 8 s limit, and the job takes ~21 s at 50k loans.
 
 ## Reproduce
 

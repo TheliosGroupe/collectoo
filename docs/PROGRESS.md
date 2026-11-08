@@ -25,7 +25,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - M2a-2 review fixes (worker): tapes that passed validation and then failed at staging or commit are now blocked at validation: two files for one EU table (`duplicate_eba_table`), items without a document number, period or due date, rows without an account reference (private loan, judgment debt), negative amount paid or legal balance 3.12 (`negative_amount`), debtors without a name (private loan, judgment debt, EU 1.03), EU loans without 3.01/3.12 whatever the portfolio's default type, T5 rows without a valid `month_offset` (`bad_month_offset`). A civil account takes its items' currency. Refs without a document number are numbered across files (rent and the same month's charges in two files = two items); a row identical to one of an earlier file is still counted once.
 
 ## Next
-- M2a-3: commit as a background job too (at 50k it takes ~19 s, above the 8 s API limit; same pattern as confirmation).
+- M2a-3 (local branch `m2a3`, PR after #13 merges): the batch commit runs as a worker job (state `committing`, back to `staged` with the reason on failure, no retries when the data or the ledger refuses). The request now fits the API's 8 s at 50k; the job takes ~21 s.
 - M2b: payments (PSP + bank import, allocation waterfall, unallocated suspense).
 - EU T5 (historical collections) files are now blocked at validation: staging needs a `month_offset` per row that the EU template does not carry and the mapping cannot set yet. Making it mappable or derived (from a reporting date) is a product decision for when a seller sends T5.
 

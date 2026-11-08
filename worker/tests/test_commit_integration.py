@@ -50,6 +50,12 @@ def _call(user: str, sql: str, params: tuple[Any, ...], aal: str = "aal1") -> No
         conn.execute(sql, params)
 
 
+def _commit(user: str, batch: str, reason: str | None = None) -> None:
+    """Request the commit (as the user), then let the worker run the commit job (M2a-3)."""
+    _call(user, "select public.commit_boarding_batch(%s, %s)", (batch, reason))
+    drain(storage())
+
+
 def _count(sql: str, params: tuple[Any, ...]) -> int:
     with psycopg.connect(DB) as conn:
         return int(one(conn, sql, params))
@@ -90,7 +96,7 @@ def test_commit_then_rollback_leaves_only_the_audit_trail(
         )
     assert digest["account"]["rows"] == len(refs)
 
-    _call(tenant["user"], "select public.commit_boarding_batch(%s)", (batch,))
+    _commit(tenant["user"], batch)
     accounts = _count("select count(*) from public.account where boarding_batch_id = %s", (batch,))
     assert accounts == len(refs)
     assert (
@@ -152,7 +158,7 @@ def test_commit_then_rollback_leaves_only_the_audit_trail(
 
 def test_confirm_needs_staff_and_an_active_mandate(tenant: dict[str, Any], tmp_path: Path) -> None:
     batch = _to_staged(tenant, _clean_file(tmp_path, "rent", 60))
-    _call(tenant["user"], "select public.commit_boarding_batch(%s)", (batch,))
+    _commit(tenant["user"], batch)
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         _call(tenant["user"], "select public.confirm_boarding_batch(%s)", (batch,))
     with pytest.raises(psycopg.errors.CheckViolation, match="mandate"):
@@ -201,12 +207,8 @@ def test_a_mismatch_needs_a_reason_to_commit(tenant: dict[str, Any], tmp_path: P
         conn.execute("select public.approve_mapping(%s, %s)", (batch, json.dumps({})))
     drain(store)
     with pytest.raises(psycopg.errors.CheckViolation, match="reason is required"):
-        _call(tenant["user"], "select public.commit_boarding_batch(%s)", (batch,))
-    _call(
-        tenant["user"],
-        "select public.commit_boarding_batch(%s, %s)",
-        (batch, "seller total excludes VAT"),
-    )
+        _commit(tenant["user"], batch)
+    _commit(tenant["user"], batch, "seller total excludes VAT")
     with psycopg.connect(DB) as conn:
         reason = one(
             conn, "select commit_override_reason from public.boarding_batch where id = %s", (batch,)
@@ -219,7 +221,7 @@ def test_reboarding_skips_accounts_already_in_the_portfolio(
 ) -> None:
     path = _clean_file(tmp_path, "b2b_invoice", 40)
     first = _to_staged(tenant, path)
-    _call(tenant["user"], "select public.commit_boarding_batch(%s)", (first,))
+    _commit(tenant["user"], first)
     (tmp_path / "again").mkdir()
     second = _to_staged(tenant, _clean_file(tmp_path / "again", "b2b_invoice", 40))
     with psycopg.connect(DB) as conn:
@@ -236,7 +238,7 @@ def test_reboarding_skips_accounts_already_in_the_portfolio(
     assert int(computed["EUR"]["outstanding_minor"]) == int(opening["outstanding_minor"]) + int(
         skipped["outstanding_minor"]
     )
-    _call(tenant["user"], "select public.commit_boarding_batch(%s)", (second,))
+    _commit(tenant["user"], second)
     assert (
         _count("select count(*) from public.account where boarding_batch_id = %s", (second,)) == 0
     )
@@ -307,7 +309,7 @@ def test_a_refused_confirmation_is_shown_at_once_and_posts_nothing(
     tenant: dict[str, Any], tmp_path: Path
 ) -> None:
     batch = _to_staged(tenant, _clean_file(tmp_path, "rent", 30))
-    _call(tenant["user"], "select public.commit_boarding_batch(%s)", (batch,))
+    _commit(tenant["user"], batch)
     _add_mandate(tenant)
     _call(tenant["staff"], "select public.confirm_boarding_batch(%s)", (batch,), aal="aal2")
     # The staged report no longer matches the plan: the posting refuses it (LG005), every time.
@@ -350,6 +352,8 @@ def test_documents_queued_before_the_confirmation_are_still_linked(
 ) -> None:
     from test_documents import make_zip  # noqa: PLC0415
 
+    from collectoo_worker.jobs.boarding import commit_batch  # noqa: PLC0415
+
     table, _ = generate_civil("b2b_invoice", "fr_semicolon", 40, 31, defect_rate=0)
     tape = tmp_path / "factures.csv"
     with tape.open("w", newline="", encoding="utf-8") as fh:
@@ -360,7 +364,9 @@ def test_documents_queued_before_the_confirmation_are_still_linked(
     drain(store)
     _call(tenant["user"], "select public.approve_mapping(%s, %s)", (batch, json.dumps({})))
     drain(store)
-    _call(tenant["user"], "select public.commit_boarding_batch(%s)", (batch,))
+    _call(tenant["user"], "select public.commit_boarding_batch(%s, %s)", (batch, None))
+    with psycopg.connect(DB) as conn, conn.transaction():
+        commit_batch(conn, batch)  # the commit job alone: the documents job stays queued
     # Confirmed before the worker reaches the documents job: it runs while 'confirming'.
     _add_mandate(tenant)
     _call(tenant["staff"], "select public.confirm_boarding_batch(%s)", (batch,), aal="aal2")
@@ -373,3 +379,42 @@ def test_documents_queued_before_the_confirmation_are_still_linked(
             (batch,),
         )
     assert status == "confirmed" and linked == len(refs)
+
+
+def test_a_refused_commit_goes_back_to_staged_with_its_reason(
+    tenant: dict[str, Any], tmp_path: Path
+) -> None:
+    batch = _to_staged(tenant, _clean_file(tmp_path, "rent", 30))
+    # The staged report no longer matches the rows: the commit job refuses it (LG005), every time.
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            """update public.boarding_batch
+               set dq_report = jsonb_set(dq_report,
+                     '{staging,opening,currencies,EUR,outstanding_minor}', '"1"')
+               where id = %s""",
+            (batch,),
+        )
+    _commit(tenant["user"], batch)
+    with psycopg.connect(DB) as conn:
+        status, failed = conn.execute(
+            "select status, failed_job from public.boarding_batch where id = %s", (batch,)
+        ).fetchone() or (None, None)
+        reason = one(
+            conn,
+            "select reason from public.boarding_event where batch_id = %s order by id desc limit 1",
+            (batch,),
+        )
+        accounts = one(
+            conn, "select count(*) from public.account where boarding_batch_id = %s", (batch,)
+        )
+        archived = one(
+            conn,
+            "select count(*) from pgmq.a_boarding"
+            " where message ->> 'type' = 'commit' and message ->> 'batch_id' = %s and read_ct = 1",
+            (batch,),
+        )
+    assert status == "staged" and failed["type"] == "commit"
+    assert failed["error"].startswith("LG005") and reason.startswith("échec de l'intégration")
+    assert accounts == 0 and archived == 1  # nothing written, no retries
+    # Staff can still abandon it (or retry the commit, which clears the failure).
+    _call(tenant["user"], "select public.abandon_boarding_batch(%s, %s)", (batch, "bad report"))

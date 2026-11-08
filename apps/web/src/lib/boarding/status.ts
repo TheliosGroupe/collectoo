@@ -9,6 +9,7 @@ export type BatchStatus =
   | "needs_fix"
   | "validated"
   | "staged"
+  | "committing"
   | "committed"
   | "confirming"
   | "confirmed"
@@ -25,6 +26,7 @@ export const STATUS_LABEL: Record<BatchStatus, string> = {
   needs_fix: "À corriger",
   validated: "Contrôles passés",
   staged: "Prêt à intégrer",
+  committing: "Intégration en cours",
   committed: "Intégré, à confirmer",
   confirming: "Confirmation en cours",
   confirmed: "Confirmé",
@@ -39,6 +41,7 @@ const PROCESSING: ReadonlySet<string> = new Set([
   "mapping_approved",
   "transformed",
   "validated",
+  "committing",
   "confirming",
 ]);
 
