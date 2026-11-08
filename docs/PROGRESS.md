@@ -3,6 +3,7 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
+- **M1 complete 2026-11-08.** PR #11 M1e merged (back-office boarding review UI; three multi-agent review rounds addressed; CI falls back to a retried Supabase CLI download).
 - PR #10 M1d merged 2026-11-08 (staging, commit/rollback/confirm, documents zip, 50k-loan CI run, 1M benchmark: 57 s, 2.9 GB peak). CI was delayed ~1.5 h by GitHub release-download 504s; CI now falls back to a curl install with longer retries.
 - PR #9 M1c merged 2026-11-08 (transformation DSL, validators, BAN adapter, claim types, validation rules, DQ report).
 - PR #8 M1b merged 2026-11-08 (mapping proposals, LLM gateway + mock, eval 167/167, mapping profiles).
@@ -19,10 +20,10 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- PR "M1e — back-office boarding review UI" (M1-19): `/backoffice/reprises` (batch list), `/nouveau` (upload: files hashed in the browser, stored under ASCII keys built from ids, retry-safe registration, optional seller control totals parsed to cents without floats), `/[id]` (file profiles incl. Excel/zip/fixed-width, mapping review with confidence/rationale and per-column override, data-quality report, integrate / confirm / roll back / abandon, history; refreshes itself while the worker runs and shows a dead-lettered job instead of waiting forever). Three multi-agent review rounds were addressed before merging (last round: a file sent twice under two names in one batch is flagged, seller totals can be cleared and freeze once the mapping is approved, unread files are listed in the DQ report, failures that matter after the batch moved on stay visible: documents not linked after commit, files not erased after a rollback) ; earlier rounds: 32 findings, then 4 partial + 5 new: mixed CSV + fixed-width batches now end in needs_fix instead of dropping the file, Excel sheet order kept explicitly, empty Excel sheets no longer crash the reader, French mapping rationale from the mock) (fixes in migration `20261108160000_boarding_review_fixes`, worker DLQ hook, reconciliation rules). Playwright flows (board + abandon) with the boarding worker, locally and in CI; screenshots `docs/screenshots/m1-boarding-*`.
+- Nothing in flight. M1 complete.
 
 ## Next
-- M1 report to the founder, then M2a ledger (M2-01 … M2-05).
+- M2a ledger (M2-01 … M2-05): double-entry, append-only ledger, chart of accounts per claim component, opening balances from committed batches (sum = reconciled outstanding).
 
 ## Decisions
 - M1e reconciliation (founder confirmed 2026-11-08: sellers always stop the portfolio at a cut-off date): the seller's control total is the **outstanding balance at cut-off** (invoice/loan amounts minus what the seller reports as already paid), compared to the cent, plus the number of data rows in the claim files. Totals are kept per currency; a tape with non-euro amounts cannot be reconciled against a euro total (mismatch, reason required to commit). Batches can be abandoned at any step before commit. The upload form requires the cut-off date.
