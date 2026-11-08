@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -252,6 +252,7 @@ class Loaded:
     log: IssueLog
     control: dict[str, Any]
     portfolio_id: str
+    unread: dict[str, str] = field(default_factory=dict)  # file id -> name, not boarded
 
 
 def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) -> Loaded:
@@ -281,18 +282,18 @@ def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id:
 
     results: list[FileResult] = []
     profiles: dict[str, dict[str, Any]] = {}
-    not_boarded: list[str] = []  # tabular files that cannot be read: never dropped silently
+    not_boarded: dict[str, str] = {}  # tabular files that cannot be read: never dropped silently
     with tempfile.TemporaryDirectory() as tmp:
         for file_id, name, bucket, path, file_format, profile in files:
             fid = str(file_id)
             if file_format == "zip":
                 continue  # documents: linked after commit
             if fid not in mappings:
-                not_boarded.append(fid)
+                not_boarded[fid] = name
                 continue
             table = read_table(storage.download(bucket, path, Path(tmp) / fid), file_format)
             if table is None:
-                not_boarded.append(fid)
+                not_boarded[fid] = name
                 continue
             mapping = mappings[fid]
             results.append(
@@ -320,7 +321,7 @@ def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id:
                 "file cannot be read as a table (fixed width without layout, or empty workbook)",
             )
         )
-    return Loaded(results, log, control or {}, str(portfolio_id))
+    return Loaded(results, log, control or {}, str(portfolio_id), not_boarded)
 
 
 def transform_batch(
@@ -339,6 +340,7 @@ def transform_batch(
         control=control or {},
         spec_versions=versions,
         addresses=_address_stats(results, normaliser, conn),
+        unread_files=loaded.unread,
     )
 
     conn.execute("delete from public.validation_issue where batch_id = %s", (batch_id,))

@@ -22,13 +22,14 @@ def _minor(v: Any) -> int:
     return int((Decimal(str(v)) * 100).to_integral_value())
 
 
-def build_report(
+def build_report(  # noqa: PLR0913 - the report's inputs
     files: list[FileResult],
     log: IssueLog,
     *,
     control: dict[str, Any],
     spec_versions: dict[str, int],
     addresses: dict[str, Any] | None = None,
+    unread_files: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     by_file: dict[str, dict[str, dict[str, int]]] = {}
     for (fid, code, sev), n in log.counts.items():
@@ -95,6 +96,17 @@ def build_report(
                 postal += post
                 reachable += e or p or post
 
+    for fid, name in (unread_files or {}).items():
+        # Not read as a table (its blocking issue says why): listed so the report shows it.
+        file_reports.append(
+            {
+                "file_id": fid,
+                "name": name,
+                "rows": 0,
+                "completeness": {},
+                "issues": by_file.get(fid, {}),
+            }
+        )
     computed: dict[str, Any] = {
         "rows": rows,  # claim rows boarded (duplicates once)
         "file_rows": file_rows,  # data rows in the claim files, as the seller counts them

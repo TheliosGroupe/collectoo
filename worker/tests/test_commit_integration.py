@@ -261,3 +261,7 @@ def test_a_file_that_cannot_be_read_as_a_table_blocks_the_batch(
         ).fetchall()
     assert status == "needs_fix"
     assert issues == [("historique.dat", "blocking")]
+    with psycopg.connect(DB) as conn:
+        report = one(conn, "select dq_report from public.boarding_batch where id = %s", (batch,))
+    listed = {f["name"]: f["issues"] for f in report["files"]}
+    assert listed["historique.dat"] == {"file_not_boarded": {"severity": "blocking", "count": 1}}

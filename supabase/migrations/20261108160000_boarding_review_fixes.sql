@@ -51,7 +51,8 @@ begin
   select f.id into v_dup
   from public.boarding_file f join public.boarding_batch b on b.id = f.batch_id
   where f.sha256 = lower(p_sha256) and b.client_organization_id = v_batch.client_organization_id
-    and b.status not in ('draft', 'rolled_back', 'abandoned')  -- unsubmitted attempts do not count
+    -- Other unsubmitted attempts do not count; the same batch does (one file sent twice).
+    and (b.status not in ('draft', 'rolled_back', 'abandoned') or b.id = p_batch_id)
   order by f.created_at limit 1;
   v_path := v_batch.client_organization_id || '/' || p_batch_id || '/' || v_id || '.' || v_ext;
   insert into public.boarding_file (id, batch_id, file_name, format, storage_path, sha256, size_bytes, duplicate_of_file_id)
@@ -116,3 +117,28 @@ comment on column public.boarding_batch.failed_job is
 
 -- Documents keep their original name; the storage key is built from the content hash.
 alter table public.document add column file_name text;
+
+-- Seller control totals: settable (or cleared, with nulls) until the transformation reads them.
+create or replace function public.set_control_totals(p_batch_id uuid, p_total_minor bigint, p_rows integer)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v public.boarding_batch;
+begin
+  select * into v from public.boarding_batch where id = p_batch_id for update;
+  if not found or not private.can_board(v.portfolio_id) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  if v.status not in ('draft', 'uploaded', 'profiled', 'mapping_proposed') then
+    raise exception 'control totals can only change before the mapping is approved (batch is %)', v.status
+      using errcode = 'check_violation';
+  end if;
+  update public.boarding_batch
+  set seller_control_totals = case when p_total_minor is null and p_rows is null then '{}'::jsonb
+                                   else jsonb_build_object('total_minor', p_total_minor, 'rows', p_rows) end
+  where id = p_batch_id;
+end;
+$$;

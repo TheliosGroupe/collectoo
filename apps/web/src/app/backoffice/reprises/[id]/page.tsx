@@ -23,6 +23,7 @@ const JOB_FR: Record<string, string> = {
   transform: "transformation et contrôles",
   stage: "préparation de l'intégration",
   documents: "rattachement des pièces",
+  purge_documents: "suppression des pièces",
 };
 
 /** M1-19: one boarding batch, from upload to confirmation. */
@@ -107,7 +108,7 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
           fichier (format, encodage), puis abandonnez ce lot et déposez-en un nouveau. Détail technique :{" "}
           <span className="font-mono text-xs break-all">{b.failed_job.error}</span>
         </ErrorNote>
-      ) : b.failed_job ? (
+      ) : b.failed_job && b.failed_job.type === "documents" && ["committed", "confirmed"].includes(b.status) ? (
         <ErrorNote>
           L&apos;étape « {JOB_FR[b.failed_job.type] ?? b.failed_job.type} » a échoué après plusieurs tentatives
           {b.failed_job.type === "documents"

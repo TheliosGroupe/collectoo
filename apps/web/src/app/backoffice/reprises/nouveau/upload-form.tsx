@@ -17,9 +17,10 @@ async function sha256Hex(file: File): Promise<string> {
  * Creates the batch, registers each file, uploads it to its registered key (the storage policy
  * accepts nothing else), then submits the batch: the worker profiles it and proposes the mapping.
  *
- * Retries are safe: the idempotency key is kept while the inputs stay the same (same batch), a
- * file registered again returns its first registration, and a file already stored is skipped.
- * Changing any input starts a new batch.
+ * Retries are safe: the idempotency key is kept while the portfolio, cut-off date and files stay
+ * the same (same draft batch), a file registered again returns its first registration, a file
+ * already stored is skipped, and the control totals are rewritten each time. Changing the
+ * portfolio, date or files starts a new batch.
  */
 export function UploadForm({ portfolios }: { portfolios: Option[] }) {
   const router = useRouter();
@@ -63,15 +64,14 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
       p_cut_off_date: cutOff,
     });
     if (e1 || !batchId) return fail(e1?.message ?? "no batch");
-    if (controlTotal !== null) {
-      const { error: e2 } = await supabase.rpc("set_control_totals", {
-        p_batch_id: batchId,
-        // bigint travels as a decimal string: no float on the way.
-        p_total_minor: controlTotal.toString() as unknown as number,
-        p_rows: Number(rowsText),
-      });
-      if (e2) return fail(e2.message);
-    }
+    // Always sent (null when blank): a retry on the same draft batch replaces earlier totals.
+    const { error: e2 } = await supabase.rpc("set_control_totals", {
+      p_batch_id: batchId,
+      // bigint travels as a decimal string: no float on the way.
+      p_total_minor: (controlTotal === null ? null : controlTotal.toString()) as unknown as number,
+      p_rows: (rowsText ? Number(rowsText) : null) as unknown as number,
+    });
+    if (e2) return fail(e2.message);
     for (const [i, file] of files.entries()) {
       setProgress(`Envoi de ${file.name} (${i + 1}/${files.length})…`);
       const { data: registered, error: e3 } = await supabase.rpc("add_boarding_file", {

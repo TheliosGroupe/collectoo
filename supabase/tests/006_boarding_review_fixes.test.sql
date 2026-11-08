@@ -1,6 +1,6 @@
 -- Retry-safe file registration, ASCII storage keys, abandon command (M1e review fixes).
 begin;
-select plan(12);
+select plan(16);
 
 insert into public.organization (id, kind, legal_name) values
   ('00000000-0000-0000-0000-00000000000a', 'servicer', 'Collectoo');
@@ -46,6 +46,14 @@ select lives_ok(
 select is(
   (public.add_boarding_file((select (v #>> '{}')::uuid from t where k = 'batch'), 'Créances août #3.csv', repeat('a', 64), 1200) ->> 'uploaded')::boolean,
   true, 'a retry after the upload knows the file is already stored');
+select isnt(
+  public.add_boarding_file((select (v #>> '{}')::uuid from t where k = 'batch'), 'copie.csv', repeat('a', 64), 1200) ->> 'duplicate_of_file_id',
+  null, 'the same content under another name in the same batch is flagged');
+select lives_ok($$select public.set_control_totals((select (v #>> '{}')::uuid from t where k = 'batch'), 1234567, 1200)$$,
+  'control totals can be set on a draft');
+select lives_ok($$select public.set_control_totals((select (v #>> '{}')::uuid from t where k = 'batch'), null, null)$$,
+  'and cleared');
+select is((select seller_control_totals from public.boarding_batch), '{}'::jsonb, 'cleared totals mean no reconciliation');
 reset role;
 
 -- Abandon ------------------------------------------------------------------------------------------
