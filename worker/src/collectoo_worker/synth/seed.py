@@ -184,6 +184,11 @@ def seed_sql(seed: int = 1, accounts_per_client: int = 125) -> str:
         )
         ctx = ClientCtx(key, servicer, client, portfolio, claim_type, regime)
         out += _accounts(fake, rng, ctx, accounts_per_client)
+    out += [
+        "-- M2-06: each workable account gets its RF payment reference (random, drawn at load).",
+        "select private.issue_payment_references(null);",
+        "",
+    ]
     return "\n".join(out)
 
 

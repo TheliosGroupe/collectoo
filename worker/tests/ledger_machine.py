@@ -1,9 +1,15 @@
-"""Shared ledger property-test machinery (M2-04).
+"""Shared ledger property-test machinery (M2-04, M2b-1).
 
-`InMemoryLedger` is an oracle with the database's rules. `LedgerMachine` drives random posts and
-reversals (with forced idempotency-key collisions) against a backend and checks the invariants
-after every step. The pure test runs it against the oracle; the integration test runs it against
-Postgres and compares balances with the oracle.
+`InMemoryLedger` is an oracle with the database's rules: entries, reversals and idempotency (M2a),
+and since M2b the payment entries with their checks at commit: client money closed in every entry
+(I2), the shape of each type (I3), what is left of a payment never negative at any date (I4), and
+a receivable credited by an allocation or a netting never overdrawn afterwards (I6).
+
+`LedgerMachine` drives random corrections, receipts (a payment and its cash_in), allocations,
+forwards, refunds, nettings and reversals (with forced idempotency-key collisions) against a
+backend and checks the invariants after every step. The pure test runs it against the oracle; the
+integration test runs it against Postgres (payment entries through private.ledger_post_set) and
+compares outcomes and balances with the oracle.
 """
 
 from __future__ import annotations
@@ -16,8 +22,9 @@ from datetime import date
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from hypothesis import event
 from hypothesis import strategies as st
-from hypothesis.stateful import Bundle, RuleBasedStateMachine, invariant, rule
+from hypothesis.stateful import Bundle, RuleBasedStateMachine, invariant, precondition, rule
 
 from collectoo_worker.ledger import (
     AlreadyReversedError,
@@ -27,21 +34,28 @@ from collectoo_worker.ledger import (
     EntryType,
     IdempotencyConflictError,
     Line,
+    OverdrawnError,
     PostResult,
     ReversalError,
+    ScopeError,
     balance_by_currency,
     mirror,
 )
+from collectoo_worker.ledger.model import CLIENT_MONEY_BOOKS
 
 ORG = UUID("00000000-0000-0000-0000-0000000000f0")
 CLIENT = UUID("00000000-0000-0000-0000-0000000000f1")
 ACCOUNT = UUID("30000000-0000-0000-0000-0000000000f1")
 ITEMS = (UUID("40000000-0000-0000-0000-0000000000f1"), UUID("40000000-0000-0000-0000-0000000000f2"))
+BANK = UUID("80000000-0000-0000-0000-0000000000f1")
 DATES = (date(2026, 2, 1), date(2026, 3, 1), date(2026, 4, 1))
+CHECK_DATES = (date(2026, 1, 31), *DATES)
 KEYS = tuple(f"prop-key-{i:04d}" for i in range(8))
+PAY_KEYS = tuple(f"pay-key-{i:04d}" for i in range(6))
 
 # A ledger "dimension": what identifies a ledger account inside one tenant.
-Dim = tuple[str, str, str | None, str | None, str | None]  # book, currency, item, component, client
+Dim = tuple[str, str, str | None, str | None, str | None, str | None]
+# book, currency, item, component, client, bank account
 
 
 def dim(line: Line) -> Dim:
@@ -56,6 +70,7 @@ def dim(line: Line) -> Dim:
         str(line.claim_item_id) if line.claim_item_id else None,
         str(line.component) if line.component else None,
         client,
+        str(line.bank_account_id) if line.bank_account_id else None,
     )
 
 
@@ -64,18 +79,45 @@ def request_hash(draft: EntryDraft) -> str:
         "type": str(draft.entry_type),
         "date": draft.effective_date.isoformat(),
         "account": str(draft.account_id),
+        "payment": str(draft.payment_id),
+        "client": str(draft.client_organization_id),
+        "source": [draft.source_type, draft.source_id],
         "reason": draft.reason,
         "lines": sorted([list(map(str, dim(line))), line.amount_minor] for line in draft.lines),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+@dataclass(frozen=True)
+class Payment:
+    id: UUID
+    amount_minor: int
+    booking_date: date
+    currency: str = "EUR"
+
+
 @dataclass
 class Entry:
     id: UUID
+    entry_type: EntryType
     effective_date: date
     lines: tuple[Line, ...]
     reverses: UUID | None = None
+    payment_id: UUID | None = None
+    account_id: UUID | None = None
+
+
+def pool_movement(entry: Entry) -> int:
+    """Debits on the pooled unallocated book: what the entry takes out of its payment."""
+    return sum(x.amount_minor for x in entry.lines if x.book is Book.UNALLOCATED_PAYMENT)
+
+
+def running(points: dict[date, int]) -> list[tuple[date, int]]:
+    out, total = [], 0
+    for d in sorted(points):
+        total += points[d]
+        out.append((d, total))
+    return out
 
 
 @dataclass
@@ -83,41 +125,172 @@ class InMemoryLedger:
     entries: dict[UUID, Entry] = field(default_factory=dict)
     by_key: dict[str, tuple[UUID, str]] = field(default_factory=dict)
     reversed_by: dict[UUID, UUID] = field(default_factory=dict)
+    payments: dict[UUID, Payment] = field(default_factory=dict)
+
+    def add_payment(self, payment: Payment) -> None:
+        self.payments[payment.id] = payment
+
+    def _replay(self, key: str, h: str) -> PostResult | None:
+        if key in self.by_key:
+            entry_id, existing = self.by_key[key]
+            if existing != h:
+                raise IdempotencyConflictError(key)
+            return PostResult(entry_id, False)
+        return None
+
+    def _commit(self, entry: Entry, key: str, h: str) -> PostResult:
+        self.check(entry)
+        self.entries[entry.id] = entry
+        self.by_key[key] = (entry.id, h)
+        return PostResult(entry.id, True)
 
     def post(self, draft: EntryDraft) -> PostResult:
+        """private.ledger_post: corrections on claims."""
         draft.validate()
         h = request_hash(draft)
-        if draft.idempotency_key in self.by_key:
-            entry_id, existing = self.by_key[draft.idempotency_key]
-            if existing != h:
-                raise IdempotencyConflictError(draft.idempotency_key)
-            return PostResult(entry_id, False)
-        entry = Entry(uuid4(), draft.effective_date, draft.lines)
-        self.entries[entry.id] = entry
-        self.by_key[draft.idempotency_key] = (entry.id, h)
-        return PostResult(entry.id, True)
+        replay = self._replay(draft.idempotency_key, h)
+        if replay is not None:
+            return replay
+        entry = Entry(
+            uuid4(),
+            draft.entry_type,
+            draft.effective_date,
+            draft.lines,
+            account_id=draft.account_id,
+        )
+        return self._commit(entry, draft.idempotency_key, h)
+
+    def post_set(self, draft: EntryDraft) -> PostResult:
+        """private.ledger_post_set: one payment entry."""
+        draft.validate_set()
+        if draft.payment_id is not None:
+            payment = self.payments.get(draft.payment_id)
+            if payment is None or any(x.currency != payment.currency for x in draft.lines):
+                raise ScopeError("payment of another servicer or in another currency")
+        h = request_hash(draft)
+        replay = self._replay(draft.idempotency_key, h)
+        if replay is not None:
+            return replay
+        entry = Entry(
+            uuid4(),
+            draft.entry_type,
+            draft.effective_date,
+            draft.lines,
+            payment_id=draft.payment_id,
+            account_id=draft.account_id,
+        )
+        return self._commit(entry, draft.idempotency_key, h)
 
     def reverse(self, entry_id: UUID, key: str, when: date | None) -> PostResult:
         target = self.entries[entry_id]
         effective = when or target.effective_date
         # A replay must repeat the request: same entry and same effective date.
         request = f"reversal:{entry_id}:{effective.isoformat()}"
-        if key in self.by_key:
-            existing_id, existing_hash = self.by_key[key]
-            if existing_hash == request:
-                return PostResult(existing_id, False)
-            raise IdempotencyConflictError(key)
+        replay = self._replay(key, request)
+        if replay is not None:
+            return replay
         if target.reverses is not None:
             raise ReversalError("a reversal is not reversed")
+        if target.entry_type is EntryType.CASH_IN:
+            raise ReversalError("a cash_in is not reversed")
         if effective < target.effective_date:
             raise ReversalError("reversal dated before the entry")
         if entry_id in self.reversed_by:
             raise AlreadyReversedError(str(entry_id))
-        entry = Entry(uuid4(), effective, mirror(target.lines), reverses=entry_id)
-        self.entries[entry.id] = entry
-        self.by_key[key] = (entry.id, request)
+        entry = Entry(
+            uuid4(),
+            EntryType.REVERSAL,
+            effective,
+            mirror(target.lines),
+            reverses=entry_id,
+            payment_id=target.payment_id,
+            account_id=target.account_id,
+        )
+        result = self._commit(entry, key, request)
         self.reversed_by[entry_id] = entry.id
-        return PostResult(entry.id, True)
+        return result
+
+    # --- Checks at commit (I4, I6) -------------------------------------------------------------
+
+    def check(self, new: Entry) -> None:
+        entries = [*self.entries.values(), new]
+        if new.payment_id is not None:
+            self.check_payment(new.payment_id, entries)
+        if new.entry_type in (
+            EntryType.ALLOCATION,
+            EntryType.NETTING,
+            EntryType.ADJUSTMENT,
+            EntryType.REVERSAL,
+        ):
+            for d in {dim(x) for x in new.lines if x.book is Book.DEBTOR_RECEIVABLE}:
+                lines = [x for x in new.lines if dim(x) == d]
+                credited = any(x.amount_minor < 0 for x in lines)
+                debited = any(x.amount_minor > 0 for x in lines)
+                self.check_receivable(d, entries, credited=credited, debited=debited)
+
+    def left_over(self, payment_id: UUID, entries: list[Entry] | None = None) -> list[int]:
+        """U_p at each date where an entry of the payment moves it (I4)."""
+        payment = self.payments[payment_id]
+        per_day: dict[date, int] = defaultdict(int)
+        for e in entries if entries is not None else self.entries.values():
+            if e.payment_id == payment_id:
+                per_day[e.effective_date] += pool_movement(e)
+        return [
+            (payment.amount_minor if d >= payment.booking_date else 0) - taken
+            for d, taken in running(per_day)
+        ]
+
+    def check_payment(self, payment_id: UUID, entries: list[Entry]) -> None:
+        if any(u < 0 for u in self.left_over(payment_id, entries)):
+            raise OverdrawnError(f"payment {payment_id} overdrawn")
+        per_account: dict[UUID | None, dict[date, int]] = defaultdict(lambda: defaultdict(int))
+        for e in entries:
+            if e.payment_id == payment_id:
+                per_account[e.account_id][e.effective_date] += pool_movement(e)
+        if any(net < 0 for days in per_account.values() for _, net in running(days)):
+            raise OverdrawnError(f"payment {payment_id}: negative net allocation")
+
+    @staticmethod
+    def check_receivable(d: Dim, entries: list[Entry], *, credited: bool, debited: bool) -> None:
+        postings = [
+            (e.entry_type, e.effective_date, x.amount_minor)
+            for e in entries
+            for x in e.lines
+            if dim(x) == d
+        ]
+        d_cr = min(
+            (
+                on
+                for t, on, a in postings
+                if a < 0 and t in (EntryType.ALLOCATION, EntryType.NETTING)
+            ),
+            default=None,
+        )
+        d_dr = min((on for t, on, a in postings if a > 0 and t is EntryType.NETTING), default=None)
+        per_day: dict[date, int] = defaultdict(int)
+        for _, on, a in postings:
+            per_day[on] += a
+        balances = running(per_day)
+        if credited and d_cr is not None and min(b for on, b in balances if on >= d_cr) < 0:
+            raise OverdrawnError(f"receivable {d} overdrawn")
+        if debited and d_dr is not None and max(b for on, b in balances if on >= d_dr) > 0:
+            raise OverdrawnError(f"credit item {d} above zero")
+
+    def available(self, d: Dim, on: date) -> int:
+        """What can be taken from a ledger account on a date: its lowest balance from then on."""
+        points = [on, *(e.effective_date for e in self.entries.values() if e.effective_date > on)]
+        return min(self.balances(t).get(d, 0) for t in points)
+
+    def remaining(self, payment_id: UUID, on: date) -> int:
+        """What can be taken from a payment on a date: its lowest remainder from then on."""
+        payment = self.payments[payment_id]
+        tagged = [e for e in self.entries.values() if e.payment_id == payment_id]
+        points = [on, *(e.effective_date for e in tagged if e.effective_date > on)]
+        return min(
+            (payment.amount_minor if t >= payment.booking_date else 0)
+            - sum(pool_movement(e) for e in tagged if e.effective_date <= t)
+            for t in points
+        )
 
     def balances(self, as_of: date) -> dict[Dim, int]:
         out: dict[Dim, int] = defaultdict(int)
@@ -129,7 +302,11 @@ class InMemoryLedger:
 
 
 class Backend(Protocol):
+    def add_payment(self, payment: Payment) -> None: ...
+
     def post(self, draft: EntryDraft) -> PostResult: ...
+
+    def post_set(self, draft: EntryDraft) -> PostResult: ...
 
     def reverse(self, entry_id: UUID, key: str, when: date | None) -> PostResult: ...
 
@@ -148,8 +325,14 @@ class OracleBackend:
     def __init__(self) -> None:
         self.ledger = InMemoryLedger()
 
+    def add_payment(self, payment: Payment) -> None:
+        self.ledger.add_payment(payment)
+
     def post(self, draft: EntryDraft) -> PostResult:
         return self.ledger.post(draft)
+
+    def post_set(self, draft: EntryDraft) -> PostResult:
+        return self.ledger.post_set(draft)
 
     def reverse(self, entry_id: UUID, key: str, when: date | None) -> PostResult:
         return self.ledger.reverse(entry_id, key, when)
@@ -173,57 +356,64 @@ class OracleBackend:
         return None
 
 
-amounts = st.integers(min_value=-1_000_000, max_value=1_000_000).filter(bool)
+amounts = st.one_of(st.integers(1, 1_000_000), st.integers(-1_000_000, -1))
+pay_keys = st.one_of(st.sampled_from(PAY_KEYS), st.uuids().map(lambda u: f"pay-{u}"))
 
 
 @st.composite
 def drafts(draw: st.DrawFn, key: str | None = None) -> EntryDraft:
-    """Balanced adjustments: receivable/owner-claim pairs and/or client-money pairs."""
-    lines: list[Line] = []
-    with_claims = draw(st.booleans())
-    if with_claims:
-        moves = draw(
-            st.lists(
-                st.tuples(st.sampled_from(ITEMS), st.sampled_from(list(Component)), amounts),
-                min_size=1,
-                max_size=4,
-            )
+    """Balanced corrections on claims: receivable/owner-claim pairs (no client money since M2b)."""
+    moves = draw(
+        st.lists(
+            st.tuples(st.sampled_from(ITEMS), st.sampled_from(list(Component)), amounts),
+            min_size=1,
+            max_size=4,
         )
-        per_component: dict[Component, int] = defaultdict(int)
-        for item, component, amount in moves:
-            lines.append(Line(Book.DEBTOR_RECEIVABLE, amount, "EUR", item, component))
-            per_component[component] += amount
-        lines += [
-            Line(Book.OWNER_CLAIM, -amount, "EUR", component=component)
-            for component, amount in per_component.items()
-            if amount
-        ]
-    if not with_claims or len(lines) < 2 or draw(st.booleans()):
-        amount = draw(amounts)
-        currency = draw(st.sampled_from(["EUR", "USD"]))
-        lines += [
-            Line(Book.UNALLOCATED_PAYMENT, amount, currency),
-            Line(Book.CLIENT_PAYABLE, -amount, currency, client_organization_id=CLIENT),
-        ]
-    has_claim = any(line.book in (Book.DEBTOR_RECEIVABLE, Book.OWNER_CLAIM) for line in lines)
+    )
+    lines: list[Line] = []
+    per_component: dict[Component, int] = defaultdict(int)
+    for item, component, amount in moves:
+        lines.append(Line(Book.DEBTOR_RECEIVABLE, amount, "EUR", item, component))
+        per_component[component] += amount
+    lines += [
+        Line(Book.OWNER_CLAIM, -amount, "EUR", component=component)
+        for component, amount in per_component.items()
+        if amount
+    ]
     return EntryDraft(
         organization_id=ORG,
         entry_type=EntryType.ADJUSTMENT,
         effective_date=draw(st.sampled_from(DATES)),
         idempotency_key=key or draw(st.sampled_from(KEYS)),
         lines=tuple(draw(st.permutations(lines))),
-        account_id=ACCOUNT if has_claim else None,
+        account_id=ACCOUNT,
         reason="property test",
     )
 
 
+def cash_in(payment: Payment) -> EntryDraft:
+    return EntryDraft(
+        organization_id=ORG,
+        entry_type=EntryType.CASH_IN,
+        effective_date=payment.booking_date,
+        idempotency_key=f"cash_in:{payment.id}",
+        lines=(
+            Line(Book.CLIENT_MONEY_CASH, payment.amount_minor, "EUR", bank_account_id=BANK),
+            Line(Book.UNALLOCATED_PAYMENT, -payment.amount_minor, "EUR"),
+        ),
+        source_type="bank_statement",
+        source_id=f"stmt-{payment.id}",
+    )
+
+
 class LedgerMachine(RuleBasedStateMachine):
-    """Random posts and reversals; invariants hold after every step."""
+    """Random entries of every kind; the invariants hold after every step."""
 
     backend: Backend
     oracle: InMemoryLedger
 
     entries = Bundle("entries")
+    payments = Bundle("payments")
 
     def __init__(self) -> None:
         super().__init__()
@@ -233,6 +423,7 @@ class LedgerMachine(RuleBasedStateMachine):
         self.rev_keys_ok: set[str] = set()
         self.first_id: dict[str, UUID] = {}  # key -> id returned by its first successful call
         self.ids: dict[UUID, UUID] = {}  # backend id -> oracle id
+        self.cash_ins: list[tuple[UUID, UUID]] = []  # (backend id, oracle id)
 
     def make_backend(self) -> Backend:
         return OracleBackend()
@@ -254,17 +445,6 @@ class LedgerMachine(RuleBasedStateMachine):
             assert got.created == want.created
         return got, want
 
-    @rule(target=entries, draft=drafts())
-    def post(self, draft: EntryDraft) -> Any:
-        got, want = self._same(lambda: self.backend.post(draft), lambda: self.oracle.post(draft))
-        self.backend.check()
-        if isinstance(got, Exception):
-            return None
-        self._remember(draft.idempotency_key, got)
-        self.keys_ok.add(draft.idempotency_key)
-        self.ids[got.entry_id] = want.entry_id
-        return got.entry_id
-
     def _remember(self, key: str, got: PostResult) -> None:
         """Same key => single entry: a replay returns the id of the first call."""
         if got.created:
@@ -272,6 +452,184 @@ class LedgerMachine(RuleBasedStateMachine):
             self.first_id[key] = got.entry_id
         else:
             assert self.first_id[key] == got.entry_id
+
+    def _post(self, draft: EntryDraft, *, payment_entry: bool) -> UUID | None:
+        if payment_entry:
+            got, want = self._same(
+                lambda: self.backend.post_set(draft), lambda: self.oracle.post_set(draft)
+            )
+        else:
+            got, want = self._same(
+                lambda: self.backend.post(draft), lambda: self.oracle.post(draft)
+            )
+        self.backend.check()
+        outcome = type(got).__name__ if isinstance(got, Exception) else got.created
+        event(f"{draft.entry_type}: {outcome}")
+        if isinstance(got, Exception):
+            return None
+        self._remember(draft.idempotency_key, got)
+        self.keys_ok.add(draft.idempotency_key)
+        self.ids[got.entry_id] = want.entry_id
+        entry_id: UUID = got.entry_id
+        return entry_id
+
+    @rule(target=entries, draft=drafts())
+    def post(self, draft: EntryDraft) -> Any:
+        return self._post(draft, payment_entry=False)
+
+    @rule(
+        target=entries,
+        item=st.sampled_from(ITEMS),
+        component=st.sampled_from([Component.PRINCIPAL, Component.ACCRUED_INTEREST]),
+        amount=st.one_of(st.integers(1, 300_000), st.integers(-60_000, -1)),
+        when=st.sampled_from(DATES),
+    )
+    def owe(self, item: UUID, component: Component, amount: int, when: date) -> Any:
+        """What the seller declared (an opening stand-in): mostly debts, sometimes a credit item."""
+        draft = EntryDraft(
+            organization_id=ORG,
+            entry_type=EntryType.ADJUSTMENT,
+            effective_date=when,
+            idempotency_key=f"owe-{uuid4()}",
+            lines=(
+                Line(Book.DEBTOR_RECEIVABLE, amount, "EUR", item, component),
+                Line(Book.OWNER_CLAIM, -amount, "EUR", component=component),
+            ),
+            account_id=ACCOUNT,
+            reason="seller balance",
+        )
+        return self._post(draft, payment_entry=False)
+
+    @rule(
+        target=payments,
+        amount=st.integers(min_value=1, max_value=200_000),
+        booked=st.sampled_from(DATES),
+    )
+    def receive(self, amount: int, booked: date) -> Any:
+        """A credit on the dedicated account: the payment and its statement day's cash_in."""
+        payment = Payment(uuid4(), amount, booked)
+        self.backend.add_payment(payment)
+        self.oracle.add_payment(payment)
+        entry = self._post(cash_in(payment), payment_entry=True)
+        assert entry is not None
+        self.cash_ins.append((entry, self.ids[entry]))
+        return payment.id
+
+    @rule(
+        target=entries,
+        payment=payments,
+        moves=st.lists(
+            st.tuples(
+                st.sampled_from(ITEMS),
+                st.sampled_from([Component.PRINCIPAL, Component.ACCRUED_INTEREST]),
+                st.integers(min_value=1, max_value=100_000),
+            ),
+            min_size=1,
+            max_size=3,
+            unique_by=lambda m: (m[0], m[1]),
+        ),
+        when=st.sampled_from(DATES),
+        key=pay_keys,
+    )
+    def allocate(
+        self, payment: UUID, moves: list[tuple[UUID, Component, int]], when: date, key: str
+    ) -> Any:
+        total = sum(a for _, _, a in moves)
+        per_component: dict[Component, int] = defaultdict(int)
+        for _, component, a in moves:
+            per_component[component] += a
+        lines = (
+            Line(Book.UNALLOCATED_PAYMENT, total, "EUR"),
+            Line(Book.CLIENT_PAYABLE, -total, "EUR", client_organization_id=CLIENT),
+            *(Line(Book.DEBTOR_RECEIVABLE, -a, "EUR", item, c) for item, c, a in moves),
+            *(Line(Book.OWNER_CLAIM, a, "EUR", component=c) for c, a in per_component.items()),
+        )
+        draft = EntryDraft(
+            organization_id=ORG,
+            entry_type=EntryType.ALLOCATION,
+            effective_date=when,
+            idempotency_key=key,
+            lines=lines,
+            account_id=ACCOUNT,
+            payment_id=payment,
+        )
+        return self._post(draft, payment_entry=True)
+
+    @rule(
+        target=entries,
+        payment=payments,
+        item=st.sampled_from(ITEMS),
+        component=st.sampled_from([Component.PRINCIPAL, Component.ACCRUED_INTEREST]),
+        when=st.sampled_from(DATES),
+        percent=st.integers(min_value=1, max_value=100),
+    )
+    def allocate_what_is_due(
+        self, payment: UUID, item: UUID, component: Component, when: date, percent: int
+    ) -> Any:
+        """An allocation sized from the oracle's balances: mostly accepted (the waterfall)."""
+        line = Line(Book.DEBTOR_RECEIVABLE, -1, "EUR", item, component)
+        room = min(self.oracle.available(dim(line), when), self.oracle.remaining(payment, when))
+        return self.allocate(
+            payment, [(item, component, max(1, room * percent // 100))], when, f"pay-{uuid4()}"
+        )
+
+    @rule(
+        target=entries,
+        payment=payments,
+        amount=st.integers(min_value=1, max_value=100_000),
+        when=st.sampled_from(DATES),
+        key=pay_keys,
+        refund=st.booleans(),
+    )
+    def release(self, payment: UUID, amount: int, when: date, key: str, refund: bool) -> Any:
+        """Money of a payment leaves the pool: refunded to the payer, or forwarded to the client."""
+        if refund:
+            lines = (
+                Line(Book.UNALLOCATED_PAYMENT, amount, "EUR"),
+                Line(Book.CLIENT_MONEY_CASH, -amount, "EUR", bank_account_id=BANK),
+            )
+            client = None
+        else:
+            lines = (
+                Line(Book.UNALLOCATED_PAYMENT, amount, "EUR"),
+                Line(Book.CLIENT_PAYABLE, -amount, "EUR", client_organization_id=CLIENT),
+            )
+            client = CLIENT
+        draft = EntryDraft(
+            organization_id=ORG,
+            entry_type=EntryType.CASH_OUT if refund else EntryType.FORWARD,
+            effective_date=when,
+            idempotency_key=key,
+            lines=lines,
+            payment_id=payment,
+            client_organization_id=client,
+            reason="property test",
+        )
+        return self._post(draft, payment_entry=True)
+
+    @rule(
+        target=entries,
+        amount=st.integers(min_value=1, max_value=100_000),
+        when=st.sampled_from(DATES),
+        key=pay_keys,
+        credit_note_first=st.booleans(),
+    )
+    def net(self, amount: int, when: date, key: str, credit_note_first: bool) -> Any:
+        """A credit item applied to an invoice (both principal)."""
+        credit, invoice = ITEMS if credit_note_first else ITEMS[::-1]
+        draft = EntryDraft(
+            organization_id=ORG,
+            entry_type=EntryType.NETTING,
+            effective_date=when,
+            idempotency_key=key,
+            lines=(
+                Line(Book.DEBTOR_RECEIVABLE, amount, "EUR", credit, Component.PRINCIPAL),
+                Line(Book.DEBTOR_RECEIVABLE, -amount, "EUR", invoice, Component.PRINCIPAL),
+            ),
+            account_id=ACCOUNT,
+            reason="property test",
+        )
+        return self._post(draft, payment_entry=True)
 
     @rule(target=entries, entry=entries, fresh=st.booleans(), when=st.sampled_from([None, *DATES]))
     def reverse(self, entry: UUID | None, fresh: bool, when: date | None) -> Any:
@@ -284,12 +642,24 @@ class LedgerMachine(RuleBasedStateMachine):
             lambda: self.oracle.reverse(oracle_id, key, when),
         )
         self.backend.check()
+        event(f"reversal: {type(got).__name__ if isinstance(got, Exception) else got.created}")
         if isinstance(got, Exception):
             return None
         self._remember(key, got)
         self.rev_keys_ok.add(key)
         self.ids[got.entry_id] = want.entry_id
         return got.entry_id
+
+    @precondition(lambda self: bool(self.cash_ins))
+    @rule(data=st.data())
+    def reverse_a_cash_in(self, data: st.DataObject) -> None:
+        backend_id, oracle_id = data.draw(st.sampled_from(self.cash_ins))
+        key = f"rev-{uuid4()}"
+        got, _ = self._same(
+            lambda: self.backend.reverse(backend_id, key, None),
+            lambda: self.oracle.reverse(oracle_id, key, None),
+        )
+        assert isinstance(got, ReversalError)
 
     @invariant()
     def entries_are_the_successful_keys(self) -> None:
@@ -317,10 +687,46 @@ class LedgerMachine(RuleBasedStateMachine):
 
     @invariant()
     def balances_match_the_oracle(self) -> None:
-        for d in (date(2026, 1, 31), *DATES):
+        for d in CHECK_DATES:
             assert self.backend.balances(d) == self.oracle.balances(d)
 
     @invariant()
     def everything_nets_to_zero_per_currency(self) -> None:
         lines = [line for entry in self.oracle.entries.values() for line in entry.lines]
         assert all(v == 0 for v in balance_by_currency(lines).values())
+
+    @invariant()
+    def client_money_is_cash_minus_what_is_owed(self) -> None:
+        """I8: Σ5120 + Σ4710 + Σ4670 = 0 at every date."""
+        for d in CHECK_DATES:
+            per_currency: dict[str, int] = defaultdict(int)
+            for k, v in self.backend.balances(d).items():
+                if Book(k[0]) in CLIENT_MONEY_BOOKS:
+                    per_currency[k[1]] += v
+            assert all(v == 0 for v in per_currency.values()), (d, per_currency)
+
+    @invariant()
+    def what_is_left_of_each_payment_is_in_the_pool(self) -> None:
+        """I4/I5: U_p ≥ 0 at every date, and the pooled 4710 balance = -Σ U_p."""
+        for p in self.oracle.payments.values():
+            assert all(u >= 0 for u in self.oracle.left_over(p.id))
+        for d in CHECK_DATES:
+            pool = sum(
+                v for k, v in self.backend.balances(d).items() if k[0] == Book.UNALLOCATED_PAYMENT
+            )
+            left = 0
+            for p in self.oracle.payments.values():
+                taken = sum(
+                    pool_movement(e)
+                    for e in self.oracle.entries.values()
+                    if e.payment_id == p.id and e.effective_date <= d
+                )
+                left += (p.amount_minor if p.booking_date <= d else 0) - taken
+            assert pool == -left, (d, pool, left)
+
+    @invariant()
+    def no_allocated_receivable_is_overdrawn(self) -> None:
+        """I6 after any sequence: from the first allocation or netting credit, never below zero."""
+        entries = list(self.oracle.entries.values())
+        for d in {dim(x) for e in entries for x in e.lines if x.book is Book.DEBTOR_RECEIVABLE}:
+            self.oracle.check_receivable(d, entries, credited=True, debited=True)

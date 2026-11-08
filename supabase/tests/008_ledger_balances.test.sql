@@ -89,11 +89,39 @@ select is(
    where la.book = 'owner_claim' and la.portfolio_id = '20000000-0000-0000-0000-0000000000a1'),
   -600::bigint, 'the owner claim mirrors the receivable');
 
--- Client money --------------------------------------------------------------------------------------
-select private.ledger_post('00000000-0000-0000-0000-00000000000a', 'adjustment', '2026-03-10', 'client-money-0001',
+-- Client money (M2b): a credit on the dedicated account, forwarded to client A ------------------------
+insert into public.bank_account (id, organization_id, iban, currency, label, feed, opened_on) values
+  ('80000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'FR3430001007940000000001001', 'EUR',
+   'Fonds de tiers', 'camt053', '2026-01-01');
+insert into public.payment (id, organization_id, bank_account_id, channel, method, amount_minor, currency, booking_date) values
+  ('90000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
+   'camt053', 'sct', 100, 'EUR', '2026-03-10');
+create or replace function pg_temp.post1(p_type text, p_date date, p_key text, p_lines jsonb, p_meta jsonb)
+returns uuid language plpgsql as $$
+declare v uuid;
+begin
+  perform private.ledger_post_set_begin();
+  insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key, account_id,
+                                  client_organization_id, payment_id, source_type, source_id, reason)
+  values (1, '00000000-0000-0000-0000-00000000000a', p_type, p_date, p_key, (p_meta ->> 'account_id')::uuid,
+          (p_meta ->> 'client_organization_id')::uuid, (p_meta ->> 'payment_id')::uuid, p_meta ->> 'source_type',
+          p_meta ->> 'source_id', p_meta ->> 'reason');
+  insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency, claim_item_id, component, bank_account_id)
+  select 1, ord::integer, l ->> 'book', (l ->> 'amount_minor')::bigint, l ->> 'currency', (l ->> 'claim_item_id')::uuid,
+         l ->> 'component', (l ->> 'bank_account_id')::uuid
+  from jsonb_array_elements(p_lines) with ordinality as x (l, ord);
+  select r.entry_id into v from private.ledger_post_set() r;
+  return v;
+end $$;
+select pg_temp.post1('cash_in', '2026-03-10', 'cash-in-0001-key',
+  '[{"book": "client_money_cash", "amount_minor": 100, "currency": "EUR", "bank_account_id": "80000000-0000-0000-0000-000000000001"},
+    {"book": "unallocated_payment", "amount_minor": -100, "currency": "EUR"}]',
+  '{"source_type": "bank_statement", "source_id": "stmt-1"}');
+select pg_temp.post1('forward', '2026-03-10', 'client-money-0001',
   '[{"book": "unallocated_payment", "amount_minor": 100, "currency": "EUR"},
-    {"book": "client_payable", "amount_minor": -100, "currency": "EUR", "client_organization_id": "00000000-0000-0000-0000-0000000000a1"}]',
-  '{"reason": "test"}');
+    {"book": "client_payable", "amount_minor": -100, "currency": "EUR"}]',
+  '{"client_organization_id": "00000000-0000-0000-0000-0000000000a1", "payment_id": "90000000-0000-0000-0000-000000000001",
+    "reason": "ratified by the client"}');
 select is((select held_minor from private.client_money_balances('00000000-0000-0000-0000-0000000000a1', '2026-03-10')),
   100::bigint, 'money owed to client A is held for it');
 select is((select count(*)::int from private.client_money_balances('00000000-0000-0000-0000-0000000000a1', '2026-03-09')),

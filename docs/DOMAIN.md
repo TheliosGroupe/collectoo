@@ -85,15 +85,22 @@ Contents: [1. Glossary](#1-glossary-fr--en) · [2. Conventions](#2-modelling-con
 | Dépens / frais taxables | Taxable legal costs | component `procedure_cost` | |
 | Anatocisme / capitalisation | Capitalisation of interest | rule-pack `capitalisation` | INT-04, INT-06 |
 | Décompte | Itemised statement of account | `statement` (engine output) | Used in letters, portal, bailiff files |
-| Imputation des paiements | Payment allocation | `allocation_order` (rule pack), `ledger_entry(entry_type = allocation)` | INT-09 |
+| Imputation des paiements | Payment allocation | `allocation_order` (rule pack), `ledger_entry(entry_type = allocation)`, one entry per (payment, account) | INT-09; ADR-0013 |
 | Quittance | Receipt | `receipt` | CPCE-07 |
 | Reversement | Remittance to the client | `remittance_run` | CPCE-08 |
-| Compte dédié aux fonds de tiers | Client money account | `bank_account(purpose = client_money)` | CPCE-02 |
+| Compte dédié aux fonds de tiers | Client money account | `bank_account(purpose = client_funds)`, book `client_money_cash` (5120) | CPCE-02; ADR-0013 |
 | Commission / honoraires | Collection commission | `mandate_terms.commission`, `commission_invoice` | |
 | Remise de dette / abandon | Debt forgiveness / write-off | `ledger_entry(entry_type = forgiveness)` | Template `3.42` |
 | Écriture / extourne | Ledger entry / reversal | `ledger_entry`, `reverses_entry_id` | Corrections only by reversal |
-| Relevé bancaire (CAMT.053) | Bank statement | `bank_statement` | |
-| Rapprochement | Reconciliation | `reconciliation_match` | |
+| Relevé bancaire (CAMT.053) | Bank statement | `bank_statement` | M2b-2 |
+| Ligne de relevé | Bank statement line | `bank_transaction` | M2b-2 |
+| Encaissement | Cash received (one statement day) | `ledger_entry(entry_type = cash_in)` | ADR-0013 |
+| Paiement | Payment (one debtor credit) | `payment` | M2-06 |
+| Rapprochement | Reconciliation (match of a payment to a file) | `payment_match` | M2b-3 |
+| Référence de paiement (RF) | RF creditor reference, ISO 11649 | `payment_reference` (RF + 14 digits, one active per account) | M2-06 |
+| Reversement sans imputation | Forward to the client without allocation | `ledger_entry(entry_type = forward)` | Recall, ratification (1342-2) |
+| Retour, restitution | Bank return, refund to the payer | `ledger_entry(entry_type = cash_out)` | |
+| Application d'un avoir | Credit note applied | `ledger_entry(entry_type = netting)` | 1347 (invoked by ops) |
 
 ### 1.4 Collection process
 
@@ -154,15 +161,19 @@ Double-entry, one `ledger_account` per (book, component, account) where relevant
 |---|---|---|
 | Opening balance at cut-off (per component) | `debtor_receivable:<component>` | `owner_claim:<component>` |
 | Interest accrual (engine) | `debtor_receivable:late_interest` | `owner_claim:late_interest` |
-| Debtor payment received on client-money account | `client_money_cash` | `unallocated_payment` |
-| Allocation (waterfall) | `unallocated_payment` | `debtor_receivable:<component>` |
-| Recognise amount due to the owner | `owner_claim:<component>` | `client_payable` |
+| Debtor payments of one statement day (`cash_in`) | `client_money_cash[bank account]` | `unallocated_payment` (pooled, no client) |
+| Allocation of a payment to a file (`allocation`, one entry: cash and claim legs) | `unallocated_payment`; `owner_claim:<component>` | `client_payable`; `debtor_receivable:<item, component>` |
+| Payment forwarded without allocation (`forward`) | `unallocated_payment` | `client_payable` |
+| Refund to the payer, bank return (`cash_out`) | `unallocated_payment` | `client_money_cash[bank account]` |
+| Credit note applied (`netting`) | `debtor_receivable:<credit item>` | `debtor_receivable:<invoice>` |
 | Commission | `client_payable` | `servicer_revenue` |
 | Remittance paid | `client_payable` | `client_money_cash` |
 | Forgiveness / settlement discount | `owner_claim:<component>` | `debtor_receivable:<component>` |
 | Correction | Reversal entry (`reverses_entry_id`) + new entry | |
 
 `servicer_revenue` and `own_cash` are the only books that are Collectoo's money; everything else is held for owners (R124-2). In phase C the owner is an FCT and the same books apply.
+
+Since M2b (ADR-0013): client-money books (`client_money_cash`, `unallocated_payment`, `client_payable`) are closed in every entry, so cash = unallocated + owed to clients at every date; unallocated money is pooled and attributed to its payment by `ledger_entry.payment_id`; a correction (`adjustment`) no longer touches client money; what is left of a payment and an allocated receivable never go below zero (`LG007`).
 
 ## 3. Entity model (two layers)
 
@@ -501,9 +512,11 @@ erDiagram
     payment ||--o{ ledger_entry : "allocated by"
     payment ||--o| receipt : "acknowledged by"
     bank_account ||--o{ bank_statement : "reported in"
-    bank_statement ||--o{ bank_statement_line : contains
-    bank_statement_line ||--o| reconciliation_match : "matched"
-    payment ||--o| reconciliation_match : "matched"
+    bank_account ||--o{ payment : "credited on"
+    bank_statement ||--o{ bank_transaction : contains
+    bank_transaction ||--o| payment : "debtor credit"
+    payment ||--o{ payment_match : "matched"
+    account ||--o{ payment_reference : "paid with"
     remittance_run ||--o{ remittance_line : contains
     remittance_line }o--|| ledger_entry : "posts"
     rate_index ||--o{ rate_value : "fixings"
@@ -517,7 +530,8 @@ erDiagram
     }
     ledger_entry {
         uuid id PK
-        text entry_type "opening|accrual|allocation|forgiveness|remittance|commission|reversal|pre_boarding_aggregate"
+        text entry_type "opening|adjustment|cash_in|allocation|forward|cash_out|netting|reversal (M2); accrual|forgiveness|remittance|commission (later)"
+        uuid payment_id FK "allocation, forward, cash_out and their reversals"
         date effective_date
         timestamptz posted_at
         uuid reverses_entry_id FK
@@ -532,13 +546,21 @@ erDiagram
     }
     payment {
         uuid id PK
-        uuid account_id FK
-        text method "card|sepa_debit|sepa_transfer|other"
-        text psp_ref
+        uuid bank_account_id FK
+        uuid bank_transaction_id FK "M2b-2"
+        uuid account_id FK "null until matched, never staged"
+        text channel "camt053|csv|psp"
+        text method "sct|sdd|card|cheque|other"
         bigint amount_minor
-        date value_date
-        text source "debtor|collateral_sale|third_party"
-        text status
+        date booking_date
+        text status "unmatched|matched|partially_allocated|allocated|refund_pending|refunded|returned"
+        text review_reason
+    }
+    payment_reference {
+        uuid id PK
+        uuid account_id FK
+        text rf "RF + 14 digits, mod 97"
+        text status "active|retired"
     }
     receipt {
         uuid id PK
@@ -548,8 +570,10 @@ erDiagram
     }
     bank_account {
         uuid id PK
-        text purpose "client_money|own"
+        text purpose "client_funds (own: M2c)"
         text iban
+        text currency
+        text status "active|closed"
     }
     bank_statement {
         uuid id PK
@@ -557,15 +581,17 @@ erDiagram
         date statement_date
         text camt053_sha256
     }
-    bank_statement_line {
+    bank_transaction {
         uuid id PK
+        uuid statement_id FK
+        text dedup_key UK
         bigint amount_minor
-        text remittance_info
+        text remittance_text
     }
-    reconciliation_match {
-        uuid bank_statement_line_id FK
+    payment_match {
         uuid payment_id FK
-        text method "auto|manual"
+        uuid account_id FK
+        text method "rf_structured|rf_text|rf_body|item_ref|iban_memory|manual|rematch"
     }
     remittance_run {
         uuid id PK

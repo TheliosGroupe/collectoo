@@ -1,0 +1,71 @@
+import { expect, test } from "@playwright/test";
+import { createMember, createTenant, type Tenant } from "./support/admin";
+import { loginAsStaff } from "./support/session";
+import { reviewShot } from "./screenshot";
+
+/**
+ * M2b-1: the dedicated client-funds bank account (CPCE R124-2) is registered and closed by an
+ * admin; ops managers only read it. IBANs are synthetic (valid check digits, no real account).
+ */
+let tenant: Tenant;
+
+test.beforeAll(async () => {
+  tenant = await createTenant();
+});
+
+test("an admin registers the client-funds account, then closes an account opened by mistake", async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  await loginAsStaff(page, await createMember(tenant.servicerId, "admin"));
+  await page.getByTestId("bank-accounts-link").click();
+  await expect(page).toHaveURL(/\/backoffice\/parametres\/comptes-bancaires$/);
+  await expect(page.getByText("Aucun compte bancaire enregistré")).toBeVisible();
+
+  const form = page.getByTestId("add-bank-account");
+  await form.getByLabel("Libellé").fill("Fonds de tiers – Banque A");
+  await form.getByLabel("IBAN").fill("fr76 3000 4000 0312 3456 7890 144");
+  await form.getByLabel("BIC (facultatif)").fill("bnpafrppxxx");
+  await form.getByRole("button", { name: "Ajouter le compte" }).click();
+  await expect(form.getByRole("alert")).toContainText("IBAN invalide");
+
+  // Pasted from a bank PDF: non-breaking spaces between the groups.
+  await form.getByLabel("IBAN").fill("fr76\u00a03000\u00a04000\u00a00312 3456 7890 143");
+  await form.getByRole("button", { name: "Ajouter le compte" }).click();
+  const list = page.getByTestId("bank-accounts");
+  await expect(list.getByTestId("iban")).toHaveText("FR76 3000 4000 0312 3456 7890 143");
+  await expect(list).toContainText("Fonds de tiers – Banque A");
+  await expect(list).toContainText("BNPAFRPPXXX");
+  await expect(list).toContainText("Actif");
+  await expect(form.getByLabel("IBAN")).toHaveValue("");
+
+  // A second account, registered by mistake, then closed (no money on it).
+  await form.getByLabel("Libellé").fill("Compte ouvert par erreur");
+  await form.getByLabel("IBAN").fill("FR1420041010050500013M02606");
+  await form.getByLabel("Format des relevés").selectOption("csv");
+  await form.getByRole("button", { name: "Ajouter le compte" }).click();
+  await expect(list.getByRole("listitem")).toHaveCount(2);
+  await form.getByLabel("IBAN").fill("FR1420041010050500013M02606");
+  await form.getByLabel("Libellé").fill("Doublon");
+  await form.getByRole("button", { name: "Ajouter le compte" }).click();
+  await expect(form.getByRole("alert")).toContainText("déjà enregistré");
+  await reviewShot(page, testInfo, "m2-bank-accounts");
+
+  const mistaken = list.getByRole("listitem").filter({ hasText: "Compte ouvert par erreur" });
+  await mistaken.getByText("Clôturer ce compte").click();
+  await mistaken.getByLabel("Motif de la clôture").fill("Ouvert par erreur");
+  await mistaken.getByLabel(/4 derniers caractères/).fill("0000");
+  await mistaken.getByRole("button", { name: "Clôturer le compte" }).click();
+  await expect(mistaken.getByRole("alert")).toContainText("4 derniers caractères");
+  await mistaken.getByLabel(/4 derniers caractères/).fill("2606");
+  await mistaken.getByRole("button", { name: "Clôturer le compte" }).click();
+  await expect(mistaken).toContainText("Clôturé");
+  await expect(mistaken.getByTestId("closed-on")).toContainText("Ouvert par erreur");
+  await reviewShot(page, testInfo, "m2-bank-account-closed");
+});
+
+test("an ops manager reads the bank accounts but cannot add one", async ({ page }) => {
+  test.setTimeout(90_000);
+  await loginAsStaff(page, await createMember(tenant.servicerId, "ops_manager"));
+  await page.goto("/backoffice/parametres/comptes-bancaires");
+  await expect(page.getByText("Seuls les administrateurs ajoutent ou clôturent un compte.")).toBeVisible();
+  await expect(page.getByTestId("add-bank-account")).toHaveCount(0);
+});

@@ -1,0 +1,77 @@
+# ADR-0013: Payments, allocation and client money (extends ADR-0012)
+
+- Status: Accepted
+- Date: 2026-11-08
+- Design: `docs/design/m2b-payments.md` (three-design panel and judge; legal texts re-read on LibreJustice). Founder answers on 2026-11-08: all 20 defaults accepted (see "Founder decisions" below).
+- Implemented from M2b-1 (this ADR's ledger, bank-account, payment and reference parts) to M2b-6.
+
+## Context
+M2a booked what debtors owe (1100 receivable, 3100 owner claim). M2b books what they pay: money lands on the account dedicated to funds collected for creditors (CPCE R124-2), is matched to a claim, allocated in the legal order (C. civ. 1342-10, 1343-1), acknowledged by a receipt (R124-6) and reported to the client (R124-5). The ledger must keep client money provably separate from Collectoo's money (M2-12, CPCE-02) and never let a payment, an allocation or a receivable go below zero.
+
+## Decision
+
+### Names (design §4)
+- Dedicated account: `bank_account.purpose = 'client_funds'` (ARCHITECTURE and COMPLIANCE wording; DOMAIN aligned). `'own'` arrives with M2c.
+- Statement `bank_statement`; statement line `bank_transaction`; match record `payment_match` (M2b-2, M2b-3).
+- Entry types: `cash_in`, `allocation`, `forward`, `cash_out`, `netting`.
+- RF creditor reference (ISO 11649): `payment_reference`.
+
+### Ledger extension (M2b-1)
+- **Book 5120 `client_money_cash`**, dimension `bank`, money of the clients: one ledger account per bank account. A 5120 ledger account exists only for an **active `client_funds` bank account of the same servicer and currency** (guard, `LG002`; composite foreign key on organization and currency). 5121 PSP clearing (M5), 5122 own cash and 6270 fees (M2c) stay unseeded: refused (fail closed).
+- **Unallocated money is pooled**: one 4710 ledger account per servicer and currency, no client. What belongs to which payment is told by `ledger_entry.payment_id`, not by the ledger account.
+- **Entry types and their books** (`ledger_entry_type.allowed_books`): `cash_in` 5120/4710; `allocation` 4710/4670/1100/3100; `forward` 4710/4670; `cash_out` 4710/5120; `netting` 1100 only. **`adjustment` loses 4710 and 4670**: client money never moves through a generic correction. No payment type reaches 7060 (M2-12).
+- **`ledger_entry.payment_id`** (FK to `payment`): required on `allocation`, `forward`, `cash_out`; allowed on their reversals, which must keep it; refused elsewhere. A `cash_in` names its bank statement and is **never reversed** (a wrong statement line is corrected by a payment-tagged `cash_out`).
+- **Checks at commit, per entry** (`private.ledger_entry_verify`, key lookups only, `enable_seqscan = off`):
+  - I2 closure: lines on client-money books (5120, 4710, 4670) sum to zero per currency (`LG001`). Only M2c `commission` will be exempt.
+  - I3 shapes: `cash_in` = one 5120 debit + one pooled 4710 credit; `cash_out` = one pooled 4710 debit + one 5120 credit; `forward` = one pooled 4710 debit + one 4670 credit; `allocation` = one pooled 4710 debit, one 4670 credit, ≥ 1 receivable credits, no receivable debit, owner-claim debits; `netting` on principal only (`LG001`).
+  - I4 payment: for every entry of a payment p, at every date t, `amount_p·[t ≥ booking date] − Σ 4710 debits of p's entries dated ≤ t ≥ 0`, and the net allocated per (payment, account) is never negative (**new SQLSTATE `LG007`**, Python `OverdrawnError`). An entry dated before the payment's booking date fails this way.
+  - I6 receivables: a 1100 account credited by an `allocation` or a `netting` dated D never goes below zero from D on; a credit item debited by a `netting` never goes above zero from D on (`LG007`). **Checked for every entry that moves such an account, corrections and reversals included**, so the invariant holds after any sequence of entries, not only after allocations.
+- **Allocation lock** (design §5.2): `pg_advisory_xact_lock(hashtext('payments:' || organization_id))`, taken by `ledger_post_set` for the types that lower a payment or a receivable, by `ledger_reverse`, and by `ledger_post` whenever a correction touches a receivable, up or down (lowering one can overdraw an allocated item; raising one can push a netted credit item above zero). With every such writer serialised, the commit-time checks of two sessions never miss each other's entries (read committed).
+- **Writes:** `private.ledger_post` refuses the five payment types. They are posted only by **`private.ledger_post_set()`**, set-based, called from other SECURITY DEFINER functions (no grant): the caller runs `private.ledger_post_set_begin()` (drops and recreates `pg_temp._lps_entry` / `_lps_line`, ADR-0012 temp-schema rule), fills them, and calls it. Scope comes from the account, the payment and the bank account; idempotency key + canonical request hash per entry (`LG004`); it runs the commit-time checks before returning, so a refusal surfaces inside the caller's call.
+- **Same migration, M2a functions redefined:** the pooled ledger-account unique index gains `bank_account_id`, so `ledger_post` and `post_opening_balances` get the new `ON CONFLICT` target (bodies otherwise unchanged; the M2a tests and the 50k confirmation run again).
+- **Read access:** client-money ledger rows (portfolio-less 5120, 4710, 4670 and the entries without a portfolio) are read by admins and ops managers only (`private.money_staff_org_ids()`); clients read their own 4670. Collectors no longer see them (closes M2a risk #6). `public.ledger_balance` and `public.client_money_balances` apply the same rule.
+
+### Bank accounts, payments, references (M2b-1)
+- **`bank_account`**: servicer's accounts; IBAN checked per ISO 13616 (registry country, that country's exact length, mod 97; the same table in SQL, Python and TypeScript); purpose, IBAN, currency and opening date immutable; a closed account stays closed and a bank account is never deleted (ALWAYS triggers). Registered and closed by admins only (`register_bank_account`, `close_bank_account`, idempotency key + request hash); **closing requires a zero 5120 balance**, and is final: the page asks staff to retype the last 4 characters of the IBAN. A reversal never puts money back on a closed account (`ledger_reverse` checks the bank accounts of the lines it negates, `LG002`). An allocation lowers the receivables by exactly the money it moves (Σ1100 = −Σ4710, checked at commit). Read by admins and ops managers.
+- **`payment`**: one row per debtor credit (later: per PSP event). Bank facts (amount, currency, dates, payer, references) immutable; never deleted; amount > 0; currency = the bank account's (composite FK). `account_id` null until matched, never a staged account; client and portfolio are copied from the account by a trigger and checked by a composite foreign key (`account_tenant_key`). The foreign key to `bank_transaction` is added in M2b-2. Read by admins and ops managers; collectors read the payments of their portfolios, never unmatched ones; clients read none (third-party payer data).
+- **`payment_reference`**: RF + 2 check digits + **12 random digits** (no sequence: nothing about portfolio size leaks); valid mod 97; **one active reference per account** (partial unique index); retired references stay and keep resolving; only `active → retired` is allowed; never deleted. Issued set-based when a batch is confirmed (`private.issue_payment_references`, called by `complete_batch_confirmation`), back-filled by the migration for accounts confirmed before M2b. An admin can retire a reference (`retire_payment_reference`), which issues a new one. Readable by whoever reads the portfolio (clients print it on letters).
+- **Check digits in SQL and Python:** `private.mod97 / rf_valid / rf_make / rf_normalise / iban_valid` and `collectoo_worker.payments.rf` give the same answer for every input (parity test on 10,000 random strings). Check digits outside 02–98 are refused (98 ≡ 1 mod 97 would otherwise give two spellings of one reference). Normalisation is ASCII-only on both sides (spaces and line breaks removed, a–z upper-cased) so that no locale changes a result.
+- **Commands** record a request hash in `private.command_log`: the same key with another request is refused.
+
+### Choices made where the design was open (M2b-1)
+1. **I6 is enforced for every entry that moves an allocated or netted receivable**, not only for `allocation` and `netting` entries. The design states I6 as an invariant; checking only the allocation would let a later correction or reversal break it. Openings are exempt (claim books only, on new ledger accounts).
+2. **Reversing a `cash_in` is refused** (`LG003`). The design corrects a wrong line with a payment-tagged `cash_out`; a reversed `cash_in` would break I11 (cash_in of a statement day = Σ its payments).
+3. **Payment rows keep `bank_transaction_id` without its foreign key** until M2b-2 creates `bank_transaction` (as asked for this slice); M2b-2 adds the key and makes it required for the `camt053` and `csv` channels.
+4. **`ledger_post_set` accepts one client per entry from the account, or from `client_organization_id` for a `forward`** (the only payment entry with a client and no account). An `account_id` is required on `allocation` and `netting` and refused on the others.
+5. **The reference check in the table is written out inline** (the ISO formula for a digits-only body) and issuance draws the body inline: a function call per row cost 6.3 s for 50k references; inline, 2.6 s. A pgTAP test shows the inline check says what `rf_valid` says.
+6. **The seed** issues references for its accounts (`select private.issue_payment_references(null)` at the end of `supabase/seed.sql`), as production does for accounts confirmed before M2b.
+
+## Founder decisions (2026-11-08, all defaults accepted)
+1. Money on the dedicated account is booked as soon as the statement is imported, in a "to be allocated" account, before we know whose file it is.
+2. Each file gets one payment reference (RF + 14 digits, printed in groups of four) when its batch is confirmed; files already confirmed get one now.
+3. Automatic matching only on a valid RF reference, on an invoice or file number backed by the payer's name, a known IBAN or the exact amount, or on an IBAN that already paid this file and only this one; name plus amount is only a suggestion.
+4. A payment pays the invoices the debtor names, then due invoices oldest first (same date: pro rata), then invoices not yet due; inside each invoice interest, then principal, then the seller's unclassified amounts.
+5. Clients and portfolios cannot change "interest before principal" or the legal order; they only set where future fees and indemnities rank.
+6. Consumer loans: the seller's unclassified amounts are not paid by allocation until ops classify them; the extra is an overpayment.
+7. Credit notes are proposed automatically and applied with one ops tap (compensation must be invoked).
+8. An overpayment stays with us, is never passed to the client, and is refunded to the payer by ops (or used for another file of the same debtor on written request).
+9. A payment in another currency than the debt is not converted; it goes to ops and is refunded by default.
+10. A payment dated before the cut-off goes to ops: passed to the client if the seller's balance already counts it, otherwise allocated at the cut-off date.
+11. A payment on a file not yet confirmed waits and is matched again at confirmation; if the batch is rolled back, it is refunded unless the client ratifies it (confirmed after an explanation).
+12. Surendettement (admissible) or collective proceeding: the payment is held, the client is told, ops refunds it or allocates it with the judge's authorisation.
+13. A bank return or chargeback undoes the allocation on the return date, cancels the receipt and informs the client.
+14. Every payment linked to a file gets a French PDF receipt, versioned, with no remaining balance until M3 computes interest.
+15. The payer's name is on the receipt only if the payer is a party to the file; otherwise « versement d'un tiers ».
+16. No go-live with real payments before M3 computes interest; M3 re-runs earlier allocations by date.
+17. The client is told of every payment we allocate (instalments of a known plan included) and of every payment held for its file.
+18. Imports, assignments, refunds and reversals: admins and ops managers; collectors see the payments of their portfolios; clients see the payment feed, not bank lines.
+19. Synthetic CAMT.053 and CSV files only, until 2–3 anonymised real exports from French banks arrive to calibrate matching.
+20. Bank fees and other debits on the dedicated account are not booked in M2b (explained gaps); the bank is asked to charge fees to the operating account.
+
+## Consequences
+- Client money is closed in every entry, so Σ5120 + Σ4710 + Σ4670 = 0 at every date by construction (I8); the property machine checks it after every step against Postgres.
+- Overpaid, held and unidentified money stays in pooled 4710, attributed by `payment_id`; M2c remits from 4670 only, so it can never be remitted by mistake.
+- Every payment entry is posted through one set-based function: M2b-2 … M2b-6 write the input tables and never insert ledger rows themselves (static test on the worker unchanged).
+- Per-entry checks at commit cost a few index lookups per payment entry; M2b-4 measures them on 50k allocations (design risk R1, fallback: statement-level checks).
+- Confirmation now also issues references: the 50k confirmation job went from ~20 s to ~23–27 s locally (50k references ≈ 2.6 s, of which ≈ 1 s is the change log; the extended commit-time check adds ≈ 0.3 s for 50k openings). The migration's back-fill of 50k references takes ≈ 3 s.
+- A correction that would take an allocated receivable below zero is refused (`LG007`): the correction must first reverse the allocation.

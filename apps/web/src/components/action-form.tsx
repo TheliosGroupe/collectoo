@@ -16,6 +16,7 @@ export function ActionForm({
   pendingLabel = "Patientez…",
   buttonClassName,
   className,
+  resetOnSuccess = false,
   children,
 }: {
   action: (formData: FormData) => Promise<ActionResult>;
@@ -23,6 +24,8 @@ export function ActionForm({
   pendingLabel?: string;
   buttonClassName: string;
   className?: string;
+  /** Empty the fields once the action succeeded (a form that adds a row). */
+  resetOnSuccess?: boolean;
   children?: ReactNode;
 }) {
   const router = useRouter();
@@ -32,12 +35,16 @@ export function ActionForm({
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (pending) return;
-    const formData = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const formData = new FormData(form);
     setError(null);
     startTransition(async () => {
       const result = await action(formData);
       if ("error" in result) setError(errorText(result.error));
-      else router.refresh();
+      else {
+        if (resetOnSuccess) form.reset();
+        router.refresh();
+      }
     });
   }
 
