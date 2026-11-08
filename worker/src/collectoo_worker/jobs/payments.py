@@ -7,8 +7,10 @@
 
 A file that cannot be imported is refused (`rejected`, with a stable code the back-office words
 in French): parse errors before anything is written, refusals of the SQL import (closed bank
-account, unbalanced, duplicate reference…) by rolling back to a savepoint. Technical failures are
-retried by the queue, then dead-lettered (`failed`).
+account, unbalanced, duplicate reference…) by rolling back to a savepoint. An unexpected error of
+a parser is a refusal too (`parse_failed`): parsing reads only the file, so a retry would fail the
+same way. Technical failures (I/O, database) are retried by the queue, then dead-lettered
+(`failed`).
 """
 
 from __future__ import annotations
@@ -108,6 +110,13 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
             )
         except StatementRejected as exc:
             reject(conn, statement_id, exc.code, exc.detail)
+            return "rejected"
+        except (OSError, MemoryError):
+            raise  # the machine, not the file: retried by the queue
+        except Exception as exc:
+            # Parsing reads only the file: it would fail the same way on every retry.
+            log.exception("statement %s: the parser failed", statement_id)
+            reject(conn, statement_id, "parse_failed", f"{type(exc).__name__}: {exc}")
             return "rejected"
     parsed_at = time.monotonic()
     try:

@@ -136,11 +136,11 @@ def test_a_documented_csv_with_preamble_and_both_amount_columns(tmp_path: Path) 
     )
     parsed = _parse(tmp_path, text)
     got = [(x.line_no, x.direction, x.amount_minor, x.kind, x.dedup_key) for x in parsed.lines]
-    assert got == [
-        (1, "credit", 120000, "debtor_credit", "c:OP1"),
-        (2, "debit", 1290, "other_debit", "c:OP2"),
-        (3, "debit", 5000, "return", "c:OP3"),
-        (4, "debit", 8000, "refund_out", "c:OP5"),
+    assert got == [  # line_no: the file's line (preamble and header included)
+        (5, "credit", 120000, "debtor_credit", "c:OP1"),
+        (6, "debit", 1290, "other_debit", "c:OP2"),
+        (7, "debit", 5000, "return", "c:OP3"),
+        (9, "debit", 8000, "refund_out", "c:OP5"),
     ]
     assert parsed.skipped_not_booked == 1  # zero amount
     first = parsed.lines[0]

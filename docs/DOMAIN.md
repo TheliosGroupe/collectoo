@@ -634,13 +634,19 @@ erDiagram
 
 **Line kinds:** `debtor_credit` a debtor's transfer, direct debit, card or cheque credit; `batch_unsplit` a batch booking whose details do not add up (a credit is still one payment); `return` the bank undoes an earlier movement (return reason, reversal indicator, return bank transaction code; either direction); `refund_out` our refund (end-to-end id `RFD…`); `other_debit` fees and anything else debited; `suspected_duplicate` a CSV line with the day, amount and direction of an earlier line and a similar label (held for ops); `psp_payout` M5.
 
-**« Relevé CSV » — the documented column set** (manual import when the bank sends no camt.053; one format per bank account). Headers are matched without case, accents or punctuation; the header row may follow up to 19 preamble lines; separator `;`, `,`, tab or `|`; UTF-8 or Windows-1252.
+**« Relevé CSV » — the documented column set** (manual import when the bank sends no camt.053; one format per bank account). Headers are matched without case, accents or punctuation; the header row may follow up to 19 preamble lines; separator `;`, `,`, tab or `|`. What the reader cannot read one way only refuses the file before anything is written, with a stable code:
+
+- **Encoding**, decided over the whole file: UTF-8 from the first byte to the last (a BOM is allowed and dropped), otherwise Windows-1252. UTF-16, a NUL byte, a byte Windows-1252 does not define (0x81, 0x8D, 0x8F, 0x90, 0x9D), or a non-UTF-8 byte in a file that starts with a UTF-8 BOM: `csv_encoding`, with the line.
+- **Quoting:** a field may be enclosed in double quotes (to hold the separator; `""` is a quote inside it). No field holds a line break: a row spread over several lines (a quote left open swallows the following rows) is refused (`csv_row`), as is a field over 131,072 characters.
+- **Row shape:** each row has the cells of the booking date, the label and the amounts; optional cells missing at the end of a row are empty; cells beyond the header must be empty (an unquoted separator in a label moves the amounts): otherwise `csv_row`.
+- **Size:** at most **250,000 lines** (preamble, header and blank lines included) and **64 MiB**, checked before parsing (`file_too_large`; 2.5 times the 100k-line target: the worker holds the parsed lines in memory, about 0.7 KB each, in the process that also runs boarding). A longer export is cut by period.
+- **Line numbers:** « ligne N » in a refusal is the line of the file as a text editor or a spreadsheet numbers it (the first line is 1; preamble, header and blank lines count), and each imported line keeps that number (`line_no`), so the SQL refusals name the same line.
 
 | Field | Accepted headers | Required | Format |
 |---|---|---|---|
-| Booking date | `Date`, `Date opération`, `Date comptable`, `Date de comptabilisation` | yes | `JJ/MM/AAAA` (also `JJ-MM-AAAA`, `JJ.MM.AAAA`, `AAAA-MM-JJ`) |
+| Booking date | `Date de comptabilisation`, `Date comptable`, then `Date opération`, `Date` | yes | `JJ/MM/AAAA` (also `JJ-MM-AAAA`, `JJ.MM.AAAA`, `AAAA-MM-JJ`). A file with a header of each rank (BPCE exports: `Date de comptabilisation` and `Date opération`) reads the first rank; two of the same rank are refused (`csv_header`) |
 | Label | `Libellé`, `Libellé opération`, `Description`, `Intitulé` | yes | text; markers `/DE <payer>`, `/MOTIF <text>`, `/REF <reference>` are read |
-| Amount | `Montant` (signed) — or `Débit` and `Crédit` | yes | `1 234,56`, `1.234,56`, `-50,00`, `50,00-`; more decimals than the currency has: refused, never rounded |
+| Amount | `Montant` (signed) — or `Débit` and `Crédit` | yes | `1 234,56`, `1.234,56`, `-50,00`, `50,00-`; more decimals than the currency has: refused, never rounded. A `Débit` may be printed negative or positive; a negative `Crédit` is refused |
 | Value date | `Date valeur`, `Date de valeur` | no | as the booking date |
 | Bank's operation id | `Référence opération`, `Référence banque`, `Réf banque`, `Id opération`, `Identifiant opération`, `Numéro d'opération` | no (recommended) | exact dedup key; a plain `Référence` is not trusted |
 | Counterparty | `Contrepartie`, `Nom contrepartie`, `Tiers`, `Émetteur bénéficiaire`; else `/DE` | no | |
@@ -649,7 +655,7 @@ erDiagram
 | Creditor reference | `Référence créancier`, `Référence RF`; else a valid RF after `/REF` | no | |
 | End-to-end id | `Référence de bout en bout`, `End to end`; else a non-RF `/REF` | no | |
 
-A bank account's `csv_profile` names its own headers (`{"columns": {"booking_date": "Date opé"}, "decimal": ","}`). Lines whose bank part of the label (before `/DE`, `/MOTIF`, `/REF`) contains `RETOUR`, `REJET`, `IMPAYÉ` or `ANNULATION` are `return` (the payer's words are not read for this). A CSV proves no balance: no opening/closing check.
+A bank account's `csv_profile` names its own headers (`{"columns": {"booking_date": "Date opé"}, "decimal": ","}`). A line is a `return` only when its label **starts** with the bank's operation type and a return word, in either order: `RETOUR`, `RETOURNÉ`, `REJET`, `REJETÉ`, `IMPAYÉ` or `ANNULATION` (optionally followed by `DE`/`DU`) with `VIR`, `VIREMENT`, `PRLV`, `PRÉLÈVEMENT`, `SEPA`, `CHQ`, `CHÈQUE`, `REM`, `REMISE`, `CB` or `CARTE` (« RETOUR VIR SEPA », « REJET DE PRLV », « PRLV SEPA REJETÉ », « IMPAYÉ CHQ »). Words further in the label may be the payer's (« REGLEMENT IMPAYE ») and are never read for this: a debtor's credit is never turned into a non-payment by its motif. A CSV proves no balance: no opening/closing check.
 
 ### 3.6 Plans, promises, disputes, holds, legal
 
@@ -1165,7 +1171,7 @@ stateDiagram-v2
     [*] --> awaiting_upload : admin or ops manager registers the file (SHA-256, size, account)
     awaiting_upload --> uploaded : file stored, import queued
     uploaded --> imported : worker books new lines (one transaction)
-    uploaded --> rejected : file unreadable or inexact, wrong account or currency, unbalanced, closed account, reference conflict
+    uploaded --> rejected : file too large, unreadable or inexact, wrong account or currency, unbalanced, closed account, reference conflict
     uploaded --> failed : technical error after the retries
     imported --> [*]
     rejected --> [*]
