@@ -23,7 +23,7 @@ _Phase 0 draft, 2026-11-07. Each task fits in under one day. 🔒 = blocked on f
 | PR-6 | M1b Mapping (mock LLM), eval, profiles | M1-06 … M1-10 |
 | PR-7 | M1c Transformations, claim type, validation, DQ report | M1-11 … M1-16 |
 | PR-8 | M1d Staging, commit/rollback, scale tests (+ documents zip) | M1-17 … M1-22 (split: M1d = M1-17, 18, 20, 21, 22; M1e = M1-19 review UI) |
-| PR-9 | M2a Ledger | M2-01 … M2-05 (split: M2a-1 = M2-01…04 ledger core; M2a-2 = M2-05 opening balances at confirmation) |
+| PR-9 | M2a Ledger | M2-01 … M2-05 (split: M2a-1 = M2-01…04 ledger core; M2a-2 = M2-05 opening balances at confirmation; M2a-3 = batch commit as a background job, needed above ~20k loans for the 8 s API limit) |
 | PR-10 | M2b Payments, reconciliation, allocation, receipts | M2-06 … M2-11 |
 | PR-11 | M2c Remittances, client statements, commission | M2-12 … M2-15 |
 | PR-12 | M3a Rate tables, rule-pack format, engine core | M3-01 … M3-06 |

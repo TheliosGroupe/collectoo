@@ -2,6 +2,82 @@
 -- Commit computes the same opening plan and checks it against the data-quality report; the
 -- ledger then holds only claims under an active mandate, and rollback stays a hard delete.
 
+------------------------------------------------------------------------------------------
+-- Ledger guards without LIMIT 1 (redefines 20261108170000). With "limit 1" over a check that
+-- normally finds nothing, the planner bets on an early match and picks nested loops: on a
+-- 50k-account opening (300k lines) right after another batch, the posting guard ran for
+-- more than 10 minutes. An aggregate makes it plan for reading every new row (hash joins).
+------------------------------------------------------------------------------------------
+
+create or replace function private.ledger_entry_guard()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+declare v_bad text;
+begin
+  select min(n.id::text) into v_bad from new_rows n
+  where not exists (select 1 from public.organization o where o.id = n.organization_id and o.kind = 'servicer')
+     or (n.client_organization_id is not null and not exists (
+           select 1 from public.organization o
+           where o.id = n.client_organization_id and o.servicer_organization_id = n.organization_id))
+     or (n.portfolio_id is not null and not exists (
+           select 1 from public.portfolio p
+           where p.id = n.portfolio_id and p.organization_id = n.organization_id
+             and p.client_organization_id = n.client_organization_id))
+     or (n.account_id is not null and not exists (
+           select 1 from public.account a
+           where a.id = n.account_id and a.portfolio_id = n.portfolio_id and a.organization_id = n.organization_id));
+  if v_bad is not null then
+    raise exception 'ledger: entry % is outside its tenant (organization, client, portfolio, account)', v_bad
+      using errcode = 'LG002';
+  end if;
+  select min(n.id::text) into v_bad from new_rows n
+  left join public.ledger_entry t on t.id = n.reverses_entry_id
+  where n.reverses_entry_id is not null
+    and (t.id is null or t.reverses_entry_id is not null
+         or t.organization_id <> n.organization_id
+         or t.client_organization_id is distinct from n.client_organization_id
+         or t.portfolio_id is distinct from n.portfolio_id
+         or t.account_id is distinct from n.account_id
+         or t.line_count <> n.line_count
+         or n.effective_date < t.effective_date);
+  if v_bad is not null then
+    raise exception 'ledger: reversal % does not match the entry it reverses', v_bad using errcode = 'LG003';
+  end if;
+  return null;
+end;
+$$;
+
+create or replace function private.ledger_posting_guard()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+declare v_bad text;
+begin
+  select min(n.entry_id || ':' || n.line_no) into v_bad
+  from new_rows n
+  left join public.ledger_entry e on e.id = n.entry_id
+  left join public.ledger_account la on la.id = n.ledger_account_id
+  left join public.ledger_entry_type t on t.code = e.entry_type
+  where e.id is null or la.id is null
+     or n.line_no > e.line_count
+     or n.currency <> la.currency
+     or n.effective_date <> e.effective_date
+     or la.organization_id <> e.organization_id
+     or (la.client_organization_id is not null and la.client_organization_id is distinct from e.client_organization_id)
+     or (la.portfolio_id is not null and la.portfolio_id is distinct from e.portfolio_id)
+     or (la.account_id is not null and la.account_id is distinct from e.account_id)
+     or (t.allowed_books is not null and not (la.book = any (t.allowed_books)));
+  if v_bad is not null then
+    raise exception 'ledger: posting % does not fit its entry (closed entry, account, currency, date, tenant or book)', v_bad
+      using errcode = 'LG002';
+  end if;
+  return null;
+end;
+$$;
+
 alter table public.boarding_batch
   add column opening_plan jsonb,
   add column opening_summary jsonb,
@@ -122,31 +198,30 @@ set search_path = ''
 as $$
 declare v_bad text;
 begin
-  select a.external_ref into v_bad from public.account a
+  -- min(), not LIMIT 1: with a limit the planner bets on finding a bad row early and picks
+  -- nested loops (50k x 50k rows when every row is fine, which is the normal case).
+  select min(a.external_ref) into v_bad from public.account a
   join public.claim_item i on i.account_id = a.id and i.kind = 'loan_principal'
   left join (select f3_01_loan_identifier, count(*) as n from eba.t3_loan
              where boarding_batch_id = p_batch_id group by f3_01_loan_identifier) t
     on t.f3_01_loan_identifier = a.external_ref
-  where a.boarding_batch_id = p_batch_id and coalesce(t.n, 0) <> 1
-  limit 1;
-  if found then
+  where a.boarding_batch_id = p_batch_id and coalesce(t.n, 0) <> 1;
+  if v_bad is not null then
     raise exception 'ledger: EU loan % has no single T3 row in this batch', v_bad using errcode = 'LG006';
   end if;
-  select a.external_ref into v_bad from public.account a
+  select min(a.external_ref) into v_bad from public.account a
   join public.claim_item i on i.account_id = a.id and i.kind = 'loan_principal'
   join eba.t3_loan t on t.boarding_batch_id = p_batch_id and t.f3_01_loan_identifier = a.external_ref
-  where a.boarding_batch_id = p_batch_id and i.original_minor <> (coalesce(t.f3_12_legal_balance, 0) * 100)::bigint
-  limit 1;
-  if found then
+  where a.boarding_batch_id = p_batch_id and i.original_minor <> (coalesce(t.f3_12_legal_balance, 0) * 100)::bigint;
+  if v_bad is not null then
     raise exception 'ledger: EU loan % legal balance differs from its 3.12', v_bad using errcode = 'LG006';
   end if;
-  select a.external_ref into v_bad from public.account a join public.claim_item i on i.account_id = a.id
+  select min(a.external_ref) into v_bad from public.account a join public.claim_item i on i.account_id = a.id
   where a.boarding_batch_id = p_batch_id
     and (i.currency <> a.currency
          or not exists (select 1 from public.currency c where c.code = a.currency and c.minor_exponent = 2)
-         or (i.kind = 'credit_note' and i.seller_paid_minor > 0))
-  limit 1;
-  if found then
+         or (i.kind = 'credit_note' and i.seller_paid_minor > 0));
+  if v_bad is not null then
     raise exception 'ledger: account % has an item in another or unsupported currency, or a paid credit note', v_bad
       using errcode = 'LG006';
   end if;
@@ -473,11 +548,14 @@ begin
 
   foreach t in array private.eba_tables() loop
     execute format(
+      -- In FROM, the record is built once per row ("(f(x)).*" in the select list calls f once
+      -- per column: 49 times per EU loan).
       $sql$insert into eba.%1$I
-           select (jsonb_populate_record(null::eba.%1$I,
-                     s.data || jsonb_build_object('id', gen_random_uuid(), 'organization_id', $2,
-                       'boarding_batch_id', $1, 'created_at', now()))).*
-           from private.boarding_staging s where s.batch_id = $1 and s.entity = %2$L$sql$,
+           select r.* from private.boarding_staging s
+           cross join lateral jsonb_populate_record(null::eba.%1$I,
+             s.data || jsonb_build_object('id', gen_random_uuid(), 'organization_id', $2,
+               'boarding_batch_id', $1, 'created_at', now())) r
+           where s.batch_id = $1 and s.entity = %2$L$sql$,
       t, 'eba.' || t)
     using p_batch_id, v.organization_id;
   end loop;
