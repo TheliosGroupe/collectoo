@@ -59,6 +59,9 @@ begin
 end;
 $$;
 
+-- The opening joins an EU loan to its T3 row by batch and loan identifier.
+create index t3_loan_batch_loan_idx on eba.t3_loan (boarding_batch_id, f3_01_loan_identifier);
+
 -- The source of an opening balance is frozen once its account is workable.
 create or replace function private.claim_item_frozen()
 returns trigger
@@ -121,9 +124,10 @@ declare v_bad text;
 begin
   select a.external_ref into v_bad from public.account a
   join public.claim_item i on i.account_id = a.id and i.kind = 'loan_principal'
-  where a.boarding_batch_id = p_batch_id
-    and (select count(*) from eba.t3_loan t
-         where t.boarding_batch_id = p_batch_id and t.f3_01_loan_identifier = a.external_ref) <> 1
+  left join (select f3_01_loan_identifier, count(*) as n from eba.t3_loan
+             where boarding_batch_id = p_batch_id group by f3_01_loan_identifier) t
+    on t.f3_01_loan_identifier = a.external_ref
+  where a.boarding_batch_id = p_batch_id and coalesce(t.n, 0) <> 1
   limit 1;
   if found then
     raise exception 'ledger: EU loan % has no single T3 row in this batch', v_bad using errcode = 'LG006';
@@ -479,6 +483,8 @@ begin
   end loop;
 
   -- The opening balances that confirmation will post, checked now against the report.
+  analyze public.claim_item;  -- the plan joins this batch's rows: statistics must include them
+  analyze eba.t3_loan;
   perform private.check_opening_sources(p_batch_id);
   v_plan := private.opening_totals(p_batch_id, false);
   perform private.assert_opening_matches(p_batch_id, v_plan);

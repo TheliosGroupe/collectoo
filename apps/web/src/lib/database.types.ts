@@ -91,14 +91,14 @@ isOneToOne: false
                   ]
                 },"boarding_batch": {
                   Row: {
-                    "art4_exemptions": NonNullable<Json>,"claim_type_spec_version": number | null,"client_organization_id": string,"commit_override_reason": string | null,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"dq_report": Json | null,"failed_job": Json | null,"id": string,"join_keys": NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"staging_digest": Json | null,"status": string,"transform_spec_version": number | null,"updated_at": string,"validation_spec_version": number | null,"version": number
+                    "art4_exemptions": NonNullable<Json>,"claim_type_spec_version": number | null,"client_organization_id": string,"commit_override_reason": string | null,"confirm_requested_at": string | null,"confirm_requested_by": string | null,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"dq_report": Json | null,"failed_job": Json | null,"id": string,"join_keys": NonNullable<Json>,"opening_plan": Json | null,"opening_summary": Json | null,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"staging_digest": Json | null,"status": string,"transform_spec_version": number | null,"updated_at": string,"validation_spec_version": number | null,"version": number
                   }
                   ComputedFields: never
                   Insert: {
-                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id": string,"commit_override_reason"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"failed_job"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version": number
+                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id": string,"commit_override_reason"?: string | null,"confirm_requested_at"?: string | null,"confirm_requested_by"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"failed_job"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"opening_plan"?: Json | null,"opening_summary"?: Json | null,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version": number
                   }
                   Update: {
-                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id"?: string,"commit_override_reason"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"failed_job"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version"?: number
+                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id"?: string,"commit_override_reason"?: string | null,"confirm_requested_at"?: string | null,"confirm_requested_by"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"failed_job"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"opening_plan"?: Json | null,"opening_summary"?: Json | null,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version"?: number
                   }
                   Relationships: [
                     {
@@ -106,6 +106,12 @@ isOneToOne: false
       columns: ["client_organization_id"]
 isOneToOne: false
       referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "boarding_batch_confirm_requested_by_fkey"
+      columns: ["confirm_requested_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
       referencedColumns: ["id"]
     },{
       foreignKeyName: "boarding_batch_created_by_fkey"
