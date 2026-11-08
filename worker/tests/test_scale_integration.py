@@ -45,6 +45,38 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
     drain(store)  # M2a-3: the commit job writes the rows and the opening plan
     commit_s = time.monotonic() - commit_started
     # M2-05: confirmation (staff at aal2, active mandate) queues the job that posts the openings.
+    _add_mandate(tenant, batch)
+    with psycopg.connect(DB) as conn, conn.transaction():
+        as_user(conn, tenant["staff"], aal="aal2")
+        conn.execute("set local statement_timeout = '8s'")  # what the API allows a request
+        conn.execute("select public.confirm_boarding_batch(%s)", (batch,))
+    confirm_started = time.monotonic()
+    drain(store)
+    confirm_s = time.monotonic() - confirm_started
+    status, openings, posted, accounts, loans, parties, references = _results(batch)
+    backfilled, backfill_s = _time_backfill(batch)
+    elapsed = time.monotonic() - started
+    print(
+        f"\n50k boarding: {elapsed:.0f}s (commit {commit_s:.1f}s, confirm job {confirm_s:.1f}s),"
+        f" accounts={accounts}, parties={parties}, openings={openings}, rows={counts},"
+        f" RF references={references}; backfill of {backfilled} references {backfill_s:.1f}s"
+    )
+    assert accounts == loans == LOANS
+    assert parties == counts["t1_counterparty"]
+    assert report["claim_types"] == {
+        k: v
+        for k, v in report["claim_types"].items()
+        if k in ("consumer_instalment_loan", "professional_loan")
+    }
+    assert report["reconciliation"]["computed"]["rows"] == LOANS
+    assert status == "confirmed" and openings == LOANS
+    assert references == LOANS and backfilled >= LOANS  # M2-06: one per workable account
+    assert posted == int(report["reconciliation"]["computed"]["outstanding_minor"])  # M2-05
+    assert elapsed < 300
+
+
+def _add_mandate(tenant: dict[str, Any], batch: str) -> None:
+    """Confirmation needs an active client mandate on the portfolio (R124-3)."""
     with psycopg.connect(DB) as conn, conn.transaction():
         mandate = one(
             conn,
@@ -62,13 +94,10 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
             "update public.portfolio set mandate_id = %s where id = %s",
             (mandate, tenant["portfolio"]),
         )
-    with psycopg.connect(DB) as conn, conn.transaction():
-        as_user(conn, tenant["staff"], aal="aal2")
-        conn.execute("set local statement_timeout = '8s'")  # what the API allows a request
-        conn.execute("select public.confirm_boarding_batch(%s)", (batch,))
-    confirm_started = time.monotonic()
-    drain(store)
-    confirm_s = time.monotonic() - confirm_started
+
+
+def _results(batch: str) -> tuple[Any, ...]:
+    """Status, openings, Σ posted receivable, accounts, EU loans, parties, valid RF references."""
     with psycopg.connect(DB) as conn:
         status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
         openings = one(
@@ -100,8 +129,13 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
                  and r.rf ~ '^RF[0-9]{14}$' and private.rf_valid(r.rf)""",
             (batch,),
         )
-    # M2-06 backfill path (references for every workable account without one), timed on this
-    # batch's accounts and rolled back.
+    return status, openings, posted, accounts, loans, parties, references
+
+
+def _time_backfill(batch: str) -> tuple[int, float]:
+    """The M2-06 backfill (a reference for every workable account without one), timed on this
+    batch's accounts and rolled back."""
+    backfilled, backfill_s = 0, 0.0
     with psycopg.connect(DB) as conn, conn.transaction():
         conn.execute(
             """update public.payment_reference r set status = 'retired', retired_at = now(),
@@ -113,21 +147,4 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
         backfilled = one(conn, "select private.issue_payment_references(null)")
         backfill_s = time.monotonic() - backfill_started
         raise psycopg.Rollback  # nothing of this measurement stays
-    elapsed = time.monotonic() - started
-    print(
-        f"\n50k boarding: {elapsed:.0f}s (commit {commit_s:.1f}s, confirm job {confirm_s:.1f}s),"
-        f" accounts={accounts}, parties={parties}, openings={openings}, rows={counts},"
-        f" RF references={references}; backfill of {backfilled} references {backfill_s:.1f}s"
-    )
-    assert accounts == loans == LOANS
-    assert parties == counts["t1_counterparty"]
-    assert report["claim_types"] == {
-        k: v
-        for k, v in report["claim_types"].items()
-        if k in ("consumer_instalment_loan", "professional_loan")
-    }
-    assert report["reconciliation"]["computed"]["rows"] == LOANS
-    assert status == "confirmed" and openings == LOANS
-    assert references == LOANS and backfilled >= LOANS  # M2-06: one per workable account
-    assert posted == int(report["reconciliation"]["computed"]["outstanding_minor"])  # M2-05
-    assert elapsed < 300
+    return backfilled, backfill_s
