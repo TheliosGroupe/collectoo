@@ -1,6 +1,6 @@
 -- Ledger balances and read access (M2-03): balance at D = sum of postings with effective_date <= D.
 begin;
-select plan(19);
+select plan(21);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -102,6 +102,9 @@ select is((select count(*)::int from private.client_money_balances('00000000-000
   0, 'and never for client B');
 
 -- Read access -----------------------------------------------------------------------------------------
+-- Expected value computed before switching role (the private function is service_role only).
+select set_config('test.a1_balance',
+  (select balance_minor::text from private.account_balances('30000000-0000-0000-0000-0000000000a1', private.paris_today())), true);
 select set_config('request.jwt.claims',
   '{"sub": "10000000-0000-0000-0000-000000000003", "role": "authenticated", "aal": "aal1"}', true);
 set local role authenticated;
@@ -111,8 +114,9 @@ select is((select count(*)::int from public.ledger_posting p join public.ledger_
            where la.client_organization_id = '00000000-0000-0000-0000-0000000000a2'), 0, 'and no line of client B');
 select is((select count(*)::int from public.ledger_account where client_organization_id is null), 0,
   'unidentified receipts are not shown to a client');
-select is((select balance_minor from public.account_balances('30000000-0000-0000-0000-0000000000a1')), 600::bigint,
-  'client A reads its own balances (as_of defaults to the Paris date)');
+select is((select balance_minor from public.account_balances('30000000-0000-0000-0000-0000000000a1')),
+  current_setting('test.a1_balance')::bigint,
+  'client A reads its own balances; as_of defaults to the Paris date');
 select throws_ok($$ select * from public.account_balances('30000000-0000-0000-0000-0000000000a2') $$, '42501', null,
   'but not client B''s');
 reset role;
@@ -136,12 +140,26 @@ select set_config('request.jwt.claims',
 set local role authenticated;
 select throws_ok($$ select * from public.account_balances('30000000-0000-0000-0000-0000000000a1') $$, '42501', null,
   'a collector restricted to another portfolio cannot read this account');
+select is(
+  (select count(*)::int from public.ledger_account where portfolio_id = '20000000-0000-0000-0000-0000000000a1')
+  + (select count(*)::int from public.ledger_entry where portfolio_id = '20000000-0000-0000-0000-0000000000a1')
+  + (select count(*)::int from public.ledger_posting p join public.ledger_entry e on e.id = p.entry_id
+     where e.portfolio_id = '20000000-0000-0000-0000-0000000000a1'),
+  0, 'nor any ledger row of that portfolio (RLS)');
+select ok((select count(*) from public.ledger_entry where portfolio_id = '20000000-0000-0000-0000-0000000000a2') > 0,
+  'but sees its own portfolio''s entries');
 reset role;
 
-select is(
-  (select count(*)::int from auth.users u where u.id::text like '10000000-%'
-     and (select private.readable_portfolio_ids()) is not null),
-  4, 'readable_portfolio_ids is callable for every fixture user');
+-- readable_portfolio_ids (used by the policies) = the portfolios can_read_portfolio allows, per user.
+create or replace function pg_temp.portfolio_sets_agree(p_user uuid, p_aal text) returns boolean language plpgsql as $$
+begin
+  perform set_config('request.jwt.claims',
+    json_build_object('sub', p_user, 'role', 'authenticated', 'aal', p_aal)::text, true);
+  return (select coalesce(array_agg(x order by x), '{}') from unnest(private.readable_portfolio_ids()) x)
+       = (select coalesce(array_agg(p.id order by p.id), '{}') from public.portfolio p where private.can_read_portfolio(p.id));
+end $$;
+select ok(bool_and(pg_temp.portfolio_sets_agree(u.id, a)), 'readable_portfolio_ids matches can_read_portfolio for every user')
+from auth.users u cross join (values ('aal1'), ('aal2')) v (a) where u.id::text like '10000000-%';
 
 select * from finish();
 rollback;

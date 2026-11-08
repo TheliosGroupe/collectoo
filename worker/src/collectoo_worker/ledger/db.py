@@ -21,8 +21,11 @@ from collectoo_worker.ledger.model import (
     ClientMoney,
     Component,
     EntryDraft,
+    InvalidRequestError,
     LedgerError,
     PostResult,
+    check_key,
+    check_reason,
 )
 
 Conn = psycopg.Connection[Any]
@@ -31,6 +34,8 @@ Conn = psycopg.Connection[Any]
 def from_db_error(exc: psycopg.Error) -> LedgerError | None:
     """The ledger exception for a database error raised by the ledger (SQLSTATE LG0xx)."""
     sqlstate = getattr(exc, "sqlstate", None) or ""
+    if sqlstate == "23514":  # a CHECK constraint of a ledger table: an invalid request
+        return InvalidRequestError(str(exc).split("\n", 1)[0])
     cls = ERRORS_BY_SQLSTATE.get(sqlstate)
     if cls is None:
         return None
@@ -77,6 +82,8 @@ def reverse(
     effective_date: date | None = None,
 ) -> PostResult:
     """Reverse an entry (ROADMAP `ledger.reverse`): a mirror entry, never an edit."""
+    check_key(idempotency_key)
+    check_reason(reason)
     rows = _call(
         conn,
         "select entry_id, created from private.ledger_reverse(%s, %s, %s, %s)",

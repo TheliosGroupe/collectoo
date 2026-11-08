@@ -10,15 +10,17 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import date
 from enum import StrEnum
 from uuid import UUID
 
 MAX_ABS_MINOR = 10**15
 MAX_LINES = 100_000
-KEY_RE = re.compile(r"^[A-Za-z0-9:._#-]{8,200}$")
-CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+KEY_RE = re.compile(r"[A-Za-z0-9:._#-]{8,200}")
+CURRENCY_RE = re.compile(r"[A-Z]{3}")
+HASH_RE = re.compile(r"[0-9a-f]{64}")
+MAX_REASON = 2000
 
 
 class Book(StrEnum):
@@ -140,7 +142,7 @@ class Line:
             )
         if self.amount_minor == 0 or abs(self.amount_minor) > MAX_ABS_MINOR:
             raise InvalidRequestError(f"amount_minor out of range: {self.amount_minor}")
-        if not CURRENCY_RE.match(self.currency):
+        if not CURRENCY_RE.fullmatch(self.currency):
             raise InvalidRequestError(f"currency must be 3 capital letters, got {self.currency!r}")
         if self.book is Book.DEBTOR_RECEIVABLE:
             if self.claim_item_id is None or self.component is None:
@@ -198,6 +200,18 @@ def mirror(lines: Iterable[Line]) -> tuple[Line, ...]:
     return tuple(line.negated() for line in lines)
 
 
+def check_key(key: str) -> None:
+    if not KEY_RE.fullmatch(key):
+        raise InvalidRequestError("idempotency key: 8-200 characters among A-Z a-z 0-9 : . _ # -")
+
+
+def check_reason(reason: str | None) -> None:
+    if not (reason and reason.strip()):
+        raise InvalidRequestError("a reason is required")
+    if len(reason.strip()) > MAX_REASON:
+        raise InvalidRequestError(f"a reason has at most {MAX_REASON} characters")
+
+
 @dataclass(frozen=True, slots=True)
 class EntryDraft:
     organization_id: UUID
@@ -212,7 +226,6 @@ class EntryDraft:
     engine_version: str | None = None
     rule_pack_version_id: UUID | None = None
     inputs_hash: str | None = None
-    meta: Mapping[str, str] = field(default_factory=dict)
 
     def validate(self) -> None:
         """Same rules as the database: refuse before sending (the database stays the backstop)."""
@@ -220,12 +233,11 @@ class EntryDraft:
             raise InvalidRequestError(f"{self.entry_type} entries are not posted through the API")
         if not 2 <= len(self.lines) <= MAX_LINES:
             raise InvalidRequestError(f"an entry has 2 to {MAX_LINES} lines, got {len(self.lines)}")
-        if not KEY_RE.match(self.idempotency_key):
+        if not KEY_RE.fullmatch(self.idempotency_key):
             raise InvalidRequestError(
                 "idempotency key: 8-200 characters among A-Z a-z 0-9 : . _ # -"
             )
-        if not (self.reason and self.reason.strip()):
-            raise InvalidRequestError("an adjustment needs a reason")
+        check_reason(self.reason)
         allowed = ALLOWED_BOOKS[self.entry_type]
         if any(line.book not in allowed for line in self.lines):
             raise ScopeError(f"a {self.entry_type} entry may only touch {sorted(allowed)}")
@@ -247,6 +259,8 @@ class EntryDraft:
             raise MirrorBrokenError(f"receivable/owner-claim mirror broken: {broken}")
         if (self.engine_version is None) != (self.inputs_hash is None):
             raise InvalidRequestError("engine_version and inputs_hash go together")
+        if self.inputs_hash is not None and not HASH_RE.fullmatch(self.inputs_hash):
+            raise InvalidRequestError("inputs_hash is a sha-256 in lowercase hex")
 
     def meta_json(self) -> dict[str, str]:
         out: dict[str, str] = {}
