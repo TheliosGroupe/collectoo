@@ -34,6 +34,10 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest --cov
+      - name: supabase/seed.sql is up to date
+        run: |
+          uv run synth seed-sql > ../supabase/seed.sql
+          git diff --exit-code -- ../supabase/seed.sql
 
   web:
     name: Web (eslint, tsc, vitest, build)
@@ -81,7 +85,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: make catalogue
       - name: Generated files match the committed ones
-        run: git diff --exit-code -- docs/reference supabase/migrations/20261108110100_eba_layer1.sql
+        run: git diff --exit-code -- docs/reference supabase/migrations/20261108110100_eba_layer1.sql worker/src/collectoo_worker/eba
 
   e2e:
     name: E2E (Playwright against the local stack, mobile + desktop)

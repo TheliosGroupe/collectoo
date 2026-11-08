@@ -14,10 +14,11 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- PR "M0c — two-layer canonical schema" (M0-12…M0-15): change log trigger (diffs, actor, composite keys, append-only); Layer-1 `eba.*` tables generated from the catalogue (CI checks regeneration); Layer-2 core (claim_type, mandate + terms, party, identifiers, contact points + consent, account, account_party, claim_item, ownership periods without overlap, document); RLS by client organization; YAML mapping spec + lossless round trip in the worker.
+- PR #5 M0c (two-layer schema): CI green except E2E, which hit a runner port clash (54322 already in use); job re-run.
+- PR "M0d — synthetic generator and seed" (M0-16…M0-18), committed locally: `synth eba` (EU-template tape, households + SMEs, co-borrowers, 36-month history; validates against the JSON Schema), `synth civil` (B2B/B2C invoices, rents in 3 accounting dialects with a defect manifest = M1 test oracle), `synth seed-sql` → `supabase/seed.sql` (servicer, 2 clients, 6 users, 250 accounts; reset ≈ 25 s).
 
 ## Next
-- PR-4 M0d synthetic generator + seed (M0-16…M0-18), then M1 (boarding).
+- M1 boarding: PR-5 upload/ingestion/profiling, PR-6 mapping (mock LLM) + eval, PR-7 transformations/validation/DQ report, PR-8 staging/commit/review UI/scale tests.
 
 ## Decisions
 - Debtor data is scoped per client organization (party.client_organization_id): no cross-client debtor merge, each client stays controller of its data. Template fields without an operational column live in `source_attributes` so tapes can be regenerated.

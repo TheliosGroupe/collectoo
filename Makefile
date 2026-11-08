@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 export SUPABASE_INTERNAL_IMAGE_REGISTRY ?= docker.io
 
-.PHONY: setup up down reset types test test-py test-web test-db e2e lint lint-py lint-web typecheck build catalogue
+.PHONY: setup up down reset seed synth types test test-py test-web test-db e2e lint lint-py lint-web typecheck build catalogue
 
 setup:            ## Install all dependencies
 	cd worker && uv sync --frozen
@@ -16,6 +16,14 @@ down:             ## Stop the local Supabase stack
 
 reset:            ## Re-apply migrations and seed
 	supabase db reset
+
+seed:             ## Regenerate supabase/seed.sql (deterministic synthetic data), then reset
+	cd worker && uv run synth seed-sql > ../supabase/seed.sql
+	supabase db reset
+
+synth:            ## Write sample tapes to tmp/synth (EU template + civil files with defect manifests)
+	cd worker && uv run synth eba --rows 1000 --seed 1 --out ../tmp/synth/eba
+	cd worker && uv run synth civil-all --rows 200 --seed 1 --out ../tmp/synth/civil
 
 types:            ## Regenerate apps/web/src/lib/database.types.ts (needs make up)
 	supabase gen types typescript --local --schema public > apps/web/src/lib/database.types.ts
@@ -49,3 +57,5 @@ catalogue:        ## Regenerate the EU NPL template catalogue from the committed
 	uv run --python 3.12 --with beautifulsoup4==4.14.2 --with lxml==6.0.2 --with openpyxl==3.1.5 \
 		python -I tools/eba_catalogue/build_catalogue.py .
 	python3 -I tools/eba_catalogue/gen_sql.py .
+	cp docs/reference/eba_field_catalogue.csv worker/src/collectoo_worker/eba/field_catalogue.csv
+	cp docs/reference/eba_template.schema.json worker/src/collectoo_worker/eba/template.schema.json

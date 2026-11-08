@@ -1,0 +1,1433 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://collectoo.local/schemas/eba-npl-template-2023-2083.json",
+ "title": "EU NPL transaction data templates, Implementing Regulation (EU) 2023/2083",
+ "$defs": {
+  "T1": {
+   "type": "object",
+   "title": "Counterparty",
+   "properties": {
+    "f1_00": {
+     "type": "string",
+     "title": "Counterparty Group Identifier",
+     "x-eba-field-id": "1.00",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_01": {
+     "type": "string",
+     "title": "Name of Counterparty Group",
+     "x-eba-field-id": "1.01",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_02": {
+     "type": "string",
+     "title": "Counterparty Identifier",
+     "x-eba-field-id": "1.02",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_03": {
+     "type": "string",
+     "title": "Name of Counterparty",
+     "x-eba-field-id": "1.03",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_04": {
+     "type": "string",
+     "description": "Code list: NACE",
+     "title": "Economic activity",
+     "x-eba-field-id": "1.04",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_05": {
+     "enum": [
+      "Protection Provider",
+      "Borrower"
+     ],
+     "title": "Role of the counterparty",
+     "x-eba-field-id": "1.05",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_06": {
+     "enum": [
+      "Non-financial corporations-SMEs",
+      "Non-financial corporations-other than SMEs",
+      "Households"
+     ],
+     "title": "Legal Type of Counterparty",
+     "x-eba-field-id": "1.06",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_07": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Date of birth",
+     "x-eba-field-id": "1.07",
+     "x-borrower-type": "Private Individual",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_08": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Residency of Counterparty",
+     "x-eba-field-id": "1.08",
+     "x-borrower-type": "Private Individual",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_09": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Counterparty deceased",
+     "x-eba-field-id": "1.09",
+     "x-borrower-type": "Private Individual",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_10": {
+     "type": "string",
+     "title": "National identifier",
+     "x-eba-field-id": "1.10",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_11": {
+     "type": "string",
+     "title": "National identifier",
+     "x-eba-field-id": "1.11",
+     "x-borrower-type": "Private Individual",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_12": {
+     "type": "string",
+     "title": "Source of National identifier",
+     "x-eba-field-id": "1.12",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_13": {
+     "type": "string",
+     "description": "Code list: ISO 17442",
+     "title": "Legal Entity Identifier (LEI)",
+     "x-eba-field-id": "1.13",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_14": {
+     "type": "string",
+     "title": "Address of Counterparty",
+     "x-eba-field-id": "1.14",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_15": {
+     "type": "string",
+     "title": "City of Counterparty",
+     "x-eba-field-id": "1.15",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_16": {
+     "type": "string",
+     "title": "Postal code of Counterparty",
+     "x-eba-field-id": "1.16",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_17": {
+     "type": "string",
+     "description": "Code list: ISO 3166-1 alpha-2",
+     "title": "Country of Counterparty",
+     "x-eba-field-id": "1.17",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_18": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Availability of e-mail address",
+     "x-eba-field-id": "1.18",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_19": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Availability of telephone number",
+     "x-eba-field-id": "1.19",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_20": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Date of Last Contact",
+     "x-eba-field-id": "1.20",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_21": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Date of Latest Annual Financial Statements",
+     "x-eba-field-id": "1.21",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_22": {
+     "type": "string",
+     "description": "Code list: ISO 4217",
+     "title": "Currency of Financial Statements",
+     "x-eba-field-id": "1.22",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_23": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Fixed Assets",
+     "x-eba-field-id": "1.23",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_24": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Current Assets",
+     "x-eba-field-id": "1.24",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_25": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Cash and Cash Equivalent Items",
+     "x-eba-field-id": "1.25",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_26": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Total Assets",
+     "x-eba-field-id": "1.26",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_27": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Total Liabilities",
+     "x-eba-field-id": "1.27",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_28": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Total Debt",
+     "x-eba-field-id": "1.28",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_29": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Annual Turnover",
+     "x-eba-field-id": "1.29",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_30": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Annual EBIT",
+     "x-eba-field-id": "1.30",
+     "x-borrower-type": "Corporate",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f1_31": {
+     "type": "string",
+     "description": "Code list: Choice dependent on the country.",
+     "title": "Name of Insolvency/Restructuring Proceedings",
+     "x-eba-field-id": "1.31",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_32": {
+     "enum": [
+      "No legal action taken",
+      "Under judicial administration, receivership or similar measures",
+      "Bankruptcy/insolvency",
+      "Other legal measures"
+     ],
+     "title": "Status of legal proceedings",
+     "x-eba-field-id": "1.32",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f1_33": {
+     "type": "string",
+     "title": "Description of other legal measures",
+     "x-eba-field-id": "1.33",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    }
+   },
+   "required": []
+  },
+  "T2": {
+   "type": "object",
+   "title": "Relationship",
+   "properties": {
+    "f2_00": {
+     "type": "string",
+     "title": "Counterparty Identifier",
+     "x-eba-field-id": "2.00",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f2_01": {
+     "type": "string",
+     "title": "Loan Identifier",
+     "x-eba-field-id": "2.01",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f2_02": {
+     "type": "string",
+     "title": "Mortgage Identifier",
+     "x-eba-field-id": "2.02",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f2_03": {
+     "type": "string",
+     "title": "Protection Identifier",
+     "x-eba-field-id": "2.03",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    }
+   },
+   "required": []
+  },
+  "T3": {
+   "type": "object",
+   "title": "Loan",
+   "properties": {
+    "f3_00": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Cut-off Date",
+     "x-eba-field-id": "3.00",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_01": {
+     "type": "string",
+     "title": "Loan Identifier",
+     "x-eba-field-id": "3.01",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_02": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Inception date",
+     "x-eba-field-id": "3.02",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_03": {
+     "type": "string",
+     "description": "Code list: ISO 3166 ALPHA-2",
+     "title": "Governing Law of Loan Agreement",
+     "x-eba-field-id": "3.03",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_04": {
+     "enum": [
+      "no joint counterparties",
+      "two counterparties",
+      "more than two counterparties"
+     ],
+     "title": "Joint Counterparties",
+     "x-eba-field-id": "3.04",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_05": {
+     "enum": [
+      "Residential real estate",
+      "Commercial real estate",
+      "Corporate",
+      "Automobile",
+      "Consumer",
+      "Credit card",
+      "Leasing",
+      "Other"
+     ],
+     "title": "Asset Class",
+     "x-eba-field-id": "3.05",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_06": {
+     "enum": [
+      "Deposits other than reverse repurchase agreements",
+      "Overdraft",
+      "Credit card debt",
+      "Revolving credit other than overdrafts and credit card debt",
+      "Credit lines other than revolving credit",
+      "Reverse repurchase agreements",
+      "Trade receivables",
+      "Financial leases",
+      "Other loans"
+     ],
+     "title": "Type of instrument",
+     "x-eba-field-id": "3.06",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_07": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Legal final maturity date",
+     "x-eba-field-id": "3.07",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_08": {
+     "type": "string",
+     "description": "Code list: ISO 4217",
+     "title": "Currency",
+     "x-eba-field-id": "3.08",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_09": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Principal amount",
+     "x-eba-field-id": "3.09",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_10": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Accrued interest",
+     "x-eba-field-id": "3.10",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_11": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Other balances",
+     "x-eba-field-id": "3.11",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_12": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Legal Balance",
+     "x-eba-field-id": "3.12",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_13": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Days in Past-Due",
+     "x-eba-field-id": "3.13",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_14": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Ratio, 2 dp",
+     "title": "Interest Rate",
+     "x-eba-field-id": "3.14",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_15": {
+     "enum": [
+      "Fixed",
+      "Variable",
+      "Mixed"
+     ],
+     "title": "Interest Rate Type",
+     "x-eba-field-id": "3.15",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_16": {
+     "type": "string",
+     "title": "Description of Interest Rate Type",
+     "x-eba-field-id": "3.16",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_17": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Ratio, 2 dp",
+     "title": "Interest rate spread/margin",
+     "x-eba-field-id": "3.17",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_18": {
+     "type": "string",
+     "title": "Reference Rate",
+     "x-eba-field-id": "3.18",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_19": {
+     "enum": [
+      "Not resettable",
+      "Overnight",
+      "Monthly",
+      "Quarterly",
+      "Semi-annually",
+      "Annually",
+      "At creditor discretion",
+      "Other frequency"
+     ],
+     "title": "Interest rate reset frequency",
+     "x-eba-field-id": "3.19",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_20": {
+     "enum": [
+      "Monthly",
+      "Quarterly",
+      "Semi-annually",
+      "Annually",
+      "Bullet",
+      "Zero coupon",
+      "Other"
+     ],
+     "title": "Payment Frequency",
+     "x-eba-field-id": "3.20",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_21": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Last Payment Date",
+     "x-eba-field-id": "3.21",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_22": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Last Payment Amount",
+     "x-eba-field-id": "3.22",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_23": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Date of the default status of the instrument",
+     "x-eba-field-id": "3.23",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_24": {
+     "enum": [
+      "out of court settlement",
+      "legal proceedings",
+      "no legal or 'out of court' action taken"
+     ],
+     "title": "Loan legal status",
+     "x-eba-field-id": "3.24",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_25": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Date of initiation of legal proceedings",
+     "x-eba-field-id": "3.25",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_26": {
+     "type": "string",
+     "title": "Stage reached in legal proceedings",
+     "x-eba-field-id": "3.26",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_27": {
+     "type": "string",
+     "description": "Code list: ISO 3166 ALPHA-2",
+     "title": "Jurisdiction of Court",
+     "x-eba-field-id": "3.27",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_28": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Date of Obtaining Order for Possession",
+     "x-eba-field-id": "3.28",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f3_29": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Statute of limitations date",
+     "x-eba-field-id": "3.29",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_30": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Syndicated Loan",
+     "x-eba-field-id": "3.30",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_31": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Ratio, 2 dp",
+     "title": "Syndicated Portion",
+     "x-eba-field-id": "3.31",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_32": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Securitised",
+     "x-eba-field-id": "3.32",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_33": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Lease agreement",
+     "x-eba-field-id": "3.33",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f3_34": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Start Date of Lease",
+     "x-eba-field-id": "3.34",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f3_35": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "End Date of Lease",
+     "x-eba-field-id": "3.35",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f3_36": {
+     "type": "string",
+     "title": "Lease Break Option",
+     "x-eba-field-id": "3.36",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f3_37": {
+     "enum": [
+      "Triple Net (Tenant pays the base rental amount plus operating costs, including real estate taxes, insurance, maintenance, and repairs)",
+      "Net-Net Lease (Tenant pays the base rental amount, real estate taxes, and insurance premiums)"
+     ],
+     "title": "Type of Lease",
+     "x-eba-field-id": "3.37",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f3_38": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Forbearance measure",
+     "x-eba-field-id": "3.38",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_39": {
+     "enum": [
+      "grace period/payment moratorium",
+      "interest rate reduction",
+      "extension of maturity/term",
+      "rescheduled payments",
+      "debt forgiveness",
+      "debt asset swaps",
+      "other forbearance measures"
+     ],
+     "title": "Type of Forbearance measure",
+     "x-eba-field-id": "3.39",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_40": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "End Date of Forbearance measure",
+     "x-eba-field-id": "3.40",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f3_41": {
+     "type": "string",
+     "title": "Description of the Forbearance measures",
+     "x-eba-field-id": "3.41",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_42": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Debt Forgiveness",
+     "x-eba-field-id": "3.42",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f3_43": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Number of historical forbearance",
+     "x-eba-field-id": "3.43",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    }
+   },
+   "required": []
+  },
+  "T4.1": {
+   "type": "object",
+   "title": "Collateral, guarantee and enforcement",
+   "properties": {
+    "f4_00": {
+     "type": "string",
+     "title": "Protection Identifier",
+     "x-eba-field-id": "4.00",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_01": {
+     "enum": [
+      "office",
+      "retail",
+      "industrial",
+      "residential",
+      "other"
+     ],
+     "title": "Type of immovable property",
+     "x-eba-field-id": "4.01",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_02": {
+     "enum": [
+      "Auto mobile vehicles",
+      "Industrial and commercial vehicles (including commercial trucks, rail vehicles etc.)",
+      "Nautical vehicles and ships (includes Nautical leisure vehicles)",
+      "Aeroplanes",
+      "Industrial equipment (includes Machine tools and Energy related equipment and Floating charge)",
+      "Office equipment",
+      "Medical equipment",
+      "Goods and inventory (company's goods and products that are ready to sell, along with the raw materials that are used to produce them)",
+      "Other physical collateral",
+      "Equity and debt securities",
+      "Financial Guarantees",
+      "Life insurance policies pledged",
+      "Gold, currency and deposits",
+      "Other collateral"
+     ],
+     "title": "Type of movable property, other collateral and guarantee",
+     "x-eba-field-id": "4.02",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_03": {
+     "type": "string",
+     "title": "Address of immovable property",
+     "x-eba-field-id": "4.03",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_04": {
+     "type": "string",
+     "description": "Code list: UN/LOCODE",
+     "title": "City of immovable Property",
+     "x-eba-field-id": "4.04",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_05": {
+     "type": "string",
+     "title": "Immovable property Postcode",
+     "x-eba-field-id": "4.05",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_06": {
+     "type": "string",
+     "description": "Code list: ISO 3166 ALPHA-2",
+     "title": "Immovable property Country",
+     "x-eba-field-id": "4.06",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_07": {
+     "type": "string",
+     "title": "Immovable property collateral cadaster identification number",
+     "x-eba-field-id": "4.07",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_08": {
+     "type": "string",
+     "title": "Cadaster identification",
+     "x-eba-field-id": "4.08",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_09": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Lien position",
+     "x-eba-field-id": "4.09",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_10": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Higher Ranking Loan",
+     "x-eba-field-id": "4.10",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_11": {
+     "type": "string",
+     "title": "Register of Deeds Number",
+     "x-eba-field-id": "4.11",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_12": {
+     "type": "string",
+     "title": "Year of construction",
+     "x-eba-field-id": "4.12",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_13": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Building Area (M2)",
+     "x-eba-field-id": "4.13",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_14": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Land Area (M2)",
+     "x-eba-field-id": "4.14",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_15": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Completion of immovable property",
+     "x-eba-field-id": "4.15",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_16": {
+     "enum": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "G"
+     ],
+     "title": "Value of Energy Performance Certificate",
+     "x-eba-field-id": "4.16",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_17": {
+     "enum": [
+      "Owner-occupied",
+      "Rented",
+      "Other"
+     ],
+     "title": "Type of Occupancy",
+     "x-eba-field-id": "4.17",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_18": {
+     "type": "string",
+     "description": "Code list: ISO 4217",
+     "title": "Currency of collateral and guarantee",
+     "x-eba-field-id": "4.18",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_19": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Latest Internal Valuation Amount",
+     "x-eba-field-id": "4.19",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_20": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Date of Latest Internal Valuation",
+     "x-eba-field-id": "4.20",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_21": {
+     "enum": [
+      "market value",
+      "liquidation value",
+      "book value",
+      "other"
+     ],
+     "title": "Type of Appraisal Amount for the Latest Internal Valuation",
+     "x-eba-field-id": "4.21",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_22": {
+     "enum": [
+      "Full Appraisal",
+      "Drive-by",
+      "Automated Valuation Model",
+      "Indexed",
+      "Desktop",
+      "Managing or Estate Agent",
+      "Purchase Price",
+      "Hair Cut",
+      "Mark to market",
+      "Counterparties Valuation",
+      "Other"
+     ],
+     "title": "Type of Latest Internal Valuation",
+     "x-eba-field-id": "4.22",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_23": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Latest External Valuation Amount",
+     "x-eba-field-id": "4.23",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_24": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Date of Latest External Valuation",
+     "x-eba-field-id": "4.24",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_25": {
+     "enum": [
+      "market value",
+      "liquidation value",
+      "book value",
+      "other"
+     ],
+     "title": "Type of Appraisal Amount for the Latest External Valuation",
+     "x-eba-field-id": "4.25",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_26": {
+     "enum": [
+      "Full Appraisal",
+      "Drive-by",
+      "Automated Valuation Model",
+      "Indexed",
+      "Desktop",
+      "Managing or Estate Agent",
+      "Purchase Price",
+      "Hair Cut",
+      "Mark to market",
+      "Counterparties Valuation",
+      "Other"
+     ],
+     "title": "Type of Latest External Valuation",
+     "x-eba-field-id": "4.26",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_27": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Financial Guarantee Amount",
+     "x-eba-field-id": "4.27",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_28": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "ISIN",
+     "x-eba-field-id": "4.28",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_29": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Enforcement Status",
+     "x-eba-field-id": "4.29",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_30": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Enforcement Status Third Parties",
+     "x-eba-field-id": "4.30",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_31": {
+     "type": "string",
+     "description": "Code list: ISO 3166 ALPHA-2",
+     "title": "Jurisdiction of Court",
+     "x-eba-field-id": "4.31",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_32": {
+     "type": "string",
+     "description": "Code list: ISO 4217",
+     "title": "Currency of Enforcement",
+     "x-eba-field-id": "4.32",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_33": {
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "title": "Indicator of Enforcement",
+     "x-eba-field-id": "4.33",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_34": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Court Appraisal Amount",
+     "x-eba-field-id": "4.34",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_35": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Date of Court Appraisal",
+     "x-eba-field-id": "4.35",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_36": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Cash in court",
+     "x-eba-field-id": "4.36",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_37": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Sale Agreed Price",
+     "x-eba-field-id": "4.37",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_38": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Next Auction Date",
+     "x-eba-field-id": "4.38",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_39": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Court Auction Reserve Price for Next Auction",
+     "x-eba-field-id": "4.39",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_40": {
+     "type": "string",
+     "pattern": "^\\d{2}/\\d{2}/\\d{4}$",
+     "description": "DD/MM/YYYY",
+     "title": "Last Auction Date",
+     "x-eba-field-id": "4.40",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_41": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Court Auction Reserve Price for Last Auction",
+     "x-eba-field-id": "4.41",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    },
+    "f4_42": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Number of Failed Auctions",
+     "x-eba-field-id": "4.42",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    }
+   },
+   "required": []
+  },
+  "T4.2": {
+   "type": "object",
+   "title": "Mortgage guarantee",
+   "properties": {
+    "f4_43": {
+     "type": "string",
+     "title": "Mortgage Identifier",
+     "x-eba-field-id": "4.43",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_44": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Mortgage amount",
+     "x-eba-field-id": "4.44",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_45": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Lien position",
+     "x-eba-field-id": "4.45",
+     "x-borrower-type": "",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_46": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "Higher ranking loan",
+     "x-eba-field-id": "4.46",
+     "x-borrower-type": "",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": true
+    },
+    "f4_47": {
+     "type": "string",
+     "title": "Register of Deeds Number",
+     "x-eba-field-id": "4.47",
+     "x-borrower-type": "",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    }
+   },
+   "required": []
+  },
+  "T5": {
+   "type": "object",
+   "title": "Historical collection of repayments",
+   "properties": {
+    "f5_00": {
+     "type": "string",
+     "title": "Loan Identifier",
+     "x-eba-field-id": "5.00",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f5_01": {
+     "enum": [
+      "Internal",
+      "External"
+     ],
+     "title": "Type of Collection",
+     "x-eba-field-id": "5.01",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f5_02": {
+     "type": "string",
+     "title": "Name of External Collection Agent",
+     "x-eba-field-id": "5.02",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": false
+    },
+    "f5_03": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "History of Total Repayments",
+     "x-eba-field-id": "5.03",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Applicable to all",
+     "x-mandatory": true
+    },
+    "f5_04": {
+     "type": "string",
+     "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+     "description": "Decimal, 2 dp (Annex III Part 1 §3); kept as string to avoid floats",
+     "title": "History of Repayments - From Collateral Sales",
+     "x-eba-field-id": "5.04",
+     "x-borrower-type": "Applicable to all",
+     "x-loan-type": "Secured loan",
+     "x-mandatory": false
+    }
+   },
+   "required": []
+  }
+ }
+}
