@@ -23,6 +23,7 @@ def make_zip(path: Path, refs: list[str]) -> Path:
         "{r} - relance.pdf",
         "Scan {r}.PDF",
         "contrat-{r}.jpg",
+        "relevé n°{r} août.pdf",
     ]
     with zipfile.ZipFile(path, "w") as zf:
         for i, ref in enumerate(refs[:99]):
@@ -89,6 +90,14 @@ def test_documents_are_linked_after_commit(tmp_path: Path) -> None:
     expected = min(99, len(refs))
     assert linked == expected and report["linked"] == expected
     assert "inconnu_ZZ9999.pdf" in report["unmatched"]
+    with psycopg.connect(DB) as conn:
+        names = [
+            r[0]
+            for r in conn.execute(
+                "select file_name from public.document where boarding_batch_id = %s", (batch,)
+            ).fetchall()
+        ]
+    assert any(n.startswith("relevé n°") for n in names)  # accented names stored and linked
 
     # Rollback removes the index rows at once and the files through the queue.
     with psycopg.connect(DB) as conn:

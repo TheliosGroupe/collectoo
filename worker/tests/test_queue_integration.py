@@ -84,12 +84,21 @@ def test_failures_retry_then_dead_letter(queue: str) -> None:
         calls["n"] += 1
         raise ValueError("boom")
 
+    dead: list[tuple[dict[str, Any], str]] = []
     msg_id = _send(queue, {"n": "x"})
-    consumer = QueueConsumer(DB, queue, handler, max_attempts=2, backoff_base_s=60)
+    consumer = QueueConsumer(
+        DB,
+        queue,
+        handler,
+        max_attempts=2,
+        backoff_base_s=60,
+        on_dead=lambda payload, error, conn: dead.append((payload, error)),
+    )
     for _ in range(3):
         consumer.poll_once()
         _make_visible(queue, msg_id)
     assert calls["n"] == 2
+    assert dead == [({"n": "x"}, "ValueError: boom")]  # the job's owner is told once
     with psycopg.connect(DB) as conn:
         status = conn.execute(
             "select status, last_error from private.job_run where queue = %s and msg_id = %s",

@@ -204,3 +204,35 @@ def test_reboarding_skips_accounts_already_in_the_portfolio(
     assert (
         _count("select count(*) from public.account where boarding_batch_id = %s", (second,)) == 0
     )
+
+
+def test_a_dead_job_is_shown_on_its_batch(tenant: dict[str, Any], tmp_path: Path) -> None:
+    from collectoo_worker.jobs.boarding import record_dead_job  # noqa: PLC0415
+
+    batch = board(tenant, storage(), _clean_file(tmp_path, rows=20))
+    with psycopg.connect(DB) as conn, conn.transaction():
+        record_dead_job({"type": "profile", "batch_id": batch}, "ValueError: not a CSV", conn)
+    with psycopg.connect(DB) as conn:
+        failed = one(conn, "select failed_job from public.boarding_batch where id = %s", (batch,))
+        files = conn.execute(
+            "select status, error from public.boarding_file where batch_id = %s", (batch,)
+        ).fetchall()
+    assert failed["type"] == "profile" and failed["error"] == "ValueError: not a CSV"
+    assert files == [("failed", "ValueError: not a CSV")]
+
+
+def test_jobs_of_an_abandoned_batch_do_nothing(tenant: dict[str, Any], tmp_path: Path) -> None:
+    store = storage()
+    batch = board(tenant, store, _clean_file(tmp_path, rows=20))
+    with psycopg.connect(DB) as conn, conn.transaction():
+        as_user(conn, tenant["user"])
+        conn.execute("select public.abandon_boarding_batch(%s, %s)", (batch, "wrong client file"))
+    drain(store)  # the queued profiling job is consumed without effect
+    with psycopg.connect(DB) as conn:
+        status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
+        profiled = one(
+            conn,
+            "select count(*) from public.boarding_file where batch_id = %s and profile is not null",
+            (batch,),
+        )
+    assert status == "abandoned" and profiled == 0

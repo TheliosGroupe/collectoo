@@ -1,15 +1,38 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { InfoNote } from "@/components/ui";
 
-/** While the worker processes the batch, reload the server data every few seconds. */
-export function AutoRefresh({ active, everyMs = 2000 }: { active: boolean; everyMs?: number }) {
+/**
+ * While the worker processes the batch, reload the server data every few seconds. Stops after
+ * `maxMs` so a stalled worker does not keep the page polling forever.
+ */
+export function AutoRefresh({
+  active,
+  everyMs = 2000,
+  maxMs = 15 * 60_000,
+}: {
+  active: boolean;
+  everyMs?: number;
+  maxMs?: number;
+}) {
   const router = useRouter();
+  const [expired, setExpired] = useState(false);
   useEffect(() => {
     if (!active) return;
-    const timer = setInterval(() => router.refresh(), everyMs);
+    const started = Date.now();
+    const timer = setInterval(() => {
+      if (Date.now() - started > maxMs) {
+        clearInterval(timer);
+        setExpired(true);
+        return;
+      }
+      router.refresh();
+    }, everyMs);
     return () => clearInterval(timer);
-  }, [active, everyMs, router]);
-  return null;
+  }, [active, everyMs, maxMs, router]);
+  return active && expired ? (
+    <InfoNote>Le traitement prend plus de temps que prévu. Rechargez la page plus tard ; s&apos;il reste bloqué, abandonnez le lot.</InfoNote>
+  ) : null;
 }

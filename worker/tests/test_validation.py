@@ -149,15 +149,28 @@ def test_consumer_loans_need_a_contract_date_for_the_legal_regime() -> None:
 def test_dq_report_reconciles_to_the_cent(tmp_path: Path) -> None:
     result, profile, _ = _civil(tmp_path, "b2b_invoice", "fr_semicolon", 0.0)
     log = _validate([result], {"f1": profile})
-    expected = int(result.values["claim_item.amount"].sum())
+    total = int(result.values["claim_item.amount"].sum())
+    paid = int(result.values["claim_item.amount_paid"].fill_null(0).sum())
+    outstanding = total - paid
     report = build_report(
-        [result], log, control={"total_minor": expected - 1, "rows": 400}, spec_versions={}
+        [result], log, control={"total_minor": outstanding - 1, "rows": 400}, spec_versions={}
     )
     rec = report["reconciliation"]
-    assert rec["computed"]["total_minor"] == expected
-    assert rec["difference_minor"] == 1 and rec["status"] == "mismatch"
-    matched = build_report([result], log, control={"total_minor": expected}, spec_versions={})
+    # The seller's figure is the outstanding balance at cut-off: amounts minus already paid.
+    assert rec["computed"]["total_minor"] == total and rec["basis"] == "outstanding_minor"
+    assert rec["computed"]["outstanding_minor"] == outstanding
+    assert rec["difference_minor"] == 1 and rec["difference_rows"] == 0
+    assert rec["status"] == "mismatch"
+    assert rec["computed"]["currencies"]["EUR"]["outstanding_minor"] == str(outstanding)
+    matched = build_report(
+        [result], log, control={"total_minor": outstanding, "rows": 400}, spec_versions={}
+    )
     assert matched["reconciliation"]["status"] == "matched"
+    fewer_rows = build_report(
+        [result], log, control={"total_minor": outstanding, "rows": 399}, spec_versions={}
+    )
+    assert fewer_rows["reconciliation"]["difference_rows"] == 1
+    assert fewer_rows["reconciliation"]["status"] == "mismatch"
     contact = report["contactability"]
     assert contact["rows"] == 400 and 0.5 < contact["any_pct"] <= 1.0
     assert report["files"][0]["completeness"]["claim_item.amount"] == 1.0
@@ -180,3 +193,15 @@ def test_dq_report_reconciles_eba_legal_balance() -> None:
         if k in ("consumer_instalment_loan", "professional_loan")
     }
     assert columns("T3")[0] == "f3_00_cut_off_date"
+
+
+def test_dq_report_does_not_add_up_currencies(tmp_path: Path) -> None:
+    result, profile, _ = _civil(tmp_path, "b2b_invoice", "fr_semicolon", 0.0)
+    log = _validate([result], {"f1": profile})
+    n = result.rows
+    result.values["claim_item.currency"] = pl.Series(["EUR", "USD"] * (n // 2) + ["EUR"] * (n % 2))
+    report = build_report([result], log, control={"total_minor": 1, "rows": n}, spec_versions={})
+    rec = report["reconciliation"]
+    assert set(rec["computed"]["currencies"]) == {"EUR", "USD"}
+    assert rec["status"] == "mismatch" and rec["currency_mismatch"] == ["EUR", "USD"]
+    assert "difference_minor" not in rec

@@ -39,8 +39,8 @@ select is((select status from public.boarding_batch), 'draft', 'a new batch is a
 insert into t values ('f1', public.add_boarding_file((select (v #>> '{}')::uuid from t where k = 'batch'),
   'factures.csv', repeat('a', 64), 1200));
 select matches((select v ->> 'storage_path' from t where k = 'f1'),
-  '^00000000-0000-0000-0000-0000000000a1/[0-9a-f-]{36}/[0-9a-f-]{36}/factures\.csv$',
-  'upload path is client/batch/file/name');
+  '^00000000-0000-0000-0000-0000000000a1/[0-9a-f-]{36}/[0-9a-f-]{36}\.csv$',
+  'upload key is client/batch/file id + extension (ASCII only)');
 select is((select v ->> 'format' from t where k = 'f1'), 'csv', 'format detected from the extension');
 select throws_ok(
   $$select public.add_boarding_file((select (v #>> '{}')::uuid from t where k = 'batch'), 'x.exe', repeat('b', 64), 10)$$,

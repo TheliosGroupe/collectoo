@@ -91,14 +91,14 @@ isOneToOne: false
                   ]
                 },"boarding_batch": {
                   Row: {
-                    "art4_exemptions": NonNullable<Json>,"claim_type_spec_version": number | null,"client_organization_id": string,"commit_override_reason": string | null,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"dq_report": Json | null,"id": string,"join_keys": NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"staging_digest": Json | null,"status": string,"transform_spec_version": number | null,"updated_at": string,"validation_spec_version": number | null,"version": number
+                    "art4_exemptions": NonNullable<Json>,"claim_type_spec_version": number | null,"client_organization_id": string,"commit_override_reason": string | null,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"dq_report": Json | null,"failed_job": Json | null,"id": string,"join_keys": NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"staging_digest": Json | null,"status": string,"transform_spec_version": number | null,"updated_at": string,"validation_spec_version": number | null,"version": number
                   }
                   ComputedFields: never
                   Insert: {
-                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id": string,"commit_override_reason"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version": number
+                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id": string,"commit_override_reason"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"failed_job"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version": number
                   }
                   Update: {
-                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id"?: string,"commit_override_reason"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version"?: number
+                    "art4_exemptions"?: NonNullable<Json>,"claim_type_spec_version"?: number | null,"client_organization_id"?: string,"commit_override_reason"?: string | null,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"dq_report"?: Json | null,"failed_job"?: Json | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"staging_digest"?: Json | null,"status"?: string,"transform_spec_version"?: number | null,"updated_at"?: string,"validation_spec_version"?: number | null,"version"?: number
                   }
                   Relationships: [
                     {
@@ -281,14 +281,14 @@ isOneToOne: false
                   ]
                 },"document": {
                   Row: {
-                    "account_id": string | null,"boarding_batch_id": string | null,"client_organization_id": string,"created_at": string,"id": string,"kind": string,"mime_type": string,"organization_id": string,"party_id": string | null,"sha256": string,"storage_bucket": string,"storage_path": string
+                    "account_id": string | null,"boarding_batch_id": string | null,"client_organization_id": string,"created_at": string,"file_name": string | null,"id": string,"kind": string,"mime_type": string,"organization_id": string,"party_id": string | null,"sha256": string,"storage_bucket": string,"storage_path": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "account_id"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id": string,"created_at"?: string,"id"?: string,"kind": string,"mime_type": string,"organization_id": string,"party_id"?: string | null,"sha256": string,"storage_bucket"?: string,"storage_path": string
+                    "account_id"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id": string,"created_at"?: string,"file_name"?: string | null,"id"?: string,"kind": string,"mime_type": string,"organization_id": string,"party_id"?: string | null,"sha256": string,"storage_bucket"?: string,"storage_path": string
                   }
                   Update: {
-                    "account_id"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string,"created_at"?: string,"id"?: string,"kind"?: string,"mime_type"?: string,"organization_id"?: string,"party_id"?: string | null,"sha256"?: string,"storage_bucket"?: string,"storage_path"?: string
+                    "account_id"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string,"created_at"?: string,"file_name"?: string | null,"id"?: string,"kind"?: string,"mime_type"?: string,"organization_id"?: string,"party_id"?: string | null,"sha256"?: string,"storage_bucket"?: string,"storage_path"?: string
                   }
                   Relationships: [
                     {
@@ -621,7 +621,10 @@ isOneToOne: false
             [_ in never]: never
           }
           Functions: {
-            "add_boarding_file":
+            "abandon_boarding_batch":
+{ Args: { "p_batch_id": string,"p_reason": string }; Returns: undefined
+                           },
+"add_boarding_file":
 { Args: { "p_batch_id": string,"p_file_name": string,"p_sha256": string,"p_size_bytes": number }; Returns: Json
                            },
 "approve_mapping":

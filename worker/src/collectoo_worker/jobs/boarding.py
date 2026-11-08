@@ -52,6 +52,8 @@ def make_handler(storage: Storage, provider: Provider, normaliser: Normaliser | 
     def handle(payload: dict[str, Any], conn: psycopg.Connection[Any]) -> None:
         kind = payload.get("type")
         batch_id = str(payload["batch_id"])
+        if kind != "purge_documents" and _abandoned(conn, batch_id):
+            return  # abandoned while the job was queued: nothing to do
         if kind == "profile":
             profile_batch(conn, storage, batch_id)
         elif kind == "propose":
@@ -68,6 +70,32 @@ def make_handler(storage: Storage, provider: Provider, normaliser: Normaliser | 
             raise ValueError(f"unknown boarding job type: {kind!r}")
 
     return handle
+
+
+def _abandoned(conn: psycopg.Connection[Any], batch_id: str) -> bool:
+    row = conn.execute(
+        "select status from public.boarding_batch where id = %s", (batch_id,)
+    ).fetchone()
+    return row is not None and row[0] in ("abandoned", "rolled_back")
+
+
+def record_dead_job(payload: dict[str, Any], error: str, conn: psycopg.Connection[Any]) -> None:
+    """A boarding job failed for good: show it on the batch (the back-office stops waiting)."""
+    batch_id = payload.get("batch_id")
+    if not batch_id:
+        return
+    conn.execute(
+        """update public.boarding_batch
+           set failed_job = jsonb_build_object('type', %s::text, 'error', %s::text, 'at', now())
+           where id = %s""",
+        (str(payload.get("type")), error[:500], str(batch_id)),
+    )
+    if payload.get("type") == "profile":
+        conn.execute(
+            "update public.boarding_file set status = 'failed', error = %s"
+            " where batch_id = %s and status = 'uploaded'",
+            (error[:500], str(batch_id)),
+        )
 
 
 def profile_file(path: Path, file_format: str) -> tuple[dict[str, Any], int | None]:
@@ -407,17 +435,27 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
             )
             for doc in result.matched:
                 account_id = accounts[doc.account_ref]
-                object_path = f"{client}/{account_id}/{doc.sha256[:16]}-{doc.name}"
+                # Storage keys must be ASCII: hash + extension; the name is kept in file_name.
+                object_path = f"{client}/{account_id}/{doc.sha256[:32]}{_safe_suffix(doc.name)}"
                 storage.upload(
                     "documents", object_path, doc.data, doc.mime or "application/octet-stream"
                 )
                 conn.execute(
                     """insert into public.document (organization_id, client_organization_id,
                          account_id, kind, storage_bucket, storage_path, sha256, mime_type,
-                         boarding_batch_id)
-                       values (%s, %s, %s, 'boarding', 'documents', %s, %s, %s, %s)
+                         boarding_batch_id, file_name)
+                       values (%s, %s, %s, 'boarding', 'documents', %s, %s, %s, %s, %s)
                        on conflict (storage_bucket, storage_path) do nothing""",
-                    (org, client, account_id, object_path, doc.sha256, doc.mime, batch_id),
+                    (
+                        org,
+                        client,
+                        account_id,
+                        object_path,
+                        doc.sha256,
+                        doc.mime,
+                        batch_id,
+                        doc.name,
+                    ),
                 )
                 linked += 1
             unmatched += result.unmatched
@@ -428,6 +466,11 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
         " set dq_report = jsonb_set(coalesce(dq_report, '{}'), '{documents}', %s) where id = %s",
         (Jsonb(summary), batch_id),
     )
+
+
+def _safe_suffix(name: str) -> str:
+    suffix = Path(name).suffix.lower()
+    return suffix if suffix[1:].isascii() and suffix[1:].isalnum() else ""
 
 
 def purge_documents(storage: Storage, objects: list[dict[str, str]]) -> None:

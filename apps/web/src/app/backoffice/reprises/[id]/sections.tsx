@@ -1,28 +1,21 @@
+import { ActionForm } from "@/components/action-form";
 import { Badge, InfoNote, Section, Stats, dangerButtonClass, inlineButtonClass, inputClass } from "@/components/ui";
-import { mappingField } from "@/lib/boarding/forms";
+import { formatPct, mappingField } from "@/lib/boarding/forms";
+import { columnIssuesLabel, readProfile, typeLabel, type FileProfile } from "@/lib/boarding/profile";
 import { issueLabel, statusLabel } from "@/lib/boarding/status";
 import { targetGroups, targetLabel } from "@/lib/boarding/targets";
 import { formatMoneyFr } from "@/lib/money";
-import { approveMapping, commitBatch, confirmBatch, rollbackBatch } from "./actions";
+import { abandonBatch, approveMapping, commitBatch, confirmBatch, rollbackBatch } from "./actions";
 
 // --- Types of the JSON written by the worker (worker/src/collectoo_worker/boarding) ---------------
 
-type ProfileColumn = {
-  name: string;
-  non_null: number;
-  null_pct: number;
-  distinct: number;
-  type_guess: string;
-  issues: Record<string, unknown>;
-  top_values?: { value: string; count: number }[];
-};
 export type FileRow = {
   id: string;
   file_name: string;
   format: string;
   status: string;
   row_count: number | null;
-  profile: { row_count: number; duplicate_rows: number; columns: ProfileColumn[] } | null;
+  profile: unknown;
   error: string | null;
   duplicate_of_file_id: string | null;
 };
@@ -47,6 +40,7 @@ export type IssueRow = {
   message: string;
   raw_value: string | null;
 };
+type CurrencyTotals = { rows: number; total_minor: string; paid_minor: string; outstanding_minor: string };
 export type DqReport = {
   files: { file_id: string; name: string; rows: number; issues: Record<string, { severity: string; count: number }> }[];
   totals: { rows: number; blocking: number; warnings: number };
@@ -54,11 +48,18 @@ export type DqReport = {
   contactability: { rows: number; email_pct: number; phone_pct: number; postal_pct: number; any_pct: number };
   claim_types: Record<string, number>;
   legal_regimes: Record<string, number>;
-  reconciliation: { status: "matched" | "mismatch" | "no_control_totals"; control: { rows?: number } | null };
+  reconciliation: {
+    status: "matched" | "mismatch" | "no_control_totals";
+    control: { rows?: number | null; total_minor?: number | null } | null;
+    computed: { rows: number; file_rows?: number; currencies?: Record<string, CurrencyTotals> };
+    difference_rows?: number;
+    currency_mismatch?: string[];
+  };
   staging?: { already_boarded_accounts_skipped: number; entities: Record<string, { rows: number }> };
   documents?: { linked: number; unmatched: string[]; unsupported: string[] };
 };
-type Money = {
+/** Amounts read with ->> (text): integer minor units, never JS numbers. */
+export type Money = {
   total_minor: string | null;
   paid_minor: string | null;
   outstanding_minor: string | null;
@@ -66,8 +67,8 @@ type Money = {
   difference_minor: string | null;
 };
 
-const pct = (ratio: number) => `${Math.round(ratio * 1000) / 10} %`;
-const eur = (minor: string | null) => (minor === null ? "—" : formatMoneyFr({ minor: BigInt(minor), currency: "EUR" }));
+const money = (minor: string | null, currency = "EUR") =>
+  minor === null ? "—" : formatMoneyFr({ minor: BigInt(minor), currency });
 const count = (n: number) => n.toLocaleString("fr-FR");
 
 const CLAIM_TYPE_FR: Record<string, string> = {
@@ -84,56 +85,92 @@ const CLAIM_TYPE_FR: Record<string, string> = {
   professional_loan: "Prêts professionnels",
 };
 
+/** Steps before commit, where a batch can still be abandoned (after commit: rollback). */
+const ABANDONABLE = new Set([
+  "draft",
+  "uploaded",
+  "profiled",
+  "mapping_proposed",
+  "mapping_approved",
+  "transformed",
+  "validated",
+  "needs_fix",
+  "staged",
+]);
+
 // --- Files and profiles ------------------------------------------------------------------------------
+
+function profileSummary(p: FileProfile): string {
+  switch (p.kind) {
+    case "table":
+      return `${p.sheet ? `feuille « ${p.sheet} » · ` : ""}${p.table.columns.length} colonnes${
+        p.table.duplicate_rows ? ` · ${count(p.table.duplicate_rows)} doublons` : ""
+      }`;
+    case "empty_workbook":
+      return "classeur sans données";
+    case "documents":
+      return "pièces jointes, rattachées après l'intégration";
+    case "needs_layout":
+      return "largeur fixe : description des colonnes nécessaire";
+    default:
+      return "";
+  }
+}
 
 export function FilesSection({ files }: { files: FileRow[] }) {
   return (
     <Section title="Fichiers" testId="files">
       <ul className="flex flex-col gap-3">
-        {files.map((f) => (
-          <li key={f.id} className="rounded-md border border-zinc-200 dark:border-zinc-800">
-            <details>
-              <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 p-3">
-                <span className="font-medium break-all">{f.file_name}</span>
-                <span className="text-sm text-zinc-600 dark:text-zinc-400">
-                  {f.format.toUpperCase()}
-                  {f.row_count !== null ? ` · ${count(f.row_count)} lignes` : ""}
-                  {f.profile ? ` · ${f.profile.columns.length} colonnes` : ""}
-                  {f.profile?.duplicate_rows ? ` · ${count(f.profile.duplicate_rows)} doublons` : ""}
-                </span>
-                {f.duplicate_of_file_id ? <Badge tone="action">Déjà reçu</Badge> : null}
-                {f.error ? <Badge tone="error">Erreur</Badge> : null}
-              </summary>
-              {f.error ? <p className="px-3 pb-3 text-sm text-red-800 dark:text-red-200">{f.error}</p> : null}
-              {f.profile ? (
-                <div className="overflow-x-auto border-t border-zinc-200 dark:border-zinc-800">
-                  <table className="w-full min-w-[560px] text-left text-sm">
-                    <thead className="text-xs text-zinc-600 dark:text-zinc-400">
-                      <tr>
-                        <th className="p-2">Colonne</th>
-                        <th className="p-2">Type détecté</th>
-                        <th className="p-2">Vides</th>
-                        <th className="p-2">Distinctes</th>
-                        <th className="p-2">Alertes</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {f.profile.columns.map((c) => (
-                        <tr key={c.name} className="border-t border-zinc-100 dark:border-zinc-900">
-                          <td className="p-2 font-mono text-xs">{c.name}</td>
-                          <td className="p-2">{c.type_guess}</td>
-                          <td className="p-2 tabular-nums">{pct(c.null_pct)}</td>
-                          <td className="p-2 tabular-nums">{count(c.distinct)}</td>
-                          <td className="p-2 text-xs">{Object.keys(c.issues).join(", ") || "—"}</td>
+        {files.map((f) => {
+          const profile = readProfile(f.profile);
+          const summary = profileSummary(profile);
+          return (
+            <li key={f.id} className="rounded-md border border-zinc-200 dark:border-zinc-800">
+              <details>
+                <summary className="cursor-pointer p-3">
+                  <span className="inline-flex flex-wrap items-center gap-x-3 gap-y-1 align-middle">
+                    <span className="font-medium break-all">{f.file_name}</span>
+                    <span className="text-sm text-zinc-600 dark:text-zinc-400">
+                      {f.format.toUpperCase()}
+                      {f.row_count !== null ? ` · ${count(f.row_count)} lignes` : ""}
+                      {summary ? ` · ${summary}` : ""}
+                    </span>
+                    {f.duplicate_of_file_id ? <Badge tone="action">Déjà reçu</Badge> : null}
+                    {f.status === "failed" ? <Badge tone="error">Erreur</Badge> : null}
+                  </span>
+                </summary>
+                {f.error ? <p className="px-3 pb-3 font-mono text-xs break-all text-red-800 dark:text-red-200">{f.error}</p> : null}
+                {profile.kind === "table" ? (
+                  <div className="overflow-x-auto border-t border-zinc-200 dark:border-zinc-800">
+                    <table className="w-full min-w-[560px] text-left text-sm">
+                      <caption className="sr-only">Profil des colonnes de {f.file_name}</caption>
+                      <thead className="text-xs text-zinc-600 dark:text-zinc-400">
+                        <tr>
+                          <th className="p-2">Colonne</th>
+                          <th className="p-2">Type détecté</th>
+                          <th className="p-2">Vides</th>
+                          <th className="p-2">Distinctes</th>
+                          <th className="p-2">Alertes</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : null}
-            </details>
-          </li>
-        ))}
+                      </thead>
+                      <tbody>
+                        {profile.table.columns.map((c) => (
+                          <tr key={c.name} className="border-t border-zinc-100 dark:border-zinc-900">
+                            <td className="p-2 font-mono text-xs">{c.name}</td>
+                            <td className="p-2">{typeLabel(c.type_guess)}</td>
+                            <td className="p-2 tabular-nums">{formatPct(c.null_pct)}</td>
+                            <td className="p-2 tabular-nums">{count(c.distinct)}</td>
+                            <td className="p-2 text-xs">{columnIssuesLabel(c.issues) || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+              </details>
+            </li>
+          );
+        })}
       </ul>
     </Section>
   );
@@ -141,9 +178,9 @@ export function FilesSection({ files }: { files: FileRow[] }) {
 
 // --- Mapping review ------------------------------------------------------------------------------------
 
-function TargetSelect({ name, value }: { name: string; value: string | null }) {
+function TargetSelect({ name, value, column }: { name: string; value: string | null; column: string }) {
   return (
-    <select name={name} defaultValue={value ?? ""} className={`${inputClass} text-sm`} aria-label="Cible">
+    <select name={name} defaultValue={value ?? ""} className={inputClass} aria-label={`Cible de la colonne ${column}`}>
       <option value="">Non repris</option>
       {targetGroups().map((g) => (
         <optgroup key={g.label} label={g.label}>
@@ -169,10 +206,18 @@ export function MappingSection({
   proposals: ProposalRow[];
   files: FileRow[];
 }) {
+  const profiles = new Map(files.map((f) => [f.id, readProfile(f.profile)]));
   const toReview = proposals.filter((p) => p.needs_review).length;
-  const examples = new Map(
-    files.flatMap((f) => (f.profile?.columns ?? []).map((c) => [`${f.id}:${c.name}`, c.top_values?.[0]?.value])),
-  );
+  const examples = new Map<string, string | undefined>();
+  for (const f of files) {
+    const p = profiles.get(f.id);
+    if (p?.kind !== "table") continue;
+    for (const c of p.table.columns) examples.set(`${f.id}:${c.name}`, c.top_values?.[0]?.value);
+  }
+  const blocked = proposals.length === 0 && files.some((f) => {
+    const kind = profiles.get(f.id)?.kind;
+    return kind === "needs_layout" || kind === "empty_workbook";
+  });
   const content = files
     .filter((f) => proposals.some((p) => p.file_id === f.id))
     .map((f) => (
@@ -197,17 +242,21 @@ export function MappingSection({
                 </div>
                 <div className="min-w-0">
                   {editable ? (
-                    <TargetSelect name={mappingField(p.file_id, p.source_column)} value={p.target} />
+                    <TargetSelect name={mappingField(p.file_id, p.source_column)} value={p.target} column={p.source_column} />
                   ) : (
                     <p className="text-sm">
                       {targetLabel(p.target)}
                       {p.status === "overridden" ? <span className="text-zinc-500"> (corrigé)</span> : null}
                     </p>
                   )}
-                  <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{p.rationale}</p>
+                  <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                    <span className="sr-only">Justification automatique : </span>
+                    {p.rationale}
+                  </p>
                 </div>
                 <div className="flex items-center gap-2 md:justify-end">
                   <Badge tone={p.confidence >= 0.9 ? "ok" : p.confidence >= 0.7 ? "neutral" : "action"}>
+                    <span className="sr-only">Confiance </span>
                     {Math.round(p.confidence * 100)} %
                   </Badge>
                   {p.needs_review && editable ? <Badge tone="action">À vérifier</Badge> : null}
@@ -218,22 +267,36 @@ export function MappingSection({
       </div>
     ));
 
+  if (editable && blocked) {
+    return (
+      <Section title="Mapping des colonnes" testId="mapping">
+        <InfoNote>
+          Aucun tableau à mapper : un fichier à largeur fixe demande la description de ses colonnes, ce que l&apos;interface ne
+          gère pas encore, ou le classeur est vide. Abandonnez ce lot et déposez un fichier CSV ou Excel.
+        </InfoNote>
+      </Section>
+    );
+  }
   return (
     <Section title="Mapping des colonnes" testId="mapping">
       {editable ? (
-        <form action={approveMapping} className="flex flex-col gap-4">
+        <ActionForm
+          action={approveMapping}
+          submitLabel="Valider le mapping"
+          pendingLabel="Validation…"
+          buttonClassName={inlineButtonClass}
+          className="flex flex-col gap-4"
+        >
           <input type="hidden" name="batch_id" value={batchId} />
           <InfoNote>
-            {toReview > 0
-              ? `Proposition automatique : vérifiez surtout les ${toReview} colonne(s) surlignée(s), corrigez la cible si besoin, puis validez.`
-              : "Proposition automatique : relisez les cibles, corrigez-les si besoin, puis validez."}{" "}
-            Le mapping validé est réutilisé pour les prochains fichiers de même format.
+            {proposals.length === 0
+              ? "Ce lot ne contient que des pièces jointes : validez pour les rattacher aux comptes du portefeuille."
+              : toReview > 0
+                ? `Proposition automatique : vérifiez surtout les ${toReview} colonne(s) surlignée(s), corrigez la cible si besoin, puis validez. Le mapping validé est réutilisé pour les prochains fichiers de même format.`
+                : "Proposition automatique : relisez les cibles, corrigez-les si besoin, puis validez. Le mapping validé est réutilisé pour les prochains fichiers de même format."}
           </InfoNote>
           {content}
-          <button type="submit" className={inlineButtonClass}>
-            Valider le mapping
-          </button>
-        </form>
+        </ActionForm>
       ) : (
         <div className="flex flex-col gap-4">{content}</div>
       )}
@@ -243,9 +306,85 @@ export function MappingSection({
 
 // --- Data-quality report -------------------------------------------------------------------------------
 
+function Reconciliation({ report, amounts }: { report: DqReport; amounts: Money }) {
+  const rec = report.reconciliation;
+  const currencies = Object.entries(rec.computed.currencies ?? {});
+  const single = currencies.length <= 1;
+  const currency = currencies[0]?.[0] ?? "EUR";
+  const control = rec.control;
+  const fileRows = rec.computed.file_rows ?? rec.computed.rows;
+  return (
+    <div>
+      <h3 className="mb-2 text-sm font-medium">Rapprochement avec le cédant</h3>
+      {single ? (
+        <Stats
+          items={[
+            { label: "Montant des pièces", value: money(amounts.total_minor, currency), testId: "dq-total" },
+            { label: "Déjà payé (cédant)", value: money(amounts.paid_minor, currency) },
+            { label: "Encours restant dû", value: money(amounts.outstanding_minor, currency), testId: "dq-outstanding" },
+            {
+              label: "Encours annoncé",
+              value: control?.total_minor == null ? "Non fourni" : money(amounts.control_minor, "EUR"),
+            },
+          ]}
+        />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[480px] text-left text-sm" data-testid="dq-currencies">
+            <caption className="sr-only">Montants par devise</caption>
+            <thead className="text-xs text-zinc-600 dark:text-zinc-400">
+              <tr>
+                <th className="p-2">Devise</th>
+                <th className="p-2">Lignes</th>
+                <th className="p-2">Montant des pièces</th>
+                <th className="p-2">Encours restant dû</th>
+              </tr>
+            </thead>
+            <tbody>
+              {currencies.map(([code, t]) => (
+                <tr key={code} className="border-t border-zinc-100 dark:border-zinc-900">
+                  <td className="p-2">{code}</td>
+                  <td className="p-2 tabular-nums">{count(t.rows)}</td>
+                  <td className="p-2 tabular-nums">{money(t.total_minor, code)}</td>
+                  <td className="p-2 tabular-nums">{money(t.outstanding_minor, code)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="mt-2 text-sm">
+        Lignes du fichier : {count(fileRows)}
+        {control?.rows != null ? ` · annoncées : ${count(control.rows)}` : ""}
+      </p>
+      <p className="mt-2 flex flex-wrap gap-2 text-sm" data-testid="dq-reconciliation">
+        {rec.status === "matched" ? (
+          <Badge tone="ok">
+            {control?.total_minor != null ? "Encours concordant au centime" : "Nombre de lignes concordant"}
+            {control?.total_minor != null && control?.rows != null ? ", lignes concordantes" : ""}
+          </Badge>
+        ) : rec.status === "mismatch" ? (
+          <>
+            {rec.currency_mismatch ? (
+              <Badge tone="error">Plusieurs devises : pas de rapprochement possible avec un total en euros</Badge>
+            ) : amounts.difference_minor !== null && amounts.difference_minor !== "0" ? (
+              <Badge tone="error">Écart d&apos;encours de {money(amounts.difference_minor, "EUR")}</Badge>
+            ) : null}
+            {rec.difference_rows ? (
+              <Badge tone="error">Écart de {count(rec.difference_rows)} ligne(s)</Badge>
+            ) : null}
+          </>
+        ) : (
+          <Badge tone="neutral">Pas de totaux cédant : rapprochement non effectué</Badge>
+        )}
+      </p>
+    </div>
+  );
+}
+
 export function QualitySection({
   report,
-  money,
+  money: amounts,
   issues,
   fileNames,
 }: {
@@ -254,7 +393,6 @@ export function QualitySection({
   issues: IssueRow[];
   fileNames: Record<string, string>;
 }) {
-  const rec = report.reconciliation;
   const byCode = new Map<string, { severity: string; count: number }>();
   for (const f of report.files) {
     for (const [code, v] of Object.entries(f.issues)) {
@@ -274,37 +412,15 @@ export function QualitySection({
             { label: "Lignes en double", value: count(report.duplicates) },
           ]}
         />
-        <div>
-          <h3 className="mb-2 text-sm font-medium">Rapprochement des montants</h3>
-          <Stats
-            items={[
-              { label: "Montant calculé", value: eur(money.total_minor), testId: "dq-total" },
-              { label: "Déjà payé (cédant)", value: eur(money.paid_minor) },
-              { label: "Restant dû", value: eur(money.outstanding_minor) },
-              {
-                label: "Annoncé par le cédant",
-                value: rec.status === "no_control_totals" ? "Non fourni" : eur(money.control_minor),
-              },
-            ]}
-          />
-          <p className="mt-2 text-sm" data-testid="dq-reconciliation">
-            {rec.status === "matched" ? (
-              <Badge tone="ok">Totaux concordants au centime</Badge>
-            ) : rec.status === "mismatch" ? (
-              <Badge tone="error">Écart de {eur(money.difference_minor)} avec le cédant</Badge>
-            ) : (
-              <Badge tone="neutral">Pas de totaux cédant : rapprochement non effectué</Badge>
-            )}
-          </p>
-        </div>
+        <Reconciliation report={report} amounts={amounts} />
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <h3 className="mb-2 text-sm font-medium">Joignabilité</h3>
             <ul className="text-sm">
-              <li>E-mail : {pct(report.contactability.email_pct)}</li>
-              <li>Téléphone : {pct(report.contactability.phone_pct)}</li>
-              <li>Adresse postale : {pct(report.contactability.postal_pct)}</li>
-              <li>Au moins un moyen : {pct(report.contactability.any_pct)}</li>
+              <li>E-mail : {formatPct(report.contactability.email_pct)}</li>
+              <li>Téléphone : {formatPct(report.contactability.phone_pct)}</li>
+              <li>Adresse postale : {formatPct(report.contactability.postal_pct)}</li>
+              <li>Au moins un moyen : {formatPct(report.contactability.any_pct)}</li>
             </ul>
           </div>
           <div>
@@ -343,7 +459,7 @@ export function QualitySection({
                 <thead className="text-xs text-zinc-600 dark:text-zinc-400">
                   <tr>
                     <th className="p-2">Fichier</th>
-                    <th className="p-2">Ligne</th>
+                    <th className="p-2">Ligne (hors en-tête)</th>
                     <th className="p-2">Colonne</th>
                     <th className="p-2">Anomalie</th>
                     <th className="p-2">Valeur</th>
@@ -376,7 +492,7 @@ export function QualitySection({
   );
 }
 
-// --- Commit, confirmation, rollback ------------------------------------------------------------------
+// --- Commit, confirmation, rollback, abandon ------------------------------------------------------------
 
 export function IntegrationSection({
   batchId,
@@ -393,8 +509,8 @@ export function IntegrationSection({
     return (
       <Section title="Intégration">
         <InfoNote>
-          Des anomalies bloquantes empêchent l&apos;intégration. Faites corriger le fichier par le cédant puis déposez-le dans
-          un nouveau lot.
+          Des anomalies bloquantes empêchent l&apos;intégration. Faites corriger le fichier par le cédant, abandonnez ce lot et
+          déposez le fichier corrigé dans un nouveau lot.
         </InfoNote>
       </Section>
     );
@@ -410,16 +526,19 @@ export function IntegrationSection({
             ? ` ${count(report.staging.already_boarded_accounts_skipped)} compte(s) déjà présents ignorés.`
             : ""}
         </p>
-        <form action={commitBatch} className="flex flex-col gap-3">
+        <ActionForm
+          action={commitBatch}
+          submitLabel="Intégrer le lot"
+          pendingLabel="Intégration…"
+          buttonClassName={inlineButtonClass}
+          className="flex flex-col gap-3"
+        >
           {hidden}
           <label className="flex flex-col gap-1 text-sm">
-            {mismatch ? "Motif (obligatoire : les totaux ne concordent pas)" : "Commentaire (facultatif)"}
+            {mismatch ? "Motif (obligatoire : le rapprochement avec le cédant n'est pas concordant)" : "Commentaire (facultatif)"}
             <input name="reason" required={mismatch} className={inputClass} />
           </label>
-          <button type="submit" className={inlineButtonClass}>
-            Intégrer le lot
-          </button>
-        </form>
+        </ActionForm>
       </Section>
     );
   }
@@ -431,22 +550,22 @@ export function IntegrationSection({
           requis). Avant confirmation, l&apos;intégration peut être annulée.
         </InfoNote>
         <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-end">
-          <form action={confirmBatch}>
+          <ActionForm action={confirmBatch} submitLabel="Confirmer le lot" pendingLabel="Confirmation…" buttonClassName={inlineButtonClass}>
             {hidden}
-            <button type="submit" className={inlineButtonClass}>
-              Confirmer le lot
-            </button>
-          </form>
-          <form action={rollbackBatch} className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-end">
+          </ActionForm>
+          <ActionForm
+            action={rollbackBatch}
+            submitLabel="Annuler l'intégration"
+            pendingLabel="Annulation…"
+            buttonClassName={dangerButtonClass}
+            className="flex flex-1 flex-col gap-2"
+          >
             {hidden}
-            <label className="flex flex-1 flex-col gap-1 text-sm">
+            <label className="flex flex-col gap-1 text-sm">
               Motif d&apos;annulation
               <input name="reason" required className={inputClass} />
             </label>
-            <button type="submit" className={dangerButtonClass}>
-              Annuler l&apos;intégration
-            </button>
-          </form>
+          </ActionForm>
         </div>
       </Section>
     );
@@ -462,6 +581,31 @@ export function IntegrationSection({
     );
   }
   return null;
+}
+
+export function AbandonSection({ batchId, status }: { batchId: string; status: string }) {
+  if (!ABANDONABLE.has(status)) return null;
+  return (
+    <details className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800" data-testid="abandon">
+      <summary className="cursor-pointer font-medium">Abandonner ce lot</summary>
+      <ActionForm
+        action={abandonBatch}
+        submitLabel="Abandonner le lot"
+        pendingLabel="Abandon…"
+        buttonClassName={dangerButtonClass}
+        className="mt-3 flex flex-col gap-2"
+      >
+        <input type="hidden" name="batch_id" value={batchId} />
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+          Rien n&apos;a été intégré : le lot est clos et ses données préparées sont supprimées. Les fichiers déposés restent stockés.
+        </p>
+        <label className="flex flex-col gap-1 text-sm">
+          Motif de l&apos;abandon
+          <input name="reason" required className={inputClass} />
+        </label>
+      </ActionForm>
+    </details>
+  );
 }
 
 // --- History ---------------------------------------------------------------------------------------------

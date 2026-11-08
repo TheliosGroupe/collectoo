@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { commandError, mappingField, mappingOverrides, parseEurosToMinor } from "./forms";
+import { commandErrorCode, errorText, formatPct, mappingField, mappingOverrides, parseEurosToMinor } from "./forms";
+import { readProfile } from "./profile";
 import { isProcessing, statusLabel, statusTone } from "./status";
 import { TARGETS, targetLabel } from "./targets";
 
@@ -10,12 +11,12 @@ describe("parseEurosToMinor", () => {
     ["1 000 €", BigInt(100000)],
     ["0,05", BigInt(5)],
     ["-10", BigInt(-1000)],
-    ["99999999999999999,99", BigInt("9999999999999999999")],
+    ["92233720368547758,07", BigInt("9223372036854775807")],
   ])("%s -> %s", (text, minor) => {
     expect(parseEurosToMinor(text)).toBe(minor);
   });
 
-  it.each(["", "abc", "1,234,56", "1.234"])("rejects %j", (text) => {
+  it.each(["", "abc", "1,234,56", "1.234", "92233720368547758,08"])("rejects %j", (text) => {
     expect(parseEurosToMinor(text)).toBeNull();
   });
 });
@@ -59,8 +60,31 @@ describe("labels", () => {
     expect(eba && targetLabel(eba.id)).toMatch(/^Modèle UE 3\.12 /);
   });
 
-  it("translates command errors", () => {
-    expect(commandError("no active client mandate covers this portfolio (CPCE R124-3)")).toMatch(/R124-3/);
-    expect(commandError("not allowed")).toMatch(/non autorisée/);
+  it("turns command errors into fixed French messages (most specific first)", () => {
+    expect(commandErrorCode("no active client mandate covers this portfolio (CPCE R124-3)")).toBe("mandate_missing");
+    expect(commandErrorCode("totals do not reconcile with the seller's control totals: a reason is required")).toBe(
+      "totals_mismatch",
+    );
+    expect(commandErrorCode("a reason is required")).toBe("reason_required");
+    expect(commandErrorCode("another file with this name is already in the batch")).toBe("name_taken");
+    expect(commandErrorCode('duplicate key value violates unique constraint "x"')).toBe("unknown");
+    expect(errorText("not_allowed")).toMatch(/non autorisée/);
+  });
+
+  it("formats percentages the French way", () => {
+    expect(formatPct(0.925).replace(/\s/g, " ")).toBe("92,5 %");
+  });
+});
+
+describe("readProfile", () => {
+  const table = { row_count: 3, duplicate_rows: 0, columns: [{ name: "a" }] };
+  it("reads CSV tables, the first non-empty Excel sheet, zips and fixed-width files", () => {
+    expect(readProfile(table).kind).toBe("table");
+    const sheet = readProfile({ sheets: { Vide: { ...table, row_count: 0 }, Factures: table } });
+    expect(sheet).toMatchObject({ kind: "table", sheet: "Factures" });
+    expect(readProfile({ sheets: { Vide: { ...table, row_count: 0 } } }).kind).toBe("empty_workbook");
+    expect(readProfile({ not_profiled: "zip" }).kind).toBe("documents");
+    expect(readProfile({ needs_layout: true }).kind).toBe("needs_layout");
+    expect(readProfile(null).kind).toBe("pending");
   });
 });

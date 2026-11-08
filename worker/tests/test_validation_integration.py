@@ -89,7 +89,7 @@ def test_clean_file_is_validated_with_a_full_report(tenant: dict[str, Any], tmp_
     rec = report["reconciliation"]
     assert (
         rec["status"] == "mismatch"
-        and rec["difference_minor"] == rec["computed"]["total_minor"] > 0
+        and rec["difference_minor"] == rec["computed"]["outstanding_minor"] > 0
     )
     assert report["legal_regimes"] == {"civil": 120}
     assert report["addresses"]["provider"] == "mock" and report["addresses"]["addresses"] == 120

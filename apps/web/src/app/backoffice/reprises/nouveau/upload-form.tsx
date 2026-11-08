@@ -1,9 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { type FormEvent, useRef, useState } from "react";
 import { ErrorNote, InfoNote, buttonClass, inputClass } from "@/components/ui";
-import { commandError, parseEurosToMinor } from "@/lib/boarding/forms";
+import { commandErrorCode, errorText, parseEurosToMinor } from "@/lib/boarding/forms";
 import { createClient } from "@/lib/supabase/browser";
 
 type Option = { id: string; label: string };
@@ -14,36 +14,51 @@ async function sha256Hex(file: File): Promise<string> {
 }
 
 /**
- * Creates the batch, registers each file, uploads it to its registered path (the storage policy
+ * Creates the batch, registers each file, uploads it to its registered key (the storage policy
  * accepts nothing else), then submits the batch: the worker profiles it and proposes the mapping.
+ *
+ * Retries are safe: the idempotency key is kept while the inputs stay the same (same batch), a
+ * file registered again returns its first registration, and a file already stored is skipped.
+ * Changing any input starts a new batch.
  */
 export function UploadForm({ portfolios }: { portfolios: Option[] }) {
   const router = useRouter();
-  // One key per form: a retry after a network error reuses the same batch.
-  const [idempotencyKey] = useState(() => crypto.randomUUID());
+  const attempt = useRef<{ signature: string; key: string } | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function onSubmit(formData: FormData) {
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); // keeps the chosen files and values if something fails
+    if (progress !== null) return;
     setError(null);
+    const formData = new FormData(event.currentTarget);
     const files = formData.getAll("files").filter((f): f is File => f instanceof File && f.size > 0);
     if (files.length === 0) return setError("Choisissez au moins un fichier.");
+    const portfolio = String(formData.get("portfolio") ?? "");
+    const cutOff = String(formData.get("cut_off_date") ?? "");
     const totalText = String(formData.get("control_total") ?? "").trim();
     const rowsText = String(formData.get("control_rows") ?? "").trim();
+    if (Boolean(totalText) !== Boolean(rowsText))
+      return setError("Indiquez l'encours annoncé et le nombre de lignes, ou aucun des deux.");
     const controlTotal = totalText ? parseEurosToMinor(totalText) : null;
-    if (totalText && controlTotal === null) return setError("Montant total du cédant illisible (ex. 12 345,67).");
-    if (totalText && !/^\d+$/.test(rowsText)) return setError("Indiquez aussi le nombre de lignes annoncé.");
+    if (totalText && (controlTotal === null || controlTotal < BigInt(0)))
+      return setError("Encours annoncé illisible (ex. 12 345,67).");
+    if (rowsText && !/^\d{1,9}$/.test(rowsText)) return setError("Nombre de lignes illisible.");
+
+    const signature = JSON.stringify([portfolio, cutOff, totalText, rowsText, files.map((f) => [f.name, f.size, f.lastModified])]);
+    if (attempt.current?.signature !== signature) attempt.current = { signature, key: crypto.randomUUID() };
 
     const supabase = createClient();
     const fail = (message: string) => {
+      console.error("boarding upload failed", message);
       setProgress(null);
-      setError(commandError(message));
+      setError(errorText(commandErrorCode(message)));
     };
     setProgress("Création du lot…");
     const { data: batchId, error: e1 } = await supabase.rpc("create_boarding_batch", {
-      p_idempotency_key: idempotencyKey,
-      p_portfolio_id: String(formData.get("portfolio")),
-      p_cut_off_date: String(formData.get("cut_off_date") ?? "") || undefined,
+      p_idempotency_key: attempt.current.key,
+      p_portfolio_id: portfolio,
+      p_cut_off_date: cutOff || undefined,
     });
     if (e1 || !batchId) return fail(e1?.message ?? "no batch");
     if (controlTotal !== null) {
@@ -64,11 +79,12 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
         p_size_bytes: file.size,
       });
       if (e3 || !registered) return fail(e3?.message ?? "file not registered");
-      const target = registered as { bucket: string; storage_path: string };
+      const target = registered as { bucket: string; storage_path: string; uploaded: boolean };
+      if (target.uploaded) continue; // stored during an earlier attempt
       const { error: e4 } = await supabase.storage
         .from(target.bucket)
         .upload(target.storage_path, file, { contentType: file.type || "application/octet-stream" });
-      if (e4 && !e4.message.includes("exists")) return fail(e4.message);
+      if (e4 && !/already exists|duplicate/i.test(e4.message)) return fail(e4.message);
     }
     setProgress("Analyse demandée…");
     const { error: e5 } = await supabase.rpc("submit_boarding_batch", { p_batch_id: batchId });
@@ -81,7 +97,7 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
   }
 
   return (
-    <form action={onSubmit} className="flex max-w-xl flex-col gap-4">
+    <form onSubmit={onSubmit} className="flex max-w-xl flex-col gap-4">
       <label className="flex flex-col gap-1 text-sm">
         Portefeuille
         <select name="portfolio" required className={inputClass}>
@@ -109,19 +125,23 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
       </label>
       <fieldset className="grid gap-3 sm:grid-cols-2">
         <legend className="mb-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Totaux annoncés par le cédant, pour le rapprochement (facultatif)
+          Totaux annoncés par le cédant, pour le rapprochement (facultatif, les deux ensemble)
         </legend>
         <label className="flex flex-col gap-1 text-sm">
-          Montant total (€)
+          Encours restant dû à la date d&apos;arrêté (€)
           <input name="control_total" inputMode="decimal" placeholder="12 345,67" className={inputClass} />
         </label>
         <label className="flex flex-col gap-1 text-sm">
-          Nombre de lignes
+          Nombre de lignes du fichier
           <input name="control_rows" inputMode="numeric" placeholder="1200" className={inputClass} />
         </label>
       </fieldset>
       {error ? <ErrorNote>{error}</ErrorNote> : null}
-      {progress ? <InfoNote>{progress}</InfoNote> : null}
+      {progress ? (
+        <div role="status" aria-live="polite">
+          <InfoNote>{progress}</InfoNote>
+        </div>
+      ) : null}
       <button type="submit" disabled={progress !== null} className={buttonClass}>
         Déposer et analyser
       </button>
