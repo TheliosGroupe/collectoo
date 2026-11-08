@@ -1,0 +1,48 @@
+# Layer 1 (EU NPL template, Regulation (EU) 2023/2083) -> Layer 2 (operational) mapping.
+# Declarative and versioned (docs/ARCHITECTURE.md §6, ADR-0009).
+#
+# Rules:
+# - `source` columns are eba.* column names (tools/eba_catalogue/gen_sql.py).
+# - A source column mapped losslessly is stored in its target column only.
+# - Every other source column (unmapped, or mapped through a many-to-one enum) is also kept
+#   verbatim in the target row's `source_attributes`, so a compliant tape can be re-exported.
+# - claim_type_code and legal_regime are not in the template: boarding assigns them (M1).
+spec: eba_to_core
+version: 1
+
+entities:
+  party:
+    source_table: t1_counterparty
+    key: {source: f1_02_counterparty_identifier, target: seller_ref}
+    fields:
+      - {source: f1_03_name_of_counterparty, target: display_name, type: text, required: true}
+      - {source: f1_07_date_of_birth, target: birth_date, type: date}
+      - source: f1_06_legal_type_of_counterparty
+        target: kind
+        type: enum
+        required: true
+        values:
+          Households: natural_person
+          Non-financial corporations-SMEs: legal_entity
+          Non-financial corporations-other than SMEs: legal_entity
+
+  account:
+    source_table: t3_loan
+    key: {source: f3_01_loan_identifier, target: external_ref}
+    fields:
+      - {source: f3_02_inception_date, target: contract_date, type: date}
+      - {source: f3_08_currency, target: currency, type: text, required: true}
+      - {source: f3_29_statute_of_limitations_date, target: seller_limitation_date, type: date}
+
+  account_party:
+    source_table: t2_1_borrower_loan
+    links:
+      party: f2_00_counterparty_identifier
+      account: f2_01_loan_identifier
+    constants: {role: borrower}
+    # Capacity from the counterparty's legal type (template 1.06). Sole traders are
+    # "Households" in the template: boarding review can switch them to `professional`.
+    derive:
+      capacity:
+        from_party: kind
+        values: {natural_person: consumer, legal_entity: legal_entity}

@@ -3,6 +3,7 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
+- PR #4 M0b-auth merged 2026-11-08 (email-code login, TOTP MFA, route gating, E2E vs local stack in CI).
 - PR #3 M0b-db merged 2026-11-08 (tenancy, RLS helpers, token hook, command pattern, 42 pgTAP checks).
 - PR #2 M0a merged 2026-11-08 (monorepo, tooling, CI 5 jobs green, session hook).
 - Phase 0 step 0: brief saved verbatim in `docs/BRIEF.md`.
@@ -13,12 +14,13 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- PR "M0b-auth — login, MFA, route gating" (M0-08): email one-time code login (French code-only template), TOTP MFA enrolment/verification, staff need aal2 for the back-office (proxy + page + RLS), client space, logout; Playwright E2E against the local stack (Mailpit for codes, RFC 6238 TOTP in tests); CI e2e job runs the stack.
+- PR "M0c — two-layer canonical schema" (M0-12…M0-15): change log trigger (diffs, actor, composite keys, append-only); Layer-1 `eba.*` tables generated from the catalogue (CI checks regeneration); Layer-2 core (claim_type, mandate + terms, party, identifiers, contact points + consent, account, account_party, claim_item, ownership periods without overlap, document); RLS by client organization; YAML mapping spec + lossless round trip in the worker.
 
 ## Next
-- PR-3 M0c two-layer canonical schema (M0-12…M0-15), PR-4 M0d synth + seed (M0-16…M0-18), then M1.
+- PR-4 M0d synthetic generator + seed (M0-16…M0-18), then M1 (boarding).
 
 ## Decisions
+- Debtor data is scoped per client organization (party.client_organization_id): no cross-client debtor merge, each client stays controller of its data. Template fields without an operational column live in `source_attributes` so tapes can be regenerated.
 - Login = email one-time code only (no magic link) for all users; accounts created by invitation (`shouldCreateUser: false`). Next.js `cacheComponents` turned off (simpler per-user auth pages).
 - 2026-11-08: Claude merges its own PRs when all CI jobs are green (founder approval); founder reviews afterwards.
 - M0a: Next.js 16.4.3 (system fonts, no Google Fonts fetch), Python 3.12 via uv, Playwright pinned 1.63.0, vitest 4.0.18 (4.1.x hits an npm resolver crash); Supabase local stack with Studio/analytics/edge runtime/realtime disabled; shadcn/ui components added when first needed.
