@@ -93,7 +93,8 @@ select lives_ok($$select public.commit_boarding_batch('30000000-0000-0000-0000-0
 reset role;
 select is(private.opening_normal((select opening_plan from public.boarding_batch where id = '30000000-0000-0000-0000-000000000001')),
   private.opening_normal((select v from t where k = 'opening')), 'commit stores the opening plan = the staged report');
-select is((select count(*)::int from public.ledger_entry), 0, 'nothing reaches the ledger at commit');
+select is((select count(*)::int from public.ledger_entry where organization_id = '00000000-0000-0000-0000-00000000000a'), 0,
+  'nothing reaches the ledger at commit');
 select is((select count(*)::int from public.claim_ownership_period o join public.account a on a.id = o.account_id
            where a.boarding_batch_id = '30000000-0000-0000-0000-000000000001' and o.valid_from = '2026-09-30'), 3,
   'servicing starts at the cut-off date');
@@ -144,7 +145,8 @@ select is((select count(*)::int from (
   'the owner claim mirrors the receivable per component');
 select lives_ok($$ set constraints all immediate $$, 'every opening entry is balanced');
 select is(private.complete_batch_confirmation('30000000-0000-0000-0000-000000000001'), 'skipped', 'a redelivered job does nothing');
-select is((select count(*)::int from public.ledger_entry), 2, 'no second opening');
+select is((select count(*)::int from public.ledger_entry where organization_id = '00000000-0000-0000-0000-00000000000a'), 2,
+  'no second opening');
 
 -- A mandate that expires between the request and the job sends the batch back -----------------------
 update public.mandate_terms set valid_to = private.paris_today() where mandate_id = '70000000-0000-0000-0000-000000000002';
