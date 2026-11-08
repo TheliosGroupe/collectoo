@@ -89,6 +89,38 @@ isOneToOne: false
                   Relationships: [
                     
                   ]
+                },"bank_account": {
+                  Row: {
+                    "bic": string | null,"closed_on": string | null,"closed_reason": string | null,"created_at": string,"created_by": string | null,"csv_profile": Json | null,"currency": string,"feed": string,"iban": string,"id": string,"label": string,"opened_on": string,"organization_id": string,"purpose": string,"status": string,"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "bic"?: string | null,"closed_on"?: string | null,"closed_reason"?: string | null,"created_at"?: string,"created_by"?: string | null,"csv_profile"?: Json | null,"currency": string,"feed": string,"iban": string,"id"?: string,"label": string,"opened_on": string,"organization_id": string,"purpose"?: string,"status"?: string,"updated_at"?: string
+                  }
+                  Update: {
+                    "bic"?: string | null,"closed_on"?: string | null,"closed_reason"?: string | null,"created_at"?: string,"created_by"?: string | null,"csv_profile"?: Json | null,"currency"?: string,"feed"?: string,"iban"?: string,"id"?: string,"label"?: string,"opened_on"?: string,"organization_id"?: string,"purpose"?: string,"status"?: string,"updated_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "bank_account_created_by_fkey"
+      columns: ["created_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "bank_account_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "bank_account_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"boarding_batch": {
                   Row: {
                     "art4_exemptions": NonNullable<Json>,"claim_type_spec_version": number | null,"client_organization_id": string,"commit_override_reason": string | null,"commit_requested_at": string | null,"commit_requested_by": string | null,"confirm_requested_at": string | null,"confirm_requested_by": string | null,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"dq_report": Json | null,"failed_job": Json | null,"id": string,"join_keys": NonNullable<Json>,"opening_plan": Json | null,"opening_summary": Json | null,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"staging_digest": Json | null,"status": string,"transform_spec_version": number | null,"updated_at": string,"validation_spec_version": number | null,"version": number
@@ -351,17 +383,23 @@ isOneToOne: false
                   ]
                 },"ledger_account": {
                   Row: {
-                    "account_id": string | null,"book": string,"claim_item_id": string | null,"client_organization_id": string | null,"component": string | null,"created_at": string,"currency": string,"id": string,"organization_id": string,"owner_organization_id": string | null,"portfolio_id": string | null
+                    "account_id": string | null,"bank_account_id": string | null,"book": string,"claim_item_id": string | null,"client_organization_id": string | null,"component": string | null,"created_at": string,"currency": string,"id": string,"organization_id": string,"owner_organization_id": string | null,"portfolio_id": string | null
                   }
                   ComputedFields: never
                   Insert: {
-                    "account_id"?: string | null,"book": string,"claim_item_id"?: string | null,"client_organization_id"?: string | null,"component"?: string | null,"created_at"?: string,"currency": string,"id"?: string,"organization_id": string,"owner_organization_id"?: string | null,"portfolio_id"?: string | null
+                    "account_id"?: string | null,"bank_account_id"?: string | null,"book": string,"claim_item_id"?: string | null,"client_organization_id"?: string | null,"component"?: string | null,"created_at"?: string,"currency": string,"id"?: string,"organization_id": string,"owner_organization_id"?: string | null,"portfolio_id"?: string | null
                   }
                   Update: {
-                    "account_id"?: string | null,"book"?: string,"claim_item_id"?: string | null,"client_organization_id"?: string | null,"component"?: string | null,"created_at"?: string,"currency"?: string,"id"?: string,"organization_id"?: string,"owner_organization_id"?: string | null,"portfolio_id"?: string | null
+                    "account_id"?: string | null,"bank_account_id"?: string | null,"book"?: string,"claim_item_id"?: string | null,"client_organization_id"?: string | null,"component"?: string | null,"created_at"?: string,"currency"?: string,"id"?: string,"organization_id"?: string,"owner_organization_id"?: string | null,"portfolio_id"?: string | null
                   }
                   Relationships: [
                     {
+      foreignKeyName: "ledger_account_bank_fk"
+      columns: ["bank_account_id","organization_id","currency"]
+isOneToOne: false
+      referencedRelation: "bank_account"
+      referencedColumns: ["id","organization_id","currency"]
+    },{
       foreignKeyName: "ledger_account_claim_fk"
       columns: ["account_id","organization_id","client_organization_id","portfolio_id","currency"]
 isOneToOne: false
@@ -405,14 +443,14 @@ isOneToOne: false
                   ]
                 },"ledger_entry": {
                   Row: {
-                    "account_id": string | null,"actor_id": string | null,"actor_label": string | null,"boarding_batch_id": string | null,"client_organization_id": string | null,"effective_date": string,"engine_version": string | null,"entry_type": string,"id": string,"idempotency_key": string,"inputs_hash": string | null,"line_count": number,"organization_id": string,"portfolio_id": string | null,"posted_at": string,"reason": string | null,"request_hash": string,"reverses_entry_id": string | null,"rule_pack_version_id": string | null,"source_id": string | null,"source_type": string | null
+                    "account_id": string | null,"actor_id": string | null,"actor_label": string | null,"boarding_batch_id": string | null,"client_organization_id": string | null,"effective_date": string,"engine_version": string | null,"entry_type": string,"id": string,"idempotency_key": string,"inputs_hash": string | null,"line_count": number,"organization_id": string,"payment_id": string | null,"portfolio_id": string | null,"posted_at": string,"reason": string | null,"request_hash": string,"reverses_entry_id": string | null,"rule_pack_version_id": string | null,"source_id": string | null,"source_type": string | null
                   }
                   ComputedFields: never
                   Insert: {
-                    "account_id"?: string | null,"actor_id"?: string | null,"actor_label"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string | null,"effective_date": string,"engine_version"?: string | null,"entry_type": string,"id"?: string,"idempotency_key": string,"inputs_hash"?: string | null,"line_count": number,"organization_id": string,"portfolio_id"?: string | null,"posted_at"?: string,"reason"?: string | null,"request_hash": string,"reverses_entry_id"?: string | null,"rule_pack_version_id"?: string | null,"source_id"?: string | null,"source_type"?: string | null
+                    "account_id"?: string | null,"actor_id"?: string | null,"actor_label"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string | null,"effective_date": string,"engine_version"?: string | null,"entry_type": string,"id"?: string,"idempotency_key": string,"inputs_hash"?: string | null,"line_count": number,"organization_id": string,"payment_id"?: string | null,"portfolio_id"?: string | null,"posted_at"?: string,"reason"?: string | null,"request_hash": string,"reverses_entry_id"?: string | null,"rule_pack_version_id"?: string | null,"source_id"?: string | null,"source_type"?: string | null
                   }
                   Update: {
-                    "account_id"?: string | null,"actor_id"?: string | null,"actor_label"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string | null,"effective_date"?: string,"engine_version"?: string | null,"entry_type"?: string,"id"?: string,"idempotency_key"?: string,"inputs_hash"?: string | null,"line_count"?: number,"organization_id"?: string,"portfolio_id"?: string | null,"posted_at"?: string,"reason"?: string | null,"request_hash"?: string,"reverses_entry_id"?: string | null,"rule_pack_version_id"?: string | null,"source_id"?: string | null,"source_type"?: string | null
+                    "account_id"?: string | null,"actor_id"?: string | null,"actor_label"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string | null,"effective_date"?: string,"engine_version"?: string | null,"entry_type"?: string,"id"?: string,"idempotency_key"?: string,"inputs_hash"?: string | null,"line_count"?: number,"organization_id"?: string,"payment_id"?: string | null,"portfolio_id"?: string | null,"posted_at"?: string,"reason"?: string | null,"request_hash"?: string,"reverses_entry_id"?: string | null,"rule_pack_version_id"?: string | null,"source_id"?: string | null,"source_type"?: string | null
                   }
                   Relationships: [
                     {
@@ -444,6 +482,12 @@ isOneToOne: false
       columns: ["organization_id"]
 isOneToOne: false
       referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "ledger_entry_payment_id_fkey"
+      columns: ["payment_id"]
+isOneToOne: false
+      referencedRelation: "payment"
       referencedColumns: ["id"]
     },{
       foreignKeyName: "ledger_entry_portfolio_id_fkey"
@@ -695,6 +739,64 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"payment": {
+                  Row: {
+                    "account_id": string | null,"amount_minor": number,"bank_account_id": string | null,"bank_transaction_id": string | null,"booking_date": string,"candidate_account_id": string | null,"channel": string,"client_organization_id": string | null,"created_at": string,"creditor_reference": string | null,"currency": string,"designation": Json | null,"end_to_end_id": string | null,"id": string,"match_method": string | null,"matched_at": string | null,"method": string,"organization_id": string,"payer_iban": string | null,"payer_name": string | null,"portfolio_id": string | null,"remittance_text": string | null,"review_reason": string | null,"status": string,"updated_at": string,"value_date": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id"?: string | null,"amount_minor": number,"bank_account_id"?: string | null,"bank_transaction_id"?: string | null,"booking_date": string,"candidate_account_id"?: string | null,"channel": string,"client_organization_id"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency": string,"designation"?: Json | null,"end_to_end_id"?: string | null,"id"?: string,"match_method"?: string | null,"matched_at"?: string | null,"method": string,"organization_id": string,"payer_iban"?: string | null,"payer_name"?: string | null,"portfolio_id"?: string | null,"remittance_text"?: string | null,"review_reason"?: string | null,"status"?: string,"updated_at"?: string,"value_date"?: string | null
+                  }
+                  Update: {
+                    "account_id"?: string | null,"amount_minor"?: number,"bank_account_id"?: string | null,"bank_transaction_id"?: string | null,"booking_date"?: string,"candidate_account_id"?: string | null,"channel"?: string,"client_organization_id"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency"?: string,"designation"?: Json | null,"end_to_end_id"?: string | null,"id"?: string,"match_method"?: string | null,"matched_at"?: string | null,"method"?: string,"organization_id"?: string,"payer_iban"?: string | null,"payer_name"?: string | null,"portfolio_id"?: string | null,"remittance_text"?: string | null,"review_reason"?: string | null,"status"?: string,"updated_at"?: string,"value_date"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "payment_account_fk"
+      columns: ["account_id","organization_id","client_organization_id","portfolio_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id","organization_id","client_organization_id","portfolio_id"]
+    },{
+      foreignKeyName: "payment_bank_fk"
+      columns: ["bank_account_id","organization_id","currency"]
+isOneToOne: false
+      referencedRelation: "bank_account"
+      referencedColumns: ["id","organization_id","currency"]
+    },{
+      foreignKeyName: "payment_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "payment_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"payment_reference": {
+                  Row: {
+                    "account_id": string,"client_organization_id": string,"created_at": string,"id": string,"organization_id": string,"portfolio_id": string,"retired_at": string | null,"retired_reason": string | null,"rf": string,"status": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id": string,"client_organization_id": string,"created_at"?: string,"id"?: string,"organization_id": string,"portfolio_id": string,"retired_at"?: string | null,"retired_reason"?: string | null,"rf": string,"status"?: string
+                  }
+                  Update: {
+                    "account_id"?: string,"client_organization_id"?: string,"created_at"?: string,"id"?: string,"organization_id"?: string,"portfolio_id"?: string,"retired_at"?: string | null,"retired_reason"?: string | null,"rf"?: string,"status"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "payment_reference_account_fk"
+      columns: ["account_id","organization_id","client_organization_id","portfolio_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id","organization_id","client_organization_id","portfolio_id"]
+    }
+                  ]
                 },"portfolio": {
                   Row: {
                     "client_organization_id": string,"created_at": string,"default_claim_type": string | null,"id": string,"mandate_id": string | null,"name": string,"organization_id": string,"updated_at": string
@@ -804,6 +906,9 @@ isOneToOne: false
               "currency": string,"held_minor": number,"payable_minor": number,"unallocated_minor": number
             }[]
                            },
+"close_bank_account":
+{ Args: { "p_bank_account_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: undefined
+                           },
 "commit_boarding_batch":
 { Args: { "p_batch_id": string,"p_override_reason"?: string }; Returns: undefined
                            },
@@ -821,6 +926,12 @@ isOneToOne: false
                            },
 "ledger_balance":
 { Args: { "p_as_of"?: string,"p_known_at"?: string,"p_ledger_account_id": string }; Returns: number
+                           },
+"register_bank_account":
+{ Args: { "p_bic"?: string,"p_currency": string,"p_feed": string,"p_iban": string,"p_idempotency_key": string,"p_label": string,"p_opened_on"?: string,"p_organization_id": string }; Returns: string
+                           },
+"retire_payment_reference":
+{ Args: { "p_idempotency_key": string,"p_reason": string,"p_reference_id": string }; Returns: string
                            },
 "rollback_boarding_batch":
 { Args: { "p_batch_id": string,"p_reason": string }; Returns: undefined

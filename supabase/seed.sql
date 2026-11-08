@@ -2442,3 +2442,6 @@ insert into public.claim_ownership_period (account_id, owner_organization_id, se
   ('20d9734e-c723-56d9-992f-ff7557d3cf6f', 'b3e2a53d-9f46-5983-957e-468ff633770d', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'mandate_amicable', '2026-01-15'),
   ('372eddcd-d1a2-5dd5-a977-0da4bd086b50', 'b3e2a53d-9f46-5983-957e-468ff633770d', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'mandate_amicable', '2026-01-15'),
   ('a4042b69-abb3-5975-b451-fec7b0e7e6fe', 'b3e2a53d-9f46-5983-957e-468ff633770d', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'mandate_amicable', '2026-01-15');
+
+-- M2-06: each workable account gets its RF payment reference (random, drawn at load).
+select private.issue_payment_references(null);

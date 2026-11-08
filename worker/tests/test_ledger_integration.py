@@ -1,6 +1,7 @@
 # ruff: noqa: E501, PLR0913, PLR0917 - SQL fixtures read better unwrapped
-"""Ledger against Postgres (M2-04, needs `make up`): property machine, commit-time checks,
-append-only after commit, concurrent idempotency and balances as known at a time."""
+"""Ledger against Postgres (M2-04, M2b-1; needs `make up`): property machine (corrections and
+payment entries), commit-time checks, append-only after commit, concurrent idempotency, the
+allocation lock and balances as known at a time."""
 
 from __future__ import annotations
 
@@ -14,7 +15,18 @@ import psycopg
 import pytest
 from hypothesis import settings
 from integration_helpers import DB, make_tenant, one
-from ledger_machine import ACCOUNT, CLIENT, ITEMS, ORG, Backend, Dim, LedgerMachine
+from ledger_machine import (
+    ACCOUNT,
+    BANK,
+    CLIENT,
+    ITEMS,
+    ORG,
+    Backend,
+    Dim,
+    LedgerMachine,
+    Payment,
+    cash_in,
+)
 
 from collectoo_worker import ledger
 from collectoo_worker.ledger import (
@@ -24,9 +36,12 @@ from collectoo_worker.ledger import (
     EntryDraft,
     EntryType,
     Line,
+    OverdrawnError,
     PostResult,
 )
-from collectoo_worker.ledger.model import BOOKS
+from collectoo_worker.ledger.model import ALLOWED_BOOKS, BOOKS
+
+IBAN = "FR3430001007940000000001001"  # synthetic
 
 pytestmark = pytest.mark.integration
 
@@ -77,37 +92,117 @@ def _fixture(
     return portfolio
 
 
+def _bank_account(conn: psycopg.Connection[Any], org: UUID, bank: UUID) -> None:
+    conn.execute(
+        """insert into public.bank_account (id, organization_id, iban, currency, label, feed, opened_on)
+           values (%s, %s, %s, 'EUR', 'Fonds de tiers', 'camt053', '2026-01-01')""",
+        (bank, org, IBAN),
+    )
+
+
+def _payment(conn: psycopg.Connection[Any], org: UUID, bank: UUID, payment: Payment) -> None:
+    conn.execute(
+        """insert into public.payment (id, organization_id, bank_account_id, channel, method, amount_minor,
+             currency, booking_date)
+           values (%s, %s, %s, 'camt053', 'sct', %s, %s, %s)""",
+        (payment.id, org, bank, payment.amount_minor, payment.currency, payment.booking_date),
+    )
+
+
+def post_set(conn: psycopg.Connection[Any], draft: EntryDraft) -> PostResult:
+    """One payment entry through private.ledger_post_set, as the M2b definer functions do."""
+    try:
+        conn.execute("select private.ledger_post_set_begin()")
+        conn.execute(
+            """insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date,
+                 idempotency_key, account_id, client_organization_id, payment_id, source_type, source_id, reason)
+               values (1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (
+                draft.organization_id,
+                str(draft.entry_type),
+                draft.effective_date,
+                draft.idempotency_key,
+                draft.account_id,
+                draft.client_organization_id,
+                draft.payment_id,
+                draft.source_type,
+                draft.source_id,
+                draft.reason,
+            ),
+        )
+        with conn.cursor() as cur:
+            cur.executemany(
+                """insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency,
+                     claim_item_id, component, bank_account_id)
+                   values (1, %s, %s, %s, %s, %s, %s, %s)""",
+                [
+                    (
+                        n,
+                        str(x.book),
+                        x.amount_minor,
+                        x.currency,
+                        x.claim_item_id,
+                        str(x.component) if x.component else None,
+                        x.bank_account_id,
+                    )
+                    for n, x in enumerate(draft.lines, start=1)
+                ],
+            )
+        row = conn.execute("select entry_id, created from private.ledger_post_set()").fetchone()
+    except psycopg.Error as exc:
+        mapped = ledger.from_db_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        raise
+    assert row is not None
+    return PostResult(row[0], bool(row[1]))
+
+
 class DbBackend:
-    """One transaction per Hypothesis example, rolled back at teardown (ledger rows never persist)."""
+    """One transaction per Hypothesis example, rolled back at teardown (ledger rows never persist).
+    Each call runs the commit-time checks at once, inside its savepoint, so a refusal (LG007)
+    shows on the call that caused it."""
 
     def __init__(self) -> None:
         self.conn = psycopg.connect(DB)
         _fixture(self.conn, ORG, CLIENT, ACCOUNT, ITEMS)
+        _bank_account(self.conn, ORG, BANK)
+
+    def add_payment(self, payment: Payment) -> None:
+        _payment(self.conn, ORG, BANK, payment)
 
     def post(self, draft: EntryDraft) -> PostResult:
         with self.conn.transaction():
-            return ledger.post(self.conn, draft)
+            result = ledger.post(self.conn, draft)
+            ledger.verify_pending(self.conn)
+            return result
+
+    def post_set(self, draft: EntryDraft) -> PostResult:
+        with self.conn.transaction():
+            return post_set(self.conn, draft)
 
     def reverse(self, entry_id: UUID, key: str, when: date | None) -> PostResult:
         with self.conn.transaction():
-            return ledger.reverse(
+            result = ledger.reverse(
                 self.conn,
                 entry_id,
                 idempotency_key=key,
                 reason="property test",
                 effective_date=when,
             )
+            ledger.verify_pending(self.conn)
+            return result
 
     def balances(self, as_of: date) -> dict[Dim, int]:
         rows = self.conn.execute(
             """select la.book, p.currency, la.claim_item_id::text, la.component,
-                      la.client_organization_id::text, sum(p.amount_minor)::bigint
+                      la.client_organization_id::text, la.bank_account_id::text, sum(p.amount_minor)::bigint
                from public.ledger_posting p join public.ledger_account la on la.id = p.ledger_account_id
                where la.organization_id = %s and p.effective_date <= %s
-               group by 1, 2, 3, 4, 5 having sum(p.amount_minor) <> 0""",
+               group by 1, 2, 3, 4, 5, 6 having sum(p.amount_minor) <> 0""",
             (ORG, as_of),
         ).fetchall()
-        return {(r[0], r[1], r[2], r[3], r[4]): int(r[5]) for r in rows}
+        return {(r[0], r[1], r[2], r[3], r[4], r[5]): int(r[6]) for r in rows}
 
     def entry_lines(self) -> dict[UUID, list[tuple[str, int]]]:
         rows = self.conn.execute(
@@ -151,7 +246,7 @@ class DbLedgerMachine(LedgerMachine):
 
 
 TestDbLedgerMachine = DbLedgerMachine.TestCase
-TestDbLedgerMachine.settings = settings(max_examples=25, stateful_step_count=15, deadline=None)
+TestDbLedgerMachine.settings = settings(max_examples=30, stateful_step_count=50, deadline=None)
 
 
 # --- Committed data: unique tenants per test (ledger rows can never be deleted) ---------------------
@@ -309,9 +404,95 @@ def test_python_books_match_the_chart_of_accounts() -> None:
         rows = conn.execute(
             "select code, account_number, dimension, money_of, normal_side, client_visible from public.ledger_book"
         ).fetchall()
+        types = conn.execute(
+            "select code, allowed_books from public.ledger_entry_type where allowed_books is not null"
+        ).fetchall()
     db = {r[0]: (r[1], r[2], r[3], r[4], r[5]) for r in rows}
     py = {
         str(b): (s.account_number, s.dimension, s.money_of, s.normal_side, s.client_visible)
         for b, s in BOOKS.items()
     }
     assert py == db
+    assert {t: set(books) for t, books in types} == {
+        str(t): {str(b) for b in books} for t, books in ALLOWED_BOOKS.items()
+    }
+
+
+def test_payment_entries_of_one_servicer_wait_for_each_other() -> None:
+    """The allocation lock (design §5.2): a refund requested while an allocation of the same
+    payment is being posted waits for it, then sees it, and is refused if it would overdraw."""
+    org, client, account, items = _confirmed_account()
+    bank, payment = uuid4(), Payment(uuid4(), 100_000, date(2026, 3, 1))
+    with psycopg.connect(DB) as conn, conn.transaction():
+        _bank_account(conn, org, bank)
+        _payment(conn, org, bank, payment)
+        post_set(conn, replace_org(cash_in(payment), org, bank))
+        ledger.post(
+            conn, _draft(org, account, items[0], 80_000, f"open-{uuid4()}", date(2026, 2, 1))
+        )
+    allocation = EntryDraft(
+        organization_id=org,
+        entry_type=EntryType.ALLOCATION,
+        effective_date=date(2026, 3, 1),
+        idempotency_key=f"alloc-{uuid4()}",
+        lines=(
+            Line(Book.UNALLOCATED_PAYMENT, 60_000, "EUR"),
+            Line(Book.CLIENT_PAYABLE, -60_000, "EUR", client_organization_id=client),
+            Line(Book.DEBTOR_RECEIVABLE, -60_000, "EUR", items[0], Component.PRINCIPAL),
+            Line(Book.OWNER_CLAIM, 60_000, "EUR", component=Component.PRINCIPAL),
+        ),
+        account_id=account,
+        payment_id=payment.id,
+    )
+    refund = EntryDraft(
+        organization_id=org,
+        entry_type=EntryType.CASH_OUT,
+        effective_date=date(2026, 3, 2),
+        idempotency_key=f"refund-{uuid4()}",
+        lines=(
+            Line(Book.UNALLOCATED_PAYMENT, 50_000, "EUR"),
+            Line(Book.CLIENT_MONEY_CASH, -50_000, "EUR", bank_account_id=bank),
+        ),
+        payment_id=payment.id,
+        reason="refund to the payer",
+    )
+    outcome: list[object] = []
+    first = psycopg.connect(DB)
+    try:
+        post_set(first, allocation)  # holds the servicer's allocation lock until it commits
+
+        def second() -> None:
+            with psycopg.connect(DB) as conn:
+                try:
+                    with conn.transaction():
+                        outcome.append(post_set(conn, refund))
+                except OverdrawnError as exc:
+                    outcome.append(exc)
+
+        thread = threading.Thread(target=second)
+        thread.start()
+        time.sleep(0.5)
+        assert thread.is_alive() and outcome == []  # waiting for the lock
+        first.commit()
+        thread.join(timeout=30)
+    finally:
+        first.close()
+    assert len(outcome) == 1 and isinstance(outcome[0], OverdrawnError)  # 400.00 left, not 500.00
+
+
+def replace_org(draft: EntryDraft, org: UUID, bank: UUID) -> EntryDraft:
+    lines = tuple(
+        Line(x.book, x.amount_minor, x.currency, bank_account_id=bank)
+        if x.book is Book.CLIENT_MONEY_CASH
+        else x
+        for x in draft.lines
+    )
+    return EntryDraft(
+        organization_id=org,
+        entry_type=draft.entry_type,
+        effective_date=draft.effective_date,
+        idempotency_key=draft.idempotency_key,
+        lines=lines,
+        source_type=draft.source_type,
+        source_id=draft.source_id,
+    )

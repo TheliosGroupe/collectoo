@@ -2,7 +2,7 @@
 -- pgTAP never commits: "fails at commit" is shown with SET CONSTRAINTS ... IMMEDIATE inside a DO block
 -- (throws_ok rolls the block back, so a failing entry leaves no pending check behind).
 begin;
-select plan(57);
+select plan(59);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -43,6 +43,18 @@ insert into public.ledger_account (id, organization_id, book, currency, client_o
   ('50000000-0000-0000-0000-000000003100', '00000000-0000-0000-0000-00000000000a', 'owner_claim', 'EUR',
    '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1',
    '20000000-0000-0000-0000-0000000000a1', 'principal');
+-- Owner claims in USD, on another component, and of client B (M2b: adjustments only touch claim books).
+insert into public.ledger_account (id, organization_id, book, currency, client_organization_id, owner_organization_id,
+                                   portfolio_id, component) values
+  ('50000000-0000-0000-0000-000000003101', '00000000-0000-0000-0000-00000000000a', 'owner_claim', 'USD',
+   '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1',
+   '20000000-0000-0000-0000-0000000000a1', 'principal'),
+  ('50000000-0000-0000-0000-000000003102', '00000000-0000-0000-0000-00000000000a', 'owner_claim', 'EUR',
+   '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1',
+   '20000000-0000-0000-0000-0000000000a1', 'accrued_interest'),
+  ('50000000-0000-0000-0000-000000003103', '00000000-0000-0000-0000-00000000000a', 'owner_claim', 'EUR',
+   '00000000-0000-0000-0000-0000000000a2', '00000000-0000-0000-0000-0000000000a2',
+   '20000000-0000-0000-0000-0000000000a2', 'principal');
 insert into public.ledger_account (id, organization_id, book, currency, client_organization_id) values
   ('50000000-0000-0000-0000-000000004670', '00000000-0000-0000-0000-00000000000a', 'client_payable', 'USD',
    '00000000-0000-0000-0000-0000000000a1'),
@@ -96,13 +108,14 @@ select throws_ok($$ do $d$ begin
 end $d$ $$, 'LG001', null, 'an unbalanced entry fails at commit');
 
 select throws_ok($$ do $d$ begin
-  insert into public.ledger_entry (id, organization_id, client_organization_id, entry_type, effective_date, line_count,
-                                   idempotency_key, request_hash, reason)
+  insert into public.ledger_entry (id, organization_id, client_organization_id, portfolio_id, account_id, entry_type,
+                                   effective_date, line_count, idempotency_key, request_hash, reason)
   values ('60000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-0000000000a1',
-          'adjustment', '2026-03-01', 2, 'raw-currencies-1', repeat('0', 64), 'test');
+          '20000000-0000-0000-0000-0000000000a1', '30000000-0000-0000-0000-0000000000a1', 'adjustment', '2026-03-01', 2,
+          'raw-currencies-1', repeat('0', 64), 'test');
   insert into public.ledger_posting values
-    ('60000000-0000-0000-0000-000000000003', 1, '50000000-0000-0000-0000-000000004710', 100, 'EUR', '2026-03-01'),
-    ('60000000-0000-0000-0000-000000000003', 2, '50000000-0000-0000-0000-000000004670', -100, 'USD', '2026-03-01');
+    ('60000000-0000-0000-0000-000000000003', 1, '50000000-0000-0000-0000-000000001100', 100, 'EUR', '2026-03-01'),
+    ('60000000-0000-0000-0000-000000000003', 2, '50000000-0000-0000-0000-000000003101', -100, 'USD', '2026-03-01');
   set constraints public.ledger_entry_balanced immediate;
 end $d$ $$, 'LG001', null, 'balanced in total but not per currency fails');
 
@@ -156,13 +169,14 @@ select throws_ok($$ do $d$ begin
 end $d$ $$, 'LG002', null, 'a line dated differently from its entry is refused');
 
 select throws_ok($$ do $d$ begin
-  insert into public.ledger_entry (id, organization_id, client_organization_id, entry_type, effective_date, line_count,
-                                   idempotency_key, request_hash, reason)
+  insert into public.ledger_entry (id, organization_id, client_organization_id, portfolio_id, account_id, entry_type,
+                                   effective_date, line_count, idempotency_key, request_hash, reason)
   values ('60000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-0000000000a1',
-          'adjustment', '2026-03-01', 2, 'raw-other-client', repeat('0', 64), 'test');
+          '20000000-0000-0000-0000-0000000000a1', '30000000-0000-0000-0000-0000000000a1', 'adjustment', '2026-03-01', 2,
+          'raw-other-client', repeat('0', 64), 'test');
   insert into public.ledger_posting values
-    ('60000000-0000-0000-0000-000000000008', 1, '50000000-0000-0000-0000-000000004710', 100, 'EUR', '2026-03-01'),
-    ('60000000-0000-0000-0000-000000000008', 2, '50000000-0000-0000-0000-000000004672', -100, 'EUR', '2026-03-01');
+    ('60000000-0000-0000-0000-000000000008', 1, '50000000-0000-0000-0000-000000001100', 100, 'EUR', '2026-03-01'),
+    ('60000000-0000-0000-0000-000000000008', 2, '50000000-0000-0000-0000-000000003103', -100, 'EUR', '2026-03-01');
 end $d$ $$, 'LG002', null, 'an entry of client A cannot touch a ledger account of client B');
 
 select throws_ok($$ do $d$ begin
@@ -173,7 +187,7 @@ select throws_ok($$ do $d$ begin
           'raw-mirror-broken', repeat('0', 64), 'test');
   insert into public.ledger_posting values
     ('60000000-0000-0000-0000-000000000009', 1, '50000000-0000-0000-0000-000000001100', 100, 'EUR', '2026-03-01'),
-    ('60000000-0000-0000-0000-000000000009', 2, '50000000-0000-0000-0000-000000004671', -100, 'EUR', '2026-03-01');
+    ('60000000-0000-0000-0000-000000000009', 2, '50000000-0000-0000-0000-000000003102', -100, 'EUR', '2026-03-01');
   set constraints public.ledger_entry_balanced immediate;
 end $d$ $$, 'LG001', null, 'the receivable cannot move without the owner claim (mirror)');
 
@@ -187,14 +201,27 @@ select throws_ok($$ do $d$ begin
     ('60000000-0000-0000-0000-000000000010', 2, '50000000-0000-0000-0000-000000007060', -100, 'EUR', '2026-03-01');
 end $d$ $$, 'LG002', null, 'an adjustment cannot touch commission revenue (book not allowed)');
 
+select throws_ok($$ do $d$ begin
+  insert into public.ledger_entry (id, organization_id, client_organization_id, entry_type, effective_date, line_count,
+                                   idempotency_key, request_hash, reason)
+  values ('60000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-0000000000a1',
+          'adjustment', '2026-03-01', 2, 'raw-client-money', repeat('0', 64), 'test');
+  insert into public.ledger_posting values
+    ('60000000-0000-0000-0000-000000000012', 1, '50000000-0000-0000-0000-000000004710', 100, 'EUR', '2026-03-01'),
+    ('60000000-0000-0000-0000-000000000012', 2, '50000000-0000-0000-0000-000000004671', -100, 'EUR', '2026-03-01');
+end $d$ $$, 'LG002', null, 'since M2b an adjustment cannot move client money (4710, 4670)');
+
 select throws_ok($$ insert into public.ledger_account (organization_id, book, currency, client_organization_id, portfolio_id,
                                                          account_id, component)
   values ('00000000-0000-0000-0000-00000000000a', 'debtor_receivable', 'EUR', '00000000-0000-0000-0000-0000000000a1',
           '20000000-0000-0000-0000-0000000000a1', '30000000-0000-0000-0000-0000000000a1', 'principal') $$,
   '23514', null, 'a receivable ledger account names its claim item');
 select throws_ok($$ insert into public.ledger_account (organization_id, book, currency)
-  values ('00000000-0000-0000-0000-00000000000a', 'client_money_cash', 'EUR') $$,
+  values ('00000000-0000-0000-0000-00000000000a', 'psp_clearing', 'EUR') $$,
   '23514', null, 'books not seeded yet are refused (fail closed)');
+select throws_ok($$ insert into public.ledger_account (organization_id, book, currency)
+  values ('00000000-0000-0000-0000-00000000000a', 'client_money_cash', 'EUR') $$,
+  '23514', null, 'a cash ledger account names its bank account');
 select throws_ok($$ insert into public.ledger_account (organization_id, book, currency, client_organization_id, portfolio_id,
                                                          account_id, claim_item_id, component)
   values ('00000000-0000-0000-0000-00000000000a', 'debtor_receivable', 'USD', '00000000-0000-0000-0000-0000000000a1',
@@ -357,9 +384,9 @@ begin insert into pg_temp.hijack_log values (1); return null; end $$;
 create trigger hijack after insert on pg_temp._ledger_lines for each statement execute function pg_temp.hijack();
 do $$ begin
   perform private.ledger_post('00000000-0000-0000-0000-00000000000a', 'adjustment', '2026-04-02', 'hijack-attempt-1',
-    '[{"book": "unallocated_payment", "amount_minor": 100, "currency": "EUR"},
-      {"book": "client_payable", "amount_minor": -100, "currency": "EUR", "client_organization_id": "00000000-0000-0000-0000-0000000000a1"}]',
-    '{"reason": "test"}');
+    '[{"book": "debtor_receivable", "amount_minor": 100, "currency": "EUR", "claim_item_id": "40000000-0000-0000-0000-0000000000a2", "component": "principal"},
+      {"book": "owner_claim", "amount_minor": -100, "currency": "EUR", "component": "principal"}]',
+    '{"account_id": "30000000-0000-0000-0000-0000000000a1", "reason": "test"}');
 end $$;
 select is((select count(*)::int from pg_temp.hijack_log), 0, 'ledger_post never runs triggers of a caller''s temp table');
 

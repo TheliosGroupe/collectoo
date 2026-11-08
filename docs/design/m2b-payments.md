@@ -1,6 +1,6 @@
 # M2b Payments: synthesized design (M2-06 … M2-11, with M2-12 hooks)
 
-Status: design for the M2b PRs (implementation follows, one PR per slice, §14). Produced by a three-design panel (ledger-first, ops-first, compliance-first) and a judge. Checked against branch `m2b`: migrations up to `20261108190000_commit_job.sql`, ADR-0012, `docs/design/m2a-ledger.md`. Every legal text in §3 was re-read by the judge on LibreJustice on 2026-11-08 (version in force, unless another date is given).
+Status: design for the M2b PRs (implementation follows, one PR per slice, §14). Founder decisions §17 answered 2026-11-08 (all defaults); ADR-0013 records the decisions; M2b-1 implemented on branch `m2b1`. Produced by a three-design panel (ledger-first, ops-first, compliance-first) and a judge. Checked against branch `m2b`: migrations up to `20261108190000_commit_job.sql`, ADR-0012, `docs/design/m2a-ledger.md`. Every legal text in §3 was re-read by the judge on LibreJustice on 2026-11-08 (version in force, unless another date is given).
 
 ---
 
@@ -606,7 +606,9 @@ Estimate for 50k payments: ~50k entries and ~350k postings, ~20–30 s in the wo
 
 ---
 
-## 17. Founder decisions (answer "1 ok, 2 ok …"; recommended default in brackets)
+## 17. Founder decisions (answered 2026-11-08: all 20 recommended defaults accepted; recorded in ADR-0013)
+
+**Answered by the founder on 2026-11-08: every default in brackets is accepted.** #11 was confirmed after an explanation; #19: synthetic CAMT.053/CSV files only until anonymised real exports arrive.
 
 1. Money on the dedicated account is booked as soon as the bank statement is imported, in a "to be allocated" account, before we know whose file it is. **[yes]**
 2. Each file gets one payment reference (RF + 14 digits, printed in groups of four) when its batch is confirmed; files already confirmed get one now. **[yes]**

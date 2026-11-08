@@ -1,6 +1,6 @@
 -- Opening balances (M2-05, ADR-0012): planned at commit, posted at confirmation by the worker job.
 begin;
-select plan(46);
+select plan(47);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -148,6 +148,10 @@ select is((select count(*)::int from (
              group by la.component having sum(p.amount_minor) <> 0) x), 0,
   'the owner claim mirrors the receivable per component');
 select lives_ok($$ set constraints all immediate $$, 'every opening entry is balanced');
+select is((select count(*)::int from public.account a
+           where a.boarding_batch_id = '30000000-0000-0000-0000-000000000001'
+             and (select count(*) from public.payment_reference r where r.account_id = a.id and r.status = 'active') = 1), 3,
+  'M2-06: confirmation issues one RF reference per account of the batch');
 select is(private.complete_batch_confirmation('30000000-0000-0000-0000-000000000001'), 'skipped', 'a redelivered job does nothing');
 select is((select count(*)::int from public.ledger_entry where organization_id = '00000000-0000-0000-0000-00000000000a'), 2,
   'no second opening');

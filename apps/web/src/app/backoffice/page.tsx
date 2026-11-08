@@ -34,6 +34,13 @@ export default async function BackofficePage() {
       <Link href="/backoffice/reprises" className={buttonClass + " text-center"} data-testid="boarding-link">
         Reprises de portefeuilles
       </Link>
+      <Link
+        href="/backoffice/parametres/comptes-bancaires"
+        className="w-full rounded-md border border-zinc-300 px-4 py-2 text-center font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+        data-testid="bank-accounts-link"
+      >
+        Comptes bancaires
+      </Link>
       <LogoutButton />
     </Page>
   );

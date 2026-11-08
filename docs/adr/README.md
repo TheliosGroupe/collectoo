@@ -14,3 +14,4 @@
 | [0010](0010-ai-gateway.md) | Provider-agnostic AI gateway with mocks and eval suites | Accepted |
 | [0011](0011-security-model.md) | Security model — RLS everywhere, writes via the worker or SECURITY DEFINER functions | Accepted |
 | [0012](0012-ledger-implementation.md) | Ledger implementation: names, grain, ALWAYS triggers, openings at confirmation (amends 0006) | Accepted |
+| [0013](0013-payments-allocation-client-money.md) | Payments, allocation and client money: cash book 5120, pooled 4710, payment entry types, `LG007`, RF references (extends 0012) | Accepted |

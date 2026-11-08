@@ -43,7 +43,10 @@ export function mappingOverrides(
   return out;
 }
 
-/** Errors of the boarding commands, as codes: raw database text never reaches the page. */
+/**
+ * Errors of the back-office commands (boarding, bank accounts), as codes: raw database text never
+ * reaches the page.
+ */
 export type ErrorCode =
   | "not_allowed"
   | "totals_mismatch"
@@ -60,6 +63,13 @@ export type ErrorCode =
   | "opening_mismatch"
   | "opening_plan_missing"
   | "ledger_rejected"
+  | "iban_invalid"
+  | "bic_invalid"
+  | "iban_taken"
+  | "label_required"
+  | "opened_future"
+  | "account_holds_money"
+  | "already_closed"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -83,6 +93,14 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   opening_plan_missing:
     "Ce lot a été intégré avant la comptabilisation des soldes d'ouverture : annulez l'intégration, puis déposez à nouveau le fichier.",
   ledger_rejected: "La comptabilité a refusé l'opération. Contactez le support.",
+  iban_invalid: "IBAN invalide : vérifiez la saisie (27 caractères pour un compte en France).",
+  bic_invalid: "BIC invalide : 8 ou 11 caractères (lettres et chiffres).",
+  iban_taken: "Cet IBAN est déjà enregistré dans cette devise.",
+  label_required: "Indiquez un libellé (100 caractères au plus).",
+  opened_future: "La date d'ouverture ne peut pas être dans le futur.",
+  account_holds_money:
+    "Ce compte détient encore des fonds de tiers : il ne peut pas être clôturé tant que son solde n'est pas nul.",
+  already_closed: "Ce compte est déjà clôturé. Rechargez la page.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 

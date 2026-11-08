@@ -92,10 +92,32 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
         parties = one(
             conn, "select count(*) from public.party where boarding_batch_id = %s", (batch,)
         )
+        references = one(
+            conn,
+            """select count(*) from public.payment_reference r
+               join public.account a on a.id = r.account_id
+               where a.boarding_batch_id = %s and r.status = 'active'
+                 and r.rf ~ '^RF[0-9]{14}$' and private.rf_valid(r.rf)""",
+            (batch,),
+        )
+    # M2-06 backfill path (references for every workable account without one), timed on this
+    # batch's accounts and rolled back.
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            """update public.payment_reference r set status = 'retired', retired_at = now(),
+                 retired_reason = 'benchmark' from public.account a
+               where a.id = r.account_id and a.boarding_batch_id = %s and r.status = 'active'""",
+            (batch,),
+        )
+        backfill_started = time.monotonic()
+        backfilled = one(conn, "select private.issue_payment_references(null)")
+        backfill_s = time.monotonic() - backfill_started
+        raise psycopg.Rollback  # nothing of this measurement stays
     elapsed = time.monotonic() - started
     print(
         f"\n50k boarding: {elapsed:.0f}s (commit {commit_s:.1f}s, confirm job {confirm_s:.1f}s),"
-        f" accounts={accounts}, parties={parties}, openings={openings}, rows={counts}"
+        f" accounts={accounts}, parties={parties}, openings={openings}, rows={counts},"
+        f" RF references={references}; backfill of {backfilled} references {backfill_s:.1f}s"
     )
     assert accounts == loans == LOANS
     assert parties == counts["t1_counterparty"]
@@ -106,5 +128,6 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
     }
     assert report["reconciliation"]["computed"]["rows"] == LOANS
     assert status == "confirmed" and openings == LOANS
+    assert references == LOANS and backfilled >= LOANS  # M2-06: one per workable account
     assert posted == int(report["reconciliation"]["computed"]["outstanding_minor"])  # M2-05
     assert elapsed < 300
