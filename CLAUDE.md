@@ -11,7 +11,7 @@ Receivables and NPL servicing platform, France first. The founder steers from a 
 ## Working rules (from BRIEF §0)
 
 - **Chat:** ≤ 10 lines. Questions as a numbered list with a default each ("1 ok, 2 b"). Long content goes in repo files; give the path.
-- **Git:** one branch + one PR per slice. PR body: what changed, why, how tested, open questions. CI green before asking to merge. The founder merges.
+- **Git:** one branch + one PR per slice. PR body: what changed, why, how tested, open questions. CI green before merging. Founder decision 2026-11-08: Claude merges its own PRs once every CI job is green and the PR is self-checked, then starts the next slice; the founder reviews merged PRs at their pace.
 - **Network:** domain allowlist. If something is blocked, don't work around it: name the exact host. See `docs/CLOUD_ENV.md`.
 - **Secrets:** none in the repo (`.env.example` only). Never production credentials. No real LLM keys: mock provider.
 - **Migrations:** forward-only, in `supabase/migrations`, applied to prod by Supabase's GitHub integration on merge to `main`. They must pass locally and in CI.
