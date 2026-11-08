@@ -11,7 +11,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from collectoo_worker.payments.camt053 import parse_camt053
+from collectoo_worker.payments.camt053 import MAX_LINES, parse_camt053
 from collectoo_worker.payments.statement import ParsedStatement, StatementRejected
 from collectoo_worker.synth.camt053 import (
     Doc,
@@ -162,11 +162,11 @@ def test_batch_bookings(tmp_path: Path) -> None:
         (
             "batch_unsplit",
             3600,
-            "e:N2#0",
+            "e:N2#1",
             "N2",
         ),  # details do not add up: one line, the booked amount
-        ("batch_unsplit", 9000, "e:N3#0", "N3"),  # no details
-        ("batch_unsplit", 3500, "e:N4#0", "N4"),  # 3 announced, 2 detailed
+        ("batch_unsplit", 9000, "e:N3#1", "N3"),  # no details
+        ("batch_unsplit", 3500, "e:N4#1", "N4"),  # 3 announced, 2 detailed
     ]
     assert parsed.lines[3].remittance_text == "LOT 3 VIREMENTS"
 
@@ -291,8 +291,8 @@ def test_hand_written_file_dates_balances_and_signs(tmp_path: Path) -> None:
     )
     parsed = _parse(tmp_path, data)
     assert [(x.direction, x.amount_minor, x.dedup_key) for x in parsed.lines] == [
-        ("credit", 1230, "e:N1#0"),
-        ("debit", 230, "e:N2#0"),
+        ("credit", 1230, "e:N1#1"),
+        ("debit", 230, "e:N2#1"),
     ]
     assert parsed.lines[0].booking_date == date(2026, 10, 1)  # the date as the bank wrote it
     assert parsed.lines[0].value_date == date(2026, 10, 2)
@@ -403,3 +403,143 @@ def test_a_line_booked_in_the_future_is_refused(tmp_path: Path) -> None:
         _refused(tmp_path, render_camt053(doc), today=START - timedelta(days=1))
         == "future_booking_date"
     )
+
+
+# -- review fixes (M2b-2) -------------------------------------------------------------------------
+
+
+def _keys(tmp_path: Path, entry: Entry) -> list[tuple[str, int, str | None]]:
+    parsed = _parse(tmp_path, render_camt053(_doc(entry), "08"))
+    return [(x.dedup_key, x.amount_minor, x.entry_ref) for x in parsed.lines]
+
+
+def test_an_entry_kept_as_one_line_has_the_same_key_with_or_without_one_detail(
+    tmp_path: Path,
+) -> None:
+    """Review #0/#5: one entry, one line, one key (`e:REF#1`), whatever detail the file gives;
+    every line carries the entry's own reference (`entry_ref`), the import's backstop."""
+    no_details = Entry(5000, True, START, ref="R1")
+    one_detail = Entry(5000, True, START, ref="R1", txs=(Tx(5000, name="DUPONT"),))
+    assert _keys(tmp_path, no_details) == _keys(tmp_path, one_detail) == [("e:R1#1", 5000, "R1")]
+    own_ref = Entry(5000, True, START, ref="R1", txs=(Tx(5000, ref="X1", name="DUPONT"),))
+    assert _keys(tmp_path, own_ref) == [("t:X1", 5000, "R1")]  # design §8.3: the line's own ref
+
+
+def test_a_batch_unsplit_or_split_meets_its_earlier_lines(tmp_path: Path) -> None:
+    """Review #0: the unsplit batch is `e:REM1#1` (booked amount), the same batch split without
+    references of its own `e:REM1#1`, `e:REM1#2`: the first key comes back with another amount
+    (reference_conflict); split with its own references, every line still names REM1."""
+    unsplit = Entry(15000, True, START, ref="REM1", batch_count=2)
+    no_refs = Entry(15000, True, START, ref="REM1", txs=(Tx(10000), Tx(5000)), batch_count=2)
+    own = Entry(
+        15000,
+        True,
+        START,
+        ref="REM1",
+        txs=(Tx(10000, ref="T1"), Tx(5000, ref="T2")),
+        batch_count=2,
+    )
+    assert _keys(tmp_path, unsplit) == [("e:REM1#1", 15000, "REM1")]
+    assert _keys(tmp_path, no_refs) == [("e:REM1#1", 10000, "REM1"), ("e:REM1#2", 5000, "REM1")]
+    assert _keys(tmp_path, own) == [("t:T1", 10000, "REM1"), ("t:T2", 5000, "REM1")]
+    no_ref = Entry(5000, True, START, txs=(Tx(5000, name="DUPONT"),))
+    ((key, _, entry_ref),) = _keys(tmp_path, no_ref)
+    assert key.startswith("h:") and entry_ref is None
+
+
+def test_an_unsplit_batch_that_undoes_a_debit_is_a_return(tmp_path: Path) -> None:
+    """Review #4/#14 (ADR-0013 M2b-2 #2): a credit that undoes a debit is a `return`, never a
+    payment, even when its batch cannot be split; the reason of any detail is kept."""
+    reversed_batch = Entry(
+        30000, True, START, reversal=True, ref="R1", code="PMNT/ICDT/RRTN", batch_count=3
+    )
+    returned_details = Entry(
+        8000,
+        True,
+        START,
+        ref="R2",
+        txs=(Tx(None, ref="T1", return_reason="AC04"), Tx(None, ref="T2", return_reason="MD06")),
+        batch_count=2,
+    )
+    miscounted = Entry(
+        4000, True, START, ref="R3", txs=(Tx(4000, ref="T3", return_reason="AC04"),), batch_count=2
+    )
+    plain = Entry(9000, True, START, ref="R4", batch_count=3)
+    debit = Entry(700, False, START, ref="R5", code="PMNT/ICDT/ESCT", batch_count=2)
+    doc = _doc(reversed_batch, returned_details, miscounted, plain, debit)
+    parsed = _parse(tmp_path, render_camt053(doc, "08"))
+    got = [(x.kind, x.direction, x.amount_minor, x.return_reason) for x in parsed.lines]
+    assert got == [
+        ("return", "credit", 30000, None),
+        ("return", "credit", 8000, "AC04"),
+        ("return", "credit", 4000, "AC04"),
+        ("batch_unsplit", "credit", 9000, None),
+        ("batch_unsplit", "debit", 700, None),
+    ]
+    _assert_lines(parsed, expected_lines(doc))  # the generator's ground truth agrees
+
+
+def test_an_unsplit_batch_with_instructed_amounts_only_and_a_return_reason(tmp_path: Path) -> None:
+    """Review #4: details that carry only AmtDtls/InstdAmt cannot be split; their RtrInf still
+    makes the credit a return."""
+    tx = (
+        "<TxDtls><Refs><EndToEndId>E{i}</EndToEndId></Refs>"
+        '<AmtDtls><InstdAmt><Amt Ccy="EUR">40.00</Amt></InstdAmt></AmtDtls>'
+        "<RtrInf><Rsn><Cd>AC04</Cd></Rsn></RtrInf></TxDtls>"
+    )
+    ntry = (
+        '<Ntry><Amt Ccy="EUR">80.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Sts>BOOK</Sts>'
+        "<BookgDt><Dt>2026-10-01</Dt></BookgDt><AcctSvcrRef>R1</AcctSvcrRef>"
+        "<NtryDtls><Btch><NbOfTxs>2</NbOfTxs></Btch>"
+        f"{tx.format(i=1)}{tx.format(i=2)}</NtryDtls></Ntry>"
+    )
+    data = _xml(ntry, closing='<Amt Ccy="EUR">80.00</Amt><CdtDbtInd>CRDT</CdtDbtInd>')
+    (line,) = _parse(tmp_path, data).lines
+    assert (line.kind, line.amount_minor, line.return_reason, line.dedup_key) == (
+        "return",
+        8000,
+        "AC04",
+        "e:R1#1",
+    )
+
+
+@pytest.mark.parametrize(
+    "written", ["2026-10-01+01:00", "2026-10-01-05:00", "2026-10-01Z", "2026-10-01+14:00"]
+)
+def test_an_xs_date_with_a_time_zone_keeps_the_date_as_written(
+    tmp_path: Path, written: str
+) -> None:
+    """Review #7: ISODate is xs:date, whose time zone is optional; the business date is the
+    date as the bank wrote it (no conversion)."""
+    data = _xml(
+        _ntry("1.00", booked=f"<Dt>{written}</Dt>"),
+        closing='<Amt Ccy="EUR">1.00</Amt><CdtDbtInd>CRDT</CdtDbtInd>',
+    ).replace(b"<Dt><Dt>2026-10-01</Dt></Dt>", f"<Dt><Dt>{written}</Dt></Dt>".encode())
+    parsed = _parse(tmp_path, data)
+    assert parsed.lines[0].booking_date == date(2026, 10, 1)
+    assert parsed.sections[0].to_date == date(2026, 10, 1)
+
+
+@pytest.mark.parametrize(
+    "written", ["2026-10-01+1:00", "2026-10-01+15:00", "2026-10-01+01:60", "2026-10-01T10:00:00"]
+)
+def test_a_date_with_anything_else_after_it_is_refused(tmp_path: Path, written: str) -> None:
+    data = _xml(
+        _ntry("1.00", booked=f"<Dt>{written}</Dt>"),
+        closing='<Amt Ccy="EUR">1.00</Amt><CdtDbtInd>CRDT</CdtDbtInd>',
+    )
+    assert _refused(tmp_path, data) == "date_invalid"
+
+
+def test_a_statement_beyond_the_line_cap_is_refused_while_streaming(tmp_path: Path) -> None:
+    """Review #13: like the CSV reader, at most 250,000 lines (a parameter here): the reader stops
+    at the first line beyond the cap, before the lines pile up in memory."""
+    batch = Entry(3500, True, START, ref="N1", txs=(Tx(1000, ref="T1"), Tx(2500, ref="T2")))
+    doc = _doc(Entry(500, True, START, ref="A"), batch)
+    path = tmp_path / "statement.xml"
+    path.write_bytes(render_camt053(doc, "08"))
+    assert len(parse_camt053(path, iban=IBAN, currency="EUR", max_lines=3).lines) == 3
+    with pytest.raises(StatementRejected) as err:
+        parse_camt053(path, iban=IBAN, currency="EUR", max_lines=2)
+    assert err.value.code == "file_too_large"
+    assert MAX_LINES == 250_000

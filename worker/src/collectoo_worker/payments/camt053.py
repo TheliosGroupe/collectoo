@@ -11,9 +11,15 @@ Strd/CdtrRefInf/Ref, RtrInf/Rsn.
 
 A batch booking becomes one line per TxDtls when the details add up to the entry (same currency
 and direction, as many as NbOfTxs says); otherwise one line of kind `batch_unsplit` with the
-booked amount (a credit is still one payment; ops split it across files). A single TxDtls takes
-the booked amount. Zero amounts move nothing and are skipped. The file is refused unless, per
-<Stmt>, opening + credits - debits = closing; nothing is written then.
+booked amount (a credit is still one payment; ops split it across files), or `return` when the
+entry or any of its details undoes an earlier movement. A single TxDtls takes the booked amount.
+Zero amounts move nothing and are skipped. The file is refused unless, per <Stmt>, opening +
+credits - debits = closing; nothing is written then.
+
+Keys (design §8.3 step 4): `t:<TxDtls ref>` when every detail of the entry has its own; else
+`e:<Ntry ref>#<n>`, n from 1 (an entry kept as one line is `#1`, with or without one detail); else
+an `h:` fingerprint. Every line carries its entry's reference (`entry_ref`): the import refuses a
+known entry that comes back split another way.
 
 Safety: a file that declares a DTD is refused before parsing (no entity can be defined); lxml
 parses with entity resolution, DTD loading and network access off and its default limits (no
@@ -34,6 +40,7 @@ from lxml import etree
 from collectoo_worker.payments.rf import rf_normalise
 from collectoo_worker.payments.statement import (
     METHOD_BY_FAMILY,
+    RETURN_SUBFAMILIES,
     DedupKeys,
     ParsedStatement,
     Section,
@@ -46,7 +53,12 @@ from collectoo_worker.payments.statement import (
 )
 
 NS_RE = re.compile(rb"urn:iso:std:iso:20022:tech:xsd:camt\.053\.001\.([0-9]{2})")
+# xs:date: a date, then an optional time zone (hours 00 to 14, 14:00 at most)
+ISO_DATE_RE = re.compile(
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2})(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?"
+)
 HEAD_BYTES = 64 * 1024
+MAX_LINES = 250_000  # the same cap as the CSV reader: a longer statement is exported in parts
 NOT_PROVIDED = "NOTPROVIDED"
 DIRECTIONS = {"CRDT": "credit", "DBIT": "debit"}
 
@@ -146,11 +158,21 @@ class _Ns:
 
 
 class _Reader:
-    def __init__(self, ns: str, version: str, *, iban: str, currency: str, exponent: int) -> None:
+    def __init__(  # noqa: PLR0913 - the version read and the bank account's settings
+        self,
+        ns: str,
+        version: str,
+        *,
+        iban: str,
+        currency: str,
+        exponent: int,
+        max_lines: int = MAX_LINES,
+    ) -> None:
         self.q = _Ns(ns)
         self.iban = iban
         self.currency = currency
         self.exponent = exponent
+        self.max_lines = max_lines
         self.out = ParsedStatement(format="camt053", currency=currency, version=version)
         self.keys = DedupKeys()
         self.section_open: Element | None = None  # the <Stmt> whose header was read
@@ -258,12 +280,14 @@ class _Reader:
         counts = self.q.texts(ntry, "NtryDtls/Btch/NbOfTxs")
         batch = max((int(c) for c in counts if c.isdigit()), default=0)
         parts = self.split(entry, txs)
-        # A batch whose count disagrees with its details cannot be split safely.
+        # A batch whose count disagrees with its details cannot be split safely. An entry kept as
+        # one line is its line 1, as when one detail comes with it: the same entry keeps its key
+        # whatever detail a file gives.
         if parts is None or (not txs and batch > 1) or (txs and batch and batch != len(txs)):
             single = txs[0] if len(txs) == 1 else {}
-            self.add(entry, single, amount, 0, unsplit=True, batch=True)
+            self.add(entry, single, amount, 1, unsplit=True, batch=True, details=txs)
         elif not txs:
-            self.add(entry, {}, amount, 0, unsplit=False, batch=False)
+            self.add(entry, {}, amount, 1, unsplit=False, batch=False)
         else:
             refs = [first(tx, "Refs/AcctSvcrRef") for tx in txs]
             own_refs = None not in refs and len(set(refs)) == len(refs)
@@ -302,7 +326,11 @@ class _Reader:
         unsplit: bool,
         batch: bool,
         own_ref: bool = False,
+        details: list[Flat] | None = None,
     ) -> None:
+        """One line. `index` is 1-based within its entry; `details` are every TxDtls of an entry
+        kept as one unsplit line (a return reason or sub-family in any of them counts)."""
+        details = details or []
         credit = entry.direction == "credit"
         side, other = ("Dbtr", "Cdtr") if credit else ("Cdtr", "Dbtr")
         tx_ref = first(tx, "Refs/AcctSvcrRef")
@@ -319,20 +347,23 @@ class _Reader:
             or (entry.info if index <= 1 else None)
         )
         creditor_ref = first(tx, "RmtInf/Strd/CdtrRefInf/Ref")
-        return_reason = first(tx, "RtrInf/Rsn/Cd") or first(tx, "RtrInf/Rsn/Prtry")
+        return_reason = _return_reason(tx) or next(filter(None, map(_return_reason, details)), None)
         code = _code(tx, "BkTxCd/") or entry.code
         family, sub_family = _family(code)
-        kind = (
-            "batch_unsplit"
-            if unsplit
-            else classify(
-                entry.direction,
-                reversal=entry.reversal,
-                return_reason=return_reason,
-                sub_family=sub_family,
-                end_to_end_id=e2e,
-            )
+        kind = classify(
+            entry.direction,
+            reversal=entry.reversal,
+            return_reason=return_reason,
+            sub_family=sub_family,
+            end_to_end_id=e2e,
         )
+        if unsplit:
+            # A batch that cannot be split is still a return when the entry or any of its details
+            # undoes an earlier movement (ADR-0013 M2b-2 #2): never a payment.
+            undone = kind == "return" or any(
+                _family(_code(d, "BkTxCd/"))[1] in RETURN_SUBFAMILIES for d in details
+            )
+            kind = "return" if undone else "batch_unsplit"
         if tx_ref is not None and own_ref and not unsplit:
             key = self.keys.claim(f"t:{tx_ref}")
         elif entry.ref is not None:
@@ -347,6 +378,11 @@ class _Reader:
                 counterparty_iban=iban,
                 end_to_end_id=e2e,
                 remittance_text=remittance,
+            )
+        if len(self.out.lines) >= self.max_lines:  # checked while streaming: memory stays bounded
+            raise StatementRejected(
+                "file_too_large",
+                f"{entry.where}: more than {self.max_lines} lines; export a shorter period",
             )
         self.out.lines.append(
             StatementLine(
@@ -375,6 +411,7 @@ class _Reader:
                 original_end_to_end_id=first(tx, "RtrInf/OrgnlEndToEndId")
                 or (e2e if kind == "return" else None),
                 batch_entry_ref=(entry.ref or entry.where) if batch else None,
+                entry_ref=entry.ref,
             )
         )
 
@@ -456,9 +493,18 @@ def _family(code: str | None) -> tuple[str | None, str | None]:
     return parts[1] or None, parts[2] or None
 
 
+def _return_reason(tx: Flat) -> str | None:
+    return first(tx, "RtrInf/Rsn/Cd") or first(tx, "RtrInf/Rsn/Prtry")
+
+
 def _iso_date(text: str, where: str) -> date:
+    """ISODate is xs:date: YYYY-MM-DD with an optional time zone (Z, +hh:mm, -hh:mm). The business
+    date is the date as written; the time zone is not applied."""
+    found = ISO_DATE_RE.fullmatch(text)
     try:
-        return date.fromisoformat(text)
+        if found is None:
+            raise ValueError(text)
+        return date.fromisoformat(found.group(1))
     except ValueError as exc:
         raise StatementRejected("date_invalid", f"{where}: {text!r} is not a date") from exc
 
@@ -499,10 +545,17 @@ def _read(path: Path, ns: str, reader: _Reader) -> None:
             del parent[0]
 
 
-def parse_camt053(
-    path: Path, *, iban: str, currency: str, exponent: int = 2, today: date | None = None
+def parse_camt053(  # noqa: PLR0913 - the bank account's settings and the reader's limits
+    path: Path,
+    *,
+    iban: str,
+    currency: str,
+    exponent: int = 2,
+    today: date | None = None,
+    max_lines: int = MAX_LINES,
 ) -> ParsedStatement:
-    """Parse a camt.053 file for the given bank account (IBAN and currency), or refuse it."""
+    """Parse a camt.053 file for the given bank account (IBAN and currency), or refuse it
+    (`file_too_large` beyond `max_lines` lines, while streaming)."""
     with path.open("rb") as fh:
         head = fh.read(HEAD_BYTES)
     check_prolog(head)
@@ -511,7 +564,9 @@ def parse_camt053(
         raise StatementRejected("not_camt053", "not a camt.053 (BankToCustomerStatement) file")
     version = found.group(1).decode("ascii")
     ns = found.group(0).decode("ascii")
-    reader = _Reader(ns, version, iban=iban, currency=currency, exponent=exponent)
+    reader = _Reader(
+        ns, version, iban=iban, currency=currency, exponent=exponent, max_lines=max_lines
+    )
     try:
         _read(path, ns, reader)
     except etree.XMLSyntaxError as exc:

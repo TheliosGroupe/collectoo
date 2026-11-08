@@ -69,6 +69,9 @@ create table public.bank_statement (
 create unique index bank_statement_file_uq on public.bank_statement (bank_account_id, file_sha256)
   where status not in ('rejected', 'failed');
 create index bank_statement_org_idx on public.bank_statement (organization_id, created_at desc);
+-- A file is the statement of one bank account of the servicer (the upload and the import check it).
+create index bank_statement_file_org_idx on public.bank_statement (organization_id, file_sha256);
+create index bank_statement_account_idx on public.bank_statement (bank_account_id, created_at desc);
 create index bank_statement_continuity_idx on public.bank_statement (bank_account_id, to_date) where status = 'imported';
 comment on table public.bank_statement is
   'Bank statement files (camt.053 or CSV) of a client_funds account, and the outcome of their import.';
@@ -159,6 +162,8 @@ create table public.bank_transaction (
   return_reason text,
   original_end_to_end_id text,
   batch_entry_ref text,
+  -- camt.053: the reference of the bank entry (Ntry/AcctSvcrRef) the line comes from, whatever its key
+  entry_ref text check (length(entry_ref) between 1 and 300),
   -- debtor_credit: a debtor's payment (booked at import); batch_unsplit: a batch booking whose details do
   -- not add up (a credit is still one payment, booked, that ops split across files); return: the bank undoes
   -- an earlier movement (either direction); refund_out: our refund (end-to-end id RFD…); other_debit: fees
@@ -180,6 +185,8 @@ create table public.bank_transaction (
 create index bank_transaction_same_day_idx on public.bank_transaction (bank_account_id, booking_date, amount_minor);
 create index bank_transaction_org_idx on public.bank_transaction (organization_id);
 create index bank_transaction_e2e_idx on public.bank_transaction (original_end_to_end_id) where original_end_to_end_id is not null;
+-- The lines of one bank entry, whatever their keys (a camt.053 entry is booked once at one level of detail).
+create index bank_transaction_entry_idx on public.bank_transaction (bank_account_id, entry_ref) where entry_ref is not null;
 -- Lines that are not in the ledger in M2b-2 (I9), read without touching the payment lines.
 create index bank_transaction_unposted_idx on public.bank_transaction (bank_account_id, booking_date)
   where not (direction = 'credit' and kind in ('debtor_credit', 'batch_unsplit'));
@@ -287,6 +294,7 @@ create unlogged table private.bank_import_stage (
   return_reason text,
   original_end_to_end_id text,
   batch_entry_ref text,
+  entry_ref text,
   kind text not null,
   method text not null,
   primary key (statement_id, line_no)
@@ -307,6 +315,47 @@ as $$
   from public.bank_transaction t
   where t.bank_account_id = p_bank_account_id and t.booking_date <= p_as_of
     and not (t.direction = 'credit' and t.kind in ('debtor_credit', 'batch_unsplit'));
+$$;
+
+-- Lookups of the import's new lines (pg_temp._bi_new of ingest_statement) among the stored lines: one
+-- index probe per new line, whatever the statistics say (bank_transaction is often just loaded and not
+-- analysed; a hash join would read every line of the account, however old, for a 500-line day).
+-- The first new line whose bank entry (camt.053 Ntry/AcctSvcrRef) this bank account has already.
+create or replace function private.bank_import_entry_known(p_bank_account_id uuid)
+returns integer
+language plpgsql
+stable
+set search_path = ''
+set enable_hashjoin = off
+set enable_mergejoin = off
+set enable_bitmapscan = off
+as $$
+begin
+  return (select min(x.line_no)
+          from pg_temp._bi_new x
+          join public.bank_transaction t on t.bank_account_id = p_bank_account_id and t.entry_ref = x.entry_ref);
+end;
+$$;
+
+-- New lines whose key is on another bank account of the servicer with the same day, amount and direction.
+create or replace function private.bank_import_lines_elsewhere(p_organization_id uuid, p_bank_account_id uuid)
+returns table (line_no integer, dedup_key text)
+language plpgsql
+stable
+set search_path = ''
+set enable_hashjoin = off
+set enable_mergejoin = off
+set enable_bitmapscan = off
+as $$
+#variable_conflict use_column
+begin
+  return query
+  select x.line_no, x.dedup_key
+  from pg_temp._bi_new x
+  join public.bank_account o on o.organization_id = p_organization_id and o.id <> p_bank_account_id
+  join public.bank_transaction t on t.bank_account_id = o.id and t.dedup_key = x.dedup_key
+  where (t.direction, t.amount_minor, t.booking_date) = (x.direction, x.amount_minor, x.booking_date);
+end;
 $$;
 
 -- p_header: {format, version, line_count, skipped_not_booked, sections: [{stmt_id, seq, from_date, to_date,
@@ -350,6 +399,16 @@ begin
     raise exception 'bank_account_closed: bank account % is not an active client_funds account', b.id
       using errcode = '22023';
   end if;
+  -- A file is the statement of one bank account: imported for another account of the servicer (the
+  -- wrong one chosen first), it is refused, so its money is never booked on two accounts. Imports of
+  -- the same file are serialised across the servicer's accounts.
+  perform pg_advisory_xact_lock(hashtext('bank_import_file:' || s.organization_id::text || ':' || s.file_sha256));
+  select min(p.bank_account_id::text) into v_bad from public.bank_statement p
+  where p.organization_id = s.organization_id and p.file_sha256 = s.file_sha256
+    and p.bank_account_id <> s.bank_account_id and p.status = 'imported';
+  if v_bad is not null then
+    raise exception 'imported_on_other_account: this file was imported for bank account %', v_bad using errcode = '22023';
+  end if;
   if coalesce(p_header ->> 'format', '') <> s.format or jsonb_typeof(v_sections) <> 'array'
      or (s.format = 'camt053' and jsonb_array_length(v_sections) = 0)
      or (s.format = 'csv' and jsonb_array_length(v_sections) <> 0)
@@ -386,9 +445,13 @@ begin
      or x.kind is null or x.kind not in ('debtor_credit', 'return', 'refund_out', 'other_debit', 'batch_unsplit')
      or (x.direction = 'credit' and x.kind not in ('debtor_credit', 'return', 'batch_unsplit'))
      or (x.direction = 'debit' and x.kind = 'debtor_credit')
-     or (s.format = 'csv' and (x.section_no <> 0 or x.dedup_key !~ '^[ch]:'))
+     or (s.format = 'csv' and (x.section_no <> 0 or x.dedup_key !~ '^[ch]:' or x.entry_ref is not null))
      or (s.format = 'camt053' and (x.section_no < 1 or x.section_no > jsonb_array_length(v_sections)
-                                   or x.dedup_key !~ '^[teh]:'));
+                                   or x.dedup_key !~ '^[teh]:'))
+     or length(x.entry_ref) not between 1 and 300
+     -- an entry key is e:<the line's entry reference>#<n>, n from 1
+     or (x.dedup_key ~ '^e:' and not coalesce(left(x.dedup_key, length(x.entry_ref) + 3) = 'e:' || x.entry_ref || '#'
+                                              and substr(x.dedup_key, length(x.entry_ref) + 4) ~ '^[1-9][0-9]*$', false));
   if v_bad is not null then
     raise exception 'line_invalid: line % is not a well-formed bank line', v_bad using errcode = '22023';
   end if;
@@ -434,10 +497,33 @@ begin
   alter table pg_temp._bi_new add primary key (line_no);
   analyze pg_temp._bi_new;
 
+  -- A camt.053 entry (Ntry/AcctSvcrRef) is booked once, at the level of detail of its first import: a new
+  -- line of an entry this bank account already has means the entry comes back split another way (unsplit
+  -- then detailed, or the reverse, or other detail references). Refused: the money would be booked twice.
+  v_bad := private.bank_import_entry_known(s.bank_account_id)::text;
+  if v_bad is not null then
+    raise exception 'entry_detail_differs: line % is part of a bank entry imported earlier with other details', v_bad
+      using errcode = '22023';
+  end if;
+
   -- 2. CSV safety net (design §8.3 step 5): same day, amount and direction as a line of another import,
   --    with a similar label -> held as a suspected duplicate (no payment, no cash) until ops decide. Two
   --    lines that both carry the bank's own id are different transactions by the bank's word.
   if s.format = 'csv' then
+    -- The same operation on another bank account of the servicer (an export uploaded on the wrong
+    -- account first): with the bank's id and the same day, amount and direction, the bank says it is the
+    -- same operation and the file is refused; with the same fingerprint (no bank id), the line is held.
+    drop table if exists pg_temp._bi_elsewhere;
+    create temp table _bi_elsewhere on commit drop as
+    select * from private.bank_import_lines_elsewhere(s.organization_id, s.bank_account_id);
+    select min(e.line_no)::text into v_bad from pg_temp._bi_elsewhere e where e.dedup_key like 'c:%';
+    if v_bad is not null then
+      raise exception 'imported_on_other_account: line % was imported for another bank account', v_bad
+        using errcode = '22023';
+    end if;
+    update pg_temp._bi_new n set kind = 'suspected_duplicate'
+    from pg_temp._bi_elsewhere e where e.line_no = n.line_no;
+
     update pg_temp._bi_new n set kind = 'suspected_duplicate'
     from (select distinct x.line_no
           from pg_temp._bi_new x
@@ -457,12 +543,12 @@ begin
     insert into public.bank_transaction (organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
       amount_minor, currency, booking_date, value_date, reversal_indicator, bank_tx_code, acct_svcr_ref, end_to_end_id,
       tx_id, mandate_ref, counterparty_name, ultimate_counterparty_name, counterparty_iban, remittance_text,
-      creditor_reference, return_reason, original_end_to_end_id, batch_entry_ref, kind)
+      creditor_reference, return_reason, original_end_to_end_id, batch_entry_ref, entry_ref, kind)
     select s.organization_id, s.bank_account_id, s.id, n.line_no, n.dedup_key, n.direction, n.amount_minor, s.currency,
            n.booking_date, n.value_date, coalesce(n.reversal_indicator, false), n.bank_tx_code, n.acct_svcr_ref,
            n.end_to_end_id, n.tx_id, n.mandate_ref, n.counterparty_name, n.ultimate_counterparty_name,
            n.counterparty_iban, n.remittance_text, n.creditor_reference, n.return_reason, n.original_end_to_end_id,
-           n.batch_entry_ref, n.kind
+           n.batch_entry_ref, n.entry_ref, n.kind
     from pg_temp._bi_new n
     order by n.line_no
     on conflict (bank_account_id, dedup_key) do nothing
@@ -568,13 +654,16 @@ begin
     from jsonb_array_elements(v_sections) with ordinality as cur (v, ord)
     join jsonb_array_elements(v_sections) with ordinality as pre (v, ord) on pre.ord = cur.ord - 1
     where (cur.v ->> 'opening_minor')::bigint <> (pre.v ->> 'closing_minor')::bigint;
-    -- with the last statement imported before this one (dates strictly before; an index scan)
+    -- with the statement that covers the day before this one: of the imported statements starting before
+    -- it, the one that ends last (an index scan). If it ends on or after this one's first day, the day
+    -- before is covered already (the overlap warning says so): nothing to compare. Only the closing at
+    -- its last day is known, so an older statement is never compared.
     select * into prev from public.bank_statement p
     where p.bank_account_id = s.bank_account_id and p.status = 'imported' and p.format = 'camt053'
-      and p.to_date < v_from
+      and p.from_date < v_from
     order by p.to_date desc, p.finished_at desc
     limit 1;
-    if found then
+    if found and prev.to_date < v_from then
       if prev.closing_booked_minor is distinct from (v_sections -> 0 ->> 'opening_minor')::bigint then
         v_warnings := v_warnings || jsonb_build_object('code', 'opening_differs', 'previous_statement_id', prev.id,
           'expected_minor', prev.closing_booked_minor::text, 'actual_minor', v_sections -> 0 ->> 'opening_minor');
@@ -695,6 +784,14 @@ begin
   if v_format <> b.feed then
     raise exception 'the file format does not match the bank account feed' using errcode = 'check_violation';
   end if;
+  -- A file sent for another bank account of the servicer (the wrong account chosen first) is not sent
+  -- again for this one: its money would be booked on both. A registration whose file never came does not
+  -- count. ingest_statement checks it again, under a lock.
+  if exists (select 1 from public.bank_statement p
+             where p.organization_id = b.organization_id and p.file_sha256 = lower(p_sha256)
+               and p.bank_account_id <> b.id and p.status in ('uploaded', 'imported')) then
+    raise exception 'the file is already a statement of another bank account' using errcode = 'check_violation';
+  end if;
   -- The same file for the same bank account: the statement already registered, never a second one.
   insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
                                      size_bytes, storage_path, created_by, idempotency_key)
@@ -784,6 +881,7 @@ create policy bank_transaction_read on public.bank_transaction for select to aut
 ------------------------------------------------------------------------------------------
 
 revoke execute on function private.ingest_statement(uuid, jsonb), private.bank_unposted(uuid, date),
+  private.bank_import_entry_known(uuid), private.bank_import_lines_elsewhere(uuid, uuid),
   private.statement_upload_target(uuid), private.can_upload_statement_object(text, text),
   private.bank_statement_guard(), private.bank_transaction_insert_guard(), private.payment_insert_guard(),
   private.refuse_change()

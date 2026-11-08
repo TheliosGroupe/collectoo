@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { Badge, InfoNote, Section, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
-import { LINE_FILTERS, lineState, maskedIban, money, signedMoney } from "@/lib/payments/statements";
+import { LINE_FILTERS, lineFilterOr, lineState, maskedIban, money, signedMoney } from "@/lib/payments/statements";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { type StatementRow, STATEMENT_COLUMNS, StatementSummary } from "../../statement-summary";
 
@@ -49,8 +49,8 @@ export default async function StatementPage({
       { count: "exact" },
     )
     .eq("statement_id", id);
-  const kinds = LINE_FILTERS[filter].kinds;
-  if (kinds) lines = lines.in("kind", kinds);
+  const or = lineFilterOr(filter); // kinds and, for an unsplit batch, direction
+  if (or) lines = lines.or(or);
   const { data, count } = await lines.order("line_no").range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
   const rows = (data ?? []) as unknown as LineRow[];
   const total = count ?? 0;

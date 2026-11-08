@@ -46,6 +46,8 @@ SQL_REFUSALS = frozenset(
         "duplicate_reference_in_file",
         "unbalanced",
         "reference_conflict",
+        "entry_detail_differs",
+        "imported_on_other_account",
     }
 )
 log = logging.getLogger("collectoo.payments")

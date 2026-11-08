@@ -372,17 +372,17 @@ def expected_lines(doc: Doc) -> list[Expected]:
             direction = "credit" if e.credit else "debit"
             if not e.adds_up() or not e.txs:
                 one = e.txs[0] if len(e.txs) == 1 else Tx(None)
-                kind = (
-                    "batch_unsplit"
-                    if not e.adds_up()
-                    else classify(
-                        direction,
-                        reversal=e.reversal,
-                        return_reason=None,
-                        sub_family=_sub_family(e.code),
-                        end_to_end_id=None,
-                    )
+                # a return in the entry or in any detail wins over an unsplit batch
+                reason = next((t.return_reason for t in e.txs if t.return_reason), None)
+                kind = classify(
+                    direction,
+                    reversal=e.reversal,
+                    return_reason=reason,
+                    sub_family=_sub_family(e.code),
+                    end_to_end_id=one.end_to_end_id,
                 )
+                if not e.adds_up():
+                    kind = "return" if kind == "return" else "batch_unsplit"
                 out.append(
                     Expected(
                         section_no,
@@ -398,6 +398,7 @@ def expected_lines(doc: Doc) -> list[Expected]:
                         one.name,
                         one.iban,
                         "\n".join(one.ustrd) or e.info,
+                        reason,
                     )
                 )
                 continue
