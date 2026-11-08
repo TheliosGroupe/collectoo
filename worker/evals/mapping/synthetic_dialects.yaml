@@ -1,0 +1,1235 @@
+description: Synthetic SMB exports (M0-17 dialects). Expected targets decided by hand.
+cases:
+- name: b2b_invoice/fr_semicolon
+  columns:
+  - header: Compte client
+    samples:
+    - C9313
+    - C2929
+    - C3945
+    - C6737
+    - C5056
+    - C3987
+    expected: account.external_ref
+  - header: Raison sociale / Nom
+    samples:
+    - Verdier S.A.S.
+    - Diallo
+    - Hervé
+    - Foucher et Fils
+    - Maréchal
+    - Bourdon
+    expected: party.display_name
+  - header: SIREN
+    samples:
+    - '590819355'
+    - '662558907'
+    - '585307622'
+    - '521104786'
+    - '485784607'
+    - '413178393'
+    expected: party.siren
+  - header: SIRET
+    samples:
+    - '59081935535179'
+    - '66255890793533'
+    - '58530762239991'
+    - '52110478697380'
+    - '48578460765190'
+    - '41317839343042'
+    expected: party.siret
+  - header: Email
+    samples:
+    - henri60@example.org
+    - ogirard@example.org
+    - chantal97@example.com
+    - lemairedenise@example.com
+    - madeleine97@example.com
+    - guillaume68@example.com
+    expected: contact.email
+  - header: Téléphone
+    samples:
+    - +33 (0)4 97 90 83 01
+    - +33 4 43 62 81 94
+    - ''
+    - +33 4 84 27 60 18
+    - 04 86 07 52 91
+    - 04 92 63 21 22
+    expected: contact.phone
+  - header: Adresse
+    samples:
+    - 41, boulevard Lamy
+    - 41, rue Emmanuelle Mendès
+    - 42, boulevard Ribeiro
+    - 65, avenue de Delorme
+    - 4, rue Nicole Hoarau
+    - 80, rue de Charles
+    expected: contact.address_line
+  - header: Code postal
+    samples:
+    - 08946
+    - 09677
+    - '67606'
+    - '58170'
+    - '50500'
+    - '36104'
+    expected: contact.postcode
+  - header: Ville
+    samples:
+    - Denis-sur-Hubert
+    - Saint Colette
+    - Chauveau
+    - Sainte ChristelleBourg
+    - Faure-les-Bains
+    - Humbert
+    expected: contact.city
+  - header: IBAN
+    samples:
+    - FR7666838648101318609139074
+    - FR7699391336881993518190988
+    - FR7649354788387574911862583
+    - FR7669795190121471049746516
+    - FR7675078205612768426846583
+    - FR7629094649128599528907873
+    expected: party.iban
+  - header: Type
+    samples:
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - AVOIR
+    expected: claim_item.kind
+  - header: N° pièce
+    samples:
+    - F2026-00001
+    - F2026-00002
+    - F2026-00003
+    - F2026-00004
+    - F2026-00005
+    - F2026-00006
+    expected: claim_item.ref
+  - header: Date pièce
+    samples:
+    - 19/03/2026
+    - 09/02/2026
+    - 17/09/2025
+    - 24/12/2025
+    - 07/01/2026
+    - 18/02/2026
+    expected: claim_item.issue_date
+  - header: Échéance
+    samples:
+    - 18/04/2026
+    - 11/03/2026
+    - 16/11/2025
+    - 07/02/2026
+    - 21/02/2026
+    - 20/03/2026
+    expected: claim_item.due_date
+  - header: Montant TTC
+    samples:
+    - 8360,04
+    - 4716,42
+    - 9047,26
+    - 902,23
+    - 3604,22
+    - -3245,04
+    expected: claim_item.amount
+  - header: Montant réglé
+    samples:
+    - 0,00
+    - 0,00
+    - 0,00
+    - 0,00
+    - 1802,11
+    - 0,00
+    expected: claim_item.amount_paid
+  - header: Devise
+    samples:
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    expected: claim_item.currency
+- name: b2b_invoice/en_comma
+  columns:
+  - header: client_ref
+    samples:
+    - C9313
+    - C2929
+    - C3945
+    - C6737
+    - C5056
+    - C3987
+    expected: account.external_ref
+  - header: debtor_name
+    samples:
+    - Verdier S.A.S.
+    - Diallo
+    - Hervé
+    - Foucher et Fils
+    - Maréchal
+    - Bourdon
+    expected: party.display_name
+  - header: siren
+    samples:
+    - '590819355'
+    - '662558907'
+    - '585307622'
+    - '521104786'
+    - '485784607'
+    - '413178393'
+    expected: party.siren
+  - header: siret
+    samples:
+    - '59081935535179'
+    - '66255890793533'
+    - '58530762239991'
+    - '52110478697380'
+    - '48578460765190'
+    - '41317839343042'
+    expected: party.siret
+  - header: email
+    samples:
+    - henri60@example.org
+    - ogirard@example.org
+    - chantal97@example.com
+    - lemairedenise@example.com
+    - madeleine97@example.com
+    - guillaume68@example.com
+    expected: contact.email
+  - header: phone
+    samples:
+    - +33 (0)4 97 90 83 01
+    - +33 4 43 62 81 94
+    - ''
+    - +33 4 84 27 60 18
+    - 04 86 07 52 91
+    - 04 92 63 21 22
+    expected: contact.phone
+  - header: address
+    samples:
+    - 41, boulevard Lamy
+    - 41, rue Emmanuelle Mendès
+    - 42, boulevard Ribeiro
+    - 65, avenue de Delorme
+    - 4, rue Nicole Hoarau
+    - 80, rue de Charles
+    expected: contact.address_line
+  - header: postcode
+    samples:
+    - 08946
+    - 09677
+    - '67606'
+    - '58170'
+    - '50500'
+    - '36104'
+    expected: contact.postcode
+  - header: city
+    samples:
+    - Denis-sur-Hubert
+    - Saint Colette
+    - Chauveau
+    - Sainte ChristelleBourg
+    - Faure-les-Bains
+    - Humbert
+    expected: contact.city
+  - header: iban
+    samples:
+    - FR7666838648101318609139074
+    - FR7699391336881993518190988
+    - FR7649354788387574911862583
+    - FR7669795190121471049746516
+    - FR7675078205612768426846583
+    - FR7629094649128599528907873
+    expected: party.iban
+  - header: document_type
+    samples:
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - AVOIR
+    expected: claim_item.kind
+  - header: document_ref
+    samples:
+    - F2026-00001
+    - F2026-00002
+    - F2026-00003
+    - F2026-00004
+    - F2026-00005
+    - F2026-00006
+    expected: claim_item.ref
+  - header: issue_date
+    samples:
+    - '2026-03-19'
+    - '2026-02-09'
+    - '2025-09-17'
+    - '2025-12-24'
+    - '2026-01-07'
+    - '2026-02-18'
+    expected: claim_item.issue_date
+  - header: due_date
+    samples:
+    - '2026-04-18'
+    - '2026-03-11'
+    - '2025-11-16'
+    - '2026-02-07'
+    - '2026-02-21'
+    - '2026-03-20'
+    expected: claim_item.due_date
+  - header: amount
+    samples:
+    - '8360.04'
+    - '4716.42'
+    - '9047.26'
+    - '902.23'
+    - '3604.22'
+    - '-3245.04'
+    expected: claim_item.amount
+  - header: amount_paid
+    samples:
+    - '0.00'
+    - '0.00'
+    - '0.00'
+    - '0.00'
+    - '1802.11'
+    - '0.00'
+    expected: claim_item.amount_paid
+  - header: currency
+    samples:
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    expected: claim_item.currency
+- name: b2b_invoice/tab_dotted
+  columns:
+  - header: COMPTE CLIENT
+    samples:
+    - C9313
+    - C2929
+    - C3945
+    - C6737
+    - C5056
+    - C3987
+    expected: account.external_ref
+  - header: RAISON SOCIALE / NOM
+    samples:
+    - Verdier S.A.S.
+    - Diallo
+    - Hervé
+    - Foucher et Fils
+    - Maréchal
+    - Bourdon
+    expected: party.display_name
+  - header: SIREN
+    samples:
+    - '590819355'
+    - '662558907'
+    - '585307622'
+    - '521104786'
+    - '485784607'
+    - '413178393'
+    expected: party.siren
+  - header: SIRET
+    samples:
+    - '59081935535179'
+    - '66255890793533'
+    - '58530762239991'
+    - '52110478697380'
+    - '48578460765190'
+    - '41317839343042'
+    expected: party.siret
+  - header: EMAIL
+    samples:
+    - henri60@example.org
+    - ogirard@example.org
+    - chantal97@example.com
+    - lemairedenise@example.com
+    - madeleine97@example.com
+    - guillaume68@example.com
+    expected: contact.email
+  - header: TÉLÉPHONE
+    samples:
+    - +33 (0)4 97 90 83 01
+    - +33 4 43 62 81 94
+    - ''
+    - +33 4 84 27 60 18
+    - 04 86 07 52 91
+    - 04 92 63 21 22
+    expected: contact.phone
+  - header: ADRESSE
+    samples:
+    - 41, boulevard Lamy
+    - 41, rue Emmanuelle Mendès
+    - 42, boulevard Ribeiro
+    - 65, avenue de Delorme
+    - 4, rue Nicole Hoarau
+    - 80, rue de Charles
+    expected: contact.address_line
+  - header: CODE POSTAL
+    samples:
+    - 08946
+    - 09677
+    - '67606'
+    - '58170'
+    - '50500'
+    - '36104'
+    expected: contact.postcode
+  - header: VILLE
+    samples:
+    - Denis-sur-Hubert
+    - Saint Colette
+    - Chauveau
+    - Sainte ChristelleBourg
+    - Faure-les-Bains
+    - Humbert
+    expected: contact.city
+  - header: IBAN
+    samples:
+    - FR7666838648101318609139074
+    - FR7699391336881993518190988
+    - FR7649354788387574911862583
+    - FR7669795190121471049746516
+    - FR7675078205612768426846583
+    - FR7629094649128599528907873
+    expected: party.iban
+  - header: TYPE
+    samples:
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - AVOIR
+    expected: claim_item.kind
+  - header: N° PIÈCE
+    samples:
+    - F2026-00001
+    - F2026-00002
+    - F2026-00003
+    - F2026-00004
+    - F2026-00005
+    - F2026-00006
+    expected: claim_item.ref
+  - header: DATE PIÈCE
+    samples:
+    - 19.03.2026
+    - 09.02.2026
+    - 17.09.2025
+    - 24.12.2025
+    - 07.01.2026
+    - 18.02.2026
+    expected: claim_item.issue_date
+  - header: ÉCHÉANCE
+    samples:
+    - 18.04.2026
+    - 11.03.2026
+    - 16.11.2025
+    - 07.02.2026
+    - 21.02.2026
+    - 20.03.2026
+    expected: claim_item.due_date
+  - header: MONTANT TTC
+    samples:
+    - 8 360,04
+    - 4 716,42
+    - 9 047,26
+    - 902,23
+    - 3 604,22
+    - -3 245,04
+    expected: claim_item.amount
+  - header: MONTANT RÉGLÉ
+    samples:
+    - 0,00
+    - 0,00
+    - 0,00
+    - 0,00
+    - 1 802,11
+    - 0,00
+    expected: claim_item.amount_paid
+  - header: DEVISE
+    samples:
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    expected: claim_item.currency
+- name: b2c_invoice/fr_semicolon
+  columns:
+  - header: Compte client
+    samples:
+    - ABO-483452
+    - ABO-195119
+    - ABO-164867
+    - ABO-539499
+    - ABO-709851
+    - ABO-749078
+    expected: account.external_ref
+  - header: Raison sociale / Nom
+    samples:
+    - LOMBARD
+    - PEREIRA
+    - PONS
+    - BONNET
+    - MICHAUD
+    - CHARLES
+    expected: party.display_name
+  - header: Prénom
+    samples:
+    - Lorraine
+    - Emmanuelle
+    - Sébastien
+    - Nath
+    - Colette
+    - Roland
+    expected: party.first_name
+  - header: Email
+    samples:
+    - henri60@example.org
+    - verdierisabelle@example.com
+    - thibaultcharles@example.net
+    - lemairedenise@example.com
+    - ''
+    - bruncaroline@example.com
+    expected: contact.email
+  - header: Téléphone
+    samples:
+    - +33 (0)4 97 90 83 01
+    - +33 (0)3 67 08 24 62
+    - +33 7 98 65 79 75
+    - +33 4 84 27 60 18
+    - '0604650752'
+    - 0262684656
+    expected: contact.phone
+  - header: Adresse
+    samples:
+    - 41, boulevard Lamy
+    - 5, rue de Henry
+    - 42, boulevard Ribeiro
+    - 65, avenue de Delorme
+    - 8, rue Lecoq
+    - 31, rue Delmas
+    expected: contact.address_line
+  - header: Code postal
+    samples:
+    - 08946
+    - '74684'
+    - '67606'
+    - '58170'
+    - '36232'
+    - '29112'
+    expected: contact.postcode
+  - header: Ville
+    samples:
+    - Denis-sur-Hubert
+    - Guichard
+    - Chauveau
+    - Sainte ChristelleBourg
+    - Chauvin
+    - Pruvost-les-Bains
+    expected: contact.city
+  - header: Type
+    samples:
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    expected: claim_item.kind
+  - header: N° pièce
+    samples:
+    - FAC-000001
+    - FAC-000002
+    - FAC-000003
+    - FAC-000004
+    - FAC-000005
+    - FAC-000006
+    expected: claim_item.ref
+  - header: Date pièce
+    samples:
+    - 19/03/2026
+    - 15/12/2025
+    - 01/08/2026
+    - 09/02/2026
+    - 02/07/2026
+    - 27/05/2026
+    expected: claim_item.issue_date
+  - header: Échéance
+    samples:
+    - 18/04/2026
+    - 14/01/2026
+    - 30/09/2026
+    - 11/03/2026
+    - 31/08/2026
+    - 11/07/2026
+    expected: claim_item.due_date
+  - header: Montant TTC
+    samples:
+    - 338,75
+    - 104,57
+    - 161,13
+    - 224,88
+    - 282,16
+    - 143,85
+    expected: claim_item.amount
+  - header: Montant réglé
+    samples:
+    - 0,00
+    - 0,00
+    - 0,00
+    - 0,00
+    - 141,08
+    - 71,92
+    expected: claim_item.amount_paid
+  - header: Devise
+    samples:
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    expected: claim_item.currency
+- name: b2c_invoice/en_comma
+  columns:
+  - header: client_ref
+    samples:
+    - ABO-483452
+    - ABO-195119
+    - ABO-164867
+    - ABO-539499
+    - ABO-709851
+    - ABO-749078
+    expected: account.external_ref
+  - header: debtor_name
+    samples:
+    - LOMBARD
+    - PEREIRA
+    - PONS
+    - BONNET
+    - MICHAUD
+    - CHARLES
+    expected: party.display_name
+  - header: first_name
+    samples:
+    - Lorraine
+    - Emmanuelle
+    - Sébastien
+    - Nath
+    - Colette
+    - Roland
+    expected: party.first_name
+  - header: email
+    samples:
+    - henri60@example.org
+    - verdierisabelle@example.com
+    - thibaultcharles@example.net
+    - lemairedenise@example.com
+    - ''
+    - bruncaroline@example.com
+    expected: contact.email
+  - header: phone
+    samples:
+    - +33 (0)4 97 90 83 01
+    - +33 (0)3 67 08 24 62
+    - +33 7 98 65 79 75
+    - +33 4 84 27 60 18
+    - '0604650752'
+    - 0262684656
+    expected: contact.phone
+  - header: address
+    samples:
+    - 41, boulevard Lamy
+    - 5, rue de Henry
+    - 42, boulevard Ribeiro
+    - 65, avenue de Delorme
+    - 8, rue Lecoq
+    - 31, rue Delmas
+    expected: contact.address_line
+  - header: postcode
+    samples:
+    - 08946
+    - '74684'
+    - '67606'
+    - '58170'
+    - '36232'
+    - '29112'
+    expected: contact.postcode
+  - header: city
+    samples:
+    - Denis-sur-Hubert
+    - Guichard
+    - Chauveau
+    - Sainte ChristelleBourg
+    - Chauvin
+    - Pruvost-les-Bains
+    expected: contact.city
+  - header: document_type
+    samples:
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    expected: claim_item.kind
+  - header: document_ref
+    samples:
+    - FAC-000001
+    - FAC-000002
+    - FAC-000003
+    - FAC-000004
+    - FAC-000005
+    - FAC-000006
+    expected: claim_item.ref
+  - header: issue_date
+    samples:
+    - '2026-03-19'
+    - '2025-12-15'
+    - '2026-08-01'
+    - '2026-02-09'
+    - '2026-07-02'
+    - '2026-05-27'
+    expected: claim_item.issue_date
+  - header: due_date
+    samples:
+    - '2026-04-18'
+    - '2026-01-14'
+    - '2026-09-30'
+    - '2026-03-11'
+    - '2026-08-31'
+    - '2026-07-11'
+    expected: claim_item.due_date
+  - header: amount
+    samples:
+    - '338.75'
+    - '104.57'
+    - '161.13'
+    - '224.88'
+    - '282.16'
+    - '143.85'
+    expected: claim_item.amount
+  - header: amount_paid
+    samples:
+    - '0.00'
+    - '0.00'
+    - '0.00'
+    - '0.00'
+    - '141.08'
+    - '71.92'
+    expected: claim_item.amount_paid
+  - header: currency
+    samples:
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    expected: claim_item.currency
+- name: b2c_invoice/tab_dotted
+  columns:
+  - header: COMPTE CLIENT
+    samples:
+    - ABO-483452
+    - ABO-195119
+    - ABO-164867
+    - ABO-539499
+    - ABO-709851
+    - ABO-749078
+    expected: account.external_ref
+  - header: RAISON SOCIALE / NOM
+    samples:
+    - LOMBARD
+    - PEREIRA
+    - PONS
+    - BONNET
+    - MICHAUD
+    - CHARLES
+    expected: party.display_name
+  - header: PRÉNOM
+    samples:
+    - Lorraine
+    - Emmanuelle
+    - Sébastien
+    - Nath
+    - Colette
+    - Roland
+    expected: party.first_name
+  - header: EMAIL
+    samples:
+    - henri60@example.org
+    - verdierisabelle@example.com
+    - thibaultcharles@example.net
+    - lemairedenise@example.com
+    - ''
+    - bruncaroline@example.com
+    expected: contact.email
+  - header: TÉLÉPHONE
+    samples:
+    - +33 (0)4 97 90 83 01
+    - +33 (0)3 67 08 24 62
+    - +33 7 98 65 79 75
+    - +33 4 84 27 60 18
+    - '0604650752'
+    - 0262684656
+    expected: contact.phone
+  - header: ADRESSE
+    samples:
+    - 41, boulevard Lamy
+    - 5, rue de Henry
+    - 42, boulevard Ribeiro
+    - 65, avenue de Delorme
+    - 8, rue Lecoq
+    - 31, rue Delmas
+    expected: contact.address_line
+  - header: CODE POSTAL
+    samples:
+    - 08946
+    - '74684'
+    - '67606'
+    - '58170'
+    - '36232'
+    - '29112'
+    expected: contact.postcode
+  - header: VILLE
+    samples:
+    - Denis-sur-Hubert
+    - Guichard
+    - Chauveau
+    - Sainte ChristelleBourg
+    - Chauvin
+    - Pruvost-les-Bains
+    expected: contact.city
+  - header: TYPE
+    samples:
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    - FACTURE
+    expected: claim_item.kind
+  - header: N° PIÈCE
+    samples:
+    - FAC-000001
+    - FAC-000002
+    - FAC-000003
+    - FAC-000004
+    - FAC-000005
+    - FAC-000006
+    expected: claim_item.ref
+  - header: DATE PIÈCE
+    samples:
+    - 19.03.2026
+    - 15.12.2025
+    - 01.08.2026
+    - 09.02.2026
+    - 02.07.2026
+    - 27.05.2026
+    expected: claim_item.issue_date
+  - header: ÉCHÉANCE
+    samples:
+    - 18.04.2026
+    - 14.01.2026
+    - 30.09.2026
+    - 11.03.2026
+    - 31.08.2026
+    - 11.07.2026
+    expected: claim_item.due_date
+  - header: MONTANT TTC
+    samples:
+    - 338,75
+    - 104,57
+    - 161,13
+    - 224,88
+    - 282,16
+    - 143,85
+    expected: claim_item.amount
+  - header: MONTANT RÉGLÉ
+    samples:
+    - 0,00
+    - 0,00
+    - 0,00
+    - 0,00
+    - 141,08
+    - 71,92
+    expected: claim_item.amount_paid
+  - header: DEVISE
+    samples:
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    expected: claim_item.currency
+- name: rent/fr_semicolon
+  columns:
+  - header: Bail
+    samples:
+    - BAIL-696
+    - BAIL-534
+    - BAIL-150
+    - BAIL-935
+    - BAIL-161
+    - BAIL-406
+    expected: account.external_ref
+  - header: Raison sociale / Nom
+    samples:
+    - LOMBARD
+    - PEREIRA
+    - LE GOFF
+    - PINEAU
+    - HERVÉ
+    - DIAS
+    expected: party.display_name
+  - header: Prénom
+    samples:
+    - Lorraine
+    - Emmanuelle
+    - Nathalie
+    - Daniel
+    - Gilles
+    - Roger
+    expected: party.first_name
+  - header: Email
+    samples:
+    - henri60@example.org
+    - verdierisabelle@example.com
+    - ''
+    - mherve@example.org
+    - dupuychristelle@example.net
+    - anastasiemichaud@example.com
+    expected: contact.email
+  - header: Téléphone
+    samples:
+    - +33 (0)4 97 90 83 01
+    - +33 (0)3 67 08 24 62
+    - +33 (0)1 81 93 78 65
+    - +33 (0)5 61 25 27 60
+    - +33 (0)1 82 49 74 65
+    - ''
+    expected: contact.phone
+  - header: Adresse
+    samples:
+    - 41, boulevard Lamy
+    - 5, rue de Henry
+    - 575, rue Rocher
+    - 9, chemin de Leblanc
+    - chemin Jean Bourdon
+    - avenue Maréchal
+    expected: contact.address_line
+  - header: Code postal
+    samples:
+    - 08946
+    - '74684'
+    - '97441'
+    - '88458'
+    - '15605'
+    - '70384'
+    expected: contact.postcode
+  - header: Ville
+    samples:
+    - Denis-sur-Hubert
+    - Guichard
+    - Sainte Édithdan
+    - Mahe-sur-Delorme
+    - Saint Pauline
+    - Perret
+    expected: contact.city
+  - header: Période
+    samples:
+    - 04/2026
+    - 01/2026
+    - 03/2026
+    - 01/2026
+    - 12/2025
+    - 04/2026
+    expected: claim_item.period
+  - header: Échéance
+    samples:
+    - 05/04/2026
+    - 05/01/2026
+    - 05/03/2026
+    - 05/01/2026
+    - 05/12/2025
+    - 05/04/2026
+    expected: claim_item.due_date
+  - header: Montant TTC
+    samples:
+    - 602,04
+    - 604,95
+    - 1029,55
+    - 923,76
+    - 989,90
+    - 1101,23
+    expected: claim_item.amount
+  - header: Montant réglé
+    samples:
+    - 0,00
+    - 27,26
+    - 246,64
+    - 0,00
+    - 0,00
+    - 0,00
+    expected: claim_item.amount_paid
+  - header: Devise
+    samples:
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    expected: claim_item.currency
+- name: rent/en_comma
+  columns:
+  - header: lease_ref
+    samples:
+    - BAIL-696
+    - BAIL-534
+    - BAIL-150
+    - BAIL-935
+    - BAIL-161
+    - BAIL-406
+    expected: account.external_ref
+  - header: debtor_name
+    samples:
+    - LOMBARD
+    - PEREIRA
+    - LE GOFF
+    - PINEAU
+    - HERVÉ
+    - DIAS
+    expected: party.display_name
+  - header: first_name
+    samples:
+    - Lorraine
+    - Emmanuelle
+    - Nathalie
+    - Daniel
+    - Gilles
+    - Roger
+    expected: party.first_name
+  - header: email
+    samples:
+    - henri60@example.org
+    - verdierisabelle@example.com
+    - ''
+    - mherve@example.org
+    - dupuychristelle@example.net
+    - anastasiemichaud@example.com
+    expected: contact.email
+  - header: phone
+    samples:
+    - +33 (0)4 97 90 83 01
+    - +33 (0)3 67 08 24 62
+    - +33 (0)1 81 93 78 65
+    - +33 (0)5 61 25 27 60
+    - +33 (0)1 82 49 74 65
+    - ''
+    expected: contact.phone
+  - header: address
+    samples:
+    - 41, boulevard Lamy
+    - 5, rue de Henry
+    - 575, rue Rocher
+    - 9, chemin de Leblanc
+    - chemin Jean Bourdon
+    - avenue Maréchal
+    expected: contact.address_line
+  - header: postcode
+    samples:
+    - 08946
+    - '74684'
+    - '97441'
+    - '88458'
+    - '15605'
+    - '70384'
+    expected: contact.postcode
+  - header: city
+    samples:
+    - Denis-sur-Hubert
+    - Guichard
+    - Sainte Édithdan
+    - Mahe-sur-Delorme
+    - Saint Pauline
+    - Perret
+    expected: contact.city
+  - header: period
+    samples:
+    - 04/2026
+    - 01/2026
+    - 03/2026
+    - 01/2026
+    - 12/2025
+    - 04/2026
+    expected: claim_item.period
+  - header: due_date
+    samples:
+    - '2026-04-05'
+    - '2026-01-05'
+    - '2026-03-05'
+    - '2026-01-05'
+    - '2025-12-05'
+    - '2026-04-05'
+    expected: claim_item.due_date
+  - header: amount
+    samples:
+    - '602.04'
+    - '604.95'
+    - '1029.55'
+    - '923.76'
+    - '989.90'
+    - '1101.23'
+    expected: claim_item.amount
+  - header: amount_paid
+    samples:
+    - '0.00'
+    - '27.26'
+    - '246.64'
+    - '0.00'
+    - '0.00'
+    - '0.00'
+    expected: claim_item.amount_paid
+  - header: currency
+    samples:
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    expected: claim_item.currency
+- name: rent/tab_dotted
+  columns:
+  - header: BAIL
+    samples:
+    - BAIL-696
+    - BAIL-534
+    - BAIL-150
+    - BAIL-935
+    - BAIL-161
+    - BAIL-406
+    expected: account.external_ref
+  - header: RAISON SOCIALE / NOM
+    samples:
+    - LOMBARD
+    - PEREIRA
+    - LE GOFF
+    - PINEAU
+    - HERVÉ
+    - DIAS
+    expected: party.display_name
+  - header: PRÉNOM
+    samples:
+    - Lorraine
+    - Emmanuelle
+    - Nathalie
+    - Daniel
+    - Gilles
+    - Roger
+    expected: party.first_name
+  - header: EMAIL
+    samples:
+    - henri60@example.org
+    - verdierisabelle@example.com
+    - ''
+    - mherve@example.org
+    - dupuychristelle@example.net
+    - anastasiemichaud@example.com
+    expected: contact.email
+  - header: TÉLÉPHONE
+    samples:
+    - +33 (0)4 97 90 83 01
+    - +33 (0)3 67 08 24 62
+    - +33 (0)1 81 93 78 65
+    - +33 (0)5 61 25 27 60
+    - +33 (0)1 82 49 74 65
+    - ''
+    expected: contact.phone
+  - header: ADRESSE
+    samples:
+    - 41, boulevard Lamy
+    - 5, rue de Henry
+    - 575, rue Rocher
+    - 9, chemin de Leblanc
+    - chemin Jean Bourdon
+    - avenue Maréchal
+    expected: contact.address_line
+  - header: CODE POSTAL
+    samples:
+    - 08946
+    - '74684'
+    - '97441'
+    - '88458'
+    - '15605'
+    - '70384'
+    expected: contact.postcode
+  - header: VILLE
+    samples:
+    - Denis-sur-Hubert
+    - Guichard
+    - Sainte Édithdan
+    - Mahe-sur-Delorme
+    - Saint Pauline
+    - Perret
+    expected: contact.city
+  - header: PÉRIODE
+    samples:
+    - 04/2026
+    - 01/2026
+    - 03/2026
+    - 01/2026
+    - 12/2025
+    - 04/2026
+    expected: claim_item.period
+  - header: ÉCHÉANCE
+    samples:
+    - 05.04.2026
+    - 05.01.2026
+    - 05.03.2026
+    - 05.01.2026
+    - 05.12.2025
+    - 05.04.2026
+    expected: claim_item.due_date
+  - header: MONTANT TTC
+    samples:
+    - 602,04
+    - 604,95
+    - 1 029,55
+    - 923,76
+    - 989,90
+    - 1 101,23
+    expected: claim_item.amount
+  - header: MONTANT RÉGLÉ
+    samples:
+    - 0,00
+    - 27,26
+    - 246,64
+    - 0,00
+    - 0,00
+    - 0,00
+    expected: claim_item.amount_paid
+  - header: DEVISE
+    samples:
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    - EUR
+    expected: claim_item.currency

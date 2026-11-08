@@ -1,0 +1,16 @@
+description: EU NPL template tape headers (column names generated from the catalogue) map to themselves.
+cases:
+- name: eba_t3_loan_subset
+  columns:
+  - {header: f3_01_loan_identifier, samples: [LOAN-000001, LOAN-000002], expected: eba.f3_01_loan_identifier}
+  - {header: f3_02_inception_date, samples: [12/03/2021, 01/09/2020], expected: eba.f3_02_inception_date}
+  - {header: f3_09_principal_amount, samples: ['12450.00', '3120.55'], expected: eba.f3_09_principal_amount}
+  - {header: f3_12_legal_balance, samples: ['13010.20', '3301.00'], expected: eba.f3_12_legal_balance}
+  - {header: f3_14_interest_rate, samples: ['0.06', '0.11'], expected: eba.f3_14_interest_rate}
+  - {header: f3_23_date_of_the_default_status_of_the_instrument, samples: [01/02/2024, 15/06/2023], expected: eba.f3_23_date_of_the_default_status_of_the_instrument}
+- name: eba_t1_counterparty_subset
+  columns:
+  - {header: f1_02_counterparty_identifier, samples: [CPTY-000001, CPTY-000002], expected: eba.f1_02_counterparty_identifier}
+  - {header: f1_03_name_of_counterparty, samples: [DURAND Hélène, Martin SAS], expected: eba.f1_03_name_of_counterparty}
+  - {header: f1_06_legal_type_of_counterparty, samples: [Households, Non-financial corporations-SMEs], expected: eba.f1_06_legal_type_of_counterparty}
+  - {header: f1_07_date_of_birth, samples: [04/05/1971, 22/11/1988], expected: eba.f1_07_date_of_birth}

@@ -1,0 +1,113 @@
+# Layer-2 mapping targets (M1-06). EU-template targets (eba.<column>) are added from the
+# field catalogue at load time. `aliases` are header labels seen in French accounting exports
+# (and their English equivalents); `value_types` are profile type guesses that fit the target.
+version: 1
+targets:
+  party.display_name:
+    type: text
+    description: Debtor name (company name, or surname of a natural person).
+    example: Durand SARL
+    aliases: [raison sociale, raison sociale nom, nom, nom client, client, debiteur, tiers, locataire,
+              societe, debtor name, debtor, company, customer name, name, libelle tiers]
+  party.first_name:
+    type: text
+    description: First name of a natural-person debtor.
+    example: Hélène
+    aliases: [prenom, first name, firstname, given name]
+  party.siren:
+    type: siren
+    description: SIREN of a legal-entity debtor (9 digits, Luhn key).
+    example: "732829320"
+    aliases: [siren, n siren, numero siren]
+    value_types: [siren]
+  party.siret:
+    type: siret
+    description: SIRET of the debtor's establishment (14 digits).
+    example: "73282932000074"
+    aliases: [siret, n siret, numero siret]
+    value_types: [siret]
+  party.iban:
+    type: iban
+    description: Debtor bank account (IBAN), e.g. for SEPA direct debit mandates.
+    example: FR7630006000011234567890189
+    aliases: [iban, rib, bank account]
+    value_types: [iban]
+  contact.email:
+    type: email
+    description: Debtor email address.
+    example: contact@durand.fr
+    aliases: [email, e mail, mail, courriel, adresse email, adresse mail]
+    value_types: [email]
+  contact.phone:
+    type: phone
+    description: Debtor phone number.
+    example: 01 23 45 67 89
+    aliases: [telephone, tel, phone, mobile, portable, phone number, numero de telephone]
+    value_types: [phone_fr]
+  contact.address_line:
+    type: text
+    description: Street address of the debtor.
+    example: 12 rue de la Paix
+    aliases: [adresse, address, rue, adresse 1, street, address line]
+  contact.postcode:
+    type: postcode
+    description: Postal code.
+    example: "75002"
+    aliases: [code postal, cp, postcode, postal code, zip, zip code]
+    value_types: [postcode_fr, integer]
+  contact.city:
+    type: text
+    description: City.
+    example: Paris
+    aliases: [ville, city, commune, localite]
+  account.external_ref:
+    type: text
+    description: The client's reference for the debtor account or contract (customer account, lease, file).
+    example: C1042
+    aliases: [compte client, client ref, ref client, reference client, numero client, compte tiers,
+              bail, lease ref, lease, contrat, dossier, account ref, customer ref, customer account]
+  claim_item.kind:
+    type: text
+    description: Kind of document (invoice, credit note).
+    example: FACTURE
+    aliases: [type, type piece, document type, type document, nature]
+  claim_item.ref:
+    type: text
+    description: Document number (invoice, credit note) or reference of the claim line.
+    example: F2026-00042
+    aliases: [n piece, numero piece, piece, numero facture, n facture, facture, invoice number,
+              document ref, document number, reference piece]
+  claim_item.issue_date:
+    type: date
+    description: Issue date of the document.
+    example: 15/03/2026
+    aliases: [date piece, date facture, date document, issue date, invoice date, date emission, date]
+    value_types: [date_fr, date_iso, date_dotted]
+  claim_item.due_date:
+    type: date
+    description: Due date of the amount.
+    example: 15/04/2026
+    aliases: [echeance, date echeance, date d echeance, due date, due, payment due, exigibilite]
+    value_types: [date_fr, date_iso, date_dotted]
+  claim_item.amount:
+    type: amount
+    description: Amount due including tax (TTC), in major units as written in the file.
+    example: 1 234,56
+    aliases: [montant ttc, montant, ttc, amount, total ttc, amount due, loyer, montant du, total]
+    value_types: [decimal_comma, decimal_dot, integer]
+  claim_item.amount_paid:
+    type: amount
+    description: Amount already paid on the document.
+    example: 0,00
+    aliases: [montant regle, regle, paye, montant paye, amount paid, paid, deja regle, reglement]
+    value_types: [decimal_comma, decimal_dot, integer]
+  claim_item.currency:
+    type: currency
+    description: ISO 4217 currency code.
+    example: EUR
+    aliases: [devise, currency, monnaie]
+  claim_item.period:
+    type: text
+    description: Period covered (e.g. rent month MM/YYYY).
+    example: 03/2026
+    aliases: [periode, period, mois, terme]

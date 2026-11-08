@@ -47,6 +47,9 @@ test-web:
 test-db:          ## pgTAP (needs `make up`)
 	supabase test db
 
+eval:             ## AI eval suites (golden datasets in worker/evals)
+	cd worker && uv run python -m collectoo_worker.ai.evals mapping
+
 test-integration: ## Worker tests against the local stack (needs `make up`)
 	eval "$$(./scripts/local-env.sh)" && cd worker && uv run pytest -m integration
 

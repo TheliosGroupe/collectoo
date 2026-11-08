@@ -1,0 +1,30 @@
+description: >
+  Hand-written headers in the style of French accounting/ERP exports (wording differs from the
+  synthetic generator). Expected targets decided by hand. null = no target (kept as source attribute).
+cases:
+- name: erp_receivables_export
+  columns:
+  - {header: Code client, samples: [CLI0042, CLI0107, CLI0311], expected: account.external_ref}
+  - {header: Tiers, samples: [BOULANGERIE DURAND, SARL MARTIN BTP, GARAGE DU PONT], expected: party.display_name}
+  - {header: N° SIRET, samples: ['73282932000074', '44306184100047', '55204944776279'], expected: party.siret}
+  - {header: N° de facture, samples: [FA-2026-0412, FA-2026-0513, FA-2026-0601], expected: claim_item.ref}
+  - {header: Date de facture, samples: [03/02/2026, 17/03/2026, 02/04/2026], expected: claim_item.issue_date}
+  - {header: Date d'échéance, samples: [05/03/2026, 16/04/2026, 02/05/2026], expected: claim_item.due_date}
+  - {header: Montant TTC, samples: ['1 254,30', '480,00', '12 990,00'], expected: claim_item.amount}
+  - {header: Montant réglé, samples: ['0,00', '240,00', '0,00'], expected: claim_item.amount_paid}
+  - {header: E-mail, samples: [compta@durand.fr, contact@martin-btp.fr, garage@dupont.fr], expected: contact.email}
+  - {header: Tél., samples: [01 42 33 44 55, 04 72 10 20 30, 06 12 34 56 78], expected: contact.phone}
+  - {header: Adresse 1, samples: [12 rue de la Gare, 4 avenue Foch, ZA des Prés], expected: contact.address_line}
+  - {header: CP, samples: ['75012', '69006', '38500'], expected: contact.postcode}
+  - {header: Ville, samples: [Paris, Lyon, Voiron], expected: contact.city}
+  - {header: Commercial, samples: [J. Morel, A. Petit, J. Morel], expected: null}
+- name: property_manager_rent_roll
+  columns:
+  - {header: Référence bail, samples: [B-104, B-221, B-009], expected: account.external_ref}
+  - {header: Locataire, samples: [DUBOIS Marie, LEROY Karim, NGUYEN Lan], expected: party.display_name}
+  - {header: Mois, samples: [01/2026, 02/2026, 03/2026], expected: claim_item.period}
+  - {header: Exigibilité, samples: [05/01/2026, 05/02/2026, 05/03/2026], expected: claim_item.due_date}
+  - {header: Loyer + charges, samples: ['812,40', '1 045,00', '690,00'], expected: claim_item.amount}
+  - {header: Payé, samples: ['0,00', '500,00', '0,00'], expected: claim_item.amount_paid}
+  - {header: Courriel, samples: [m.dubois@example.org, k.leroy@example.org, lan.n@example.org], expected: contact.email}
+  - {header: Portable, samples: [06 11 22 33 44, 07 55 66 77 88, 06 99 88 77 66], expected: contact.phone}

@@ -1,0 +1,35 @@
+id: mapping_proposal
+version: 1
+description: Map the columns of a client tape to Collectoo's canonical targets.
+system: |
+  You map columns of a debt-collection data file to a fixed list of target fields.
+  Rules:
+  - Choose targets ONLY from the provided list, by id. Use null when no target fits.
+  - Never invent, compute or transform values. Do not output amounts, dates or legal text.
+  - Use the column header, the detected value patterns and the sample values.
+  - Map at most one column of the file to each target.
+  - Give a confidence between 0 and 1 and a one-sentence rationale per column.
+user_template: |
+  Targets:
+  {targets_json}
+
+  Columns (header, detected patterns, sample values):
+  {columns_json}
+
+  Answer with JSON only, matching the output schema.
+output_schema:
+  type: object
+  required: [proposals]
+  additionalProperties: false
+  properties:
+    proposals:
+      type: array
+      items:
+        type: object
+        required: [source_column, target, confidence, rationale]
+        additionalProperties: false
+        properties:
+          source_column: {type: string}
+          target: {type: [string, "null"]}
+          confidence: {type: number, minimum: 0, maximum: 1}
+          rationale: {type: string, maxLength: 500}
