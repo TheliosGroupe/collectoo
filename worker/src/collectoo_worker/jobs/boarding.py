@@ -68,6 +68,8 @@ def make_handler(storage: Storage, provider: Provider, normaliser: Normaliser | 
             stage_batch(conn, storage, batch_id)
         elif kind == "documents":
             documents_batch(conn, storage, batch_id)
+        elif kind == "commit":
+            commit_batch(conn, batch_id)
         elif kind == "confirm":
             confirm_batch(conn, batch_id)
         elif kind == "purge_documents":
@@ -90,8 +92,8 @@ def record_dead_job(payload: dict[str, Any], error: str, conn: psycopg.Connectio
     batch_id = payload.get("batch_id")
     if not batch_id:
         return
-    if payload.get("type") == "confirm":
-        fail_confirmation(conn, str(batch_id), error)
+    if payload.get("type") in SEND_BACK:
+        send_back(conn, str(payload["type"]), str(batch_id), error)
         return
     conn.execute(
         """update public.boarding_batch
@@ -434,6 +436,13 @@ def stage_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) 
         }
     staged, opening, skipped = split_skipped(staged, existing)
     check_bridge(computed_row[0], opening, skipped)
+    # Only a batch still waiting for its staging is written: a duplicate run of this job (queue
+    # redelivery) must not rewrite a batch that has moved on, e.g. one being committed.
+    status = conn.execute(
+        "select status from public.boarding_batch where id = %s for update", (batch_id,)
+    ).fetchone()
+    if status is None or status[0] != "validated":
+        return
     digest = write_staging(conn, batch_id, staged)
     conn.execute(
         """update public.boarding_batch
@@ -529,46 +538,66 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
     )
 
 
-def fail_confirmation(conn: psycopg.Connection[Any], batch_id: str, error: str) -> None:
-    """The confirmation could not post: record why and go back to committed, so staff see it and
-    can retry or roll back. Nothing was posted (the posting is one transaction). A documents
-    failure already shown stays (the history keeps the confirmation's reason)."""
+# Jobs run on a batch in a transient state, and where the batch goes back if they fail:
+# (state while the job runs, state to go back to, history label).
+SEND_BACK: dict[str, tuple[str, str, str]] = {
+    "commit": ("committing", "staged", "échec de l'intégration"),
+    "confirm": ("confirming", "committed", "échec de la confirmation"),
+}
+
+
+def send_back(conn: psycopg.Connection[Any], kind: str, batch_id: str, error: str) -> None:
+    """The commit or the confirmation failed: record why and send the batch back one step, so
+    staff see it and can retry (or roll back / abandon). Nothing was written: each step is one
+    transaction. A documents failure already shown stays (the history keeps this reason)."""
+    current, back, label = SEND_BACK[kind]
     conn.execute(
         """update public.boarding_batch
-           set failed_job = jsonb_build_object('type', 'confirm', 'error', %s::text, 'at', now())
-           where id = %s and status = 'confirming'
+           set failed_job = jsonb_build_object('type', %s::text, 'error', %s::text, 'at', now())
+           where id = %s and status = %s
              and coalesce(failed_job ->> 'type', '') not in ('documents', 'purge_documents')""",
-        (error[:500], batch_id),
+        (kind, error[:500], batch_id, current),
     )
     conn.execute(
-        """select private.transition_batch(id, 'committed', %s, 'worker:boarding')
-           from public.boarding_batch where id = %s and status = 'confirming'""",
-        (f"échec de la confirmation : {error[:300]}", batch_id),
+        """select private.transition_batch(id, %s, %s, 'worker:boarding')
+           from public.boarding_batch where id = %s and status = %s""",
+        (back, f"{label} : {error[:300]}", batch_id, current),
     )
 
 
 def _deterministic(exc: psycopg.Error) -> bool:
-    """Ledger and check errors fail the same way on every retry; other errors may be transient."""
+    """Data, constraint and ledger errors fail the same way on every retry; others (deadlock,
+    serialization, connection, cancel) may be transient and are left to the queue's retries."""
     state = exc.sqlstate or ""
-    return state.startswith("LG") or state == "23514"
+    return state.startswith(("LG", "22", "23"))
+
+
+def _run_step(conn: psycopg.Connection[Any], kind: str, batch_id: str, sql: str) -> str:
+    try:
+        with conn.transaction():  # savepoint: a failed step leaves nothing behind
+            row = conn.execute(sql, (batch_id,)).fetchone()
+    except psycopg.Error as exc:
+        if not _deterministic(exc):
+            raise
+        message = exc.diag.message_primary or str(exc)
+        send_back(conn, kind, batch_id, f"{exc.sqlstate}: {message}")
+        return "failed"
+    return str(row[0]) if row else "skipped"
+
+
+def commit_batch(conn: psycopg.Connection[Any], batch_id: str) -> str:
+    """Write the staged rows into Layers 1 and 2 and compute the opening plan (M1-18, M2a-3):
+    one SQL call in the job's transaction; a redelivered job finds the batch committed. A data,
+    constraint or ledger error is recorded on the batch at once (a retry would fail the same
+    way)."""
+    return _run_step(conn, "commit", batch_id, "select private.complete_batch_commit(%s)")
 
 
 def confirm_batch(conn: psycopg.Connection[Any], batch_id: str) -> str:
     """Post the opening balances and confirm (M2-05): one SQL call, inside the job's transaction,
     so it happens exactly once; a redelivered job finds the batch confirmed and does nothing.
     A ledger or check error is recorded on the batch at once (retrying would only redo the work)."""
-    try:
-        with conn.transaction():  # savepoint: a failed posting leaves nothing behind
-            row = conn.execute(
-                "select private.complete_batch_confirmation(%s)", (batch_id,)
-            ).fetchone()
-    except psycopg.Error as exc:
-        if not _deterministic(exc):
-            raise
-        message = exc.diag.message_primary or str(exc)
-        fail_confirmation(conn, batch_id, f"{exc.sqlstate}: {message}")
-        return "failed"
-    return str(row[0]) if row else "skipped"
+    return _run_step(conn, "confirm", batch_id, "select private.complete_batch_confirmation(%s)")
 
 
 def _safe_suffix(name: str) -> str:

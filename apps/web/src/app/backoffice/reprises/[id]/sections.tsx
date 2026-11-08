@@ -630,6 +630,13 @@ export function IntegrationSection({
       </Section>
     );
   }
+  if (status === "committing") {
+    return (
+      <Section title="Intégration" testId="integration">
+        <InfoNote>Intégration en cours : création des comptes, des pièces et du plan des soldes d&apos;ouverture… la page se met à jour seule.</InfoNote>
+      </Section>
+    );
+  }
   if (status === "committed") {
     return (
       <Section title="Intégration" testId="integration">
@@ -737,8 +744,12 @@ export function AbandonSection({ batchId, status }: { batchId: string; status: s
  */
 function historyReason(e: { to_status: string; reason: string | null }): string | null {
   if (!e.reason) return null;
-  if (!["abandoned", "rolled_back", "committed"].includes(e.to_status)) return null;
-  return e.reason === "committed" ? null : e.reason;
+  // Commit requested (staff motif), back to staged (failed commit), back to committed (failed
+  // confirmation), abandon, rollback.
+  if (!["committing", "staged", "committed", "abandoned", "rolled_back"].includes(e.to_status)) return null;
+  if (["commit requested", "committed", "rows staged"].includes(e.reason)) return null;
+  // Failure reasons carry technical detail (shown in full in the page's error note): keep it short.
+  return e.reason.length > 160 ? `${e.reason.slice(0, 157)}…` : e.reason;
 }
 
 export function HistorySection({

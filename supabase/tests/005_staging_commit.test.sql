@@ -1,6 +1,6 @@
 -- Staging, commit, rollback and confirmation of a boarding batch (M1-17, M1-18).
 begin;
-select plan(17);
+select plan(22);
 
 -- Fixtures ----------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -74,6 +74,17 @@ select lives_ok($$select public.commit_boarding_batch('30000000-0000-0000-0000-0
   'the client admin commits the staged batch');
 select throws_ok($$select public.commit_boarding_batch('30000000-0000-0000-0000-000000000001')$$,
   '23514', null, 'a batch is committed once');
+select throws_ok($$select public.abandon_boarding_batch('30000000-0000-0000-0000-000000000001', 'too late')$$,
+  '23514', null, 'a batch being committed cannot be abandoned');
+select throws_ok($$select private.complete_batch_commit('30000000-0000-0000-0000-000000000001')$$,
+  '42501', null, 'only the worker runs the commit job');
+reset role;
+select is((select message ->> 'type' from pgmq.q_boarding
+           where message ->> 'batch_id' = '30000000-0000-0000-0000-000000000001' order by msg_id desc limit 1),
+  'commit', 'the request queues the commit job');
+select is(private.complete_batch_commit('30000000-0000-0000-0000-000000000001'), 'committed', 'the worker job commits it');
+select is(private.complete_batch_commit('30000000-0000-0000-0000-000000000001'), 'skipped', 'a redelivered job does nothing');
+set local role authenticated;
 select is((select count(*)::int from public.account where status = 'staged'), 1,
   'the account is created, not yet workable');
 select is((select original_minor from public.claim_item), 125000::bigint, 'the invoice amount is boarded as is');

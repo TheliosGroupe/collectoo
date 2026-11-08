@@ -1073,7 +1073,9 @@ stateDiagram-v2
     transformed --> needs_fix : blocking issues
     needs_fix --> mapping_proposed : mapping or files changed
     validated --> staged : DQ report produced, rows in staging
-    staged --> committed : ops commits [reconciliation within tolerance or override with reason]
+    staged --> committing : ops commits [reconciliation within tolerance or override with reason]
+    committing --> committed : worker writes the rows and the opening plan
+    committing --> staged : commit failed (reason shown)
     committed --> confirming : ops_manager confirms [active mandate]
     confirming --> confirmed : worker posts the opening balances
     confirming --> committed : mandate inactive or posting failed
@@ -1089,10 +1091,10 @@ stateDiagram-v2
 
 | Rule | Detail |
 |---|---|
-| Commit | Writes Layer-2 rows with `boarding_batch_id`; accounts in `staged`; computes the opening plan and checks it against the DQ report (`opening_plan`); nothing reaches the ledger; no outbound activity |
+| Commit | Requested by ops (checks: rights, cut-off date, reason when totals differ), then run by a worker job in one transaction (M2a-3: ~20 s at 50k loans, above the API's 8 s); a refused commit goes back to `staged` with its reason. Writes Layer-2 rows with `boarding_batch_id`; accounts in `staged`; computes the opening plan and checks it against the DQ report (`opening_plan`); nothing reaches the ledger; no outbound activity |
 | Rollback | Allowed only before confirmation; deletes the batch's Layer-2 rows (no ledger row exists yet) |
 | Confirm | Requires an active `mandate` covering the portfolio (R124-3, CPCE-03), at the request and again when the worker runs; the worker posts one opening entry per account (components, effective date = cut-off; Σ = DQ reconciled outstanding minus the accounts already in the portfolio, which are not boarded again), moves accounts to `awaiting_first_letter` and starts flows (ADR-0012) |
-| Abandon | Any step before commit; prepared staging rows are deleted |
+| Abandon | Any step before commit (not while the commit job runs); prepared staging rows are deleted |
 | Versioning | Re-boarding the same tape creates `version + 1`; mapping profiles are versioned and reused per seller/client |
 | Mandatory fields | Severity from the catalogue and `conformance` (gap analysis §3.3) |
 

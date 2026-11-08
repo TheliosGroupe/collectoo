@@ -10,10 +10,13 @@ import { InfoNote } from "@/components/ui";
  */
 export function AutoRefresh({
   active,
+  abandonable = true,
   everyMs = 2000,
   maxMs = 15 * 60_000,
 }: {
   active: boolean;
+  /** Whether staff can still abandon the batch (not while it is being integrated or confirmed). */
+  abandonable?: boolean;
   everyMs?: number;
   maxMs?: number;
 }) {
@@ -33,6 +36,9 @@ export function AutoRefresh({
     return () => clearInterval(timer);
   }, [active, everyMs, maxMs, router]);
   return active && expired ? (
-    <InfoNote>Le traitement prend plus de temps que prévu. Rechargez la page plus tard ; s&apos;il reste bloqué, abandonnez le lot.</InfoNote>
+    <InfoNote>
+      Le traitement prend plus de temps que prévu. Rechargez la page plus tard ; s&apos;il reste bloqué,{" "}
+      {abandonable ? "abandonnez le lot." : "contactez le support."}
+    </InfoNote>
   ) : null;
 }

@@ -23,6 +23,7 @@ const JOB_FR: Record<string, string> = {
   propose: "proposition de mapping",
   transform: "transformation et contrôles",
   stage: "préparation de l'intégration",
+  commit: "intégration des données",
   documents: "rattachement des pièces",
   confirm: "confirmation et soldes d'ouverture",
   purge_documents: "suppression des pièces",
@@ -105,7 +106,10 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
         </span>
       }
     >
-      <AutoRefresh active={isProcessing(b.status) && !failed} />
+      <AutoRefresh
+        active={isProcessing(b.status) && !failed}
+        abandonable={b.status !== "committing" && b.status !== "confirming"}
+      />
       <p className="-mt-3 text-sm text-zinc-600 dark:text-zinc-400">
         {b.client?.legal_name} · {b.portfolio?.name}
         {cutOff ? ` · arrêté au ${cutOff}` : ""}
@@ -114,6 +118,12 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
         <ErrorNote>
           L&apos;étape « {JOB_FR[b.failed_job.type] ?? b.failed_job.type} » a échoué après plusieurs tentatives. Vérifiez le
           fichier (format, encodage), puis abandonnez ce lot et déposez-en un nouveau. Détail technique :{" "}
+          <span className="font-mono text-xs break-all">{b.failed_job.error}</span>
+        </ErrorNote>
+      ) : b.failed_job?.type === "commit" && b.status === "staged" ? (
+        <ErrorNote>
+          L&apos;intégration a échoué : rien n&apos;a été intégré et le lot est revenu à l&apos;état « Prêt à intégrer ».
+          Réessayez ; si l&apos;échec se répète, abandonnez ce lot et contactez le support. Détail technique :{" "}
           <span className="font-mono text-xs break-all">{b.failed_job.error}</span>
         </ErrorNote>
       ) : b.failed_job?.type === "confirm" && b.status === "committed" ? (

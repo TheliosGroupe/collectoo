@@ -40,7 +40,9 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
     commit_started = time.monotonic()
     with psycopg.connect(DB) as conn, conn.transaction():
         as_user(conn, tenant["user"])
+        conn.execute("set local statement_timeout = '8s'")  # what the API allows a request
         conn.execute("select public.commit_boarding_batch(%s)", (batch,))
+    drain(store)  # M2a-3: the commit job writes the rows and the opening plan
     commit_s = time.monotonic() - commit_started
     # M2-05: confirmation (staff at aal2, active mandate) queues the job that posts the openings.
     with psycopg.connect(DB) as conn, conn.transaction():
