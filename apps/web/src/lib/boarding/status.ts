@@ -86,6 +86,8 @@ const ISSUE_LABEL: Record<string, string> = {
   mixed_currency_account: "Plusieurs devises pour un même compte",
   unsupported_currency: "Devise non acceptée",
   duplicate_loan: "Identifiant de prêt en double avec des valeurs différentes",
+  duplicate_eba_table:
+    "Plusieurs fichiers pour la même table du modèle UE : refaire la reprise avec un seul fichier par table",
   sub_cent_amount: "Montant avec plus de 2 décimales (arrondi au centime)",
   components_exceed_legal_balance: "Principal, intérêts et autres soldes supérieurs au solde légal (3.12)",
   unassigned_claim_type: "Type de créance non déterminé",

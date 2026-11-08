@@ -34,6 +34,7 @@ CIVIL_CLAIM_TYPES = {"b2b_invoice", "b2c_invoice", "rent", "private_loan", "judg
 # Claim currencies accepted when public.currency cannot be read (it lists exponent-2 codes).
 DEFAULT_CURRENCIES = frozenset({"EUR", "USD", "GBP", "CHF"})
 VALIDATION_SPEC_VERSION = 2
+REF_BASIS = ("claim_item.ref", "claim_item.period", "claim_item.due_date")  # an item's ref
 _NULL_DTYPES: dict[str, pl.DataType] = {"amount": pl.Int64(), "date": pl.Date()}
 
 
@@ -314,15 +315,21 @@ def assign_rows(result: FileResult, portfolio_default: str | None, log: IssueLog
 # --- Row and file rules -----------------------------------------------------------------
 
 
-def _required(result: FileResult, log: IssueLog) -> None:
-    req, rec = rules()["required"], rules()["recommended"]
-    keys = pl.Series(
+def _rule_keys(result: FileResult) -> pl.Series:
+    """Per row, the key of the `required` / `recommended` lists: its civil claim type, else
+    `bank_credit` (null when the claim type is unassigned)."""
+    return pl.Series(
         [
             None if ct is None else (ct if ct in CIVIL_CLAIM_TYPES else "bank_credit")
             for ct in result.claim_types
         ],
         dtype=pl.Utf8,
     )
+
+
+def _required(result: FileResult, log: IssueLog) -> None:
+    req, rec = rules()["required"], rules()["recommended"]
+    keys = _rule_keys(result)
     for code, spec in (("missing_required", req), ("missing_recommended", rec)):
         for key, targets in spec.items():
             applies = keys == key
@@ -418,6 +425,27 @@ def _items(files: list[FileResult], log: IssueLog, currencies: frozenset[str]) -
         message="an amount paid on a credit note",
         target="claim_item.amount_paid",
     )
+    # No document number, period or due date: no ref (claim_item.ref is NOT NULL). Claim types
+    # requiring one of these already report the row (`_required`, or the value's own error).
+    reported = pl.Series(
+        [k for k, targets in rules()["required"].items() if set(targets) & set(REF_BASIS)],
+        dtype=pl.Utf8,
+    ).implode()
+    for (file_id,), part in items.filter(pl.col("ref").is_null()).group_by(
+        "file_id", maintain_order=True
+    ):
+        f = by_id[str(file_id)]
+        rows = part["row"]
+        if f.claim_types:
+            rows = rows.filter(~_rule_keys(f).gather(rows).is_in(reported).fill_null(False))
+        log.add_rows(
+            f.file_id,
+            rows.to_list(),
+            code="missing_required",
+            message="claim_item.ref is missing: no document number, period or due date",
+            column=f.column_for("claim_item.ref"),
+            target="claim_item.ref",
+        )
     staged = items.filter(pl.col("first"))
     account_currency = pl.col("currency").first().over("account_key")
     _item_rows(
@@ -483,13 +511,27 @@ def _loans(files: list[FileResult], log: IssueLog, currencies: frozenset[str]) -
                 values={i: values[i] for i in rows[:MAX_DETAILS_PER_CODE]},
             )
         with_balance = loans.filter(pl.col("p312").is_not_null())
-        negative = [
-            r
-            for r, components in zip(
-                with_balance["row"].to_list(), loan_components(with_balance), strict=True
-            )
-            if components.get("balancing_line", 0) < 0
-        ]
+        negative: list[int] = []
+        below_zero: dict[int, str] = {}  # claim_item.original_minor >= 0
+        for r, legal, components in zip(
+            with_balance["row"].to_list(),
+            with_balance["p312"].to_list(),
+            loan_components(with_balance),
+            strict=True,
+        ):
+            if components.get("balancing_line", 0) < 0:
+                negative.append(r)
+            if sum(components.values()) < 0:  # the components add up to 3.12 in minor units
+                below_zero[r] = legal
+        log.add_rows(
+            t3.file_id,
+            list(below_zero),
+            code="negative_amount",
+            message="negative legal balance (3.12)",
+            column=t3.column_for("eba.f3_12_legal_balance"),
+            target="eba.f3_12_legal_balance",
+            values=below_zero,
+        )
         log.add_rows(
             t3.file_id,
             negative,
@@ -502,10 +544,23 @@ def _loans(files: list[FileResult], log: IssueLog, currencies: frozenset[str]) -
 
 
 def _amounts(result: FileResult, log: IssueLog) -> None:
+    paid = result.col("claim_item.amount_paid", pl.Int64())
+    paid_col = result.column_for("claim_item.amount_paid")
+    rows = _rows(paid < 0)  # claim_item.seller_paid_minor >= 0
+    log.add_rows(
+        result.file_id,
+        rows,
+        code="negative_amount",
+        message="negative amount paid",
+        column=paid_col,
+        target="claim_item.amount_paid",
+        values={i: result.raw[paid_col][i] for i in rows[:MAX_DETAILS_PER_CODE]}
+        if paid_col
+        else None,
+    )
     if "claim_item.amount" not in result.values:
         return
     amount = result.values["claim_item.amount"]
-    paid = result.col("claim_item.amount_paid", pl.Int64())
     kind = result.col("claim_item.kind")
     col = result.column_for("claim_item.amount")
     negative = (amount < 0) & (kind.is_null() | (kind != "credit_note"))
@@ -623,6 +678,24 @@ def _references(files: list[FileResult], join_keys: list[dict[str, Any]], log: I
             )
 
 
+def _eba_tables(files: list[FileResult], log: IssueLog) -> None:
+    """One file per EU-template table: staging and the cross-file references read one."""
+    seen: set[str] = set()
+    for f in files:
+        if f.eba_table is None:
+            continue
+        if f.eba_table in seen:
+            log.add_rows(
+                f.file_id,
+                [],
+                code="duplicate_eba_table",
+                message=f"another file of this batch is already the EU template table "
+                f"{f.eba_table}: one file per table",
+                file_level=True,
+            )
+        seen.add(f.eba_table)
+
+
 def validate_batch(  # noqa: PLR0913 - the batch's inputs
     files: list[FileResult],
     profiles: dict[str, dict[str, Any]],
@@ -644,6 +717,7 @@ def validate_batch(  # noqa: PLR0913 - the batch's inputs
         _amounts(result, log)
         _contacts(result, log)
         _eba_mandatory(result, log, art4_exempt)
+    _eba_tables(files, log)
     _items(files, log, currencies)
     _loans(files, log, currencies)
     _references(files, join_keys, log)

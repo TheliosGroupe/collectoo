@@ -262,6 +262,19 @@ def test_opening_plus_skipped_equals_the_dq_report(
     _bridge(files, skip)
 
 
+def _claims(files: list[FileResult]) -> dict[str, Any]:
+    report = build_report(files, validate(*files), control={}, spec_versions={})
+    currencies: dict[str, Any] = report["reconciliation"]["computed"]["currencies"]
+    return currencies
+
+
+@settings(max_examples=100, deadline=None)
+@given(rows=_file_rows)
+def test_a_file_sent_twice_is_counted_once(rows: list[dict[str, str | None]]) -> None:
+    once = _claims([civil_file("f0", rows)])
+    assert _claims([civil_file("f0", rows), civil_file("f1", rows)]) == once
+
+
 def test_bridge_on_a_synthetic_civil_tape() -> None:
     rows = [
         row("C1", piece="F1", montant="1250.00", regle="250.00"),
