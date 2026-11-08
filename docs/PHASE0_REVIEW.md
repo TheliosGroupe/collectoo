@@ -61,3 +61,7 @@ Questions for counsel (no need to answer now; rule packs ship conservative defau
 | — | Brevo | Keep; declare the use case in writing; standby email/SMS provider wired. |
 | — | CNIL délibération | Cite Loi 78-17 art. 82 only. |
 | — | PR #1 | Claude watches the PR. |
+| — | Staged accounts | No outbound activity until the boarding batch is **confirmed** (commit stays fully reversible). |
+| — | Plan outside envelope | Client has 5 business days (configurable per client); on silence the proposal expires and the debtor gets in-envelope options. |
+| — | Forbearance in EU exports | **Seller's measures only**; our payment plans are not exported as forbearance (3.38–3.43). |
+| — | Percentages in EU exports | Ratio (5 % → `0.05`), configurable per export. |

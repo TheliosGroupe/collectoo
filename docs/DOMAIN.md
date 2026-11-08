@@ -1088,7 +1088,7 @@ stateDiagram-v2
 
 ## 5. Open questions (❓ founder)
 
-**Answered by the founder on 2026-11-07** (see `docs/PHASE0_REVIEW.md` §D): Q1 one account per (client, debtor) with invoices as items; Q2 components + balancing line up to `3.12`; Q4 deceased → collect against heirs, insolvency hold only on proof of the Banque de France admissibility decision (or court judgment); Q5 receive and forward; Q7 10 days, per client; Q8 one dossier per loan. Still open: Q3, Q6 and below.
+**Answered by the founder on 2026-11-07** (see `docs/PHASE0_REVIEW.md` §D): Q1 one account per (client, debtor) with invoices as items; Q2 components + balancing line up to `3.12`; Q4 deceased → collect against heirs, insolvency hold only on proof of the Banque de France admissibility decision (or court judgment); Q5 receive and forward; Q7 10 days, per client; Q8 one dossier per loan; Q3 no outbound until the batch is confirmed; Q6 5 business days, silence = proposal expires. Gap-analysis questions: our plans are **not** exported as forbearance (seller's measures only); percentages exported as ratios (`0.05`).
 
 1. **Account grain for invoices:** one account per (client, debtor) with invoices as `claim_item`s (proposed), or one account per invoice?
 2. **Opening balance for bank tapes:** collect on `3.12` legal balance, or on `3.09 + 3.10 + 3.11`? (gap analysis Q1)
