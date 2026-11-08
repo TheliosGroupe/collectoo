@@ -67,6 +67,10 @@ jobs:
       - run: supabase start
       - run: supabase db reset
       - run: supabase test db
+      - name: Generated DB types are up to date
+        run: |
+          supabase gen types typescript --local --schema public > apps/web/src/lib/database.types.ts
+          git diff --exit-code -- apps/web/src/lib/database.types.ts
 
   catalogue:
     name: EU template catalogue is reproducible

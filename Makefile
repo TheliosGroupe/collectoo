@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 export SUPABASE_INTERNAL_IMAGE_REGISTRY ?= docker.io
 
-.PHONY: setup up down reset test test-py test-web test-db e2e lint lint-py lint-web typecheck build catalogue
+.PHONY: setup up down reset types test test-py test-web test-db e2e lint lint-py lint-web typecheck build catalogue
 
 setup:            ## Install all dependencies
 	cd worker && uv sync --frozen
@@ -16,6 +16,9 @@ down:             ## Stop the local Supabase stack
 
 reset:            ## Re-apply migrations and seed
 	supabase db reset
+
+types:            ## Regenerate apps/web/src/lib/database.types.ts (needs make up)
+	supabase gen types typescript --local --schema public > apps/web/src/lib/database.types.ts
 
 lint: lint-py lint-web
 
