@@ -12,8 +12,9 @@ Duplicate rows are staged once. Re-running gives identical rows.
 
 Claim items come from `boarding.items` (the definition the DQ report also uses): one item per
 (account, kind, ref) across all civil files; an account appearing in several civil files is
-staged once. The opening balances of the staged accounts (`boarding.opening`) are computed here
-and must reconcile with the DQ report (M2-05).
+staged once, in the currency of its first staged item (EUR when it has none). The opening
+balances of the staged accounts (`boarding.opening`) are computed here and must reconcile with
+the DQ report (M2-05).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from typing import Any
 import polars as pl
 import psycopg
 
-from collectoo_worker.boarding.items import eba_loans, minor_units, staged_items
+from collectoo_worker.boarding.items import DEFAULT_CURRENCY, eba_loans, minor_units, staged_items
 from collectoo_worker.boarding.opening import opening_totals
 from collectoo_worker.boarding.validate import FileResult, IssueLog
 
@@ -82,7 +83,6 @@ def _civil(f: FileResult) -> dict[str, pl.DataFrame]:
                 c("contact.address_line"),
                 c("contact.postcode"),
                 c("contact.city"),
-                c("claim_item.currency"),
                 claim_types,
                 pl.Series("legal_regime", f.legal_regimes or [None] * n, dtype=pl.Utf8),
             ]
@@ -104,7 +104,6 @@ def _civil(f: FileResult) -> dict[str, pl.DataFrame]:
             .alias("display_name"),
             pl.col("external_ref").alias("seller_ref"),
             pl.col("claim_type").replace_strict(CAPACITY, default="consumer").alias("capacity"),
-            pl.col("currency").fill_null("EUR"),
         )
     )
     party = _json(
@@ -115,7 +114,7 @@ def _civil(f: FileResult) -> dict[str, pl.DataFrame]:
     account = _json(
         parties,
         pl.col("external_ref"),
-        ["external_ref", "claim_type", "legal_regime", "currency", "capacity"],
+        ["external_ref", "claim_type", "legal_regime", "capacity"],  # currency: `_with_currency`
     )
     contacts = []
     for typ, col in (("email", "email"), ("phone", "phone")):
@@ -143,10 +142,10 @@ def _civil(f: FileResult) -> dict[str, pl.DataFrame]:
     return {"party": party, "contact": contact, "account": account}
 
 
-def _claim_items(civil: list[FileResult]) -> pl.DataFrame:
+def _claim_items(items: pl.DataFrame) -> pl.DataFrame:
     """One claim item per (account, kind, ref) across the civil files (`boarding.items`)."""
     return _json(
-        staged_items(civil),
+        items,
         pl.col("account_key"),
         [
             "account_key",
@@ -158,6 +157,22 @@ def _claim_items(civil: list[FileResult]) -> pl.DataFrame:
             "seller_paid_minor",
             "currency",
         ],
+    )
+
+
+def _with_currency(accounts: pl.DataFrame, items: pl.DataFrame) -> pl.DataFrame:
+    """Civil accounts in the currency of their first staged item, EUR when they have none: a row
+    without an amount never sets it, so the account and its items always agree (LG006)."""
+    first = items.group_by("account_key", maintain_order=True).agg(pl.col("currency").first())
+    return accounts.join(
+        first, left_on="key", right_on="account_key", how="left", maintain_order="left"
+    ).select(
+        "key",
+        "external_ref",
+        "claim_type",
+        "legal_regime",
+        pl.col("currency").fill_null(DEFAULT_CURRENCY),
+        "capacity",
     )
 
 
@@ -284,7 +299,9 @@ def stage_rows(files: list[FileResult], log: IssueLog) -> dict[str, pl.DataFrame
                     else df.unique("key", keep="first", maintain_order=True)
                 )
             staged[entity] = [df]
-        staged["claim_item"] = [_claim_items(civil)]
+        items = staged_items(civil)
+        staged["account"] = [_with_currency(staged["account"][0], items)]
+        staged["claim_item"] = [_claim_items(items)]
     for entity, df in _eba([f for f in files if f.eba_table]).items():
         staged.setdefault(entity, []).append(df)
     return {entity: _concat(dfs) for entity, dfs in staged.items()}

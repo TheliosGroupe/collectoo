@@ -11,7 +11,8 @@ from test_validation import _eba_files, _validate
 
 from collectoo_worker.boarding.dq import build_report
 from collectoo_worker.boarding.items import civil_items, eba_loans
-from collectoo_worker.boarding.stage import encode, stage_rows
+from collectoo_worker.boarding.opening import check_bridge
+from collectoo_worker.boarding.stage import encode, split_skipped, stage_rows
 from collectoo_worker.boarding.validate import FileResult, IssueLog, rules
 
 CIVIL_MAPPING: dict[str, str | None] = {
@@ -36,7 +37,7 @@ def civil_file(file_id: str, rows: list[dict[str, str | None]]) -> FileResult:
     return FileResult(file_id, f"{file_id}.csv", raw, dict(CIVIL_MAPPING))
 
 
-def row(account: str = "A1", **kw: str | None) -> dict[str, str | None]:
+def row(account: str | None = "A1", **kw: str | None) -> dict[str, str | None]:
     base: dict[str, str | None] = {
         "compte": account,
         "nom": "DURAND",
@@ -181,6 +182,138 @@ def test_an_invoice_and_a_credit_note_may_share_a_number() -> None:
     assert [i["kind"] for i in staged_items(f)] == ["invoice", "credit_note"]
 
 
+def _computed(files: list[FileResult], log: IssueLog) -> dict[str, Any]:
+    report = build_report(files, log, control={}, spec_versions={})
+    computed: dict[str, Any] = report["reconciliation"]["computed"]
+    return computed
+
+
+def test_rent_and_charges_of_the_same_month_in_two_files_are_two_items() -> None:
+    f1 = civil_file("f1", [row(periode="03/2026", montant="500.00")])  # rent
+    f2 = civil_file("f2", [row(periode="03/2026", montant="80.00")])  # charges, another file
+    log = validate(f1, f2)
+    assert log.blocking == 0
+    assert not codes(log, "duplicate_document") and not codes(log, "conflicting_document")
+    items = [(i["ref"], i["original_minor"]) for i in staged_items(f1, f2)]
+    assert items == [("03/2026", 50000), ("03/2026#2", 8000)]
+    assert _computed([f1, f2], log)["outstanding_minor"] == 58000
+
+
+def test_the_same_derived_row_in_another_file_is_counted_once() -> None:
+    f1 = civil_file("f1", [row(periode="03/2026", montant="500.00")])
+    f2 = civil_file("f2", [row(periode="03/2026", montant="500.00")])  # identical row
+    log = validate(f1, f2)
+    assert codes(log, "duplicate_document") == [("f2", 1, "warning")]  # ambiguous: reported
+    assert log.blocking == 0
+    assert [i["ref"] for i in staged_items(f1, f2)] == ["03/2026"]
+    assert _computed([f1, f2], log)["outstanding_minor"] == 50000
+
+
+def test_derived_refs_are_numbered_across_the_batch_in_file_then_row_order() -> None:
+    f1 = civil_file(
+        "f1", [row(periode="03/2026", montant="500.00"), row(periode="03/2026", montant="80.00")]
+    )
+    f2 = civil_file(
+        "f2",
+        [
+            row(periode="03/2026", montant="30.00"),  # new: numbered after f1's two
+            row(periode="03/2026", montant="500.00"),  # f1's first row again
+            row(periode="03/2026", montant="80.00", nom="DURAND SA"),  # another value: new
+        ],
+    )
+    log = validate(f1, f2)
+    assert codes(log, "duplicate_document") == [("f2", 2, "warning")]
+    assert log.blocking == 0
+    refs = [(i["ref"], i["original_minor"]) for i in staged_items(f1, f2)]
+    assert refs == [
+        ("03/2026", 50000),
+        ("03/2026#2", 8000),
+        ("03/2026#3", 3000),
+        ("03/2026#4", 8000),
+    ]
+    assert staged_items(f1, f2) == staged_items(f1, f2)  # deterministic
+
+
+def test_items_without_any_ref_are_blocking_and_all_counted() -> None:
+    # private_loan requires no ref, period or due date: two items of A1 with none of them.
+    f = civil_file("f1", [row(echeance=None), row(echeance=None, montant="250.00")])
+    log = validate(f, portfolio_default="private_loan")
+    found = [(i.row, i.target, i.severity) for i in log.issues if i.code == "missing_required"]
+    assert found == [(1, "claim_item.ref", "blocking"), (2, "claim_item.ref", "blocking")]
+    assert not codes(log, "conflicting_document") and not codes(log, "duplicate_document")
+    computed = _computed([f], log)
+    assert computed["rows"] == 2 and computed["outstanding_minor"] == 35000  # nothing dropped
+    # The same file sent twice is still counted once.
+    again = civil_file("f2", [row(echeance=None), row(echeance=None, montant="250.00")])
+    twice = validate(f, again, portfolio_default="private_loan")
+    assert _computed([f, again], twice)["outstanding_minor"] == 35000
+
+
+@pytest.mark.parametrize(
+    ("claim_type", "expected"),
+    [
+        ("b2c_invoice", ["claim_item.due_date", "claim_item.ref"]),
+        ("rent", ["claim_item.due_date"]),
+    ],
+)
+def test_a_missing_ref_is_reported_once(claim_type: str, expected: list[str]) -> None:
+    # These claim types require the due date (b2c: the document number too): `_required`
+    # already reports the row, no second issue for the same reason.
+    f = civil_file("f1", [row(echeance=None)])
+    log = validate(f, portfolio_default=claim_type)
+    found = sorted(i.target or "" for i in log.issues if i.code == "missing_required")
+    assert found == expected
+
+
+@pytest.mark.parametrize("claim_type", ["private_loan", "judgment_debt"])
+def test_a_row_without_an_account_reference_is_blocking(claim_type: str) -> None:
+    f = civil_file("f1", [row(None, piece="P1"), row(None, montant=None), row("A1", piece="P2")])
+    log = validate(f, portfolio_default=claim_type)
+    found = [(i.row, i.target, i.severity) for i in log.issues if i.code == "missing_required"]
+    missing = ("account.external_ref", "blocking")
+    assert found == [(1, *missing), (2, *missing)]
+
+
+def _accounts(*files: FileResult) -> list[dict[str, Any]]:
+    staged = stage_rows(list(files), IssueLog())
+    return [json.loads(d) for d in encode(staged["account"])["data"].to_list()]
+
+
+def test_a_civil_account_takes_the_currency_of_its_items() -> None:
+    # Row 2 has no amount (no item): its currency never becomes the account's (commit: LG006).
+    f = civil_file(
+        "f1", [row("P1", piece="P1", montant="1000.00"), row("P1", montant=None, devise="USD")]
+    )
+    log = validate(f, portfolio_default="private_loan")
+    assert log.blocking == 0
+    (account,) = _accounts(f)
+    assert account["currency"] == "EUR"
+    _, opening, skipped = split_skipped(stage_rows([f], log), set())
+    check_bridge(_computed([f], log)["currencies"], opening, skipped)
+    assert set(opening["currencies"]) == {"EUR"}
+    assert opening["currencies"]["EUR"]["accounts"] == 1
+
+
+def test_an_account_in_several_files_takes_the_currency_of_its_items() -> None:
+    f1 = civil_file("f1", [row("A1", montant=None), row("A2", montant=None, devise="USD")])
+    f2 = civil_file("f2", [row("A1", piece="F1", devise="USD")])  # A1's only item
+    log = validate(f1, f2, portfolio_default="private_loan")
+    assert log.blocking == 0
+    currencies = {a["external_ref"]: a["currency"] for a in _accounts(f1, f2)}
+    assert currencies == {"A1": "USD", "A2": "EUR"}  # no item: EUR, whatever its rows say
+    _, opening, skipped = split_skipped(stage_rows([f1, f2], log), set())
+    check_bridge(_computed([f1, f2], log)["currencies"], opening, skipped)
+    assert opening["currencies"]["USD"]["accounts"] == 1
+    assert opening["currencies"]["EUR"]["accounts_without_balance"] == 1
+
+
+def test_a_negative_amount_paid_is_blocking() -> None:
+    f = civil_file("f1", [row(piece="F1", regle="-30.00"), row(piece="F2", regle="10.00")])
+    log = validate(f)
+    found = [(i.row, i.target, i.severity) for i in log.issues if i.code == "negative_amount"]
+    assert found == [(1, "claim_item.amount_paid", "blocking")]
+
+
 # --- Other v2 rules ----------------------------------------------------------------------------
 
 
@@ -246,6 +379,8 @@ def test_validation_spec_v2_is_the_default_and_v1_is_kept() -> None:
         "mixed_currency_account",
         "unsupported_currency",
         "file_not_boarded",
+        "duplicate_eba_table",
+        "negative_amount",
     ):
         assert v2[code] == "blocking", code
     for code in ("sub_cent_amount", "components_exceed_legal_balance", "duplicate_document"):
@@ -337,3 +472,39 @@ def test_eu_currency_is_checked_case_insensitively() -> None:
     staged = stage_rows(files, log)
     accounts = [json.loads(d) for d in encode(staged["account"])["data"].to_list()]
     assert accounts[1]["currency"] == "EUR"
+
+
+def test_a_negative_eu_legal_balance_is_blocking() -> None:
+    files, profiles = _eba_files(5)
+    t3 = _loans(files)
+    _set(t3, "f3_12_legal_balance", 0, "-125.50")  # claim_item.original_minor >= 0 at commit
+    _set(t3, "f3_12_legal_balance", 1, "-0.004")  # rounds to 0.00: nothing negative is staged
+    log = _validate(files, profiles)
+    found = [(i.row, i.target, i.severity) for i in log.issues if i.code == "negative_amount"]
+    assert found == [(1, "eba.f3_12_legal_balance", "blocking")]
+
+
+def _copy(f: FileResult, file_id: str, raw: pl.DataFrame | None = None) -> FileResult:
+    data = f.raw if raw is None else raw
+    return FileResult(file_id, file_id, data, dict(f.mapping), eba_table=f.eba_table)
+
+
+@pytest.mark.parametrize(
+    "table", ["t1_counterparty", "t2_1_borrower_loan", "t3_loan", "t5_collection"]
+)
+def test_two_files_for_the_same_eu_table_are_blocking(table: str) -> None:
+    files, profiles = _eba_files(20)
+    original = next(f for f in files if f.eba_table == table)
+    again = _copy(original, "again")
+    log = _validate([*files, again], {**profiles, "again": profiles[original.file_id]})
+    assert codes(log, "duplicate_eba_table") == [("again", None, "blocking")]
+    assert log.blocking == 1
+
+
+def test_a_superset_t3_file_is_blocking() -> None:
+    files, profiles = _eba_files(20)
+    t3 = _loans(files)
+    extra = t3.raw.head(1).with_columns(pl.lit("LOAN-NEW").alias("f3_01_loan_identifier"))
+    superset = _copy(t3, "superset", pl.concat([t3.raw, extra]))
+    log = _validate([*files, superset], {**profiles, "superset": profiles[t3.file_id]})
+    assert codes(log, "duplicate_eba_table") == [("superset", None, "blocking")]

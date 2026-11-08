@@ -716,7 +716,8 @@ ledger (opening entries)
    - Today `duplicate_document` is a per-file warning, and commit's `on conflict (account_id, kind, ref) do nothing` keeps an arbitrary row.
    - The same identity with identical amounts is counted and staged once (warning `duplicate_document`, as today).
    - Commit drops the `on conflict`.
-3. **Derived refs that collide** (no document number: `coalesce(doc_ref, period, due_date)`, e.g. rent and charges on two lines for the same month) get a suffix `#2`, `#3`, … in source order. Both are boarded and both are counted (founder question 7).
+3. **Derived refs that collide** (no document number: `coalesce(doc_ref, period, due_date)`, e.g. rent and charges on two lines for the same month) get a suffix `#2`, `#3`, … in batch order (file order, then row order), across files: rent in one file and the same month's charges in another are two items too. Both are boarded and both are counted (founder question 7). Only a row identical in every mapped value to a row of an earlier file (the same file sent twice) gets the same ref: it is boarded once, with the warning `duplicate_document`.
+   - An item with no document number, period or due date has no ref: blocking `missing_required` (target `claim_item.ref`). `private_loan` and `judgment_debt` also require the account reference.
 4. **Duplicate EU loan id** (3.01) with different content → blocking `duplicate_loan`. Today DQ counts both rows and staging keeps the first.
 5. **One money parser for EU amounts:** `money.to_minor_units` (half-up) in DQ (today `Decimal.to_integral_value`, which is half-even) and in staging (today an unverified Polars `cast(Decimal(38,2))*100`). Values with more than 2 decimals raise the warning `sub_cent_amount` (founder question 4).
 6. **Re-boarded accounts:** they are skipped at staging but counted in DQ. Staging now records `staging.skipped` per currency, and the bridge above holds.
@@ -725,6 +726,9 @@ Plus:
 - `credit_note_paid` (blocking).
 - `mixed_currency_account` (blocking; one currency per debtor account). The DB checks it again in `check_opening_sources`.
 - `unsupported_currency` (blocking; the worker reads `public.currency` at validation).
+- A civil account's currency is the currency of its first staged item (EUR when it has none), so a row without an amount never sets it.
+- `duplicate_eba_table` (blocking): two files of a batch for the same EU template table (staging and the cross-file references read one file per table).
+- `negative_amount` (blocking) also covers a negative amount paid and a negative legal balance 3.12 (both rejected by `claim_item` checks at commit).
 - `validation.v1.yaml` → **v2** (spec version recorded in `dq_report.spec_versions`).
 - DQ adds `balancing` per currency for EU tapes: Σ 3.09 / 3.10 / 3.11 / balancing, the number of loans with a non-zero balancing line, the number negative, and the number with missing components. A negative balancing line also raises the warning `components_exceed_legal_balance`. This is the "flagged in the DQ report" part of founder decision #6.
 
