@@ -75,6 +75,14 @@ jobs:
         run: |
           supabase gen types typescript --local --schema public > apps/web/src/lib/database.types.ts
           git diff --exit-code -- apps/web/src/lib/database.types.ts
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: worker/uv.lock
+      - name: Worker integration tests (queue, storage, profiling)
+        run: |
+          eval "$(./scripts/local-env.sh)"
+          cd worker && uv sync --frozen && uv run pytest -m integration
 
   catalogue:
     name: EU template catalogue is reproducible

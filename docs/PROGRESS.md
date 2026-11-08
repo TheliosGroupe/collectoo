@@ -3,6 +3,7 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
+- M0 complete 2026-11-08: PRs #2–#6 merged (tooling/CI, tenancy/RLS, auth/MFA, two-layer schema, synth + seed).
 - PR #4 M0b-auth merged 2026-11-08 (email-code login, TOTP MFA, route gating, E2E vs local stack in CI).
 - PR #3 M0b-db merged 2026-11-08 (tenancy, RLS helpers, token hook, command pattern, 42 pgTAP checks).
 - PR #2 M0a merged 2026-11-08 (monorepo, tooling, CI 5 jobs green, session hook).
@@ -14,11 +15,10 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- PR #5 M0c (two-layer schema): CI green except E2E, which hit a runner port clash (54322 already in use); job re-run.
-- PR "M0d — synthetic generator and seed" (M0-16…M0-18), committed locally: `synth eba` (EU-template tape, households + SMEs, co-borrowers, 36-month history; validates against the JSON Schema), `synth civil` (B2B/B2C invoices, rents in 3 accounting dialects with a defect manifest = M1 test oracle), `synth seed-sql` → `supabase/seed.sql` (servicer, 2 clients, 6 users, 250 accounts; reset ≈ 25 s).
+- PR "M1a — boarding upload, worker runtime, readers, profiling" (M1-01…M1-05): boarding_batch/file/event + state machine enforced in the DB, upload commands (client admins self-serve, staff ops), Storage upload policy limited to registered paths, `boarding` queue + DLQ; worker: pgmq consumer with exactly-once effects (job + ack in one transaction), retries/backoff/dead-letter, CSV/XLSX/fixed-width readers (encoding + separator sniffing, streaming), column profiling that detects every injected defect pattern; integration tests run in the CI db job.
 
 ## Next
-- M1 boarding: PR-5 upload/ingestion/profiling, PR-6 mapping (mock LLM) + eval, PR-7 transformations/validation/DQ report, PR-8 staging/commit/review UI/scale tests.
+- M1b mapping (target registry, LLM gateway + mock, proposals, eval suite, mapping profiles), M1c transformations/validation/DQ report, M1d staging/commit/review UI/scale tests.
 
 ## Decisions
 - Debtor data is scoped per client organization (party.client_organization_id): no cross-client debtor merge, each client stays controller of its data. Template fields without an operational column live in `source_attributes` so tapes can be regenerated.
