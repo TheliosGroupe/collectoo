@@ -32,4 +32,5 @@ severity:
   unassigned_claim_type: blocking
   unknown_legal_regime: blocking
   broken_reference: blocking
+  file_not_boarded: blocking  # a tabular file that cannot be read as a table (no layout, empty)
   eba_mandatory_missing: warning   # becomes blocking for a regulatory-grade tape

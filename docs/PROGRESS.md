@@ -3,6 +3,7 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
+- PR #10 M1d merged 2026-11-08 (staging, commit/rollback/confirm, documents zip, 50k-loan CI run, 1M benchmark: 57 s, 2.9 GB peak). CI was delayed ~1.5 h by GitHub release-download 504s; CI now falls back to a curl install with longer retries.
 - PR #9 M1c merged 2026-11-08 (transformation DSL, validators, BAN adapter, claim types, validation rules, DQ report).
 - PR #8 M1b merged 2026-11-08 (mapping proposals, LLM gateway + mock, eval 167/167, mapping profiles).
 - PR #7 M1a merged 2026-11-08 (boarding upload, queue runtime, readers, profiling).
@@ -18,12 +19,14 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- PR "M1d — staging, commit/rollback/confirm, documents zip, 50k CI run, 1M benchmark" (M1-17, 18, 20, 21, 22): validation reworked to whole-column operations (Polars) so 1M-row tapes fit in memory; staging rows per entity in `private.boarding_staging` (identical digest on re-run); `commit_boarding_batch` writes Layer 2 (parties, identifiers, contacts, accounts `staged`, debtor links, claim items, ownership periods) and Layer 1 EU-template rows in one transaction, a reason is required when totals don't reconcile; `rollback_boarding_batch` removes everything before confirmation, including documents linked from the batch's zip (files purged by the worker; change log keeps the trail); `confirm_boarding_batch` needs servicer staff with two-factor and an active mandate (R124-3), accounts become `awaiting_first_letter`; zip of PDFs/images linked to accounts by the reference in the file name, stored in the `documents` bucket and indexed; 50k-loan EU tape boarded end to end in the CI `db` job; `make bench-boarding`: 1M loans in 57 s, peak memory 2.9 GB (< 4 GB target), see `docs/benchmarks/boarding.md`.
+- PR "M1e — back-office boarding review UI" (M1-19): `/backoffice/reprises` (batch list), `/nouveau` (upload: files hashed in the browser, stored under ASCII keys built from ids, retry-safe registration, optional seller control totals parsed to cents without floats), `/[id]` (file profiles incl. Excel/zip/fixed-width, mapping review with confidence/rationale and per-column override, data-quality report, integrate / confirm / roll back / abandon, history; refreshes itself while the worker runs and shows a dead-lettered job instead of waiting forever). Three multi-agent review rounds were addressed before merging (last round: a file sent twice under two names in one batch is flagged, seller totals can be cleared and freeze once the mapping is approved, unread files are listed in the DQ report, failures that matter after the batch moved on stay visible: documents not linked after commit, files not erased after a rollback) ; earlier rounds: 32 findings, then 4 partial + 5 new: mixed CSV + fixed-width batches now end in needs_fix instead of dropping the file, Excel sheet order kept explicitly, empty Excel sheets no longer crash the reader, French mapping rationale from the mock) (fixes in migration `20261108160000_boarding_review_fixes`, worker DLQ hook, reconciliation rules). Playwright flows (board + abandon) with the boarding worker, locally and in CI; screenshots `docs/screenshots/m1-boarding-*`.
 
 ## Next
-- M1e: back-office review UI (M1-19): batch list, upload, profile, mapping review (accept/override, confidence, rationale), DQ report, commit/rollback/confirm; Playwright flow + mobile/desktop screenshots. Then M1 report to the founder, then M2a ledger.
+- M1 report to the founder, then M2a ledger (M2-01 … M2-05).
 
 ## Decisions
+- M1e reconciliation (founder confirmed 2026-11-08: sellers always stop the portfolio at a cut-off date): the seller's control total is the **outstanding balance at cut-off** (invoice/loan amounts minus what the seller reports as already paid), compared to the cent, plus the number of data rows in the claim files. Totals are kept per currency; a tape with non-euro amounts cannot be reconciled against a euro total (mismatch, reason required to commit). Batches can be abandoned at any step before commit. The upload form requires the cut-off date.
+- M1e: back-office copy in French; mapping targets offered in the review come from the worker's registry (`apps/web/src/lib/boarding/targets.json`, a pytest fails if it drifts). Batch amounts are read from the DQ report as text (`->>`) so integer cents never pass through a JS number.
 - M1d: the R124-3 mandate check sits on batch confirmation (accounts become workable), not on commit (data loaded for review, reversible); COMPLIANCE CPCE-03 aligned with DOMAIN §4.4. Re-boarding an account reference already in the portfolio is skipped at staging (listed in the DQ report); updates of existing accounts come with M2 reconciliation.
 - Debtor data is scoped per client organization (party.client_organization_id): no cross-client debtor merge, each client stays controller of its data. Template fields without an operational column live in `source_attributes` so tapes can be regenerated.
 - Login = email one-time code only (no magic link) for all users; accounts created by invitation (`shouldCreateUser: false`). Next.js `cacheComponents` turned off (simpler per-user auth pages).
@@ -36,6 +39,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - EU template catalogue built from EUR-Lex only; Excel used for the diff.
 
 ## Open questions
+- When a real LLM key is provided: the mapping prompt (v1) must ask for the rationale in French (back-office copy); bump it to v2 then.
 - Hosted Supabase: enable the custom access token hook, TOTP MFA and the French code-only `magic_link` email template (`supabase/templates/magic_link.html`) in the dashboard, or `supabase config push`; migrations alone don't set Auth config.
 - Counsel: `docs/COMPLIANCE.md` §9 (OQ-1…17), `docs/CHANNELS.md` §8, `docs/ARCHITECTURE.md` §17; domain questions at the end of `docs/DOMAIN.md`.
 - GitHub default branch is still `claude/loving-clarke-u1b205`: switch it to `main` in Settings → Branches.

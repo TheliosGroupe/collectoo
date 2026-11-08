@@ -21,6 +21,7 @@ from psycopg.types.json import Jsonb
 log = logging.getLogger("collectoo.queue")
 
 Handler = Callable[[dict[str, Any], psycopg.Connection[Any]], None]
+DeadHandler = Callable[[dict[str, Any], str, psycopg.Connection[Any]], None]
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,9 @@ class QueueConsumer:
     visibility_timeout_s: int = 300
     max_attempts: int = 5
     backoff_base_s: int = 10
+    # Called in the dead-letter transaction with (payload, last error, conn): lets the job's
+    # owner record the failure where users can see it.
+    on_dead: DeadHandler | None = None
 
     @property
     def dlq(self) -> str:
@@ -108,6 +112,7 @@ class QueueConsumer:
 
     def _dead_letter(self, msg: Message) -> None:
         with psycopg.connect(self.conninfo) as conn, conn.transaction():
+            conn.execute("select set_config('app.actor', %s, true)", (f"worker:{self.queue}",))
             body = {**msg.payload, "_dead_letter": {"queue": self.queue, "msg_id": msg.msg_id}}
             conn.execute("select pgmq.send(%s, %s)", (self.dlq, Jsonb(body)))
             conn.execute(
@@ -117,6 +122,12 @@ class QueueConsumer:
                      set status = 'dead', attempts = excluded.attempts""",
                 (self.queue, msg.msg_id, msg.read_ct),
             )
+            if self.on_dead is not None:
+                row = conn.execute(
+                    "select last_error from private.job_run where queue = %s and msg_id = %s",
+                    (self.queue, msg.msg_id),
+                ).fetchone()
+                self.on_dead(msg.payload, (row[0] if row else None) or "unknown error", conn)
             conn.execute("select pgmq.archive(%s, %s::bigint)", (self.queue, msg.msg_id))
 
 

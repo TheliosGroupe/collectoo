@@ -63,3 +63,14 @@ def by_id() -> dict[str, Target]:
 def export_json() -> str:
     """Registry as JSON, e.g. for the review UI or a real LLM prompt."""
     return json.dumps([asdict(t) for t in registry()], ensure_ascii=False, indent=1)
+
+
+def export_ui_json() -> str:
+    """Target ids and descriptions for the back-office mapping review
+    (`apps/web/src/lib/boarding/targets.json`, kept in sync by a test)."""
+    rows = [{"id": t.id, "type": t.type, "description": t.description} for t in registry()]
+    return json.dumps(rows, ensure_ascii=False, indent=1) + "\n"
+
+
+if __name__ == "__main__":
+    print(export_ui_json(), end="")

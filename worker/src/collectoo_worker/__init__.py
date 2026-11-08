@@ -33,7 +33,10 @@ def _normaliser(name: str) -> Normaliser:
 
 def main(argv: list[str] | None = None) -> int:
     """`collectoo-worker consume boarding`: run a queue consumer until stopped."""
-    from collectoo_worker.jobs.boarding import make_handler  # noqa: PLC0415 - fast --help
+    from collectoo_worker.jobs.boarding import (  # noqa: PLC0415 - fast --help
+        make_handler,
+        record_dead_job,
+    )
     from collectoo_worker.runtime.queue import QueueConsumer, json_log_formatter  # noqa: PLC0415
     from collectoo_worker.runtime.storage import SupabaseStorage  # noqa: PLC0415
 
@@ -52,5 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     addresses = _normaliser(os.environ.get("ADDRESS_NORMALISER", "mock"))
     if args.cmd == "consume":
         handler = make_handler(storage, provider, addresses)
-        QueueConsumer(os.environ["DATABASE_URL"], args.queue, handler).run_forever()
+        QueueConsumer(
+            os.environ["DATABASE_URL"], args.queue, handler, on_dead=record_dead_job
+        ).run_forever()
     return 0

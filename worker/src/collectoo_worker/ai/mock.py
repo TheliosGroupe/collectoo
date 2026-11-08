@@ -59,19 +59,36 @@ def _name_score(header: str, aliases: list[str]) -> tuple[float, str]:
     return best, best_alias
 
 
+# Back-office copy is French (the rationale is shown to ops as is).
+TYPE_FR = {
+    "date_fr": "date jj/mm/aaaa",
+    "date_iso": "date aaaa-mm-jj",
+    "date_dotted": "date jj.mm.aaaa",
+    "siret": "SIRET",
+    "siren": "SIREN",
+    "postcode_fr": "code postal",
+    "iban": "IBAN",
+    "email": "e-mail",
+    "phone_fr": "téléphone",
+    "integer": "nombre entier",
+    "decimal_comma": "nombre décimal",
+    "decimal_dot": "nombre décimal",
+}
+
+
 def _score(column: dict[str, Any], target: dict[str, Any]) -> tuple[float, str]:
     name, alias = _name_score(
         column["name"], [*target.get("aliases", []), target["id"].split(".")[-1]]
     )
     guess = column.get("type_guess", "text")
     value_types = target.get("value_types", [])
-    why = f"header '{column['name']}' ~ '{alias}'"
+    why = f"en-tête « {column['name']} » proche de « {alias} »"
     if value_types and guess in value_types:
         name = min(1.0, name + 0.1)
-        why += f"; values look like {guess}"
+        why += f" ; valeurs de type {TYPE_FR.get(guess, guess)}"
     elif value_types and guess != "text":
         name *= 0.6
-        why += f"; values look like {guess}, unusual for this target"
+        why += f" ; valeurs de type {TYPE_FR.get(guess, guess)}, inhabituel pour cette cible"
     return round(name, 3), why
 
 
@@ -118,7 +135,7 @@ def propose_mapping(payload: dict[str, Any]) -> dict[str, Any]:
                     "source_column": c["name"],
                     "target": None,
                     "confidence": 0.0,
-                    "rationale": "no target matches; kept in source_attributes",
+                    "rationale": "aucune cible ne correspond : valeur conservée telle quelle",
                 }
             )
     return {"proposals": proposals}

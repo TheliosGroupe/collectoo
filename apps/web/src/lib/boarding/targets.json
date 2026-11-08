@@ -1,0 +1,772 @@
+[
+ {
+  "id": "party.display_name",
+  "type": "text",
+  "description": "Debtor name (company name, or surname of a natural person)."
+ },
+ {
+  "id": "party.first_name",
+  "type": "text",
+  "description": "First name of a natural-person debtor."
+ },
+ {
+  "id": "party.siren",
+  "type": "siren",
+  "description": "SIREN of a legal-entity debtor (9 digits, Luhn key)."
+ },
+ {
+  "id": "party.siret",
+  "type": "siret",
+  "description": "SIRET of the debtor's establishment (14 digits)."
+ },
+ {
+  "id": "party.iban",
+  "type": "iban",
+  "description": "Debtor bank account (IBAN), e.g. for SEPA direct debit mandates."
+ },
+ {
+  "id": "contact.email",
+  "type": "email",
+  "description": "Debtor email address."
+ },
+ {
+  "id": "contact.phone",
+  "type": "phone",
+  "description": "Debtor phone number."
+ },
+ {
+  "id": "contact.address_line",
+  "type": "text",
+  "description": "Street address of the debtor."
+ },
+ {
+  "id": "contact.postcode",
+  "type": "postcode",
+  "description": "Postal code."
+ },
+ {
+  "id": "contact.city",
+  "type": "text",
+  "description": "City."
+ },
+ {
+  "id": "account.external_ref",
+  "type": "text",
+  "description": "The client's reference for the debtor account or contract (customer account, lease, file)."
+ },
+ {
+  "id": "claim_item.kind",
+  "type": "text",
+  "description": "Kind of document (invoice, credit note)."
+ },
+ {
+  "id": "claim_item.ref",
+  "type": "text",
+  "description": "Document number (invoice, credit note) or reference of the claim line."
+ },
+ {
+  "id": "claim_item.issue_date",
+  "type": "date",
+  "description": "Issue date of the document."
+ },
+ {
+  "id": "claim_item.due_date",
+  "type": "date",
+  "description": "Due date of the amount."
+ },
+ {
+  "id": "claim_item.amount",
+  "type": "amount",
+  "description": "Amount due including tax (TTC), in major units as written in the file."
+ },
+ {
+  "id": "claim_item.amount_paid",
+  "type": "amount",
+  "description": "Amount already paid on the document."
+ },
+ {
+  "id": "claim_item.currency",
+  "type": "currency",
+  "description": "ISO 4217 currency code."
+ },
+ {
+  "id": "claim_item.period",
+  "type": "text",
+  "description": "Period covered (e.g. rent month MM/YYYY)."
+ },
+ {
+  "id": "eba.f1_00_counterparty_group_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.00 Counterparty Group Identifier"
+ },
+ {
+  "id": "eba.f1_01_name_of_counterparty_group",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.01 Name of Counterparty Group"
+ },
+ {
+  "id": "eba.f1_02_counterparty_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.02 Counterparty Identifier"
+ },
+ {
+  "id": "eba.f1_03_name_of_counterparty",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.03 Name of Counterparty"
+ },
+ {
+  "id": "eba.f1_04_economic_activity",
+  "type": "choice",
+  "description": "EU NPL template 1.04 Economic activity"
+ },
+ {
+  "id": "eba.f1_05_role_of_the_counterparty",
+  "type": "choice",
+  "description": "EU NPL template 1.05 Role of the counterparty"
+ },
+ {
+  "id": "eba.f1_06_legal_type_of_counterparty",
+  "type": "choice",
+  "description": "EU NPL template 1.06 Legal Type of Counterparty"
+ },
+ {
+  "id": "eba.f1_07_date_of_birth",
+  "type": "date",
+  "description": "EU NPL template 1.07 Date of birth"
+ },
+ {
+  "id": "eba.f1_08_residency_of_counterparty",
+  "type": "boolean",
+  "description": "EU NPL template 1.08 Residency of Counterparty"
+ },
+ {
+  "id": "eba.f1_09_counterparty_deceased",
+  "type": "boolean",
+  "description": "EU NPL template 1.09 Counterparty deceased"
+ },
+ {
+  "id": "eba.f1_10_national_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.10 National identifier"
+ },
+ {
+  "id": "eba.f1_11_national_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.11 National identifier"
+ },
+ {
+  "id": "eba.f1_12_source_of_national_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.12 Source of National identifier"
+ },
+ {
+  "id": "eba.f1_13_legal_entity_identifier_lei",
+  "type": "choice",
+  "description": "EU NPL template 1.13 Legal Entity Identifier (LEI)"
+ },
+ {
+  "id": "eba.f1_14_address_of_counterparty",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.14 Address of Counterparty"
+ },
+ {
+  "id": "eba.f1_15_city_of_counterparty",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.15 City of Counterparty"
+ },
+ {
+  "id": "eba.f1_16_postal_code_of_counterparty",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.16 Postal code of Counterparty"
+ },
+ {
+  "id": "eba.f1_17_country_of_counterparty",
+  "type": "choice",
+  "description": "EU NPL template 1.17 Country of Counterparty"
+ },
+ {
+  "id": "eba.f1_18_availability_of_e_mail_address",
+  "type": "boolean",
+  "description": "EU NPL template 1.18 Availability of e-mail address"
+ },
+ {
+  "id": "eba.f1_19_availability_of_telephone_number",
+  "type": "boolean",
+  "description": "EU NPL template 1.19 Availability of telephone number"
+ },
+ {
+  "id": "eba.f1_20_date_of_last_contact",
+  "type": "date",
+  "description": "EU NPL template 1.20 Date of Last Contact"
+ },
+ {
+  "id": "eba.f1_21_date_of_latest_annual_financial_statements",
+  "type": "date",
+  "description": "EU NPL template 1.21 Date of Latest Annual Financial Statements"
+ },
+ {
+  "id": "eba.f1_22_currency_of_financial_statements",
+  "type": "choice",
+  "description": "EU NPL template 1.22 Currency of Financial Statements"
+ },
+ {
+  "id": "eba.f1_23_fixed_assets",
+  "type": "number",
+  "description": "EU NPL template 1.23 Fixed Assets"
+ },
+ {
+  "id": "eba.f1_24_current_assets",
+  "type": "number",
+  "description": "EU NPL template 1.24 Current Assets"
+ },
+ {
+  "id": "eba.f1_25_cash_and_cash_equivalent_items",
+  "type": "number",
+  "description": "EU NPL template 1.25 Cash and Cash Equivalent Items"
+ },
+ {
+  "id": "eba.f1_26_total_assets",
+  "type": "number",
+  "description": "EU NPL template 1.26 Total Assets"
+ },
+ {
+  "id": "eba.f1_27_total_liabilities",
+  "type": "number",
+  "description": "EU NPL template 1.27 Total Liabilities"
+ },
+ {
+  "id": "eba.f1_28_total_debt",
+  "type": "number",
+  "description": "EU NPL template 1.28 Total Debt"
+ },
+ {
+  "id": "eba.f1_29_annual_turnover",
+  "type": "number",
+  "description": "EU NPL template 1.29 Annual Turnover"
+ },
+ {
+  "id": "eba.f1_30_annual_ebit",
+  "type": "number",
+  "description": "EU NPL template 1.30 Annual EBIT"
+ },
+ {
+  "id": "eba.f1_31_name_of_insolvency_restructuring_proceedings",
+  "type": "choice",
+  "description": "EU NPL template 1.31 Name of Insolvency/Restructuring Proceedings"
+ },
+ {
+  "id": "eba.f1_32_status_of_legal_proceedings",
+  "type": "choice",
+  "description": "EU NPL template 1.32 Status of legal proceedings"
+ },
+ {
+  "id": "eba.f1_33_description_of_other_legal_measures",
+  "type": "alphanumeric",
+  "description": "EU NPL template 1.33 Description of other legal measures"
+ },
+ {
+  "id": "eba.f2_00_counterparty_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 2.00 Counterparty Identifier"
+ },
+ {
+  "id": "eba.f2_01_loan_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 2.01 Loan Identifier"
+ },
+ {
+  "id": "eba.f2_02_mortgage_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 2.02 Mortgage Identifier"
+ },
+ {
+  "id": "eba.f2_03_protection_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 2.03 Protection Identifier"
+ },
+ {
+  "id": "eba.f3_00_cut_off_date",
+  "type": "date",
+  "description": "EU NPL template 3.00 Cut-off Date"
+ },
+ {
+  "id": "eba.f3_01_loan_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 3.01 Loan Identifier"
+ },
+ {
+  "id": "eba.f3_02_inception_date",
+  "type": "date",
+  "description": "EU NPL template 3.02 Inception date"
+ },
+ {
+  "id": "eba.f3_03_governing_law_of_loan_agreement",
+  "type": "choice",
+  "description": "EU NPL template 3.03 Governing Law of Loan Agreement"
+ },
+ {
+  "id": "eba.f3_04_joint_counterparties",
+  "type": "choice",
+  "description": "EU NPL template 3.04 Joint Counterparties"
+ },
+ {
+  "id": "eba.f3_05_asset_class",
+  "type": "choice",
+  "description": "EU NPL template 3.05 Asset Class"
+ },
+ {
+  "id": "eba.f3_06_type_of_instrument",
+  "type": "choice",
+  "description": "EU NPL template 3.06 Type of instrument"
+ },
+ {
+  "id": "eba.f3_07_legal_final_maturity_date",
+  "type": "date",
+  "description": "EU NPL template 3.07 Legal final maturity date"
+ },
+ {
+  "id": "eba.f3_08_currency",
+  "type": "choice",
+  "description": "EU NPL template 3.08 Currency"
+ },
+ {
+  "id": "eba.f3_09_principal_amount",
+  "type": "number",
+  "description": "EU NPL template 3.09 Principal amount"
+ },
+ {
+  "id": "eba.f3_10_accrued_interest",
+  "type": "number",
+  "description": "EU NPL template 3.10 Accrued interest"
+ },
+ {
+  "id": "eba.f3_11_other_balances",
+  "type": "number",
+  "description": "EU NPL template 3.11 Other balances"
+ },
+ {
+  "id": "eba.f3_12_legal_balance",
+  "type": "number",
+  "description": "EU NPL template 3.12 Legal Balance"
+ },
+ {
+  "id": "eba.f3_13_days_in_past_due",
+  "type": "number",
+  "description": "EU NPL template 3.13 Days in Past-Due"
+ },
+ {
+  "id": "eba.f3_14_interest_rate",
+  "type": "percentage",
+  "description": "EU NPL template 3.14 Interest Rate"
+ },
+ {
+  "id": "eba.f3_15_interest_rate_type",
+  "type": "choice",
+  "description": "EU NPL template 3.15 Interest Rate Type"
+ },
+ {
+  "id": "eba.f3_16_description_of_interest_rate_type",
+  "type": "alphanumeric",
+  "description": "EU NPL template 3.16 Description of Interest Rate Type"
+ },
+ {
+  "id": "eba.f3_17_interest_rate_spread_margin",
+  "type": "percentage",
+  "description": "EU NPL template 3.17 Interest rate spread/margin"
+ },
+ {
+  "id": "eba.f3_18_reference_rate",
+  "type": "alphanumeric",
+  "description": "EU NPL template 3.18 Reference Rate"
+ },
+ {
+  "id": "eba.f3_19_interest_rate_reset_frequency",
+  "type": "choice",
+  "description": "EU NPL template 3.19 Interest rate reset frequency"
+ },
+ {
+  "id": "eba.f3_20_payment_frequency",
+  "type": "choice",
+  "description": "EU NPL template 3.20 Payment Frequency"
+ },
+ {
+  "id": "eba.f3_21_last_payment_date",
+  "type": "date",
+  "description": "EU NPL template 3.21 Last Payment Date"
+ },
+ {
+  "id": "eba.f3_22_last_payment_amount",
+  "type": "number",
+  "description": "EU NPL template 3.22 Last Payment Amount"
+ },
+ {
+  "id": "eba.f3_23_date_of_the_default_status_of_the_instrument",
+  "type": "date",
+  "description": "EU NPL template 3.23 Date of the default status of the instrument"
+ },
+ {
+  "id": "eba.f3_24_loan_legal_status",
+  "type": "choice",
+  "description": "EU NPL template 3.24 Loan legal status"
+ },
+ {
+  "id": "eba.f3_25_date_of_initiation_of_legal_proceedings",
+  "type": "date",
+  "description": "EU NPL template 3.25 Date of initiation of legal proceedings"
+ },
+ {
+  "id": "eba.f3_26_stage_reached_in_legal_proceedings",
+  "type": "alphanumeric",
+  "description": "EU NPL template 3.26 Stage reached in legal proceedings"
+ },
+ {
+  "id": "eba.f3_27_jurisdiction_of_court",
+  "type": "choice",
+  "description": "EU NPL template 3.27 Jurisdiction of Court"
+ },
+ {
+  "id": "eba.f3_28_date_of_obtaining_order_for_possession",
+  "type": "date",
+  "description": "EU NPL template 3.28 Date of Obtaining Order for Possession"
+ },
+ {
+  "id": "eba.f3_29_statute_of_limitations_date",
+  "type": "date",
+  "description": "EU NPL template 3.29 Statute of limitations date"
+ },
+ {
+  "id": "eba.f3_30_syndicated_loan",
+  "type": "boolean",
+  "description": "EU NPL template 3.30 Syndicated Loan"
+ },
+ {
+  "id": "eba.f3_31_syndicated_portion",
+  "type": "percentage",
+  "description": "EU NPL template 3.31 Syndicated Portion"
+ },
+ {
+  "id": "eba.f3_32_securitised",
+  "type": "boolean",
+  "description": "EU NPL template 3.32 Securitised"
+ },
+ {
+  "id": "eba.f3_33_lease_agreement",
+  "type": "boolean",
+  "description": "EU NPL template 3.33 Lease agreement"
+ },
+ {
+  "id": "eba.f3_34_start_date_of_lease",
+  "type": "date",
+  "description": "EU NPL template 3.34 Start Date of Lease"
+ },
+ {
+  "id": "eba.f3_35_end_date_of_lease",
+  "type": "date",
+  "description": "EU NPL template 3.35 End Date of Lease"
+ },
+ {
+  "id": "eba.f3_36_lease_break_option",
+  "type": "alphanumeric",
+  "description": "EU NPL template 3.36 Lease Break Option"
+ },
+ {
+  "id": "eba.f3_37_type_of_lease",
+  "type": "choice",
+  "description": "EU NPL template 3.37 Type of Lease"
+ },
+ {
+  "id": "eba.f3_38_forbearance_measure",
+  "type": "boolean",
+  "description": "EU NPL template 3.38 Forbearance measure"
+ },
+ {
+  "id": "eba.f3_39_type_of_forbearance_measure",
+  "type": "choice",
+  "description": "EU NPL template 3.39 Type of Forbearance measure"
+ },
+ {
+  "id": "eba.f3_40_end_date_of_forbearance_measure",
+  "type": "date",
+  "description": "EU NPL template 3.40 End Date of Forbearance measure"
+ },
+ {
+  "id": "eba.f3_41_description_of_the_forbearance_measures",
+  "type": "alphanumeric",
+  "description": "EU NPL template 3.41 Description of the Forbearance measures"
+ },
+ {
+  "id": "eba.f3_42_debt_forgiveness",
+  "type": "number",
+  "description": "EU NPL template 3.42 Debt Forgiveness"
+ },
+ {
+  "id": "eba.f3_43_number_of_historical_forbearance",
+  "type": "number",
+  "description": "EU NPL template 3.43 Number of historical forbearance"
+ },
+ {
+  "id": "eba.f4_00_protection_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 4.00 Protection Identifier"
+ },
+ {
+  "id": "eba.f4_01_type_of_immovable_property",
+  "type": "choice",
+  "description": "EU NPL template 4.01 Type of immovable property"
+ },
+ {
+  "id": "eba.f4_02_type_of_movable_property_other_collateral_and_guarantee",
+  "type": "choice",
+  "description": "EU NPL template 4.02 Type of movable property, other collateral and guarantee"
+ },
+ {
+  "id": "eba.f4_03_address_of_immovable_property",
+  "type": "alphanumeric",
+  "description": "EU NPL template 4.03 Address of immovable property"
+ },
+ {
+  "id": "eba.f4_04_city_of_immovable_property",
+  "type": "choice",
+  "description": "EU NPL template 4.04 City of immovable Property"
+ },
+ {
+  "id": "eba.f4_05_immovable_property_postcode",
+  "type": "alphanumeric",
+  "description": "EU NPL template 4.05 Immovable property Postcode"
+ },
+ {
+  "id": "eba.f4_06_immovable_property_country",
+  "type": "choice",
+  "description": "EU NPL template 4.06 Immovable property Country"
+ },
+ {
+  "id": "eba.f4_07_immovable_property_collateral_cadaster_identification_num",
+  "type": "alphanumeric",
+  "description": "EU NPL template 4.07 Immovable property collateral cadaster identification number"
+ },
+ {
+  "id": "eba.f4_08_cadaster_identification",
+  "type": "alphanumeric",
+  "description": "EU NPL template 4.08 Cadaster identification"
+ },
+ {
+  "id": "eba.f4_09_lien_position",
+  "type": "number",
+  "description": "EU NPL template 4.09 Lien position"
+ },
+ {
+  "id": "eba.f4_10_higher_ranking_loan",
+  "type": "number",
+  "description": "EU NPL template 4.10 Higher Ranking Loan"
+ },
+ {
+  "id": "eba.f4_11_register_of_deeds_number",
+  "type": "alphanumeric",
+  "description": "EU NPL template 4.11 Register of Deeds Number"
+ },
+ {
+  "id": "eba.f4_12_year_of_construction",
+  "type": "unspecified",
+  "description": "EU NPL template 4.12 Year of construction"
+ },
+ {
+  "id": "eba.f4_13_building_area_m2",
+  "type": "number",
+  "description": "EU NPL template 4.13 Building Area (M2)"
+ },
+ {
+  "id": "eba.f4_14_land_area_m2",
+  "type": "number",
+  "description": "EU NPL template 4.14 Land Area (M2)"
+ },
+ {
+  "id": "eba.f4_15_completion_of_immovable_property",
+  "type": "boolean",
+  "description": "EU NPL template 4.15 Completion of immovable property"
+ },
+ {
+  "id": "eba.f4_16_value_of_energy_performance_certificate",
+  "type": "choice",
+  "description": "EU NPL template 4.16 Value of Energy Performance Certificate"
+ },
+ {
+  "id": "eba.f4_17_type_of_occupancy",
+  "type": "choice",
+  "description": "EU NPL template 4.17 Type of Occupancy"
+ },
+ {
+  "id": "eba.f4_18_currency_of_collateral_and_guarantee",
+  "type": "choice",
+  "description": "EU NPL template 4.18 Currency of collateral and guarantee"
+ },
+ {
+  "id": "eba.f4_19_latest_internal_valuation_amount",
+  "type": "number",
+  "description": "EU NPL template 4.19 Latest Internal Valuation Amount"
+ },
+ {
+  "id": "eba.f4_20_date_of_latest_internal_valuation",
+  "type": "date",
+  "description": "EU NPL template 4.20 Date of Latest Internal Valuation"
+ },
+ {
+  "id": "eba.f4_21_type_of_appraisal_amount_for_the_latest_internal_valuatio",
+  "type": "choice",
+  "description": "EU NPL template 4.21 Type of Appraisal Amount for the Latest Internal Valuation"
+ },
+ {
+  "id": "eba.f4_22_type_of_latest_internal_valuation",
+  "type": "choice",
+  "description": "EU NPL template 4.22 Type of Latest Internal Valuation"
+ },
+ {
+  "id": "eba.f4_23_latest_external_valuation_amount",
+  "type": "number",
+  "description": "EU NPL template 4.23 Latest External Valuation Amount"
+ },
+ {
+  "id": "eba.f4_24_date_of_latest_external_valuation",
+  "type": "date",
+  "description": "EU NPL template 4.24 Date of Latest External Valuation"
+ },
+ {
+  "id": "eba.f4_25_type_of_appraisal_amount_for_the_latest_external_valuatio",
+  "type": "choice",
+  "description": "EU NPL template 4.25 Type of Appraisal Amount for the Latest External Valuation"
+ },
+ {
+  "id": "eba.f4_26_type_of_latest_external_valuation",
+  "type": "choice",
+  "description": "EU NPL template 4.26 Type of Latest External Valuation"
+ },
+ {
+  "id": "eba.f4_27_financial_guarantee_amount",
+  "type": "number",
+  "description": "EU NPL template 4.27 Financial Guarantee Amount"
+ },
+ {
+  "id": "eba.f4_28_isin",
+  "type": "number",
+  "description": "EU NPL template 4.28 ISIN"
+ },
+ {
+  "id": "eba.f4_29_enforcement_status",
+  "type": "boolean",
+  "description": "EU NPL template 4.29 Enforcement Status"
+ },
+ {
+  "id": "eba.f4_30_enforcement_status_third_parties",
+  "type": "boolean",
+  "description": "EU NPL template 4.30 Enforcement Status Third Parties"
+ },
+ {
+  "id": "eba.f4_31_jurisdiction_of_court",
+  "type": "choice",
+  "description": "EU NPL template 4.31 Jurisdiction of Court"
+ },
+ {
+  "id": "eba.f4_32_currency_of_enforcement",
+  "type": "choice",
+  "description": "EU NPL template 4.32 Currency of Enforcement"
+ },
+ {
+  "id": "eba.f4_33_indicator_of_enforcement",
+  "type": "boolean",
+  "description": "EU NPL template 4.33 Indicator of Enforcement"
+ },
+ {
+  "id": "eba.f4_34_court_appraisal_amount",
+  "type": "number",
+  "description": "EU NPL template 4.34 Court Appraisal Amount"
+ },
+ {
+  "id": "eba.f4_35_date_of_court_appraisal",
+  "type": "date",
+  "description": "EU NPL template 4.35 Date of Court Appraisal"
+ },
+ {
+  "id": "eba.f4_36_cash_in_court",
+  "type": "number",
+  "description": "EU NPL template 4.36 Cash in court"
+ },
+ {
+  "id": "eba.f4_37_sale_agreed_price",
+  "type": "number",
+  "description": "EU NPL template 4.37 Sale Agreed Price"
+ },
+ {
+  "id": "eba.f4_38_next_auction_date",
+  "type": "date",
+  "description": "EU NPL template 4.38 Next Auction Date"
+ },
+ {
+  "id": "eba.f4_39_court_auction_reserve_price_for_next_auction",
+  "type": "number",
+  "description": "EU NPL template 4.39 Court Auction Reserve Price for Next Auction"
+ },
+ {
+  "id": "eba.f4_40_last_auction_date",
+  "type": "date",
+  "description": "EU NPL template 4.40 Last Auction Date"
+ },
+ {
+  "id": "eba.f4_41_court_auction_reserve_price_for_last_auction",
+  "type": "number",
+  "description": "EU NPL template 4.41 Court Auction Reserve Price for Last Auction"
+ },
+ {
+  "id": "eba.f4_42_number_of_failed_auctions",
+  "type": "number",
+  "description": "EU NPL template 4.42 Number of Failed Auctions"
+ },
+ {
+  "id": "eba.f4_43_mortgage_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 4.43 Mortgage Identifier"
+ },
+ {
+  "id": "eba.f4_44_mortgage_amount",
+  "type": "number",
+  "description": "EU NPL template 4.44 Mortgage amount"
+ },
+ {
+  "id": "eba.f4_45_lien_position",
+  "type": "number",
+  "description": "EU NPL template 4.45 Lien position"
+ },
+ {
+  "id": "eba.f4_46_higher_ranking_loan",
+  "type": "number",
+  "description": "EU NPL template 4.46 Higher ranking loan"
+ },
+ {
+  "id": "eba.f4_47_register_of_deeds_number",
+  "type": "alphanumeric",
+  "description": "EU NPL template 4.47 Register of Deeds Number"
+ },
+ {
+  "id": "eba.f5_00_loan_identifier",
+  "type": "alphanumeric",
+  "description": "EU NPL template 5.00 Loan Identifier"
+ },
+ {
+  "id": "eba.f5_01_type_of_collection",
+  "type": "choice",
+  "description": "EU NPL template 5.01 Type of Collection"
+ },
+ {
+  "id": "eba.f5_02_name_of_external_collection_agent",
+  "type": "alphanumeric",
+  "description": "EU NPL template 5.02 Name of External Collection Agent"
+ },
+ {
+  "id": "eba.f5_03_history_of_total_repayments",
+  "type": "number",
+  "description": "EU NPL template 5.03 History of Total Repayments"
+ },
+ {
+  "id": "eba.f5_04_history_of_repayments_from_collateral_sales",
+  "type": "number",
+  "description": "EU NPL template 5.04 History of Repayments - From Collateral Sales"
+ }
+]

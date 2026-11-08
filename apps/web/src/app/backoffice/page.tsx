@@ -1,6 +1,7 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { LogoutButton } from "@/components/logout";
-import { Page } from "@/components/ui";
+import { Page, buttonClass } from "@/components/ui";
 import type { SessionClaims } from "@/lib/auth/access";
 import { createClient } from "@/lib/supabase/server";
 
@@ -30,6 +31,9 @@ export default async function BackofficePage() {
         </ul>
         <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">Portefeuilles : {count ?? 0}</p>
       </section>
+      <Link href="/backoffice/reprises" className={buttonClass + " text-center"} data-testid="boarding-link">
+        Reprises de portefeuilles
+      </Link>
       <LogoutButton />
     </Page>
   );

@@ -64,7 +64,7 @@ def from_saved_profile(
             h,
             mapping.get(h),
             1.0,
-            f"saved mapping profile v{version} for this file layout",
+            f"mapping validé v{version} réutilisé pour ce format de fichier",
             False,
             "profile",
         )

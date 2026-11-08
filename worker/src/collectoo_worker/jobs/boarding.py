@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -36,9 +36,11 @@ from collectoo_worker.boarding.stage import stage_rows, write_staging
 from collectoo_worker.boarding.transforms import load_spec
 from collectoo_worker.boarding.validate import (
     FileResult,
+    Issue,
     IssueLog,
     detect_eba_table,
     rules,
+    severity,
     validate_batch,
 )
 from collectoo_worker.runtime.storage import Storage
@@ -52,6 +54,8 @@ def make_handler(storage: Storage, provider: Provider, normaliser: Normaliser | 
     def handle(payload: dict[str, Any], conn: psycopg.Connection[Any]) -> None:
         kind = payload.get("type")
         batch_id = str(payload["batch_id"])
+        if kind != "purge_documents" and _abandoned(conn, batch_id):
+            return  # abandoned while the job was queued: nothing to do
         if kind == "profile":
             profile_batch(conn, storage, batch_id)
         elif kind == "propose":
@@ -70,6 +74,32 @@ def make_handler(storage: Storage, provider: Provider, normaliser: Normaliser | 
     return handle
 
 
+def _abandoned(conn: psycopg.Connection[Any], batch_id: str) -> bool:
+    row = conn.execute(
+        "select status from public.boarding_batch where id = %s", (batch_id,)
+    ).fetchone()
+    return row is not None and row[0] in ("abandoned", "rolled_back")
+
+
+def record_dead_job(payload: dict[str, Any], error: str, conn: psycopg.Connection[Any]) -> None:
+    """A boarding job failed for good: show it on the batch (the back-office stops waiting)."""
+    batch_id = payload.get("batch_id")
+    if not batch_id:
+        return
+    conn.execute(
+        """update public.boarding_batch
+           set failed_job = jsonb_build_object('type', %s::text, 'error', %s::text, 'at', now())
+           where id = %s""",
+        (str(payload.get("type")), error[:500], str(batch_id)),
+    )
+    if payload.get("type") == "profile":
+        conn.execute(
+            "update public.boarding_file set status = 'failed', error = %s"
+            " where batch_id = %s and status = 'uploaded'",
+            (error[:500], str(batch_id)),
+        )
+
+
 def profile_file(path: Path, file_format: str) -> tuple[dict[str, Any], int | None]:
     if file_format == "csv":
         lf, dialect = scan_csv(path)
@@ -78,7 +108,9 @@ def profile_file(path: Path, file_format: str) -> tuple[dict[str, Any], int | No
         return profile, int(profile["row_count"])
     if file_format == "xlsx":
         sheets = {name: profile_frame(df.lazy()) for name, df in read_xlsx(path).items()}
-        return {"sheets": sheets}, sum(int(p["row_count"]) for p in sheets.values())
+        # jsonb sorts object keys: the workbook order is kept explicitly.
+        profile = {"sheets": sheets, "sheet_order": list(sheets)}
+        return profile, sum(int(p["row_count"]) for p in sheets.values())
     if file_format == "fixed_width":
         return {"needs_layout": True}, None
     return {"not_profiled": file_format}, None  # zip: documents, handled in M1-20
@@ -88,8 +120,11 @@ def mappable_profile(profile: dict[str, Any]) -> dict[str, Any] | None:
     """The tabular profile to map: the file itself, or the first non-empty sheet of a workbook."""
     if "columns" in profile:
         return profile
-    for sheet in profile.get("sheets", {}).values():
-        if sheet["row_count"]:
+    sheets = profile.get("sheets", {})
+    # Same sheet as read_table: the first non-empty one in workbook order.
+    for name in profile.get("sheet_order") or list(sheets):
+        sheet = sheets.get(name)
+        if sheet and sheet["row_count"]:
             return dict(sheet)
     return None
 
@@ -217,6 +252,7 @@ class Loaded:
     log: IssueLog
     control: dict[str, Any]
     portfolio_id: str
+    unread: dict[str, str] = field(default_factory=dict)  # file id -> name, not boarded
 
 
 def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) -> Loaded:
@@ -246,13 +282,18 @@ def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id:
 
     results: list[FileResult] = []
     profiles: dict[str, dict[str, Any]] = {}
+    not_boarded: dict[str, str] = {}  # tabular files that cannot be read: never dropped silently
     with tempfile.TemporaryDirectory() as tmp:
         for file_id, name, bucket, path, file_format, profile in files:
             fid = str(file_id)
+            if file_format == "zip":
+                continue  # documents: linked after commit
             if fid not in mappings:
+                not_boarded[fid] = name
                 continue
             table = read_table(storage.download(bucket, path, Path(tmp) / fid), file_format)
             if table is None:
+                not_boarded[fid] = name
                 continue
             mapping = mappings[fid]
             results.append(
@@ -268,7 +309,19 @@ def load_and_validate(conn: psycopg.Connection[Any], storage: Storage, batch_id:
         art4_exempt=any(bool(v) for v in (art4 or {}).values()),
         join_keys=keys or [],
     )
-    return Loaded(results, log, control or {}, str(portfolio_id))
+    for fid in not_boarded:
+        log.add(
+            Issue(
+                fid,
+                None,
+                None,
+                None,
+                "file_not_boarded",
+                severity("file_not_boarded"),
+                "file cannot be read as a table (fixed width without layout, or empty workbook)",
+            )
+        )
+    return Loaded(results, log, control or {}, str(portfolio_id), not_boarded)
 
 
 def transform_batch(
@@ -287,6 +340,7 @@ def transform_batch(
         control=control or {},
         spec_versions=versions,
         addresses=_address_stats(results, normaliser, conn),
+        unread_files=loaded.unread,
     )
 
     conn.execute("delete from public.validation_issue where batch_id = %s", (batch_id,))
@@ -407,17 +461,27 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
             )
             for doc in result.matched:
                 account_id = accounts[doc.account_ref]
-                object_path = f"{client}/{account_id}/{doc.sha256[:16]}-{doc.name}"
+                # Storage keys must be ASCII: hash + extension; the name is kept in file_name.
+                object_path = f"{client}/{account_id}/{doc.sha256[:32]}{_safe_suffix(doc.name)}"
                 storage.upload(
                     "documents", object_path, doc.data, doc.mime or "application/octet-stream"
                 )
                 conn.execute(
                     """insert into public.document (organization_id, client_organization_id,
                          account_id, kind, storage_bucket, storage_path, sha256, mime_type,
-                         boarding_batch_id)
-                       values (%s, %s, %s, 'boarding', 'documents', %s, %s, %s, %s)
+                         boarding_batch_id, file_name)
+                       values (%s, %s, %s, 'boarding', 'documents', %s, %s, %s, %s, %s)
                        on conflict (storage_bucket, storage_path) do nothing""",
-                    (org, client, account_id, object_path, doc.sha256, doc.mime, batch_id),
+                    (
+                        org,
+                        client,
+                        account_id,
+                        object_path,
+                        doc.sha256,
+                        doc.mime,
+                        batch_id,
+                        doc.name,
+                    ),
                 )
                 linked += 1
             unmatched += result.unmatched
@@ -428,6 +492,11 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
         " set dq_report = jsonb_set(coalesce(dq_report, '{}'), '{documents}', %s) where id = %s",
         (Jsonb(summary), batch_id),
     )
+
+
+def _safe_suffix(name: str) -> str:
+    suffix = Path(name).suffix.lower()
+    return suffix if suffix[1:].isascii() and suffix[1:].isalnum() else ""
 
 
 def purge_documents(storage: Storage, objects: list[dict[str, str]]) -> None:

@@ -68,8 +68,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: supabase/setup-cli@v1
+        id: supabase_cli
+        continue-on-error: true  # GitHub release downloads sometimes 504: fallback below
         with:
           version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Install the Supabase CLI (fallback with longer retries)
+        if: steps.supabase_cli.outcome == 'failure'
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 -o "$RUNNER_TEMP/supabase.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
+          supabase --version
       - run: supabase start
       - run: supabase db reset
       - run: supabase test db
@@ -106,8 +115,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: supabase/setup-cli@v1
+        id: supabase_cli
+        continue-on-error: true  # GitHub release downloads sometimes 504: fallback below
         with:
           version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Install the Supabase CLI (fallback with longer retries)
+        if: steps.supabase_cli.outcome == 'failure'
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 -o "$RUNNER_TEMP/supabase.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
+          supabase --version
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -127,10 +145,22 @@ jobs:
         working-directory: apps/web
       - run: npx playwright install --with-deps chromium
         working-directory: apps/web
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: worker/uv.lock
+      - name: Start the boarding worker (mock LLM, mock addresses)
+        run: |
+          eval "$(./scripts/local-env.sh)"
+          cd worker && uv sync --frozen
+          LLM_PROVIDER=mock ADDRESS_NORMALISER=mock nohup uv run collectoo-worker consume boarding > ../worker.log 2>&1 &
       - run: npm run build
         working-directory: apps/web
       - run: npm run e2e
         working-directory: apps/web
+      - name: Worker log
+        if: failure()
+        run: tail -n 100 worker.log
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
