@@ -68,8 +68,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: supabase/setup-cli@v1
+        id: supabase_cli
+        continue-on-error: true  # GitHub release downloads sometimes 504: fallback below
         with:
           version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Install the Supabase CLI (fallback with longer retries)
+        if: steps.supabase_cli.outcome == 'failure'
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 -o "$RUNNER_TEMP/supabase.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
+          supabase --version
       - run: supabase start
       - run: supabase db reset
       - run: supabase test db
@@ -106,8 +115,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: supabase/setup-cli@v1
+        id: supabase_cli
+        continue-on-error: true  # GitHub release downloads sometimes 504: fallback below
         with:
           version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Install the Supabase CLI (fallback with longer retries)
+        if: steps.supabase_cli.outcome == 'failure'
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 -o "$RUNNER_TEMP/supabase.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
+          supabase --version
       - uses: actions/setup-node@v5
         with:
           node-version: 22

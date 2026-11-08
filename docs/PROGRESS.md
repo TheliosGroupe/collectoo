@@ -3,6 +3,7 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
+- PR #10 M1d merged 2026-11-08 (staging, commit/rollback/confirm, documents zip, 50k-loan CI run, 1M benchmark: 57 s, 2.9 GB peak). CI was delayed ~1.5 h by GitHub release-download 504s; CI now falls back to a curl install with longer retries.
 - PR #9 M1c merged 2026-11-08 (transformation DSL, validators, BAN adapter, claim types, validation rules, DQ report).
 - PR #8 M1b merged 2026-11-08 (mapping proposals, LLM gateway + mock, eval 167/167, mapping profiles).
 - PR #7 M1a merged 2026-11-08 (boarding upload, queue runtime, readers, profiling).
@@ -19,7 +20,6 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 
 ## In progress
 - PR "M1e — back-office boarding review UI" (M1-19): `/backoffice/reprises` (batch list), `/nouveau` (upload: files hashed in the browser, stored at their registered path, optional seller control totals in euros parsed to cents without floats), `/[id]` (file profiles, mapping review with confidence/rationale and per-column target override, data-quality report with reconciliation to the cent, integrate / confirm / roll back, history; refreshes itself while the worker runs). Playwright flow end to end on a synthetic B2B invoice file with the boarding worker consuming the queue (also in the CI e2e job); screenshots `docs/screenshots/m1-boarding-*`.
-- PR "M1d — staging, commit/rollback/confirm, documents zip, 50k CI run, 1M benchmark" (M1-17, 18, 20, 21, 22): validation reworked to whole-column operations (Polars) so 1M-row tapes fit in memory; staging rows per entity in `private.boarding_staging` (identical digest on re-run); `commit_boarding_batch` writes Layer 2 (parties, identifiers, contacts, accounts `staged`, debtor links, claim items, ownership periods) and Layer 1 EU-template rows in one transaction, a reason is required when totals don't reconcile; `rollback_boarding_batch` removes everything before confirmation, including documents linked from the batch's zip (files purged by the worker; change log keeps the trail); `confirm_boarding_batch` needs servicer staff with two-factor and an active mandate (R124-3), accounts become `awaiting_first_letter`; zip of PDFs/images linked to accounts by the reference in the file name, stored in the `documents` bucket and indexed; 50k-loan EU tape boarded end to end in the CI `db` job; `make bench-boarding`: 1M loans in 57 s, peak memory 2.9 GB (< 4 GB target), see `docs/benchmarks/boarding.md`. Waiting for CI: GitHub release downloads (setup-cli, setup-uv) returned 504 on 2026-11-08; jobs re-run once the outage clears.
 
 ## Next
 - M1 report to the founder, then M2a ledger (M2-01 … M2-05).
