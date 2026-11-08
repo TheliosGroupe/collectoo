@@ -23,7 +23,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- M2b (payments): design next (PSP in test mode, bank statement import, allocation, unallocated suspense, receipts).
+- M2b (payments): design done by a panel (3 designs + judge, legal texts read on LibreJustice): `docs/design/m2b-payments.md`, slicing M2b-1 … M2b-6; 20 founder decisions pending (§17); counsel questions OQ-19 … OQ-29 added to COMPLIANCE. Next: M2b-1 (ledger extension, bank account, payment table, RF references, ADR-0013).
 
 ## Next
 - EU T5 (historical collections) files are now blocked at validation: staging needs a `month_offset` per row that the EU template does not carry and the mapping cannot set yet. Making it mappable or derived (from a reporting date) is a product decision for when a seller sends T5.
