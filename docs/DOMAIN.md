@@ -1,0 +1,1100 @@
+# Domain model
+
+> **Status:** Phase 0 draft. Code in English, debtor-facing copy in French. Legal IDs (CPCE-04, INT-05, HOLD-01…) refer to `docs/COMPLIANCE.md`; field IDs (`3.12`) to `docs/reference/eba_field_catalogue.csv`; the gap analysis behind Layer 2 is `docs/reference/eba_gap_analysis.md`.
+
+Contents: [1. Glossary](#1-glossary-fr--en) · [2. Conventions](#2-modelling-conventions) · [3. Entity model](#3-entity-model-two-layers) · [4. State machines](#4-state-machines) · [5. Open questions](#5-open-questions-founder)
+
+## 1. Glossary FR ↔ EN
+
+`In code` is the identifier used in tables, enums and APIs.
+
+### 1.1 Parties and roles
+
+| Français | English | In code | Note |
+|---|---|---|---|
+| Créancier | Creditor | `organization(kind = creditor_client)` | Owner of the claim in phase A |
+| Mandant | Principal (client giving the mandate) | `organization(kind = creditor_client)` | Our client in third-party collection |
+| Mandataire | Agent | — | Collectoo when collecting under mandate |
+| Débiteur | Debtor | `party` + `account_party(role = borrower)` | |
+| Codébiteur / co-emprunteur | Co-debtor / co-borrower | `account_party(role = co_borrower)` | Usually jointly and severally liable |
+| Caution | Guarantor (surety) | `account_party(role = guarantor)` | |
+| Fournisseur de protection | Protection provider | `account_party(role = protection_provider)` | Template `1.05` |
+| Personne physique / morale | Natural person / legal entity | `party.kind` | |
+| Consommateur / non-professionnel / professionnel | Consumer / non-professional / professional | `account_party.capacity` | Capacity is per contract |
+| Ayants droit / succession | Heirs / estate | `party_life_event(kind = deceased)` | |
+| Commissaire de justice (ex-huissier) | Bailiff / judicial officer | `bailiff_partner` | |
+| Mandataire judiciaire / liquidateur | Court-appointed creditors' representative / liquidator | `insolvency_proceeding.administrator` | |
+| Gestionnaire de crédits | Credit servicer | `organization(kind = servicer)` | Dir. (EU) 2021/2167, phase B |
+| Acheteur de crédits | Credit purchaser | `organization(kind = fund \| fct)` | |
+| Cédant | Seller / assignor | `portfolio_transfer.seller_organization_id` | |
+| Cessionnaire | Buyer / assignee | `portfolio_transfer.buyer_organization_id` | |
+| FCT (fonds commun de titrisation) | French securitisation fund | `organization(kind = fct)` | Phase C |
+| Société de gestion | Management company | `organization(kind = management_company)` | Manages the FCT |
+| Dépositaire | Depositary | `organization(kind = depositary)` | Holds the FCT's assets |
+| Fonds de dette / de crédit | Credit fund | `organization(kind = fund)` | |
+| Co-investissement | Co-investment | `fund_share` | Our share in each FCT |
+
+### 1.2 Claims and contracts
+
+| Français | English | In code | Note |
+|---|---|---|---|
+| Créance | Claim | `account` (+ `claim_item`) | |
+| Dossier | Case / account | `account` | The unit we service |
+| Ligne de créance (facture, échéance, loyer) | Claim item | `claim_item` | Invoice, instalment, rent period, judgment head |
+| Portefeuille | Portfolio | `portfolio` | |
+| Bande de données / data tape | Data tape | `boarding_file` | |
+| Date d'arrêté / cut-off | Cut-off date | `boarding_batch.cut_off_date` | Template `3.00` |
+| Créance non performante (NPL / NPE) | Non-performing loan / exposure | — | CRR art. 47a |
+| Crédit à la consommation amortissable | Consumer instalment loan | `claim_type = consumer_instalment_loan` | |
+| Crédit renouvelable | Revolving credit | `claim_type = revolving_credit` | |
+| Découvert | Overdraft | `claim_type = overdraft` | |
+| Paiement fractionné (BNPL) | Buy now pay later / split payment | `claim_type = bnpl` | |
+| Crédit immobilier | Mortgage credit | `claim_type = mortgage` | |
+| Prêt professionnel | Professional / SME loan | `claim_type = professional_loan` | |
+| Facture B2B / B2C | B2B / B2C invoice | `claim_type = b2b_invoice \| b2c_invoice` | |
+| Loyers et charges | Rent and charges | `claim_type = rent` | |
+| Prêt entre particuliers | Private loan between individuals | `claim_type = private_loan` | |
+| Titre exécutoire | Enforceable title | `enforceable_title` | Judgment, order for payment with enforcement formula, notarial deed… |
+| Jugement | Judgment | `account_event(kind = judgment)` | |
+| Signification | Service (of a judgment) | `account_event(kind = judgment_served)` | |
+| Régime juridique applicable | Applicable legal regime | `account.legal_regime` | e.g. `pre_ccd2`, `ccd2` |
+| Tableau d'amortissement | Amortisation schedule | `schedule_line` | |
+| Échéance | Instalment / due date | `schedule_line`, `claim_item.due_date` | |
+| Échéance impayée | Unpaid instalment | ledger component `unpaid_instalment_*` | |
+| Capital restant dû (CRD) | Capital outstanding | ledger component `capital_outstanding` | |
+| Déchéance du terme | Acceleration | `account_event(kind = acceleration)` | |
+| Mise en demeure | Formal notice (letter of demand) | `account_event(kind = formal_notice)` | Starts legal-rate interest (INT-01) |
+| Garantie / sûreté | Collateral / security | `protection` | Template T4.1 |
+| Hypothèque | Mortgage (security) | `mortgage` | Template T4.2 |
+| Mesure de restructuration (forbearance) | Forbearance measure | `forbearance_measure` | Template `3.38`–`3.43` |
+
+### 1.3 Amounts, interest, ledger
+
+| Français | English | In code | Note |
+|---|---|---|---|
+| Principal / capital | Principal | component `principal` | |
+| Intérêts conventionnels | Contractual interest | component `contractual_interest` | |
+| Intérêts moratoires / de retard | Late-payment interest | component `late_interest` | |
+| Taux d'intérêt légal | Legal interest rate | `rate_index = legal_rate_consumer_creditor \| legal_rate_other` | Two rates per semester (INT-02) |
+| Majoration de 5 points | +5-point increase | rule `l313_3_increase` | 2 months after the judgment is enforceable (INT-03) |
+| Pénalités de retard (B2B) | Late-payment penalties | component `late_penalty` | INT-08 |
+| Indemnité forfaitaire de 40 € | €40 flat recovery indemnity | component `b2b_flat_indemnity` | D441-5 |
+| Indemnité de défaillance | Default indemnity (consumer credit) | component `statutory_indemnity` | D312-16 / D312-17 |
+| Accessoires | Accessories (interest, fees, costs) | — | R124-4 breakdown |
+| Frais de recouvrement | Recovery fees | component `recovery_fee` | Never debtor-chargeable without a title (CPCE-09) |
+| Dépens / frais taxables | Taxable legal costs | component `procedure_cost` | |
+| Anatocisme / capitalisation | Capitalisation of interest | rule-pack `capitalisation` | INT-04, INT-06 |
+| Décompte | Itemised statement of account | `statement` (engine output) | Used in letters, portal, bailiff files |
+| Imputation des paiements | Payment allocation | `allocation_order` (rule pack), `ledger_entry(entry_type = allocation)` | INT-09 |
+| Quittance | Receipt | `receipt` | CPCE-07 |
+| Reversement | Remittance to the client | `remittance_run` | CPCE-08 |
+| Compte dédié aux fonds de tiers | Client money account | `bank_account(purpose = client_money)` | CPCE-02 |
+| Commission / honoraires | Collection commission | `mandate_terms.commission`, `commission_invoice` | |
+| Remise de dette / abandon | Debt forgiveness / write-off | `ledger_entry(entry_type = forgiveness)` | Template `3.42` |
+| Écriture / extourne | Ledger entry / reversal | `ledger_entry`, `reverses_entry_id` | Corrections only by reversal |
+| Relevé bancaire (CAMT.053) | Bank statement | `bank_statement` | |
+| Rapprochement | Reconciliation | `reconciliation_match` | |
+
+### 1.4 Collection process
+
+| Français | English | In code | Note |
+|---|---|---|---|
+| Recouvrement amiable | Amicable (out-of-court) collection | `mandate_type = mandate_amicable` | CPCE R124-1 ff. |
+| Recouvrement judiciaire | Judicial collection | `legal_procedure` | |
+| Convention de recouvrement (écrite) | Written collection agreement | `mandate` | R124-3 |
+| Premier courrier (R124-4) | First letter | `communication(first_letter = true)` | Mandatory mentions (CPCE-04) |
+| Référence du premier courrier | First-letter reference | template block `first_letter_ref` | Repeated in every later step (CPCE-05) |
+| Échéancier / plan d'apurement | Payment plan | `payment_plan` | |
+| Promesse de paiement | Promise to pay | `promise_to_pay` | |
+| Accord transactionnel | Settlement (with discount) | `payment_plan(kind = settlement)` | Within the client's envelope |
+| Contestation / litige | Dispute | `dispute` | Creates a hold |
+| Réclamation | Complaint | `complaint` | |
+| Gel / suspension | Hold | `account_hold` | |
+| Rappel (de dossier) par le client | Recall by the client | `account_hold(kind = recalled)` → closure | |
+| Surendettement | Consumer over-indebtedness procedure | `account_hold(kind = surendettement)` | Banque de France (HOLD-01) |
+| Recevabilité | Admissibility (of a surendettement file) | `account_event(kind = surendettement_admissible)` | Starts the suspension |
+| Rétablissement personnel | Personal debt discharge | `account_event(kind = personal_recovery)` | Usually ends the claim |
+| Procédure collective | Collective insolvency proceeding | `insolvency_proceeding`, `account_hold(kind = collective_proceeding)` | HOLD-02 |
+| Sauvegarde / redressement / liquidation judiciaire | Safeguard / reorganisation / liquidation | `insolvency_proceeding.kind` | |
+| Déclaration de créance | Proof of claim | `claim_filing` | |
+| BODACC | Official bulletin of civil and commercial notices | `bodacc_watch` (later) | |
+| Injonction de payer | Order for payment procedure | `legal_procedure(kind = injonction_de_payer)` | Later (B2B) |
+| Procédure simplifiée de recouvrement des petites créances | Small-claims simplified procedure (< €5,000) | `legal_procedure(kind = small_claims)` | Later |
+| Juge de l'exécution (JEX) | Enforcement judge | — | Can waive the +5 pts (INT-03) |
+| Saisie-attribution / saisie des rémunérations | Bank attachment / wage attachment | `legal_procedure_event(kind = attachment)` | Bailiff acts |
+| Prescription | Limitation period | `rule_pack.limitation`, `limitation_event` | Can be interrupted/suspended |
+| Forclusion | Time bar (preclusion) | `rule_pack.limitation(type = forclusion)` | e.g. 2 years consumer credit (R312-35) |
+| Lettre simple | Standard letter | channel `letter` | |
+| LRAR | Registered letter with acknowledgement of receipt | channel `registered_letter` | |
+| LRE | Qualified electronic registered letter | channel `lre` | Prior consent for non-professionals (LRE-01) |
+| NPAI (n'habite pas à l'adresse indiquée) | Returned mail: not at address | `communication.status = returned` | Marks the postal contact point invalid |
+| Consentement | Consent | `contact_consent` | Per contact point × channel × purpose |
+| Courbe de recouvrement | Collection curve | analytics | By cohort and claim type |
+| Taux de liquidation | Liquidation rate | analytics | Collected / boarded balance |
+| ERC (estimated remaining collections) | Estimated remaining collections | analytics | Pricing (phase C) |
+
+## 2. Modelling conventions
+
+| Topic | Rule |
+|---|---|
+| Schemas | `public` (exposed through the API, RLS on every table; the browser writes only through `SECURITY DEFINER` RPCs), `private` (not exposed: flow runtime, queues, audit, LLM logs, channel health), `eba` (not exposed: Layer-1 staging/export) |
+| Keys | `uuid` primary keys; natural keys as unique constraints |
+| Tenancy | Every business row carries `organization_id` (servicing tenant) and, where relevant, `portfolio_id`. Client users see rows of portfolios whose `client_organization_id` they belong to, through `portfolio_access` |
+| Money | `bigint` minor units + `currency char(3)`; rates `numeric(12,8)`; never floats |
+| Time | `timestamptz` UTC; business dates `date` interpreted in Europe/Paris |
+| History | Temporal tables (`valid_from`, `valid_to`, `recorded_at`) where the past must be re-read (contract terms, ownership, contact validity, valuations); `private.change_log` trigger on other core tables |
+| Immutability | Ledger, communications, delivery proofs, rendered letters and receipts are append-only. Corrections = new rows (reversal, new version) |
+| Provenance | Rows created by boarding carry `boarding_batch_id`; seller-declared values keep a `source` |
+
+### 2.1 Ledger books
+
+Double-entry, one `ledger_account` per (book, component, account) where relevant. Example flows:
+
+| Event | Debit | Credit |
+|---|---|---|
+| Opening balance at cut-off (per component) | `debtor_receivable:<component>` | `owner_claim:<component>` |
+| Interest accrual (engine) | `debtor_receivable:late_interest` | `owner_claim:late_interest` |
+| Debtor payment received on client-money account | `client_money_cash` | `unallocated_payment` |
+| Allocation (waterfall) | `unallocated_payment` | `debtor_receivable:<component>` |
+| Recognise amount due to the owner | `owner_claim:<component>` | `client_payable` |
+| Commission | `client_payable` | `servicer_revenue` |
+| Remittance paid | `client_payable` | `client_money_cash` |
+| Forgiveness / settlement discount | `owner_claim:<component>` | `debtor_receivable:<component>` |
+| Correction | Reversal entry (`reverses_entry_id`) + new entry | |
+
+`servicer_revenue` and `own_cash` are the only books that are Collectoo's money; everything else is held for owners (R124-2). In phase C the owner is an FCT and the same books apply.
+
+## 3. Entity model (two layers)
+
+Diagrams are split by area. Attribute lists are abridged to keys and the fields that matter for the design.
+
+### 3.1 Tenancy, mandates, portfolios
+
+```mermaid
+erDiagram
+    organization ||--o{ membership : "has members"
+    auth_user ||--o{ membership : "belongs to"
+    auth_user ||--o{ portfolio_access : "is granted"
+    organization ||--o{ portfolio : "services (organization_id)"
+    organization ||--o{ portfolio : "is client of (client_organization_id)"
+    portfolio ||--o{ portfolio_access : "grants"
+    organization ||--o{ mandate : "signs as client"
+    mandate ||--o{ mandate_terms : "versions"
+    mandate ||--o{ portfolio : "covers"
+    organization {
+        uuid id PK
+        text kind "servicer|creditor_client|fund|fct|management_company|depositary"
+        text legal_name
+        text siren
+    }
+    membership {
+        uuid user_id FK
+        uuid organization_id FK
+        text role "admin|ops_manager|collector|client_admin|client_viewer"
+    }
+    portfolio_access {
+        uuid user_id FK
+        uuid portfolio_id FK
+        text role
+    }
+    portfolio {
+        uuid id PK
+        uuid organization_id FK "servicer tenant"
+        uuid client_organization_id FK
+        uuid mandate_id FK
+        text name
+        text default_claim_type
+    }
+    mandate {
+        uuid id PK
+        uuid organization_id FK
+        uuid client_organization_id FK
+        text mandate_type "mandate_amicable|servicing_agreement"
+        uuid signed_document_id FK
+        date signed_on
+        text insurance_terms "R124-3"
+    }
+    mandate_terms {
+        uuid mandate_id FK
+        date valid_from
+        date valid_to
+        numeric commission_rate
+        int remittance_max_days "R124-6 default 30"
+        jsonb plan_envelope "max duration, min instalment"
+        jsonb settlement_authority "max discount"
+    }
+```
+
+### 3.2 Parties and contacts
+
+```mermaid
+erDiagram
+    party_group ||--o{ party : groups
+    party ||--o{ party_identifier : "identified by"
+    party ||--o{ party_financials : "reports"
+    party ||--o{ contact_point : "reachable at"
+    contact_point ||--o{ contact_consent : "consents"
+    party ||--o| portal_identity : "logs in as"
+    party ||--o{ party_life_event : "has"
+    party ||--o{ insolvency_proceeding : "subject to"
+    party {
+        uuid id PK
+        uuid organization_id FK
+        text kind "natural_person|legal_entity"
+        text display_name
+        text first_name
+        text last_name
+        date birth_date "template 1.07"
+        uuid party_group_id FK
+    }
+    party_group {
+        uuid id PK
+        text seller_ref "template 1.00"
+        text name "template 1.01"
+    }
+    party_identifier {
+        uuid party_id FK
+        text scheme "siren|siret|lei|national_id|seller_ref"
+        text value
+        text source
+    }
+    party_financials {
+        uuid party_id FK
+        date statement_date "template 1.21"
+        text currency
+        bigint total_assets_minor
+        bigint turnover_minor
+    }
+    contact_point {
+        uuid id PK
+        uuid party_id FK
+        text type "postal|email|phone|messaging"
+        text value_normalised "BAN, E.164"
+        text source "seller|debtor|enrichment"
+        text status "unverified|valid|invalid|opted_out"
+        date valid_from
+        date valid_to
+    }
+    contact_consent {
+        uuid contact_point_id FK
+        text channel
+        text purpose
+        text basis "consent|legal_obligation|legitimate_interest"
+        timestamptz given_at
+        timestamptz withdrawn_at
+        uuid evidence_id
+    }
+    portal_identity {
+        uuid party_id FK
+        text access_token_hash
+        text verification_method
+        timestamptz verified_at
+    }
+    party_life_event {
+        uuid party_id FK
+        text kind "deceased"
+        date event_date
+        uuid evidence_document_id
+    }
+    insolvency_proceeding {
+        uuid id PK
+        uuid party_id FK
+        text kind "sauvegarde|redressement|liquidation|surendettement|retablissement_personnel"
+        date opened_at
+        text court
+        text administrator
+        date claim_deadline
+    }
+```
+
+### 3.3 Claims, contracts, ownership
+
+```mermaid
+erDiagram
+    portfolio ||--o{ account : contains
+    account ||--o{ account_party : "involves"
+    party ||--o{ account_party : "plays role in"
+    account ||--o{ claim_item : "made of"
+    account ||--o{ contract_terms : "versions"
+    account ||--o{ schedule_line : "amortises"
+    claim_type ||--o{ account : types
+    claim_type ||--o{ rule_pack : "governed by"
+    rule_pack ||--o{ rule_pack_version : versions
+    account ||--o{ account_rule_pack : "assigned"
+    rule_pack_version ||--o{ account_rule_pack : "applies"
+    account ||--o{ account_event : "has"
+    account ||--o{ claim_ownership_period : "owned over time"
+    portfolio_transfer ||--o{ claim_ownership_period : "creates"
+    account ||--o{ forbearance_measure : "seller history"
+    account ||--o{ limitation_event : "interrupts/suspends"
+    account {
+        uuid id PK
+        uuid organization_id FK
+        uuid portfolio_id FK
+        uuid claim_type_id FK
+        text external_ref "template 3.01"
+        text currency
+        text legal_regime "pre_ccd2|ccd2|consumer_mortgage|commercial|civil"
+        text status "see state machine"
+        uuid boarding_batch_id FK
+        date seller_limitation_date "template 3.29"
+    }
+    account_party {
+        uuid account_id FK
+        uuid party_id FK
+        text role "borrower|co_borrower|guarantor|protection_provider"
+        text capacity "consumer|professional|legal_entity"
+        text liability "joint_several|several|capped"
+        bigint cap_minor
+    }
+    claim_item {
+        uuid id PK
+        uuid account_id FK
+        text kind "instalment|invoice|rent_period|judgment_head|loan_principal"
+        text ref
+        date issue_date
+        date due_date
+        bigint original_minor
+    }
+    contract_terms {
+        uuid account_id FK
+        date valid_from
+        date valid_to
+        date contract_date "template 3.02"
+        text governing_law "template 3.03"
+        numeric rate "template 3.14"
+        text rate_index "template 3.18"
+        int margin_bp "template 3.17"
+        text day_count
+        text payment_frequency "template 3.20"
+        date maturity "template 3.07"
+    }
+    schedule_line {
+        uuid account_id FK
+        int seq
+        date due_date
+        bigint capital_minor
+        bigint interest_minor
+        bigint insurance_minor
+        text source "imported|rebuilt"
+    }
+    claim_type {
+        uuid id PK
+        text code "consumer_instalment_loan|b2b_invoice|..."
+        text family "bank_credit|civil_commercial"
+    }
+    rule_pack {
+        uuid id PK
+        text code
+    }
+    rule_pack_version {
+        uuid id PK
+        uuid rule_pack_id FK
+        date effective_from
+        date effective_to
+        text yaml_sha256
+        jsonb legal_references
+    }
+    account_rule_pack {
+        uuid account_id FK
+        uuid rule_pack_version_id FK
+        date valid_from
+    }
+    account_event {
+        uuid id PK
+        uuid account_id FK
+        text kind "due|acceleration|formal_notice|judgment|judgment_served|judgment_enforceable|default_status|surendettement_admissible|collective_proceeding_opened"
+        date event_date
+        uuid evidence_document_id
+        text source
+    }
+    claim_ownership_period {
+        uuid account_id FK
+        uuid owner_organization_id FK
+        uuid servicer_organization_id FK
+        text mandate_type "mandate_amicable|servicing_agreement|owned"
+        date valid_from
+        date valid_to
+        uuid portfolio_transfer_id FK
+    }
+    portfolio_transfer {
+        uuid id PK
+        uuid seller_organization_id FK
+        uuid buyer_organization_id FK
+        date cut_off_date
+        date transfer_date
+        bigint price_minor
+    }
+    forbearance_measure {
+        uuid account_id FK
+        text type "template 3.39"
+        date end_date "template 3.40"
+        bigint forgiven_minor "template 3.42"
+    }
+    limitation_event {
+        uuid account_id FK
+        text kind "interruption|suspension"
+        date event_date
+        text legal_ref
+    }
+```
+
+### 3.4 Collateral
+
+```mermaid
+erDiagram
+    account ||--o{ account_protection : "secured by"
+    protection ||--o{ account_protection : secures
+    mortgage ||--o{ account_protection : "via deed"
+    party ||--o{ protection : provides
+    protection ||--o| collateral_property : describes
+    protection ||--o{ valuation : "valued"
+    protection {
+        uuid id PK
+        text seller_ref "template 4.00"
+        text type "immovable|movable|financial_guarantee"
+        uuid provider_party_id FK "T2.4"
+        bigint guarantee_amount_minor "template 4.27"
+    }
+    account_protection {
+        uuid account_id FK
+        uuid protection_id FK
+        uuid mortgage_id FK "T2.2"
+    }
+    mortgage {
+        uuid id PK
+        text seller_ref "template 4.43"
+        bigint amount_minor "template 4.44"
+        int lien_position "template 4.45"
+        bigint higher_ranking_minor "template 4.46"
+    }
+    collateral_property {
+        uuid protection_id FK
+        text address "templates 4.03-4.06"
+        text cadastre "template 4.07"
+        text epc "template 4.16"
+        text occupancy "template 4.17"
+    }
+    valuation {
+        uuid protection_id FK
+        text source "internal|external|court"
+        bigint amount_minor
+        date valuation_date
+        text basis "market|liquidation|book|other"
+    }
+```
+
+### 3.5 Ledger and payments
+
+```mermaid
+erDiagram
+    ledger_account ||--o{ ledger_posting : "receives"
+    ledger_entry ||--|{ ledger_posting : "balanced set"
+    ledger_entry |o--o| ledger_entry : "reverses"
+    account ||--o{ ledger_account : "has components"
+    payment ||--o{ ledger_entry : "allocated by"
+    payment ||--o| receipt : "acknowledged by"
+    bank_account ||--o{ bank_statement : "reported in"
+    bank_statement ||--o{ bank_statement_line : contains
+    bank_statement_line ||--o| reconciliation_match : "matched"
+    payment ||--o| reconciliation_match : "matched"
+    remittance_run ||--o{ remittance_line : contains
+    remittance_line }o--|| ledger_entry : "posts"
+    rate_index ||--o{ rate_value : "fixings"
+    ledger_account {
+        uuid id PK
+        uuid organization_id FK
+        uuid account_id FK "null for pooled books"
+        text book "debtor_receivable|owner_claim|unallocated_payment|client_money_cash|client_payable|servicer_revenue|own_cash"
+        text component "principal|capital_outstanding|contractual_interest|late_interest|statutory_indemnity|b2b_flat_indemnity|fees|insurance|procedure_cost|recovery_fee|off_balance_legal_claim"
+        text currency
+    }
+    ledger_entry {
+        uuid id PK
+        text entry_type "opening|accrual|allocation|forgiveness|remittance|commission|reversal|pre_boarding_aggregate"
+        date effective_date
+        timestamptz posted_at
+        uuid reverses_entry_id FK
+        uuid rule_pack_version_id FK
+        text idempotency_key UK
+    }
+    ledger_posting {
+        uuid entry_id FK
+        uuid ledger_account_id FK
+        bigint amount_minor "signed, entry sums to 0"
+        text currency
+    }
+    payment {
+        uuid id PK
+        uuid account_id FK
+        text method "card|sepa_debit|sepa_transfer|other"
+        text psp_ref
+        bigint amount_minor
+        date value_date
+        text source "debtor|collateral_sale|third_party"
+        text status
+    }
+    receipt {
+        uuid id PK
+        uuid payment_id FK
+        uuid document_id FK
+        timestamptz issued_at
+    }
+    bank_account {
+        uuid id PK
+        text purpose "client_money|own"
+        text iban
+    }
+    bank_statement {
+        uuid id PK
+        uuid bank_account_id FK
+        date statement_date
+        text camt053_sha256
+    }
+    bank_statement_line {
+        uuid id PK
+        bigint amount_minor
+        text remittance_info
+    }
+    reconciliation_match {
+        uuid bank_statement_line_id FK
+        uuid payment_id FK
+        text method "auto|manual"
+    }
+    remittance_run {
+        uuid id PK
+        uuid client_organization_id FK
+        date period_end
+        text status
+    }
+    remittance_line {
+        uuid remittance_run_id FK
+        uuid account_id FK
+        bigint gross_minor
+        bigint commission_minor
+        bigint net_minor
+    }
+    rate_index {
+        text code PK "legal_rate_consumer_creditor|legal_rate_other|ecb_mro|euribor_3m"
+    }
+    rate_value {
+        text rate_index FK
+        date valid_from
+        numeric rate
+        text source_ref "arrete or ECB link"
+    }
+```
+
+### 3.6 Plans, promises, disputes, holds, legal
+
+```mermaid
+erDiagram
+    account ||--o{ payment_plan : "agreed"
+    payment_plan ||--|{ plan_instalment : schedules
+    plan_instalment ||--o{ payment : "paid by"
+    account ||--o{ promise_to_pay : "promised"
+    account ||--o{ dispute : "contested"
+    account ||--o{ complaint : "complained"
+    account ||--o{ account_hold : "frozen by"
+    dispute ||--o| account_hold : "creates"
+    account ||--o{ legal_procedure : "pursued by"
+    legal_procedure ||--o{ legal_procedure_event : "steps"
+    legal_procedure ||--o{ procedure_cost : "costs"
+    bailiff_partner ||--o{ legal_procedure : "handles"
+    account ||--o{ enforceable_title : "backed by"
+    account ||--o{ escalation_package : "escalated with"
+    payment_plan {
+        uuid id PK
+        uuid account_id FK
+        text kind "instalments|settlement"
+        bigint total_minor
+        bigint discount_minor
+        text status "see state machine"
+        uuid approved_by "client or rule"
+    }
+    plan_instalment {
+        uuid payment_plan_id FK
+        int seq
+        date due_date
+        bigint amount_minor
+        text status "due|paid|missed|cured"
+    }
+    promise_to_pay {
+        uuid account_id FK
+        date promised_date
+        bigint amount_minor
+        text status "open|kept|broken"
+    }
+    dispute {
+        uuid id PK
+        uuid account_id FK
+        text reason
+        text status "open|upheld|rejected|withdrawn"
+    }
+    complaint {
+        uuid account_id FK
+        text channel
+        text status
+    }
+    account_hold {
+        uuid id PK
+        uuid account_id FK
+        text kind "dispute|surendettement|collective_proceeding|deceased|wrong_party|recalled|ccd2_forbearance"
+        text legal_basis
+        text scope "outbound|payment_requests|accruals|enforcement"
+        uuid evidence_document_id
+        timestamptz started_at
+        timestamptz ended_at
+        uuid decided_by
+    }
+    legal_procedure {
+        uuid id PK
+        uuid account_id FK
+        text kind "injonction_de_payer|small_claims|merits|collateral_enforcement|attachment"
+        text court
+        text case_ref
+        text stage
+    }
+    legal_procedure_event {
+        uuid legal_procedure_id FK
+        text kind
+        date event_date
+    }
+    procedure_cost {
+        uuid legal_procedure_id FK
+        bigint amount_minor
+        bool debtor_chargeable "only with a title, CPCE-09"
+    }
+    enforceable_title {
+        uuid id PK
+        uuid account_id FK
+        text kind "judgment|injonction_de_payer|notarial_deed"
+        date decision_date
+        date served_at
+        date enforceable_at
+    }
+    bailiff_partner {
+        uuid id PK
+        text name
+        text adapter "api|sftp|email"
+    }
+    escalation_package {
+        uuid id PK
+        uuid account_id FK
+        text status
+        uuid approved_by "human, GDPR-06"
+    }
+```
+
+### 3.7 Communications, flows, engagement
+
+```mermaid
+erDiagram
+    template ||--o{ template_version : versions
+    template_version ||--o{ template_block : "composed of"
+    template_version ||--o{ communication : renders
+    account ||--o{ communication : "about"
+    contact_point ||--o{ communication : "sent to"
+    communication ||--o{ communication_event : "status"
+    communication ||--o| delivery_proof : "proved by"
+    communication |o--o| communication : "fallback_of"
+    party ||--o{ conversation : "talks in"
+    conversation ||--o{ inbound_message : contains
+    flow ||--o{ flow_version : versions
+    flow_version ||--o{ flow_run : "runs"
+    account ||--o{ flow_run : "enrolled"
+    flow_run ||--o{ flow_step_execution : executes
+    flow_step_execution ||--o{ communication : "sends"
+    flow_step_execution ||--o{ task : "creates"
+    account ||--o{ engagement_event : "emits"
+    channel_descriptor ||--o{ communication : "constrains"
+    template {
+        uuid id PK
+        text code
+        text message_type "first_letter|reminder|receipt|plan_offer|formal_notice"
+    }
+    template_version {
+        uuid id PK
+        uuid template_id FK
+        int version
+        text status "draft|approved|retired"
+        uuid approved_by "CPCE-10 review"
+    }
+    template_block {
+        uuid template_version_id FK
+        text code "r124_4_mentions|l111_8_text|first_letter_ref|gdpr_art14|ai_disclosure"
+        bool locked
+        text legal_ref
+    }
+    communication {
+        uuid id PK
+        uuid account_id FK
+        text channel
+        text provider
+        text direction "outbound|inbound"
+        bool first_letter
+        text content_sha256
+        text storage_path
+        text status "see state machine"
+        text idempotency_key UK
+        bigint cost_minor
+    }
+    communication_event {
+        uuid communication_id FK
+        text status
+        timestamptz occurred_at
+        jsonb provider_payload
+    }
+    delivery_proof {
+        uuid communication_id FK
+        text kind "provider_log|ar_signed|lre_evidence"
+        uuid document_id FK
+    }
+    conversation {
+        uuid id PK
+        uuid party_id FK
+        text channel
+        timestamptz window_expires_at
+    }
+    inbound_message {
+        uuid conversation_id FK
+        text triage_label "dispute|hardship|promise|wrong_person|deceased|complaint|other"
+        numeric triage_confidence
+    }
+    flow {
+        uuid id PK
+        uuid portfolio_id FK
+        text name
+    }
+    flow_version {
+        uuid id PK
+        uuid flow_id FK
+        jsonb graph
+        text status "draft|published|retired"
+    }
+    flow_run {
+        uuid id PK "private schema"
+        uuid account_id FK
+        uuid flow_version_id FK
+        text node_id
+        timestamptz next_run_at
+        text state
+    }
+    flow_step_execution {
+        uuid flow_run_id FK "private schema"
+        text idempotency_key UK
+        text outcome
+    }
+    task {
+        uuid id PK
+        uuid account_id FK
+        text kind
+        uuid assignee
+        text status
+    }
+    engagement_event {
+        uuid id PK
+        uuid account_id FK
+        text kind "portal_visit|reply|read|payment|plan_set_up"
+        timestamptz occurred_at
+    }
+    channel_descriptor {
+        text channel
+        text provider
+        int version
+        jsonb capabilities
+    }
+```
+
+### 3.8 Boarding
+
+```mermaid
+erDiagram
+    portfolio ||--o{ boarding_batch : "boarded through"
+    boarding_batch ||--|{ boarding_file : includes
+    boarding_file ||--o| file_profile : "profiled as"
+    mapping_profile ||--o{ mapping_profile_version : versions
+    mapping_profile_version ||--o{ boarding_batch : "used by"
+    boarding_batch ||--o{ mapping_proposal : "LLM proposes"
+    boarding_batch ||--o{ validation_issue : raises
+    boarding_batch ||--o| dq_report : "summarised in"
+    boarding_batch ||--o{ account : "creates"
+    boarding_batch {
+        uuid id PK
+        uuid portfolio_id FK
+        int version
+        date cut_off_date
+        text conformance "regulatory|servicing"
+        jsonb seller_control_totals
+        jsonb art4_exemptions
+        text status "see state machine"
+    }
+    boarding_file {
+        uuid id PK
+        text role "debtors|accounts|transactions|schedules|collateral|documents|eba_t1..eba_t5"
+        text storage_path
+        text sha256
+        text format "csv|xlsx|fixed_width|zip"
+    }
+    file_profile {
+        uuid boarding_file_id FK
+        jsonb columns "types, nulls, distinct, patterns"
+    }
+    mapping_profile {
+        uuid id PK
+        uuid client_organization_id FK
+        text seller_name
+    }
+    mapping_profile_version {
+        uuid id PK
+        uuid mapping_profile_id FK
+        jsonb field_map
+        jsonb transformations
+        jsonb split_rules
+    }
+    mapping_proposal {
+        uuid boarding_batch_id FK
+        text source_column
+        text target_field
+        numeric confidence
+        text rationale
+        text decision "accepted|changed|rejected"
+    }
+    validation_issue {
+        uuid boarding_batch_id FK
+        int row_no
+        text rule
+        text severity "blocking|warning"
+    }
+    dq_report {
+        uuid boarding_batch_id FK
+        numeric completeness
+        numeric contactability
+        jsonb reconciliation
+    }
+```
+
+### 3.9 Layer 1 (`eba` schema) and mapping to Layer 2
+
+```mermaid
+erDiagram
+    eba_tape ||--o{ eba_t1_counterparty : "T1"
+    eba_tape ||--o{ eba_t2_links : "T2.1-T2.4"
+    eba_tape ||--o{ eba_t3_loan : "T3"
+    eba_tape ||--o{ eba_t4_1_protection : "T4.1"
+    eba_tape ||--o{ eba_t4_2_mortgage : "T4.2"
+    eba_tape ||--o{ eba_t5_collection_month : "T5"
+    eba_t1_counterparty }o--|| party : "maps to"
+    eba_t3_loan }o--|| account : "maps to"
+    eba_t4_1_protection }o--|| protection : "maps to"
+    eba_t4_2_mortgage }o--|| mortgage : "maps to"
+    eba_t5_collection_month }o--|| ledger_entry : "pre_boarding_aggregate"
+    eba_tape {
+        uuid id PK
+        text direction "import|export"
+        uuid boarding_batch_id FK
+        date cut_off_date
+        timestamptz knowledge_time "exports"
+        text catalogue_sha256
+        text file_sha256
+        text mode "full|pseudonymised"
+    }
+    eba_t1_counterparty {
+        uuid tape_id FK
+        int row_no
+        text f1_02 "Counterparty Identifier"
+        text f1_06 "Legal Type"
+        uuid party_id FK
+    }
+    eba_t2_links {
+        uuid tape_id FK
+        text sub_template "2.1|2.2|2.3|2.4"
+        text f2_00
+        text f2_01
+        text f2_02
+        text f2_03
+    }
+    eba_t3_loan {
+        uuid tape_id FK
+        text f3_01 "Loan Identifier"
+        text f3_12 "Legal Balance"
+        uuid account_id FK
+    }
+    eba_t4_1_protection {
+        uuid tape_id FK
+        text f4_00
+        uuid protection_id FK
+    }
+    eba_t4_2_mortgage {
+        uuid tape_id FK
+        text f4_43
+        uuid mortgage_id FK
+    }
+    eba_t5_collection_month {
+        uuid tape_id FK
+        text f5_00
+        int month_offset
+        bigint total_minor "5.03"
+        bigint from_collateral_minor "5.04"
+    }
+```
+
+Each `eba` table has one column per catalogue field (`f<id>`, raw text plus typed column where useful); the diagram shows only keys. Mapping rules both ways: `docs/reference/eba_gap_analysis.md` §3–4.
+
+## 4. State machines
+
+### 4.1 Account
+
+```mermaid
+stateDiagram-v2
+    [*] --> staged : boarding batch committed
+    staged --> [*] : batch rolled back
+    staged --> awaiting_first_letter : batch confirmed [active mandate covers portfolio]
+    awaiting_first_letter --> in_collection : first letter sent [R124-4 validator passed, archived]
+    in_collection --> arrangement : plan agreed or promise recorded
+    arrangement --> in_collection : plan broken or promise broken
+    arrangement --> closed_paid : plan completed and balance zero
+    arrangement --> closed_settled : settlement completed, discount posted
+    in_collection --> closed_paid : balance zero
+    in_collection --> legal : escalation approved by a human
+    legal --> in_collection : procedure abandoned
+    legal --> closed_paid : recovered in full
+    in_collection --> closed_uncollectable : time-barred or written off by owner
+    in_collection --> closed_recalled : client recall
+    arrangement --> closed_recalled : client recall
+    closed_paid --> in_collection : payment reversed or charged back
+    awaiting_first_letter --> on_hold : blocking hold
+    in_collection --> on_hold : blocking hold
+    arrangement --> on_hold : blocking hold
+    legal --> on_hold : blocking hold
+    on_hold --> awaiting_first_letter : hold lifted [first letter not yet sent]
+    on_hold --> in_collection : hold lifted [first letter sent]
+    on_hold --> closed_uncollectable : debt extinguished (e.g. personal recovery, liquidation closed)
+    on_hold --> closed_recalled : client recall
+    closed_paid --> [*]
+    closed_settled --> [*]
+    closed_uncollectable --> [*]
+    closed_recalled --> [*]
+```
+
+| Rule | Detail |
+|---|---|
+| Outbound in `awaiting_first_letter` | Only the R124-4 first letter (CPCE-04). Every later step carries the first-letter reference (CPCE-05) |
+| Guardrail | Any blocking `account_hold` stops all outbound actions; flows cannot override (CHANNELS §4.1) |
+| Hold scopes | `dispute`, `wrong_party`, `recalled`: outbound. `deceased`: **not an account hold** (founder 2026-11-07): outbound to the deceased party's own contact points stops; collection continues against the estate/heirs (`party_role = heir`, notary), so the account moves to an estate workflow. `surendettement` (after admissibility): outbound **and** payment requests, plan instalments suspended (HOLD-01, L722-5). `collective_proceeding`: outbound, payment requests, accruals per rule pack (HOLD-02, INT-10) |
+| On-hold return | `on_hold` returns to the state implied by the guards, not blindly to the previous one; plans suspended during a hold resume or are cancelled (Payment Plan machine) |
+| Accruals | The engine keeps accruing in every non-closed state unless a hold scope or rule pack says otherwise |
+| Ownership change | Not a state: a new `claim_ownership_period` row. A sale to a new owner with another servicer closes servicing via `closed_recalled` |
+
+### 4.2 Payment plan
+
+```mermaid
+stateDiagram-v2
+    [*] --> proposed : debtor (portal), collector or flow offer
+    proposed --> active : accepted [inside client envelope]
+    proposed --> pending_client_approval : accepted [outside envelope]
+    pending_client_approval --> active : client approves
+    pending_client_approval --> rejected : client rejects
+    proposed --> expired : not accepted in time
+    active --> active : instalment paid
+    active --> grace : instalment missed
+    grace --> active : cured within grace days
+    grace --> broken : not cured
+    active --> completed : last instalment paid
+    active --> suspended : blocking hold (e.g. surendettement admissible)
+    grace --> suspended : blocking hold
+    suspended --> active : hold lifted, schedule re-based
+    suspended --> cancelled : hold leads to extinction or new plan imposed
+    active --> cancelled : replaced by a new plan or client recall
+    completed --> [*]
+    broken --> [*]
+    rejected --> [*]
+    expired --> [*]
+    cancelled --> [*]
+```
+
+| Rule | Detail |
+|---|---|
+| Envelope | From `mandate_terms.plan_envelope` and `settlement_authority` (max duration, min instalment, max discount). Inside → automatic (rule, not model: GDPR-06) |
+| Settlement | `kind = settlement`: on `completed`, post a forgiveness entry for the agreed discount |
+| Client information | Any proposal other than immediate payment is reported to the client unless the mandate says otherwise (CPCE-06) |
+| Amounts | Instalment amounts come from the engine's statement at agreement date; never typed or LLM-generated |
+| Broken | Emits `plan_broken`; the account returns to `in_collection` |
+
+### 4.3 Communication
+
+```mermaid
+stateDiagram-v2
+    [*] --> requested : flow step, collector or system event
+    requested --> blocked : guardrail fails (hold, consent, invalid contact, missing locked block)
+    requested --> rendered : template + statement variables frozen, content hashed
+    rendered --> queued : idempotency key reserved
+    queued --> sent : provider accepted
+    queued --> failed : provider error
+    sent --> delivered : delivery receipt or AR signed
+    sent --> failed : bounce, invalid number, NPAI returned
+    sent --> unclaimed : registered mail or LRE not collected
+    delivered --> read : read receipt (platform-provided only, no pixels)
+    delivered --> replied : inbound reply linked
+    read --> replied : inbound reply linked
+    failed --> [*] : fallback creates a new communication (fallback_of)
+    blocked --> [*] : ops task if no eligible channel
+    delivered --> [*]
+    read --> [*]
+    replied --> [*]
+    unclaimed --> [*]
+```
+
+| Rule | Detail |
+|---|---|
+| Pre-send gate | Same gate for first try and fallback: holds, contact validity, consent (LRE for non-professionals → else paper LRAR; LRE-01), locked blocks renderable on the channel, then business caps (CHANNELS §4.1) |
+| First letter | `first_letter = true` requires the R124-4 validator on the rendered content; the exact rendered content and proof are archived (CPCE-04) |
+| GDPR | First communication on any channel carries the art. 14 block or link (GDPR-01) |
+| Proof | Rendered content (`content_sha256`, `storage_path`) and every provider event are append-only |
+| Contact effect | Hard bounce, invalid number, NPAI → `contact_point.status = invalid`; channel restrictions → channel health, not the contact |
+| Tracking | `read` only from platform receipts; e-mail open pixels off by default (GDPR-08) |
+
+### 4.4 Boarding batch
+
+```mermaid
+stateDiagram-v2
+    [*] --> uploaded : files stored with SHA-256
+    uploaded --> profiled : profiling done
+    profiled --> mapping_proposed : LLM (mock first) proposes mapping with confidence
+    mapping_proposed --> mapping_approved : human review accepts or edits
+    mapping_approved --> transformed : declarative transformations applied
+    transformed --> validated : no blocking issue
+    transformed --> needs_fix : blocking issues
+    needs_fix --> mapping_proposed : mapping or files changed
+    validated --> staged : DQ report produced, rows in staging
+    staged --> committed : ops commits [reconciliation within tolerance or override with reason]
+    committed --> confirmed : ops_manager confirms
+    committed --> rolled_back : ops rolls back
+    uploaded --> abandoned
+    needs_fix --> abandoned
+    staged --> abandoned
+    confirmed --> [*]
+    rolled_back --> [*]
+    abandoned --> [*]
+```
+
+| Rule | Detail |
+|---|---|
+| Commit | Writes Layer-2 rows with `boarding_batch_id`; accounts in `staged`; no outbound activity, no accruals posted beyond the opening entry |
+| Rollback | Allowed only before confirmation; posts reversal entries and deletes or invalidates the batch's Layer-2 rows (no other activity can exist yet) |
+| Confirm | Requires an active `mandate` covering the portfolio (R124-3, CPCE-03); moves accounts to `awaiting_first_letter` and starts flows |
+| Versioning | Re-boarding the same tape creates `version + 1`; mapping profiles are versioned and reused per seller/client |
+| Mandatory fields | Severity from the catalogue and `conformance` (gap analysis §3.3) |
+
+## 5. Open questions (❓ founder)
+
+**Answered by the founder on 2026-11-07** (see `docs/PHASE0_REVIEW.md` §D): Q1 one account per (client, debtor) with invoices as items; Q2 components + balancing line up to `3.12`; Q4 deceased → collect against heirs, insolvency hold only on proof of the Banque de France admissibility decision (or court judgment); Q5 receive and forward; Q7 10 days, per client; Q8 one dossier per loan; Q3 no outbound until the batch is confirmed; Q6 5 business days, silence = proposal expires. Gap-analysis questions: our plans are **not** exported as forbearance (seller's measures only); percentages exported as ratios (`0.05`).
+
+1. **Account grain for invoices:** one account per (client, debtor) with invoices as `claim_item`s (proposed), or one account per invoice?
+2. **Opening balance for bank tapes:** collect on `3.12` legal balance, or on `3.09 + 3.10 + 3.11`? (gap analysis Q1)
+3. **Staged accounts:** confirm that accounts get no outbound activity until the batch is **confirmed**, not just committed.
+4. **Hold on deceased / insolvency flags from the tape (`1.09`, `1.31`, `1.32`):** auto-apply the hold at boarding, or propose and let ops confirm (proposed: propose, ops confirms; outbound blocked while pending)?
+5. **Recall:** when a client recalls an account, do we keep servicing payments that arrive afterwards (forward them), or refuse them?
+6. **Client approval outside the envelope:** fixed response deadline for the client, and what happens on silence (proposed: proposal expires)?
+7. **Grace period for missed plan instalments:** default number of days before a plan is `broken` (proposed: 10 days, configurable per client)?
+8. **Co-debtors:** one dossier per loan with all co-borrowers/guarantors as parties (proposed), or one dossier per debtor?
