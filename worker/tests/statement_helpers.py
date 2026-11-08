@@ -36,6 +36,20 @@ def bank_tenant(feed: str = "camt053") -> dict[str, Any]:
     return tenant
 
 
+def other_bank(tenant: dict[str, Any], feed: str = "camt053") -> dict[str, Any]:
+    """The same servicer and staff, another active client-funds bank account."""
+    iban = iban_fr(random.Random(f"{tenant['servicer']}-2"))
+    with psycopg.connect(DB) as conn, conn.transaction():
+        bank = one(
+            conn,
+            """insert into public.bank_account (organization_id, iban, currency, label, feed,
+                 opened_on) values (%s, %s, 'EUR', 'Fonds de tiers 2', %s, '2026-01-01')
+               returning id""",
+            (tenant["servicer"], iban, feed),
+        )
+    return {**tenant, "bank": bank, "iban": iban}
+
+
 def upload(
     tenant: dict[str, Any], store: Storage, data: bytes, name: str = "releve.xml"
 ) -> dict[str, Any]:

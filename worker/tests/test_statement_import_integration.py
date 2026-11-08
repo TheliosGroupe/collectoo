@@ -16,6 +16,7 @@ from statement_helpers import (
     cash_in_by_day,
     drain,
     money_state,
+    other_bank,
     paid_by_day,
     statement,
     upload,
@@ -161,9 +162,8 @@ def test_an_overlapping_statement_adds_only_its_new_lines() -> None:
     assert after["payments_minor"] - before["payments_minor"] == sum(new_days.values())
     assert after["cash_entries"] - before["cash_entries"] == len(new_days)
     assert s2["bank_check"]["difference_minor"] == "0"
-    assert {w["code"] for w in s2["warnings"]} == {
-        "overlap"
-    }  # continuity: opening = previous closing
+    # the first statement covers the day before: no « relevé manquant », only the overlap
+    assert {w["code"] for w in s2["warnings"]} == {"overlap"}
 
 
 def test_a_reused_bank_reference_with_other_facts_refuses_the_file() -> None:
@@ -333,3 +333,116 @@ def test_a_technical_failure_is_retried_then_marked_failed() -> None:
             )
             == 0
         )
+
+
+def _rejected(target: dict[str, Any], code: str) -> None:
+    s = statement(target["statement_id"])
+    assert (s["status"], s["error_code"]) == ("rejected", code), s
+
+
+def test_one_bank_entry_is_booked_once_whatever_detail_the_file_gives() -> None:
+    """Review #0: day D's statement without remittance details (a single transfer, a remise kept as
+    one unsplit line), then the same day with its details: refused, never booked twice."""
+    tenant = bank_tenant()
+    store = storage()
+    single = Entry(5000, True, START, ref="R1", info="VIR DUPONT")
+    remise = Entry(15000, True, START, ref="REM1", batch_count=2, info="REMISE 2 VIREMENTS")
+    first = upload(
+        tenant,
+        store,
+        render_camt053(
+            make_doc([single, remise], iban=tenant["iban"], from_date=START, to_date=START), "08"
+        ),
+    )
+    drain(store)
+    assert _imported(first)["counts"]["payments"] == {"count": 2, "minor": "20000"}
+    before = money_state(tenant["bank"])
+
+    def day(*entries: Entry) -> bytes:
+        return render_camt053(
+            make_doc(entries, iban=tenant["iban"], from_date=START, to_date=START), "08"
+        )
+
+    one_detail = replace(single, txs=(Tx(5000, name="DUPONT", ustrd=("F-1",)),))
+    with_refs = replace(remise, txs=(Tx(10000, ref="T1", name="A"), Tx(5000, ref="T2", name="B")))
+    without_refs = replace(remise, txs=(Tx(10000, name="A"), Tx(5000, name="B")))
+    detailed = upload(tenant, store, day(one_detail, with_refs))
+    drain(store)
+    _rejected(detailed, "entry_detail_differs")
+    split = upload(tenant, store, day(one_detail, without_refs))
+    drain(store)
+    _rejected(split, "reference_conflict")
+    assert money_state(tenant["bank"]) == before  # 200,00 € once, to the hash
+
+    # the transfer with its one detail is the line already imported: nothing new
+    same = upload(tenant, store, day(one_detail, remise))
+    drain(store)
+    counts = _imported(same)["counts"]
+    assert (counts["new_lines"], counts["known_lines"]) == (0, 2)
+    assert money_state(tenant["bank"]) == before
+
+
+def test_an_unsplit_batch_that_undoes_a_debit_is_recorded_not_booked() -> None:
+    """Review #4/#14 (ADR-0013 M2b-2 #2): a batch credited back by the bank is a return line, not a
+    payment, even when its details cannot be split."""
+    tenant = bank_tenant()
+    store = storage()
+    paid = Entry(1000, True, START, ref="P1", txs=(Tx(1000, ref="TP1", name="MARTIN"),))
+    returned = Entry(
+        30000, True, START, reversal=True, ref="RV1", code="PMNT/ICDT/RRTN", batch_count=3
+    )
+    details = Entry(
+        8000,
+        True,
+        START,
+        ref="RV2",
+        txs=(Tx(None, ref="TR1", return_reason="AC04"), Tx(None, ref="TR2")),
+        batch_count=2,
+    )
+    doc = make_doc([paid, returned, details], iban=tenant["iban"], from_date=START, to_date=START)
+    target = upload(tenant, store, render_camt053(doc, "08"))
+    drain(store)
+    s = _imported(target)
+    assert s["counts"]["payments"] == {"count": 1, "minor": "1000"}
+    assert (s["counts"]["returns"], s["counts"]["batch_unsplit"]) == (2, 0)
+    assert money_state(tenant["bank"])["cash_minor"] == 1000
+    # the bank's closing balance = the cash booked + the 2 lines to classify
+    assert s["bank_check"]["difference_minor"] == "0"
+    assert s["bank_check"]["unposted_lines"] == 2
+
+
+def test_a_csv_export_imported_on_the_wrong_account_is_not_booked_again() -> None:
+    """Review #2: ops upload account A's export with B selected, then on A. The same file is
+    refused at upload; another export with the bank's ids is refused at import; without ids, its
+    lines are held (no payment, no cash)."""
+    wrong = bank_tenant("csv")
+    right = other_bank(wrong, "csv")
+    store = storage()
+    doc, _ = _doc(wrong, 60, 2, seed=19)
+    lines = expected_lines(doc)
+    data = render_bank_csv(lines)
+    first = upload(wrong, store, data, "export.csv")
+    drain(store)
+    _imported(first)
+    booked_on_wrong = money_state(wrong["bank"])
+    with pytest.raises(psycopg.errors.CheckViolation, match="another bank account"):
+        upload(right, store, data, "export.csv")
+    reexport = upload(right, store, render_bank_csv(lines, seed=9, signed=True), "export-2.csv")
+    drain(store)
+    _rejected(reexport, "imported_on_other_account")
+    assert money_state(right["bank"])["lines"] == 0
+
+    # without the bank's ids: fingerprints only, held as suspected duplicates
+    doc2, _ = _doc(wrong, 40, 2, seed=20)
+    lines2 = expected_lines(doc2)
+    _ = upload(wrong, store, render_bank_csv(lines2, bank_ids=False), "sans-id.csv")
+    drain(store)
+    again = upload(
+        right, store, render_bank_csv(lines2, bank_ids=False, seed=3, signed=True), "sans-id-2.csv"
+    )
+    drain(store)
+    s = _imported(again)
+    assert s["counts"]["suspected_duplicates"] == s["counts"]["new_lines"] == len(lines2)
+    state = money_state(right["bank"])
+    assert (state["payments"], state["cash_entries"]) == (0, 0)
+    assert money_state(wrong["bank"])["payments"] > booked_on_wrong["payments"]

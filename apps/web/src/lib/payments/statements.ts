@@ -37,7 +37,10 @@ export function lineState(line: { kind: string; direction: string; has_payment: 
   state: string;
   tone: Tone;
 } {
-  const kind = LINE_KIND[line.kind] ?? line.kind;
+  const kind =
+    line.kind === "batch_unsplit" && line.direction === "debit"
+      ? "Débit groupé non ventilé"
+      : (LINE_KIND[line.kind] ?? line.kind);
   if (line.has_payment) return { kind, state: "Comptabilisé · à affecter", tone: "ok" };
   if (line.kind === "suspected_duplicate") return { kind, state: "Retenu : doublon possible", tone: "action" };
   return { kind, state: "Non comptabilisé · à classer", tone: "action" };
@@ -53,12 +56,75 @@ const LINE_KIND: Record<string, string> = {
   psp_payout: "Versement du prestataire de paiement",
 };
 
-export const LINE_FILTERS: Record<string, { label: string; kinds: string[] | null }> = {
-  toutes: { label: "Toutes", kinds: null },
-  encaissements: { label: "Encaissements", kinds: ["debtor_credit", "batch_unsplit"] },
-  "a-classer": { label: "À classer", kinds: ["return", "refund_out", "other_debit", "psp_payout"] },
-  doublons: { label: "Doublons possibles", kinds: ["suspected_duplicate"] },
+/** Lines of these kinds (and of this direction, when given). */
+type LineGroup = { direction?: "credit" | "debit"; kinds: string[] };
+
+/**
+ * Filters of a statement's lines. « Encaissements » are exactly the lines booked as payments (credits a
+ * debtor paid, an unsplit batch credit); everything else not held is « à classer », an unsplit debit
+ * batch included: what the bank check counts as not booked.
+ */
+export const LINE_FILTERS: Record<string, { label: string; groups: LineGroup[] | null }> = {
+  toutes: { label: "Toutes", groups: null },
+  encaissements: { label: "Encaissements", groups: [{ direction: "credit", kinds: ["debtor_credit", "batch_unsplit"] }] },
+  "a-classer": {
+    label: "À classer",
+    groups: [{ kinds: ["return", "refund_out", "other_debit", "psp_payout"] }, { direction: "debit", kinds: ["batch_unsplit"] }],
+  },
+  doublons: { label: "Doublons possibles", groups: [{ kinds: ["suspected_duplicate"] }] },
 };
+
+/** Whether a line belongs to a filter (the rule `lineFilterOr` gives PostgREST). */
+export function lineInFilter(key: string, line: { kind: string; direction: string }): boolean {
+  const groups = LINE_FILTERS[key]?.groups;
+  if (!groups) return true;
+  return groups.some((g) => (!g.direction || g.direction === line.direction) && g.kinds.includes(line.kind));
+}
+
+/** A filter as a PostgREST `or` argument, or null for every line. */
+export function lineFilterOr(key: string): string | null {
+  const groups = LINE_FILTERS[key]?.groups;
+  if (!groups) return null;
+  return groups
+    .map((g) => {
+      const kinds = `kind.in.(${g.kinds.join(",")})`;
+      return g.direction ? `and(direction.eq.${g.direction},${kinds})` : kinds;
+    })
+    .join(",");
+}
+
+/** Filters of the statement list (« Relevés »). */
+export const STATEMENT_STATUS_FILTERS: Record<string, { label: string; statuses: string[] | null }> = {
+  tous: { label: "Tous", statuses: null },
+  importes: { label: "Importés", statuses: ["imported"] },
+  "en-cours": { label: "En cours", statuses: ["awaiting_upload", "uploaded"] },
+  refuses: { label: "Refusés ou en échec", statuses: ["rejected", "failed"] },
+};
+
+export const STATEMENT_PAGE_SIZE = 20;
+
+export type StatementListQuery = { page: number; compte: string | null; statut: string };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Page, bank account and status of the list, from the URL (anything else falls back to the default). */
+export function statementListQuery(query: Record<string, string | string[] | undefined>): StatementListQuery {
+  const text = (v: string | string[] | undefined) => (typeof v === "string" ? v : "");
+  const page = /^[1-9][0-9]{0,5}$/.test(text(query.page)) ? Number(text(query.page)) : 1;
+  const compte = UUID_RE.test(text(query.compte)) ? text(query.compte) : null;
+  const statut = text(query.statut) in STATEMENT_STATUS_FILTERS ? text(query.statut) : "tous";
+  return { page, compte, statut };
+}
+
+/** The list's URL for a query (defaults left out). */
+export function statementListHref(q: StatementListQuery, page: number = q.page): string {
+  const params = new URLSearchParams();
+  if (q.compte) params.set("compte", q.compte);
+  if (q.statut !== "tous") params.set("statut", q.statut);
+  if (page > 1) params.set("page", String(page));
+  const search = params.toString();
+  return `/backoffice/encaissements${search ? `?${search}` : ""}`;
+}
 
 export type BankCheck = {
   as_of: string;
@@ -131,11 +197,19 @@ const IMPORT_ERROR: Record<string, string> = {
   duplicate_reference_in_file: "La même référence bancaire apparaît deux fois dans le fichier.",
   reference_conflict:
     "Une référence bancaire déjà importée revient avec un autre montant, sens ou date : vérifiez le fichier avec la banque.",
+  entry_detail_differs:
+    "Une opération déjà importée revient avec un autre niveau de détail (remise ventilée ou non) : le fichier est refusé pour ne pas la comptabiliser deux fois. Importez les relevés de ce compte toujours avec le même niveau de détail.",
+  imported_on_other_account:
+    "Ce fichier, ou une opération qu'il contient, a déjà été importé sur un autre compte bancaire : vérifiez le compte choisi.",
   future_booking_date: "Une opération est datée après aujourd'hui.",
   csv_header: "Colonnes manquantes : il faut au moins la date, le libellé et le montant (ou débit et crédit).",
-  csv_row: "Une ligne du CSV est illisible (date JJ/MM/AAAA, montant 1 234,56 ; aucun arrondi n'est fait).",
+  csv_row:
+    "Une ligne du CSV est illisible : date JJ/MM/AAAA, montant 1 234,56 (aucun arrondi n'est fait), guillemet non fermé, nombre de colonnes différent de l'en-tête, ou montant négatif dans la colonne Crédit.",
   csv_empty: "Le fichier ne contient aucune opération.",
-  csv_profile_invalid: "Le paramétrage CSV du compte bancaire est invalide.",
+  csv_encoding:
+    "Encodage non reconnu : enregistrez l'export en CSV UTF-8 ou Windows-1252 (pas en texte Unicode/UTF-16).",
+  csv_profile_invalid: "Le paramétrage CSV du compte bancaire est invalide : contactez le support.",
+  file_too_large: "Relevé trop volumineux : exportez une période plus courte.",
   file_changed: "Le fichier stocké ne correspond pas au fichier déposé : déposez-le à nouveau.",
   bank_account_closed: "Le compte bancaire est clôturé : ses relevés ne sont plus importés.",
   import_failed:
@@ -156,6 +230,8 @@ export function uploadErrorText(message: string): string {
   if (message.includes("bank account is closed")) return "Ce compte bancaire est clôturé.";
   if (message.includes("does not match the bank account feed"))
     return "Ce compte reçoit ses relevés dans l'autre format (CAMT.053 ou CSV) : déposez le bon fichier.";
+  if (message.includes("already a statement of another bank account"))
+    return "Ce fichier a déjà été déposé sur un autre compte bancaire : vérifiez le compte choisi.";
   if (message.includes("unsupported statement file type")) return "Type de fichier non pris en charge (XML ou CSV).";
   if (message.includes("too large")) return "Fichier trop volumineux (500 Mo au plus).";
   if (message.includes("invalid file")) return "Fichier invalide : renommez-le sans « / ».";

@@ -88,6 +88,18 @@ test("an ops manager imports a statement, the same file again, then an overlappi
   await page.goto("/backoffice/encaissements");
   await expect(page.getByTestId("statement-list").getByRole("listitem")).toHaveCount(2);
   await reviewShot(page, testInfo, "m2-statements");
+
+  // The list is paged and narrowed to a bank account or a status, so no statement goes out of reach.
+  const filters = page.getByTestId("statement-filters");
+  await filters.getByLabel("Statut").selectOption("refuses");
+  await filters.getByRole("button", { name: "Filtrer" }).click();
+  await expect(page).toHaveURL(/statut=refuses/);
+  await expect(page.getByText("Aucun relevé ne correspond à ces filtres.")).toBeVisible();
+  await filters.getByLabel("Statut").selectOption("importes");
+  await filters.getByLabel("Compte bancaire").selectOption({ index: 1 });
+  await filters.getByRole("button", { name: "Filtrer" }).click();
+  await expect(page).toHaveURL(/compte=[0-9a-f-]{36}&statut=importes/);
+  await expect(page.getByTestId("statement-list").getByRole("listitem")).toHaveCount(2);
 });
 
 test("collectors do not see bank statements", async ({ page }) => {

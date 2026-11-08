@@ -3,7 +3,7 @@
 -- here by inserting the parsed lines into private.bank_import_stage and calling private.ingest_statement,
 -- as the import job does in one transaction.
 begin;
-select plan(93);
+select plan(109);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -33,7 +33,13 @@ insert into public.bank_account (id, organization_id, iban, currency, label, fee
   ('80000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000a', 'FR7630004000031234567890143', 'EUR',
    'Bientôt clôturé', 'camt053', '2026-01-01'),
   ('80000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-00000000000a', 'FR1420041010050500013M02606', 'EUR',
-   'Clôturé', 'camt053', '2026-01-01');
+   'Clôturé', 'camt053', '2026-01-01'),
+  ('80000000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-00000000000a', 'FR7652911690573468086161054', 'EUR',
+   'Fonds de tiers 2', 'camt053', '2026-01-01'),
+  ('80000000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-00000000000a', 'FR7658954489556714560695353', 'EUR',
+   'Fonds de tiers 3', 'camt053', '2026-01-01'),
+  ('80000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-00000000000a', 'FR7666662613887206717771879', 'EUR',
+   'Fonds de tiers CSV 2', 'csv', '2026-01-01');
 update public.bank_account set status = 'closed', closed_on = '2026-02-01', closed_reason = 'replaced'
 where id = '80000000-0000-0000-0000-000000000005';
 
@@ -45,28 +51,34 @@ create or replace function pg_temp.as_user(p_user uuid, p_aal text) returns void
     json_build_object('sub', p_user, 'role', 'authenticated', 'aal', p_aal)::text, true);
 $$;
 -- A statement whose file is stored and whose import job runs (what submit_statement_import leaves).
-create or replace function pg_temp.statement(p_id uuid, p_bank uuid) returns void language plpgsql as $$
+create or replace function pg_temp.sha(p_id uuid) returns text language sql as $$
+  select encode(sha256(convert_to(p_id::text, 'UTF8')), 'hex');
+$$;
+create or replace function pg_temp.statement(p_id uuid, p_bank uuid, p_sha text default null) returns void
+language plpgsql as $$
 begin
   insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
                                      size_bytes, storage_path)
   select p_id, b.organization_id, b.id, b.currency, b.feed, 'releve.' || case b.feed when 'csv' then 'csv' else 'xml' end,
-         encode(sha256(convert_to(p_id::text, 'UTF8')), 'hex'), 10, 'test/' || p_id
+         coalesce(p_sha, pg_temp.sha(p_id)), 10, 'test/' || p_id
   from public.bank_account b where b.id = p_bank;
   update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = p_id;
 end $$;
--- The parsed lines, as the job COPYs them: {n, key, dir, amount, date, kind?, s?, ccy?, name?, text?}.
+-- The parsed lines, as the job COPYs them: {n, key, ref?, dir, amount, date, kind?, s?, ccy?, name?, text?}
+-- (ref: the bank entry's own reference, Ntry/AcctSvcrRef).
 create or replace function pg_temp.stage(p_statement uuid, p_lines jsonb) returns void language sql as $$
-  insert into private.bank_import_stage (statement_id, line_no, section_no, dedup_key, direction, amount_minor, currency,
-                                         booking_date, counterparty_name, remittance_text, kind, method)
-  select p_statement, (l ->> 'n')::int, coalesce((l ->> 's')::int, 1), l ->> 'key', l ->> 'dir', (l ->> 'amount')::bigint,
-         coalesce(l ->> 'ccy', 'EUR'), (l ->> 'date')::date, l ->> 'name', l ->> 'text',
+  insert into private.bank_import_stage (statement_id, line_no, section_no, dedup_key, entry_ref, direction, amount_minor,
+                                         currency, booking_date, counterparty_name, remittance_text, kind, method)
+  select p_statement, (l ->> 'n')::int, coalesce((l ->> 's')::int, 1), l ->> 'key', l ->> 'ref', l ->> 'dir',
+         (l ->> 'amount')::bigint, coalesce(l ->> 'ccy', 'EUR'), (l ->> 'date')::date, l ->> 'name', l ->> 'text',
          coalesce(l ->> 'kind', 'debtor_credit'), 'sct'
   from jsonb_array_elements(p_lines) l;
 $$;
-create or replace function pg_temp.camt(p_count int, p_opening bigint, p_closing bigint, p_from date, p_to date)
+create or replace function pg_temp.camt(p_count int, p_opening bigint, p_closing bigint, p_from date, p_to date,
+                                        p_seq int default 1)
 returns jsonb language sql as $$
   select jsonb_build_object('format', 'camt053', 'version', '08', 'line_count', p_count, 'skipped_not_booked', 1,
-    'sections', jsonb_build_array(jsonb_build_object('stmt_id', 'STMT', 'seq', 1, 'from_date', p_from, 'to_date', p_to,
+    'sections', jsonb_build_array(jsonb_build_object('stmt_id', 'STMT', 'seq', p_seq, 'from_date', p_from, 'to_date', p_to,
       'opening_minor', p_opening::text, 'closing_minor', p_closing::text)));
 $$;
 create or replace function pg_temp.csv(p_count int) returns jsonb language sql as $$
@@ -97,8 +109,8 @@ select pg_temp.statement('a0000000-0000-0000-0000-000000000001', '80000000-0000-
 select pg_temp.stage('a0000000-0000-0000-0000-000000000001', '[
   {"n": 1, "key": "t:A1", "dir": "credit", "amount": 10000, "date": "2026-10-01", "name": "MARTIN SAS", "text": "REGLT F-1"},
   {"n": 2, "key": "t:A2", "dir": "credit", "amount": 2500, "date": "2026-10-01"},
-  {"n": 3, "key": "e:N3#0", "dir": "credit", "amount": 7000, "date": "2026-10-02", "kind": "batch_unsplit"},
-  {"n": 4, "key": "e:N4#0", "dir": "debit", "amount": 150, "date": "2026-10-02", "kind": "other_debit"},
+  {"n": 3, "key": "e:N3#1", "ref": "N3", "dir": "credit", "amount": 7000, "date": "2026-10-02", "kind": "batch_unsplit"},
+  {"n": 4, "key": "e:N4#1", "ref": "N4", "dir": "debit", "amount": 150, "date": "2026-10-02", "kind": "other_debit"},
   {"n": 5, "key": "t:A5", "dir": "debit", "amount": 2500, "date": "2026-10-02", "kind": "return"}]');
 insert into t select 's1', private.ingest_statement('a0000000-0000-0000-0000-000000000001',
   pg_temp.camt(5, 0, 16850, '2026-10-01', '2026-10-02'));
@@ -149,8 +161,8 @@ select pg_temp.statement('a0000000-0000-0000-0000-000000000002', '80000000-0000-
 select pg_temp.stage('a0000000-0000-0000-0000-000000000002', '[
   {"n": 1, "key": "t:A1", "dir": "credit", "amount": 10000, "date": "2026-10-01", "name": "MARTIN SAS", "text": "REGLT F-1"},
   {"n": 2, "key": "t:A2", "dir": "credit", "amount": 2500, "date": "2026-10-01"},
-  {"n": 3, "key": "e:N3#0", "dir": "credit", "amount": 7000, "date": "2026-10-02", "kind": "batch_unsplit"},
-  {"n": 4, "key": "e:N4#0", "dir": "debit", "amount": 150, "date": "2026-10-02", "kind": "other_debit"},
+  {"n": 3, "key": "e:N3#1", "ref": "N3", "dir": "credit", "amount": 7000, "date": "2026-10-02", "kind": "batch_unsplit"},
+  {"n": 4, "key": "e:N4#1", "ref": "N4", "dir": "debit", "amount": 150, "date": "2026-10-02", "kind": "other_debit"},
   {"n": 5, "key": "t:A5", "dir": "debit", "amount": 2500, "date": "2026-10-02", "kind": "return"}]');
 insert into t select 's2', private.ingest_statement('a0000000-0000-0000-0000-000000000002',
   pg_temp.camt(5, 0, 16850, '2026-10-01', '2026-10-02'));
@@ -171,8 +183,8 @@ select is((select bank_check ->> 'difference_minor' from public.bank_statement w
 -- Opening 12500 (end of 10-01); + 7000 - 150 - 2500 (known) + 4000 + 300 (new) = 21150.
 select pg_temp.statement('a0000000-0000-0000-0000-000000000003', '80000000-0000-0000-0000-000000000001');
 select pg_temp.stage('a0000000-0000-0000-0000-000000000003', '[
-  {"n": 1, "key": "e:N3#0", "dir": "credit", "amount": 7000, "date": "2026-10-02", "kind": "batch_unsplit"},
-  {"n": 2, "key": "e:N4#0", "dir": "debit", "amount": 150, "date": "2026-10-02", "kind": "other_debit"},
+  {"n": 1, "key": "e:N3#1", "ref": "N3", "dir": "credit", "amount": 7000, "date": "2026-10-02", "kind": "batch_unsplit"},
+  {"n": 2, "key": "e:N4#1", "ref": "N4", "dir": "debit", "amount": 150, "date": "2026-10-02", "kind": "other_debit"},
   {"n": 3, "key": "t:A5", "dir": "debit", "amount": 2500, "date": "2026-10-02", "kind": "return"},
   {"n": 4, "key": "t:A6", "dir": "credit", "amount": 4000, "date": "2026-10-03"},
   {"n": 5, "key": "h:0f0f#1", "dir": "credit", "amount": 300, "date": "2026-10-03", "text": "COTISATION"}]');
@@ -193,6 +205,96 @@ select private.ingest_statement('a0000000-0000-0000-0000-000000000004', pg_temp.
 select is((select array[warnings -> 0 ->> 'code', warnings -> 0 ->> 'expected_minor', bank_check ->> 'difference_minor']
            from public.bank_statement where id = 'a0000000-0000-0000-0000-000000000004'),
   array['opening_differs', '21150', '3850'], 'a gap with the previous statement is a warning, and I9 shows the difference');
+
+-- Continuity is checked against the statement that covers the day before (review #1): a re-download
+-- that overlaps the last statement is not compared with an older one.
+-- K0 01/10 (seq 7) 0 -> 1000; K1 02/10–05/10 (seq 8) 1000 -> 1700; K2 04/10–06/10 (seq 9) re-download,
+-- opening 1500 (end of 03/10) -> 1800; K3 08/10 (seq 11) 1800 -> 1850.
+select pg_temp.statement('d0000000-0000-0000-0000-000000000001', '80000000-0000-0000-0000-000000000007');
+select pg_temp.stage('d0000000-0000-0000-0000-000000000001', '[
+  {"n": 1, "key": "t:K0", "dir": "credit", "amount": 1000, "date": "2026-10-01"}]');
+select private.ingest_statement('d0000000-0000-0000-0000-000000000001', pg_temp.camt(1, 0, 1000, '2026-10-01', '2026-10-01', 7));
+select pg_temp.statement('d0000000-0000-0000-0000-000000000002', '80000000-0000-0000-0000-000000000007');
+select pg_temp.stage('d0000000-0000-0000-0000-000000000002', '[
+  {"n": 1, "key": "t:K1", "dir": "credit", "amount": 500, "date": "2026-10-02"},
+  {"n": 2, "key": "t:K2", "dir": "credit", "amount": 200, "date": "2026-10-04"}]');
+select private.ingest_statement('d0000000-0000-0000-0000-000000000002', pg_temp.camt(2, 1000, 1700, '2026-10-02', '2026-10-05', 8));
+select is((select warnings from public.bank_statement where id = 'd0000000-0000-0000-0000-000000000002'), '[]'::jsonb,
+  'the next statement follows the previous one: no warning');
+select pg_temp.statement('d0000000-0000-0000-0000-000000000003', '80000000-0000-0000-0000-000000000007');
+select pg_temp.stage('d0000000-0000-0000-0000-000000000003', '[
+  {"n": 1, "key": "t:K2", "dir": "credit", "amount": 200, "date": "2026-10-04"},
+  {"n": 2, "key": "t:K3", "dir": "credit", "amount": 100, "date": "2026-10-06"}]');
+select private.ingest_statement('d0000000-0000-0000-0000-000000000003', pg_temp.camt(2, 1500, 1800, '2026-10-04', '2026-10-06', 9));
+select is((select warnings from public.bank_statement where id = 'd0000000-0000-0000-0000-000000000003'),
+  '[{"code": "overlap", "statements": 1}]'::jsonb,
+  'a re-download overlapping the last statement: « chevauche », never « relevé manquant » against an older one');
+select pg_temp.statement('d0000000-0000-0000-0000-000000000004', '80000000-0000-0000-0000-000000000007');
+select pg_temp.stage('d0000000-0000-0000-0000-000000000004', '[
+  {"n": 1, "key": "t:K4", "dir": "credit", "amount": 50, "date": "2026-10-08"}]');
+select private.ingest_statement('d0000000-0000-0000-0000-000000000004', pg_temp.camt(1, 1800, 1850, '2026-10-08', '2026-10-08', 11));
+select is((select warnings from public.bank_statement where id = 'd0000000-0000-0000-0000-000000000004'),
+  jsonb_build_array(jsonb_build_object('code', 'sequence_gap', 'previous_statement_id', 'd0000000-0000-0000-0000-000000000003',
+                                       'previous_seq', '9', 'seq', '11')),
+  'after it, the latest statement is the previous one: same balance, but statement 10 is missing');
+
+-- One bank entry is booked once, whatever detail the file gives (review #0) ----------------------------
+-- REM1 imported as one unsplit line, REM2 with its two details (references of their own).
+select pg_temp.statement('a0000000-0000-0000-0000-000000000011', '80000000-0000-0000-0000-000000000006');
+select pg_temp.stage('a0000000-0000-0000-0000-000000000011', '[
+  {"n": 1, "key": "e:REM1#1", "ref": "REM1", "dir": "credit", "amount": 15000, "date": "2026-10-01", "kind": "batch_unsplit"},
+  {"n": 2, "key": "t:T3", "ref": "REM2", "dir": "credit", "amount": 6000, "date": "2026-10-01"},
+  {"n": 3, "key": "t:T4", "ref": "REM2", "dir": "credit", "amount": 4000, "date": "2026-10-01"}]');
+select private.ingest_statement('a0000000-0000-0000-0000-000000000011', pg_temp.camt(3, 0, 25000, '2026-10-01', '2026-10-01'));
+select is((select array_agg(entry_ref order by line_no) from public.bank_transaction
+           where statement_id = 'a0000000-0000-0000-0000-000000000011'), array['REM1', 'REM2', 'REM2'],
+  'every camt.053 line keeps the reference of its bank entry');
+-- REM1 again, now with its details
+select pg_temp.statement('a0000000-0000-0000-0000-000000000012', '80000000-0000-0000-0000-000000000006');
+select pg_temp.stage('a0000000-0000-0000-0000-000000000012', '[
+  {"n": 1, "key": "t:T3", "ref": "REM2", "dir": "credit", "amount": 6000, "date": "2026-10-01"},
+  {"n": 2, "key": "t:T4", "ref": "REM2", "dir": "credit", "amount": 4000, "date": "2026-10-01"},
+  {"n": 3, "key": "t:T1", "ref": "REM1", "dir": "credit", "amount": 10000, "date": "2026-10-01"},
+  {"n": 4, "key": "t:T2", "ref": "REM1", "dir": "credit", "amount": 5000, "date": "2026-10-01"}]');
+select throws_like($$ select private.ingest_statement('a0000000-0000-0000-0000-000000000012',
+  pg_temp.camt(4, 0, 25000, '2026-10-01', '2026-10-01')) $$, 'entry_detail_differs: line 3 %',
+  'an entry imported unsplit comes back with its details: the file is refused, the money is never booked twice');
+-- REM2 again, now unsplit
+select pg_temp.statement('a0000000-0000-0000-0000-000000000013', '80000000-0000-0000-0000-000000000006');
+select pg_temp.stage('a0000000-0000-0000-0000-000000000013', '[
+  {"n": 1, "key": "e:REM1#1", "ref": "REM1", "dir": "credit", "amount": 15000, "date": "2026-10-01", "kind": "batch_unsplit"},
+  {"n": 2, "key": "e:REM2#1", "ref": "REM2", "dir": "credit", "amount": 10000, "date": "2026-10-01", "kind": "batch_unsplit"}]');
+select throws_like($$ select private.ingest_statement('a0000000-0000-0000-0000-000000000013',
+  pg_temp.camt(2, 0, 25000, '2026-10-01', '2026-10-01')) $$, 'entry_detail_differs: line 2 %', 'and the other way round');
+-- REM1 split by details without references of their own: its first key comes back with another amount
+select pg_temp.statement('a0000000-0000-0000-0000-000000000014', '80000000-0000-0000-0000-000000000006');
+select pg_temp.stage('a0000000-0000-0000-0000-000000000014', '[
+  {"n": 1, "key": "e:REM1#1", "ref": "REM1", "dir": "credit", "amount": 10000, "date": "2026-10-01"},
+  {"n": 2, "key": "e:REM1#2", "ref": "REM1", "dir": "credit", "amount": 5000, "date": "2026-10-01"}]');
+select throws_like($$ select private.ingest_statement('a0000000-0000-0000-0000-000000000014',
+  pg_temp.camt(2, 0, 15000, '2026-10-01', '2026-10-01')) $$, 'reference_conflict: line 1 %',
+  'details without references of their own: the unsplit line''s key comes back with another amount');
+select is(array[(select count(*) from public.payment where bank_account_id = '80000000-0000-0000-0000-000000000006'),
+                pg_temp.balance('client_money_cash', '80000000-0000-0000-0000-000000000006')],
+  array[3::bigint, 25000], 'nothing of the refused files is booked: three payments, 250,00 € once');
+-- The same entries at the same level of detail: known, nothing new, not refused
+select pg_temp.statement('a0000000-0000-0000-0000-000000000015', '80000000-0000-0000-0000-000000000006');
+select pg_temp.stage('a0000000-0000-0000-0000-000000000015', '[
+  {"n": 1, "key": "e:REM1#1", "ref": "REM1", "dir": "credit", "amount": 15000, "date": "2026-10-01", "kind": "batch_unsplit"},
+  {"n": 2, "key": "t:T3", "ref": "REM2", "dir": "credit", "amount": 6000, "date": "2026-10-01"},
+  {"n": 3, "key": "t:T4", "ref": "REM2", "dir": "credit", "amount": 4000, "date": "2026-10-01"},
+  {"n": 4, "key": "e:REM5#1", "ref": "REM5", "dir": "credit", "amount": 700, "date": "2026-10-02"}]');
+insert into t select 'same_detail', private.ingest_statement('a0000000-0000-0000-0000-000000000015',
+  pg_temp.camt(4, 0, 25700, '2026-10-01', '2026-10-02'));
+select is((select array[v ->> 'new_lines', v ->> 'known_lines'] from t where k = 'same_detail'), array['1', '3'],
+  'the same entries at the same level of detail are known; a new entry is booked');
+-- The entry reference is the one an e: key names.
+select pg_temp.statement('a0000000-0000-0000-0000-000000000016', '80000000-0000-0000-0000-000000000006');
+select pg_temp.stage('a0000000-0000-0000-0000-000000000016', '[
+  {"n": 1, "key": "e:REM9#1", "ref": "REM8", "dir": "credit", "amount": 100, "date": "2026-10-03"}]');
+select throws_like($$ select private.ingest_statement('a0000000-0000-0000-0000-000000000016',
+  pg_temp.camt(1, 25700, 25800, '2026-10-03', '2026-10-03')) $$, 'line_invalid: line 1 %',
+  'an entry key names the entry reference the line carries');
 
 -- Refusals: the whole import is undone, the job records the code -------------------------------------
 select pg_temp.statement('a0000000-0000-0000-0000-000000000005', '80000000-0000-0000-0000-000000000001');
@@ -283,6 +385,40 @@ select pg_temp.stage('c0000000-0000-0000-0000-000000000003', '[
   {"n": 1, "s": 1, "key": "t:X", "dir": "credit", "amount": 5, "date": "2026-10-01"}]');
 select throws_like($$ select private.ingest_statement('c0000000-0000-0000-0000-000000000003', pg_temp.csv(1)) $$,
   'line_invalid: %', 'CSV lines carry CSV keys and no statement section');
+select pg_temp.statement('c0000000-0000-0000-0000-000000000004', '80000000-0000-0000-0000-000000000002');
+select pg_temp.stage('c0000000-0000-0000-0000-000000000004', '[
+  {"n": 1, "s": 0, "key": "c:X", "ref": "N1", "dir": "credit", "amount": 5, "date": "2026-10-01"}]');
+select throws_like($$ select private.ingest_statement('c0000000-0000-0000-0000-000000000004', pg_temp.csv(1)) $$,
+  'line_invalid: %', 'and no bank entry reference');
+
+-- The same money is never booked on two bank accounts (review #2): a CSV export uploaded on the wrong
+-- client-funds account, then on the right one.
+select pg_temp.statement('c0000000-0000-0000-0000-000000000005', '80000000-0000-0000-0000-000000000008',
+                         pg_temp.sha('c0000000-0000-0000-0000-000000000001'));
+select pg_temp.stage('c0000000-0000-0000-0000-000000000005', '[
+  {"n": 1, "s": 0, "key": "c:Q1", "dir": "credit", "amount": 5000, "date": "2026-10-01"}]');
+select throws_like($$ select private.ingest_statement('c0000000-0000-0000-0000-000000000005', pg_temp.csv(1)) $$,
+  'imported_on_other_account: %', 'a file already imported on another bank account of the servicer is refused');
+select pg_temp.statement('c0000000-0000-0000-0000-000000000006', '80000000-0000-0000-0000-000000000008');
+select pg_temp.stage('c0000000-0000-0000-0000-000000000006', '[
+  {"n": 1, "s": 0, "key": "c:Q2", "dir": "credit", "amount": 100, "date": "2026-10-02"},
+  {"n": 2, "s": 0, "key": "c:OP1", "dir": "credit", "amount": 5000, "date": "2026-10-01",
+   "text": "VIR SEPA RECU /DE DUPONT /MOTIF FACTURE 12"}]');
+select throws_like($$ select private.ingest_statement('c0000000-0000-0000-0000-000000000006', pg_temp.csv(2)) $$,
+  'imported_on_other_account: line 2 %',
+  'another export with a bank operation of another account (same id, day, amount and direction) is refused');
+select pg_temp.statement('c0000000-0000-0000-0000-000000000007', '80000000-0000-0000-0000-000000000008');
+select pg_temp.stage('c0000000-0000-0000-0000-000000000007', '[
+  {"n": 1, "s": 0, "key": "c:OP1", "dir": "credit", "amount": 4999, "date": "2026-10-01"},
+  {"n": 2, "s": 0, "key": "h:aa#1", "dir": "credit", "amount": 3000, "date": "2026-10-01",
+   "text": "VIR SEPA RECU /DE MARTIN /MOTIF LOYER OCTOBRE"},
+  {"n": 3, "s": 0, "key": "h:dd#1", "dir": "credit", "amount": 3000, "date": "2026-10-01",
+   "text": "VIR SEPA RECU /DE MARTIN /MOTIF LOYER OCTOBRE"}]');
+insert into t select 'c7', private.ingest_statement('c0000000-0000-0000-0000-000000000007', pg_temp.csv(3));
+select is((select array_agg(kind order by line_no) from public.bank_transaction
+           where statement_id = 'c0000000-0000-0000-0000-000000000007'),
+  array['debtor_credit', 'suspected_duplicate', 'debtor_credit'],
+  'a bank id of another account with other facts is another operation; a line whose fingerprint is on another account is held');
 
 -- Facts are append-only; a payment is its bank line ------------------------------------------------
 select throws_ok($$ update public.bank_transaction set amount_minor = 1 $$, '23514', null, 'bank lines never change');
@@ -300,7 +436,7 @@ select throws_ok($$ insert into public.bank_transaction (organization_id, bank_a
   dedup_key, direction, amount_minor, currency, booking_date, kind) values ('00000000-0000-0000-0000-00000000000a',
   '80000000-0000-0000-0000-000000000001', 'a0000000-0000-0000-0000-000000000001', 9, 't:LATE', 'credit', 1, 'EUR',
   '2026-10-01', 'debtor_credit') $$, '23514', null, 'no line is added to an imported statement');
-insert into t select 'debit_line', to_jsonb(id) from public.bank_transaction where dedup_key = 'e:N4#0';
+insert into t select 'debit_line', to_jsonb(id) from public.bank_transaction where dedup_key = 'e:N4#1';
 insert into t select 'credit_line', to_jsonb(id) from public.bank_transaction where dedup_key = 't:A6';
 insert into t select 'held_line', to_jsonb(id) from public.bank_transaction where dedup_key = 'h:bb#1';
 select throws_ok(format($$ insert into public.payment (organization_id, bank_account_id, bank_transaction_id, channel, method,
@@ -394,6 +530,12 @@ select pg_temp.as_user('10000000-0000-0000-0000-000000000004', 'aal2');
 set local role authenticated;
 select lives_ok($$ select public.create_statement_upload('upload-key-0013', '80000000-0000-0000-0000-000000000002',
   'export octobre.CSV', repeat('7', 64), 10) $$, 'an admin imports too (CSV on a CSV account)');
+select throws_ok(format($$ select public.create_statement_upload('upload-key-0014', '80000000-0000-0000-0000-000000000008',
+  'export.csv', %L, 10) $$, pg_temp.sha('c0000000-0000-0000-0000-000000000001')), '23514',
+  'the file is already a statement of another bank account',
+  'a file imported on one client-funds account is not uploaded on another (review #2)');
+select lives_ok($$ select public.create_statement_upload('upload-key-0015', '80000000-0000-0000-0000-000000000008',
+  'export octobre.CSV', repeat('7', 64), 10) $$, 'a file registered on another account but never sent does not block');
 reset role;
 
 -- Read access (RLS): third-party payer data, admins and ops managers of the servicer --------------------

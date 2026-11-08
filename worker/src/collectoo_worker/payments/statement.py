@@ -140,6 +140,7 @@ class StatementLine:
     return_reason: str | None = None
     original_end_to_end_id: str | None = None
     batch_entry_ref: str | None = None
+    entry_ref: str | None = None  # camt.053: the bank entry's own reference (Ntry/AcctSvcrRef)
 
     @property
     def signed_minor(self) -> int:
@@ -169,6 +170,7 @@ STAGE_COLUMNS = (
     "return_reason",
     "original_end_to_end_id",
     "batch_entry_ref",
+    "entry_ref",
     "kind",
     "method",
 )

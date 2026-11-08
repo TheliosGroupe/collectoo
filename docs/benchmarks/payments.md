@@ -25,6 +25,12 @@ just loaded (the 100k run below was made right after `supabase db reset`).
 | 50k (CI size, full integration suite) | 50,000 | 35 MB | **9.1 s** | 0.2 / 3.0 / 0.2 / 5.7 s | 48,368 | 5 |
 | the same lines again (other file) | 50,000 | 35 MB | **4.1 s** | 0.3 / 2.9 / 0.2 / 0.6 s | 0 | 0 |
 
+- After the M2b-2 review fixes (each line keeps its entry reference, indexed; new lines are probed
+  for an entry already imported, one index lookup per line whatever the statistics say), right after
+  `supabase db reset`: 100k job **17.6 s** (0.4 / 6.0 / 0.4 / 10.8 s), the same lines again **8.1 s**
+  (ingest 1.0 s); 50k in the full integration suite 9.7 s (ingest 6.2 s), again 4.2 s. The entry
+  lookup alone: 134 ms for 100k new lines, 1.8 ms for a 500-line day, against an unanalysed table
+  of 1.1M lines (a hash join would read every line of the account, however old).
 - Parsing alone: 5.6 s for 100k lines, **peak memory 111 MB** (elements freed as they are read).
 - The upload commands (`create_statement_upload`, `submit_statement_import`) take milliseconds and
   run under the API's `statement_timeout = 8s` in the tests.

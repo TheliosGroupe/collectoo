@@ -592,7 +592,8 @@ erDiagram
     bank_transaction {
         uuid id PK
         uuid statement_id FK
-        text dedup_key UK "per bank account: t: e: c: h:"
+        text dedup_key UK "per bank account: t: e:<entry>#n c: h:"
+        text entry_ref "camt.053 entry reference (Ntry/AcctSvcrRef)"
         text direction "credit|debit"
         bigint amount_minor "> 0"
         date booking_date
@@ -630,9 +631,9 @@ erDiagram
     }
 ```
 
-**Bank statements (M2b-2, ADR-0013).** A statement of a `client_funds` account is uploaded by an admin or ops manager (« Relevés »), then imported by the worker in one transaction. Each line is kept as the bank reported it (`bank_transaction`, append-only), once per bank account: the same file, or the lines an overlapping statement repeats, add nothing; a known bank reference reported with another amount, direction or date refuses the file. Every credit a debtor paid (`debtor_credit`, and an unsplit batch credit) becomes one `payment` (`unmatched`), and each booking day of the statement is booked by one `cash_in` entry (5120 / 4710 pool). Debits (`other_debit`, `refund_out`), `return` lines and CSV `suspected_duplicate` lines are recorded but not booked (M2b-3, M2b-6); the page shows the gap they explain between the bank's closing balance and the ledger cash (I9).
+**Bank statements (M2b-2, ADR-0013).** A statement of a `client_funds` account is uploaded by an admin or ops manager (« Relevés »), then imported by the worker in one transaction. Each line is kept as the bank reported it (`bank_transaction`, append-only), once per bank account: the same file, or the lines an overlapping statement repeats, add nothing; a known bank reference reported with another amount, direction or date refuses the file. A camt.053 entry is booked once at the level of detail of its first import: the same entry coming back split another way (unsplit, then with its details, or the reverse) refuses the file. A file, or a CSV bank operation (same id, day, amount and direction), already imported for another bank account of the servicer is refused; a CSV line whose fingerprint is on another account is held. Every credit a debtor paid (`debtor_credit`, and an unsplit batch credit) becomes one `payment` (`unmatched`), and each booking day of the statement is booked by one `cash_in` entry (5120 / 4710 pool). Debits (`other_debit`, `refund_out`), `return` lines and CSV `suspected_duplicate` lines are recorded but not booked (M2b-3, M2b-6); the page shows the gap they explain between the bank's closing balance and the ledger cash (I9).
 
-**Line kinds:** `debtor_credit` a debtor's transfer, direct debit, card or cheque credit; `batch_unsplit` a batch booking whose details do not add up (a credit is still one payment); `return` the bank undoes an earlier movement (return reason, reversal indicator, return bank transaction code; either direction); `refund_out` our refund (end-to-end id `RFD…`); `other_debit` fees and anything else debited; `suspected_duplicate` a CSV line with the day, amount and direction of an earlier line and a similar label (held for ops); `psp_payout` M5.
+**Line kinds:** `debtor_credit` a debtor's transfer, direct debit, card or cheque credit; `batch_unsplit` a batch booking whose details do not add up (a credit is still one payment); `return` the bank undoes an earlier movement (return reason, reversal indicator, return bank transaction code; either direction; also a batch that cannot be split, when the entry or any of its details says so); `refund_out` our refund (end-to-end id `RFD…`); `other_debit` fees and anything else debited; `suspected_duplicate` a CSV line with the day, amount and direction of an earlier line and a similar label (held for ops); `psp_payout` M5.
 
 **« Relevé CSV » — the documented column set** (manual import when the bank sends no camt.053; one format per bank account). Headers are matched without case, accents or punctuation; the header row may follow up to 19 preamble lines; separator `;`, `,`, tab or `|`; UTF-8 or Windows-1252.
 
@@ -1176,8 +1177,10 @@ stateDiagram-v2
 |---|---|
 | Same file | The same SHA-256 for the same bank account is one statement: uploading it again opens the existing one (a rejected or failed file can be sent again) |
 | Same lines | Lines already reported for the bank account are skipped (counted as « déjà importées »); nothing is booked twice |
+| Same entry | A camt.053 entry keeps its key with or without a single detail (`e:<ref>#1`); an entry already imported that comes back split another way refuses the file (`entry_detail_differs`) |
+| Other account | A file already sent for another bank account of the servicer is refused at upload and at import; so is a CSV whose bank operation (id, day, amount, direction) is on another account (`imported_on_other_account`) |
 | Refusal | Nothing of the import is written; the statement keeps a stable code, worded in French on the page |
-| Warnings | Opening balance ≠ previous closing or a sequence gap: « relevé manquant ? »; dates overlapping an imported statement |
+| Warnings | Opening balance ≠ the closing of the statement covering the day before, or a sequence gap: « relevé manquant ? » (not checked when an imported statement already covers that day); dates overlapping an imported statement |
 
 ## 5. Open questions (❓ founder)
 
