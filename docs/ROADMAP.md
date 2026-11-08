@@ -23,7 +23,7 @@ _Phase 0 draft, 2026-11-07. Each task fits in under one day. 🔒 = blocked on f
 | PR-6 | M1b Mapping (mock LLM), eval, profiles | M1-06 … M1-10 |
 | PR-7 | M1c Transformations, claim type, validation, DQ report | M1-11 … M1-16 |
 | PR-8 | M1d Staging, commit/rollback, scale tests (+ documents zip) | M1-17 … M1-22 (split: M1d = M1-17, 18, 20, 21, 22; M1e = M1-19 review UI) |
-| PR-9 | M2a Ledger | M2-01 … M2-05 |
+| PR-9 | M2a Ledger | M2-01 … M2-05 (split: M2a-1 = M2-01…04 ledger core; M2a-2 = M2-05 opening balances at confirmation) |
 | PR-10 | M2b Payments, reconciliation, allocation, receipts | M2-06 … M2-11 |
 | PR-11 | M2c Remittances, client statements, commission | M2-12 … M2-15 |
 | PR-12 | M3a Rate tables, rule-pack format, engine core | M3-01 … M3-06 |
@@ -92,11 +92,11 @@ _Phase 0 draft, 2026-11-07. Each task fits in under one day. 🔒 = blocked on f
 
 | ID | Task | Acceptance criteria | Deps |
 |---|---|---|---|
-| M2-01 | Ledger schema (per `ARCHITECTURE.md`): `ledger_account` (per claim × component, client-money accounts per client, servicer revenue accounts), `journal_entry`, `posting` (bigint cents + currency); deferred constraint: postings of an entry sum to zero per currency | pgTAP: an unbalanced entry fails at commit | M0-14 |
-| M2-02 | Append-only enforcement: no `update/delete` on entries/postings (trigger + revoked privileges), corrections only through `ledger.reverse(entry_id)` | pgTAP: update/delete rejected even for the owner role used by the worker; reversal creates the mirror entry | M2-01 |
+| M2-01 | Ledger schema (per `ARCHITECTURE.md`): `ledger_account` (receivable per claim item × component, owner claim pooled per owner × portfolio × component, client-money accounts per client, servicer revenue), `ledger_entry`, `ledger_posting` (bigint cents + currency; names per ADR-0012); deferred constraint: postings of an entry sum to zero per currency | pgTAP: an unbalanced entry fails at commit | M0-14 |
+| M2-02 | Append-only enforcement: no `update/delete` on entries/postings (trigger + revoked privileges), corrections only through `private.ledger_reverse` / `collectoo_worker.ledger.reverse(entry_id)` | pgTAP: update/delete rejected even for the owner role used by the worker; reversal creates the mirror entry | M2-01 |
 | M2-03 | Balance views/functions: balance per account, component and date (`as_of`), client-money balance per client | Balance at date D equals the sum of postings with `effective_date ≤ D` (pgTAP) | M2-01 |
 | M2-04 | Python ledger API (`collectoo_worker.ledger`): post, reverse, idempotency key per command | Property tests (hypothesis): any sequence of posts/reversals keeps every entry balanced; post + reverse ⇒ zero net effect; same idempotency key ⇒ single entry | M2-02 |
-| M2-05 | Opening balances from boarding: committed batches post opening entries per component (principal, interest, fees as provided by the seller) | Sum of opening balances = DQ-report reconciled total for the batch | M2-04, M1-18 |
+| M2-05 | Opening balances from boarding: confirmed batches post opening entries (at confirmation, ADR-0012) per component (principal, interest, fees as provided by the seller) | Sum of opening balances = DQ-report reconciled total for the batch | M2-04, M1-18 |
 | M2-06 | Payment model: `payment` (source: bank transfer, SEPA DD, card, manual; status), structured reference per account (RF creditor reference, ISO 11649) | RF references validate (mod 97); one active reference per account | M2-01 |
 | M2-07 | CAMT.053 parser + manual CSV payment import; dedup by bank transaction ID | Parses sample CAMT.053 files (synthetic, incl. batch bookings and returns); importing twice creates no duplicates | M2-06 |
 | M2-08 | Reconciliation: exact match on RF reference, then rules (amount + name + invoice ref), else exception queue for ops | Synthetic statement: ≥ 95 % auto-matched; others in the exception queue | M2-07 |

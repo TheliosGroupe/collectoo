@@ -279,6 +279,20 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"currency": {
+                  Row: {
+                    "code": string,"label_fr": string,"minor_exponent": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "code": string,"label_fr": string,"minor_exponent": number
+                  }
+                  Update: {
+                    "code"?: string,"label_fr"?: string,"minor_exponent"?: number
+                  }
+                  Relationships: [
+                    
+                  ]
                 },"document": {
                   Row: {
                     "account_id": string | null,"boarding_batch_id": string | null,"client_organization_id": string,"created_at": string,"file_name": string | null,"id": string,"kind": string,"mime_type": string,"organization_id": string,"party_id": string | null,"sha256": string,"storage_bucket": string,"storage_path": string
@@ -322,6 +336,144 @@ isOneToOne: false
       referencedRelation: "party"
       referencedColumns: ["id"]
     }
+                  ]
+                },"ledger_account": {
+                  Row: {
+                    "account_id": string | null,"book": string,"claim_item_id": string | null,"client_organization_id": string | null,"component": string | null,"created_at": string,"currency": string,"id": string,"organization_id": string,"owner_organization_id": string | null,"portfolio_id": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id"?: string | null,"book": string,"claim_item_id"?: string | null,"client_organization_id"?: string | null,"component"?: string | null,"created_at"?: string,"currency": string,"id"?: string,"organization_id": string,"owner_organization_id"?: string | null,"portfolio_id"?: string | null
+                  }
+                  Update: {
+                    "account_id"?: string | null,"book"?: string,"claim_item_id"?: string | null,"client_organization_id"?: string | null,"component"?: string | null,"created_at"?: string,"currency"?: string,"id"?: string,"organization_id"?: string,"owner_organization_id"?: string | null,"portfolio_id"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "ledger_account_claim_fk"
+      columns: ["account_id","organization_id","client_organization_id","portfolio_id","currency"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id","organization_id","client_organization_id","portfolio_id","currency"]
+    },{
+      foreignKeyName: "ledger_account_item_fk"
+      columns: ["claim_item_id","account_id"]
+isOneToOne: false
+      referencedRelation: "claim_item"
+      referencedColumns: ["id","account_id"]
+    }
+                  ]
+                },"ledger_book": {
+                  Row: {
+                    "account_number": string,"client_visible": boolean,"code": string,"dimension": string,"label_fr": string,"money_of": string,"normal_side": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_number": string,"client_visible": boolean,"code": string,"dimension": string,"label_fr": string,"money_of": string,"normal_side": number
+                  }
+                  Update: {
+                    "account_number"?: string,"client_visible"?: boolean,"code"?: string,"dimension"?: string,"label_fr"?: string,"money_of"?: string,"normal_side"?: number
+                  }
+                  Relationships: [
+                    
+                  ]
+                },"ledger_component": {
+                  Row: {
+                    "code": string,"eba_field": string | null,"family": string,"label_fr": string,"reference": string,"sort_order": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "code": string,"eba_field"?: string | null,"family": string,"label_fr": string,"reference": string,"sort_order": number
+                  }
+                  Update: {
+                    "code"?: string,"eba_field"?: string | null,"family"?: string,"label_fr"?: string,"reference"?: string,"sort_order"?: number
+                  }
+                  Relationships: [
+                    
+                  ]
+                },"ledger_entry": {
+                  Row: {
+                    "account_id": string | null,"actor_id": string | null,"actor_label": string | null,"boarding_batch_id": string | null,"client_organization_id": string | null,"effective_date": string,"engine_version": string | null,"entry_type": string,"id": string,"idempotency_key": string,"inputs_hash": string | null,"line_count": number,"organization_id": string,"portfolio_id": string | null,"posted_at": string,"reason": string | null,"request_hash": string,"reverses_entry_id": string | null,"rule_pack_version_id": string | null,"source_id": string | null,"source_type": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id"?: string | null,"actor_id"?: string | null,"actor_label"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string | null,"effective_date": string,"engine_version"?: string | null,"entry_type": string,"id"?: string,"idempotency_key": string,"inputs_hash"?: string | null,"line_count": number,"organization_id": string,"portfolio_id"?: string | null,"posted_at"?: string,"reason"?: string | null,"request_hash": string,"reverses_entry_id"?: string | null,"rule_pack_version_id"?: string | null,"source_id"?: string | null,"source_type"?: string | null
+                  }
+                  Update: {
+                    "account_id"?: string | null,"actor_id"?: string | null,"actor_label"?: string | null,"boarding_batch_id"?: string | null,"client_organization_id"?: string | null,"effective_date"?: string,"engine_version"?: string | null,"entry_type"?: string,"id"?: string,"idempotency_key"?: string,"inputs_hash"?: string | null,"line_count"?: number,"organization_id"?: string,"portfolio_id"?: string | null,"posted_at"?: string,"reason"?: string | null,"request_hash"?: string,"reverses_entry_id"?: string | null,"rule_pack_version_id"?: string | null,"source_id"?: string | null,"source_type"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "ledger_entry_account_id_fkey"
+      columns: ["account_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "ledger_entry_boarding_batch_id_fkey"
+      columns: ["boarding_batch_id"]
+isOneToOne: false
+      referencedRelation: "boarding_batch"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "ledger_entry_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "ledger_entry_entry_type_fkey"
+      columns: ["entry_type"]
+isOneToOne: false
+      referencedRelation: "ledger_entry_type"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "ledger_entry_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "ledger_entry_portfolio_id_fkey"
+      columns: ["portfolio_id"]
+isOneToOne: false
+      referencedRelation: "portfolio"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "ledger_entry_reverses_entry_id_fkey"
+      columns: ["reverses_entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"ledger_entry_type": {
+                  Row: {
+                    "allowed_books": (string)[] | null,"code": string,"label_fr": string,"requires_reason": boolean
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "allowed_books"?: (string)[] | null,"code": string,"label_fr": string,"requires_reason": boolean
+                  }
+                  Update: {
+                    "allowed_books"?: (string)[] | null,"code"?: string,"label_fr"?: string,"requires_reason"?: boolean
+                  }
+                  Relationships: [
+                    
+                  ]
+                },"ledger_posting": {
+                  Row: {
+                    "amount_minor": number,"currency": string,"effective_date": string,"entry_id": string,"ledger_account_id": string,"line_no": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "amount_minor": number,"currency": string,"effective_date": string,"entry_id": string,"ledger_account_id": string,"line_no": number
+                  }
+                  Update: {
+                    "amount_minor"?: number,"currency"?: string,"effective_date"?: string,"entry_id"?: string,"ledger_account_id"?: string,"line_no"?: number
+                  }
+                  Relationships: [
+                    
                   ]
                 },"mandate": {
                   Row: {
@@ -624,11 +776,21 @@ isOneToOne: false
             "abandon_boarding_batch":
 { Args: { "p_batch_id": string,"p_reason": string }; Returns: undefined
                            },
+"account_balances":
+{ Args: { "p_account_id": string,"p_as_of"?: string,"p_known_at"?: string }; Returns: {
+              "balance_minor": number,"claim_item_id": string,"component": string,"currency": string
+            }[]
+                           },
 "add_boarding_file":
 { Args: { "p_batch_id": string,"p_file_name": string,"p_sha256": string,"p_size_bytes": number }; Returns: Json
                            },
 "approve_mapping":
 { Args: { "p_batch_id": string,"p_overrides"?: Json }; Returns: undefined
+                           },
+"client_money_balances":
+{ Args: { "p_as_of"?: string,"p_client_organization_id": string,"p_known_at"?: string }; Returns: {
+              "currency": string,"held_minor": number,"payable_minor": number,"unallocated_minor": number
+            }[]
                            },
 "commit_boarding_batch":
 { Args: { "p_batch_id": string,"p_override_reason"?: string }; Returns: undefined
@@ -644,6 +806,9 @@ isOneToOne: false
                            },
 "custom_access_token_hook":
 { Args: { "event": Json }; Returns: Json
+                           },
+"ledger_balance":
+{ Args: { "p_as_of"?: string,"p_known_at"?: string,"p_ledger_account_id": string }; Returns: number
                            },
 "rollback_boarding_batch":
 { Args: { "p_batch_id": string,"p_reason": string }; Returns: undefined
