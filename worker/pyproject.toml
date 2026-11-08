@@ -6,6 +6,10 @@ authors = [{ name = "Collectoo" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "faker>=40.44.0",
+    "fastexcel>=0.21.0",
+    "httpx>=0.28.1",
+    "polars>=2.1.0",
+    "psycopg[binary]>=3.3.8",
     "pyyaml>=6.0.3",
 ]
 
@@ -27,6 +31,7 @@ dev = [
     "types-pyyaml>=6.0.12.20261103",
     "jsonschema>=4.26.0",
     "types-jsonschema>=4.26.0.20261006",
+    "xlsxwriter>=3.3.1",
 ]
 
 [tool.ruff]
@@ -49,7 +54,8 @@ files = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers -m 'not integration'"
+markers = ["integration: needs the local Supabase stack (make up)"]
 
 [tool.coverage.run]
 source = ["collectoo_worker"]

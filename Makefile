@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 export SUPABASE_INTERNAL_IMAGE_REGISTRY ?= docker.io
 
-.PHONY: setup up down reset seed synth types test test-py test-web test-db e2e lint lint-py lint-web typecheck build catalogue
+.PHONY: setup up down reset seed synth worker test-integration types test test-py test-web test-db e2e lint lint-py lint-web typecheck build catalogue
 
 setup:            ## Install all dependencies
 	cd worker && uv sync --frozen
@@ -46,6 +46,12 @@ test-web:
 
 test-db:          ## pgTAP (needs `make up`)
 	supabase test db
+
+test-integration: ## Worker tests against the local stack (needs `make up`)
+	eval "$$(./scripts/local-env.sh)" && cd worker && uv run pytest -m integration
+
+worker:           ## Run the boarding queue consumer against the local stack
+	eval "$$(./scripts/local-env.sh)" && cd worker && uv run collectoo-worker consume boarding
 
 e2e:              ## Playwright against the local stack (needs make up; builds the web app first)
 	./scripts/e2e.sh

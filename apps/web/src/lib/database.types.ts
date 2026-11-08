@@ -83,6 +83,90 @@ isOneToOne: false
                   Relationships: [
                     
                   ]
+                },"boarding_batch": {
+                  Row: {
+                    "art4_exemptions": NonNullable<Json>,"client_organization_id": string,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"id": string,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"status": string,"updated_at": string,"version": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "art4_exemptions"?: NonNullable<Json>,"client_organization_id": string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"id"?: string,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"updated_at"?: string,"version": number
+                  }
+                  Update: {
+                    "art4_exemptions"?: NonNullable<Json>,"client_organization_id"?: string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"id"?: string,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"updated_at"?: string,"version"?: number
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "boarding_batch_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "boarding_batch_created_by_fkey"
+      columns: ["created_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "boarding_batch_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "boarding_batch_portfolio_id_fkey"
+      columns: ["portfolio_id"]
+isOneToOne: false
+      referencedRelation: "portfolio"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"boarding_event": {
+                  Row: {
+                    "actor_id": string | null,"actor_label": string | null,"at": string,"batch_id": string,"from_status": string | null,"id": number,"reason": string | null,"to_status": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "actor_id"?: string | null,"actor_label"?: string | null,"at"?: string,"batch_id": string,"from_status"?: string | null,"id"?: never,"reason"?: string | null,"to_status": string
+                  }
+                  Update: {
+                    "actor_id"?: string | null,"actor_label"?: string | null,"at"?: string,"batch_id"?: string,"from_status"?: string | null,"id"?: never,"reason"?: string | null,"to_status"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "boarding_event_batch_id_fkey"
+      columns: ["batch_id"]
+isOneToOne: false
+      referencedRelation: "boarding_batch"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"boarding_file": {
+                  Row: {
+                    "batch_id": string,"created_at": string,"duplicate_of_file_id": string | null,"error": string | null,"file_name": string,"format": string,"id": string,"profile": Json | null,"role": string | null,"row_count": number | null,"sha256": string,"size_bytes": number,"status": string,"storage_bucket": string,"storage_path": string,"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "batch_id": string,"created_at"?: string,"duplicate_of_file_id"?: string | null,"error"?: string | null,"file_name": string,"format": string,"id"?: string,"profile"?: Json | null,"role"?: string | null,"row_count"?: number | null,"sha256": string,"size_bytes": number,"status"?: string,"storage_bucket"?: string,"storage_path": string,"updated_at"?: string
+                  }
+                  Update: {
+                    "batch_id"?: string,"created_at"?: string,"duplicate_of_file_id"?: string | null,"error"?: string | null,"file_name"?: string,"format"?: string,"id"?: string,"profile"?: Json | null,"role"?: string | null,"row_count"?: number | null,"sha256"?: string,"size_bytes"?: number,"status"?: string,"storage_bucket"?: string,"storage_path"?: string,"updated_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "boarding_file_batch_id_fkey"
+      columns: ["batch_id"]
+isOneToOne: false
+      referencedRelation: "boarding_batch"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "boarding_file_duplicate_of_file_id_fkey"
+      columns: ["duplicate_of_file_id"]
+isOneToOne: false
+      referencedRelation: "boarding_file"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"claim_item": {
                   Row: {
                     "account_id": string,"created_at": string,"currency": string,"due_date": string | null,"id": string,"issue_date": string | null,"kind": string,"original_minor": number,"ref": string
@@ -429,11 +513,20 @@ isOneToOne: false
             [_ in never]: never
           }
           Functions: {
-            "create_portfolio":
+            "add_boarding_file":
+{ Args: { "p_batch_id": string,"p_file_name": string,"p_sha256": string,"p_size_bytes": number }; Returns: Json
+                           },
+"create_boarding_batch":
+{ Args: { "p_conformance"?: string,"p_cut_off_date"?: string,"p_idempotency_key": string,"p_portfolio_id": string }; Returns: string
+                           },
+"create_portfolio":
 { Args: { "p_client_organization_id": string,"p_default_claim_type"?: string,"p_idempotency_key": string,"p_name": string }; Returns: string
                            },
 "custom_access_token_hook":
 { Args: { "event": Json }; Returns: Json
+                           },
+"submit_boarding_batch":
+{ Args: { "p_batch_id": string }; Returns: number
                            }
           }
           Enums: {
