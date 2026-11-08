@@ -60,7 +60,7 @@ def test_defective_file_needs_fix_with_issues(tenant: dict[str, Any], tmp_path: 
         if d["type"] in expected:
             assert (d["row"], d["type"]) in found, d
     assert report["totals"]["blocking"] > 0
-    assert report["spec_versions"] == {"transform": 1, "validation": 1, "claim_types": 1}
+    assert report["spec_versions"] == {"transform": 1, "validation": 2, "claim_types": 1}
     assert report["claim_types"] == {"b2b_invoice": 300}
 
 

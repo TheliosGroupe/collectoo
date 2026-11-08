@@ -1,0 +1,44 @@
+# Validation rules (M1-15; v2 for M2-05 opening balances, docs/design/m2a-ledger.md §7.4).
+# Blocking issues stop the batch (needs_fix); warnings are reported. v1 is kept for history.
+version: 2
+required:              # blocking when the value is missing, per claim type
+  b2b_invoice: [account.external_ref, party.display_name, claim_item.ref, claim_item.due_date, claim_item.amount]
+  b2c_invoice: [account.external_ref, party.display_name, claim_item.ref, claim_item.due_date, claim_item.amount]
+  rent: [account.external_ref, party.display_name, claim_item.due_date, claim_item.amount]
+  bank_credit: [eba.f3_01_loan_identifier, eba.f3_12_legal_balance]
+recommended:           # warning when missing
+  b2b_invoice: [party.siren]
+severity:
+  # transformation errors
+  impossible_date: blocking
+  bad_date: blocking
+  bad_amount: blocking
+  unknown_value: blocking
+  invalid_siren: warning
+  invalid_siret: warning
+  invalid_iban: warning
+  invalid_email: warning
+  bad_phone: warning
+  invalid_postcode_fr: warning
+  invalid_currency: blocking
+  # row and file rules
+  missing_required: blocking
+  missing_recommended: warning
+  missing_contact: warning
+  duplicate_row: warning
+  duplicate_document: warning       # same account, kind and ref, identical amounts: boarded once
+  conflicting_document: blocking    # same account, kind and ref, other amount/paid/currency/due date
+  mixed_date_format: warning
+  negative_amount: blocking
+  overpaid: warning
+  credit_note_paid: blocking        # a paid amount on a credit note
+  mixed_currency_account: blocking  # one debtor account with items in several currencies
+  unsupported_currency: blocking    # not in public.currency with exponent 2 (EUR, USD, GBP, CHF)
+  unassigned_claim_type: blocking
+  unknown_legal_regime: blocking
+  broken_reference: blocking
+  file_not_boarded: blocking  # a tabular file that cannot be read as a table (no layout, empty)
+  eba_mandatory_missing: warning   # becomes blocking for a regulatory-grade tape
+  duplicate_loan: blocking          # the same EU loan identifier (3.01) on two different rows
+  sub_cent_amount: warning          # EU amount 3.09-3.12 below the cent: rounded half-up
+  components_exceed_legal_balance: warning  # 3.09 + 3.10 + 3.11 > 3.12: negative balancing line
