@@ -51,24 +51,17 @@ DB schemas: `public` (exposed, RLS), `private` (internal: flow runtime, audit, r
 ## Commands
 
 ```bash
-# Environment (cloud): see docs/CLOUD_ENV.md
-export SUPABASE_INTERNAL_IMAGE_REGISTRY=docker.io
-supabase start                  # local stack
-supabase db reset               # migrations + seed
-supabase test db                # pgTAP
-supabase gen types typescript --local > apps/web/lib/database.types.ts
-
-# Worker
-cd worker && uv sync && uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run pytest
-
-# Web
-cd apps/web && npm ci && npm run lint && npm run typecheck && npm test && npx playwright test --trace off
-
-# EU template catalogue (regenerate)
-uv run --with beautifulsoup4 --with lxml --with openpyxl python -I tools/eba_catalogue/build_catalogue.py .
+make setup        # uv sync (worker) + npm ci (web)
+make up / down    # local Supabase stack (export SUPABASE_INTERNAL_IMAGE_REGISTRY=docker.io in cloud sessions)
+make reset        # supabase db reset: migrations + seed
+make lint         # ruff, ruff format --check, mypy --strict, eslint, tsc
+make test         # pytest (+hypothesis), vitest, pgTAP (needs make up)
+make e2e          # next build + Playwright (desktop + mobile); screenshots -> docs/screenshots/
+make catalogue    # regenerate the EU NPL template catalogue (CI checks it is unchanged)
 ```
 
-(Commands become real as M0 lands; keep this section in sync with CI.)
+CI (`.github/workflows/ci.yml`) runs the same: jobs `py`, `web`, `db`, `catalogue`, `e2e`.
+Pins: Supabase CLI 2.122.1, Python 3.12, Node 22, Playwright 1.63.0 (matches the browser preinstalled in cloud sessions), vitest 4.0.x (4.1.x crashes npm's resolver).
 
 ## Definition of done (per slice / PR)
 
