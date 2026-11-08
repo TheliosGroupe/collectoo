@@ -137,6 +137,7 @@ $$;
 
 -- The opening joins an EU loan to its T3 row by batch and loan identifier.
 create index t3_loan_batch_loan_idx on eba.t3_loan (boarding_batch_id, f3_01_loan_identifier);
+drop index eba.t3_loan_batch_idx;  -- same leading column: the new index serves its lookups
 
 -- The source of an opening balance is frozen once its account is workable.
 create or replace function private.claim_item_frozen()
@@ -345,43 +346,51 @@ begin
   perform private.check_opening_sources(p_batch_id);
   set constraints public.ledger_entry_balanced deferred;
 
-  drop table if exists pg_temp._open;
-  create temp table _open on commit drop as
+  drop table if exists pg_temp._open_src;
+  create temp table _open_src on commit drop as
   select l.account_id, l.claim_item_id, l.component, l.currency, l.amount_minor, l.sort_key, c.sort_order,
-         a.organization_id, a.client_organization_id, a.portfolio_id, o.owner_organization_id,
-         null::uuid as la_receivable, null::uuid as la_owner
+         a.organization_id, a.client_organization_id, a.portfolio_id, o.owner_organization_id
   from private.opening_lines(p_batch_id) l
   join public.account a on a.id = l.account_id
   join public.ledger_component c on c.code = l.component
   left join public.claim_ownership_period o on o.account_id = a.id and o.valid_from <= v.cut_off_date
     and (o.valid_to is null or o.valid_to > v.cut_off_date)
   where l.amount_minor <> 0;
-  select account_id::text into v_bad from _open where owner_organization_id is null limit 1;
-  if found then
+  select min(account_id::text) into v_bad from _open_src where owner_organization_id is null;
+  if v_bad is not null then
     raise exception 'ledger: account % has no owner on the cut-off date', v_bad using errcode = 'LG006';
   end if;
-  analyze _open;
+  analyze _open_src;
 
   insert into public.ledger_account (organization_id, book, currency, client_organization_id, portfolio_id,
                                      account_id, claim_item_id, component)
   select distinct organization_id, 'debtor_receivable', currency, client_organization_id, portfolio_id,
          account_id, claim_item_id, component
-  from _open
+  from _open_src
   on conflict (claim_item_id, component) do nothing;
   insert into public.ledger_account (organization_id, book, currency, client_organization_id, owner_organization_id,
                                      portfolio_id, component)
   select distinct organization_id, 'owner_claim', currency, client_organization_id, owner_organization_id,
          portfolio_id, component
-  from _open
+  from _open_src
   on conflict (organization_id, book, currency, client_organization_id, owner_organization_id, portfolio_id, component)
     where claim_item_id is null do nothing;
-  update _open o set la_receivable = la.id from public.ledger_account la
-  where la.claim_item_id = o.claim_item_id and la.component = o.component;
-  update _open o set la_owner = la.id from public.ledger_account la
-  where la.claim_item_id is null and la.book = 'owner_claim' and la.organization_id = o.organization_id
-    and la.currency = o.currency and la.client_organization_id = o.client_organization_id
-    and la.owner_organization_id = o.owner_organization_id and la.portfolio_id = o.portfolio_id
-    and la.component = o.component;
+
+  -- Each line with its two ledger accounts, built in one pass (no rewrite of a large temp table).
+  drop table if exists pg_temp._open;
+  create temp table _open on commit drop as
+  select s.*, r.id as la_receivable, w.id as la_owner
+  from _open_src s
+  join public.ledger_account r on r.claim_item_id = s.claim_item_id and r.component = s.component
+  join public.ledger_account w on w.claim_item_id is null and w.book = 'owner_claim'
+    and w.organization_id = s.organization_id and w.currency = s.currency
+    and w.client_organization_id = s.client_organization_id and w.owner_organization_id = s.owner_organization_id
+    and w.portfolio_id = s.portfolio_id and w.component = s.component;
+  if (select count(*) from _open) <> (select count(*) from _open_src) then
+    raise exception 'ledger: batch % has opening lines without their ledger accounts', p_batch_id using errcode = 'LG006';
+  end if;
+  drop table _open_src;
+  analyze _open;
 
   -- Owner-claim lines: one per (account, component) with a non-zero total.
   drop table if exists pg_temp._open_owner;
@@ -441,6 +450,52 @@ $$;
 ------------------------------------------------------------------------------------------
 -- Boarding commands
 ------------------------------------------------------------------------------------------
+
+create or replace function public.create_boarding_batch(
+  p_idempotency_key text,
+  p_portfolio_id uuid,
+  p_cut_off_date date default null,
+  p_conformance text default 'servicing'
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_existing jsonb;
+  v_id uuid;
+  v_portfolio public.portfolio;
+begin
+  select result into v_existing from private.command_log
+  where command = 'create_boarding_batch' and idempotency_key = p_idempotency_key;
+  if found then
+    return (v_existing ->> 'batch_id')::uuid;
+  end if;
+  if not private.can_board(p_portfolio_id) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  -- The tape describes the portfolio as it stood on that date: it cannot be a future date
+  -- (commit refuses it too, but only after the whole review).
+  if p_cut_off_date > private.paris_today() then
+    raise exception 'the cut-off date cannot be in the future' using errcode = 'check_violation';
+  end if;
+  select * into v_portfolio from public.portfolio where id = p_portfolio_id;
+  -- Serialise version numbering per portfolio.
+  perform 1 from public.portfolio where id = p_portfolio_id for update;
+  insert into public.boarding_batch (
+    organization_id, client_organization_id, portfolio_id, version, cut_off_date, conformance, created_by)
+  values (
+    v_portfolio.organization_id, v_portfolio.client_organization_id, p_portfolio_id,
+    coalesce((select max(version) from public.boarding_batch where portfolio_id = p_portfolio_id), 0) + 1,
+    p_cut_off_date, p_conformance, auth.uid())
+  returning id into v_id;
+  insert into public.boarding_event (batch_id, to_status, actor_id) values (v_id, 'draft', auth.uid());
+  insert into private.command_log (command, idempotency_key, actor_id, result)
+  values ('create_boarding_batch', p_idempotency_key, auth.uid(), jsonb_build_object('batch_id', v_id));
+  return v_id;
+end;
+$$;
 
 create or replace function public.commit_boarding_batch(p_batch_id uuid, p_override_reason text default null)
 returns void
@@ -645,12 +700,18 @@ begin
   if v.status <> 'committed' then
     raise exception 'batch is %, expected committed', v.status using errcode = 'check_violation';
   end if;
+  if v.opening_plan is null then  -- committed before openings existed: it cannot be posted
+    raise exception 'ledger: batch % was committed without an opening plan; roll it back and board the file again',
+      p_batch_id using errcode = 'LG005';
+  end if;
   if not private.has_active_mandate(v.portfolio_id, private.paris_today()) then
     raise exception 'no active client mandate covers this portfolio (CPCE R124-3)'
       using errcode = 'check_violation';
   end if;
+  -- A new request clears the previous confirmation failure only (a documents failure stays shown).
   update public.boarding_batch
-  set confirm_requested_by = auth.uid(), confirm_requested_at = now(), failed_job = null
+  set confirm_requested_by = auth.uid(), confirm_requested_at = now(),
+      failed_job = case when failed_job ->> 'type' = 'confirm' then null else failed_job end
   where id = p_batch_id;
   perform private.transition_batch(p_batch_id, 'confirming', 'confirmation requested');
 end;
@@ -671,6 +732,9 @@ begin
     return 'skipped';
   end if;
   if not private.has_active_mandate(v.portfolio_id, private.paris_today()) then
+    update public.boarding_batch
+    set failed_job = jsonb_build_object('type', 'confirm', 'error', 'mandate_inactive', 'at', now())
+    where id = p_batch_id and coalesce(failed_job ->> 'type', '') not in ('documents', 'purge_documents');
     perform private.transition_batch(p_batch_id, 'committed', 'mandat inactif (CPCE R124-3)', 'worker:boarding');
     return 'mandate_inactive';
   end if;

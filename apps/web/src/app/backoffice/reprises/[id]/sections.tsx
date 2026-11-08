@@ -55,7 +55,12 @@ export type DqReport = {
     difference_rows?: number;
     currency_mismatch?: string[];
   };
-  staging?: { already_boarded_accounts_skipped: number; entities: Record<string, { rows: number }> };
+  staging?: {
+    already_boarded_accounts_skipped: number;
+    entities: Record<string, { rows: number }>;
+    opening?: OpeningTotals;
+    skipped?: OpeningTotals;
+  };
   documents?: { linked: number; unmatched: string[]; unsupported: string[] };
 };
 /** Opening balances per currency, amounts as text (dq_report.staging.opening, opening_plan). */
@@ -96,6 +101,26 @@ function OpeningTable({ totals, testId }: { totals: OpeningTotals; testId: strin
         </div>
       ))}
     </div>
+  );
+}
+
+/**
+ * Accounts of the tape already in the portfolio are not boarded again: the quality report's
+ * outstanding includes them, the opening balances do not (outstanding = opening + this).
+ */
+function SkippedNote({ report }: { report: DqReport | null }) {
+  const skipped = Object.entries(report?.staging?.skipped?.currencies ?? {}).filter(
+    ([, t]) => t.accounts + t.accounts_without_balance > 0,
+  );
+  if (skipped.length === 0) return null;
+  return (
+    <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400" data-testid="opening-skipped">
+      Non repris car déjà présents dans le portefeuille (inclus dans l&apos;encours du contrôle qualité) :{" "}
+      {skipped
+        .map(([currency, t]) => `${count(t.accounts + t.accounts_without_balance)} compte(s), ${money(t.outstanding_minor, currency)}`)
+        .join(" ; ")}
+      .
+    </p>
   );
 }
 
@@ -608,21 +633,31 @@ export function IntegrationSection({
   if (status === "committed") {
     return (
       <Section title="Intégration" testId="integration">
-        <InfoNote>
-          Le lot est intégré mais aucun débiteur ne sera contacté avant confirmation par un responsable (mandat actif
-          requis). Avant confirmation, l&apos;intégration peut être annulée. La confirmation comptabilise les soldes
-          d&apos;ouverture ci-dessous, à la date d&apos;arrêté.
-        </InfoNote>
         {openingPlan ? (
-          <div className="mt-4">
-            <h3 className="mb-2 text-sm font-medium">Soldes d&apos;ouverture prévus</h3>
-            <OpeningTable totals={openingPlan} testId="opening-plan" />
-          </div>
-        ) : null}
+          <>
+            <InfoNote>
+              Le lot est intégré mais aucun débiteur ne sera contacté avant confirmation par un responsable (mandat actif
+              requis). Avant confirmation, l&apos;intégration peut être annulée. La confirmation comptabilise les soldes
+              d&apos;ouverture ci-dessous, à la date d&apos;arrêté.
+            </InfoNote>
+            <div className="mt-4">
+              <h3 className="mb-2 text-sm font-medium">Soldes d&apos;ouverture prévus</h3>
+              <OpeningTable totals={openingPlan} testId="opening-plan" />
+              <SkippedNote report={report} />
+            </div>
+          </>
+        ) : (
+          <InfoNote>
+            Ce lot a été intégré avant la comptabilisation des soldes d&apos;ouverture : il ne peut pas être confirmé.
+            Annulez l&apos;intégration, puis déposez à nouveau le fichier dans un nouveau lot.
+          </InfoNote>
+        )}
         <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-end">
-          <ActionForm action={confirmBatch} submitLabel="Confirmer le lot" pendingLabel="Confirmation…" buttonClassName={inlineButtonClass}>
-            {hidden}
-          </ActionForm>
+          {openingPlan ? (
+            <ActionForm action={confirmBatch} submitLabel="Confirmer le lot" pendingLabel="Confirmation…" buttonClassName={inlineButtonClass}>
+              {hidden}
+            </ActionForm>
+          ) : null}
           <ActionForm
             action={rollbackBatch}
             submitLabel="Annuler l'intégration"
@@ -660,6 +695,7 @@ export function IntegrationSection({
               Soldes d&apos;ouverture comptabilisés ({count(openingSummary.entries)} écritures)
             </h3>
             <OpeningTable totals={openingSummary.totals} testId="opening-summary" />
+            <SkippedNote report={report} />
           </div>
         ) : null}
       </Section>
@@ -695,6 +731,16 @@ export function AbandonSection({ batchId, status }: { batchId: string; status: s
 
 // --- History ---------------------------------------------------------------------------------------------
 
+/**
+ * The reason worth showing: a motif typed by staff (abandon, rollback, commit despite a mismatch)
+ * or why a confirmation came back. Step names recorded by the system are not repeated.
+ */
+function historyReason(e: { to_status: string; reason: string | null }): string | null {
+  if (!e.reason) return null;
+  if (!["abandoned", "rolled_back", "committed"].includes(e.to_status)) return null;
+  return e.reason === "committed" ? null : e.reason;
+}
+
 export function HistorySection({
   events,
 }: {
@@ -710,6 +756,7 @@ export function HistorySection({
             </span>
             <span>{statusLabel(e.to_status)}</span>
             {e.actor_label ? <span className="text-zinc-500">({e.actor_label === "worker:boarding" ? "automatique" : e.actor_label})</span> : null}
+            {historyReason(e) ? <span className="w-full text-zinc-600 sm:w-auto dark:text-zinc-400">— {historyReason(e)}</span> : null}
           </li>
         ))}
       </ol>

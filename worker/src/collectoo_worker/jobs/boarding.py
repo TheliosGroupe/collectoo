@@ -90,19 +90,15 @@ def record_dead_job(payload: dict[str, Any], error: str, conn: psycopg.Connectio
     batch_id = payload.get("batch_id")
     if not batch_id:
         return
+    if payload.get("type") == "confirm":
+        fail_confirmation(conn, str(batch_id), error)
+        return
     conn.execute(
         """update public.boarding_batch
            set failed_job = jsonb_build_object('type', %s::text, 'error', %s::text, 'at', now())
            where id = %s""",
         (str(payload.get("type")), error[:500], str(batch_id)),
     )
-    if payload.get("type") == "confirm":
-        # The confirmation could not post: back to committed, so staff can retry or roll back.
-        conn.execute(
-            """select private.transition_batch(id, 'committed', %s, 'worker:boarding')
-               from public.boarding_batch where id = %s and status = 'confirming'""",
-            (f"échec de la confirmation : {error[:300]}", str(batch_id)),
-        )
     if payload.get("type") == "profile":
         conn.execute(
             "update public.boarding_file set status = 'failed', error = %s"
@@ -470,7 +466,9 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
     row = conn.execute(
         "select status from public.boarding_batch where id = %s for share", (batch_id,)
     ).fetchone()
-    if row is None or row[0] not in ("committed", "confirmed"):
+    # Confirming is fine too: documents only link to accounts, and the confirmation job takes
+    # the batch row FOR UPDATE, so the two jobs run one after the other.
+    if row is None or row[0] not in ("committed", "confirming", "confirmed"):
         return
     accounts = dict(
         conn.execute(
@@ -531,10 +529,45 @@ def documents_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: s
     )
 
 
+def fail_confirmation(conn: psycopg.Connection[Any], batch_id: str, error: str) -> None:
+    """The confirmation could not post: record why and go back to committed, so staff see it and
+    can retry or roll back. Nothing was posted (the posting is one transaction). A documents
+    failure already shown stays (the history keeps the confirmation's reason)."""
+    conn.execute(
+        """update public.boarding_batch
+           set failed_job = jsonb_build_object('type', 'confirm', 'error', %s::text, 'at', now())
+           where id = %s and status = 'confirming'
+             and coalesce(failed_job ->> 'type', '') not in ('documents', 'purge_documents')""",
+        (error[:500], batch_id),
+    )
+    conn.execute(
+        """select private.transition_batch(id, 'committed', %s, 'worker:boarding')
+           from public.boarding_batch where id = %s and status = 'confirming'""",
+        (f"échec de la confirmation : {error[:300]}", batch_id),
+    )
+
+
+def _deterministic(exc: psycopg.Error) -> bool:
+    """Ledger and check errors fail the same way on every retry; other errors may be transient."""
+    state = exc.sqlstate or ""
+    return state.startswith("LG") or state == "23514"
+
+
 def confirm_batch(conn: psycopg.Connection[Any], batch_id: str) -> str:
     """Post the opening balances and confirm (M2-05): one SQL call, inside the job's transaction,
-    so it happens exactly once; a redelivered job finds the batch confirmed and does nothing."""
-    row = conn.execute("select private.complete_batch_confirmation(%s)", (batch_id,)).fetchone()
+    so it happens exactly once; a redelivered job finds the batch confirmed and does nothing.
+    A ledger or check error is recorded on the batch at once (retrying would only redo the work)."""
+    try:
+        with conn.transaction():  # savepoint: a failed posting leaves nothing behind
+            row = conn.execute(
+                "select private.complete_batch_confirmation(%s)", (batch_id,)
+            ).fetchone()
+    except psycopg.Error as exc:
+        if not _deterministic(exc):
+            raise
+        message = exc.diag.message_primary or str(exc)
+        fail_confirmation(conn, batch_id, f"{exc.sqlstate}: {message}")
+        return "failed"
     return str(row[0]) if row else "skipped"
 
 

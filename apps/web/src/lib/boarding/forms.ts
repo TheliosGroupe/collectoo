@@ -56,7 +56,9 @@ export type ErrorCode =
   | "missing_upload"
   | "state_changed"
   | "cut_off_required"
+  | "cut_off_future"
   | "opening_mismatch"
+  | "opening_plan_missing"
   | "ledger_rejected"
   | "unknown";
 
@@ -73,9 +75,13 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   unsupported_type: "Type de fichier non pris en charge (CSV, Excel, largeur fixe ou zip).",
   missing_upload: "Un fichier n'a pas été envoyé. Réessayez.",
   state_changed: "Le lot a changé d'état entre-temps. Rechargez la page.",
-  cut_off_required: "La date d'arrêté du portefeuille est obligatoire et ne peut pas être dans le futur.",
+  cut_off_required:
+    "La date d'arrêté du portefeuille est obligatoire et ne peut pas être dans le futur : abandonnez ce lot et créez-en un avec une date d'arrêté passée.",
+  cut_off_future: "La date d'arrêté ne peut pas être dans le futur : le fichier décrit le portefeuille à une date passée.",
   opening_mismatch:
     "Les soldes d'ouverture ne correspondent pas au rapport qualité : abandonnez ce lot et déposez à nouveau le fichier.",
+  opening_plan_missing:
+    "Ce lot a été intégré avant la comptabilisation des soldes d'ouverture : annulez l'intégration, puis déposez à nouveau le fichier.",
   ledger_rejected: "La comptabilité a refusé l'opération. Contactez le support.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
@@ -84,6 +90,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
 export function commandErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
   if (message.includes("cut-off date is required")) return "cut_off_required";
+  if (message.includes("cut-off date cannot be in the future")) return "cut_off_future";
+  if (message.includes("roll it back and board the file again")) return "opening_plan_missing";
   if (message.includes("opening balances do not reconcile") || message.includes("without an opening plan"))
     return "opening_mismatch";
   if (message.includes("do not reconcile")) return "totals_mismatch";

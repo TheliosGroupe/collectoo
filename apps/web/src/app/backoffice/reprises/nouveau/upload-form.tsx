@@ -22,7 +22,7 @@ async function sha256Hex(file: File): Promise<string> {
  * already stored is skipped, and the control totals are rewritten each time. Changing the
  * portfolio, date or files starts a new batch.
  */
-export function UploadForm({ portfolios }: { portfolios: Option[] }) {
+export function UploadForm({ portfolios, maxCutOff }: { portfolios: Option[]; maxCutOff: string }) {
   const router = useRouter();
   const attempt = useRef<{ signature: string; key: string } | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
@@ -38,6 +38,7 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
     if (!formData.get("cut_off_date")) return setError("Indiquez la date d'arrêté du portefeuille.");
     const portfolio = String(formData.get("portfolio") ?? "");
     const cutOff = String(formData.get("cut_off_date") ?? "");
+    if (cutOff > maxCutOff) return setError(errorText("cut_off_future"));
     const totalText = String(formData.get("control_total") ?? "").trim();
     const rowsText = String(formData.get("control_rows") ?? "").trim();
     if (Boolean(totalText) !== Boolean(rowsText))
@@ -112,7 +113,7 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
       </label>
       <label className="flex flex-col gap-1 text-sm">
         Date d&apos;arrêté du portefeuille (cut-off du cédant)
-        <input type="date" name="cut_off_date" required className={inputClass} />
+        <input type="date" name="cut_off_date" required max={maxCutOff} className={inputClass} />
       </label>
       <label className="flex flex-col gap-1 text-sm">
         Fichiers (CSV, Excel, largeur fixe, zip de pièces)

@@ -85,8 +85,11 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
   const fileRows = (files ?? []) as unknown as FileRow[];
   const fileNames = Object.fromEntries(fileRows.map((f) => [f.id, f.file_name]));
   // A job that failed for good: blocks the page while processing; after commit (documents job)
-  // it is shown as a warning, the batch itself being integrated.
-  const failed = b.failed_job !== null && isProcessing(b.status);
+  // it is shown as a warning, the batch itself being integrated. The documents job runs next to
+  // the confirmation, so its failure does not stop the confirmation.
+  const failedType = b.failed_job?.type ?? null;
+  const documentsFailure = failedType === "documents" || failedType === "purge_documents";
+  const failed = b.failed_job !== null && isProcessing(b.status) && !(b.status === "confirming" && documentsFailure);
   // "yyyy-mm-dd" is a calendar date: format it without a timezone shift.
   const cutOff = b.cut_off_date ? b.cut_off_date.split("-").reverse().join("/") : null;
 
@@ -113,8 +116,23 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
           fichier (format, encodage), puis abandonnez ce lot et déposez-en un nouveau. Détail technique :{" "}
           <span className="font-mono text-xs break-all">{b.failed_job.error}</span>
         </ErrorNote>
+      ) : b.failed_job?.type === "confirm" && b.status === "committed" ? (
+        <ErrorNote>
+          {b.failed_job.error === "mandate_inactive" ? (
+            <>
+              La confirmation n&apos;a pas été faite : aucun mandat actif ne couvre ce portefeuille à cette date (art. R124-3
+              CPCE). Aucun solde n&apos;a été comptabilisé. Rattachez un mandat actif au portefeuille, puis confirmez à nouveau.
+            </>
+          ) : (
+            <>
+              La confirmation a échoué : aucun solde n&apos;a été comptabilisé et le lot est revenu à l&apos;état « Intégré, à
+              confirmer ». Réessayez ; si l&apos;échec se répète, annulez l&apos;intégration et contactez le support. Détail
+              technique : <span className="font-mono text-xs break-all">{b.failed_job.error}</span>
+            </>
+          )}
+        </ErrorNote>
       ) : b.failed_job &&
-        ((b.failed_job.type === "documents" && ["committed", "confirmed"].includes(b.status)) ||
+        ((b.failed_job.type === "documents" && ["committed", "confirming", "confirmed"].includes(b.status)) ||
           (b.failed_job.type === "purge_documents" && b.status === "rolled_back")) ? (
         // Failures that still matter after the batch moved on: documents not linked after commit,
         // or files not deleted from storage after a rollback (personal data to erase).

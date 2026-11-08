@@ -55,6 +55,27 @@ def _count(sql: str, params: tuple[Any, ...]) -> int:
         return int(one(conn, sql, params))
 
 
+def _add_mandate(tenant: dict[str, Any]) -> None:
+    """An active client mandate on the tenant's portfolio (confirmation needs one, R124-3)."""
+    with psycopg.connect(DB) as conn, conn.transaction():
+        mandate = one(
+            conn,
+            "insert into public.mandate"
+            " (organization_id, client_organization_id, reference, mandate_type, signed_on)"
+            " values (%s, %s, %s, 'mandate_amicable', current_date - 30) returning id",
+            (tenant["servicer"], tenant["client"], f"M-{uuid.uuid4().hex[:6]}"),
+        )
+        conn.execute(
+            "insert into public.mandate_terms (mandate_id, valid_from, commission_rate)"
+            " values (%s, current_date - 30, 0.15)",
+            (mandate,),
+        )
+        conn.execute(
+            "update public.portfolio set mandate_id = %s where id = %s",
+            (mandate, tenant["portfolio"]),
+        )
+
+
 def test_commit_then_rollback_leaves_only_the_audit_trail(
     tenant: dict[str, Any], tmp_path: Path
 ) -> None:
@@ -137,23 +158,7 @@ def test_confirm_needs_staff_and_an_active_mandate(tenant: dict[str, Any], tmp_p
     with pytest.raises(psycopg.errors.CheckViolation, match="mandate"):
         _call(tenant["staff"], "select public.confirm_boarding_batch(%s)", (batch,), aal="aal2")
 
-    with psycopg.connect(DB) as conn, conn.transaction():
-        mandate = one(
-            conn,
-            "insert into public.mandate"
-            " (organization_id, client_organization_id, reference, mandate_type, signed_on)"
-            " values (%s, %s, %s, 'mandate_amicable', current_date - 30) returning id",
-            (tenant["servicer"], tenant["client"], f"M-{uuid.uuid4().hex[:6]}"),
-        )
-        conn.execute(
-            "insert into public.mandate_terms (mandate_id, valid_from, commission_rate)"
-            " values (%s, current_date - 30, 0.15)",
-            (mandate,),
-        )
-        conn.execute(
-            "update public.portfolio set mandate_id = %s where id = %s",
-            (mandate, tenant["portfolio"]),
-        )
+    _add_mandate(tenant)
     _call(tenant["staff"], "select public.confirm_boarding_batch(%s)", (batch,), aal="aal2")
     drain(storage())  # the confirmation job posts the opening balances (M2-05)
     total = _count("select count(*) from public.account where boarding_batch_id = %s", (batch,))
@@ -296,3 +301,75 @@ def test_a_file_that_cannot_be_read_as_a_table_blocks_the_batch(
         report = one(conn, "select dq_report from public.boarding_batch where id = %s", (batch,))
     listed = {f["name"]: f["issues"] for f in report["files"]}
     assert listed["historique.dat"] == {"file_not_boarded": {"severity": "blocking", "count": 1}}
+
+
+def test_a_refused_confirmation_is_shown_at_once_and_posts_nothing(
+    tenant: dict[str, Any], tmp_path: Path
+) -> None:
+    batch = _to_staged(tenant, _clean_file(tmp_path, "rent", 30))
+    _call(tenant["user"], "select public.commit_boarding_batch(%s)", (batch,))
+    _add_mandate(tenant)
+    _call(tenant["staff"], "select public.confirm_boarding_batch(%s)", (batch,), aal="aal2")
+    # The staged report no longer matches the plan: the posting refuses it (LG005), every time.
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            """update public.boarding_batch
+               set dq_report = jsonb_set(dq_report,
+                     '{staging,opening,currencies,EUR,outstanding_minor}', '"1"')
+               where id = %s""",
+            (batch,),
+        )
+    drain(storage())
+    with psycopg.connect(DB) as conn:
+        status, failed = conn.execute(
+            "select status, failed_job from public.boarding_batch where id = %s", (batch,)
+        ).fetchone() or (None, None)
+        entries = one(
+            conn, "select count(*) from public.ledger_entry where boarding_batch_id = %s", (batch,)
+        )
+        archived = one(
+            conn,
+            "select count(*) from pgmq.a_boarding"
+            " where message ->> 'type' = 'confirm' and message ->> 'batch_id' = %s and read_ct = 1",
+            (batch,),
+        )
+        workable = one(
+            conn,
+            "select count(*) from public.account"
+            " where boarding_batch_id = %s and status <> 'staged'",
+            (batch,),
+        )
+    assert status == "committed" and failed["type"] == "confirm"
+    assert failed["error"].startswith("LG005")
+    assert entries == 0 and workable == 0
+    assert archived == 1  # done on the first attempt: no retries of a deterministic refusal
+
+
+def test_documents_queued_before_the_confirmation_are_still_linked(
+    tenant: dict[str, Any], tmp_path: Path
+) -> None:
+    from test_documents import make_zip  # noqa: PLC0415
+
+    table, _ = generate_civil("b2b_invoice", "fr_semicolon", 40, 31, defect_rate=0)
+    tape = tmp_path / "factures.csv"
+    with tape.open("w", newline="", encoding="utf-8") as fh:
+        csv.writer(fh, delimiter=";").writerows(table)
+    refs = sorted({r[0] for r in table[1:]})
+    store = storage()
+    batch = board(tenant, store, tape, make_zip(tmp_path / "pieces.zip", refs))
+    drain(store)
+    _call(tenant["user"], "select public.approve_mapping(%s, %s)", (batch, json.dumps({})))
+    drain(store)
+    _call(tenant["user"], "select public.commit_boarding_batch(%s)", (batch,))
+    # Confirmed before the worker reaches the documents job: it runs while 'confirming'.
+    _add_mandate(tenant)
+    _call(tenant["staff"], "select public.confirm_boarding_batch(%s)", (batch,), aal="aal2")
+    drain(store)
+    with psycopg.connect(DB) as conn:
+        status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
+        linked = one(
+            conn,
+            "select count(*) from public.document where boarding_batch_id = %s",
+            (batch,),
+        )
+    assert status == "confirmed" and linked == len(refs)

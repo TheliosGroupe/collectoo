@@ -77,6 +77,11 @@ describe("labels", () => {
     );
     expect(commandErrorCode("the cut-off date is required and cannot be in the future")).toBe("cut_off_required");
     expect(commandErrorCode("ledger: batch x has ledger entries; correct them with reversals")).toBe("ledger_rejected");
+    expect(commandErrorCode("the cut-off date cannot be in the future")).toBe("cut_off_future");
+    expect(
+      commandErrorCode("ledger: batch x was committed without an opening plan; roll it back and board the file again"),
+    ).toBe("opening_plan_missing");
+    expect(errorText("opening_plan_missing")).toMatch(/annulez l'intégration/);
   });
 
   it("formats percentages the French way", () => {

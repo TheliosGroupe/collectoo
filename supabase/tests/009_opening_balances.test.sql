@@ -1,6 +1,6 @@
 -- Opening balances (M2-05, ADR-0012): planned at commit, posted at confirmation by the worker job.
 begin;
-select plan(32);
+select plan(43);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -152,6 +152,52 @@ select is(private.complete_batch_confirmation('30000000-0000-0000-0000-000000000
   'no posting without an active mandate (R124-3)');
 select is((select status from public.boarding_batch where id = '30000000-0000-0000-0000-000000000004'), 'committed',
   'the batch is back to committed');
+select is((select failed_job ->> 'error' from public.boarding_batch where id = '30000000-0000-0000-0000-000000000004'),
+  'mandate_inactive', 'and the page is told why');
+
+-- Confirming again: a batch without an opening plan is refused; the previous failure is cleared -----
+update public.mandate_terms set valid_to = null where mandate_id = '70000000-0000-0000-0000-000000000002';
+insert into t select 'plan4', opening_plan from public.boarding_batch where id = '30000000-0000-0000-0000-000000000004';
+update public.boarding_batch set opening_plan = null where id = '30000000-0000-0000-0000-000000000004';
+select set_config('request.jwt.claims',
+  '{"sub": "10000000-0000-0000-0000-000000000001", "role": "authenticated", "aal": "aal2"}', true);
+set local role authenticated;
+select throws_ok($$select public.confirm_boarding_batch('30000000-0000-0000-0000-000000000004')$$, 'LG005',
+  'ledger: batch 30000000-0000-0000-0000-000000000004 was committed without an opening plan; roll it back and board the file again',
+  'a batch committed without an opening plan cannot be confirmed');
+reset role;
+update public.boarding_batch set opening_plan = (select v from t where k = 'plan4') where id = '30000000-0000-0000-0000-000000000004';
+set local role authenticated;
+select lives_ok($$select public.confirm_boarding_batch('30000000-0000-0000-0000-000000000004')$$, 'staff confirm again');
+reset role;
+select is((select failed_job from public.boarding_batch where id = '30000000-0000-0000-0000-000000000004'), null,
+  'the earlier confirmation failure is cleared');
+
+-- A documents failure stays shown through confirmation attempts ---------------------------------------
+update public.boarding_batch set failed_job = '{"type": "documents", "error": "zip too large"}'
+where id = '30000000-0000-0000-0000-000000000004';
+update public.mandate_terms set valid_to = private.paris_today() where mandate_id = '70000000-0000-0000-0000-000000000002';
+select is(private.complete_batch_confirmation('30000000-0000-0000-0000-000000000004'), 'mandate_inactive',
+  'the mandate lapses again');
+select is((select failed_job ->> 'type' from public.boarding_batch where id = '30000000-0000-0000-0000-000000000004'),
+  'documents', 'an inactive mandate does not hide a documents failure');
+update public.mandate_terms set valid_to = null where mandate_id = '70000000-0000-0000-0000-000000000002';
+set local role authenticated;
+select lives_ok($$select public.confirm_boarding_batch('30000000-0000-0000-0000-000000000004')$$, 'staff confirm once more');
+reset role;
+select is((select failed_job ->> 'type' from public.boarding_batch where id = '30000000-0000-0000-0000-000000000004'),
+  'documents', 'nor does a new confirmation request');
+
+-- A batch cannot be created with a future cut-off date --------------------------------------------
+select set_config('request.jwt.claims',
+  '{"sub": "10000000-0000-0000-0000-000000000003", "role": "authenticated", "aal": "aal1"}', true);
+set local role authenticated;
+select throws_ok($$select public.create_boarding_batch('future-cut-off-0001', '20000000-0000-0000-0000-0000000000a1',
+  (now() at time zone 'Europe/Paris')::date + 1)$$, '23514', 'the cut-off date cannot be in the future',
+  'a future cut-off date is refused when the batch is created');
+reset role;
+select has_index('eba', 't3_loan', 't3_loan_batch_loan_idx', 'EU loans are found by batch and loan identifier');
+select hasnt_index('eba', 't3_loan', 't3_loan_batch_idx', 'without a redundant batch-only index');
 
 -- After confirmation: the source of the openings is frozen -------------------------------------------
 select throws_ok($$ update public.claim_item set original_minor = 1 where ref = 'F-2' $$, 'LG002', null,
