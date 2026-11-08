@@ -74,7 +74,7 @@ ADR-0006 fixed the principles: double-entry, append-only, integer minor units, c
 - Before confirmation a batch is undone by the existing hard delete, so the books only ever hold claims under an active mandate (CPCE R124-3).
 - `effective_date` = the batch cut-off date.
 - Σ opening balances = the DQ report's reconciled outstanding total, minus the accounts of the tape already in the portfolio (skipped at staging, shown on the batch page). Checked at staging (DQ outstanding = opening + skipped, per currency), at commit (plan = staged opening) and at posting (posted = plan = staged opening).
-- A confirmation refused by the ledger (LG00x or a check) is recorded on the batch at once and the batch goes back to `committed`; it is not retried, since it would fail the same way. Other errors are retried by the queue.
+- A commit or a confirmation that fails with a data, constraint or ledger error (SQLSTATE 22xxx, 23xxx, LGxxx) is recorded on the batch at once and the batch goes back one step (`committing → staged`, `confirming → committed`), since a retry would fail the same way. Other errors are retried by the queue (5 attempts), then the dead-letter hook sends the batch back the same way.
 
 ## Founder decisions (2026-11-08, all defaults accepted)
 1. Opening balances are posted when a batch is confirmed.

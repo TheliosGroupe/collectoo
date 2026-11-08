@@ -744,9 +744,12 @@ export function AbandonSection({ batchId, status }: { batchId: string; status: s
  */
 function historyReason(e: { to_status: string; reason: string | null }): string | null {
   if (!e.reason) return null;
-  // Back to staged (failed commit), committed (motif, or failed confirmation), abandon, rollback.
-  if (!["abandoned", "rolled_back", "committed", "staged"].includes(e.to_status)) return null;
-  return ["committed", "rows staged"].includes(e.reason) ? null : e.reason;
+  // Commit requested (staff motif), back to staged (failed commit), back to committed (failed
+  // confirmation), abandon, rollback.
+  if (!["committing", "staged", "committed", "abandoned", "rolled_back"].includes(e.to_status)) return null;
+  if (["commit requested", "committed", "rows staged"].includes(e.reason)) return null;
+  // Failure reasons carry technical detail (shown in full in the page's error note): keep it short.
+  return e.reason.length > 160 ? `${e.reason.slice(0, 157)}…` : e.reason;
 }
 
 export function HistorySection({

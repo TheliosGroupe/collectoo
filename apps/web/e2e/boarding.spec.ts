@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { createMandate, createMember, createTenant, type Tenant } from "./support/admin";
+import { createMandate, createMember, createTenant, tamperStagedOpening, type Tenant } from "./support/admin";
 import { loginAsStaff } from "./support/session";
 import { reviewShot } from "./screenshot";
 
@@ -101,4 +101,24 @@ test("ops abandon a batch before integrating it", async ({ page }) => {
   await expect(status).toHaveText("Abandonné");
   await expect(page.getByTestId("mapping").getByRole("combobox").first()).toHaveCount(0);
   await expect(page.getByTestId("history")).toContainText("Abandonné");
+});
+
+test("a commit refused by the worker sends the batch back with its reason", async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  await loginAsStaff(page, await createMember(tenant.servicerId, "ops_manager"));
+  await uploadFixture(page);
+  await page.getByRole("button", { name: "Déposer et analyser" }).click();
+  await expect(page).toHaveURL(/\/backoffice\/reprises\/[0-9a-f-]{36}$/, { timeout: 30_000 });
+  const status = page.getByTestId("batch-status");
+  await expect(status).toHaveText("Mapping à valider", { timeout: 60_000 });
+  await page.getByRole("button", { name: "Valider le mapping" }).click();
+  await expect(status).toHaveText("Prêt à intégrer", { timeout: 60_000 });
+
+  // The staged report no longer matches the rows: the commit job refuses it (LG005).
+  await tamperStagedOpening(page.url().split("/").pop()!);
+  await page.getByRole("button", { name: "Intégrer le lot" }).click();
+  await expect(page.getByText("L'intégration a échoué")).toBeVisible({ timeout: 60_000 });
+  await expect(status).toHaveText("Prêt à intégrer");
+  await expect(page.getByTestId("history")).toContainText("échec de l'intégration");
+  await reviewShot(page, testInfo, "m2-commit-failed");
 });

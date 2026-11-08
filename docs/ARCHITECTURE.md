@@ -185,29 +185,31 @@ flowchart LR
   VAL --> DQ[DQ report<br/>completeness, contactability, reconciliation]
   DQ --> STG[Staging tables]
   STG --> COM[Commit batch<br/>reversible until confirmed]
+  COM --> CONF[Confirm<br/>opening balances posted]
 ```
 
-- **Batch state machine:** `uploaded → profiled → mapping_proposed → mapping_approved → transformed → validated → staged → committed → confirmed` (or `rejected` / `rolled_back`). Defined in `docs/DOMAIN.md`.
+- **Batch state machine:** `uploaded → profiled → mapping_proposed → mapping_approved → transformed → validated → staged → committing → committed → confirming → confirmed` (or `needs_fix`, `abandoned`, `rolled_back`). Defined in `docs/DOMAIN.md` §4.4.
 - **Streaming:** the worker reads files with Polars lazy scans / DuckDB, processes in chunks, writes to staging with `COPY`. Large tapes run as a Serverless Job. Targets: 50k rows in CI, 1M rows benchmarked within VM memory.
 - **Mapping:** the AI gateway proposes `source column → canonical field` with confidence and rationale, from column names, profiles and a few sample values (masked). Saved **mapping profiles** per seller/client are applied first; the LLM only fills gaps. Nothing commits without human approval of the mapping.
 - **Transforms** are data (a versioned list of named, pure functions: `parse_fr_date`, `parse_fr_decimal`, `siren_check`, `iban_normalise`, `phone_e164`, `ban_geocode`...), so a batch can be replayed exactly.
 - **Claim type and legal regime** are assigned at boarding from mapped fields (`contract_date`, product) and never recomputed silently (CCD-01).
-- **Commit** (one transaction, `SECURITY DEFINER` function called by the worker):
+- **Commit and confirmation** are requested from the web (one short `SECURITY DEFINER` command each, within the API's 8 s) and run by worker jobs on the `boarding` queue, each in one transaction (M2a-2, M2a-3; ADR-0012). At 50k loans the commit job takes ~21 s and the confirmation ~20 s (`docs/benchmarks/boarding.md`).
 
 ```mermaid
 sequenceDiagram
   participant Ops as Ops user (web)
-  participant W as worker-api
-  participant DB as Postgres
-  Ops->>W: POST /v1/boarding/{batch}/commit (user JWT)
-  W->>DB: check role + active mandate (CPCE-03)
-  W->>DB: begin
-  W->>DB: insert parties, accounts, contacts, documents from staging (batch_id on every row)
-  W->>DB: ledger: opening entries per account and component (idempotency key = batch:account:component)
-  W->>DB: claim_ownership rows, account_event(boarded)
-  W->>DB: batch.status = committed, commit
-  W-->>Ops: summary + DQ report link
-  Note over Ops,DB: Until "confirmed": rollback = reversal entries + soft-delete of batch rows.<br/>After "confirmed": corrections only through normal reversal.
+  participant DB as Postgres (commands, queue)
+  participant W as worker (boarding queue)
+  Ops->>DB: commit_boarding_batch (rights, cut-off date, motif if totals differ)
+  DB-->>W: batch committing, job "commit" queued
+  W->>DB: parties, accounts, contacts, claim items, EU tables from staging (batch_id on every row)
+  W->>DB: claim ownership from the cut-off date, opening plan checked against the DQ report
+  W->>DB: batch committed (or back to staged with the reason)
+  Ops->>DB: confirm_boarding_batch (staff at aal2, active mandate, CPCE-03)
+  DB-->>W: batch confirming, job "confirm" queued
+  W->>DB: ledger: one opening entry per account at the cut-off date, = plan = DQ report
+  W->>DB: accounts workable, batch confirmed (or back to committed with the reason)
+  Note over Ops,DB: Until confirmed: rollback = hard delete of the batch's rows (nothing in the ledger yet).<br/>After confirmed: corrections only through ledger reversals.
 ```
 
 ## 7. Calculation engine

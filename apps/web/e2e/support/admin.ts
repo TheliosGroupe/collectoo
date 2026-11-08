@@ -83,3 +83,17 @@ export async function createMandate(tenant: Tenant): Promise<void> {
   const { error: e3 } = await admin.from("portfolio").update({ mandate_id: mandate.id }).eq("id", tenant.portfolioId);
   if (e3) throw e3;
 }
+
+/**
+ * Makes a staged batch's report disagree with its rows, so the commit job refuses it (LG005):
+ * the way to show the commit-failure note without a broken tape.
+ */
+export async function tamperStagedOpening(batchId: string): Promise<void> {
+  const admin = adminClient();
+  const { data, error } = await admin.from("boarding_batch").select("dq_report").eq("id", batchId).single();
+  if (error) throw error;
+  const report = data.dq_report as { staging: { opening: { currencies: Record<string, { outstanding_minor: string }> } } };
+  for (const c of Object.values(report.staging.opening.currencies)) c.outstanding_minor = "1";
+  const { error: e2 } = await admin.from("boarding_batch").update({ dq_report: report }).eq("id", batchId);
+  if (e2) throw e2;
+}

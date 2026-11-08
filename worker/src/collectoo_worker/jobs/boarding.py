@@ -436,6 +436,13 @@ def stage_batch(conn: psycopg.Connection[Any], storage: Storage, batch_id: str) 
         }
     staged, opening, skipped = split_skipped(staged, existing)
     check_bridge(computed_row[0], opening, skipped)
+    # Only a batch still waiting for its staging is written: a duplicate run of this job (queue
+    # redelivery) must not rewrite a batch that has moved on, e.g. one being committed.
+    status = conn.execute(
+        "select status from public.boarding_batch where id = %s for update", (batch_id,)
+    ).fetchone()
+    if status is None or status[0] != "validated":
+        return
     digest = write_staging(conn, batch_id, staged)
     conn.execute(
         """update public.boarding_batch

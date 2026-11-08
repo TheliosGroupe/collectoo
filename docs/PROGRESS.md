@@ -22,7 +22,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- M2a-3 (PR): the batch commit runs as a worker job (state `committing`, back to `staged` with the reason on failure, no retries when the data or the ledger refuses). The request now fits the API's 8 s at 50k; the job takes ~21 s.
+- M2a-3 (PR; multi-agent review: 14 findings, 12 confirmed = 7 distinct, all fixed: stale stage job guarded, override motif kept on the requester's event and change history names the requester, portfolio lock that does not wait for running jobs, refresh-stalled wording, dead-letter and retry paths tested, ARCHITECTURE §6, commit-failure E2E + screenshots): the batch commit runs as a worker job (state `committing`, back to `staged` with the reason on failure, no retries when the data or the ledger refuses). The request now fits the API's 8 s at 50k; the job takes ~21 s.
 
 ## Next
 - M2b: payments (PSP + bank import, allocation waterfall, unallocated suspense).

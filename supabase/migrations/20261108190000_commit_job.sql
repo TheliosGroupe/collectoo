@@ -88,7 +88,9 @@ begin
       commit_requested_by = auth.uid(), commit_requested_at = now(),
       failed_job = case when failed_job ->> 'type' = 'commit' then null else failed_job end
   where id = p_batch_id;
-  perform private.transition_batch(p_batch_id, 'committing', 'commit requested');
+  -- The staff motif (commit despite a mismatch, or a comment) stays on the requester's event.
+  perform private.transition_batch(p_batch_id, 'committing',
+                                   coalesce(nullif(btrim(p_override_reason), ''), 'commit requested'));
 end;
 $$;
 
@@ -113,6 +115,8 @@ begin
   if v.cut_off_date is null or v.cut_off_date > private.paris_today() then
     raise exception 'the cut-off date is required and cannot be in the future' using errcode = 'check_violation';
   end if;
+  -- The change history of every row written here names the staff member who asked for it.
+  perform set_config('app.actor', 'worker:boarding, requested by ' || coalesce(v.commit_requested_by::text, '?'), true);
   analyze private.boarding_staging;  -- fresh statistics so the joins below use hash joins
 
   -- Parties (debtors): reuse a debtor already known for this client (same seller reference).
@@ -209,11 +213,58 @@ begin
   perform private.assert_opening_matches(p_batch_id, v_plan);
   update public.boarding_batch set opening_plan = v_plan where id = p_batch_id;
 
-  perform private.transition_batch(p_batch_id, 'committed', coalesce(v.commit_override_reason, 'committed'),
-                                   'worker:boarding');
+  perform private.transition_batch(p_batch_id, 'committed', 'committed', 'worker:boarding');
   return 'committed';
 end;
 $$;
 
 revoke execute on function private.complete_batch_commit(uuid) from public, anon, authenticated;
 grant execute on function private.complete_batch_commit(uuid) to service_role;
+
+create or replace function public.create_boarding_batch(
+  p_idempotency_key text,
+  p_portfolio_id uuid,
+  p_cut_off_date date default null,
+  p_conformance text default 'servicing'
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_existing jsonb;
+  v_id uuid;
+  v_portfolio public.portfolio;
+begin
+  select result into v_existing from private.command_log
+  where command = 'create_boarding_batch' and idempotency_key = p_idempotency_key;
+  if found then
+    return (v_existing ->> 'batch_id')::uuid;
+  end if;
+  if not private.can_board(p_portfolio_id) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  -- The tape describes the portfolio as it stood on that date: it cannot be a future date
+  -- (commit refuses it too, but only after the whole review).
+  if p_cut_off_date > private.paris_today() then
+    raise exception 'the cut-off date cannot be in the future' using errcode = 'check_violation';
+  end if;
+  select * into v_portfolio from public.portfolio where id = p_portfolio_id;
+  -- Serialise version numbering per portfolio. NO KEY UPDATE: it does not wait for the key-share
+  -- locks that the commit and confirmation jobs hold on the portfolio (account and ledger FKs)
+  -- for their whole run, which would exceed a request's 8 s.
+  perform 1 from public.portfolio where id = p_portfolio_id for no key update;
+  insert into public.boarding_batch (
+    organization_id, client_organization_id, portfolio_id, version, cut_off_date, conformance, created_by)
+  values (
+    v_portfolio.organization_id, v_portfolio.client_organization_id, p_portfolio_id,
+    coalesce((select max(version) from public.boarding_batch where portfolio_id = p_portfolio_id), 0) + 1,
+    p_cut_off_date, p_conformance, auth.uid())
+  returning id into v_id;
+  insert into public.boarding_event (batch_id, to_status, actor_id) values (v_id, 'draft', auth.uid());
+  insert into private.command_log (command, idempotency_key, actor_id, result)
+  values ('create_boarding_batch', p_idempotency_key, auth.uid(), jsonb_build_object('batch_id', v_id));
+  return v_id;
+end;
+$$;

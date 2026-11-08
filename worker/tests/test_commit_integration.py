@@ -213,7 +213,22 @@ def test_a_mismatch_needs_a_reason_to_commit(tenant: dict[str, Any], tmp_path: P
         reason = one(
             conn, "select commit_override_reason from public.boarding_batch where id = %s", (batch,)
         )
+        # The motif is the requester's decision: it is on their own event, not the worker's.
+        event = conn.execute(
+            "select reason, actor_id::text from public.boarding_event"
+            " where batch_id = %s and to_status = 'committing'",
+            (batch,),
+        ).fetchone()
+        logged_by = one(
+            conn,
+            "select distinct actor_label from private.change_log c"
+            " join public.account a on c.table_name = 'public.account' and c.row_id = a.id::text"
+            " where a.boarding_batch_id = %s",
+            (batch,),
+        )
     assert reason == "seller total excludes VAT"
+    assert event == ("seller total excludes VAT", tenant["user"])
+    assert logged_by == f"worker:boarding, requested by {tenant['user']}"
 
 
 def test_reboarding_skips_accounts_already_in_the_portfolio(
@@ -385,6 +400,12 @@ def test_a_refused_commit_goes_back_to_staged_with_its_reason(
     tenant: dict[str, Any], tmp_path: Path
 ) -> None:
     batch = _to_staged(tenant, _clean_file(tmp_path, "rent", 30))
+    with psycopg.connect(DB) as conn:
+        opening = one(
+            conn,
+            "select dq_report #> '{staging,opening}' from public.boarding_batch where id = %s",
+            (batch,),
+        )
     # The staged report no longer matches the rows: the commit job refuses it (LG005), every time.
     with psycopg.connect(DB) as conn, conn.transaction():
         conn.execute(
@@ -416,5 +437,54 @@ def test_a_refused_commit_goes_back_to_staged_with_its_reason(
     assert status == "staged" and failed["type"] == "commit"
     assert failed["error"].startswith("LG005") and reason.startswith("échec de l'intégration")
     assert accounts == 0 and archived == 1  # nothing written, no retries
-    # Staff can still abandon it (or retry the commit, which clears the failure).
-    _call(tenant["user"], "select public.abandon_boarding_batch(%s, %s)", (batch, "bad report"))
+    # Once the cause is fixed, a new request clears the failure and the commit goes through.
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            """update public.boarding_batch
+               set dq_report = jsonb_set(dq_report, '{staging,opening}', %s)
+               where id = %s""",
+            (json.dumps(opening), batch),
+        )
+    _call(tenant["user"], "select public.commit_boarding_batch(%s, %s)", (batch, None))
+    with psycopg.connect(DB) as conn:
+        cleared = one(conn, "select failed_job from public.boarding_batch where id = %s", (batch,))
+    assert cleared is None
+    drain(storage())
+    with psycopg.connect(DB) as conn:
+        status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
+    assert status == "committed"
+
+
+def test_a_dead_commit_job_sends_the_batch_back(tenant: dict[str, Any], tmp_path: Path) -> None:
+    """Transient errors are retried by the queue; after the last attempt the dead-letter hook
+    sends the batch back to staged with the error, like a refused commit."""
+    from collectoo_worker.jobs.boarding import record_dead_job  # noqa: PLC0415
+
+    batch = _to_staged(tenant, _clean_file(tmp_path, "rent", 20))
+    _call(tenant["user"], "select public.commit_boarding_batch(%s, %s)", (batch, None))
+    with psycopg.connect(DB) as conn, conn.transaction():
+        record_dead_job({"type": "commit", "batch_id": batch}, "OperationalError: gone", conn)
+    with psycopg.connect(DB) as conn:
+        status, failed = conn.execute(
+            "select status, failed_job from public.boarding_batch where id = %s", (batch,)
+        ).fetchone() or (None, None)
+    assert status == "staged" and failed["type"] == "commit"
+    assert failed["error"] == "OperationalError: gone"
+
+
+def test_a_duplicate_stage_job_leaves_a_batch_being_committed_alone(
+    tenant: dict[str, Any], tmp_path: Path
+) -> None:
+    from collectoo_worker.jobs.boarding import stage_batch  # noqa: PLC0415
+
+    batch = _to_staged(tenant, _clean_file(tmp_path, "rent", 20))
+    _call(tenant["user"], "select public.commit_boarding_batch(%s, %s)", (batch, None))
+    with psycopg.connect(DB) as conn, conn.transaction():
+        stage_batch(conn, storage(), batch)  # a redelivered stage job
+    with psycopg.connect(DB) as conn:
+        status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
+    assert status == "committing"
+    drain(storage())
+    with psycopg.connect(DB) as conn:
+        status = one(conn, "select status from public.boarding_batch where id = %s", (batch,))
+    assert status == "committed"
