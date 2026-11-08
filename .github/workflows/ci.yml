@@ -127,10 +127,22 @@ jobs:
         working-directory: apps/web
       - run: npx playwright install --with-deps chromium
         working-directory: apps/web
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: worker/uv.lock
+      - name: Start the boarding worker (mock LLM, mock addresses)
+        run: |
+          eval "$(./scripts/local-env.sh)"
+          cd worker && uv sync --frozen
+          LLM_PROVIDER=mock ADDRESS_NORMALISER=mock nohup uv run collectoo-worker consume boarding > ../worker.log 2>&1 &
       - run: npm run build
         working-directory: apps/web
       - run: npm run e2e
         working-directory: apps/web
+      - name: Worker log
+        if: failure()
+        run: tail -n 100 worker.log
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4

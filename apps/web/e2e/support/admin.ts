@@ -12,7 +12,13 @@ export function adminClient() {
   return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 }
 
-export type Tenant = { servicerId: string; clientId: string; clientName: string; portfolioName: string };
+export type Tenant = {
+  servicerId: string;
+  clientId: string;
+  clientName: string;
+  portfolioId: string;
+  portfolioName: string;
+};
 
 export async function createTenant(): Promise<Tenant> {
   const admin = adminClient();
@@ -31,11 +37,13 @@ export async function createTenant(): Promise<Tenant> {
     .single();
   if (e2) throw e2;
   const portfolioName = "Factures impayées 2026";
-  const { error: e3 } = await admin
+  const { data: portfolio, error: e3 } = await admin
     .from("portfolio")
-    .insert({ organization_id: servicer.id, client_organization_id: client.id, name: portfolioName });
+    .insert({ organization_id: servicer.id, client_organization_id: client.id, name: portfolioName })
+    .select("id")
+    .single();
   if (e3) throw e3;
-  return { servicerId: servicer.id, clientId: client.id, clientName, portfolioName };
+  return { servicerId: servicer.id, clientId: client.id, clientName, portfolioId: portfolio.id, portfolioName };
 }
 
 export async function createMember(
@@ -51,4 +59,27 @@ export async function createMember(
     .insert({ user_id: data.user.id, organization_id: organizationId, role });
   if (e2) throw e2;
   return email;
+}
+
+/** A signed amicable-collection mandate covering the tenant's portfolio (CPCE R124-3). */
+export async function createMandate(tenant: Tenant): Promise<void> {
+  const admin = adminClient();
+  const { data: mandate, error } = await admin
+    .from("mandate")
+    .insert({
+      organization_id: tenant.servicerId,
+      client_organization_id: tenant.clientId,
+      reference: `MAND-${randomUUID().slice(0, 8)}`,
+      mandate_type: "mandate_amicable",
+      signed_on: "2026-01-15",
+    })
+    .select("id")
+    .single();
+  if (error) throw error;
+  const { error: e2 } = await admin
+    .from("mandate_terms")
+    .insert({ mandate_id: mandate.id, valid_from: "2026-01-15", commission_rate: 0.15 });
+  if (e2) throw e2;
+  const { error: e3 } = await admin.from("portfolio").update({ mandate_id: mandate.id }).eq("id", tenant.portfolioId);
+  if (e3) throw e3;
 }

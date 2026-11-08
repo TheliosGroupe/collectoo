@@ -134,3 +134,15 @@ def test_join_keys_link_files_mapping_the_same_key() -> None:
 def test_header_signature_is_order_independent() -> None:
     assert header_signature(["b", "Échéance", "a"]) == header_signature(["a", "b", "Échéance"])
     assert len(header_signature(["a"])) == 64
+
+
+def test_ui_target_list_is_up_to_date() -> None:
+    """The back-office review offers exactly the registry's targets. Regenerate with:
+    uv run python -m collectoo_worker.boarding.targets > ../apps/web/src/lib/boarding/targets.json
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    from collectoo_worker.boarding.targets import export_ui_json  # noqa: PLC0415
+
+    ui = Path(__file__).parents[2] / "apps/web/src/lib/boarding/targets.json"
+    assert ui.read_text(encoding="utf-8") == export_ui_json()

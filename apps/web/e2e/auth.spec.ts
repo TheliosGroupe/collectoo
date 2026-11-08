@@ -1,6 +1,6 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { createMember, createTenant, type Tenant } from "./support/admin";
-import { latestCode } from "./support/mailpit";
+import { loginWithEmailCode } from "./support/session";
 import { totp } from "./support/totp";
 import { reviewShot } from "./screenshot";
 
@@ -9,16 +9,6 @@ let tenant: Tenant;
 test.beforeAll(async () => {
   tenant = await createTenant();
 });
-
-async function loginWithEmailCode(page: Page, email: string) {
-  await page.goto("/connexion");
-  await page.getByLabel("Adresse e-mail").fill(email);
-  const requestedAt = new Date();
-  await page.getByRole("button", { name: "Recevoir un code" }).click();
-  await expect(page).toHaveURL(/\/connexion\/code/);
-  await page.getByLabel("Code reçu par e-mail").fill(await latestCode(email, requestedAt));
-  await page.getByRole("button", { name: "Se connecter" }).click();
-}
 
 test("login page", async ({ page }, testInfo) => {
   await page.goto("/connexion");
@@ -63,6 +53,8 @@ test("staff must enrol TOTP before reaching the back-office", async ({ page }, t
   // Logout, then a fresh login asks for the TOTP code again (verify step, no new enrolment).
   await page.getByRole("button", { name: "Se déconnecter" }).click();
   await expect(page).toHaveURL(/\/connexion$/);
+  // Auth sends at most one code per address per second (supabase/config.toml max_frequency).
+  await page.waitForTimeout(1_100);
   await loginWithEmailCode(page, email);
   await expect(page).toHaveURL(/\/mfa$/);
   await expect(page.getByTestId("totp-secret")).toHaveCount(0);
