@@ -73,7 +73,8 @@ insert into public.bank_statement (id, organization_id, bank_account_id, currenc
    'EUR', 'camt053', 'releve-eur.xml', repeat('a', 64), 1, 'test/releve-eur.xml'),
   ('a0000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000004',
    'USD', 'camt053', 'releve-usd.xml', repeat('b', 64), 1, 'test/releve-usd.xml');
-update public.bank_statement set status = 'uploaded', uploaded_at = now();
+update public.bank_statement set status = 'uploaded', uploaded_at = now()
+where id in ('a0000000-0000-0000-0000-000000000001', 'a0000000-0000-0000-0000-000000000004');
 insert into public.bank_transaction (id, organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
                                      amount_minor, currency, booking_date, kind) values
   ('b0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '80000000-0000-0000-0000-000000000001',
