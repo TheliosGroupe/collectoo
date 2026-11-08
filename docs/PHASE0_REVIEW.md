@@ -64,4 +64,5 @@ Questions for counsel (no need to answer now; rule packs ship conservative defau
 | — | Staged accounts | No outbound activity until the boarding batch is **confirmed** (commit stays fully reversible). |
 | — | Plan outside envelope | Client has 5 business days (configurable per client); on silence the proposal expires and the debtor gets in-envelope options. |
 | — | Forbearance in EU exports | **Seller's measures only**; our payment plans are not exported as forbearance (3.38–3.43). |
+| — | Seller balance breakdown | Depends on the seller: the mapping profile per seller maps any breakdown file; default = template aggregates + balancing line. |
 | — | Percentages in EU exports | Ratio (5 % → `0.05`), configurable per export. |
