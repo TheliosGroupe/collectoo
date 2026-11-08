@@ -6,8 +6,21 @@ import argparse
 import logging
 import os
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collectoo_worker.ai.gateway import Provider
 
 __version__ = "0.1.0"
+
+
+def _provider(name: str) -> Provider:
+    """Only the mock exists until a real LLM key is provided (BRIEF §5)."""
+    from collectoo_worker.ai.mock import MockProvider  # noqa: PLC0415
+
+    if name != "mock":
+        raise SystemExit(f"LLM_PROVIDER={name!r} is not configured; only 'mock' is available")
+    return MockProvider()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,6 +40,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, handlers=[handler_])
 
     storage = SupabaseStorage(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SECRET_KEY"])
+    provider = _provider(os.environ.get("LLM_PROVIDER", "mock"))
     if args.cmd == "consume":
-        QueueConsumer(os.environ["DATABASE_URL"], args.queue, make_handler(storage)).run_forever()
+        QueueConsumer(
+            os.environ["DATABASE_URL"], args.queue, make_handler(storage, provider)
+        ).run_forever()
     return 0

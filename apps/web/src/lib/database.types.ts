@@ -85,14 +85,14 @@ isOneToOne: false
                   ]
                 },"boarding_batch": {
                   Row: {
-                    "art4_exemptions": NonNullable<Json>,"client_organization_id": string,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"id": string,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"status": string,"updated_at": string,"version": number
+                    "art4_exemptions": NonNullable<Json>,"client_organization_id": string,"conformance": string,"created_at": string,"created_by": string | null,"cut_off_date": string | null,"id": string,"join_keys": NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals": NonNullable<Json>,"status": string,"updated_at": string,"version": number
                   }
                   ComputedFields: never
                   Insert: {
-                    "art4_exemptions"?: NonNullable<Json>,"client_organization_id": string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"id"?: string,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"updated_at"?: string,"version": number
+                    "art4_exemptions"?: NonNullable<Json>,"client_organization_id": string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id": string,"portfolio_id": string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"updated_at"?: string,"version": number
                   }
                   Update: {
-                    "art4_exemptions"?: NonNullable<Json>,"client_organization_id"?: string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"id"?: string,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"updated_at"?: string,"version"?: number
+                    "art4_exemptions"?: NonNullable<Json>,"client_organization_id"?: string,"conformance"?: string,"created_at"?: string,"created_by"?: string | null,"cut_off_date"?: string | null,"id"?: string,"join_keys"?: NonNullable<Json>,"organization_id"?: string,"portfolio_id"?: string,"seller_control_totals"?: NonNullable<Json>,"status"?: string,"updated_at"?: string,"version"?: number
                   }
                   Relationships: [
                     {
@@ -357,6 +357,70 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"mapping_profile": {
+                  Row: {
+                    "client_organization_id": string,"created_at": string,"created_by": string | null,"header_signature": string,"headers": NonNullable<Json>,"id": string,"mapping": NonNullable<Json>,"organization_id": string,"version": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "client_organization_id": string,"created_at"?: string,"created_by"?: string | null,"header_signature": string,"headers": NonNullable<Json>,"id"?: string,"mapping": NonNullable<Json>,"organization_id": string,"version": number
+                  }
+                  Update: {
+                    "client_organization_id"?: string,"created_at"?: string,"created_by"?: string | null,"header_signature"?: string,"headers"?: NonNullable<Json>,"id"?: string,"mapping"?: NonNullable<Json>,"organization_id"?: string,"version"?: number
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "mapping_profile_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "mapping_profile_created_by_fkey"
+      columns: ["created_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "mapping_profile_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"mapping_proposal": {
+                  Row: {
+                    "batch_id": string,"confidence": number,"created_at": string,"file_id": string,"id": string,"needs_review": boolean,"origin": string,"rationale": string,"reviewed_by": string | null,"source_column": string,"status": string,"target": string | null,"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "batch_id": string,"confidence": number,"created_at"?: string,"file_id": string,"id"?: string,"needs_review": boolean,"origin": string,"rationale": string,"reviewed_by"?: string | null,"source_column": string,"status"?: string,"target"?: string | null,"updated_at"?: string
+                  }
+                  Update: {
+                    "batch_id"?: string,"confidence"?: number,"created_at"?: string,"file_id"?: string,"id"?: string,"needs_review"?: boolean,"origin"?: string,"rationale"?: string,"reviewed_by"?: string | null,"source_column"?: string,"status"?: string,"target"?: string | null,"updated_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "mapping_proposal_batch_id_fkey"
+      columns: ["batch_id"]
+isOneToOne: false
+      referencedRelation: "boarding_batch"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "mapping_proposal_file_id_fkey"
+      columns: ["file_id"]
+isOneToOne: false
+      referencedRelation: "boarding_file"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "mapping_proposal_reviewed_by_fkey"
+      columns: ["reviewed_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"membership": {
                   Row: {
                     "created_at": string,"organization_id": string,"role": string,"user_id": string
@@ -515,6 +579,9 @@ isOneToOne: false
           Functions: {
             "add_boarding_file":
 { Args: { "p_batch_id": string,"p_file_name": string,"p_sha256": string,"p_size_bytes": number }; Returns: Json
+                           },
+"approve_mapping":
+{ Args: { "p_batch_id": string,"p_overrides"?: Json }; Returns: undefined
                            },
 "create_boarding_batch":
 { Args: { "p_conformance"?: string,"p_cut_off_date"?: string,"p_idempotency_key": string,"p_portfolio_id": string }; Returns: string

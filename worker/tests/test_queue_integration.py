@@ -11,6 +11,7 @@ from typing import Any
 import psycopg
 import pytest
 
+from collectoo_worker.ai.mock import MockProvider
 from collectoo_worker.jobs.boarding import make_handler
 from collectoo_worker.runtime.queue import QueueConsumer
 from collectoo_worker.runtime.storage import SupabaseStorage
@@ -137,7 +138,7 @@ def test_profile_job_end_to_end(tmp_path: Path) -> None:
     storage.upload("boarding-uploads", storage_path, data, "text/csv")
     _send("boarding", {"type": "profile", "batch_id": str(batch)})
 
-    consumer = QueueConsumer(DB, "boarding", make_handler(storage))
+    consumer = QueueConsumer(DB, "boarding", make_handler(storage, MockProvider()))
     while consumer.poll_once():
         pass
     with psycopg.connect(DB) as conn:
@@ -149,5 +150,5 @@ def test_profile_job_end_to_end(tmp_path: Path) -> None:
             " from public.boarding_file where batch_id = %s",
             (batch,),
         ).fetchone()
-    assert status == ("profiled",)
+    assert status == ("mapping_proposed",)  # profiling queues the mapping proposal
     assert file_row == ("profiled", 300, ";")

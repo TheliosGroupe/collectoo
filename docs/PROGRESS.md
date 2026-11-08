@@ -3,6 +3,7 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
+- PR #7 M1a merged 2026-11-08 (boarding upload, queue runtime, readers, profiling).
 - M0 complete 2026-11-08: PRs #2–#6 merged (tooling/CI, tenancy/RLS, auth/MFA, two-layer schema, synth + seed).
 - PR #4 M0b-auth merged 2026-11-08 (email-code login, TOTP MFA, route gating, E2E vs local stack in CI).
 - PR #3 M0b-db merged 2026-11-08 (tenancy, RLS helpers, token hook, command pattern, 42 pgTAP checks).
@@ -15,10 +16,10 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- PR "M1a — boarding upload, worker runtime, readers, profiling" (M1-01…M1-05): boarding_batch/file/event + state machine enforced in the DB, upload commands (client admins self-serve, staff ops), Storage upload policy limited to registered paths, `boarding` queue + DLQ; worker: pgmq consumer with exactly-once effects (job + ack in one transaction), retries/backoff/dead-letter, CSV/XLSX/fixed-width readers (encoding + separator sniffing, streaming), column profiling that detects every injected defect pattern; integration tests run in the CI db job.
+- PR "M1b — mapping proposals, LLM gateway + mock, eval suite, mapping profiles" (M1-06…M1-10): target registry (20 operational + 135 EU-template targets with aliases and value types), provider-agnostic gateway (versioned prompts, JSON-Schema-validated outputs, every call logged in `private.llm_call`), deterministic mock provider, proposals with confidence/rationale/needs_review, join keys across files, `approve_mapping` with overrides saving versioned mapping profiles per client and file layout, reused at confidence 1.0; eval suite 167 golden columns, 100 % (threshold 0.98) in CI.
 
 ## Next
-- M1b mapping (target registry, LLM gateway + mock, proposals, eval suite, mapping profiles), M1c transformations/validation/DQ report, M1d staging/commit/review UI/scale tests.
+- M1c transformations, validators, BAN adapter (mock in CI), claim-type assignment, validation rules, data-quality report; then M1d staging/commit/review UI/50k CI/1M benchmark.
 
 ## Decisions
 - Debtor data is scoped per client organization (party.client_organization_id): no cross-client debtor merge, each client stays controller of its data. Template fields without an operational column live in `source_attributes` so tapes can be regenerated.
