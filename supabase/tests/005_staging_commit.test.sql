@@ -22,9 +22,12 @@ insert into public.portfolio (id, organization_id, client_organization_id, name)
   ('20000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-0000000000a1', 'A');
 
 -- A batch walked to `staged`, with one civil account (debtor, contact, invoice) in staging.
-insert into public.boarding_batch (id, organization_id, client_organization_id, portfolio_id, version) values
+insert into public.boarding_batch (id, organization_id, client_organization_id, portfolio_id, version, cut_off_date,
+                                   dq_report) values
   ('30000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
-   '00000000-0000-0000-0000-0000000000a1', '20000000-0000-0000-0000-0000000000a1', 1);
+   '00000000-0000-0000-0000-0000000000a1', '20000000-0000-0000-0000-0000000000a1', 1, '2026-09-30',
+   '{"staging": {"opening": {"currencies": {"EUR": {"accounts": 1, "accounts_without_balance": 0,
+     "outstanding_minor": "125000", "components": {"principal": "125000"}}}}}}');
 select private.transition_batch('30000000-0000-0000-0000-000000000001', s, 'test')
 from unnest(array['uploaded', 'profiled', 'mapping_proposed', 'mapping_approved', 'transformed',
                   'validated', 'staged']) with ordinality as x (s, n) order by n;
