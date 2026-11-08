@@ -34,6 +34,7 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
     const formData = new FormData(event.currentTarget);
     const files = formData.getAll("files").filter((f): f is File => f instanceof File && f.size > 0);
     if (files.length === 0) return setError("Choisissez au moins un fichier.");
+    if (!formData.get("cut_off_date")) return setError("Indiquez la date d'arrêté du portefeuille.");
     const portfolio = String(formData.get("portfolio") ?? "");
     const cutOff = String(formData.get("cut_off_date") ?? "");
     const totalText = String(formData.get("control_total") ?? "").trim();
@@ -58,7 +59,7 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
     const { data: batchId, error: e1 } = await supabase.rpc("create_boarding_batch", {
       p_idempotency_key: attempt.current.key,
       p_portfolio_id: portfolio,
-      p_cut_off_date: cutOff || undefined,
+      p_cut_off_date: cutOff,
     });
     if (e1 || !batchId) return fail(e1?.message ?? "no batch");
     if (controlTotal !== null) {
@@ -109,8 +110,8 @@ export function UploadForm({ portfolios }: { portfolios: Option[] }) {
         </select>
       </label>
       <label className="flex flex-col gap-1 text-sm">
-        Date d&apos;arrêté des données (facultatif)
-        <input type="date" name="cut_off_date" className={inputClass} />
+        Date d&apos;arrêté du portefeuille (cut-off du cédant)
+        <input type="date" name="cut_off_date" required className={inputClass} />
       </label>
       <label className="flex flex-col gap-1 text-sm">
         Fichiers (CSV, Excel, largeur fixe, zip de pièces)

@@ -24,6 +24,7 @@ async function uploadFixture(page: Page) {
   await page.getByTestId("boarding-link").click();
   await expect(page).toHaveURL(/\/backoffice\/reprises$/);
   await page.getByRole("link", { name: "Nouveau lot" }).click();
+  await page.getByLabel("Date d'arrêté du portefeuille").fill("2026-09-30");
   await page.getByLabel("Fichiers").setInputFiles(FIXTURE);
 }
 
