@@ -121,7 +121,7 @@ create table public.ledger_entry (
   account_id uuid references public.account (id),
   entry_type text not null references public.ledger_entry_type (code),
   effective_date date not null,                 -- business date (Europe/Paris)
-  posted_at timestamptz not null default now(),
+  posted_at timestamptz not null default clock_timestamp(),  -- when written (see ADR-0012 on known_at)
   line_count integer not null check (line_count between 2 and 100000),
   idempotency_key text not null check (idempotency_key ~ '^[A-Za-z0-9:._#-]{8,200}$'),
   request_hash text not null check (request_hash ~ '^[0-9a-f]{64}$'),
@@ -322,10 +322,13 @@ alter table public.ledger_posting enable always trigger ledger_posting_guard;
 -- Balance check: one deferred event per entry, at commit (or SET CONSTRAINTS ... IMMEDIATE)
 ------------------------------------------------------------------------------------------
 
+-- Runs once per entry at commit, often right after a bulk insert no ANALYZE has seen, and its
+-- plans are cached for the session: index lookups only, whatever the statistics say.
 create or replace function private.ledger_entry_verify()
 returns trigger
 language plpgsql
 set search_path = ''
+set enable_seqscan = off
 as $$
 declare
   v_lines bigint;
@@ -342,10 +345,14 @@ begin
     raise exception 'ledger: entry % is not balanced in %', new.id, v_cur using errcode = 'LG001';
   end if;
   -- Receivable and owner claim move by opposite amounts per (component, currency).
-  select la.component || ' ' || p.currency into v_bad
-  from public.ledger_posting p join public.ledger_account la on la.id = p.ledger_account_id
-  where p.entry_id = new.id and la.book in ('debtor_receivable', 'owner_claim')
-  group by la.component, p.currency having sum(p.amount_minor) <> 0
+  -- One key lookup per line (a hash join would scan every ledger account for every entry).
+  select x.component || ' ' || x.currency into v_bad
+  from (select p.currency, p.amount_minor,
+               (select la.component from public.ledger_account la
+                where la.id = p.ledger_account_id and la.book in ('debtor_receivable', 'owner_claim')) as component
+        from public.ledger_posting p where p.entry_id = new.id) x
+  where x.component is not null
+  group by x.component, x.currency having sum(x.amount_minor) <> 0
   limit 1;
   if found then
     raise exception 'ledger: entry % breaks the receivable/owner-claim mirror (%)', new.id, v_bad using errcode = 'LG001';
@@ -440,24 +447,25 @@ begin
       using errcode = 'LG006';
   end if;
 
-  -- Lines, parsed once.
-  create temp table if not exists _ledger_lines (
+  -- Lines, parsed once. Never reuse a relation the caller created under this name (it could carry
+  -- triggers that would run with the definer's rights): drop it and create our own.
+  drop table if exists pg_temp._ledger_lines;
+  create temp table _ledger_lines (
     line_no integer, book text, amount_minor bigint, currency char(3), claim_item_id uuid,
     component text, client_organization_id uuid, owner_organization_id uuid, portfolio_id uuid,
     ledger_account_id uuid) on commit drop;
-  truncate _ledger_lines;
-  insert into _ledger_lines (line_no, book, amount_minor, currency, claim_item_id, component, client_organization_id)
+  insert into pg_temp._ledger_lines (line_no, book, amount_minor, currency, claim_item_id, component, client_organization_id)
   select ord::integer, l ->> 'book', (l ->> 'amount_minor')::bigint, l ->> 'currency',
          nullif(l ->> 'claim_item_id', '')::uuid, nullif(l ->> 'component', ''),
          nullif(l ->> 'client_organization_id', '')::uuid
   from jsonb_array_elements(p_lines) with ordinality as t (l, ord);
 
-  if exists (select 1 from _ledger_lines l where not exists (select 1 from public.ledger_book b where b.code = l.book)
+  if exists (select 1 from pg_temp._ledger_lines l where not exists (select 1 from public.ledger_book b where b.code = l.book)
                                                  or not (l.book = any (v_type.allowed_books))) then
     raise exception 'ledger: a line uses a book not allowed for a % entry', p_entry_type using errcode = 'LG002';
   end if;
 
-  v_has_claim := exists (select 1 from _ledger_lines where book in ('debtor_receivable', 'owner_claim'));
+  v_has_claim := exists (select 1 from pg_temp._ledger_lines where book in ('debtor_receivable', 'owner_claim'));
   if v_has_claim then
     if v_account_id is null then
       raise exception 'ledger: claim lines need meta.account_id' using errcode = 'LG006';
@@ -481,7 +489,7 @@ begin
     end if;
     v_client := v_account.client_organization_id;
     if exists (
-      select 1 from _ledger_lines l
+      select 1 from pg_temp._ledger_lines l
       where (l.book = 'debtor_receivable' and (l.claim_item_id is null or l.component is null
               or l.currency <> v_account.currency
               or not exists (select 1 from public.claim_item i where i.id = l.claim_item_id and i.account_id = v_account_id)))
@@ -496,7 +504,7 @@ begin
 
   -- Client lines: the client must be a client of this servicer; one client per entry.
   if exists (
-    select 1 from _ledger_lines l
+    select 1 from pg_temp._ledger_lines l
     where l.book not in ('debtor_receivable', 'owner_claim')
       and (l.claim_item_id is not null or l.component is not null
            or (l.client_organization_id is null and l.book <> 'unallocated_payment')
@@ -508,40 +516,40 @@ begin
   end if;
   if (select count(distinct x) from (
         select v_client as x where v_client is not null
-        union all select client_organization_id from _ledger_lines where client_organization_id is not null) c) > 1 then
+        union all select client_organization_id from pg_temp._ledger_lines where client_organization_id is not null) c) > 1 then
     raise exception 'ledger: an entry concerns one client at most' using errcode = 'LG002';
   end if;
-  v_client := coalesce(v_client, (select min(client_organization_id::text)::uuid from _ledger_lines));
+  v_client := coalesce(v_client, (select min(client_organization_id::text)::uuid from pg_temp._ledger_lines));
 
   -- Fail fast (the deferred check is the backstop).
-  select currency into v_bad from _ledger_lines group by currency having sum(amount_minor) <> 0 limit 1;
+  select currency into v_bad from pg_temp._ledger_lines group by currency having sum(amount_minor) <> 0 limit 1;
   if found then
     raise exception 'ledger: entry is not balanced in %', v_bad using errcode = 'LG001';
   end if;
-  select component || ' ' || currency into v_bad from _ledger_lines
+  select component || ' ' || currency into v_bad from pg_temp._ledger_lines
   where book in ('debtor_receivable', 'owner_claim') group by component, currency having sum(amount_minor) <> 0 limit 1;
   if found then
     raise exception 'ledger: entry breaks the receivable/owner-claim mirror (%)', v_bad using errcode = 'LG001';
   end if;
 
   -- Get or create the ledger accounts.
-  update _ledger_lines set client_organization_id = v_client where book in ('debtor_receivable', 'owner_claim');
-  update _ledger_lines set portfolio_id = v_account.portfolio_id where book in ('debtor_receivable', 'owner_claim');
-  update _ledger_lines set owner_organization_id = v_owner where book = 'owner_claim';
+  update pg_temp._ledger_lines set client_organization_id = v_client where book in ('debtor_receivable', 'owner_claim');
+  update pg_temp._ledger_lines set portfolio_id = v_account.portfolio_id where book in ('debtor_receivable', 'owner_claim');
+  update pg_temp._ledger_lines set owner_organization_id = v_owner where book = 'owner_claim';
   insert into public.ledger_account (organization_id, book, currency, client_organization_id, portfolio_id,
                                      account_id, claim_item_id, component)
   select distinct p_organization_id, 'debtor_receivable', l.currency, l.client_organization_id, l.portfolio_id,
          v_account_id, l.claim_item_id, l.component
-  from _ledger_lines l where l.book = 'debtor_receivable'
+  from pg_temp._ledger_lines l where l.book = 'debtor_receivable'
   on conflict (claim_item_id, component) do nothing;
   insert into public.ledger_account (organization_id, book, currency, client_organization_id, owner_organization_id,
                                      portfolio_id, component)
   select distinct p_organization_id, l.book, l.currency, l.client_organization_id, l.owner_organization_id,
          l.portfolio_id, l.component
-  from _ledger_lines l where l.book <> 'debtor_receivable'
+  from pg_temp._ledger_lines l where l.book <> 'debtor_receivable'
   on conflict (organization_id, book, currency, client_organization_id, owner_organization_id, portfolio_id, component)
     where claim_item_id is null do nothing;
-  update _ledger_lines l set ledger_account_id = la.id
+  update pg_temp._ledger_lines l set ledger_account_id = la.id
   from public.ledger_account la
   where (l.book = 'debtor_receivable' and la.claim_item_id = l.claim_item_id and la.component = l.component)
      or (l.book <> 'debtor_receivable' and la.claim_item_id is null and la.organization_id = p_organization_id
@@ -560,7 +568,7 @@ begin
     'reason', v_reason,
     'engine', jsonb_build_array(p_meta ->> 'engine_version', p_meta ->> 'rule_pack_version_id', p_meta ->> 'inputs_hash'),
     'lines', (select jsonb_agg(jsonb_build_array(ledger_account_id, currency, amount_minor)
-                               order by ledger_account_id, amount_minor) from _ledger_lines)
+                               order by ledger_account_id, amount_minor) from pg_temp._ledger_lines)
   )::text, 'UTF8')), 'hex');
 
   insert into public.ledger_entry (organization_id, client_organization_id, portfolio_id, account_id, entry_type,
@@ -584,7 +592,7 @@ begin
   end if;
 
   insert into public.ledger_posting (entry_id, line_no, ledger_account_id, amount_minor, currency, effective_date)
-  select v_id, line_no, ledger_account_id, amount_minor, currency, p_effective_date from _ledger_lines;
+  select v_id, line_no, ledger_account_id, amount_minor, currency, p_effective_date from pg_temp._ledger_lines;
   return query select v_id, true;
 end;
 $$;
@@ -612,10 +620,13 @@ begin
   if not found then
     raise exception 'ledger: entry % does not exist', p_entry_id using errcode = 'LG003';
   end if;
+  v_date := coalesce(p_effective_date, v_target.effective_date);
   select * into v_existing from public.ledger_entry
   where organization_id = v_target.organization_id and idempotency_key = p_idempotency_key;
   if found then
-    if v_existing.reverses_entry_id = p_entry_id then
+    -- A replay must be the same request: same target, date and reason.
+    if v_existing.reverses_entry_id = p_entry_id and v_existing.effective_date = v_date
+       and v_existing.reason = btrim(p_reason) then
       return query select v_existing.id, false;
       return;
     end if;
@@ -628,7 +639,6 @@ begin
   if nullif(btrim(p_reason), '') is null then
     raise exception 'ledger: a reversal needs a reason' using errcode = 'LG006';
   end if;
-  v_date := coalesce(p_effective_date, v_target.effective_date);
   if v_date < v_target.effective_date then
     raise exception 'ledger: a reversal cannot be dated before the entry it reverses' using errcode = 'LG003';
   end if;
@@ -645,6 +655,17 @@ begin
             p_entry_id, v_target.boarding_batch_id, 'ledger_entry', p_entry_id::text, btrim(p_reason))
     returning id into v_id;
   exception when unique_violation then
+    -- A concurrent call won the race: a replay of the same request gets its reversal back.
+    select * into v_existing from public.ledger_entry
+    where organization_id = v_target.organization_id and idempotency_key = p_idempotency_key;
+    if found and v_existing.reverses_entry_id = p_entry_id and v_existing.effective_date = v_date
+       and v_existing.reason = btrim(p_reason) then
+      return query select v_existing.id, false;
+      return;
+    elsif found then
+      raise exception 'ledger: idempotency key % was used for a different request', p_idempotency_key
+        using errcode = 'LG004';
+    end if;
     raise exception 'ledger: entry % is already reversed', p_entry_id using errcode = 'LG003';
   end;
   insert into public.ledger_posting (entry_id, line_no, ledger_account_id, amount_minor, currency, effective_date)
@@ -788,6 +809,9 @@ grant execute on function private.ledger_post(uuid, text, date, text, jsonb, jso
   private.ledger_reverse(uuid, text, text, date),
   private.ledger_balance(uuid, date, timestamptz), private.account_balances(uuid, date, timestamptz),
   private.client_money_balances(uuid, date, timestamptz) to service_role;
+revoke execute on function public.ledger_balance(uuid, date, timestamptz),
+  public.account_balances(uuid, date, timestamptz),
+  public.client_money_balances(uuid, date, timestamptz) from public, anon;
 grant execute on function public.ledger_balance(uuid, date, timestamptz),
   public.account_balances(uuid, date, timestamptz),
   public.client_money_balances(uuid, date, timestamptz) to authenticated;
@@ -819,6 +843,7 @@ as $$
   where (p.organization_id = any (private.staff_org_ids()) or p.client_organization_id = any (private.client_org_ids()))
     and private.can_read_portfolio(p.id);
 $$;
+revoke execute on function private.readable_portfolio_ids() from public, anon;
 grant execute on function private.readable_portfolio_ids() to authenticated;
 
 create policy ledger_account_read on public.ledger_account for select to authenticated using (

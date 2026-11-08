@@ -120,6 +120,18 @@ class DbBackend:
             out.setdefault(entry_id, []).append((currency, int(amount)))
         return out
 
+    def entry_detail(self) -> dict[UUID, tuple[UUID | None, list[tuple[str, int]]]]:
+        rows = self.conn.execute(
+            """select e.id, e.reverses_entry_id, p.ledger_account_id::text, p.amount_minor
+               from public.ledger_entry e join public.ledger_posting p on p.entry_id = e.id
+               where e.organization_id = %s""",
+            (ORG,),
+        ).fetchall()
+        out: dict[UUID, tuple[UUID | None, list[tuple[str, int]]]] = {}
+        for entry_id, reverses, account, amount in rows:
+            out.setdefault(entry_id, (reverses, []))[1].append((account, int(amount)))
+        return out
+
     def check(self) -> None:
         ledger.verify_pending(self.conn)
 

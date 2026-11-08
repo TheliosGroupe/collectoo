@@ -64,9 +64,11 @@ def test_moving_an_owner_claim_line_to_another_component_breaks_the_mirror(
 
 
 @given(drafts())
-def test_mirror_is_an_involution_and_cancels_out(draft: EntryDraft) -> None:
-    assert mirror(mirror(draft.lines)) == draft.lines
-    assert all(v == 0 for v in balance_by_currency(draft.lines + mirror(draft.lines)).values())
+def test_mirror_negates_every_line_and_cancels_out(draft: EntryDraft) -> None:
+    mirrored = mirror(draft.lines)
+    assert [m.amount_minor for m in mirrored] == [-line.amount_minor for line in draft.lines]
+    assert [replace(m, amount_minor=-m.amount_minor) for m in mirrored] == list(draft.lines)
+    assert all(v == 0 for v in balance_by_currency(draft.lines + mirrored).values())
 
 
 @pytest.mark.parametrize("amount", [True, 1.0, Decimal(1), 0, 10**15 + 1])

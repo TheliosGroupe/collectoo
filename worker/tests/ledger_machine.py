@@ -99,21 +99,23 @@ class InMemoryLedger:
 
     def reverse(self, entry_id: UUID, key: str, when: date | None) -> PostResult:
         target = self.entries[entry_id]
+        effective = when or target.effective_date
+        # A replay must repeat the request: same entry and same effective date.
+        request = f"reversal:{entry_id}:{effective.isoformat()}"
         if key in self.by_key:
             existing_id, existing_hash = self.by_key[key]
-            if existing_hash == f"reversal:{entry_id}":
+            if existing_hash == request:
                 return PostResult(existing_id, False)
             raise IdempotencyConflictError(key)
         if target.reverses is not None:
             raise ReversalError("a reversal is not reversed")
-        effective = when or target.effective_date
         if effective < target.effective_date:
             raise ReversalError("reversal dated before the entry")
         if entry_id in self.reversed_by:
             raise AlreadyReversedError(str(entry_id))
         entry = Entry(uuid4(), effective, mirror(target.lines), reverses=entry_id)
         self.entries[entry.id] = entry
-        self.by_key[key] = (entry.id, f"reversal:{entry_id}")
+        self.by_key[key] = (entry.id, request)
         self.reversed_by[entry_id] = entry.id
         return PostResult(entry.id, True)
 
@@ -135,6 +137,10 @@ class Backend(Protocol):
 
     def entry_lines(self) -> dict[UUID, list[tuple[str, int]]]: ...
 
+    def entry_detail(self) -> dict[UUID, tuple[UUID | None, list[tuple[str, int]]]]:
+        """Per entry: the entry it reverses, and its lines as (ledger account key, amount)."""
+        ...
+
     def check(self) -> None: ...
 
 
@@ -154,6 +160,12 @@ class OracleBackend:
     def entry_lines(self) -> dict[UUID, list[tuple[str, int]]]:
         return {
             e.id: [(line.currency, line.amount_minor) for line in e.lines]
+            for e in self.ledger.entries.values()
+        }
+
+    def entry_detail(self) -> dict[UUID, tuple[UUID | None, list[tuple[str, int]]]]:
+        return {
+            e.id: (e.reverses, [(repr(dim(line)), line.amount_minor) for line in e.lines])
             for e in self.ledger.entries.values()
         }
 
@@ -218,6 +230,8 @@ class LedgerMachine(RuleBasedStateMachine):
         self.backend = self.make_backend()
         self.oracle = InMemoryLedger()
         self.keys_ok: set[str] = set()
+        self.rev_keys_ok: set[str] = set()
+        self.first_id: dict[str, UUID] = {}  # key -> id returned by its first successful call
         self.ids: dict[UUID, UUID] = {}  # backend id -> oracle id
 
     def make_backend(self) -> Backend:
@@ -246,9 +260,18 @@ class LedgerMachine(RuleBasedStateMachine):
         self.backend.check()
         if isinstance(got, Exception):
             return None
+        self._remember(draft.idempotency_key, got)
         self.keys_ok.add(draft.idempotency_key)
         self.ids[got.entry_id] = want.entry_id
         return got.entry_id
+
+    def _remember(self, key: str, got: PostResult) -> None:
+        """Same key => single entry: a replay returns the id of the first call."""
+        if got.created:
+            assert key not in self.first_id
+            self.first_id[key] = got.entry_id
+        else:
+            assert self.first_id[key] == got.entry_id
 
     @rule(target=entries, entry=entries, fresh=st.booleans(), when=st.sampled_from([None, *DATES]))
     def reverse(self, entry: UUID | None, fresh: bool, when: date | None) -> Any:
@@ -263,8 +286,22 @@ class LedgerMachine(RuleBasedStateMachine):
         self.backend.check()
         if isinstance(got, Exception):
             return None
+        self._remember(key, got)
+        self.rev_keys_ok.add(key)
         self.ids[got.entry_id] = want.entry_id
         return got.entry_id
+
+    @invariant()
+    def entries_are_the_successful_keys(self) -> None:
+        assert len(self.backend.entry_lines()) == len(self.keys_ok) + len(self.rev_keys_ok)
+
+    @invariant()
+    def a_reversal_negates_its_entry_line_by_line(self) -> None:
+        detail = self.backend.entry_detail()
+        for reverses, lines in detail.values():
+            if reverses is not None:
+                target = detail[reverses][1]
+                assert sorted(lines) == sorted((k, -a) for k, a in target)
 
     @invariant()
     def every_entry_is_balanced(self) -> None:

@@ -90,6 +90,8 @@ ADR-0006 fixed the principles: double-entry, append-only, integer minor units, c
 
 ## Consequences
 - **Correction:** every correction is a reversal plus a new entry, and past "as of" balances can change after it. Issued documents (M2c statements, receipts) must use `known_at` or frozen snapshots.
+- **`known_at`:** `posted_at` is the time the entry was written (`clock_timestamp()`), and the entry only becomes visible when its transaction commits. "The books as known at T" is therefore reproducible only for a T earlier than the start of every ledger transaction still running. M2c statements will use a stored knowledge watermark rather than "now".
+- **Definer functions and the session's temporary schema:** Postgres resolves unqualified table names in `pg_temp` first, even with `search_path = ''`. `private.ledger_post` therefore drops and recreates its working table `pg_temp._ledger_lines` on every call. Reusing one the caller created could run the caller's triggers with the definer's rights. A pgTAP test covers this.
 - **Remaining owner risk:** the worker's login role owns the tables, so DDL (disable a trigger, drop a table) cannot be stopped by triggers. Mitigations:
   - a catalog test asserts `tgenabled = 'A'`;
   - a static test refuses raw ledger DML in the worker;
