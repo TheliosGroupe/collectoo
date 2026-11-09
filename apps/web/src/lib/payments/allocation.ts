@@ -19,7 +19,9 @@ export const PAYMENT_STATUS: Record<string, { label: string; tone: Tone }> = {
   returned: { label: "Retourné par la banque", tone: "neutral" },
 };
 
-export function paymentStatus(status: string): { label: string; tone: Tone } {
+/** A forward is not an allocation (the debt is untouched): a forwarded payment has its own label (M2b-4 review). */
+export function paymentStatus(status: string, opts: { forwarded?: boolean } = {}): { label: string; tone: Tone } {
+  if (status === "allocated" && opts.forwarded) return { label: "Reversé au client", tone: "ok" };
   return PAYMENT_STATUS[status] ?? { label: status, tone: "neutral" };
 }
 
@@ -43,13 +45,32 @@ export const ENTRY_LABEL: Record<string, string> = {
   cash_out: "Restitution ou retour",
 };
 
-/** What the client was told (client_notification.kind, R124-5). */
+/** What a notification for the client is about (client_notification.kind). */
 export const NOTIFICATION_LABEL: Record<string, string> = {
-  payment_allocated: "Informé de l'imputation",
-  payment_allocation_reversed: "Informé de l'annulation de l'imputation",
-  payment_forwarded: "Informé du reversement",
-  payment_held: "Informé que le paiement est retenu",
+  payment_allocated: "Imputation",
+  payment_allocation_reversed: "Annulation de l'imputation",
+  payment_forwarded: "Reversement sans imputation",
+  payment_held: "Paiement retenu (procédure)",
 };
+
+export type Notification = {
+  kind: string;
+  created_at: string;
+  client_name: string;
+  reason: string | null;
+  delivered_at: string | null;
+};
+
+/**
+ * A notification as the page lists it: recorded for the client, and sent only once its delivery is recorded (the
+ * delivery itself comes later): the page never says the client was informed before it was (M2b-4 review).
+ */
+export function notificationText(n: Notification, when: (iso: string) => string): string {
+  const what = NOTIFICATION_LABEL[n.kind] ?? n.kind;
+  return n.delivered_at
+    ? `${what} · notification envoyée à ${n.client_name} le ${when(n.delivered_at)}`
+    : `${what} · notification enregistrée pour ${n.client_name} le ${when(n.created_at)} (envoi : à venir)`;
+}
 
 export type Line = {
   claim_item_id: string;
@@ -66,6 +87,7 @@ export type Entry = {
   effective_date: string;
   posted_at: string;
   reason: string | null;
+  ops_note: string | null;
   account_id: string | null;
   external_ref: string | null;
   reverses_entry_id: string | null;
@@ -92,11 +114,12 @@ export type PaymentDetail = {
     match_method: string | null;
     matched_at: string | null;
     designation: { item_ids?: string[] } | null;
-    instruction: { release?: string; account_id?: string } | null;
+    instruction: { releases?: string[]; account_id?: string } | null;
     channel: string;
     method: string;
   };
-  position: { allocated_minor: string; unallocated_minor: string; returned_minor: string };
+  // allocated_minor counts forwards (design §7); forwarded_minor tells them apart
+  position: { allocated_minor: string; unallocated_minor: string; returned_minor: string; forwarded_minor: string };
   file: {
     account_id: string;
     external_ref: string;
@@ -106,6 +129,7 @@ export type PaymentDetail = {
     currency: string;
     legal_regime: string;
     debtor_name: string | null;
+    holds: string[]; // active surendettement / collective proceeding holds
   } | null;
   matches: {
     action: string;
@@ -120,7 +144,7 @@ export type PaymentDetail = {
     by_ops: boolean;
   }[];
   entries: Entry[];
-  notifications: { kind: string; created_at: string; client_name: string; reason: string | null }[];
+  notifications: Notification[];
   documents: { id: string; kind: string; created_at: string }[];
   other_files: { account_id: string; external_ref: string }[];
 };
@@ -150,6 +174,50 @@ export function allocationRows(entries: Entry[]): { key: string; file: string | 
   return [...rows.values()];
 }
 
+/** What was allocated (forwards apart), forwarded and left of a payment, as text (integer minor units). */
+export function positionFigures(position: PaymentDetail["position"]): {
+  allocated: string;
+  forwarded: string;
+  unallocated: string;
+} {
+  const forwarded = BigInt(position.forwarded_minor);
+  return {
+    allocated: (BigInt(position.allocated_minor) - forwarded).toString(),
+    forwarded: forwarded.toString(),
+    unallocated: position.unallocated_minor,
+  };
+}
+
+/** The file an allocation row belongs to, when it is not obviously the payment's own one (else null). */
+export function rowFileLabel(rowFile: string | null, ownFile: string | null | undefined, liveFiles: number): string | null {
+  if (!rowFile) return null;
+  return liveFiles > 1 || rowFile !== ownFile ? rowFile : null;
+}
+
+/**
+ * The order the allocation engine applies (worker `payments.allocation`), as it applies it; articles cited only for
+ * what they say (1342-10: the debtor's designation, due debts first; 1343-1: interest first).
+ */
+export const APPLIED_ORDER =
+  "Ordre appliqué : d'abord les factures désignées par le débiteur, puis les factures échues (art. 1342-10 C. civ.), " +
+  "de la plus ancienne échéance à la plus récente (à échéance égale, au prorata), puis les factures non échues ; " +
+  "dans chaque facture, les intérêts avant le principal (art. 1343-1 C. civ.).";
+
+/** What « Désimputer » does, by the file reversed (the payment's own, or another file of the debtor). */
+export function reverseEffect(o: { amount: string; fileRef: string; ownFile: boolean; othersRemain: boolean }): string {
+  const head = `${o.amount} imputés sur le dossier ${o.fileRef} seront contre-passés à la date de l'imputation : les factures retrouvent leur solde. Notification enregistrée pour le client (envoi : à venir).`;
+  if (!o.ownFile)
+    return `${head} Ce montant redevient un trop-perçu du paiement : il n'est jamais reversé au client ; il sera remboursé au payeur, ou imputé sur un autre dossier du débiteur à sa demande écrite.`;
+  if (o.othersRemain)
+    return `${head} Le paiement attendra ensuite votre décision : réimputer sur ce dossier (l'imputation sur l'autre dossier reste en place).`;
+  return `${head} Le paiement attendra ensuite votre décision (réimputer, ou désaffecter s'il ne concerne pas ce dossier).`;
+}
+
+/** Holds that block allocation, forwards and compensation (surendettement, collective proceeding). */
+export function blockingHold(holds: { kind: string }[]): boolean {
+  return holds.some((h) => h.kind === "surendettement" || h.kind === "collective_proceeding");
+}
+
 /** Reasons ops may send back to allocation from (« Imputer »). */
 const REALLOCATE_FROM = new Set(["allocation_reversed", "nothing_due", "credit_note_to_apply", "before_servicing_start"]);
 const CLOSED = new Set(["closed_paid", "closed_settled", "closed_uncollectable", "closed_recalled"]);
@@ -169,12 +237,16 @@ export function paymentActions(d: Pick<PaymentDetail, "payment" | "position" | "
   const live = liveAllocations(d.entries);
   return {
     reverse: live.size > 0,
-    allocate: p.status === "matched" && p.review_reason !== null && REALLOCATE_FROM.has(p.review_reason),
+    allocate:
+      (p.status === "matched" && p.review_reason !== null && REALLOCATE_FROM.has(p.review_reason)) ||
+      // its own file's allocation reversed while another file keeps its share: back to its file
+      (p.status === "partially_allocated" && p.review_reason === "allocation_reversed"),
     releaseHold: p.status === "matched" && p.review_reason === "hold_blocks_allocation",
     forward:
       allocated === BigInt(0) &&
       left > BigInt(0) &&
       p.status === "matched" &&
+      (d.file?.holds ?? []).length === 0 && // a held file's payments are refunded, or allocated on authorisation
       (p.review_reason === "before_servicing_start" || d.file?.status === "closed_recalled"),
     otherFile:
       left > BigInt(0) &&
@@ -187,12 +259,12 @@ export function paymentActions(d: Pick<PaymentDetail, "payment" | "position" | "
 
 /** What « Imputer » does, by the reason the payment waits for (the sheet says it before anything is sent). */
 export const REALLOCATE_TEXT: Record<string, string> = {
-  allocation_reversed: "Le paiement sera imputé à nouveau sur ce dossier, dans l'ordre légal.",
+  allocation_reversed: "Le paiement sera imputé à nouveau sur ce dossier, dans l'ordre appliqué.",
   nothing_due: "Le paiement sera imputé sur ce dossier s'il présente à nouveau un solde ; sinon il reviendra ici.",
   credit_note_to_apply:
     "Le paiement sera imputé sans appliquer l'avoir du dossier (la compensation n'est pas invoquée).",
   before_servicing_start:
-    "Le solde du cédant ne tient pas compte de ce paiement : il sera imputé à la date d'arrêté, dans l'ordre légal.",
+    "Le solde du cédant ne tient pas compte de ce paiement : il sera imputé à la date d'arrêté, dans l'ordre appliqué.",
 };
 
 /** A file's open status as words. */
@@ -205,7 +277,16 @@ export function allocationErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
   if (message.includes("reason is required")) return "reason_required";
   if (message.includes("allocation changed")) return "allocation_changed";
-  if (message.includes("the payment changed") || message.includes("is not held")) return "payment_changed";
+  if (message.includes("nothing of this payment is allocated")) return "already_reversed";
+  if (message.includes("the file is held")) return "file_held";
+  if (
+    message.includes("the payment changed") ||
+    message.includes("is not held") ||
+    message.includes("cannot be sent to allocation from here") ||
+    message.includes("only what is left of a payment over its file") ||
+    message.includes("nothing is left of this payment")
+  )
+    return "payment_changed";
   if (message.includes("amount changed")) return "amount_changed";
   if (message.includes("proposal changed")) return "proposal_changed";
   if (message.includes("no credit note to apply")) return "proposal_changed";
@@ -265,6 +346,7 @@ export type AccountDetail = {
     status: string;
     review_reason: string | null;
     payer_name: string | null;
+    forwarded: boolean;
   }[];
   proposal: Proposal | null;
 };

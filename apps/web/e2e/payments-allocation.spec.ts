@@ -125,7 +125,11 @@ test("ops follow how payments are allocated and act on them", async ({ page }, t
   await expect(page.getByTestId("payment-allocated")).toContainText(n("1 000,00"));
   await expect(page.getByTestId("payment-unallocated")).toContainText("200,00");
   await expect(page.getByTestId("overpayment-note")).toContainText("n'est jamais reversé au client");
-  await expect(page.getByTestId("payment-notifications")).toContainText("Informé de l'imputation");
+  // a notification is recorded for the client; it is not said to be delivered before it is (M2b-4 review)
+  await expect(page.getByTestId("payment-notifications")).toContainText("Imputation · notification enregistrée pour");
+  await expect(page.getByTestId("payment-notifications")).toContainText("(envoi : à venir)");
+  await expect(page.getByTestId("payment-notifications")).not.toContainText("Informé");
+  await expect(page.getByTestId("applied-order")).toContainText("à échéance égale, au prorata");
   await reviewShot(page, testInfo, "m2-payment-overpayment");
 
   // Pro rata between two invoices due the same day
@@ -171,15 +175,18 @@ test("ops follow how payments are allocated and act on them", async ({ page }, t
   const reverse = page.getByRole("dialog", { name: "Annuler cette imputation" });
   await expect(reverse.getByTestId("sheet-effect")).toContainText(n("2 000,00"));
   await reviewShot(page, testInfo, "m2-payment-reverse-sheet");
-  await reverse.getByLabel("Motif (gardé dans l'historique)").fill("Désignation à vérifier avec le débiteur");
+  await expect(reverse.getByTestId("sheet-effect")).toContainText("Notification enregistrée pour le client (envoi : à venir)");
+  await reverse.getByLabel("Motif interne (non transmis au client)").fill("Désignation à vérifier avec le débiteur");
   await reverse.getByRole("button", { name: "Confirmer l'annulation" }).click();
   await expect(page.getByTestId("payment-reason")).toHaveText("Imputation annulée");
   await expect(page.getByTestId("payment-allocation")).toContainText("Rien n'est imputé.");
-  await expect(page.getByTestId("payment-notifications")).toContainText("Informé de l'annulation de l'imputation");
+  await expect(page.getByTestId("payment-notifications")).toContainText("Annulation de l'imputation · notification enregistrée");
+  // the client reads a fixed wording; ops read their motif (internal)
+  await expect(page.getByTestId("entry-ops-note")).toContainText("Désignation à vérifier avec le débiteur");
   await reviewShot(page, testInfo, "m2-payment-reversed");
   await page.getByTestId("reallocate").getByRole("button", { name: "Imputer" }).click();
   const again = page.getByRole("dialog", { name: "Imputer ce paiement" });
-  await again.getByLabel("Motif (gardé dans l'historique)").fill("Désignation confirmée par le débiteur");
+  await again.getByLabel("Motif interne (non transmis au client)").fill("Désignation confirmée par le débiteur");
   await again.getByRole("button", { name: "Confirmer" }).click();
   await expect(page.getByTestId("payment-status")).toHaveText("Imputé", { timeout: 60_000 });
   await expect(rows).toHaveCount(3);

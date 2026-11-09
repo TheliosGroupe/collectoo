@@ -225,8 +225,9 @@ export function gatingOutcome(file: QueueAccount, paid: { currency: string; book
   if (file.status === "staged") return "account_not_confirmed";
   if (file.status.startsWith("closed")) return "account_closed";
   if (paid.currency.trim() !== file.currency.trim()) return "currency_mismatch";
-  if (!file.servicing_start || paid.booking_date < file.servicing_start) return "before_servicing_start";
+  // the hold before the cut-off (M2b-4 review): a payment held for its file is reported, and its client told
   if (file.holds.length > 0) return "hold_blocks_allocation";
+  if (!file.servicing_start || paid.booking_date < file.servicing_start) return "before_servicing_start";
   if (BigInt(file.balance_minor) - BigInt(file.pending_minor) <= BigInt(0)) return "nothing_due";
   return null;
 }

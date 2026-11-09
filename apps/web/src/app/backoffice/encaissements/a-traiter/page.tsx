@@ -53,6 +53,7 @@ type Row = {
   account_id: string | null;
   candidate_account_id: string | null;
   total: number;
+  forwarded: boolean; // passed to the client without allocation (« Rapprochés »): never shown as « Imputé »
 };
 type Candidate = { payment_id: string; rank: number; account_id: string; rule: string; acceptable: boolean; signals: Signals };
 type Decision = { payment_id: string; action: string; rule: string | null; evidence: Signals & { designation?: string[] } };
@@ -286,7 +287,7 @@ function PaymentCard({
   const amount = money(r.amount_minor, r.currency);
   const payment: PaymentFacts = { id: r.payment_id, amount, currency: r.currency, booking_date: r.booking_date };
   const reason = reviewReason(r.status === "matched" && r.review_reason === null ? "ready" : r.review_reason);
-  const position = r.review_reason === null && r.status !== "matched" && r.status !== "unmatched" ? paymentStatus(r.status) : null;
+  const position = r.review_reason === null && r.status !== "matched" && r.status !== "unmatched" ? paymentStatus(r.status, { forwarded: r.forwarded }) : null;
   const age = ageBadge(r.age_days);
   const file = r.account_id ? files.get(r.account_id) : undefined;
   const waitingFor = r.review_reason === "account_not_confirmed" && r.candidate_account_id ? files.get(r.candidate_account_id) : undefined;

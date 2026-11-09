@@ -5,6 +5,7 @@ import { staffSession } from "@/lib/auth/staff";
 import {
   type AccountDetail,
   HOLD_LABEL,
+  blockingHold,
   componentLabel,
   groupsOfFour,
   itemBalances,
@@ -54,6 +55,7 @@ export default async function FilePage({ params }: PageProps<"/backoffice/dossie
   const fmt = (minor: string) => money(minor, cur);
   const { items, total } = itemBalances(d.balances);
   const debtor = d.parties.find((p) => p.role === "borrower")?.name ?? d.parties[0]?.name ?? "";
+  const held = blockingHold(d.holds);
 
   return (
     <WidePage title={`Dossier ${a.external_ref}`} back={back}>
@@ -88,7 +90,12 @@ export default async function FilePage({ params }: PageProps<"/backoffice/dossie
       {d.proposal ? (
         <Section title="Avoir à appliquer" testId="file-credit-note">
           <p className="text-sm">{proposalSummary(d.proposal, fmt, frenchDate)}</p>
-          {d.can_act ? (
+          {held ? (
+            <p className="mt-3 text-sm text-amber-900 dark:text-amber-200" data-testid="credit-note-held">
+              Dossier bloqué (surendettement ou procédure collective) : la compensation n&apos;est pas invoquée tant que le
+              blocage est en place.
+            </p>
+          ) : d.can_act ? (
             <div className="mt-3">
               <ApplyCreditNote
                 accountId={a.id}
@@ -145,7 +152,7 @@ export default async function FilePage({ params }: PageProps<"/backoffice/dossie
         ) : (
           <ul className="flex flex-col gap-2 text-sm">
             {d.payments.map((p) => {
-              const s = paymentStatus(p.status);
+              const s = paymentStatus(p.status, { forwarded: p.forwarded });
               return (
                 <li key={p.id} className="flex flex-wrap items-center justify-between gap-2" data-testid="file-payment">
                   {d.can_act ? (

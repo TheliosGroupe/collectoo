@@ -619,6 +619,7 @@ erDiagram
         uuid payment_id
         uuid ledger_entry_id UK "null for payment_held"
         text kind "payment_allocated|payment_forwarded|payment_allocation_reversed|payment_held"
+        text reason "a code, never the ops motif: ops_correction|file_recalled|before_servicing_start|client_ratification|hold_blocks_allocation"
     }
     allocation_policy {
         uuid id PK
@@ -1232,6 +1233,9 @@ stateDiagram-v2
     partially_allocated --> allocated : rest allocated on another file of the debtor (written request)
     allocated --> matched : ops reverse the allocation (allocation_reversed)
     partially_allocated --> matched : ops reverse the allocation (allocation_reversed)
+    allocated --> partially_allocated : another file's allocation reversed (overpayment again)
+    allocated --> partially_allocated : its own file's reversed, another file's kept (allocation_reversed)
+    partially_allocated --> allocated : « Imputer » after its own file's reversal (allocated there again)
     matched --> unmatched : ops unassign (nothing allocated)
     unmatched --> allocated : forwarded on the client's ratification (rolled-back batch)
 ```
@@ -1239,8 +1243,10 @@ stateDiagram-v2
 | Status | Ledger position | Review reasons met in M2b-4 |
 |---|---|---|
 | `matched` | nothing allocated (A = 0) | none (ready: the job allocates), `nothing_due`, `credit_note_to_apply`, `allocation_reversed`, the gates of M2b-3 |
-| `partially_allocated` | A > 0, something left (U > 0) | `overpayment` |
+| `partially_allocated` | A > 0, something left (U > 0) | `overpayment`; `allocation_reversed` (its own file's allocation reversed while another file keeps its share: « Imputer » sends it back to its file); none (ops sent the rest to another file, or back to its own: waiting for the job) |
 | `allocated` | A > 0 (allocations and forwards), U = 0 | none |
+
+Gates, first that applies (match runs, the job and the confirmation sheet alike): file not confirmed, closed, other currency, **an active surendettement or collective-proceeding hold, then** booked before the servicing start (review fix: the hold is reported first, so the client is told), nothing left to pay, a credit note to compensate (job only). Ops' decisions add up: « Lever le blocage » (the judge's authorisation) and « Imputer » (the cut-off checked, a credit note not invoked, nothing due checked) each add the gate shown to the payment's released set (`allocation_instruction.releases`, every decision kept in `decisions`), which the job consumes when it allocates; a payment behind two gates passes both. A held file's payments are never forwarded to the client and its credit notes are not applied while the hold is active.
 
 Refunds, returns and their states (`refund_pending`, `refunded`, `returned`) come with M2b-6.
 

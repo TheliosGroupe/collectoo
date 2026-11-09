@@ -175,6 +175,9 @@ describe("what the confirmation sheet promises (= the SQL gating, first that app
     [{}, { ...PAID, booking_date: "2025-12-31" }, "before_servicing_start"],
     [{ servicing_start: null }, PAID, "before_servicing_start"],
     [{ holds: ["collective_proceeding"] }, PAID, "hold_blocks_allocation"],
+    // the hold before the cut-off (M2b-4 review): the payment is reported held, the client told
+    [{ holds: ["surendettement"] }, { ...PAID, booking_date: "2025-12-31" }, "hold_blocks_allocation"],
+    [{ holds: ["surendettement"], servicing_start: null }, PAID, "hold_blocks_allocation"],
     [{ pending_minor: "80000" }, PAID, "nothing_due"],
     [{ balance_minor: "0" }, PAID, "nothing_due"],
     [{ balance_minor: "99999999999999999", pending_minor: "99999999999999998" }, PAID, null],
