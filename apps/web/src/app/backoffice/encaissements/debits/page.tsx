@@ -304,7 +304,9 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
           idempotencyKey={randomUUID()}
         />
       ))}
-      {explainable(row) ? <Explain lineId={row.bank_transaction_id} idempotencyKey={randomUUID()} /> : null}
+      {explainable({ direction: row.direction, kind: row.kind, namesPayment: fromReview.length > 0 }) ? (
+        <Explain lineId={row.bank_transaction_id} idempotencyKey={randomUUID()} />
+      ) : null}
     </div>
   );
 }

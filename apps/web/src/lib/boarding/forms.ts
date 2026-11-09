@@ -182,7 +182,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   link_refused:
     "Ce rapprochement n'est pas possible pour cette ligne (sens, compte bancaire, date ou état) : vérifiez la ligne et rechargez la page.",
   not_explainable:
-    "Un retour ou un remboursement sortant ne se classe pas sans comptabiliser : liez-le au paiement concerné.",
+    "Ce retour nomme l'un de nos paiements (ou c'est notre remboursement) : il ne se classe pas sans comptabiliser, liez-le au paiement concerné.",
   link_before_return:
     "Cette ligne est antérieure à un retour déjà comptabilisé sur ce paiement : elle ne peut pas être liée à sa date.",
   link_payment_returned:

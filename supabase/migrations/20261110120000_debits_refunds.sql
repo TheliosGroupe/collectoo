@@ -768,9 +768,22 @@ begin
     when d.kind = 'explained' then case
       when d.payment_id is not null or d.refund_request_id is not null then 'bad_request'
       when d.direction = 'credit' and d.line_kind in ('debtor_credit', 'batch_unsplit') then 'payment_line'
-      -- money that went back out for a payment (a return, our refund) is booked, never only explained: the line waits
-      -- in « À classer » (and the ageing alert) until it is linked (I9; review fix)
-      when d.direction = 'debit' and d.line_kind in ('return', 'refund_out') then 'not_explainable'
+      -- money that went back out for one of our payments is booked, never only explained: our refund (RFD id), or a
+      -- return whose references name a payment of this bank account (end-to-end id, or the bank transaction id of the
+      -- credit it takes back). The line waits in « À classer » (and the ageing alert) until it is linked (I9; review
+      -- fix: a chargeback larger than what is left of its payment is never hidden as an explained gap, OQ-34). A
+      -- return naming nothing of ours (e.g. a fee's direct debit the bank rejected) is explained with a motif.
+      when d.direction = 'debit' and d.line_kind = 'refund_out' then 'not_explainable'
+      when d.direction = 'debit' and d.line_kind = 'return' and exists (
+             select 1 from public.bank_transaction x
+             where x.id = d.bank_transaction_id
+               and (exists (select 1 from public.payment p
+                            where p.end_to_end_id = coalesce(x.original_end_to_end_id, x.end_to_end_id)
+                              and p.bank_account_id = x.bank_account_id)
+                    or (x.tx_id is not null
+                        and exists (select 1 from public.bank_transaction o join public.payment p on p.bank_transaction_id = o.id
+                                    where o.bank_account_id = x.bank_account_id and o.tx_id = x.tx_id
+                                      and o.direction = 'credit')))) then 'not_explainable'
       when nullif(btrim(d.reason), '') is null then 'reason_required' end
     when d.pay_org is distinct from p_organization_id then 'payment_unknown'
     when d.pay_bank is distinct from d.line_bank then 'other_bank_account'

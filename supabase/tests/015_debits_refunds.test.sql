@@ -3,7 +3,7 @@
 -- §6, §7, §8.1, §9, §11, §13; ADR-0013 (M2b-6 addendum). The worker's debit job is played here through ops' link_debit
 -- (same posting function) and private.apply_debit_decisions; the direct-payment job through private.post_direct_payment.
 begin;
-select plan(162);
+select plan(163);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -770,6 +770,13 @@ select throws_ok($$select public.link_debit('k-link-0101', pg_temp.ln('r10'), 'e
   '23514', 'debit link refused: not_explainable', 'nor a debit carrying our RFD id');
 select is((select count(*)::int from public.debit_queue('a-classer', 0, 100)
            where bank_transaction_id in (pg_temp.ln('t10'), pg_temp.ln('r10'))), 2, 'both stay to classify');
+reset role;
+-- a return whose references name none of our payments (a fee's direct debit the bank rejected) is explained, with a motif
+select pg_temp.line('n10', 'debit', 'return', 5000, '2026-11-03', 'NOT-OURS-10');
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.link_debit('k-link-0102', pg_temp.ln('n10'), 'explained', null, null, null,
+  'rejet d''un prélèvement de frais, hors fonds de tiers')$$, 'a return naming none of our payments is explained');
 reset role;
 
 -- An other debit of a pending refund's amount on its bank account may be that refund (the bank dropped our RFD id)

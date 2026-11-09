@@ -280,12 +280,14 @@ describe("errors of the M2b-6 commands", () => {
 });
 
 describe("classifying without booking", () => {
-  it("is never offered for a return or a refund leaving the account (review M2b-6)", () => {
-    expect(explainable({ direction: "debit", kind: "return" })).toBe(false);
-    expect(explainable({ direction: "debit", kind: "refund_out" })).toBe(false);
-    expect(explainable({ direction: "debit", kind: "other_debit" })).toBe(true);
+  it("is never offered for our refund or a return naming one of our payments (review M2b-6)", () => {
+    expect(explainable({ direction: "debit", kind: "return", namesPayment: true })).toBe(false);
+    expect(explainable({ direction: "debit", kind: "refund_out", namesPayment: false })).toBe(false);
+    // a return naming nothing of ours (a fee's direct debit the bank rejected) is explained with a motif
+    expect(explainable({ direction: "debit", kind: "return", namesPayment: false })).toBe(true);
+    expect(explainable({ direction: "debit", kind: "other_debit", namesPayment: false })).toBe(true);
     // a credit undoing a fee stays explainable (ADR choice #7)
-    expect(explainable({ direction: "credit", kind: "return" })).toBe(true);
+    expect(explainable({ direction: "credit", kind: "return", namesPayment: true })).toBe(true);
   });
   it("has a label for every review code the debit job writes", () => {
     for (const code of ["posting_failed", "refund_amount_match", "payment_returned", "before_previous_return", "payment_changed"])

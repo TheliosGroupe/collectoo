@@ -92,11 +92,14 @@ export const DEBIT_REVIEW: Record<string, string> = {
 };
 
 /**
- * Whether a line may be classified without booking (« Classer sans comptabiliser »): never a return or one of our
- * refunds leaving the account (review M2b-6: money out for a payment is always booked; the database refuses it too).
+ * Whether a line may be classified without booking (« Classer sans comptabiliser »): never our refund leaving the
+ * account, nor a return whose references name one of our payments (review M2b-6: money out for a payment is always
+ * booked; the database refuses it too). A return naming nothing of ours (a fee's direct debit the bank rejected) may be.
  */
-export function explainable(o: { direction: string; kind: string }): boolean {
-  return !(o.direction === "debit" && (o.kind === "return" || o.kind === "refund_out"));
+export function explainable(o: { direction: string; kind: string; namesPayment: boolean }): boolean {
+  if (o.direction !== "debit") return true;
+  if (o.kind === "refund_out") return false;
+  return !(o.kind === "return" && o.namesPayment);
 }
 
 /**
