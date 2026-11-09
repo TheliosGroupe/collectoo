@@ -891,16 +891,55 @@ begin
 end;
 $$;
 
--- Per statement: payments, matched by a rule, left to ops (security invoker: RLS applies).
+-- The exception queue (design §12.2), oldest first: payments without a file or held for a reason; or, tab
+-- 'rapproches', the matched payments ready for allocation, latest first. The client is the file's, else the
+-- candidate file's. Amounts as text; the payer's IBAN by its end only (design R10). Security invoker: RLS
+-- applies (admins and ops managers read every payment of their servicer).
+create or replace function public.payment_queue(p_tab text default 'a-traiter', p_reason text default null,
+                                                p_client uuid default null, p_min_minor bigint default null,
+                                                p_max_minor bigint default null, p_min_days integer default null,
+                                                p_offset integer default 0, p_limit integer default 20)
+returns table (payment_id uuid, amount_minor text, currency char(3), booking_date date, age_days integer,
+               payer_name text, payer_iban_end text, remittance_text text, creditor_reference text, status text,
+               review_reason text, match_method text, matched_at timestamptz, account_id uuid,
+               candidate_account_id uuid, client_organization_id uuid, total bigint)
+language sql
+stable
+set search_path = ''
+as $$
+  with q as (
+    select p.*, coalesce(p.client_organization_id, c.client_organization_id) as client_id
+    from public.payment p
+    left join public.account c on c.id = p.candidate_account_id
+    where case when p_tab = 'rapproches' then p.status = 'matched' and p.review_reason is null
+               else p.status = 'unmatched' or p.review_reason is not null end
+      and (p_reason is null or p.review_reason = p_reason or (p_reason = 'waiting' and p.review_reason is null))
+      and (p_min_minor is null or p.amount_minor >= p_min_minor)
+      and (p_max_minor is null or p.amount_minor <= p_max_minor)
+      and (p_min_days is null or p.booking_date <= (now() at time zone 'Europe/Paris')::date - p_min_days)
+  )
+  select q.id, q.amount_minor::text, q.currency, q.booking_date,
+         ((now() at time zone 'Europe/Paris')::date - q.booking_date)::integer, q.payer_name, right(q.payer_iban, 4),
+         q.remittance_text, q.creditor_reference, q.status, q.review_reason, q.match_method, q.matched_at, q.account_id,
+         q.candidate_account_id, q.client_id, count(*) over ()
+  from q
+  where p_client is null or q.client_id = p_client
+  order by case when p_tab = 'rapproches' then q.matched_at end desc nulls last, q.booking_date, q.id
+  offset greatest(coalesce(p_offset, 0), 0) limit least(greatest(coalesce(p_limit, 20), 1), 100);
+$$;
+
+-- Per statement: payments, matched by a rule, left to ops, not tried yet (the match job is queued) (security
+-- invoker: RLS applies).
 create or replace function public.statement_match_counts(p_statement_ids uuid[])
-returns table (statement_id uuid, payments bigint, automatic bigint, to_review bigint)
+returns table (statement_id uuid, payments bigint, automatic bigint, to_review bigint, waiting bigint)
 language sql
 stable
 set search_path = ''
 as $$
   select t.statement_id, count(*),
          count(*) filter (where p.match_method in ('rf_structured', 'rf_text', 'rf_body', 'item_ref', 'iban_memory')),
-         count(*) filter (where p.status = 'unmatched' or p.review_reason is not null)
+         count(*) filter (where p.review_reason is not null),
+         count(*) filter (where p.status = 'unmatched' and p.review_reason is null)
   from public.bank_transaction t
   join public.payment p on p.bank_transaction_id = t.id
   where t.statement_id = any (p_statement_ids[1:50])
@@ -949,10 +988,12 @@ grant select on private.payer_account_link to service_role;
 revoke execute on function public.assign_payment(text, uuid, jsonb, jsonb, text),
   public.accept_suggestions(text, uuid[]), public.unassign_payment(text, uuid, text),
   public.place_account_hold(text, uuid, text, text, uuid, text), public.lift_account_hold(text, uuid, text),
-  public.match_queue_accounts(uuid[]), public.search_payment_files(uuid, text), public.statement_match_counts(uuid[])
+  public.match_queue_accounts(uuid[]), public.search_payment_files(uuid, text), public.statement_match_counts(uuid[]),
+  public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer)
   from public, anon;
 grant execute on function public.assign_payment(text, uuid, jsonb, jsonb, text),
   public.accept_suggestions(text, uuid[]), public.unassign_payment(text, uuid, text),
   public.place_account_hold(text, uuid, text, text, uuid, text), public.lift_account_hold(text, uuid, text),
-  public.match_queue_accounts(uuid[]), public.search_payment_files(uuid, text), public.statement_match_counts(uuid[])
+  public.match_queue_accounts(uuid[]), public.search_payment_files(uuid, text), public.statement_match_counts(uuid[]),
+  public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer)
   to authenticated;

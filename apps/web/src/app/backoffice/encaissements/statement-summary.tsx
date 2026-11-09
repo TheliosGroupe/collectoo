@@ -1,5 +1,7 @@
+import Link from "next/link";
 import { Badge, ErrorNote, InfoNote, Stats } from "@/components/ui";
 import { frenchDate } from "@/lib/payments/bank-accounts";
+import { autoShare } from "@/lib/payments/matching";
 import {
   type BankCheck,
   type Warning,
@@ -44,8 +46,11 @@ export const STATEMENT_COLUMNS =
   "id, file_name, format, currency, status, from_date, to_date, created_at, counts, warnings, bank_check, error_code," +
   " error, bank_account:bank_account!bank_statement_bank_fk(label)";
 
-/** One statement: status, period, what was booked, the bank check and the warnings. */
-export function StatementSummary({ s }: { s: StatementRow }) {
+/** What matching did with a statement's payments (public.statement_match_counts). */
+export type MatchCounts = { payments: number; automatic: number; to_review: number; waiting: number };
+
+/** One statement: status, period, what was booked, how its payments were matched, the bank check, the warnings. */
+export function StatementSummary({ s, match }: { s: StatementRow; match?: MatchCounts }) {
   const status = statementStatus(s.status);
   const check = s.status === "imported" ? bankCheckText(s.bank_check, s.currency) : null;
   const c = s.counts;
@@ -77,6 +82,25 @@ export function StatementSummary({ s }: { s: StatementRow }) {
             { label: "À classer ou retenues", value: c.unposted.lines, testId: "count-unposted" },
           ]}
         />
+      ) : null}
+      {match && match.waiting > 0 ? (
+        <p className="text-sm" data-testid="match-counts">
+          <Badge tone="busy">Rapprochement en cours</Badge> {match.waiting} paiement(s) en attente des règles
+        </p>
+      ) : match && match.payments > 0 ? (
+        <p className="flex flex-wrap items-center gap-2 text-sm" data-testid="match-counts">
+          <Badge tone="ok">Rapprochés automatiquement {autoShare(match.automatic, match.payments)}</Badge>
+          <span>
+            {match.automatic} sur {match.payments} paiements
+          </span>
+          {match.to_review > 0 ? (
+            <Link href="/backoffice/encaissements/a-traiter" className="underline-offset-4 hover:underline">
+              · à traiter : {match.to_review}
+            </Link>
+          ) : (
+            <span>· rien à traiter</span>
+          )}
+        </p>
       ) : null}
       {check ? (
         <p className="text-sm" data-testid="bank-check">

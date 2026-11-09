@@ -1098,6 +1098,11 @@ isOneToOne: false
               "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"pending_minor": string,"rf": string,"status": string
             }[]
                            },
+"payment_queue":
+{ Args: { "p_client"?: string,"p_limit"?: number,"p_max_minor"?: number,"p_min_days"?: number,"p_min_minor"?: number,"p_offset"?: number,"p_reason"?: string,"p_tab"?: string }; Returns: {
+              "account_id": string,"age_days": number,"amount_minor": string,"booking_date": string,"candidate_account_id": string,"client_organization_id": string,"creditor_reference": string,"currency": string,"match_method": string,"matched_at": string,"payer_iban_end": string,"payer_name": string,"payment_id": string,"remittance_text": string,"review_reason": string,"status": string,"total": number
+            }[]
+                           },
 "place_account_hold":
 { Args: { "p_account_id": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string,"p_legal_basis": string,"p_reason": string }; Returns: string
                            },
@@ -1120,7 +1125,7 @@ isOneToOne: false
                            },
 "statement_match_counts":
 { Args: { "p_statement_ids": (string)[] }; Returns: {
-              "automatic": number,"payments": number,"statement_id": string,"to_review": number
+              "automatic": number,"payments": number,"statement_id": string,"to_review": number,"waiting": number
             }[]
                            },
 "submit_boarding_batch":

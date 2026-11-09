@@ -5,7 +5,7 @@ import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import { LINE_FILTERS, lineFilterOr, lineState, maskedIban, money, signedMoney } from "@/lib/payments/statements";
 import { AutoRefresh } from "@/components/auto-refresh";
-import { type StatementRow, STATEMENT_COLUMNS, StatementSummary } from "../../statement-summary";
+import { type MatchCounts, type StatementRow, STATEMENT_COLUMNS, StatementSummary } from "../../statement-summary";
 
 const PAGE_SIZE = 100;
 
@@ -39,6 +39,8 @@ export default async function StatementPage({
   const { data: statement } = await supabase.from("bank_statement").select(STATEMENT_COLUMNS).eq("id", id).maybeSingle();
   if (!statement) notFound();
   const s = statement as unknown as StatementRow;
+  const { data: matchRows } = await supabase.rpc("statement_match_counts", { p_statement_ids: [id] });
+  const match: MatchCounts | undefined = matchRows?.[0];
 
   let lines = supabase
     .from("bank_transaction")
@@ -59,9 +61,9 @@ export default async function StatementPage({
 
   return (
     <WidePage title={s.file_name} back={{ href: "/backoffice/encaissements", label: "Relevés bancaires" }}>
-      <AutoRefresh active={s.status === "uploaded"} abandonable={false} />
+      <AutoRefresh active={s.status === "uploaded" || (match?.waiting ?? 0) > 0} abandonable={false} />
       {query.deja === "1" ? <InfoNote>Ce fichier a déjà été déposé pour ce compte : voici le relevé existant.</InfoNote> : null}
-      <StatementSummary s={s} />
+      <StatementSummary s={s} match={match} />
 
       {s.counts && s.counts.cash_in.length > 0 ? (
         <Section title="Comptabilisé par jour (fonds de tiers à affecter)" testId="cash-in">
