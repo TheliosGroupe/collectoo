@@ -1,3 +1,4 @@
+import { frenchDate } from "@/lib/payments/bank-accounts";
 import type { Tone } from "@/lib/payments/statements";
 
 /**
@@ -103,13 +104,27 @@ export const FEED_REASON: Record<string, string> = {
   before_servicing_start:
     "Paiement antérieur à la date d'arrêté du portefeuille : il vous est reversé sans être imputé.",
   client_ratification: "Paiement reversé sur votre ratification.",
-  bank_return:
-    "La banque du payeur a repris ce paiement (retour ou contestation) : son imputation est annulée à la date du retour et les factures retrouvent leur solde.",
+  // the return's own row (`payment_returned`), whatever the payment was before: allocated, forwarded, held or waiting
+  bank_return: "La banque du payeur a repris ce montant (retour ou contestation).",
 };
 
-export function feedReason(reason: string | null): string | null {
-  if (!reason) return null;
-  return FEED_REASON[reason] ?? null;
+/**
+ * Why, worded by what the row records (review M2b-6). A bank return writes one row per allocation it reversed, one per
+ * forward it reversed, and one for the return itself: only an allocation's row says the invoices regain their balance,
+ * a forward's says its remittance is cancelled (a forward imputes nothing), and the return's own row says no more than
+ * that the bank took the amount back (a held or waiting payment had nothing imputed or remitted). The date is the
+ * reversal's effective date.
+ */
+export function feedReason(row: Pick<FeedRow, "kind" | "reason" | "effective_date">): string | null {
+  if (!row.reason) return null;
+  if (row.reason === "bank_return") {
+    const when = row.effective_date ? `au ${frenchDate(row.effective_date)}` : "à la date du retour";
+    if (row.kind === "payment_allocation_reversed")
+      return `La banque du payeur a repris tout ou partie de ce paiement (retour ou contestation) : son imputation est annulée ${when} et les factures retrouvent leur solde.`;
+    if (row.kind === "payment_forward_reversed")
+      return `La banque du payeur a repris tout ou partie de ce paiement (retour ou contestation) : son reversement est annulé ${when}.`;
+  }
+  return FEED_REASON[row.reason] ?? null;
 }
 
 /** The link to a receipt version and its words (« Quittance Q-2026-000001 · version 2 (annulée) »). */
