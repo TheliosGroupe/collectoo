@@ -217,6 +217,8 @@ select ok(exists (select 1 from pg_trigger where tgrelid = 'public.refund_reques
           and exists (select 1 from pg_trigger where tgrelid = 'public.direct_payment'::regclass and tgname = 'direct_payment_change_log'),
   'refund requests and direct payments are in the change log (design §6)');
 select ok(not has_function_privilege('authenticated', 'private.post_debit_links(uuid, boolean)', 'execute')
+          and not has_function_privilege('authenticated', 'private.debit_post_rows(uuid)', 'execute')
+          and not has_function_privilege('service_role', 'private.debit_post_rows(uuid)', 'execute')
           and not has_function_privilege('authenticated', 'private.apply_debit_decisions(uuid)', 'execute')
           and has_function_privilege('service_role', 'private.apply_debit_decisions(uuid)', 'execute')
           and not has_function_privilege('authenticated', 'private.run_payment_checks(uuid)', 'execute')
@@ -232,7 +234,8 @@ select ok(not has_function_privilege('anon', 'public.request_refund(text, uuid, 
 select is((select array_agg(p.proname::text order by p.proname) from pg_proc p
            join pg_namespace n on n.oid = p.pronamespace
            where n.nspname in ('public', 'private')
-             and p.proname in ('post_debit_links', 'debit_candidates', 'apply_debit_decisions', 'request_refund',
+             and p.proname in ('post_debit_links', 'debit_post_rows', 'debit_candidates', 'apply_debit_decisions',
+                               'request_refund',
                                'cancel_refund', 'link_debit', 'resolve_duplicate', 'record_direct_payment',
                                'post_direct_payment', 'run_payment_checks', 'debit_queue', 'debit_link_options',
                                'bank_unposted')

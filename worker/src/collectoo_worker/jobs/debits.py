@@ -16,9 +16,10 @@ duplicate): one transaction (the queue's, exactly once) under the servicer's deb
    others are posted: one bad line never stops a servicer's returns and refunds.
 
 `CHUNK` lines per transaction (2,000 by default): the transaction holds the servicer's allocation
-lock while it posts (~21 ms a return, docs/benchmarks/payments.md: ~45 s for a chunk, twice that
-if one line fails and the chunk is posted line by line), far below the queue's 300 s visibility
-timeout; the rest follows in a continuation message.
+lock while it posts. Measured on the 50k scale data (4 vCPU): 2,000 full returns posted in 5.7 s;
+with one line the posting refuses, the chunk's try, a try of each line on its own and the post of
+the others take 83 s — both far below the queue's 300 s visibility timeout (20,000 lines would
+have taken ~1 min, and ~14 min with one refused line). The rest follows in a continuation message.
 
 `direct_payment` (design §8.1, §9): a payment the debtor made to the client directly, as the
 client's statement says: the waterfall (`payments.allocation`, the debts the client names as the

@@ -693,7 +693,8 @@ $$;
 -- otherwise (job) refused links are left in pg_temp._debit_skipped for the next run. Then posts them
 -- (private.debit_post_rows). A link the posting itself refuses (a ledger check the re-check did not foresee) never
 -- takes the others down: ops get « debit link refused: posting_failed (…) »; the job posts the chunk in one
--- subtransaction and, if it fails, each link in its own, the ones refused left to ops in pg_temp._debit_failed.
+-- subtransaction and, if it fails, tries each link in its own, the ones refused left to ops in pg_temp._debit_failed,
+-- the others posted.
 create or replace function private.post_debit_links(p_organization_id uuid, p_strict boolean)
 returns jsonb
 language plpgsql
@@ -834,33 +835,41 @@ begin
       if not (v_state like 'LG%' or v_state like '22%' or v_state like '23%') then
         raise;  -- not the data's doing (a lock, the machine): the queue retries the run
       end if;
-      -- one link refused by the posting (its subtransaction rolled back): each link on its own, in order
+      -- A link the posting refuses (the chunk's subtransaction rolled back): each link is tried on its own in a
+      -- subtransaction that is always rolled back (a try leaves nothing, not even its locks: the posting's working
+      -- tables would otherwise hold some until commit, for every link); the ones refused go to ops, then the others
+      -- are posted together (one link per payment: each posts as it did alone).
       drop table if exists pg_temp._dl_all;
       create temp table _dl_all on commit drop as select * from pg_temp._dl;
-      drop table if exists pg_temp._dl_done;
-      create temp table _dl_done on commit drop as select * from pg_temp._dl limit 0;
+      create index on pg_temp._dl_all (ord);
       for r in select a.ord, a.bank_transaction_id, a.payment_id, a.refund_request_id from pg_temp._dl_all a
                order by a.ord loop
         begin
           delete from pg_temp._dl d where d.bank_transaction_id is not null;
           insert into pg_temp._dl select * from pg_temp._dl_all a where a.ord = r.ord;
           perform private.debit_post_rows(p_organization_id);
-          insert into pg_temp._dl_done select * from pg_temp._dl;
+          raise exception 'debit link tried' using errcode = 'DL000';   -- posts on its own: undo the try
         exception when others then
           get stacked diagnostics v_state = returned_sqlstate, v_msg = message_text;
-          if not (v_state like 'LG%' or v_state like '22%' or v_state like '23%') then
-            raise;
+          if v_state <> 'DL000' then
+            if not (v_state like 'LG%' or v_state like '22%' or v_state like '23%') then
+              raise;
+            end if;
+            insert into pg_temp._debit_failed (bank_transaction_id, candidates, detail)
+            values (r.bank_transaction_id,
+                    jsonb_build_array(jsonb_strip_nulls(jsonb_build_object('payment_id', r.payment_id,
+                                                                           'refund_request_id', r.refund_request_id))),
+                    left(v_state || ': ' || v_msg, 2000))
+            on conflict (bank_transaction_id) do nothing;
           end if;
-          insert into pg_temp._debit_failed (bank_transaction_id, candidates, detail)
-          values (r.bank_transaction_id,
-                  jsonb_build_array(jsonb_strip_nulls(jsonb_build_object('payment_id', r.payment_id,
-                                                                         'refund_request_id', r.refund_request_id))),
-                  left(v_state || ': ' || v_msg, 2000))
-          on conflict (bank_transaction_id) do nothing;
         end;
       end loop;
       delete from pg_temp._dl d where d.bank_transaction_id is not null;
-      insert into pg_temp._dl select * from pg_temp._dl_done;
+      insert into pg_temp._dl select * from pg_temp._dl_all a
+      where not exists (select 1 from pg_temp._debit_failed f where f.bank_transaction_id = a.bank_transaction_id);
+      if exists (select 1 from pg_temp._dl) then
+        perform private.debit_post_rows(p_organization_id);
+      end if;
     end;
   end if;
 
