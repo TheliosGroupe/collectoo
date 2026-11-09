@@ -4,6 +4,7 @@ import { entryLabel, paymentActions } from "./allocation";
 import {
   CHECK_LABEL,
   DEBIT_REVIEW,
+  DIRECT_REFUSAL,
   checkLabel,
   debitErrorCode,
   lineKindLabel,
@@ -136,7 +137,18 @@ describe("returns (founder #13; design §2 #3)", () => {
     expect(lineKindLabel("return", "credit")).toBe("Crédit annulant un débit");
     expect(lineKindLabel("refund_out", "debit")).toContain("RFD");
     expect(Object.keys(DEBIT_REVIEW).sort()).toEqual(
-      ["already_returned", "ambiguous", "amount_differs", "changed", "no_candidate", "partial_return", "refund_not_pending"].sort(),
+      [
+        "already_returned",
+        "ambiguous",
+        "amount_differs",
+        "before_previous_return",
+        "changed",
+        "no_candidate",
+        "partial_return",
+        "payment_changed",
+        "payment_returned",
+        "refund_not_pending",
+      ].sort(),
     );
   });
 
@@ -221,6 +233,11 @@ describe("nightly checks", () => {
     ])
       expect(CHECK_LABEL[code], code).toBeDefined();
     expect(checkLabel("unknown_code")).toEqual({ label: "unknown_code", help: "" });
+  });
+
+  it("words every refusal of a direct payment, a dead-lettered job included", () => {
+    for (const code of ["more_than_due", "nothing_due", "before_servicing_start", "file_closed", "failed"])
+      expect(DIRECT_REFUSAL[code], code).toBeDefined();
   });
 });
 

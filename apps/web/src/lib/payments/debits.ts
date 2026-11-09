@@ -81,6 +81,12 @@ export const DEBIT_REVIEW: Record<string, string> = {
   refund_not_pending: "Le remboursement nommé n'est plus en attente.",
   already_returned: "Le paiement nommé est déjà retourné ou remboursé.",
   changed: "Le paiement a changé pendant l'analyse : nouvel essai automatique.",
+  // review M2b-6: a line the posting refused is left to ops with its code
+  payment_changed: "Le paiement a changé pendant l'analyse : nouvel essai automatique.",
+  payment_returned:
+    "Remboursement revenu alors que son paiement a été retourné par la banque : rien n'est comptabilisé, la façon de le comptabiliser reste à décider.",
+  before_previous_return:
+    "Ligne antérieure à un retour déjà comptabilisé sur ce paiement, à une date plus récente : elle ne peut pas être liée à sa date.",
 };
 
 /**
@@ -257,6 +263,8 @@ export const DIRECT_REFUSAL: Record<string, string> = {
   nothing_due: "Rien n'est dû sur ces factures à cette date",
   before_servicing_start: "Date antérieure à la reprise du dossier",
   file_closed: "Dossier clos",
+  // the job failed after its retries (review M2b-6: a dead-lettered direct payment is refused, never left « En cours »)
+  failed: "Le traitement a échoué après plusieurs essais : contactez le support",
 };
 
 export const DIRECT_STATUS: Record<string, { label: string; tone: Tone }> = {
