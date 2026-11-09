@@ -117,6 +117,14 @@ jobs:
           supabase --version
       - run: supabase start
       - run: supabase db reset
+      - name: Log the plan of any statement slower than 60 s (read when the job fails)
+        run: |
+          psql "postgresql://supabase_admin:postgres@127.0.0.1:54322/postgres" -v ON_ERROR_STOP=1 -q \
+            -c "alter system set pg_stat_statements.track = 'all'" \
+            -c "alter system set session_preload_libraries = 'auto_explain'" \
+            -c "alter system set auto_explain.log_min_duration = '60s'" \
+            -c "alter system set auto_explain.log_nested_statements = on" \
+            -c "select pg_reload_conf()"
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -127,6 +135,14 @@ jobs:
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen && uv run pytest -m integration -s tests/*scale_integration.py
+      - name: Slowest statements and the plans of those over 60 s
+        if: failure()
+        run: |
+          psql "postgresql://supabase_admin:postgres@127.0.0.1:54322/postgres" -P pager=off -c \
+            "select round(max_exec_time) as max_ms, calls, round(total_exec_time) as total_ms,
+                    left(regexp_replace(query, '\s+', ' ', 'g'), 400) as query
+             from pg_stat_statements order by max_exec_time desc limit 40"
+          docker logs supabase_db_collectoo 2>&1 | grep -A 120 "duration: .* plan:" | head -3000 || true
 
   catalogue:
     name: EU template catalogue is reproducible

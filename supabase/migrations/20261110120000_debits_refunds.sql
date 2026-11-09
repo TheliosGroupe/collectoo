@@ -2592,16 +2592,6 @@ create policy payment_check_result_read on public.payment_check_result for selec
   using (organization_id = any ((select private.money_staff_org_ids())::uuid[]));
 
 ------------------------------------------------------------------------------------------
--- Statement triggers that join their two transition tables (new_rows ⋈ old_rows on the payment) cache the plan of the
--- session's first, small update; a nested loop reused for a 50k-row update compares every pair (the 50k match apply
--- took minutes instead of seconds). No nested loop there, whatever the first update was (the same setting as the M2b-5
--- review fix of these two functions; idempotent).
-------------------------------------------------------------------------------------------
-
-alter function private.payment_after_update() set enable_nestloop = off;
-alter function private.receipts_after_payment() set enable_nestloop = off;
-
-------------------------------------------------------------------------------------------
 -- Privileges
 ------------------------------------------------------------------------------------------
 
