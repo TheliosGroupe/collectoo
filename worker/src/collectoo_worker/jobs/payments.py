@@ -4,6 +4,8 @@
   and call `private.ingest_statement`: new lines become `bank_transaction` rows (deduplicated per
   bank account), debtor credits become `payment` rows, and each booking day of the statement is
   booked by one `cash_in` entry (Dr 5120 / Cr 4710). One transaction: the queue's (exactly once).
+  It queues `match` in the same transaction.
+- `match` (M2-08): which file each waiting payment pays (`jobs.matching`).
 
 A file that cannot be imported is refused (`rejected`, with a stable code the back-office words
 in French): parse errors before anything is written, refusals of the SQL import (closed bank
@@ -27,6 +29,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
+from collectoo_worker.jobs.matching import run_match
 from collectoo_worker.payments.camt053 import parse_camt053
 from collectoo_worker.payments.csv_import import CsvProfile, parse_csv
 from collectoo_worker.payments.statement import STAGE_COLUMNS, ParsedStatement, StatementRejected
@@ -58,6 +61,8 @@ def make_handler(storage: Storage) -> Any:
         kind = payload.get("type")
         if kind == "import":
             import_statement(conn, storage, str(payload["statement_id"]))
+        elif kind == "match":
+            run_match(conn, payload)
         else:
             raise ValueError(f"unknown payments job type: {kind!r}")
 
@@ -84,7 +89,7 @@ def deterministic(exc: psycopg.Error) -> bool:
 def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
     row = conn.execute(
         """select s.status, s.format, s.storage_bucket, s.storage_path, s.file_sha256, s.currency,
-                  b.iban, b.csv_profile, c.minor_exponent, private.paris_today()
+                  b.iban, b.csv_profile, c.minor_exponent, private.paris_today(), s.organization_id
            from public.bank_statement s
            join public.bank_account b on b.id = s.bank_account_id
            join public.currency c on c.code = s.currency
@@ -93,7 +98,7 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
     ).fetchone()
     if row is None or row[0] != "uploaded":
         return "skipped"  # unknown, or already done by an earlier delivery
-    _status, fmt, bucket, path, sha256, currency, iban, csv_profile, exponent, today = row
+    _status, fmt, bucket, path, sha256, currency, iban, csv_profile, exponent, today, org = row
     started = time.monotonic()
     with tempfile.TemporaryDirectory() as tmp:
         local = storage.download(bucket, path, Path(tmp) / "statement")
@@ -127,6 +132,11 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
             staged = time.monotonic()
             conn.execute(
                 "select private.ingest_statement(%s, %s)", (statement_id, Jsonb(parsed.header()))
+            )
+            # M2-08: the new payments are matched by the next job (same transaction: exactly once).
+            conn.execute(
+                "select pgmq.send('payments', %s)",
+                (Jsonb({"type": "match", "organization_id": str(org), "trigger": "import"}),),
             )
     except psycopg.Error as exc:
         if not deterministic(exc):

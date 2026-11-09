@@ -45,6 +45,11 @@ class Tx:
     ustrd: tuple[str, ...] = ()
     creditor_ref: str | None = None
     return_reason: str | None = None
+    # Reconciliation ground truth (synth.reconciliation): the file this credit pays, what matching
+    # must do (auto | no_match | ambiguous) and the scenario that wrote it.
+    truth: str | None = None
+    expect: str | None = None
+    scenario: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,9 @@ class Expected:
     counterparty_iban: str | None
     remittance_text: str | None
     return_reason: str | None = None
+    truth: str | None = None  # reconciliation ground truth (see Tx)
+    expect: str | None = None
+    scenario: str | None = None
 
 
 # -- generation -------------------------------------------------------------------------------
@@ -432,6 +440,9 @@ def expected_lines(doc: Doc) -> list[Expected]:
                         t.iban,
                         remittance,
                         t.return_reason,
+                        t.truth,
+                        t.expect,
+                        t.scenario,
                     )
                 )
     return out

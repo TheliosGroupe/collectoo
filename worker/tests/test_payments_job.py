@@ -39,7 +39,13 @@ def _error(sqlstate: str) -> psycopg.Error:
 def test_an_unknown_job_type_is_an_error() -> None:
     handle = make_handler(_NoStorage())
     with pytest.raises(ValueError, match="unknown payments job type"):
-        handle({"type": "match"}, None)
+        handle({"type": "allocate"}, None)
+
+
+def test_a_match_job_with_an_unknown_trigger_is_an_error() -> None:
+    handle = make_handler(_NoStorage())
+    with pytest.raises(ValueError, match="unknown match trigger"):
+        handle({"type": "match", "organization_id": "o", "trigger": "later"}, None)
 
 
 @pytest.mark.parametrize(
@@ -103,6 +109,7 @@ def _import(data: bytes) -> tuple[str, list[tuple[Any, ...]]]:
         None,
         2,
         date(2026, 11, 8),
+        "org-1",
     )
     conn = _Conn(row)
     outcome = import_statement(cast(Any, conn), cast(Any, _LocalStorage(data)), "s-1")
