@@ -55,6 +55,12 @@ create index bank_transaction_tx_idx on public.bank_transaction (bank_account_id
 -- Fees and other debits: shown as explained gaps (founder #20).
 create index bank_transaction_other_debit_idx on public.bank_transaction (organization_id, booking_date, id)
   where kind = 'other_debit';
+-- An other debit of a pending refund's amount on its bank account may be that refund (a bank that drops our RFD id):
+-- it is listed to classify, not as a fee.
+create index bank_transaction_other_debit_amount_idx on public.bank_transaction (bank_account_id, amount_minor)
+  where kind = 'other_debit' and direction = 'debit';
+-- The payments ops may link a line to (« Lier »): those of its bank account booked on or before it.
+create index payment_bank_account_idx on public.payment (bank_account_id, booking_date);
 
 ------------------------------------------------------------------------------------------
 -- Refund requests (design §6; founder #8, #9, #11, #12; C. civ. 1302-1): ops ask, the bank executes, the statement
@@ -104,6 +110,7 @@ create table public.refund_request (
 create unique index refund_request_pending_uq on public.refund_request (payment_id) where status = 'requested';
 create index refund_request_payment_idx on public.refund_request (payment_id);
 create index refund_request_waiting_idx on public.refund_request (organization_id, requested_at) where status = 'requested';
+create index refund_request_amount_idx on public.refund_request (bank_account_id, amount_minor);
 comment on table public.refund_request is
   'A refund ops asked for (RFD end-to-end id); booked as a cash_out when the bank''s debit shows it (design §6, §8.1).';
 
@@ -214,12 +221,17 @@ comment on table public.bank_debit_link is
   'What a bank debit (or a credit undoing one) is: a payment''s return, our refund, its bounce, or explained by ops.';
 
 -- What the debit job found for a line it could not link (derived, replaced at each run, gone once linked).
+-- payment_returned: a refund that came back to a payment the bank has taken back since (not booked: OQ, M2c);
+-- before_previous_return: dated before a later-dated reversal of the payment (its money was allocated then: I4);
+-- posting_failed: the posting refused it (a ledger check), `detail` says why (support).
 create table public.bank_debit_review (
   bank_transaction_id uuid primary key references public.bank_transaction (id),
   organization_id uuid not null references public.organization (id),
   reason text not null check (reason in ('no_candidate', 'ambiguous', 'amount_differs', 'partial_return',
-                                         'refund_not_pending', 'already_returned', 'changed')),
+                                         'refund_not_pending', 'already_returned', 'changed', 'payment_returned',
+                                         'before_previous_return', 'posting_failed')),
   candidates jsonb not null default '[]' check (jsonb_typeof(candidates) = 'array'),
+  detail text check (length(detail) <= 2000),
   checked_at timestamptz not null default now()
 );
 create index bank_debit_review_org_idx on public.bank_debit_review (organization_id);
@@ -489,6 +501,7 @@ begin
   drop table if exists pg_temp._debit_link;
   drop table if exists pg_temp._debit_review;
   drop table if exists pg_temp._debit_skipped;
+  drop table if exists pg_temp._debit_failed;
   create temp table _debit_link (
     ord integer not null unique,
     bank_transaction_id uuid primary key,
@@ -503,136 +516,49 @@ begin
   create temp table _debit_review (
     bank_transaction_id uuid primary key,
     reason text not null,
-    candidates jsonb not null default '[]'
+    candidates jsonb not null default '[]',
+    detail text
   ) on commit drop;
   create temp table _debit_skipped (
     bank_transaction_id uuid primary key,
     why text not null
   ) on commit drop;
+  -- job: links the posting refused (each line on its own), for ops
+  create temp table _debit_failed (
+    bank_transaction_id uuid primary key,
+    candidates jsonb not null,
+    detail text not null
+  ) on commit drop;
 end;
 $$;
 
--- Posts pg_temp._debit_link. Locks in the order every payments writer takes them (ADR-0013): the payments' files FOR
--- KEY SHARE, the payments FOR UPDATE, their refund requests, the bank accounts FOR SHARE, then the servicer's
--- allocation lock. Re-checks every link on what it finds under these locks; `p_strict` (ops) raises the first refusal,
--- otherwise (job) refused links are left in pg_temp._debit_skipped for the next run. Then, per link:
+-- Posts every row of pg_temp._dl (links the caller re-checked under its locks), then runs the ledger's commit-time
+-- checks of what it posted (I4 → LG007…) at once, so that a refusal is raised here, inside the caller's subtransaction.
+-- Per link:
 --   return:          the payment's live allocations and forwards reversed at the return date (an entry dated after
 --                    it, at its own date), the client told of each; a cash_out at the return date; returned in full →
 --                    `returned` (pending refund cancelled; the receipts job issues the final void version), in part →
 --                    waits for ops (`partial_return`); the client of its file told of the return;
 --   refund:          a cash_out at the debit's date; the request executed; the payment `refunded`, `allocated`, or
 --                    back to its earlier reason if something is left;
---   refund_returned: the refund's cash_out reversed at the credit's date; the request bounced; the payment back to the
---                    reason it had when the refund was asked;
+--   refund_returned: the refund's cash_out reversed at the credit's date; the request bounced; the payment's state
+--                    from its facts now (it may have been matched or allocated since the refund): no file →
+--                    `unmatched` (`no_match`, or `ambiguous` if it was and still is unmatched); on a file → no reason,
+--                    the allocation job gates it again (founder #8: an overpayment is kept until ops decide);
 --   explained:       nothing booked (founder #20), ops' motif kept.
-create or replace function private.post_debit_links(p_organization_id uuid, p_strict boolean)
-returns jsonb
+create or replace function private.debit_post_rows(p_organization_id uuid)
+returns void
 language plpgsql
 security definer
 set search_path = ''
 as $$
 declare
-  v_why record;
   r record;
   e record;
   v_n_account uuid;
   v_n_portfolio uuid;
   v_rev uuid;
 begin
-  -- a refund (or its bounce) is the request's payment
-  update pg_temp._debit_link l set payment_id = q.payment_id
-  from public.refund_request q where q.id = l.refund_request_id and l.payment_id is null;
-  analyze pg_temp._debit_link;
-
-  perform 1 from public.account a
-  where a.id in (select p.account_id from public.payment p
-                 where p.id in (select l.payment_id from pg_temp._debit_link l where l.payment_id is not null))
-  order by a.id for key share;
-  perform 1 from public.payment p
-  where p.id in (select l.payment_id from pg_temp._debit_link l where l.payment_id is not null)
-  order by p.id for update;
-  perform 1 from public.refund_request q
-  where q.payment_id in (select l.payment_id from pg_temp._debit_link l where l.payment_id is not null)
-  order by q.id for update;
-  perform 1 from public.bank_account b
-  where b.id in (select t.bank_account_id from public.bank_transaction t
-                 where t.id in (select l.bank_transaction_id from pg_temp._debit_link l))
-  order by b.id for share;
-  perform pg_advisory_xact_lock(hashtext('payments:' || p_organization_id::text));
-
-  -- The facts, read under the locks.
-  drop table if exists pg_temp._dl;
-  create temp table _dl on commit drop as
-  select l.*, t.organization_id as line_org, t.bank_account_id as line_bank, t.direction, t.currency,
-         t.amount_minor as line_minor, t.booking_date as line_date, coalesce(dr.released_kind, t.kind) as line_kind,
-         (t.kind = 'suspected_duplicate' and dr.decision is distinct from 'released') as held,
-         exists (select 1 from public.bank_debit_link x where x.bank_transaction_id = l.bank_transaction_id) as linked,
-         p.organization_id as pay_org, p.bank_account_id as pay_bank, p.booking_date as pay_date, p.status as pay_status,
-         p.account_id, p.amount_minor as pay_minor,
-         q.payment_id as req_payment, q.status as req_status, q.amount_minor as req_minor, q.bank_account_id as req_bank,
-         q.cash_out_entry_id as req_entry, q.executed_on as req_executed_on, q.prior_review_reason as req_prior_reason,
-         0::bigint as allocated, 0::bigint as returned, 0::bigint as unallocated, 0::bigint as pending,
-         null::text as why, null::uuid as cash_entry_id
-  from pg_temp._debit_link l
-  left join public.bank_transaction t on t.id = l.bank_transaction_id
-  left join public.bank_duplicate_resolution dr on dr.bank_transaction_id = l.bank_transaction_id
-  left join public.payment p on p.id = l.payment_id
-  left join public.refund_request q on q.id = l.refund_request_id;
-  update pg_temp._dl d set allocated = x.allocated_minor, returned = x.returned_minor, unallocated = x.unallocated_minor
-  from private.payment_positions(array(select l.payment_id from pg_temp._debit_link l where l.payment_id is not null)) x
-  where x.payment_id = d.payment_id;
-  update pg_temp._dl d set pending = s.total
-  from (select q.payment_id, sum(q.amount_minor) as total from public.refund_request q
-        where q.payment_id in (select l.payment_id from pg_temp._debit_link l) and q.status = 'requested'
-        group by q.payment_id) s
-  where s.payment_id = d.payment_id;
-
-  update pg_temp._dl d set why = case
-    when d.line_org is distinct from p_organization_id then 'line_unknown'
-    when d.linked then 'already_linked'
-    when d.held then 'held_duplicate'
-    when d.kind = 'explained' then case
-      when d.payment_id is not null or d.refund_request_id is not null then 'bad_request'
-      when d.direction = 'credit' and d.line_kind in ('debtor_credit', 'batch_unsplit') then 'payment_line'
-      when nullif(btrim(d.reason), '') is null then 'reason_required' end
-    when d.pay_org is distinct from p_organization_id then 'payment_unknown'
-    when d.pay_bank is distinct from d.line_bank then 'other_bank_account'
-    when d.kind = 'return' then case
-      when d.direction <> 'debit' or d.line_kind not in ('return', 'refund_out', 'other_debit') then 'not_a_return'
-      when d.refund_request_id is not null then 'bad_request'
-      when d.pay_status = 'returned' then 'already_returned'
-      when d.line_date < d.pay_date then 'before_payment'
-      when d.line_minor > d.pay_minor - d.returned then 'amount_exceeds'
-      when d.line_minor < d.pay_minor - d.returned and d.pending > 0 then 'refund_pending'  -- partial: cancel it first
-      when d.method = 'ops' and d.expected_left_minor is distinct from d.pay_minor - d.returned then 'payment_changed' end
-    when d.kind = 'refund' then case
-      when d.direction <> 'debit' or d.line_kind not in ('refund_out', 'other_debit', 'return') then 'not_a_refund'
-      when d.req_status is distinct from 'requested' or d.req_payment is distinct from d.payment_id then 'refund_not_pending'
-      when d.req_bank is distinct from d.line_bank then 'other_bank_account'
-      when d.line_minor <> d.req_minor then 'amount_differs'
-      when d.line_date < d.pay_date then 'before_payment'
-      when d.line_minor > d.unallocated then 'amount_exceeds' end
-    when d.kind = 'refund_returned' then case
-      when d.direction <> 'credit' or d.line_kind <> 'return' then 'not_a_refund_return'
-      when d.req_status is distinct from 'executed' or d.req_payment is distinct from d.payment_id then 'refund_not_executed'
-      when d.line_minor <> d.req_minor then 'amount_differs'
-      when d.line_date < d.req_executed_on then 'before_refund' end
-  end
-  where d.bank_transaction_id is not null;  -- (every row: PostgREST sessions refuse an UPDATE without WHERE)
-  -- one link per payment per call (a later one waits for the next run)
-  update pg_temp._dl d set why = 'payment_twice'
-  where d.why is null and d.payment_id is not null
-    and exists (select 1 from pg_temp._dl o where o.payment_id = d.payment_id and o.why is null and o.ord < d.ord);
-  select d.why, d.bank_transaction_id into v_why from pg_temp._dl d where d.why is not null order by d.ord limit 1;
-  if found and p_strict then
-    raise exception 'debit link refused: %', v_why.why using errcode = 'check_violation';
-  end if;
-  insert into pg_temp._debit_skipped (bank_transaction_id, why)
-  select d.bank_transaction_id, d.why from pg_temp._dl d where d.why is not null
-  on conflict (bank_transaction_id) do update set why = excluded.why;
-  delete from pg_temp._dl d where d.why is not null;
-  analyze pg_temp._dl;
-
   -- 1. Returns: undo the payment's allocations and forwards at the return date (founder #13; design §2 #3), the client
   --    told of each with a code (never ops' motif).
   for r in select d.* from pg_temp._dl d where d.kind = 'return' order by d.ord loop
@@ -732,6 +658,12 @@ begin
                                    and q.status = 'requested') then null
                     when x.unallocated_minor = 0 then null
                     when d.kind = 'return' then 'partial_return'
+                    -- a bounce: from the payment's facts now, not from when the refund was asked (review fix)
+                    when d.kind = 'refund_returned' then
+                      case when d.account_id is not null then null   -- on a file: the allocation job gates it again
+                           when d.pay_status in ('unmatched', 'refunded') and d.req_prior_status = 'unmatched'
+                                and d.req_prior_reason in ('no_match', 'ambiguous') then d.req_prior_reason
+                           else 'no_match' end
                     else coalesce(d.req_prior_reason, case when x.allocated_minor > 0 then 'overpayment'
                                                            when d.account_id is null then 'no_match' end) end
                  as review_reason
@@ -749,26 +681,222 @@ begin
 
   delete from public.bank_debit_review v using pg_temp._dl d where v.bank_transaction_id = d.bank_transaction_id;
 
+  -- the ledger's checks of the reversals and cash_outs posted above, now (not at commit)
+  set constraints public.ledger_entry_balanced immediate;
+  set constraints public.ledger_entry_balanced deferred;
+end;
+$$;
+
+-- Posts pg_temp._debit_link. Locks in the order every payments writer takes them (ADR-0013): the payments' files FOR
+-- KEY SHARE, the payments FOR UPDATE, their refund requests, the bank accounts FOR SHARE, then the servicer's
+-- allocation lock. Re-checks every link on what it finds under these locks; `p_strict` (ops) raises the first refusal,
+-- otherwise (job) refused links are left in pg_temp._debit_skipped for the next run. Then posts them
+-- (private.debit_post_rows). A link the posting itself refuses (a ledger check the re-check did not foresee) never
+-- takes the others down: ops get « debit link refused: posting_failed (…) »; the job posts the chunk in one
+-- subtransaction and, if it fails, tries each link in its own, the ones refused left to ops in pg_temp._debit_failed,
+-- the others posted.
+create or replace function private.post_debit_links(p_organization_id uuid, p_strict boolean)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_why record;
+  r record;
+  v_state text;
+  v_msg text;
+begin
+  -- a refund (or its bounce) is the request's payment
+  update pg_temp._debit_link l set payment_id = q.payment_id
+  from public.refund_request q where q.id = l.refund_request_id and l.payment_id is null;
+  analyze pg_temp._debit_link;
+
+  perform 1 from public.account a
+  where a.id in (select p.account_id from public.payment p
+                 where p.id in (select l.payment_id from pg_temp._debit_link l where l.payment_id is not null))
+  order by a.id for key share;
+  perform 1 from public.payment p
+  where p.id in (select l.payment_id from pg_temp._debit_link l where l.payment_id is not null)
+  order by p.id for update;
+  perform 1 from public.refund_request q
+  where q.payment_id in (select l.payment_id from pg_temp._debit_link l where l.payment_id is not null)
+  order by q.id for update;
+  perform 1 from public.bank_account b
+  where b.id in (select t.bank_account_id from public.bank_transaction t
+                 where t.id in (select l.bank_transaction_id from pg_temp._debit_link l))
+  order by b.id for share;
+  perform pg_advisory_xact_lock(hashtext('payments:' || p_organization_id::text));
+
+  -- The facts, read under the locks. free_from: the latest reversal of the payment dated after the entry it reverses
+  -- (a return, a refund that bounced, an allocation ops reversed later): until then its money was allocated or out, so
+  -- nothing goes out of it before that date (I4; post_allocations' not_before). One keyed lookup per link.
+  drop table if exists pg_temp._dl;
+  create temp table _dl on commit drop as
+  select l.*, t.organization_id as line_org, t.bank_account_id as line_bank, t.direction, t.currency,
+         t.amount_minor as line_minor, t.booking_date as line_date, coalesce(dr.released_kind, t.kind) as line_kind,
+         (t.kind = 'suspected_duplicate' and dr.decision is distinct from 'released') as held,
+         exists (select 1 from public.bank_debit_link x where x.bank_transaction_id = l.bank_transaction_id) as linked,
+         p.organization_id as pay_org, p.bank_account_id as pay_bank, p.booking_date as pay_date, p.status as pay_status,
+         p.account_id, p.amount_minor as pay_minor, nb.d as free_from,
+         q.payment_id as req_payment, q.status as req_status, q.amount_minor as req_minor, q.bank_account_id as req_bank,
+         q.cash_out_entry_id as req_entry, q.executed_on as req_executed_on, q.prior_status as req_prior_status,
+         q.prior_review_reason as req_prior_reason,
+         0::bigint as allocated, 0::bigint as returned, 0::bigint as unallocated, 0::bigint as pending,
+         null::text as why, null::uuid as cash_entry_id
+  from pg_temp._debit_link l
+  left join public.bank_transaction t on t.id = l.bank_transaction_id
+  left join public.bank_duplicate_resolution dr on dr.bank_transaction_id = l.bank_transaction_id
+  left join public.payment p on p.id = l.payment_id
+  left join public.refund_request q on q.id = l.refund_request_id
+  left join lateral (select max(e.effective_date) as d from public.ledger_entry e
+                     join public.ledger_entry v on v.id = e.reverses_entry_id
+                     where e.payment_id = l.payment_id and e.effective_date > v.effective_date) nb on true;
+  update pg_temp._dl d set allocated = x.allocated_minor, returned = x.returned_minor, unallocated = x.unallocated_minor
+  from private.payment_positions(array(select l.payment_id from pg_temp._debit_link l where l.payment_id is not null)) x
+  where x.payment_id = d.payment_id;
+  update pg_temp._dl d set pending = s.total
+  from (select q.payment_id, sum(q.amount_minor) as total from public.refund_request q
+        where q.payment_id in (select l.payment_id from pg_temp._debit_link l) and q.status = 'requested'
+        group by q.payment_id) s
+  where s.payment_id = d.payment_id;
+
+  update pg_temp._dl d set why = case
+    when d.line_org is distinct from p_organization_id then 'line_unknown'
+    when d.linked then 'already_linked'
+    when d.held then 'held_duplicate'
+    when d.kind = 'explained' then case
+      when d.payment_id is not null or d.refund_request_id is not null then 'bad_request'
+      when d.direction = 'credit' and d.line_kind in ('debtor_credit', 'batch_unsplit') then 'payment_line'
+      -- money that went back out for a payment (a return, our refund) is booked, never only explained: the line waits
+      -- in « À classer » (and the ageing alert) until it is linked (I9; review fix)
+      when d.direction = 'debit' and d.line_kind in ('return', 'refund_out') then 'not_explainable'
+      when nullif(btrim(d.reason), '') is null then 'reason_required' end
+    when d.pay_org is distinct from p_organization_id then 'payment_unknown'
+    when d.pay_bank is distinct from d.line_bank then 'other_bank_account'
+    when d.kind = 'return' then case
+      when d.direction <> 'debit' or d.line_kind not in ('return', 'refund_out', 'other_debit') then 'not_a_return'
+      when d.refund_request_id is not null then 'bad_request'
+      when d.pay_status = 'returned' then 'already_returned'
+      when d.line_date < d.pay_date then 'before_payment'
+      when d.line_date < d.free_from then 'before_previous_return'
+      -- the job links exactly what is left (payments.debits): anything else, the payment changed since it read it
+      when d.method = 'auto' and d.line_minor <> d.pay_minor - d.returned then 'payment_changed'
+      when d.line_minor > d.pay_minor - d.returned then 'amount_exceeds'
+      when d.line_minor < d.pay_minor - d.returned and d.pending > 0 then 'refund_pending'  -- partial: cancel it first
+      when d.method = 'ops' and d.expected_left_minor is distinct from d.pay_minor - d.returned then 'payment_changed' end
+    when d.kind = 'refund' then case
+      when d.direction <> 'debit' or d.line_kind not in ('refund_out', 'other_debit', 'return') then 'not_a_refund'
+      when d.req_status is distinct from 'requested' or d.req_payment is distinct from d.payment_id then 'refund_not_pending'
+      when d.req_bank is distinct from d.line_bank then 'other_bank_account'
+      when d.line_minor <> d.req_minor then 'amount_differs'
+      when d.line_date < d.pay_date then 'before_payment'
+      when d.line_date < d.free_from then 'before_previous_return'
+      when d.line_minor > d.unallocated then 'amount_exceeds' end
+    when d.kind = 'refund_returned' then case
+      when d.direction <> 'credit' or d.line_kind <> 'return' then 'not_a_refund_return'
+      when d.req_status is distinct from 'executed' or d.req_payment is distinct from d.payment_id then 'refund_not_executed'
+      -- the bank took the payment back after the refund: where the money that came back goes is not decided (OQ)
+      when d.pay_status = 'returned' then 'payment_returned'
+      when d.line_minor <> d.req_minor then 'amount_differs'
+      when d.line_date < d.req_executed_on then 'before_refund' end
+  end
+  where d.bank_transaction_id is not null;  -- (every row: PostgREST sessions refuse an UPDATE without WHERE)
+  -- one link per payment per call (a later one waits for the next run)
+  update pg_temp._dl d set why = 'payment_twice'
+  where d.why is null and d.payment_id is not null
+    and exists (select 1 from pg_temp._dl o where o.payment_id = d.payment_id and o.why is null and o.ord < d.ord);
+  select d.why, d.bank_transaction_id into v_why from pg_temp._dl d where d.why is not null order by d.ord limit 1;
+  if found and p_strict then
+    raise exception 'debit link refused: %', v_why.why using errcode = 'check_violation';
+  end if;
+  insert into pg_temp._debit_skipped (bank_transaction_id, why)
+  select d.bank_transaction_id, d.why from pg_temp._dl d where d.why is not null
+  on conflict (bank_transaction_id) do update set why = excluded.why;
+  delete from pg_temp._dl d where d.why is not null;
+  analyze pg_temp._dl;
+
+  if p_strict then
+    begin
+      perform private.debit_post_rows(p_organization_id);
+    exception when others then
+      get stacked diagnostics v_state = returned_sqlstate, v_msg = message_text;
+      if v_state like 'LG%' or v_state like '22%' or v_state like '23%' then
+        raise exception 'debit link refused: posting_failed (%: %)', v_state, left(v_msg, 500)
+          using errcode = 'check_violation';
+      end if;
+      raise;
+    end;
+  elsif exists (select 1 from pg_temp._dl) then
+    begin
+      perform private.debit_post_rows(p_organization_id);   -- the whole chunk at once
+    exception when others then
+      get stacked diagnostics v_state = returned_sqlstate;
+      if not (v_state like 'LG%' or v_state like '22%' or v_state like '23%') then
+        raise;  -- not the data's doing (a lock, the machine): the queue retries the run
+      end if;
+      -- A link the posting refuses (the chunk's subtransaction rolled back): each link is tried on its own in a
+      -- subtransaction that is always rolled back (a try leaves nothing, not even its locks: the posting's working
+      -- tables would otherwise hold some until commit, for every link); the ones refused go to ops, then the others
+      -- are posted together (one link per payment: each posts as it did alone).
+      drop table if exists pg_temp._dl_all;
+      create temp table _dl_all on commit drop as select * from pg_temp._dl;
+      create index on pg_temp._dl_all (ord);
+      for r in select a.ord, a.bank_transaction_id, a.payment_id, a.refund_request_id from pg_temp._dl_all a
+               order by a.ord loop
+        begin
+          delete from pg_temp._dl d where d.bank_transaction_id is not null;
+          insert into pg_temp._dl select * from pg_temp._dl_all a where a.ord = r.ord;
+          perform private.debit_post_rows(p_organization_id);
+          raise exception 'debit link tried' using errcode = 'DL000';   -- posts on its own: undo the try
+        exception when others then
+          get stacked diagnostics v_state = returned_sqlstate, v_msg = message_text;
+          if v_state <> 'DL000' then
+            if not (v_state like 'LG%' or v_state like '22%' or v_state like '23%') then
+              raise;
+            end if;
+            insert into pg_temp._debit_failed (bank_transaction_id, candidates, detail)
+            values (r.bank_transaction_id,
+                    jsonb_build_array(jsonb_strip_nulls(jsonb_build_object('payment_id', r.payment_id,
+                                                                           'refund_request_id', r.refund_request_id))),
+                    left(v_state || ': ' || v_msg, 2000))
+            on conflict (bank_transaction_id) do nothing;
+          end if;
+        end;
+      end loop;
+      delete from pg_temp._dl d where d.bank_transaction_id is not null;
+      insert into pg_temp._dl select * from pg_temp._dl_all a
+      where not exists (select 1 from pg_temp._debit_failed f where f.bank_transaction_id = a.bank_transaction_id);
+      if exists (select 1 from pg_temp._dl) then
+        perform private.debit_post_rows(p_organization_id);
+      end if;
+    end;
+  end if;
+
   return jsonb_build_object(
     'returns', (select count(*) from pg_temp._dl where kind = 'return'),
     'refunds', (select count(*) from pg_temp._dl where kind = 'refund'),
     'refunds_returned', (select count(*) from pg_temp._dl where kind = 'refund_returned'),
     'explained', (select count(*) from pg_temp._dl where kind = 'explained'),
-    'skipped', (select count(*) from pg_temp._debit_skipped));
+    'skipped', (select count(*) from pg_temp._debit_skipped),
+    'failed', (select count(*) from pg_temp._debit_failed));
 end;
 $$;
 
 -- The lines the debit job looks at (unlinked returns, our refunds, credits undoing a debit; released duplicates as what
 -- they were), in date order after `p_after`, and what each may be: the payment its end-to-end id or bank transaction id
--- names (a return), the refund request its RFD id names (a refund, or a refund that came back). One row per (line,
--- candidate), a line without any once with nulls. Keyed lookups whatever the statistics (a just-imported statement is
--- not analysed).
+-- names (a return), the refund request of this servicer and bank account its RFD id names (a refund, or a refund that
+-- came back). One row per (line, candidate), a line without any once with nulls; with the payment's position, status
+-- and free-from date (`cand_free_from`: its latest reversal dated after the entry it reverses — nothing goes out of it
+-- before then, I4). Keyed lookups whatever the statistics (a just-imported statement is not analysed): O(lines +
+-- candidates), each line's candidates and each payment's position read by key from indexed working tables.
 create or replace function private.debit_candidates(p_organization_id uuid, p_after_date date, p_after_id uuid,
                                                     p_limit integer)
 returns table (line_id uuid, line_kind text, direction text, bank_account_id uuid, amount_minor bigint,
                booking_date date, payment_id uuid, refund_request_id uuid, via text, cand_bank_account_id uuid,
                cand_amount_minor bigint, cand_left_minor bigint, cand_unallocated_minor bigint,
-               cand_pending_minor bigint, cand_status text, cand_date date)
+               cand_pending_minor bigint, cand_status text, cand_date date, cand_payment_status text,
+               cand_free_from date)
 language plpgsql
 security definer
 set search_path = ''
@@ -815,22 +943,35 @@ begin
   join public.refund_request q
     on q.end_to_end_id = case when x.direction = 'debit' then x.end_to_end_id
                               else coalesce(x.original_end_to_end_id, x.end_to_end_id) end
+   and q.organization_id = p_organization_id and q.bank_account_id = x.bank_account_id   -- never another tenant's
   where x.kind = 'refund_out' or (x.direction = 'credit' and x.kind = 'return');
+  create index on pg_temp._dc_cand (line_id);
   analyze pg_temp._dc_cand;
+
+  -- Each payment named, once: its position, its pending refunds, its free-from date (keyed lookups per payment).
+  drop table if exists pg_temp._dc_pos;
+  create temp table _dc_pos on commit drop as
+  select x.payment_id, x.amount_minor - x.returned_minor as left_minor, x.unallocated_minor,
+         coalesce((select sum(z.amount_minor) from public.refund_request z
+                   where z.payment_id = x.payment_id and z.status = 'requested'), 0)::bigint as pending_minor,
+         (select max(e.effective_date) from public.ledger_entry e
+          join public.ledger_entry v on v.id = e.reverses_entry_id
+          where e.payment_id = x.payment_id and e.effective_date > v.effective_date) as free_from
+  from private.payment_positions(array(select distinct y.payment_id from pg_temp._dc_cand y
+                                       where y.payment_id is not null)) x;
+  alter table pg_temp._dc_pos add primary key (payment_id);
+  analyze pg_temp._dc_pos;
 
   return query
   select x.id, x.kind, x.direction, x.bank_account_id, x.amount_minor, x.booking_date, c.payment_id, c.refund_request_id,
          c.via, coalesce(q.bank_account_id, p.bank_account_id), coalesce(q.amount_minor, p.amount_minor),
-         pos.amount_minor - pos.returned_minor, pos.unallocated_minor,
-         coalesce((select sum(z.amount_minor) from public.refund_request z
-                   where z.payment_id = c.payment_id and z.status = 'requested'), 0)::bigint,
-         coalesce(q.status, p.status), coalesce(q.executed_on, p.booking_date)
+         pos.left_minor, pos.unallocated_minor, pos.pending_minor,
+         coalesce(q.status, p.status), coalesce(q.executed_on, p.booking_date), p.status, pos.free_from
   from pg_temp._dc_line x
   left join pg_temp._dc_cand c on c.line_id = x.id
   left join public.payment p on p.id = c.payment_id
   left join public.refund_request q on q.id = c.refund_request_id
-  left join private.payment_positions(array(select y.payment_id from pg_temp._dc_cand y)) pos
-    on pos.payment_id = c.payment_id
+  left join pg_temp._dc_pos pos on pos.payment_id = c.payment_id
   order by x.booking_date, x.id, c.payment_id;
 end;
 $$;
@@ -849,12 +990,17 @@ begin
   update pg_temp._debit_link set method = 'auto', decided_by = null, expected_left_minor = null
   where bank_transaction_id is not null;
   v := private.post_debit_links(p_organization_id, false);
+  -- refused by the posting itself: ops decide (never retried in a loop: the next run tries it once more)
+  insert into pg_temp._debit_review (bank_transaction_id, reason, candidates, detail)
+  select f.bank_transaction_id, 'posting_failed', f.candidates, f.detail from pg_temp._debit_failed f
+  on conflict (bank_transaction_id) do update
+    set reason = excluded.reason, candidates = excluded.candidates, detail = excluded.detail;
   insert into pg_temp._debit_review (bank_transaction_id, reason)
   select s.bank_transaction_id, 'changed' from pg_temp._debit_skipped s
   on conflict (bank_transaction_id) do nothing;
   delete from public.bank_debit_review v using pg_temp._debit_review r where v.bank_transaction_id = r.bank_transaction_id;
-  insert into public.bank_debit_review (bank_transaction_id, organization_id, reason, candidates)
-  select r.bank_transaction_id, p_organization_id, r.reason, r.candidates
+  insert into public.bank_debit_review (bank_transaction_id, organization_id, reason, candidates, detail)
+  select r.bank_transaction_id, p_organization_id, r.reason, r.candidates, r.detail
   from pg_temp._debit_review r
   join public.bank_transaction t on t.id = r.bank_transaction_id and t.organization_id = p_organization_id
   where not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = r.bank_transaction_id);
@@ -1174,7 +1320,10 @@ create table public.direct_payment (
   evidence_document_id uuid not null references public.document (id),
   reason text not null check (length(btrim(reason)) between 1 and 2000),
   status text not null default 'requested' check (status in ('requested', 'posted', 'refused')),
-  refusal_code text check (refusal_code in ('more_than_due', 'nothing_due', 'before_servicing_start', 'file_closed')),
+  -- failed: the job could not book it (the ledger refused the plan, or the job failed for good): ops record it again
+  -- once the cause is fixed (support: the worker's log and private.job_run)
+  refusal_code text check (refusal_code in ('more_than_due', 'nothing_due', 'before_servicing_start', 'file_closed',
+                                            'failed')),
   entry_id uuid unique references public.ledger_entry (id),
   requested_by uuid not null,
   requested_at timestamptz not null default now(),
@@ -1427,33 +1576,35 @@ begin
   create temp table _chk (code text, severity text, subject_type text, subject_id uuid, currency char(3),
                           amount_minor bigint, count integer, oldest_days integer, details jsonb) on commit drop;
 
-  -- Every payment's position from its tagged entries (one pass), and its pending refunds.
-  drop table if exists pg_temp._chk_pos;
-  create temp table _chk_pos on commit drop as
-  select p.id, p.status, p.review_reason, p.account_id, p.amount_minor, p.currency, p.booking_date, p.bank_account_id,
-         p.updated_at, coalesce(s.a, 0)::bigint as allocated, coalesce(s.r, 0)::bigint as returned,
-         (p.amount_minor - coalesce(s.a, 0) - coalesce(s.r, 0))::bigint as unallocated,
-         coalesce(q.pending, 0)::bigint as pending, coalesce(q.n, 0) as pending_n
-  from public.payment p
-  left join (select e.payment_id,
-                    sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) in ('allocation', 'forward')) as a,
-                    sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) = 'cash_out') as r
-             from public.ledger_entry e
-             left join public.ledger_entry t on t.id = e.reverses_entry_id
-             join public.ledger_posting lp on lp.entry_id = e.id
-             join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment'
-             where e.organization_id = p_organization_id and e.payment_id is not null
-             group by e.payment_id) s on s.payment_id = p.id
-  left join (select q.payment_id, sum(q.amount_minor) as pending, count(*) as n from public.refund_request q
-             where q.organization_id = p_organization_id and q.status = 'requested' group by q.payment_id) q
-    on q.payment_id = p.id
-  where p.organization_id = p_organization_id;
-  create index on pg_temp._chk_pos (id);
-  analyze pg_temp._chk_pos;
-
+  -- Every check reads the books in ONE statement, so in one snapshot: an entry or a payment committed while the
+  -- checks run (a link, a release, an allocation from a PostgREST session) is in every check or in none — never a gap
+  -- between the cash read by one check and the payments read by another (review fix: the job runs READ COMMITTED,
+  -- where each statement of a function sees the latest commits).
+  insert into pg_temp._chk (code, severity, subject_type, subject_id, currency, amount_minor, count, oldest_days, details)
+  with pos as materialized (
+    -- Every payment's position from its tagged entries (one pass), and its pending refunds.
+    select p.id, p.status, p.review_reason, p.account_id, p.amount_minor, p.currency, p.booking_date, p.bank_account_id,
+           p.updated_at, coalesce(s.a, 0)::bigint as allocated, coalesce(s.r, 0)::bigint as returned,
+           (p.amount_minor - coalesce(s.a, 0) - coalesce(s.r, 0))::bigint as unallocated,
+           coalesce(q.pending, 0)::bigint as pending, coalesce(q.n, 0) as pending_n
+    from public.payment p
+    left join (select e.payment_id,
+                      sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) in ('allocation', 'forward')) as a,
+                      sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) = 'cash_out') as r
+               from public.ledger_entry e
+               left join public.ledger_entry t on t.id = e.reverses_entry_id
+               join public.ledger_posting lp on lp.entry_id = e.id
+               join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment'
+               where e.organization_id = p_organization_id and e.payment_id is not null
+               group by e.payment_id) s on s.payment_id = p.id
+    left join (select q.payment_id, sum(q.amount_minor) as pending, count(*) as n from public.refund_request q
+               where q.organization_id = p_organization_id and q.status = 'requested' group by q.payment_id) q
+      on q.payment_id = p.id
+    where p.organization_id = p_organization_id
+  )
   -- I8: client money closed per currency (5120 + 4710 + 4670 = 0).
-  insert into pg_temp._chk (code, severity, subject_type, currency, amount_minor, details)
-  select 'client_money_identity', 'violation', 'servicer', x.currency, x.total,
+  select 'client_money_identity'::text, 'violation'::text, 'servicer'::text, null::uuid, x.currency::char(3),
+         x.total::bigint, null::integer, null::integer,
          jsonb_build_object('cash_minor', x.cash::text, 'unallocated_minor', x.pool::text, 'owed_minor', x.owed::text)
   from (select la.currency, sum(lp.amount_minor) as total,
                sum(lp.amount_minor) filter (where la.book = 'client_money_cash') as cash,
@@ -1463,13 +1614,13 @@ begin
         where la.organization_id = p_organization_id
           and la.book in ('client_money_cash', 'unallocated_payment', 'client_payable')
         group by la.currency) x
-  where x.total <> 0;
+  where x.total <> 0
 
+  union all
   -- Per bank account: its cash = what its payments brought in less what went back out = Σ unallocated + Σ allocated
   -- or forwarded (owed to the clients until remitted, M2c).
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, currency, amount_minor, details)
   select 'bank_cash_identity', 'violation', 'bank_account', coalesce(c.bank_account_id, y.bank_account_id), b.currency,
-         coalesce(c.cash, 0) - coalesce(y.held, 0),
+         (coalesce(c.cash, 0) - coalesce(y.held, 0))::bigint, null, null,
          jsonb_build_object('cash_minor', coalesce(c.cash, 0)::text, 'unallocated_minor', coalesce(y.unallocated, 0)::text,
                             'allocated_minor', coalesce(y.allocated, 0)::text)
   from (select la.bank_account_id, sum(lp.amount_minor) as cash
@@ -1478,15 +1629,15 @@ begin
         group by la.bank_account_id) c
   full join (select x.bank_account_id, sum(x.amount_minor - x.returned) as held, sum(x.unallocated) as unallocated,
                     sum(x.allocated) as allocated
-             from pg_temp._chk_pos x where x.bank_account_id is not null group by x.bank_account_id) y
+             from pos x where x.bank_account_id is not null group by x.bank_account_id) y
     on y.bank_account_id = c.bank_account_id
   join public.bank_account b on b.id = coalesce(c.bank_account_id, y.bank_account_id)
-  where coalesce(c.cash, 0) <> coalesce(y.held, 0);
+  where coalesce(c.cash, 0) <> coalesce(y.held, 0)
 
+  union all
   -- I11: the cash booked for a statement day = its payments (released duplicates included).
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, amount_minor, details)
-  select 'cash_in_statement', 'violation', 'bank_statement', coalesce(ci.statement_id, pd.statement_id),
-         coalesce(ci.total, 0) - coalesce(pd.total, 0),
+  select 'cash_in_statement', 'violation', 'bank_statement', coalesce(ci.statement_id, pd.statement_id), null,
+         (coalesce(ci.total, 0) - coalesce(pd.total, 0))::bigint, null, null,
          jsonb_build_object('date', coalesce(ci.d, pd.d), 'cash_in_minor', coalesce(ci.total, 0)::text,
                             'payments_minor', coalesce(pd.total, 0)::text)
   from (select e.source_id::uuid as statement_id, e.effective_date as d, sum(lp.amount_minor) as total
@@ -1500,15 +1651,15 @@ begin
              where p.organization_id = p_organization_id
              group by t.statement_id, p.booking_date) pd
     on pd.statement_id = ci.statement_id and pd.d = ci.d
-  where coalesce(ci.total, 0) <> coalesce(pd.total, 0);
+  where coalesce(ci.total, 0) <> coalesce(pd.total, 0)
 
+  union all
   -- I4, I5 and design §7: each payment's position against its status.
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, currency, amount_minor, oldest_days, details)
-  select 'payment_position', 'violation', 'payment', c.id, c.currency, c.unallocated, v_today - c.booking_date,
+  select 'payment_position', 'violation', 'payment', c.id, c.currency, c.unallocated, null, v_today - c.booking_date,
          jsonb_build_object('status', c.status, 'allocated_minor', c.allocated::text,
                             'unallocated_minor', c.unallocated::text, 'returned_minor', c.returned::text,
                             'pending_refund_minor', c.pending::text)
-  from pg_temp._chk_pos c
+  from pos c
   where c.unallocated < 0 or c.allocated < 0 or c.returned < 0
      or (c.status = 'allocated' and not (c.allocated > 0 and c.unallocated = 0))
      or (c.status = 'partially_allocated' and not (c.allocated > 0 and c.unallocated > 0))
@@ -1517,10 +1668,11 @@ begin
      or (c.status = 'refunded' and not (c.allocated = 0 and c.unallocated = 0 and c.returned = c.amount_minor))
      or (c.status = 'returned' and not (c.allocated = 0 and c.unallocated = 0))
      or ((c.status = 'refund_pending') <> (c.pending_n > 0))
-     or c.pending > c.unallocated;
+     or c.pending > c.unallocated
+
+  union all
   -- the net allocated per (payment, file) is never negative
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, amount_minor, details)
-  select 'payment_negative_allocation', 'violation', 'payment', x.payment_id, x.total,
+  select 'payment_negative_allocation', 'violation', 'payment', x.payment_id, null, x.total::bigint, null, null,
          jsonb_build_object('account_id', x.account_id)
   from (select e.payment_id, e.account_id, sum(lp.amount_minor) as total
         from public.ledger_entry e
@@ -1530,12 +1682,12 @@ begin
         where e.organization_id = p_organization_id and e.payment_id is not null
           and coalesce(t.entry_type, e.entry_type) = 'allocation'
         group by e.payment_id, e.account_id) x
-  where x.total < 0;
+  where x.total < 0
 
+  union all
   -- I6: no receivable a payment (or a credit note, or a payment made to the client) lowered is below zero now; no item
   -- below zero as a whole once such an entry touched it.
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, currency, amount_minor, details)
-  select 'receivable_negative', 'violation', 'claim_item', x.claim_item_id, x.currency, x.balance,
+  select 'receivable_negative', 'violation', 'claim_item', x.claim_item_id, x.currency, x.balance::bigint, null, null,
          jsonb_build_object('component', x.component)
   from (select la.claim_item_id, la.component, la.currency, sum(lp.amount_minor) as balance
         from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
@@ -1547,7 +1699,8 @@ begin
         group by la.claim_item_id, la.component, la.currency) x
   where x.balance < 0
   union all
-  select 'item_negative', 'violation', 'claim_item', y.claim_item_id, y.currency, y.balance, '{}'::jsonb
+  select 'item_negative', 'violation', 'claim_item', y.claim_item_id, y.currency, y.balance::bigint, null, null,
+         '{}'::jsonb
   from (select la.claim_item_id, la.currency, sum(lp.amount_minor) as balance
         from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
         where la.organization_id = p_organization_id and la.book = 'debtor_receivable'
@@ -1558,22 +1711,23 @@ begin
             where l2.organization_id = p_organization_id and l2.book = 'debtor_receivable' and q.amount_minor < 0
               and (e.entry_type = 'allocation' or (e.entry_type = 'adjustment' and e.source_type = 'direct_payment')))
         group by la.claim_item_id, la.currency) y
-  where y.balance < 0;
+  where y.balance < 0
 
+  union all
   -- The owner-claim mirror (M2a risk #5): per portfolio, component and currency, 3100 = −Σ1100.
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, currency, amount_minor, details)
-  select 'owner_claim_mirror', 'violation', 'portfolio', x.portfolio_id, x.currency, x.total,
+  select 'owner_claim_mirror', 'violation', 'portfolio', x.portfolio_id, x.currency, x.total::bigint, null, null,
          jsonb_build_object('component', x.component)
   from (select la.portfolio_id, la.component, la.currency, sum(lp.amount_minor) as total
         from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
         where la.organization_id = p_organization_id and la.book in ('debtor_receivable', 'owner_claim')
         group by la.portfolio_id, la.component, la.currency) x
-  where x.total <> 0;
+  where x.total <> 0
 
+  union all
   -- R124-6: one receipt number per payment on a file and a current version about its file (void once returned). A
   -- payment changed in the last hour may still be in the receipts queue.
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, oldest_days, details)
-  select y.code, 'violation', 'payment', y.id, v_today - y.booking_date, jsonb_build_object('status', y.status)
+  select y.code, 'violation', 'payment', y.id, null, null, null, v_today - y.booking_date,
+         jsonb_build_object('status', y.status)
   from (select c.id, c.booking_date, c.status,
                case when r.payment_id is null and c.status <> 'returned' then 'receipt_missing'
                     when r.numbers > 1 then 'receipt_numbers'
@@ -1581,52 +1735,55 @@ begin
                     when c.status <> 'returned' and r.payment_id is not null
                          and (cur.kind = 'void' or cur.account_id is distinct from c.account_id) then 'receipt_stale'
                end as code
-        from pg_temp._chk_pos c
+        from pos c
         left join (select x.payment_id, count(distinct x.number) as numbers, max(x.version) as v
                    from public.receipt x where x.organization_id = p_organization_id group by x.payment_id) r
           on r.payment_id = c.id
         left join public.receipt cur on cur.payment_id = c.id and cur.version = r.v
         where c.account_id is not null and c.updated_at < now() - interval '1 hour'
           and not (c.status in ('matched', 'partially_allocated') and c.review_reason is null)) y
-  where y.code is not null;
+  where y.code is not null
 
+  union all
   -- R124-5: one notification per entry that moves what a client is owed, one per payment held for a file, one per
   -- return of a payment on a file.
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, details)
-  select 'notification_missing', 'violation', 'ledger_entry', e.id,
+  select 'notification_missing', 'violation', 'ledger_entry', e.id, null, null, null, null,
          jsonb_build_object('entry_type', e.entry_type, 'payment_id', e.payment_id)
   from public.ledger_entry e
   left join public.ledger_entry t on t.id = e.reverses_entry_id
   where e.organization_id = p_organization_id and e.payment_id is not null
     and (e.entry_type in ('allocation', 'forward') or (e.entry_type = 'reversal' and t.entry_type in ('allocation', 'forward')))
-    and not exists (select 1 from public.client_notification n where n.ledger_entry_id = e.id);
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, details)
-  select 'notification_missing', 'violation', 'payment', c.id, jsonb_build_object('kind', 'payment_held')
-  from pg_temp._chk_pos c
+    and not exists (select 1 from public.client_notification n where n.ledger_entry_id = e.id)
+  union all
+  select 'notification_missing', 'violation', 'payment', c.id, null, null, null, null,
+         jsonb_build_object('kind', 'payment_held')
+  from pos c
   where c.review_reason = 'hold_blocks_allocation' and c.account_id is not null
     and not exists (select 1 from public.client_notification n
-                    where n.payment_id = c.id and n.account_id = c.account_id and n.kind = 'payment_held');
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, details)
-  select 'notification_missing', 'violation', 'payment', l.payment_id, jsonb_build_object('kind', 'payment_returned')
+                    where n.payment_id = c.id and n.account_id = c.account_id and n.kind = 'payment_held')
+  union all
+  select 'notification_missing', 'violation', 'payment', l.payment_id, null, null, null, null,
+         jsonb_build_object('kind', 'payment_returned')
   from public.bank_debit_link l
   join public.payment p on p.id = l.payment_id
   where l.organization_id = p_organization_id and l.kind = 'return' and p.account_id is not null
-    and not exists (select 1 from public.client_notification n where n.ledger_entry_id = l.cash_entry_id);
+    and not exists (select 1 from public.client_notification n where n.ledger_entry_id = l.cash_entry_id)
 
+  union all
   -- Statements (I9): a camt.053 statement whose opening is not the previous closing (« relevé manquant »), and each
   -- bank account's balance at its last statement against the ledger cash plus the lines not booked.
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, amount_minor, details)
-  select 'statement_gap', 'alert', 'bank_statement', x.id, x.opening_booked_minor - x.prev_closing,
+  select 'statement_gap', 'alert', 'bank_statement', x.id, null, (x.opening_booked_minor - x.prev_closing)::bigint,
+         null, null,
          jsonb_build_object('bank_account_id', x.bank_account_id, 'from_date', x.from_date, 'previous_to_date', x.prev_to)
   from (select s.id, s.bank_account_id, s.from_date, s.opening_booked_minor,
                lag(s.closing_booked_minor) over w as prev_closing, lag(s.to_date) over w as prev_to
         from public.bank_statement s
         where s.organization_id = p_organization_id and s.status = 'imported' and s.format = 'camt053'
         window w as (partition by s.bank_account_id order by s.from_date, s.to_date, s.finished_at)) x
-  where x.prev_closing is not null and x.prev_to < x.from_date and x.opening_booked_minor <> x.prev_closing;
-  insert into pg_temp._chk (code, severity, subject_type, subject_id, currency, amount_minor, details)
+  where x.prev_closing is not null and x.prev_to < x.from_date and x.opening_booked_minor <> x.prev_closing
+  union all
   select 'bank_balance_gap', 'alert', 'bank_account', z.bank_account_id, z.currency,
-         z.closing - z.cash - z.unposted,
+         (z.closing - z.cash - z.unposted)::bigint, null, null,
          jsonb_build_object('as_of', z.to_date, 'closing_minor', z.closing::text, 'cash_minor', z.cash::text,
                             'unposted_minor', z.unposted::text, 'unposted_lines', z.unposted_lines)
   from (select l.bank_account_id, l.currency, l.to_date, l.closing_booked_minor as closing,
@@ -1639,21 +1796,21 @@ begin
               where s.organization_id = p_organization_id and s.status = 'imported' and s.format = 'camt053'
               order by s.bank_account_id, s.to_date desc, s.finished_at desc) l
         cross join lateral private.bank_unposted(l.bank_account_id, l.to_date) u) z
-  where z.closing - z.cash - z.unposted <> 0;
+  where z.closing - z.cash - z.unposted <> 0
 
+  union all
   -- Ageing (alerts, one row per code with the oldest and up to 50 payments or lines).
-  insert into pg_temp._chk (code, severity, subject_type, currency, amount_minor, count, oldest_days, details)
-  select x.code, 'alert', 'servicer', x.currency, x.total, x.n, x.oldest, jsonb_build_object('ids', x.ids)
+  select x.code, 'alert', 'servicer', null, x.currency, x.total, x.n, x.oldest, jsonb_build_object('ids', x.ids)
   from (select 'unmatched_ageing' as code, c.currency, sum(c.unallocated)::bigint as total, count(*)::integer as n,
                max(v_today - c.booking_date) as oldest,
                (array_agg(c.id order by c.booking_date, c.id))[1:50] as ids
-        from pg_temp._chk_pos c
+        from pos c
         where c.status = 'unmatched' and v_today - c.booking_date >= 20
         group by c.currency
         union all
         select 'unallocated_ageing', c.currency, sum(c.unallocated)::bigint, count(*)::integer,
                max(v_today - c.booking_date), (array_agg(c.id order by c.booking_date, c.id))[1:50]
-        from pg_temp._chk_pos c
+        from pos c
         where c.account_id is not null and c.unallocated > 0 and c.status in ('matched', 'partially_allocated')
           and c.review_reason is not null and v_today - c.booking_date >= 20
         group by c.currency
@@ -1666,12 +1823,19 @@ begin
           and v_today - (q.requested_at at time zone 'Europe/Paris')::date >= 5
         group by q.currency
         union all
+        -- returns, our refunds, credits undoing a debit (released duplicates of those kinds) not linked — they can
+        -- only be booked, never explained — and other debits of a pending refund's amount on its bank account
         select 'debit_unclassified', t.currency, sum(t.amount_minor)::bigint, count(*)::integer,
                max(v_today - t.booking_date), (array_agg(t.id order by t.booking_date, t.id))[1:50]
         from public.bank_transaction t
         left join public.bank_duplicate_resolution r on r.bank_transaction_id = t.id
-        where t.organization_id = p_organization_id and t.kind in ('return', 'refund_out', 'suspected_duplicate')
-          and (t.kind <> 'suspected_duplicate' or r.released_kind in ('return', 'refund_out'))
+        where t.organization_id = p_organization_id
+          and (t.kind in ('return', 'refund_out')
+               or (t.kind = 'suspected_duplicate' and r.released_kind in ('return', 'refund_out'))
+               or (t.kind = 'other_debit' and t.direction = 'debit'
+                   and exists (select 1 from public.refund_request q
+                               where q.bank_account_id = t.bank_account_id and q.amount_minor = t.amount_minor
+                                 and q.organization_id = t.organization_id and q.status = 'requested')))
           and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id)
           and v_today - t.booking_date >= 3
         group by t.currency
@@ -2111,8 +2275,11 @@ $$;
 ------------------------------------------------------------------------------------------
 
 -- « Débits à classer » (design §12): lines to classify (returns, our refunds, credits undoing a debit, released
--- duplicates of those kinds) with what the job found; suspected duplicates to decide; lines decided (latest first);
--- fees and other debits (explained gaps, founder #20). One query per tab on a partial index led by the servicer.
+-- duplicates of those kinds) with what the job found, and other debits of a pending refund's amount on its bank account
+-- (the bank may drop our RFD id: review `refund_amount_match`, the matching requests as candidates); suspected
+-- duplicates to decide; lines decided (latest first); fees and other debits (explained gaps, founder #20; the other
+-- debits listed to classify are not repeated there). One query per tab on a partial index led by the servicer; a
+-- candidate is only ever enriched from the line's own servicer.
 create or replace function public.debit_queue(p_tab text default 'a-classer', p_offset integer default 0,
                                               p_limit integer default 20)
 returns table (bank_transaction_id uuid, statement_id uuid, bank_account_id uuid, direction text, kind text,
@@ -2134,18 +2301,25 @@ begin
   drop table if exists pg_temp._dq;
   if p_tab = 'doublons' then
     create temp table _dq on commit drop as
-    select t.*, null::text as eff_kind from public.bank_transaction t
+    select t.*, null::text as eff_kind, null::text as dq_reason, null::jsonb as dq_candidates
+    from public.bank_transaction t
     where t.organization_id = any (v_orgs) and t.kind = 'suspected_duplicate'
       and not exists (select 1 from public.bank_duplicate_resolution r where r.bank_transaction_id = t.id);
   elsif p_tab = 'frais' then
     create temp table _dq on commit drop as
-    select t.*, null::text as eff_kind from public.bank_transaction t
+    select t.*, null::text as eff_kind, null::text as dq_reason, null::jsonb as dq_candidates
+    from public.bank_transaction t
     where t.organization_id = any (v_orgs) and t.kind = 'other_debit'
-      and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id);
+      and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id)
+      and not (t.direction = 'debit'
+               and exists (select 1 from public.refund_request q
+                           where q.bank_account_id = t.bank_account_id and q.amount_minor = t.amount_minor
+                             and q.organization_id = t.organization_id and q.status = 'requested'));
   elsif p_tab = 'traites' then
     -- from the decisions (a few per day), never from the servicer's lines
     create temp table _dq on commit drop as
-    select t.*, null::text as eff_kind from public.bank_transaction t
+    select t.*, null::text as eff_kind, null::text as dq_reason, null::jsonb as dq_candidates
+    from public.bank_transaction t
     where t.id in (select l.bank_transaction_id from public.bank_debit_link l where l.organization_id = any (v_orgs)
                    union
                    select r.bank_transaction_id from public.bank_duplicate_resolution r
@@ -2155,17 +2329,32 @@ begin
                                               where l.bank_transaction_id = r.bank_transaction_id)));
   else
     create temp table _dq on commit drop as
-    select t.*, coalesce(r.released_kind, t.kind) as eff_kind from public.bank_transaction t
+    select t.*, coalesce(r.released_kind, t.kind) as eff_kind, null::text as dq_reason, null::jsonb as dq_candidates
+    from public.bank_transaction t
     left join public.bank_duplicate_resolution r on r.bank_transaction_id = t.id
     where t.organization_id = any (v_orgs) and t.kind in ('return', 'refund_out', 'suspected_duplicate')
       and (t.kind <> 'suspected_duplicate' or r.released_kind in ('return', 'refund_out'))
-      and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id);
+      and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id)
+    union all
+    -- an other debit of a pending refund's amount on its bank account: maybe that refund (from the pending requests,
+    -- a few, to the lines of their amount)
+    select t.*, t.kind, 'refund_amount_match', m.candidates
+    from (select o.id, jsonb_agg(jsonb_build_object('refund_request_id', q.id, 'payment_id', q.payment_id)
+                                 order by q.requested_at, q.id) as candidates
+          from public.refund_request q
+          join public.bank_transaction o
+            on o.bank_account_id = q.bank_account_id and o.amount_minor = q.amount_minor and o.kind = 'other_debit'
+           and o.direction = 'debit' and o.organization_id = q.organization_id
+          where q.organization_id = any (v_orgs) and q.status = 'requested'
+            and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = o.id)
+          group by o.id) m
+    join public.bank_transaction t on t.id = m.id;
   end if;
   select count(*) into v_total from pg_temp._dq;
   return query
   select t.id, t.statement_id, t.bank_account_id, t.direction, coalesce(t.eff_kind, t.kind), t.amount_minor::text,
          t.currency, t.booking_date, (v_today - t.booking_date)::integer, t.counterparty_name, right(t.counterparty_iban, 4),
-         t.remittance_text, t.end_to_end_id, t.original_end_to_end_id, t.return_reason, v.reason,
+         t.remittance_text, t.end_to_end_id, t.original_end_to_end_id, t.return_reason, coalesce(v.reason, t.dq_reason),
          coalesce((select jsonb_agg(c.v || coalesce(
                      (select jsonb_build_object('amount_minor', p.amount_minor::text, 'currency', p.currency,
                                                 'booking_date', p.booking_date, 'payer_name', p.payer_name,
@@ -2174,12 +2363,15 @@ begin
                       from public.payment p
                       left join public.account a on a.id = p.account_id
                       cross join lateral private.payment_positions(array[p.id]) pos
-                      where p.id = (c.v ->> 'payment_id')::uuid), '{}')
+                      where p.id = (c.v ->> 'payment_id')::uuid and p.organization_id = t.organization_id), '{}')
                    || coalesce((select jsonb_build_object('end_to_end_id', q.end_to_end_id, 'refund_status', q.status,
                                                           'refund_minor', q.amount_minor::text)
-                                from public.refund_request q where q.id = (c.v ->> 'refund_request_id')::uuid), '{}')
+                                from public.refund_request q
+                                where q.id = (c.v ->> 'refund_request_id')::uuid
+                                  and q.organization_id = t.organization_id), '{}')
                      order by c.ord)
-                   from jsonb_array_elements(v.candidates) with ordinality c (v, ord)), '[]'::jsonb),
+                   from jsonb_array_elements(coalesce(v.candidates, t.dq_candidates)) with ordinality c (v, ord)),
+                  '[]'::jsonb),
          coalesce(l.kind, case r.decision when 'duplicate' then 'duplicate'
                                            when 'released' then 'released' end),
          coalesce(l.decided_at, r.decided_at), l.payment_id, v_total
@@ -2195,7 +2387,8 @@ $$;
 
 -- What ops may link a line to when the job found nothing: payments of the same bank account booked on or before it,
 -- not returned, with at least the line's amount left (the same amount first), and pending (or, for a credit, executed)
--- refunds of the same amount. At most 20 of each.
+-- refunds of the same amount. At most 60 payments looked at (index on the bank account and booking date), their
+-- positions read in one call over those only: bounded whatever the account's history.
 create or replace function public.debit_link_options(p_bank_transaction_id uuid)
 returns jsonb
 language plpgsql
@@ -2218,20 +2411,21 @@ begin
   from (select 1) x left join public.bank_duplicate_resolution r on r.bank_transaction_id = t.id;
   return jsonb_build_object(
     'payments', case when t.direction = 'debit' then coalesce((
+      with y as (select p.id, p.amount_minor, p.booking_date, p.payer_name, p.status, p.account_id
+                 from public.payment p
+                 where p.bank_account_id = t.bank_account_id and p.booking_date <= t.booking_date
+                   and p.status <> 'returned' and p.amount_minor >= t.amount_minor
+                 order by (p.amount_minor = t.amount_minor) desc, p.booking_date desc, p.id
+                 limit 60)
       select jsonb_agg(jsonb_build_object('payment_id', y.id, 'amount_minor', y.amount_minor::text,
                                           'booking_date', y.booking_date, 'payer_name', y.payer_name, 'status', y.status,
-                                          'left_minor', y.left_minor::text, 'file_reference', y.external_ref)
-                       order by (y.left_minor = t.amount_minor) desc, y.booking_date desc, y.id)
-      from (select p.id, p.amount_minor, p.booking_date, p.payer_name, p.status, a.external_ref,
-                   pos.amount_minor - pos.returned_minor as left_minor
-            from public.payment p
-            left join public.account a on a.id = p.account_id
-            cross join lateral private.payment_positions(array[p.id]) pos
-            where p.bank_account_id = t.bank_account_id and p.booking_date <= t.booking_date
-              and p.status <> 'returned' and p.amount_minor >= t.amount_minor
-            order by (p.amount_minor = t.amount_minor) desc, p.booking_date desc, p.id
-            limit 60) y
-      where y.left_minor >= t.amount_minor
+                                          'left_minor', (pos.amount_minor - pos.returned_minor)::text,
+                                          'file_reference', a.external_ref)
+                       order by (pos.amount_minor - pos.returned_minor = t.amount_minor) desc, y.booking_date desc, y.id)
+      from y
+      join private.payment_positions(array(select y2.id from y y2)) pos on pos.payment_id = y.id
+      left join public.account a on a.id = y.account_id
+      where pos.amount_minor - pos.returned_minor >= t.amount_minor
       ), '[]') else '[]'::jsonb end,
     'refunds', coalesce((
       select jsonb_agg(jsonb_build_object('refund_request_id', q.id, 'payment_id', q.payment_id,
@@ -2602,6 +2796,7 @@ create policy payment_check_result_read on public.payment_check_result for selec
 revoke execute on function private.refund_request_guard(), private.payment_money_out_guard(),
   private.bank_debit_link_guard(), private.bank_duplicate_resolution_guard(), private.bank_transaction_held_kind(),
   private.held_line_kind(uuid), private.debit_link_begin(), private.post_debit_links(uuid, boolean),
+  private.debit_post_rows(uuid),
   private.debit_candidates(uuid, date, uuid, integer), private.apply_debit_decisions(uuid),
   private.direct_payment_guard(), private.post_direct_payment(uuid, jsonb, text, text),
   private.refuse_direct_payment(uuid, text), private.payment_check_result_guard(), private.run_payment_checks(uuid),

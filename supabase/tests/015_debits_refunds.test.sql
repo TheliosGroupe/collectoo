@@ -3,7 +3,7 @@
 -- §6, §7, §8.1, §9, §11, §13; ADR-0013 (M2b-6 addendum). The worker's debit job is played here through ops' link_debit
 -- (same posting function) and private.apply_debit_decisions; the direct-payment job through private.post_direct_payment.
 begin;
-select plan(123);
+select plan(161);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -138,6 +138,13 @@ begin
   from jsonb_array_elements(p_lines) with ordinality as x (l, ord);
   return private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1');
 end $$;
+-- The allocation job's decision for a payment its gates stop (no lines): what the worker posts for it.
+create or replace function pg_temp.gate(p_n text, p_file text, p_outcome text) returns jsonb language plpgsql as $$
+begin
+  perform private.allocation_begin();
+  insert into pg_temp._alloc_target (payment_id, ord, account_id, outcome) values (pg_temp.pay(p_n), 1, pg_temp.f(p_file), p_outcome);
+  return private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1');
+end $$;
 create or replace function pg_temp.as_user(p_user text, p_aal text default 'aal2') returns void language sql as $$
   select set_config('request.jwt.claims',
     json_build_object('sub', '10000000-0000-0000-0000-0000000000' || p_user, 'role', 'authenticated', 'aal', p_aal)::text, true);
@@ -210,6 +217,8 @@ select ok(exists (select 1 from pg_trigger where tgrelid = 'public.refund_reques
           and exists (select 1 from pg_trigger where tgrelid = 'public.direct_payment'::regclass and tgname = 'direct_payment_change_log'),
   'refund requests and direct payments are in the change log (design §6)');
 select ok(not has_function_privilege('authenticated', 'private.post_debit_links(uuid, boolean)', 'execute')
+          and not has_function_privilege('authenticated', 'private.debit_post_rows(uuid)', 'execute')
+          and not has_function_privilege('service_role', 'private.debit_post_rows(uuid)', 'execute')
           and not has_function_privilege('authenticated', 'private.apply_debit_decisions(uuid)', 'execute')
           and has_function_privilege('service_role', 'private.apply_debit_decisions(uuid)', 'execute')
           and not has_function_privilege('authenticated', 'private.run_payment_checks(uuid)', 'execute')
@@ -225,7 +234,8 @@ select ok(not has_function_privilege('anon', 'public.request_refund(text, uuid, 
 select is((select array_agg(p.proname::text order by p.proname) from pg_proc p
            join pg_namespace n on n.oid = p.pronamespace
            where n.nspname in ('public', 'private')
-             and p.proname in ('post_debit_links', 'debit_candidates', 'apply_debit_decisions', 'request_refund',
+             and p.proname in ('post_debit_links', 'debit_post_rows', 'debit_candidates', 'apply_debit_decisions',
+                               'request_refund',
                                'cancel_refund', 'link_debit', 'resolve_duplicate', 'record_direct_payment',
                                'post_direct_payment', 'run_payment_checks', 'debit_queue', 'debit_link_options',
                                'bank_unposted')
@@ -365,15 +375,21 @@ select lives_ok($$select public.link_debit('k-link-0003', pg_temp.ln('b1'), 'ref
 reset role;
 select is(pg_temp.entries('02'), 'allocation@2026-10-05 cash_out@2026-10-21 reversal(cash_out)@2026-10-23',
   'the refund''s cash_out reversed at the credit''s date');
-select is(pg_temp.state('02'), 'partially_allocated/overpayment', 'the payment is back to its overpayment');
+select is(pg_temp.state('02'), 'partially_allocated/-',
+  'the payment''s state from its facts now: on its file, for the allocation job to gate again (not the reason of the refund)');
+select ok(exists (select 1 from pgmq.q_payments where message ->> 'type' = 'allocate'
+                  and message ->> 'organization_id' = '00000000-0000-0000-0000-0000000000aa'),
+  'the allocation job is queued for it');
 select is((select status from public.refund_request where id = pg_temp.refund_of('02')), 'bounced', 'the request bounced');
 select is(pg_temp.left_of('02'), '5000', 'its 5 000 left again');
+select pg_temp.gate('02', '02', 'nothing_due');
+select is(pg_temp.state('02'), 'partially_allocated/nothing_due', 'the job finds nothing more due on the file: for ops again');
 
 -- A partial return while a refund is pending waits for ops to cancel the refund first ---------------------------------
 set local role authenticated;
 select pg_temp.as_user('01');
 select lives_ok($$select public.request_refund('k-refund-0030', pg_temp.pay('02'), '1000', null, null, 'overpayment',
-  'overpayment', '5000', 'remboursement partiel')$$, 'a partial refund asked');
+  'nothing_due', '5000', 'remboursement partiel')$$, 'a partial refund asked');
 reset role;
 select pg_temp.line('t4', 'debit', 'return', 1000, '2026-11-05', 'E2E-02');
 set local role authenticated;
@@ -588,8 +604,13 @@ select results_eq($$select r.code, r.subject_id from public.payment_check_result
                     where x.organization_id = '00000000-0000-0000-0000-0000000000aa' and r.severity = 'violation'$$,
   $$values ('payment_position'::text, pg_temp.pay('03'))$$, 'the payment named');
 update public.payment set status = 'unmatched', review_reason = 'no_match' where id = pg_temp.pay('03');
-select ok((select alerts from public.payment_check_run where organization_id = '00000000-0000-0000-0000-0000000000aa'
-           order by started_at desc limit 1) >= 1, 'and the ageing alerts (money not allocated after 20 days)');
+select is(private.run_payment_checks('00000000-0000-0000-0000-0000000000aa') -> 'by_code' ->> 'unmatched_ageing', '1',
+  'and the ageing alert of money not matched 20 days after its booking');
+select results_eq($$select r.subject_type, r.details -> 'ids' ? pg_temp.pay('03')::text from public.payment_check_result r
+                    join public.payment_check_run x on x.id = r.run_id
+                    where x.organization_id = '00000000-0000-0000-0000-0000000000aa' and r.code = 'unmatched_ageing'
+                    order by x.started_at desc limit 1$$,
+  $$values ('servicer'::text, true)$$, 'it names the payment (booked 2026-10-05)');
 select throws_ok($$insert into public.payment_check_result (run_id, organization_id, code, severity, subject_type)
   select id, organization_id, 'x', 'alert', 'servicer' from public.payment_check_run
   where organization_id = '00000000-0000-0000-0000-0000000000aa' limit 1$$, '23514', null,
@@ -603,6 +624,228 @@ select pg_temp.as_user('02');
 select throws_ok($$select public.request_payment_checks('00000000-0000-0000-0000-0000000000aa')$$, '42501', null,
   'a collector cannot run the checks');
 reset role;
+
+
+-- Review fixes: a bad line never stops the debit job; what cannot be booked stays to classify ---------------------------
+select pg_temp.file('04', '20000000-0000-0000-0000-0000000000a1', 'Revue SA');
+select pg_temp.item('04', '1', '2026-08-01', 100000);
+
+-- A refund that comes back to a payment the bank took back since: never booked (where it goes: open question)
+select pg_temp.payment('06', 25000, 'FR7630006000011234567890189');
+select pg_temp.match('06', '04');
+select pg_temp.allocate('06', '04', '[["1", 20000]]');
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.request_refund('k-refund-0060', pg_temp.pay('06'), '5000', null, null, 'overpayment',
+  'overpayment', '5000', 'trop perçu')$$, 'review fixes: the overpayment refunded');
+reset role;
+select pg_temp.line('r6', 'debit', 'refund_out', 5000, '2026-10-21', pg_temp.rfd_of('06'));
+select private.debit_link_begin();
+insert into pg_temp._debit_link (ord, bank_transaction_id, kind, refund_request_id, method)
+values (1, pg_temp.ln('r6'), 'refund', pg_temp.refund_of('06'), 'auto');
+select private.apply_debit_decisions('00000000-0000-0000-0000-0000000000aa');
+select pg_temp.line('t6', 'debit', 'return', 20000, '2026-10-25', 'E2E-06');
+select private.debit_link_begin();
+insert into pg_temp._debit_link (ord, bank_transaction_id, kind, payment_id, method)
+values (1, pg_temp.ln('t6'), 'return', pg_temp.pay('06'), 'auto');
+select private.apply_debit_decisions('00000000-0000-0000-0000-0000000000aa');
+select is(pg_temp.state('06'), 'returned/-', 'then the bank takes the rest back');
+select pg_temp.line('b6', 'credit', 'return', 5000, '2026-10-27', pg_temp.rfd_of('06'));
+select results_eq($$select refund_request_id, cand_status, cand_payment_status
+                    from private.debit_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100)
+                    where line_id = pg_temp.ln('b6')$$,
+  $$values (pg_temp.refund_of('06'), 'executed'::text, 'returned'::text)$$,
+  'the job sees the refund the credit names, and that its payment was returned since (payments.debits: to ops)');
+set local role authenticated;
+select pg_temp.as_user('01');
+select throws_ok($$select public.link_debit('k-link-0060', pg_temp.ln('b6'), 'refund_returned', null, pg_temp.refund_of('06'),
+  null, 'retour du remboursement')$$, '23514', 'debit link refused: payment_returned',
+  'ops get a clear refusal, not the returned payment''s guard');
+reset role;
+select private.debit_link_begin();
+insert into pg_temp._debit_link (ord, bank_transaction_id, kind, refund_request_id, method)
+values (1, pg_temp.ln('b6'), 'refund_returned', pg_temp.refund_of('06'), 'auto');
+select is(private.apply_debit_decisions('00000000-0000-0000-0000-0000000000aa') ->> 'skipped', '1',
+  'the job''s re-check skips it: the run goes on');
+select is(pg_temp.state('06'), 'returned/-', 'nothing booked on the returned payment');
+
+-- A return dated before a later-dated reversal of the payment (its money was allocated that day: I4)
+select pg_temp.payment('07', 10000);
+select pg_temp.match('07', '04');
+select pg_temp.allocate('07', '04', '[["1", 10000]]');
+select pg_temp.line('t7a', 'debit', 'return', 6000, '2026-11-01', 'E2E-07');
+select pg_temp.line('t7b', 'debit', 'return', 4000, '2026-11-02', 'E2E-07');
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.link_debit('k-link-0070', pg_temp.ln('t7b'), 'return', pg_temp.pay('07'), null, '10000',
+  'retour partiel')$$, 'ops link the later partial return first');
+reset role;
+select results_eq($$select cand_left_minor, cand_free_from
+                    from private.debit_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100)
+                    where line_id = pg_temp.ln('t7a')$$,
+  $$values (6000::bigint, '2026-11-02'::date)$$,
+  'the earlier line is exactly what is left now, but dated before the payment''s free-from date');
+set local role authenticated;
+select pg_temp.as_user('01');
+select throws_ok($$select public.link_debit('k-link-0071', pg_temp.ln('t7a'), 'return', pg_temp.pay('07'), null, '6000',
+  'retour partiel')$$, '23514', 'debit link refused: before_previous_return',
+  'never out of the payment on a day its money was allocated: a clear refusal, not LG007');
+reset role;
+select private.debit_link_begin();
+insert into pg_temp._debit_link (ord, bank_transaction_id, kind, payment_id, method)
+values (1, pg_temp.ln('t7a'), 'return', pg_temp.pay('07'), 'auto');
+select is(private.apply_debit_decisions('00000000-0000-0000-0000-0000000000aa') ->> 'skipped', '1',
+  'the job''s re-check skips it: the run goes on');
+select is(pg_temp.state('07'), 'matched/partial_return', 'nothing booked');
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.request_refund('k-refund-0070', pg_temp.pay('07'), '1000', 'FR7630006000011234567890189',
+  'PAYEUR 07', 'partial_return', 'partial_return', '6000', 'reste remboursé')$$, 'a refund of what is left');
+reset role;
+select pg_temp.line('r7', 'debit', 'refund_out', 1000, '2026-11-01', pg_temp.rfd_of('07'));
+set local role authenticated;
+select pg_temp.as_user('01');
+select throws_ok($$select public.link_debit('k-link-0072', pg_temp.ln('r7'), 'refund', null, pg_temp.refund_of('07'), null,
+  'virement fait avant la saisie')$$, '23514', 'debit link refused: before_previous_return',
+  'a refund the bank booked before that date neither');
+select lives_ok($$select public.cancel_refund('k-cancel-0070', pg_temp.refund_of('07'), 'date à vérifier')$$, 'cancelled');
+reset role;
+
+-- A line the posting itself refuses (a planted ledger refusal) goes to ops; the other lines of the run are booked
+select pg_temp.payment('08', 3000);
+select pg_temp.payment('09', 2000);
+update public.payment set review_reason = 'no_match' where id in (pg_temp.pay('08'), pg_temp.pay('09'));
+select pg_temp.line('t8', 'debit', 'return', 3000, '2026-11-03', 'E2E-08');
+select pg_temp.line('t9', 'debit', 'return', 2000, '2026-11-03', 'E2E-09');
+create function public.test_refuse_cash_out() returns trigger language plpgsql as $$
+begin
+  raise exception 'ledger: planted refusal' using errcode = 'LG007';
+end $$;
+create trigger test_refuse_cash_out before insert on public.ledger_entry for each row
+  when (new.payment_id = 'f1000000-0000-0000-0000-000000000008' and new.entry_type = 'cash_out')
+  execute function public.test_refuse_cash_out();
+select private.debit_link_begin();
+insert into pg_temp._debit_link (ord, bank_transaction_id, kind, payment_id, method) values
+  (1, pg_temp.ln('t8'), 'return', pg_temp.pay('08'), 'auto'),
+  (2, pg_temp.ln('t9'), 'return', pg_temp.pay('09'), 'auto');
+select results_eq($$select (x ->> 'returns')::int, (x ->> 'failed')::int, (x ->> 'skipped')::int, (x ->> 'reviews')::int
+                    from (select private.apply_debit_decisions('00000000-0000-0000-0000-0000000000aa') as x) y$$,
+  $$values (1, 1, 0, 1)$$, 'one line refused by the posting: the other is booked, the run does not fail');
+select results_eq($$select reason, left(detail, 30), candidates from public.bank_debit_review
+                    where bank_transaction_id = pg_temp.ln('t8')$$,
+  $$values ('posting_failed'::text, 'LG007: ledger: planted refusal'::text,
+            jsonb_build_array(jsonb_build_object('payment_id', pg_temp.pay('08'))))$$,
+  'the refused line waits for ops, with why (support)');
+select is(pg_temp.state('09'), 'returned/-', 'the other line of the run is booked');
+select is((select count(*)::int from public.ledger_entry where payment_id = pg_temp.pay('08')), 0,
+  'nothing of the refused one is left in the ledger');
+set local role authenticated;
+select pg_temp.as_user('01');
+select throws_like($$select public.link_debit('k-link-0080', pg_temp.ln('t8'), 'return', pg_temp.pay('08'), null, '3000',
+  'retour')$$, 'debit link refused: posting_failed (LG007: ledger: planted refusal%', 'ops get a clear refusal');
+reset role;
+drop trigger test_refuse_cash_out on public.ledger_entry;
+
+-- The job links a return only for exactly what is left now (a payment that changed since it read it: re-decided)
+select pg_temp.payment('10', 5000);
+update public.payment set review_reason = 'no_match' where id = pg_temp.pay('10');
+select pg_temp.line('t10', 'debit', 'return', 4000, '2026-11-03', 'E2E-10');
+select private.debit_link_begin();
+insert into pg_temp._debit_link (ord, bank_transaction_id, kind, payment_id, method)
+values (1, pg_temp.ln('t10'), 'return', pg_temp.pay('10'), 'auto');
+select private.apply_debit_decisions('00000000-0000-0000-0000-0000000000aa');
+select is((select why from pg_temp._debit_skipped where bank_transaction_id = pg_temp.ln('t10')), 'payment_changed',
+  'an automatic partial return is refused on re-check (ops decide partial returns)');
+select is(pg_temp.state('10'), 'unmatched/no_match', 'nothing booked');
+
+-- Money that went out for a payment is booked, never only explained: it stays to classify
+select pg_temp.line('r10', 'debit', 'refund_out', 777, '2026-11-03', 'RFD000000000099');
+set local role authenticated;
+select pg_temp.as_user('01');
+select throws_ok($$select public.link_debit('k-link-0100', pg_temp.ln('t10'), 'explained', null, null, null, 'inconnu')$$,
+  '23514', 'debit link refused: not_explainable', 'a bank return cannot be « expliqué »');
+select throws_ok($$select public.link_debit('k-link-0101', pg_temp.ln('r10'), 'explained', null, null, null, 'inconnu')$$,
+  '23514', 'debit link refused: not_explainable', 'nor a debit carrying our RFD id');
+select is((select count(*)::int from public.debit_queue('a-classer', 0, 100)
+           where bank_transaction_id in (pg_temp.ln('t10'), pg_temp.ln('r10'))), 2, 'both stay to classify');
+reset role;
+
+-- An other debit of a pending refund's amount on its bank account may be that refund (the bank dropped our RFD id)
+select pg_temp.payment('11', 4000, 'FR7630006000011234567890189');
+update public.payment set review_reason = 'no_match' where id = pg_temp.pay('11');
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.request_refund('k-refund-0110', pg_temp.pay('11'), '4000', null, null, 'unidentified',
+  'no_match', '4000', 'payeur inconnu')$$, 'a refund of an unidentified payment');
+reset role;
+select pg_temp.line('o11', 'debit', 'other_debit', 4000, '2026-11-05', null, '80000000-0000-0000-0000-0000000000aa',
+                    'VIR SEPA EMIS');
+select pg_temp.line('f11', 'debit', 'other_debit', 1234, '2026-11-05', null, '80000000-0000-0000-0000-0000000000aa', 'FRAIS');
+set local role authenticated;
+select pg_temp.as_user('01');
+select results_eq($$select kind, review_reason, candidates -> 0 ->> 'refund_request_id', candidates -> 0 ->> 'end_to_end_id',
+                           candidates -> 0 ->> 'payer_name'
+                    from public.debit_queue('a-classer', 0, 100) where bank_transaction_id = pg_temp.ln('o11')$$,
+  $$values ('other_debit'::text, 'refund_amount_match'::text, pg_temp.refund_of('11')::text, pg_temp.rfd_of('11'),
+            'PAYEUR 11'::text)$$,
+  'listed to classify, with the pending refund it may be');
+select results_eq($$select bank_transaction_id from public.debit_queue('frais', 0, 100)
+                    where bank_transaction_id in (pg_temp.ln('o11'), pg_temp.ln('f11'))$$,
+  $$values (pg_temp.ln('f11'))$$, 'not among the fees (a fee of another amount is)');
+reset role;
+select private.run_payment_checks('00000000-0000-0000-0000-0000000000aa');
+select ok((select r.details -> 'ids' ? pg_temp.ln('o11')::text from public.payment_check_result r
+           join public.payment_check_run x on x.id = r.run_id
+           where x.organization_id = '00000000-0000-0000-0000-0000000000aa' and r.code = 'debit_unclassified'
+           order by x.started_at desc limit 1),
+  'and in the ageing alert of lines to classify');
+
+-- Tenant isolation: another servicer's line naming our RFD id, and candidate ids of ours in its review
+insert into public.bank_account (id, organization_id, iban, currency, label, feed, opened_on) values
+  ('80000000-0000-0000-0000-0000000000bb', '00000000-0000-0000-0000-0000000000bb', 'FR7630006000011234567890189', 'EUR',
+   'Autre', 'camt053', '2026-01-01');
+select pg_temp.stmt(md5('bb-line')::uuid, '80000000-0000-0000-0000-0000000000bb');
+insert into public.bank_transaction (id, organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+                                     amount_minor, currency, booking_date, kind, end_to_end_id)
+values (md5('bb-line')::uuid, '00000000-0000-0000-0000-0000000000bb', '80000000-0000-0000-0000-0000000000bb',
+        md5('bb-line')::uuid, 1, 'h:bb#1', 'debit', 4000, 'EUR', '2026-11-05', 'refund_out', pg_temp.rfd_of('11'));
+select is((select count(*)::int from private.debit_candidates('00000000-0000-0000-0000-0000000000bb', null, null, 100)
+           where line_id = md5('bb-line')::uuid and refund_request_id is null), 1,
+  'tenant isolation: another servicer''s line naming our RFD id finds none of our refunds');
+select private.debit_link_begin();
+insert into pg_temp._debit_review (bank_transaction_id, reason, candidates)
+values (md5('bb-line')::uuid, 'no_candidate',
+        jsonb_build_array(jsonb_build_object('refund_request_id', pg_temp.refund_of('11'), 'payment_id', pg_temp.pay('11'))));
+select private.apply_debit_decisions('00000000-0000-0000-0000-0000000000bb');
+set local role authenticated;
+select pg_temp.as_user('05');
+select results_eq($$select candidates -> 0 ? 'payer_name', candidates -> 0 ? 'file_reference',
+                           candidates -> 0 ? 'end_to_end_id', candidates -> 0 ? 'refund_status'
+                    from public.debit_queue('a-classer') where bank_transaction_id = md5('bb-line')::uuid$$,
+  $$values (false, false, false, false)$$,
+  'tenant isolation: ids of another servicer in a review are never enriched with its payer or refund');
+select is((select count(*)::int from public.debit_queue('a-classer')), 1, 'it sees its own line only');
+reset role;
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.link_debit('k-link-0110', pg_temp.ln('o11'), 'refund', null, pg_temp.refund_of('11'), null,
+  'remboursement sans référence RFD')$$, 'ops link it to the refund');
+reset role;
+select is(pg_temp.state('11'), 'refunded/-', 'the refund is booked');
+
+-- A direct payment the job could not book: refused, `failed` (never « en cours » for good)
+set local role authenticated;
+select pg_temp.as_user('01');
+select public.record_direct_payment('k-direct-0005', pg_temp.f('01'), '{}', '1000', '2026-10-16',
+                                    'd1000000-0000-0000-0000-000000000001', 'relevé du client');
+reset role;
+select private.refuse_direct_payment((select id from public.direct_payment where account_id = pg_temp.f('01')
+                                      and status = 'requested'), 'failed');
+select is((select count(*)::int from public.direct_payment where account_id = pg_temp.f('01') and status = 'refused'
+             and refusal_code = 'failed'), 1, 'refused with the code the page shows');
+
+select is((private.run_payment_checks('00000000-0000-0000-0000-0000000000aa') ->> 'violations')::int, 0,
+  'after all of it, the books still hold');
 
 select * from finish();
 rollback;

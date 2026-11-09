@@ -1,8 +1,10 @@
 """Debit rules (M2b-6, payments.debits): what a debit is, or why ops decide. Examples, then
 Hypothesis properties: a return is linked only to the one payment it names and only for exactly
 what is left of it (never more than was allocated and left unallocated); a refund only for its
-pending request's amount, never above what is left of the payment; the order of the candidates
-never matters; a payment is linked at most once per run."""
+pending request's amount, never above what is left of the payment; neither dated before the
+payment's free-from date (its latest reversal dated after the entry it reverses: I4); a refund
+that came back is never booked on a payment the bank took back; the order of the candidates never
+matters; a payment is linked at most once per run."""
 
 import random
 from dataclasses import replace
@@ -15,9 +17,12 @@ from collectoo_worker.payments.debits import (
     ALREADY_RETURNED,
     AMBIGUOUS,
     AMOUNT_DIFFERS,
+    BEFORE_PREVIOUS_RETURN,
     NO_CANDIDATE,
     PARTIAL_RETURN,
+    PAYMENT_RETURNED,
     REFUND_NOT_PENDING,
+    REVIEW_REASONS,
     DebitLine,
     PaymentCandidate,
     RefundCandidate,
@@ -45,8 +50,9 @@ def pay(  # noqa: PLR0913 - a candidate's facts
     day: date = date(2026, 10, 5),
     via: str = "end_to_end_id",
     pending: int = 0,
+    free_from: date | None = None,
 ) -> PaymentCandidate:
-    return PaymentCandidate(pid, bank, amount or left, left, pending, status, day, via)
+    return PaymentCandidate(pid, bank, amount or left, left, pending, status, day, via, free_from)
 
 
 def refund(  # noqa: PLR0913 - a candidate's facts
@@ -58,9 +64,11 @@ def refund(  # noqa: PLR0913 - a candidate's facts
     bank: str = BANK,
     day: date = date(2026, 10, 5),
     payment: str = "P1",
+    payment_status: str = "partially_allocated",
+    free_from: date | None = None,
 ) -> RefundCandidate:
     left = amount if unallocated is None else unallocated
-    return RefundCandidate(rid, payment, bank, amount, status, left, day)
+    return RefundCandidate(rid, payment, bank, amount, status, left, day, payment_status, free_from)
 
 
 # -- returns --------------------------------------------------------------------------------------
@@ -104,6 +112,18 @@ def test_a_payment_already_returned_or_on_another_account_or_later() -> None:
     assert decide(ret(500), [pay("P1", 500, day=later)]).review_reason == NO_CANDIDATE
 
 
+def test_a_return_dated_before_a_later_reversal_of_the_payment_goes_to_ops() -> None:
+    # 10 000 allocated on 10-05; a 4 000 return of 11-02 linked first (its allocation reversed on
+    # 11-02): on 11-01 the 10 000 were still allocated, so the 6 000 line of 11-01 cannot go out
+    # then (LG007), even though 6 000 is exactly what is left now
+    early = ret(6000, day=date(2026, 11, 1))
+    p = pay("P1", 6000, amount=10000, status="matched", free_from=date(2026, 11, 2))
+    assert decide(early, [p]).review_reason == BEFORE_PREVIOUS_RETURN
+    # on or after that date it is the payment's return as usual
+    assert decide(ret(6000, day=date(2026, 11, 2)), [p]).kind == "return"
+    assert decide(ret(6000, day=date(2026, 11, 5)), [p]).kind == "return"
+
+
 def test_a_refund_pending_does_not_stop_a_full_return() -> None:
     # the posting cancels the pending refund: nothing is left to refund
     d = decide(ret(500), [pay("P1", 500, status="refund_pending", pending=200)])
@@ -137,6 +157,43 @@ def test_a_refund_not_pending_another_amount_or_account_goes_to_ops() -> None:
     assert decide(out(8000), refunds=[]).review_reason == NO_CANDIDATE
 
 
+def test_a_refund_dated_before_a_later_reversal_of_the_payment_goes_to_ops() -> None:
+    # the bank executed it on 11-03 (ops recorded it later), but an allocation of the payment
+    # was reversed on 11-05 only: the money was allocated on 11-03
+    r = refund("R1", 3000, free_from=date(2026, 11, 5))
+    assert decide(out(3000, date(2026, 11, 3)), refunds=[r]).review_reason == (
+        BEFORE_PREVIOUS_RETURN
+    )
+    assert decide(out(3000, date(2026, 11, 5)), refunds=[r]).kind == "refund"
+
+
+def test_a_refund_that_came_back_to_a_returned_payment_goes_to_ops() -> None:
+    # refunded 5 000 on 10-21, then the bank took back the rest of the payment (returned): the
+    # 5 000 that came back cannot be put back on it (where it goes is for ops: never guessed)
+    back = ret(5000, line_id="L7", direction="credit", day=date(2026, 10, 27))
+    r = refund("R1", 5000, status="executed", day=date(2026, 10, 21), payment_status="returned")
+    assert decide(back, refunds=[r]).review_reason == PAYMENT_RETURNED
+    assert decide(back, refunds=[replace(r, payment_status="allocated")]).kind == (
+        "refund_returned"
+    )
+
+
+def test_every_review_reason_is_one_the_database_accepts() -> None:
+    # public.bank_debit_review.reason check (posting_failed is written by the SQL only)
+    assert {
+        "no_candidate",
+        "ambiguous",
+        "amount_differs",
+        "partial_return",
+        "refund_not_pending",
+        "already_returned",
+        "changed",
+        "payment_returned",
+        "before_previous_return",
+        "posting_failed",
+    } >= REVIEW_REASONS
+
+
 def test_a_refund_that_came_back_is_linked_to_the_executed_refund() -> None:
     back = ret(8000, line_id="L7", direction="credit")
     d = decide(back, refunds=[refund("R1", 8000, status="executed", day=date(2026, 10, 21))])
@@ -167,6 +224,7 @@ payments = st.lists(
         status=st.sampled_from(["allocated", "partially_allocated", "matched", "returned"]),
         booking_date=days,
         via=st.sampled_from(["end_to_end_id", "tx_id"]),
+        free_from=st.none() | days,
     ),
     max_size=5,
 )
@@ -180,6 +238,8 @@ refunds = st.lists(
         status=st.sampled_from(["requested", "executed", "cancelled", "bounced"]),
         unallocated_minor=st.integers(min_value=0, max_value=10**9),
         date=days,
+        payment_status=st.sampled_from(["allocated", "matched", "refunded", "returned"]),
+        free_from=st.none() | days,
     ),
     max_size=3,
     unique_by=lambda r: r.refund_request_id,
@@ -228,6 +288,7 @@ def test_links_never_take_more_than_is_left_and_ignore_order(
         assert line.direction == "debit"
         assert line.amount_minor == p.left_minor  # exactly what is left: never more, never partial
         assert p.booking_date <= line.booking_date and p.bank_account_id == line.bank_account_id
+        assert p.free_from is None or line.booking_date >= p.free_from  # I4 at the line's date
     elif d.kind == "refund":
         (r,) = [x for x in refs if x.refund_request_id == d.refund_request_id]
         assert r.status == "requested" and r.bank_account_id == line.bank_account_id
@@ -235,12 +296,14 @@ def test_links_never_take_more_than_is_left_and_ignore_order(
             line.amount_minor == r.amount_minor <= r.unallocated_minor
         )  # never above what is left
         assert d.payment_id == r.payment_id
+        assert r.free_from is None or line.booking_date >= r.free_from  # I4 at the line's date
     elif d.kind == "refund_returned":
         (r,) = [x for x in refs if x.refund_request_id == d.refund_request_id]
         assert line.direction == "credit" and r.status == "executed"
         assert line.amount_minor == r.amount_minor and line.booking_date >= r.date
+        assert r.payment_status != "returned"  # never put back on a payment the bank took back
     else:
-        assert d.review_reason is not None
+        assert d.review_reason in REVIEW_REASONS
 
 
 @settings(max_examples=200)
