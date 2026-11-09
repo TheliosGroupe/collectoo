@@ -42,6 +42,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 
 ## In progress
 - **Plan robustness (CI scale job)**: lookups whose join order depended on statistics (`payment_positions` 439 s inside `post_allocations`, `bank_import_entry_known` 133 s inside `ingest_statement` on CI, same trap as the M2b-6 held-line trigger) made structural (kept laterals, keyed scalar lookups) in a new migration `20261110130000_plan_robustness.sql`, proved under stale statistics on a second local stack, scale tests set those states every run. Next: PR, then M2c.
+- **M2c design (M2-12..M2-15)**: panel (compliance-, ledger-, ops-first designs, a critique each, a judge) → `docs/design/m2c-remittances.md` (two funds with a 4679/4689 mirror, remittance runs per client and currency, commission from the mandate's versioned schedule, invoices and credit notes in one gapless yearly series, pain.001 for ops, nothing leaves 5120 before the bank's debit, servicer advances for returns after remittance). 15 founder decisions pending (§24); OQ-35..50 added to COMPLIANCE (biggest: OQ-45, CMF L314-1 payment-service authorisation, before go-live).
 
 ## Next
 - Performance before production volumes: RLS on `account` / `party` (and tables keyed by them) calls `can_read_portfolio()` per row; with 157k accounts locally a client's `count(*)` took 41 s. Apply the ledger's pattern (`= any ((select private.readable_portfolio_ids())::uuid[])`, evaluated once per query) and add a scale check.
