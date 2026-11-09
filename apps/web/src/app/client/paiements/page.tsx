@@ -130,7 +130,7 @@ export default async function ClientPaymentsPage({ searchParams }: PageProps<"/c
                     {receipt} (PDF)
                   </a>
                 </p>
-              ) : r.kind !== "payment_allocation_reversed" ? (
+              ) : !["payment_allocation_reversed", "payment_forward_reversed", "payment_returned"].includes(r.kind) ? (
                 <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">Quittance en cours d&apos;établissement.</p>
               ) : null}
             </li>

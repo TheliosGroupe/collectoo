@@ -31,8 +31,16 @@ export function signedMoney(direction: string, minor: string, currency: string):
   return direction === "debit" ? `− ${text}` : `+ ${text}`;
 }
 
-/** What a statement line is, and where it stands in M2b-2 (payments are booked; the rest waits). */
-export function lineState(line: { kind: string; direction: string; has_payment: boolean }): {
+/** What a statement line is, and where it stands: payments are booked at import; since M2b-6 a debit linked to a
+ * payment (its return) or to our refund is booked too, a line ops explained or a confirmed duplicate stays out of the
+ * books, fees and other debits are explained gaps (founder #20); the rest waits to be classified. */
+export function lineState(line: {
+  kind: string;
+  direction: string;
+  has_payment: boolean;
+  link?: string | null; // bank_debit_link.kind
+  duplicate?: string | null; // bank_duplicate_resolution.decision
+}): {
   kind: string;
   state: string;
   tone: Tone;
@@ -42,7 +50,14 @@ export function lineState(line: { kind: string; direction: string; has_payment: 
       ? "Débit groupé non ventilé"
       : (LINE_KIND[line.kind] ?? line.kind);
   if (line.has_payment) return { kind, state: "Comptabilisé · à affecter", tone: "ok" };
-  if (line.kind === "suspected_duplicate") return { kind, state: "Retenu : doublon possible", tone: "action" };
+  if (line.link === "return") return { kind, state: "Comptabilisé · retour du paiement", tone: "ok" };
+  if (line.link === "refund") return { kind, state: "Comptabilisé · remboursement exécuté", tone: "ok" };
+  if (line.link === "refund_returned") return { kind, state: "Comptabilisé · remboursement revenu", tone: "ok" };
+  if (line.link === "explained") return { kind, state: "Expliqué · non comptabilisé", tone: "neutral" };
+  if (line.duplicate === "duplicate") return { kind, state: "Doublon confirmé · non comptabilisé", tone: "neutral" };
+  if (line.kind === "suspected_duplicate" && line.duplicate !== "released")
+    return { kind, state: "Retenu : doublon possible", tone: "action" };
+  if (line.kind === "other_debit") return { kind, state: "Non comptabilisé · écart expliqué (frais)", tone: "neutral" };
   return { kind, state: "Non comptabilisé · à classer", tone: "action" };
 }
 

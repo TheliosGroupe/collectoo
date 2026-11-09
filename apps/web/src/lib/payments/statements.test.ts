@@ -58,9 +58,32 @@ describe("statement and line states", () => {
     );
     expect(lineState({ kind: "other_debit", direction: "debit", has_payment: false })).toEqual({
       kind: "Débit (frais, autre)",
-      state: "Non comptabilisé · à classer",
-      tone: "action",
+      state: "Non comptabilisé · écart expliqué (frais)",
+      tone: "neutral",
     });
+    expect(lineState({ kind: "return", direction: "debit", has_payment: false }).state).toBe("Non comptabilisé · à classer");
+  });
+
+  it("M2b-6: debits linked, explained, and duplicates decided", () => {
+    expect(lineState({ kind: "return", direction: "debit", has_payment: false, link: "return" })).toEqual({
+      kind: "Retour ou rejet",
+      state: "Comptabilisé · retour du paiement",
+      tone: "ok",
+    });
+    expect(lineState({ kind: "refund_out", direction: "debit", has_payment: false, link: "refund" }).state).toBe(
+      "Comptabilisé · remboursement exécuté",
+    );
+    expect(lineState({ kind: "return", direction: "credit", has_payment: false, link: "explained" }).tone).toBe("neutral");
+    expect(lineState({ kind: "suspected_duplicate", direction: "credit", has_payment: false, duplicate: "duplicate" }).state).toBe(
+      "Doublon confirmé · non comptabilisé",
+    );
+    // released: a credit becomes a payment; a debit waits to be classified
+    expect(lineState({ kind: "suspected_duplicate", direction: "credit", has_payment: true, duplicate: "released" }).state).toBe(
+      "Comptabilisé · à affecter",
+    );
+    expect(lineState({ kind: "suspected_duplicate", direction: "debit", has_payment: false, duplicate: "released" }).state).toBe(
+      "Non comptabilisé · à classer",
+    );
   });
 });
 

@@ -23,6 +23,8 @@ type LineRow = {
   creditor_reference: string | null;
   return_reason: string | null;
   payment: { id: string }[];
+  bank_debit_link: { kind: string } | null;
+  bank_duplicate_resolution: { decision: string } | null;
 };
 
 /** M2b-2: one statement and its lines, with what became of each (booked, to classify, held). */
@@ -47,7 +49,8 @@ export default async function StatementPage({
     .select(
       // amount as text: integer minor units never pass through a JS number
       "id, line_no, direction, amount:amount_minor::text, booking_date, value_date, kind, counterparty_name," +
-        " counterparty_iban, remittance_text, creditor_reference, return_reason, payment(id)",
+        " counterparty_iban, remittance_text, creditor_reference, return_reason, payment(id)," +
+        " bank_debit_link(kind), bank_duplicate_resolution(decision)",
       { count: "exact" },
     )
     .eq("statement_id", id);
@@ -105,7 +108,13 @@ export default async function StatementPage({
           ) : (
             <ul className="divide-y divide-zinc-200 dark:divide-zinc-800" data-testid="line-list">
               {rows.map((l) => {
-                const state = lineState({ kind: l.kind, direction: l.direction, has_payment: l.payment.length > 0 });
+                const state = lineState({
+                  kind: l.kind,
+                  direction: l.direction,
+                  has_payment: l.payment.length > 0,
+                  link: l.bank_debit_link?.kind ?? null,
+                  duplicate: l.bank_duplicate_resolution?.decision ?? null,
+                });
                 return (
                   <li key={l.id} className="grid gap-1 py-3 sm:grid-cols-[7rem_1fr_auto] sm:gap-4">
                     <span className="text-sm text-zinc-600 dark:text-zinc-400">{frenchDate(l.booking_date)}</span>

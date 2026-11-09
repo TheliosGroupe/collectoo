@@ -43,6 +43,15 @@ export default async function StatementsPage({ searchParams }: PageProps<"/backo
     ? await supabase.rpc("statement_match_counts", { p_statement_ids: rows.map((r) => r.id) })
     : { data: [] };
   const matches = new Map<string, MatchCounts>((matchRows ?? []).map((m) => [m.statement_id, m]));
+  // M2b-6: debits to classify, and the last nightly check (anomalies, alerts)
+  const [{ data: debitRows }, { data: lastRun }] = canImport
+    ? await Promise.all([
+        supabase.rpc("debit_queue", { p_tab: "a-classer", p_offset: 0, p_limit: 1 }),
+        supabase.from("payment_check_run").select("violations, alerts").order("started_at", { ascending: false }).limit(1),
+      ])
+    : [{ data: [] }, { data: [] }];
+  const toClassify = Number(((debitRows ?? []) as { total: number }[])[0]?.total ?? 0);
+  const run = ((lastRun ?? []) as { violations: number | null; alerts: number | null }[])[0];
   const filtered = q.compte !== null || q.statut !== "tous";
 
   return (
@@ -59,6 +68,23 @@ export default async function StatementsPage({ searchParams }: PageProps<"/backo
           <Link href="/backoffice/encaissements/a-traiter" className={`${buttonClass} text-center`} data-testid="queue-link">
             Paiements à traiter
           </Link>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Link
+              href="/backoffice/encaissements/debits"
+              className="rounded-md border border-zinc-300 px-3 py-2 text-center text-sm dark:border-zinc-700"
+              data-testid="debits-link"
+            >
+              Débits et retours{toClassify > 0 ? ` · ${toClassify} à classer` : ""}
+            </Link>
+            <Link
+              href="/backoffice/encaissements/controles"
+              className="rounded-md border border-zinc-300 px-3 py-2 text-center text-sm dark:border-zinc-700"
+              data-testid="checks-link"
+            >
+              Contrôles
+              {run ? ` · ${run.violations ?? 0} anomalie(s), ${run.alerts ?? 0} alerte(s)` : ""}
+            </Link>
+          </div>
           <Section title="Importer un relevé" testId="import-statement">
             <StatementUploadForm accounts={options} />
           </Section>
