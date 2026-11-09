@@ -1,11 +1,12 @@
 """M2-09 allocation waterfall: properties (Hypothesis) and the design's worked example (§8.2).
 
 Acceptance (ROADMAP M2-09): allocation never exceeds component balances; Σ allocated = payment
-amount, or the remainder is an overpayment. Plus the legal order: designated debts first, then
-due debts oldest first, equal ones pro rata, then debts not yet due; inside each debt interest
-first (1343-1); accessories where the policy ranks them (OQ-7); the seller's unclassified amounts
-last, held for consumer loans (founder #6). Deterministic, independent of input order, re-runnable
-by date (M3).
+amount, or the remainder is an overpayment. An item is never paid beyond the net of all its
+components (a negative balancing line or credit counts: M2b-4 review #0). Plus the legal order:
+designated debts first, then due debts oldest first, equal ones pro rata, then debts not yet due
+(the same order among designated debts: review #1); inside each debt interest first (1343-1);
+accessories where the policy ranks them (OQ-7); the seller's unclassified amounts last, held for
+consumer loans (founder #6). Deterministic, independent of input order, re-runnable by date (M3).
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from collectoo_worker.payments.allocation import (
 )
 
 AS_OF = date(2026, 10, 12)
+OPENED = date(2026, 9, 30)
 COMPONENTS = (
     ("accrued_interest", Family.INTEREST, 20),
     ("late_interest", Family.INTEREST, 25),
@@ -115,6 +117,22 @@ def item_paid(result: Allocation, item: str) -> int:
     return sum(x.amount_minor for x in result.lines if x.item_id == item)
 
 
+def legal_rank(
+    item: str, designation: list[str], meta: dict[str, tuple[date | None, date | None]]
+) -> tuple[object, ...]:
+    """1342-10: designated debts first, then the others; in each block due debts oldest due date
+    first (then issue date; undated after dated), then debts not yet due. Equal ranks: pro rata."""
+    due, issue = meta[item]
+    issue_key = issue or date.max
+    if due is None:
+        legal: tuple[object, ...] = (0, 1, issue_key)
+    elif due <= AS_OF:
+        legal = (0, 0, due, issue_key)
+    else:
+        legal = (1, 0, due, issue_key)
+    return (0 if item in designation else 1, *legal)
+
+
 @given(cases())
 @settings(max_examples=400)
 def test_amounts_add_up_and_never_exceed_a_balance(
@@ -161,21 +179,16 @@ def test_interest_first_inside_each_debt(case: tuple[int, list[Slot], Policy, li
 @given(cases())
 @settings(max_examples=400)
 def test_debts_in_the_legal_order(case: tuple[int, list[Slot], Policy, list[str]]) -> None:
-    """1342-10: designated debts first (in the order named), then due ones oldest first, then the
-    rest; an item is paid only once every debt before it is exhausted."""
+    """1342-10: designated debts first (among them the legal order: a designation without a split
+    names debts, not an order), then due ones oldest first, then the rest; an item is paid only once
+    every debt before it is exhausted."""
     amount, slots, policy, designation = case
     result = allocate(amount, slots, policy, designation, as_of=AS_OF)
     ok = eligible(slots, policy)
     meta = {s.item_id: (s.due_date, s.issue_date) for s in ok}
 
     def rank(item: str) -> tuple[object, ...]:
-        if item in designation:
-            return (0, designation.index(item))
-        due, issue = meta[item]
-        issue_key = issue or date.max
-        if due is None:
-            return (1, 1, issue_key)
-        return (1, 0, due, issue_key) if due <= AS_OF else (2, 0, due, issue_key)
+        return legal_rank(item, designation, meta)
 
     paid_items = {x.item_id for x in result.lines}
     for item in paid_items:
@@ -198,17 +211,13 @@ def test_equal_debts_share_pro_rata_to_the_cent(
     amount, slots, policy, designation = case
     result = allocate(amount, slots, policy, designation, as_of=AS_OF)
     ok = eligible(slots, policy)
+    meta = {s.item_id: (s.due_date, s.issue_date) for s in ok}
     demand: dict[str, int] = defaultdict(int)
-    key: dict[str, tuple[object, ...]] = {}
     for s in ok:
         demand[s.item_id] += s.available_minor
-        if s.item_id in designation:
-            key[s.item_id] = (0, designation.index(s.item_id))
-        else:
-            key[s.item_id] = ("d", s.due_date, s.issue_date, (s.due_date or date.min) <= AS_OF)
     groups: dict[tuple[object, ...], list[str]] = defaultdict(list)
-    for item, k in key.items():
-        groups[k].append(item)
+    for item in meta:  # designated debts with equal keys share pro rata too (review #1)
+        groups[legal_rank(item, designation, meta)].append(item)
     for members in groups.values():
         got = {i: item_paid(result, i) for i in members}
         total = sum(demand[i] for i in members)
@@ -230,6 +239,10 @@ def test_deterministic_and_independent_of_input_order(
     rnd.shuffle(shuffled)
     assert allocate(amount, shuffled, policy, designation, as_of=AS_OF) == first
     assert allocate(amount, slots, policy, designation, as_of=AS_OF) == first
+    # the order a designation was stored in changes nothing (the RPC stores uuid order: review #1)
+    named = list(designation)
+    rnd.shuffle(named)
+    assert allocate(amount, slots, policy, named, as_of=AS_OF) == first
 
 
 @given(cases())
@@ -348,6 +361,47 @@ def test_a_designated_debt_not_yet_due_is_honoured() -> None:
     ]
     plain = allocate(40_000, slots, Policy(), as_of=AS_OF)
     assert [(x.item_id, x.amount_minor) for x in plain.lines] == [("due", 40_000)]
+    # among designated debts the due one first; the designated one not yet due still comes before
+    # the debts not named
+    older = Slot("older", "principal", Family.PRINCIPAL, 10, 20_000, AS_OF - timedelta(days=90))
+    both = allocate(70_000, [*slots, older], Policy(), ["later", "due"], as_of=AS_OF)
+    assert [(x.item_id, x.amount_minor) for x in both.lines] == [
+        ("due", 50_000),
+        ("later", 20_000),
+    ]
+
+
+# 9f... sorts after 1a...: the RPC path (assign_payment) stores a designation in uuid order
+F101 = "9f000000-0000-0000-0000-000000000101"
+F103 = "1a000000-0000-0000-0000-000000000103"
+
+
+@pytest.mark.parametrize("named", [[F101, F103], [F103, F101]])
+def test_designated_debts_are_paid_oldest_first_whatever_the_stored_order(
+    named: list[str],
+) -> None:
+    """M2b-4 review #1: the debtor named F-101 (due 10/06) and F-103 (due 20/08) and paid less than
+    both. A designation without a split names debts, not an order: 1342-10 decides among them, so
+    F-101, the oldest, is paid first, whatever order the designation was stored in."""
+    slots = [
+        Slot(F101, "principal", Family.PRINCIPAL, 10, 130_000, date(2026, 6, 10)),
+        Slot(F103, "principal", Family.PRINCIPAL, 10, 40_000, date(2026, 8, 20)),
+    ]
+    result = allocate(50_000, slots, Policy(), named, as_of=AS_OF)
+    assert [(x.item_id, x.amount_minor) for x in result.lines] == [(F101, 50_000)]
+
+
+@pytest.mark.parametrize("named", [["a", "b"], ["b", "a"]])
+def test_designated_debts_due_the_same_day_share_pro_rata(named: list[str]) -> None:
+    """M2b-4 review #1: two designated invoices of 500,00 € due the same day, 600,00 € paid:
+    « toutes choses égales, elle se fait proportionnellement » (1342-10), as without designation."""
+    slots = [
+        Slot("a", "principal", Family.PRINCIPAL, 10, 50_000, date(2026, 9, 1)),
+        Slot("b", "principal", Family.PRINCIPAL, 10, 50_000, date(2026, 9, 1)),
+    ]
+    result = allocate(60_000, slots, Policy(), named, as_of=AS_OF)
+    assert [(x.item_id, x.amount_minor) for x in result.lines] == [("a", 30_000), ("b", 30_000)]
+    assert allocate(60_000, slots, Policy(), as_of=AS_OF) == result
 
 
 # -- several payments on one file, over time (I6, and M3's re-run by date) -----------------------
@@ -362,15 +416,16 @@ def histories(
     for i in range(n):
         due = draw(due_dates)
         for comp, family, order in draw(
-            st.lists(
-                st.sampled_from(COMPONENTS[:4]), min_size=1, max_size=2, unique_by=lambda c: c[0]
-            )
+            st.lists(st.sampled_from(COMPONENTS), min_size=1, max_size=3, unique_by=lambda c: c[0])
         ):
-            opening = draw(st.integers(0, 50_000))
-            points = {date(2026, 9, 30): opening}
-            # an earlier run's allocation dated later than some of this run's payments
+            # a component may be negative: a credit, or an EU balancing line that brings the
+            # components down to the legal balance 3.12 (review #0)
+            opening = draw(st.integers(-20_000, 50_000))
+            points = {OPENED: opening}
+            # an earlier run's allocation dated later than some of this run's payments, or a later
+            # correction that takes a negative component further down
             if draw(st.booleans()) and opening:
-                points[date(2026, 10, 20)] = -draw(st.integers(0, opening))
+                points[date(2026, 10, 20)] = -draw(st.integers(0, abs(opening)))
             comps.append((Component(f"i{i}", comp, family, order, due), points))
     payments = draw(
         st.lists(
@@ -436,6 +491,143 @@ def test_a_rerun_by_date_gives_the_same_allocation(
     assert [again.plan(amount, policy, (), at=at)[0] for at, amount in payments] == together
 
 
+def item_net(f: FileBalances, item: str, at: date) -> int:
+    """The item as a whole at a date: every component summed, held and negative ones included."""
+    return sum(p.balance(at) for (i, _), p in f.profiles.items() if i == item)
+
+
+def from_on(f: FileBalances, at: date) -> list[date]:
+    """`at` and every later date a balance of the file changes (balances are step functions)."""
+    return sorted({at, *(d for p in f.profiles.values() for d in p.points if d > at)})
+
+
+@given(histories())
+@settings(max_examples=400)
+def test_an_item_is_never_paid_beyond_its_net_balance(
+    h: tuple[list[tuple[Component, dict[date, int]]], list[tuple[date, int]], Policy],
+) -> None:
+    """M2b-4 review #0: Σ lines on an item ≤ the item's net balance (all its components, held and
+    negative ones included) at every date from D on; the excess stays unallocated (an overpayment:
+    founder #8, C. civ. 1302-1). The cap trims the lowest ranks first, so interest stays first; and
+    a remainder is left only once every item is paid up to the lower of its slots and its net."""
+    comps, payments, policy = h
+    f = _file(comps)
+    items = sorted({c.item_id for c, _ in comps})
+    first: dict[str, date] = {}
+    for at, amount in payments:
+        dates = from_on(f, at)
+        net = {i: min(item_net(f, i, t) for t in dates) for i in items}
+        avail = {k: max(0, min(p.balance(t) for t in dates)) for k, p in f.profiles.items()}
+        result, _ = f.plan(amount, policy, (), at=at)
+        assert result.allocated_minor + result.remainder_minor == amount
+        per_item: dict[str, int] = defaultdict(int)
+        for x in result.lines:
+            per_item[x.item_id] += x.amount_minor
+            first.setdefault(x.item_id, at)
+        for i, got in per_item.items():
+            assert got <= net[i], (i, got, net[i])
+        p = paid(result)
+        for x in result.lines:  # 1343-1, measured on what each component had before the cap
+            rank = policy.family_rank(FAMILY[x.component])
+            assert rank is not None
+            for (i, c), a in avail.items():
+                other = policy.family_rank(FAMILY[c])
+                if i == x.item_id and other is not None and other < rank:
+                    assert p.get((i, c), 0) == a, (x, c)
+        if result.remainder_minor:
+            for i in items:
+                payable = sum(
+                    a
+                    for (j, c), a in avail.items()
+                    if j == i and policy.family_rank(FAMILY[c]) is not None
+                )
+                assert per_item.get(i, 0) == min(payable, max(net[i], 0)), i
+    # after the run, an item paid at D is not below zero on any date from D on (the SQL backstop)
+    for i, d0 in first.items():
+        for t in from_on(f, d0):
+            assert item_net(f, i, t) >= 0, (i, t)
+
+
+def _loan(points: dict[str, dict[date, int]]) -> FileBalances:
+    f = FileBalances()
+    for comp, pts in points.items():
+        f.add(Component("L", comp, FAMILY[comp], ORDER[comp], None), pts)
+    return f
+
+
+@pytest.mark.parametrize(
+    "policy", [Policy(), Policy().for_regime("consumer_credit_ccd2")], ids=["b2b", "consumer"]
+)
+def test_a_negative_balancing_line_caps_the_loan_at_its_legal_balance(policy: Policy) -> None:
+    """M2b-4 review #0: an EU loan's components add up to the legal balance 3.12 through a signed
+    balancing line (founder 2026-11-07 #6). Principal 5 000,00, interest 120,00, balancing line
+    -220,00: 3.12 = 4 900,00. A payment of 5 120,00 (an old statement) pays interest 120,00, then
+    principal 4 780,00; the 220,00 not owed stay unallocated (an overpayment, refunded: founder #8,
+    C. civ. 1302-1), never passed to the client."""
+    f = _loan(
+        {
+            "principal": {OPENED: 500_000},
+            "accrued_interest": {OPENED: 12_000},
+            "other_balances": {OPENED: 0},
+            "balancing_line": {OPENED: -22_000},
+        }
+    )
+    result, slots = f.plan(512_000, policy, (), at=AS_OF)
+    assert [(x.component, x.amount_minor) for x in result.lines] == [
+        ("accrued_interest", 12_000),
+        ("principal", 478_000),
+    ]
+    assert result.remainder_minor == 22_000
+    assert item_net(f, "L", AS_OF) == 0
+    # the slots returned (for the inputs hash) are the capped ones: they give the same lines
+    assert allocate(512_000, slots, policy, as_of=AS_OF) == result
+
+
+def test_a_negative_principal_nets_a_positive_balancing_line() -> None:
+    """M2b-4 review #0: principal -1,01 and balancing line +1,01 (a rounding case of the opening):
+    the item's net is 0, so nothing is paid."""
+    f = _loan({"principal": {OPENED: -101}, "balancing_line": {OPENED: 101}})
+    result, _ = f.plan(1_000, Policy(), (), at=AS_OF)
+    assert result.lines == ()
+    assert result.remainder_minor == 1_000
+
+
+def test_the_cap_trims_the_lowest_ranks_first_and_looks_at_later_dates() -> None:
+    """The excess over the item's net comes off the slot paid last (unclassified, then principal):
+    interest is trimmed last (1343-1). A later-dated fall of the item's net caps it too (an
+    allocation at D never takes the item below zero at a later date)."""
+    pts = {
+        "accrued_interest": {OPENED: 1_000},
+        "principal": {OPENED: 10_000},
+        "other_balances": {OPENED: 3_000},
+        "balancing_line": {OPENED: -2_000},
+    }
+    b2b, _ = _loan(pts).plan(20_000, Policy(), (), at=AS_OF)
+    assert [(x.component, x.amount_minor) for x in b2b.lines] == [
+        ("accrued_interest", 1_000),
+        ("principal", 10_000),
+        ("other_balances", 1_000),
+    ]
+    assert b2b.remainder_minor == 8_000
+    # held (consumer): 3.11 is not paid, and the net (12 000) is above what may be paid (11 000)
+    consumer = Policy().for_regime("consumer_mortgage")
+    held, _ = _loan(pts).plan(20_000, consumer, (), at=AS_OF)
+    assert [(x.component, x.amount_minor) for x in held.lines] == [
+        ("accrued_interest", 1_000),
+        ("principal", 10_000),
+    ]
+    later = _loan(
+        {
+            "accrued_interest": {OPENED: 1_000},
+            "principal": {OPENED: 10_000},
+            "balancing_line": {AS_OF + timedelta(days=8): -10_500},
+        }
+    )
+    capped, _ = later.plan(20_000, Policy(), (), at=AS_OF)
+    assert [(x.component, x.amount_minor) for x in capped.lines] == [("accrued_interest", 500)]
+    assert capped.remainder_minor == 19_500
+
+
 def test_inputs_hash_changes_with_any_input() -> None:
     slots = [Slot("a", "principal", Family.PRINCIPAL, 10, 1_000, AS_OF)]
     base = {
@@ -458,3 +650,8 @@ def test_inputs_hash_changes_with_any_input() -> None:
         {"slots": [Slot("a", "principal", Family.PRINCIPAL, 10, 999, AS_OF)]},
     ):
         assert inputs_hash(**{**base, **change}) != h  # type: ignore[arg-type]
+    # a designation is a set of debts (review #1): the order it was stored in is not an input
+    two = {**base, "slots": [*slots, Slot("b", "principal", Family.PRINCIPAL, 10, 1_000, AS_OF)]}
+    assert inputs_hash(**{**two, "designation": ("a", "b")}) == inputs_hash(  # type: ignore[arg-type]
+        **{**two, "designation": ("b", "a")}  # type: ignore[arg-type]
+    )

@@ -7,10 +7,12 @@ Legal order (texts quoted in the design, §3):
   entend acquitter. A défaut d'indication par le débiteur, l'imputation a lieu comme suit : d'abord
   sur les dettes échues ; parmi celles-ci, sur les dettes que le débiteur avait le plus d'intérêt
   d'acquitter. A égalité d'intérêt, l'imputation se fait sur la plus ancienne ; toutes choses
-  égales, elle se fait proportionnellement. » A "debt" is a claim item. Designated items first (in
-  the order named; an item not yet due is honoured, 1305-3), then due items, oldest due date first
-  (then issue date), equal keys shared pro rata, then items not yet due. « Plus d'intérêt
-  d'acquitter » is not encoded (OQ-21).
+  égales, elle se fait proportionnellement. » A "debt" is a claim item. Designated items first (an
+  item not yet due is honoured, 1305-3), then the others. Within each of the two blocks: due items,
+  oldest due date first (then issue date), equal keys shared pro rata, then items not yet due. A
+  designation without a split names debts, not an order, so the legal order decides among the
+  designated items, whatever order the designation was stored in (M2b-4 review #1). « Plus
+  d'intérêt d'acquitter » is not encoded (OQ-21).
 - C. civ. 1343-1: « Le paiement partiel s'impute d'abord sur les intérêts. » Inside each item the
   interest family first, always (not configurable, OQ-19; a designation names debts, not the order
   inside one).
@@ -26,17 +28,23 @@ Each item spends its share in its own family order.
 
 Availability: a slot is a (claim item, component) with an available amount > 0 at the effective
 date D, where available = min over t >= D of that receivable's running balance (design §2 #6), so an
-allocation dated D never overdraws a later date (I6). `BalanceProfile` computes it and records what
-a plan takes, so several payments of one file in one run are planned in date order on the same
-numbers the ledger will hold. M3 re-runs earlier allocations by date (founder #16): reverse, then
-call `allocate` again on the slots at D; nothing here depends on the clock or on input order.
+allocation dated D never overdraws a later date (I6). An item as a whole is capped the same way
+(M2b-4 review #0): what its payable slots show is never more than min over t >= D of the sum of ALL
+its components, held and negative ones included (a credit, or an EU balancing line that brings the
+components down to the legal balance 3.12). `cap_items` trims the excess from the item's
+lowest-ranked slots first, so interest is trimmed last (1343-1); the payment's excess then stays
+as the remainder, an overpayment (founder #8; C. civ. 1302-1: what is not owed is refunded),
+never paid to the client. `BalanceProfile` computes availability and records what a plan takes,
+so several payments of one file in one run are planned in date order on the same numbers the
+ledger will hold. M3 re-runs earlier allocations by date (founder #16): reverse, then plan again
+at D (`FileBalances.plan`); nothing here depends on the clock or on input order.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import StrEnum
@@ -172,20 +180,36 @@ class _Item:
         return sum(s.available_minor for s in self.slots)
 
 
-def _debt_key(item: _Item, designation: Mapping[str, int], as_of: date) -> tuple[Any, ...]:
+def _debt_key(item: _Item, designated: frozenset[str], as_of: date) -> tuple[Any, ...]:
     """Sort key of a debt (equal keys form one tie group, shared pro rata).
 
-    Designated items first, in the order named; then due items by due date, then issue date; an item
-    without a due date counts as due, after the dated ones (its age is unknown; a defaulted loan's
-    single item); then items not yet due by due date. An unknown issue date sorts last."""
-    if item.item_id in designation:
-        return (0, designation[item.item_id])
+    Designated items first, then the others; within each block, due items by due date, then issue
+    date; an item without a due date counts as due, after the dated ones (its age is unknown; a
+    defaulted loan's single item); then items not yet due by due date. An unknown issue date sorts
+    last. The order a designation was stored in plays no part (review #1)."""
+    block = 0 if item.item_id in designated else 1
     issue = item.issue_date or date.max
     if item.due_date is None:
-        return (1, 1, issue)
+        return (block, 0, 1, issue)
     if item.due_date <= as_of:
-        return (1, 0, item.due_date, issue)
-    return (2, 0, item.due_date, issue)
+        return (block, 0, 0, item.due_date, issue)
+    return (block, 1, 0, item.due_date, issue)
+
+
+def _payable(s: Slot, policy: Policy) -> bool:
+    return s.available_minor > 0 and policy.family_rank(s.family) is not None
+
+
+def _spend_key(policy: Policy) -> Callable[[Slot], tuple[int, int, str]]:
+    """The order an item's payable slots are spent in (interest first: 1343-1)."""
+
+    def key(s: Slot) -> tuple[int, int, str]:
+        rank = policy.family_rank(s.family)
+        if rank is None:  # pragma: no cover - held slots are never ranked
+            raise ValueError(f"slot {s.item_id}/{s.component}: a held family is never paid")
+        return (rank, s.component_order, s.component)
+
+    return key
 
 
 def _items(slots: Iterable[Slot], policy: Policy) -> list[_Item]:
@@ -193,9 +217,8 @@ def _items(slots: Iterable[Slot], policy: Policy) -> list[_Item]:
     for s in slots:
         if s.available_minor < 0:
             raise ValueError(f"slot {s.item_id}/{s.component}: negative availability")
-        if s.available_minor == 0 or policy.family_rank(s.family) is None:
-            continue
-        by_item.setdefault(s.item_id, []).append(s)
+        if _payable(s, policy):
+            by_item.setdefault(s.item_id, []).append(s)
     items = []
     for item_id, group in by_item.items():
         dates = {(s.due_date, s.issue_date) for s in group}
@@ -203,12 +226,40 @@ def _items(slots: Iterable[Slot], policy: Policy) -> list[_Item]:
             raise ValueError(f"item {item_id}: its slots disagree on its dates")
         if len({s.component for s in group}) != len(group):
             raise ValueError(f"item {item_id}: a component appears twice")
-        ordered = sorted(
-            group, key=lambda s: (policy.family_rank(s.family), s.component_order, s.component)
-        )
+        ordered = sorted(group, key=_spend_key(policy))
         due, issue = next(iter(dates))
         items.append(_Item(item_id, due, issue, tuple(ordered)))
     return items
+
+
+def cap_items(
+    slots: Iterable[Slot], item_available: Mapping[str, int], policy: Policy
+) -> list[Slot]:
+    """The slots with each item's payable amount capped at the item's net availability (review #0).
+
+    `item_available[item]` is min over t >= D of the item's balance as a whole: all its components
+    summed, held and negative ones included (`FileBalances.item_available`). What the item's payable
+    slots show above it is trimmed from the slot spent last upwards, so interest is the last to be
+    trimmed (1343-1); a slot trimmed to nothing is left out. Held slots are kept as they are (never
+    paid, but they count in the net). The order of the slots is kept."""
+    out = list(slots)
+    by_item: dict[str, list[int]] = {}
+    for n, s in enumerate(out):
+        if _payable(s, policy):
+            by_item.setdefault(s.item_id, []).append(n)
+    spend_key = _spend_key(policy)
+    emptied: set[int] = set()
+    for item_id, idx in by_item.items():
+        excess = sum(out[n].available_minor for n in idx) - max(item_available[item_id], 0)
+        for n in sorted(idx, key=lambda n: spend_key(out[n]), reverse=True):
+            if excess <= 0:
+                break
+            cut = min(excess, out[n].available_minor)
+            out[n] = replace(out[n], available_minor=out[n].available_minor - cut)
+            excess -= cut
+            if out[n].available_minor == 0:
+                emptied.add(n)
+    return [s for n, s in enumerate(out) if n not in emptied]
 
 
 def _spend(item: _Item, amount: int, out: list[Line]) -> None:
@@ -246,10 +297,12 @@ def allocate(
     *,
     as_of: date,
 ) -> Allocation:
-    """The lines of one payment on one file. Deterministic and independent of the input order."""
+    """The lines of one payment on one file. Deterministic and independent of the input order
+    (of the slots and of the designation). `slots` are what may be paid: per component, and per
+    item already capped at the item's net (`cap_items`; `FileBalances.plan` does both)."""
     if amount_minor < 0:
         raise ValueError("a payment amount is never negative")
-    named = {item: n for n, item in enumerate(dict.fromkeys(designation))}
+    named = frozenset(designation)
     items = sorted(_items(slots, policy), key=lambda it: (_debt_key(it, named, as_of), it.item_id))
     groups: list[list[_Item]] = []
     for it in items:
@@ -342,6 +395,17 @@ class FileBalances:
                 )
         return out
 
+    def item_available(self, at: date) -> dict[str, int]:
+        """Per claim item: min over t >= at of the sum of ALL its components' running balances,
+        held and negative ones included (0 if it never goes above 0). What an item may be paid at
+        `at`: never more than it is owed as a whole, now or at a later date (review #0)."""
+        merged: dict[str, BalanceProfile] = {}
+        for (item_id, _), profile in self.profiles.items():
+            points = merged.setdefault(item_id, BalanceProfile()).points
+            for d, v in profile.points.items():
+                points[d] = points.get(d, 0) + v
+        return {item_id: p.available(at) for item_id, p in merged.items()}
+
     def plan(
         self,
         amount_minor: int,
@@ -350,8 +414,10 @@ class FileBalances:
         *,
         at: date,
     ) -> tuple[Allocation, list[Slot]]:
-        """Allocate at date `at` and record what it takes (later payments of the run see it)."""
-        slots = self.slots(at)
+        """Allocate at date `at` and record what it takes (later payments of the run see it).
+        Returns the slots the waterfall ran on (each item capped at its net), for the inputs hash:
+        `allocate` on them gives the same lines."""
+        slots = cap_items(self.slots(at), self.item_available(at), policy)
         result = allocate(amount_minor, slots, policy, designation, as_of=at)
         for line in result.lines:
             self.profiles[(line.item_id, line.component)].take(at, line.amount_minor)
@@ -369,7 +435,9 @@ def inputs_hash(  # noqa: PLR0913 - every input of the computation is in the has
     slots: Sequence[Slot],
 ) -> str:
     """sha256 of the canonical inputs (ledger_entry.inputs_hash): the same inputs give the same
-    allocation, so M3 can tell whether a re-run by date changes anything."""
+    allocation, so M3 can tell whether a re-run by date changes anything. `slots` are the ones the
+    waterfall ran on (capped per item); a designation is a set of debts, so its order is not hashed.
+    """
     payload = {
         "engine": ENGINE_VERSION,
         "payment": payment_id,
@@ -377,7 +445,7 @@ def inputs_hash(  # noqa: PLR0913 - every input of the computation is in the has
         "amount": str(amount_minor),
         "date": effective_date.isoformat(),
         "policy": policy.as_json(),
-        "designation": list(designation),
+        "designation": sorted(set(designation)),
         "slots": sorted(
             [
                 s.item_id,
