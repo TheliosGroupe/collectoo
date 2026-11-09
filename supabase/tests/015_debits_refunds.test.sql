@@ -3,7 +3,7 @@
 -- §6, §7, §8.1, §9, §11, §13; ADR-0013 (M2b-6 addendum). The worker's debit job is played here through ops' link_debit
 -- (same posting function) and private.apply_debit_decisions; the direct-payment job through private.post_direct_payment.
 begin;
-select plan(113);
+select plan(117);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -419,6 +419,27 @@ select throws_ok($$select pg_temp.allocate('04', '01', '[["2", 6000]]', '2026-10
 select lives_ok($$select pg_temp.allocate('04', '01', '[["2", 6000]]', '2026-11-02')$$, 'allocated again from the return date');
 select is(pg_temp.state('04'), 'allocated/-', 'allocated');
 
+-- A forwarded payment the bank takes back: the forward undone at the return date, the client told ------------------
+select pg_temp.file('03', '20000000-0000-0000-0000-0000000000a1', 'Rappel SA');
+select pg_temp.item('03', '1', '2026-08-01', 9000);
+update public.account set status = 'closed_recalled' where id = pg_temp.f('03');
+select pg_temp.payment('05', 3000);
+select pg_temp.match('05', '03', 'account_closed');
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.forward_payment('k-fwd-0001', pg_temp.pay('05'), null, '3000', null, 'dossier rappelé')$$,
+  'a recalled file''s payment forwarded to the client');
+select pg_temp.line('t3', 'debit', 'return', 3000, '2026-11-04', 'E2E-05');
+select lives_ok($$select public.link_debit('k-link-0040', pg_temp.ln('t3'), 'return', pg_temp.pay('05'), null, '3000',
+  'retour bancaire')$$, 'its return linked');
+reset role;
+select is(pg_temp.entries('05'), format('forward@%1$s reversal(forward)@%1$s cash_out@2026-11-04', private.paris_today()),
+  'returned before the forward''s date: the forward reversed at its own date, the cash_out at the return date (I4 holds)');
+select results_eq($$select kind, reason from public.client_notification where payment_id = pg_temp.pay('05') order by kind$$,
+  $$values ('payment_forward_reversed'::text, 'bank_return'::text), ('payment_forwarded'::text, 'file_recalled'::text),
+           ('payment_returned'::text, 'bank_return'::text)$$,
+  'the client is told the forward is undone and the payment returned');
+
 -- Lines ops explain (founder #20: not booked) -------------------------------------------------------------------------
 select pg_temp.line('x1', 'credit', 'return', 290, '2026-11-04', null, '80000000-0000-0000-0000-0000000000aa', 'FRAIS REPRIS');
 set local role authenticated;
@@ -512,11 +533,11 @@ select throws_ok($$update public.direct_payment set reason = 'x' where account_i
 -- Read access (founder #18) ---------------------------------------------------------------------------------------------
 set local role authenticated;
 select pg_temp.as_user('01');
-select ok((select count(*) from public.refund_request) = 2 and (select count(*) from public.bank_debit_link) = 5
+select ok((select count(*) from public.refund_request) = 2 and (select count(*) from public.bank_debit_link) = 6
           and (select count(*) from public.bank_debit_review) = 1 and (select count(*) from public.bank_duplicate_resolution) = 2,
   'money staff read the refunds, links, reviews and duplicate decisions of their servicer');
 select is((select count(*)::int from public.debit_queue('a-classer')), 1, 'the queue lists the line left to ops');
-select is((select count(*)::int from public.debit_queue('traites')), 7, 'and the lines decided');
+select is((select count(*)::int from public.debit_queue('traites')), 8, 'and the lines decided');
 select pg_temp.as_user('05');
 select ok((select count(*) from public.refund_request) + (select count(*) from public.bank_debit_link)
           + (select count(*) from public.bank_debit_review) + (select count(*) from public.direct_payment)

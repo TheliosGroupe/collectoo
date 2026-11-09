@@ -532,7 +532,8 @@ declare
   v_why record;
   r record;
   e record;
-  n record;
+  v_n_account uuid;
+  v_n_portfolio uuid;
   v_rev uuid;
 begin
   -- a refund (or its bounce) is the request's payment
@@ -649,10 +650,13 @@ begin
                 'payment_allocation_reversed', 'bank_return');
       else
         -- the forward's own notification says which file (if any) the client read it about
-        select c.account_id, c.portfolio_id into n from public.client_notification c where c.ledger_entry_id = e.id;
+        v_n_account := null;
+        v_n_portfolio := null;
+        select c.account_id, c.portfolio_id into v_n_account, v_n_portfolio
+        from public.client_notification c where c.ledger_entry_id = e.id;
         insert into public.client_notification (organization_id, client_organization_id, portfolio_id, account_id,
                                                 payment_id, ledger_entry_id, kind, reason)
-        values (p_organization_id, e.client_organization_id, n.portfolio_id, n.account_id, r.payment_id, v_rev,
+        values (p_organization_id, e.client_organization_id, v_n_portfolio, v_n_account, r.payment_id, v_rev,
                 'payment_forward_reversed', 'bank_return');
       end if;
     end loop;
@@ -2135,13 +2139,16 @@ begin
     where t.organization_id = any (v_orgs) and t.kind = 'other_debit'
       and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id);
   elsif p_tab = 'traites' then
+    -- from the decisions (a few per day), never from the servicer's lines
     create temp table _dq on commit drop as
     select t.*, null::text as eff_kind from public.bank_transaction t
-    where t.organization_id = any (v_orgs) and t.kind in ('return', 'refund_out', 'suspected_duplicate', 'other_debit')
-      and (exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id)
-           or exists (select 1 from public.bank_duplicate_resolution r where r.bank_transaction_id = t.id
-                      and not (r.decision = 'released' and r.released_kind in ('return', 'refund_out')
-                               and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id))));
+    where t.id in (select l.bank_transaction_id from public.bank_debit_link l where l.organization_id = any (v_orgs)
+                   union
+                   select r.bank_transaction_id from public.bank_duplicate_resolution r
+                   where r.organization_id = any (v_orgs)
+                     and not (r.decision = 'released' and r.released_kind in ('return', 'refund_out')
+                              and not exists (select 1 from public.bank_debit_link l
+                                              where l.bank_transaction_id = r.bank_transaction_id)));
   else
     create temp table _dq on commit drop as
     select t.*, coalesce(r.released_kind, t.kind) as eff_kind from public.bank_transaction t
