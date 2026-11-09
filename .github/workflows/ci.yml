@@ -36,6 +36,8 @@ jobs:
       - run: uv run pytest --cov
       - name: Mapping eval suite (mock provider, fails below threshold)
         run: uv run python -m collectoo_worker.ai.evals mapping
+      - name: Reconciliation eval (100k-credit synthetic statement; fails below 95 % or on a wrong match)
+        run: uv run python -m collectoo_worker.payments.reconciliation_eval
       - name: supabase/seed.sql is up to date
         run: |
           uv run synth seed-sql > ../supabase/seed.sql
@@ -90,7 +92,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
-      - name: Worker integration tests (queue, storage, commit, statements, 50k-loan and 50k-line scale runs)
+      - name: Worker integration tests (queue, storage, commit, statements, matching, 50k scale runs)
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen && uv run pytest -m integration

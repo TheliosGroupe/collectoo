@@ -88,7 +88,7 @@ def test_match_50k_payments_against_50k_files(
     hist = score(pay(tenant, store, history, prefix="H", days=2), history, "H")
     hist_s = time.monotonic() - hist_started
     assert hist.wrong == [] and hist.auto == hist.total
-    credits = generate_credits(world, CREDITS, seed=4)
+    credits = generate_credits(world, CREDITS, seed=4, earlier=history)
     main_started = time.monotonic()
     statement = pay(tenant, store, credits, prefix="M", days=5)
     main_s = time.monotonic() - main_started
@@ -103,4 +103,5 @@ def test_match_50k_payments_against_50k_files(
     assert result.wrong == [], result.wrong[:5]
     assert result.bad_reason == [], result.bad_reason[:5]
     assert result.rate >= 0.95, result.report()
+    assert result.ready_rate >= 0.95, result.report()  # and not held by the gating
     assert main_s < 240

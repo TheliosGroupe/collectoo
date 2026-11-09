@@ -24,6 +24,9 @@ import {
 import { money } from "@/lib/payments/statements";
 import { AcceptSuggestion, BulkAccept, ChooseFile, SearchAndAssign, Unassign } from "./queue-actions";
 
+const NO_SUGGESTION_HELP =
+  "Aucune règle ne désigne un dossier : cherchez-le par sa référence, un numéro de facture, la référence RF ou le nom du débiteur.";
+
 type Row = {
   payment_id: string;
   amount_minor: string;
@@ -153,7 +156,9 @@ export default async function QueuePage({ searchParams }: PageProps<"/backoffice
           : "Paiements rattachés à un dossier, prêts pour l'imputation. Un paiement affecté au mauvais dossier se désaffecte ici tant que rien n'est imputé."}
       </InfoNote>
 
-      <form method="get" action="/backoffice/encaissements/a-traiter" className="grid grid-cols-2 gap-3 sm:grid-cols-6" aria-label="Filtrer les paiements" data-testid="queue-filters">
+      <details open={filtered} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800" data-testid="queue-filter-panel">
+        <summary className="cursor-pointer text-sm font-medium">Filtres{filtered ? " (actifs)" : ""}</summary>
+      <form method="get" action="/backoffice/encaissements/a-traiter" className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-6" aria-label="Filtrer les paiements" data-testid="queue-filters">
         {q.onglet === "rapproches" ? <input type="hidden" name="onglet" value="rapproches" /> : null}
         {q.onglet === "a-traiter" ? (
           <label className="col-span-2 flex flex-col gap-1 text-sm">
@@ -197,6 +202,7 @@ export default async function QueuePage({ searchParams }: PageProps<"/backoffice
           </button>
         </div>
       </form>
+      </details>
 
       {q.onglet === "a-traiter" && acceptable > 1 ? <BulkAccept idempotencyKey={randomUUID()} count={acceptable} /> : null}
 
@@ -319,8 +325,8 @@ function PaymentCard({
             {file.debtor_name ? ` · ${file.debtor_name}` : ""}
           </p>
           <p className="text-zinc-600 dark:text-zinc-400">
-            {decision?.rule ? `Règle ${decision.rule} : ` : ""}
-            {r.match_method ? METHOD_LABEL[r.match_method] : ""} · solde {money(file.balance_minor, file.currency)}
+            {decision?.rule && r.match_method ? `Règle ${decision.rule} : ${METHOD_LABEL[r.match_method]} · ` : ""}
+            solde {money(file.balance_minor, file.currency)}
           </p>
         </div>
       ) : null}
@@ -330,7 +336,9 @@ function PaymentCard({
         </p>
       ) : null}
       {reason.help && (r.status !== "matched" || r.review_reason) ? (
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">{reason.help}</p>
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+          {r.review_reason === "no_match" && !topFile ? NO_SUGGESTION_HELP : reason.help}
+        </p>
       ) : null}
 
       {r.status === "unmatched" && r.review_reason && !["account_not_confirmed", "no_mandate"].includes(r.review_reason) ? (

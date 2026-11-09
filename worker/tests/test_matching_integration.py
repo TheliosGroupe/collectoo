@@ -31,12 +31,13 @@ def test_the_synthetic_statement_is_matched_through_the_database() -> None:
     history = history_credits(world, seed=7)
     hist = score(pay(tenant, store, history, prefix="H"), history, "H")
     assert hist.wrong == [] and hist.auto == hist.total  # what teaches the IBAN memory
-    credits = generate_credits(world, 1_500, seed=8)
+    credits = generate_credits(world, 1_500, seed=8, earlier=history)
     result = score(pay(tenant, store, credits, prefix="M"), credits, "M")
     print("\n" + json.dumps(result.report(), indent=1))
     assert result.wrong == [], result.wrong[:5]
     assert result.bad_reason == [], result.bad_reason[:5]
     assert result.rate >= 0.95, result.report()
+    assert result.ready_rate >= 0.95, result.report()  # and not held by the gating
 
 
 def test_sql_and_python_read_references_alike() -> None:

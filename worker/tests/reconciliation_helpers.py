@@ -178,7 +178,8 @@ def score(statement_id: str, credits: Sequence[Credit], prefix: str) -> Score:
         account, reason, method, _status = found[line_ref(prefix, k)]
         automatic = method in ("rf_structured", "rf_text", "rf_body", "item_ref", "iban_memory")
         queue_reason = reason if not automatic else None
-        s.add(c, line_ref(prefix, k), account if automatic else None, queue_reason)
+        gated = automatic and reason is not None
+        s.add(c, line_ref(prefix, k), account if automatic else None, queue_reason, gated)
     return s
 
 

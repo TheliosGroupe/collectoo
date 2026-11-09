@@ -244,7 +244,7 @@ class _Pools:
 
     world: World
     open_: list[WorldAccount]
-    single_link: list[WorldAccount]
+    single_link: list[tuple[WorldAccount, str]]  # a file and the IBAN that paid it (only it)
     two_files: list[tuple[str, list[str]]]
     unique_items: list[tuple[WorldAccount, ItemInfo]]
     shared_items: list[tuple[WorldAccount, ItemInfo]]
@@ -258,17 +258,22 @@ class _Pools:
             for key in {ref_key(a.external_ref), *(i.key for i in a.items)}:
                 owners.setdefault(key, set()).add(a.id)
         ids = {a.id for a in open_}
+        files = world.by_id()
+        by_iban = [(iban, links) for iban, links in world.iban_links.items()]
         single = [
-            a
-            for a in open_
-            if set(world.iban_links.get(debtor_iban(a.id), {})) == {a.id}
-            and world.iban_links[debtor_iban(a.id)][a.id] >= 1
+            (files[account], iban)
+            for iban, links in by_iban
+            for account, n in links.items()
+            if len(links) == 1 and n >= 1 and account in ids
         ]
+        single.sort(key=lambda x: x[0].external_ref)
+        # files in the order of their references (ids are drawn afresh in each database)
         two = [
-            (iban, sorted(links))
-            for iban, links in world.iban_links.items()
+            (iban, sorted(links, key=lambda a: files[a].external_ref))
+            for iban, links in by_iban
             if len(links) == 2 and set(links) <= ids
         ]
+        two.sort(key=lambda x: [files[a].external_ref for a in x[1]])
         unique, shared = [], []
         for a in open_:
             for i in a.items:
@@ -282,12 +287,27 @@ class _Pools:
 
 
 class _Writer:
-    def __init__(self, world: World, seed: int) -> None:
+    def __init__(self, world: World, seed: int, earlier: Sequence[Credit] = ()) -> None:
         self.rng = random.Random(seed)
         self.fake = Faker("fr_FR")
         self.fake.seed_instance(seed)
         self.p = _Pools.of(world)
-        self.taken: dict[str, int] = {}
+        self.taken: dict[str, int] = {}  # paid to each file (earlier statements included)
+        for c in earlier:
+            if c.truth is not None:
+                self.taken[c.truth] = self.taken.get(c.truth, 0) + c.amount_minor
+
+    def left(self, a: WorldAccount) -> int:
+        return a.balance_minor - self.taken.get(a.id, 0)
+
+    def pick(self, pool: Sequence[Any], file: Any = lambda x: x) -> Any:
+        """A file of the pool that still owes something (payers do not pay a settled file)."""
+        for _ in range(30):
+            choice = self.rng.choice(pool)
+            a = file(choice)
+            if self.left(a) >= max(1_000, a.balance_minor // 10):
+                return choice
+        return self.rng.choice(pool)
 
     # -- payers ---------------------------------------------------------------------------------
 
@@ -325,8 +345,7 @@ class _Writer:
 
     def amount(self, a: WorldAccount, *, share: float = 0.3) -> int:
         """A partial payment that leaves room for the file's other payments in the statement."""
-        left = a.balance_minor - self.taken.get(a.id, 0)
-        top = max(100, int(left * share))
+        top = max(1, int(max(self.left(a), 0) * share))
         amount = self.rng.randint(min(100, top), top)
         self.taken[a.id] = self.taken.get(a.id, 0) + amount
         return amount
@@ -335,11 +354,10 @@ class _Writer:
 
     def credit(self, scenario: str) -> Credit:
         """A credit of that scenario (one with an empty pool pays by structured RF instead)."""
-        rng = self.rng
         if scenario in ("rf_structured", "rf_text", "rf_body"):
-            return self._by_reference(scenario, rng.choice(self.p.open_))
+            return self._by_reference(scenario, self.pick(self.p.open_))
         if scenario == "item_ref" and self.p.unique_items:
-            return self._by_invoice(*rng.choice(self.p.unique_items))
+            return self._by_invoice(*self.pick(self.p.unique_items, lambda x: x[0]))
         write = {
             "repeat_iban": self._repeat_iban if self.p.single_link else None,
             "name_amount": self._name_amount,
@@ -350,14 +368,14 @@ class _Writer:
         }.get(scenario)
         if write is not None:
             return write()
-        return self._by_reference("rf_structured", rng.choice(self.p.open_))
+        return self._by_reference("rf_structured", self.pick(self.p.open_))
 
     def _repeat_iban(self) -> Credit:
-        a = self.rng.choice(self.p.single_link)
+        a, iban = self.pick(self.p.single_link, lambda x: x[0])
         text = self.rng.choice(((), ("VIREMENT",), ("Remboursement mensuel",), ("ECHEANCE",)))
         amount = self.amount(a, share=0.1)
         name = self.as_payer(a.names[0])
-        return Credit(amount, name, debtor_iban(a.id), text, None, a.id, "auto", "repeat_iban")
+        return Credit(amount, name, iban, text, None, a.id, "auto", "repeat_iban")
 
     def _name_amount(self) -> Credit:
         a = self.rng.choice(self.p.open_)
@@ -368,7 +386,7 @@ class _Writer:
         return Credit(amount, a.names[0], iban, ("SOLDE",), None, a.id, "no_match", "name_amount")
 
     def _rf_typo(self) -> Credit:
-        a = self.rng.choice(self.p.open_)
+        a = self.pick(self.p.open_)
         bad = _typo(a.rf or "", self.rng)
         structured = self.rng.random() < 0.5
         text = () if structured else (f"REGLT {rf_format(bad)}",)
@@ -377,7 +395,7 @@ class _Writer:
         return Credit(amount, self.stranger(), iban, text, ref, a.id, "no_match", "rf_typo")
 
     def _shared_ref(self) -> Credit:
-        a, item = self.rng.choice(self.p.shared_items)
+        a, item = self.pick(self.p.shared_items, lambda x: x[0])
         text = (f"REGLEMENT FACTURE {item.ref}",)
         amount, iban = self.amount(a, share=0.1), self.fresh_iban()
         return Credit(amount, self.stranger(), iban, text, None, a.id, "ambiguous", "shared_ref")
@@ -439,7 +457,7 @@ class _Writer:
             )
         else:
             text = rng.choice(((f"REGLT FACT {item.ref}",), (f"VIR FACTURE N {item.ref}",)))
-        if rng.random() < 0.2:  # a third party pays the cited invoice to the cent
+        if rng.random() < 0.2 and self.taken.get(a.id, 0) == 0:  # a third party pays it to the cent
             self.taken[a.id] = self.taken.get(a.id, 0) + item.balance_minor
             return Credit(
                 item.balance_minor,
@@ -476,9 +494,12 @@ def mix_counts(n: int) -> dict[str, int]:
     return counts
 
 
-def generate_credits(world: World, n: int, seed: int = 1) -> list[Credit]:
-    """n credits in the mix's exact proportions, in a random order."""
-    w = _Writer(world, seed)
+def generate_credits(
+    world: World, n: int, seed: int = 1, earlier: Sequence[Credit] = ()
+) -> list[Credit]:
+    """n credits in the mix's exact proportions, in a random order. `earlier`: credits already
+    paid to the files (an earlier statement): nobody pays a file more than it still owes."""
+    w = _Writer(world, seed, earlier)
     scenarios = [name for name, k in mix_counts(n).items() for _ in range(k)]
     w.rng.shuffle(scenarios)
     return [w.credit(s) for s in scenarios]
@@ -490,7 +511,11 @@ def history_credits(world: World, seed: int = 1) -> list[Credit]:
     rng = random.Random(seed)
     files = world.by_id()
     out = []
-    for iban, links in sorted(world.iban_links.items()):
+    # in the order of the files' references (not of ids or IBANs, drawn afresh in each database)
+    order = sorted(
+        world.iban_links.items(), key=lambda kv: sorted(files[a].external_ref for a in kv[1])
+    )
+    for iban, links in order:
         for account in sorted(links):
             a = files[account]
             amount = rng.randint(100, max(100, a.balance_minor // 20))
@@ -542,9 +567,14 @@ class Score:
     missed: dict[str, int] = field(default_factory=dict)  # expected auto, queued (per scenario)
     bad_reason: list[str] = field(default_factory=list)  # expected in the queue for another reason
     auto_unexpected: int = 0  # expected in the queue, matched automatically to the right file
+    gated: int = 0  # matched automatically to the right file, then held for ops by the gating
     by_scenario: dict[str, list[int]] = field(default_factory=dict)  # [count, auto]
 
-    def add(self, c: Credit, line: str, account: str | None, reason: str | None) -> None:
+    def add(
+        self, c: Credit, line: str, account: str | None, reason: str | None, gated: bool = False
+    ) -> None:
+        """`account`: the file a rule matched (None: left to ops, with `reason`); `gated`: the
+        automatic match was then held for ops (file not confirmed, closed, nothing due…)."""
         self.total += 1
         row = self.by_scenario.setdefault(c.scenario, [0, 0])
         row[0] += 1
@@ -555,6 +585,7 @@ class Score:
                 self.wrong.append(f"{line} ({c.scenario}): matched {account}, truth {c.truth}")
             elif c.expect != "auto":
                 self.auto_unexpected += 1
+            self.gated += int(gated)
             return
         self.queued += 1
         if c.expect == "auto":
@@ -566,11 +597,18 @@ class Score:
     def rate(self) -> float:
         return self.auto / self.total if self.total else 0.0
 
+    @property
+    def ready_rate(self) -> float:
+        """Matched automatically and ready for allocation (not held by the gating)."""
+        return (self.auto - self.gated) / self.total if self.total else 0.0
+
     def report(self) -> dict[str, Any]:
         return {
             "credits": self.total,
             "auto": self.auto,
             "auto_rate": f"{self.rate:.4f}",
+            "gated": self.gated,
+            "ready_rate": f"{self.ready_rate:.4f}",
             "wrong": len(self.wrong),
             "queued": self.queued,
             "missed_by_scenario": dict(sorted(self.missed.items())),
