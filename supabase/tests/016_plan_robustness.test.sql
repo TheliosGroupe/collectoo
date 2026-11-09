@@ -10,8 +10,7 @@ create temp table _fn (sig regprocedure primary key, config text[], secdef boole
                        grantees text[]);
 insert into _fn values
   ('private.bank_import_entry_known(uuid)',
-   array['search_path=""', 'enable_hashjoin=off', 'enable_mergejoin=off', 'enable_bitmapscan=off',
-         'enable_seqscan=off'], false, 's', '{}'),
+   array['search_path=""', 'enable_nestloop=off', 'enable_mergejoin=off'], false, 's', '{}'),
   ('private.bank_import_lines_elsewhere(uuid, uuid)',
    array['search_path=""', 'enable_nestloop=off', 'enable_mergejoin=off'], false, 's', '{}'),
   ('private.payment_positions(uuid[])', array['search_path=""', 'enable_seqscan=off'], false, 's',
@@ -132,15 +131,18 @@ select g, 'e:M' || g || '#1', 'M' || g, 'credit', 100, '2026-03-11' from generat
 insert into pg_temp._bi_new values (301, 'e:N1#9999', 'N1', 'credit', 1, '2026-03-10'),
                                    (302, 't:no-entry', null, 'credit', 1, '2026-03-10');
 analyze pg_temp._bi_new;
+create temp table _stored as select count(*) as n from public.bank_transaction;
 select pg_temp.mark();
 select is(private.bank_import_entry_known('80000000-0000-0000-0000-0000000000f1'), 301,
   'entry known: the line of an entry the account has already');
--- 55b594b's body (lateral LIMIT 1 without enable_seqscan = off) seq-scanned the account's lines once per new line
--- here: 301 seq scans, 1.8M rows read (4.2 s for 500 lines on a 50k-line account; 17 min for a 50k import).
-select is((select array[r.seq_scan, r.seq_tup_read] from pg_temp.read_since_mark() r), array[0, 0]::bigint[],
-  'and no line of the account is read by a seq scan, whatever few entries its lines share');
-select ok((select r.idx_scan <= 301 from pg_temp.read_since_mark() r),
-  'one index probe at most per new line with an entry reference');
+-- A probe per new line was not robust: 55b594b's lateral LIMIT 1 seq-scanned the account's lines once per new line here
+-- (301 seq scans, 1.8M rows read) and, with enable_seqscan off, read the whole account through an index whose leading
+-- column is not the account once bank_transaction counted zero rows over its pages (6000 rows a new line). A hash
+-- semi-join reads the account's lines once, whatever the statistics.
+select ok((select r.seq_scan + r.idx_scan <= 1 from pg_temp.read_since_mark() r),
+  'the account''s stored lines are read in one pass, not once per new line');
+select ok((select r.seq_tup_read <= (select n from _stored) from pg_temp.read_since_mark() r),
+  'at most one read of the stored lines, whatever few entries they share');
 select is(private.bank_import_entry_known('80000000-0000-0000-0000-0000000000f2'), null,
   'another account: none of those entries is known there');
 

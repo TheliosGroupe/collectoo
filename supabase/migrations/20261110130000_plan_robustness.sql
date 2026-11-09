@@ -27,32 +27,28 @@
 -- Statement import: the new lines (pg_temp._bi_new of private.ingest_statement) against the stored ones
 ------------------------------------------------------------------------------------------
 
--- The first new line whose bank entry (camt.053 Ntry/AcctSvcrRef) this bank account has already. The new lines are
--- outside by construction (lateral, LIMIT 1): one probe of bank_transaction_entry_idx per new line that has an entry
--- reference, never the account's lines scanned per new line (CI: 133 s for 50k new lines on an account whose 13.5k
--- lines the statistics did not know yet). The account is compared through an init-plan parameter: estimated as an
--- average account, never as « no line », so the probe uses the index on (account, entry reference) and not one that
--- reads every line of the account. `enable_seqscan = off` (added): the LIMIT divides a scan's cost by the rows it is
--- expected to find, so on an account whose lines share few bank entries (batch bookings, n_distinct 25 on 50k lines,
--- pages not all-visible yet) a seq scan of bank_transaction per new line looked cheaper than the probe: 4.2 s for 500
--- new lines (about 17 min for 50k) against 1.8 ms with the probe.
+-- The first new line whose bank entry (camt.053 Ntry/AcctSvcrRef) this bank account has already: one hash semi-join of
+-- the new lines with the account's lines that carry an entry reference (enable_nestloop and enable_mergejoin off; the
+-- SET clauses change from hashjoin/mergejoin/bitmapscan off). One pass over each side whatever the statistics. A probe
+-- per new line (a nested loop) was not robust: the old join scanned the new lines once per stored line when the
+-- account's 13.5k lines were unknown to the statistics (CI: 133 s for 50k new lines); a LIMIT 1 probe chose a seq scan
+-- per new line when the account's lines shared few bank entries (4.2 s for 500 lines) and, once bank_transaction
+-- counted zero rows over its pages, an index where the account is not the leading column, reading every line of the
+-- account per new line (33 ms a line, about 27 min for 50k). Cost now: one read of the account's lines with an entry
+-- reference per import (41 ms at zero density for 50k).
 create or replace function private.bank_import_entry_known(p_bank_account_id uuid)
 returns integer
 language plpgsql
 stable
 set search_path = ''
-set enable_hashjoin = off
+set enable_nestloop = off
 set enable_mergejoin = off
-set enable_bitmapscan = off
-set enable_seqscan = off
 as $$
 begin
   return (select min(x.line_no)
           from pg_temp._bi_new x
-          cross join lateral (select 1 from public.bank_transaction t
-                              where t.bank_account_id = (select p_bank_account_id) and t.entry_ref = x.entry_ref
-                              limit 1) k
-          where x.entry_ref is not null);
+          where x.entry_ref in (select t.entry_ref from public.bank_transaction t
+                                where t.bank_account_id = p_bank_account_id and t.entry_ref is not null));
 end;
 $$;
 
@@ -322,7 +318,9 @@ $$;
 -- They drive from the payment's entries now: each entry's postings by entry, the book by the posting's account key (a
 -- scalar lookup, or a keyed lateral where the account's columns are read). The rows the page names (parties, files,
 -- organizations, bank lines) are reached by key from the row that names them, and the payer's other files from the
--- file's parties (they were found by testing every account against them). The lists ordered by a date then the id
+-- file's parties (they were found by testing every account against them; known limit: at zero rows over its pages,
+-- account_party is read through its primary key, where the party is the second column, about 13 ms a party, linear per
+-- page). The lists ordered by a date then the id
 -- (entries, matches, notifications, refunds, documents) read their rows in a subquery holding the key alone (OFFSET
 -- 0): with the order passed down, a table counting zero rows over its pages was read whole through its primary key
 -- (sorted by id, the list's last key) instead of probed by the payment (ledger_entry_pkey, 212k rows removed by the
@@ -495,6 +493,9 @@ $$;
 -- lateral holding the key alone (OFFSET 0: the other conditions are not pushed into it, so no index but the key's can
 -- serve it), the other conditions applied to the rows it returns: the refund request by its RFD id (unique), the
 -- payment by its end-to-end id, the payment of a line by its bank line (unique): 3.5 ms for the 2000 refunds above.
+-- The final query reads each candidate's payment and refund request the same way (keyed laterals): as plain left joins,
+-- at zero rows over their pages, the planner materialised every payment and every request and compared each line with
+-- all of them (1244 lines × 169k payments: 145M rows removed, 10 s; 0.41 s keyed).
 -- Left as it was: the line a return names by its bank transaction id is found on (bank account, tx id), and at zero
 -- rows over bank_transaction's pages every index led by (or holding) the bank account costs the same, so the planner
 -- may read the account's lines for each such return (394 of the 2000 returns on a 63.5k-line account: 14 s for the
@@ -586,8 +587,10 @@ begin
          coalesce(q.status, p.status), coalesce(q.executed_on, p.booking_date), p.status, pos.free_from
   from pg_temp._dc_line x
   left join pg_temp._dc_cand c on c.line_id = x.id
-  left join public.payment p on p.id = c.payment_id
-  left join public.refund_request q on q.id = c.refund_request_id
+  left join lateral (select z.bank_account_id, z.amount_minor, z.status, z.booking_date from public.payment z
+                     where z.id = c.payment_id offset 0) p on true
+  left join lateral (select z.bank_account_id, z.amount_minor, z.status, z.executed_on from public.refund_request z
+                     where z.id = c.refund_request_id offset 0) q on true
   left join pg_temp._dc_pos pos on pos.payment_id = c.payment_id
   order by x.booking_date, x.id, c.payment_id;
 end;

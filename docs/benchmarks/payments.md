@@ -253,20 +253,24 @@ counts one row whatever the table holds, and every index scan costs about the sa
 | `receipt_payload` | `ledger_entry` not analysed | 3,000 payloads 67.3 s | 0.84 s |
 | `receipt_payload` | `account`, `claim_item`, `party`, `account_party` at zero density | 50 receipts 10.9 s (`55b594b`) | 15 ms; 2,000 in 0.48 s |
 | `bank_import_entry_known` | the account estimated at 1 line (13.5k in fact), 50k import | ingest 117.4 s | 6.5–6.9 s |
-| `bank_import_entry_known` | a 63.5k-line account analysed as 3 bank entries (batch bookings), no page all-visible | 300 new lines 7.5 s (`55b594b`, ~21 min for 50k) | 1.9 ms; 50k new lines 75 ms |
+| `bank_import_entry_known` | a 63.5k-line account analysed as 3 bank entries (batch bookings), no page all-visible | 300 new lines 7.5 s (`55b594b`, ~21 min for 50k) | one pass (hash semi-join) |
+| `bank_import_entry_known` | `bank_transaction` at zero density, 50k lines on 25 entries | 2,001 new lines 66 s with a probe kept to the index (`f8271de`, ~27 min for 50k); 4.5 s as merged | 41 ms (hash semi-join) |
 | `bank_import_lines_elsewhere` | `bank_transaction` stale, 50k CSV lines | 196.8 s | 0.07 s |
 | `bank_import_lines_elsewhere` | `bank_transaction` at zero density, 50k CSV lines against a 63.5k-line account | 282.7 s (as merged); `55b594b` 1.9 s for 300 lines (~5 min for 50k) | 89 ms (hash join) |
 | `payment_detail` | `ledger_entry` never analysed | 200 pages 0.58 s | 0.42 s |
 | `payment_detail` | every table it reads at zero density | 1 page > 300 s (cancelled) | 3.7 ms a page (2,000 in 7.3 s) |
 | `debit_candidates`, refund lookup | 2,000 refund lines, 20k refunds at zero density / analysed at 20 refunds | 4.5 s / 0.88 s | 3.5 ms / 3.5 ms |
 | `debit_candidates`, payment lookups | 2,000 returns naming payments, `payment` and `bank_transaction` at zero density | > 120 s (cancelled) | 14.3 s (see below) |
+| `debit_candidates`, final query | 1,244 lines, every table at zero density (169k payments) | 10.0 s (plain left joins: 145M rows removed) | 0.41 s (keyed laterals) |
 
 - `55b594b` is the first version of this migration (never merged); the verifier's review found its probes still
   depended on estimates (a `LIMIT 1` divides a scan's cost by the rows it expects: on batch-booked lines a seq scan per
-  new line looked cheaper; `= any (others)` read a whole index per line at zero density). The final version adds
-  `enable_seqscan = off` to the entry probe and makes the CSV check a hash join. 016 checks both by what they read
-  (`pg_stat_xact_user_tables`): no seq scan of the account's lines (`55b594b`: 301 seq scans, 1.8M rows), the stored
-  lines read in one pass (`55b594b`: 5,000 index probes).
+  new line looked cheaper; `= any (others)` read a whole index per line at zero density). A second review found that
+  forcing the probe onto an index was not enough either: at zero density the planner chose an index where the account
+  is not the leading column and read every line of the account per new line. Both statement-import checks are now hash
+  joins (one pass over each side, nested loops and merge joins off), whatever the statistics. 016 checks them by what
+  they read (`pg_stat_xact_user_tables`): the account's lines read in one pass (`55b594b`: 301 seq scans, 1.8M rows),
+  the other accounts' lines in one pass (`55b594b`: 5,000 index probes).
 - `payment_detail`: the lists ordered by a date then the id read their rows in a key-only subquery: with the order
   passed down, a table at zero density was read whole through its primary key (188 ms a page with the keyed lookups
   alone).
