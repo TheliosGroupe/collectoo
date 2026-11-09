@@ -2,7 +2,7 @@
 -- §6, §10, §13; ADR-0013 (M2b-5 addendum). The worker's receipts job is played here: private.receipt_begin, then
 -- private.receipt_prepare, then the rendered PDFs' hashes written into pg_temp._receipt_pdf, then private.receipt_issue.
 begin;
-select plan(130);
+select plan(131);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -608,5 +608,9 @@ select ok(has_function_privilege('service_role', 'private.receipt_orphan_objects
 select is((select schedule from cron.job where jobname = 'receipts-sweep'), '23 2 * * *', 'the sweep is queued daily');
 select is(private.queue_receipt_sweep() >= 1, true, 'one sweep job per servicer');
 
+select ok((select bool_and('enable_nestloop=off' = any (coalesce(p.proconfig, '{}')))
+           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+           where n.nspname = 'private' and p.proname in ('receipts_after_payment', 'payment_after_update')),
+  'triggers joining old and new payment rows never reuse a nested-loop plan (50k-row updates)');
 select * from finish();
 rollback;

@@ -558,11 +558,14 @@ create trigger ledger_entry_receipts after insert on public.ledger_entry
   referencing new table as new_rows for each statement execute function private.receipts_after_entry();
 alter table public.ledger_entry enable always trigger ledger_entry_receipts;
 
+-- The two transition tables are joined: plpgsql caches the plan made for the session's first update (often a
+-- handful of rows), and a nested loop reused for a 50k-row update compares every pair (minutes). Hash joins only.
 create or replace function private.receipts_after_payment()
 returns trigger
 language plpgsql
 security definer
 set search_path = ''
+set enable_nestloop = off
 as $$
 begin
   perform private.queue_receipts(coalesce(jsonb_agg(jsonb_build_object('organization_id', n.organization_id,
@@ -575,6 +578,9 @@ begin
   return null;
 end;
 $$;
+-- Same trap in M2b-4's trigger (already applied): its joins of old and new rows get hash joins too.
+alter function private.payment_after_update() set enable_nestloop = off;
+
 create trigger payment_receipts after update on public.payment
   referencing old table as old_rows new table as new_rows
   for each statement execute function private.receipts_after_payment();
