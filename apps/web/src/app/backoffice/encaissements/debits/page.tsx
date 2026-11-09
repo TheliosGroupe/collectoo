@@ -144,11 +144,21 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
                 {r.remittance_text ? (
                   <p className="text-sm break-words text-zinc-600 dark:text-zinc-400">{r.remittance_text}</p>
                 ) : null}
-                <p className="font-mono text-xs break-all text-zinc-600 dark:text-zinc-400">
-                  {r.original_end_to_end_id ? `Réf. d'origine ${r.original_end_to_end_id}` : r.end_to_end_id ? `Réf. ${r.end_to_end_id}` : "Sans référence"}
-                  {r.return_reason ? ` · motif ${r.return_reason}` : ""} ·{" "}
-                  <Link href={`/backoffice/encaissements/releves/${r.statement_id}`} className="underline underline-offset-4">
-                    relevé
+                <p className="text-xs text-zinc-600 dark:text-zinc-400">
+                  <span className="font-mono break-all">
+                    {r.original_end_to_end_id
+                      ? `Réf. d'origine ${r.original_end_to_end_id}`
+                      : r.end_to_end_id
+                        ? `Réf. ${r.end_to_end_id}`
+                        : "Sans référence"}
+                    {r.return_reason ? ` · motif ${r.return_reason}` : ""}
+                  </span>{" "}
+                  ·{" "}
+                  <Link
+                    href={`/backoffice/encaissements/releves/${r.statement_id}`}
+                    className="whitespace-nowrap underline underline-offset-4"
+                  >
+                    voir le relevé
                   </Link>
                 </p>
                 {r.review_reason ? (
@@ -200,9 +210,21 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
 function LineActions({ row, options }: { row: Row; options: Options | undefined }) {
   const cur = row.currency;
   const fromReview = row.candidates.filter((c) => c.payment_id && !c.refund_request_id && c.left_minor);
-  const payments = new Map<string, { payment_id: string; amount_minor: string; booking_date: string; payer_name: string | null; left_minor: string; file_reference: string | null }>();
+  const payments = new Map<
+    string,
+    {
+      payment_id: string;
+      amount_minor: string;
+      booking_date: string;
+      payer_name: string | null;
+      left_minor: string;
+      file_reference: string | null;
+      named?: boolean; // the line's references name it (the job's candidate), else only same account and amount
+    }
+  >();
   for (const c of fromReview)
     payments.set(c.payment_id!, {
+      named: true,
       payment_id: c.payment_id!,
       amount_minor: c.amount_minor ?? "0",
       booking_date: c.booking_date ?? "",
@@ -227,6 +249,7 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
                   lineId={row.bank_transaction_id}
                   paymentId={p.payment_id}
                   leftMinor={p.left_minor}
+                  primary={p.named === true}
                   label={`Retour du paiement de ${money(p.amount_minor, cur)} du ${frenchDate(p.booking_date)}${p.file_reference ? ` · ${p.file_reference}` : ""}${full ? "" : " (partiel)"}`}
                   effect={returnEffect({
                     amount: money(row.amount_minor, cur),

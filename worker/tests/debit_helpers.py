@@ -2,6 +2,8 @@
 return, our refund, a refund that comes back), imported through the payments queue, and what the
 ledger and the bank lines say afterwards."""
 
+import json
+import os
 import random
 import uuid
 from collections.abc import Sequence
@@ -9,12 +11,30 @@ from datetime import date
 from typing import Any
 
 import psycopg
-from integration_helpers import DB, as_user
+from integration_helpers import DB
 from statement_helpers import drain, upload
 
 from collectoo_worker.runtime.storage import Storage
 from collectoo_worker.synth.camt053 import Entry, Tx, make_doc, render_camt053
 from collectoo_worker.synth.ids import iban_fr
+
+# The role PostgREST connects as (local CLI default password, not a secret): its sessions preload
+# pg-safeupdate (an UPDATE or DELETE without WHERE is refused), as the back-office's commands run.
+API_DB = os.environ.get(
+    "AUTHENTICATOR_URL", "postgresql://authenticator:postgres@127.0.0.1:54322/postgres"
+)
+
+
+def api(tenant: dict[str, Any], sql: str, *params: Any) -> Any:
+    """A command as the ops manager at aal2, through a session like the API's (authenticator,
+    then the authenticated role and the JWT claims), within the 8 s the API allows a request."""
+    with psycopg.connect(API_DB) as conn, conn.transaction():
+        claims = json.dumps({"sub": tenant["staff"], "role": "authenticated", "aal": "aal2"})
+        conn.execute("select set_config('request.jwt.claims', %s, true)", (claims,))
+        conn.execute("set local role authenticated")
+        conn.execute("set local statement_timeout = '8s'")
+        row = conn.execute(sql, params).fetchone()
+    return row[0] if row else None
 
 
 def return_entry(amount: int, e2e: str | None, ref: str, day: date, reason: str = "MD06") -> Entry:
@@ -146,31 +166,28 @@ def refund_request(
     """request_refund as the ops manager (what the page shows: the payment's reason, what is
     left), to a synthetic IBAN (the test credits carry none)."""
     payee = iban_fr(random.Random(payment))
-    with psycopg.connect(DB) as conn, conn.transaction():
+    with psycopg.connect(DB) as conn:
         row = conn.execute(
             """select p.review_reason, x.unallocated_minor::text
                from public.payment p cross join lateral private.payment_positions(array[p.id]) x
                where p.id = %s""",
             (payment,),
         ).fetchone()
-        assert row is not None
-        as_user(conn, tenant["staff"], "aal2")
-        conn.execute("set local statement_timeout = '8s'")
-        out = conn.execute(
-            "select public.request_refund(%s, %s, %s, %s, 'PAYEUR', %s, %s, %s, %s)",
-            (
-                str(uuid.uuid4()),
-                payment,
-                str(amount),
-                payee,
-                reason_code,
-                row[0],
-                row[1],
-                "remboursement au payeur",
-            ),
-        ).fetchone()
+    assert row is not None
+    out = api(
+        tenant,
+        "select public.request_refund(%s, %s, %s, %s, 'PAYEUR', %s, %s, %s, %s)",
+        str(uuid.uuid4()),
+        payment,
+        str(amount),
+        payee,
+        reason_code,
+        row[0],
+        row[1],
+        "remboursement au payeur",
+    )
     assert out is not None
-    return dict(out[0])
+    return dict(out)
 
 
 def checks(tenant: dict[str, Any]) -> dict[str, Any]:

@@ -295,7 +295,7 @@ export function paymentActions(d: Pick<PaymentDetail, "payment" | "position" | "
   const left = BigInt(d.position.unallocated_minor);
   const live = liveAllocations(d.entries);
   return {
-    reverse: live.size > 0,
+    reverse: live.size > 0 && p.status !== "refund_pending", // a pending refund is cancelled first (M2b-6)
     allocate:
       (p.status === "matched" && p.review_reason !== null && REALLOCATE_FROM.has(p.review_reason)) ||
       // its own file's allocation reversed while another file keeps its share: back to its file

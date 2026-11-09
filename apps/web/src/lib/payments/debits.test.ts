@@ -83,6 +83,19 @@ describe("returns (founder #13; design §2 #3)", () => {
     expect(a.unassign).toBe(false);
     expect(a.allocate).toBe(true); // « Imputer » from partial_return (from the return date)
   });
+
+  it("never offers « Désimputer » while a refund is pending (cancel it first)", () => {
+    const entry = { entry_id: "e", entry_type: "allocation", account_id: "a", reversed_by: null, lines: [] };
+    const d = {
+      payment: { status: "refund_pending", review_reason: null, account_id: "a" },
+      position: { allocated_minor: "1000", unallocated_minor: "200", returned_minor: "0", forwarded_minor: "0" },
+      file: null,
+      entries: [entry],
+      other_files: [],
+    } as unknown as Parameters<typeof paymentActions>[0];
+    expect(paymentActions(d).reverse).toBe(false);
+    expect(paymentActions({ ...d, payment: { ...d.payment, status: "partially_allocated" } }).reverse).toBe(true);
+  });
 });
 
 describe("nightly checks", () => {

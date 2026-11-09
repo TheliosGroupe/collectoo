@@ -21,11 +21,11 @@ from allocation_helpers import (
     create_file,
     credit,
     evidence,
-    ops,
     state,
     statement,
 )
 from debit_helpers import (
+    api,
     bounce_entry,
     checks,
     closing,
@@ -189,7 +189,7 @@ def test_refund_then_bank_return_of_the_worked_example() -> None:
     drain(store, receipts=True)
     assert receipt_kinds(p1) == ["original", "void"]
     with pytest.raises(psycopg.errors.CheckViolation):
-        ops(
+        api(
             tenant,
             "select public.allocate_payment(%s, %s, null, null, null, 'x')",
             str(uuid.uuid4()),
@@ -278,14 +278,14 @@ def test_a_partial_return_is_left_to_ops_then_the_rest_is_allocated_from_the_ret
     assert state(p) == ("allocated", None)
     # ops link it, with what is left of the payment as the page showed it (compare and set)
     with pytest.raises(psycopg.errors.CheckViolation, match="payment_changed"):
-        ops(
+        api(
             tenant,
             "select public.link_debit(%s, %s, 'return', %s, null, '49999', 'retour partiel')",
             str(uuid.uuid4()),
             line,
             p,
         )
-    ops(
+    api(
         tenant,
         "select public.link_debit(%s, %s, 'return', %s, null, '50000', 'retour partiel')",
         str(uuid.uuid4()),
@@ -301,7 +301,7 @@ def test_a_partial_return_is_left_to_ops_then_the_rest_is_allocated_from_the_ret
     ]
     # « Imputer »: the 30 000 left is allocated again, from the return date (I4: it was allocated
     # until then)
-    ops(
+    api(
         tenant,
         "select public.allocate_payment(%s, %s, 'partial_return', null, null, 'débiteur confirme')",
         str(uuid.uuid4()),
@@ -341,7 +341,7 @@ def test_lines_the_job_cannot_decide_wait_for_ops() -> None:
     assert _bank_check(s2) == 0
     # ops explain the unknown RFD debit, and link the unknown return to the payment (a bank that
     # drops the end-to-end id)
-    ops(
+    api(
         tenant,
         "select public.link_debit(%s, %s, 'explained', null, null, null,"
         " 'frais repris par la banque')",
@@ -349,7 +349,7 @@ def test_lines_the_job_cannot_decide_wait_for_ops() -> None:
         rfd,
     )
     assert link_of(rfd) == ("explained", None, None, "ops")
-    ops(
+    api(
         tenant,
         "select public.link_debit(%s, %s, 'return', %s, null, '10000', 'retour sans référence')",
         str(uuid.uuid4()),
@@ -358,7 +358,7 @@ def test_lines_the_job_cannot_decide_wait_for_ops() -> None:
     )
     assert state(p) == ("matched", "partial_return")  # 4 000 of 10 000 taken back
     with pytest.raises(psycopg.errors.CheckViolation, match="already_linked"):
-        ops(
+        api(
             tenant,
             "select public.link_debit(%s, %s, 'explained', null, null, null, 'x')",
             str(uuid.uuid4()),
@@ -397,7 +397,7 @@ def test_a_payment_made_to_the_client_directly_lowers_the_debt_in_the_legal_orde
         )
     # the client's statement: 25 000 paid on 10-20 for F-2 (designated first), the rest in the
     # legal order
-    out = ops(
+    out = api(
         tenant,
         "select public.record_direct_payment(%s, %s, %s::uuid[], '25000', '2026-10-20', %s,"
         " 'relevé client')",
@@ -433,7 +433,7 @@ def test_a_payment_made_to_the_client_directly_lowers_the_debt_in_the_legal_orde
     ]
     assert client_money(tenant) == {}  # no client money moved
     # more than is due is refused (the client must refund its debtor, not us)
-    late = ops(
+    late = api(
         tenant,
         "select public.record_direct_payment(%s, %s, '{}'::uuid[], '30000', '2026-10-21', %s,"
         " 'relevé client')",
@@ -498,21 +498,21 @@ def test_csv_suspected_duplicates_are_released_or_confirmed() -> None:
     assert client_money(tenant) == before  # held: no payment, no cash
     # ops: the 150,00 is a second rent payment (released: payment + cash_in of its day); the 80,00
     # a duplicate
-    out = ops(
+    out = api(
         tenant,
         "select public.resolve_duplicate(%s, %s, false, 'deux loyers distincts')",
         str(uuid.uuid4()),
         held[15_000],
     )
     assert out["decision"] == "released" and out["kind"] == "debtor_credit"
-    ops(
+    api(
         tenant,
         "select public.resolve_duplicate(%s, %s, true, 'même opération')",
         str(uuid.uuid4()),
         held[8_000],
     )
     with pytest.raises(psycopg.errors.CheckViolation, match="already decided"):
-        ops(
+        api(
             tenant,
             "select public.resolve_duplicate(%s, %s, true, 'x')",
             str(uuid.uuid4()),

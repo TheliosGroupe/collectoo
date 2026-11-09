@@ -33,7 +33,7 @@ export function RecordDirectPayment({
       buttonClassName={secondaryClass}
       testId="direct-payment"
     >
-      {() => (
+      {(close) => (
         <>
           <p className="text-sm" data-testid="sheet-effect">
             La créance du dossier diminuera du montant payé, à la date du relevé du client, d&apos;abord sur les factures
@@ -45,7 +45,7 @@ export function RecordDirectPayment({
               Aucun document n&apos;est classé dans ce dossier : ajoutez d&apos;abord le relevé du client.
             </p>
           ) : (
-            <ActionForm action={recordDirectPayment} submitLabel="Enregistrer" buttonClassName={buttonClass}>
+            <ActionForm onDone={close} action={recordDirectPayment} submitLabel="Enregistrer" buttonClassName={buttonClass}>
               <input type="hidden" name="account_id" value={accountId} />
               <input type="hidden" name="idempotency_key" value={idempotencyKey} />
               <label className="flex flex-col gap-1 text-sm">

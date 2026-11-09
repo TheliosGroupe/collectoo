@@ -5,6 +5,7 @@ import { Badge, InfoNote, Section, Stats, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import {
   APPLIED_ORDER,
+  type Entry,
   type PaymentDetail,
   REALLOCATE_TEXT,
   allocationRows,
@@ -332,7 +333,7 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
       {anyAction ? (
         <Section title="Actions" testId="payment-actions">
           <div className="flex flex-col gap-3">
-            {[...live.entries()].map(([account, entries]) => {
+            {[...(actions.reverse ? live : new Map<string, Entry[]>()).entries()].map(([account, entries]) => {
               const total = entries.reduce((s, e) => s + BigInt(e.amount_minor ?? "0"), BigInt(0));
               const fileRef = entries[0].external_ref ?? "";
               return (

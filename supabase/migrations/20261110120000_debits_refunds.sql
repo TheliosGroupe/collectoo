@@ -613,7 +613,8 @@ begin
       when d.req_status is distinct from 'executed' or d.req_payment is distinct from d.payment_id then 'refund_not_executed'
       when d.line_minor <> d.req_minor then 'amount_differs'
       when d.line_date < d.req_executed_on then 'before_refund' end
-  end;
+  end
+  where d.bank_transaction_id is not null;  -- (every row: PostgREST sessions refuse an UPDATE without WHERE)
   -- one link per payment per call (a later one waits for the next run)
   update pg_temp._dl d set why = 'payment_twice'
   where d.why is null and d.payment_id is not null
@@ -838,7 +839,8 @@ as $$
 declare
   v jsonb;
 begin
-  update pg_temp._debit_link set method = 'auto', decided_by = null, expected_left_minor = null;
+  update pg_temp._debit_link set method = 'auto', decided_by = null, expected_left_minor = null
+  where bank_transaction_id is not null;
   v := private.post_debit_links(p_organization_id, false);
   insert into pg_temp._debit_review (bank_transaction_id, reason)
   select s.bank_transaction_id, 'changed' from pg_temp._debit_skipped s

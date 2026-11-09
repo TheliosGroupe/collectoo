@@ -19,6 +19,7 @@ export function LinkReturn({
   lineId,
   paymentId,
   leftMinor,
+  primary,
   label,
   effect,
   idempotencyKey,
@@ -26,18 +27,25 @@ export function LinkReturn({
   lineId: string;
   paymentId: string;
   leftMinor: string;
+  /** a payment the line's references name (else a payment of the same account ops may choose) */
+  primary: boolean;
   label: string;
   effect: string;
   idempotencyKey: string;
 }) {
   return (
-    <ConfirmSheet label={label} title="Retour d'un paiement" buttonClassName={buttonClass} testId="link-return">
-      {() => (
+    <ConfirmSheet
+      label={label}
+      title="Retour d'un paiement"
+      buttonClassName={primary ? buttonClass : secondaryClass}
+      testId="link-return"
+    >
+      {(close) => (
         <>
           <p className="text-sm" data-testid="sheet-effect">
             {effect}
           </p>
-          <ActionForm action={linkDebit} submitLabel="Confirmer le retour" buttonClassName={buttonClass}>
+          <ActionForm onDone={close} action={linkDebit} submitLabel="Confirmer le retour" buttonClassName={buttonClass}>
             <input type="hidden" name="bank_transaction_id" value={lineId} />
             <input type="hidden" name="kind" value="return" />
             <input type="hidden" name="payment_id" value={paymentId} />
@@ -69,12 +77,12 @@ export function LinkRefund({
 }) {
   return (
     <ConfirmSheet label={label} title="Remboursement" buttonClassName={buttonClass} testId="link-refund">
-      {() => (
+      {(close) => (
         <>
           <p className="text-sm" data-testid="sheet-effect">
             {effect}
           </p>
-          <ActionForm action={linkDebit} submitLabel="Confirmer" buttonClassName={buttonClass}>
+          <ActionForm onDone={close} action={linkDebit} submitLabel="Confirmer" buttonClassName={buttonClass}>
             <input type="hidden" name="bank_transaction_id" value={lineId} />
             <input type="hidden" name="kind" value={kind} />
             <input type="hidden" name="refund_request_id" value={refundId} />
@@ -91,13 +99,13 @@ export function LinkRefund({
 export function Explain({ lineId, idempotencyKey }: { lineId: string; idempotencyKey: string }) {
   return (
     <ConfirmSheet label="Classer sans comptabiliser" title="Classer sans comptabiliser" buttonClassName={secondaryClass} testId="explain">
-      {() => (
+      {(close) => (
         <>
           <p className="text-sm">
             La ligne restera hors comptabilité (écart expliqué avec le solde bancaire) : à réserver aux frais repris, aux
             corrections de la banque, aux mouvements qui ne concernent aucun paiement reçu.
           </p>
-          <ActionForm action={linkDebit} submitLabel="Classer" buttonClassName={buttonClass}>
+          <ActionForm onDone={close} action={linkDebit} submitLabel="Classer" buttonClassName={buttonClass}>
             <input type="hidden" name="bank_transaction_id" value={lineId} />
             <input type="hidden" name="kind" value="explained" />
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />
@@ -122,12 +130,12 @@ export function ResolveDuplicate({
   return (
     <div className="flex flex-wrap gap-2">
       <ConfirmSheet label="Libérer" title="Ce n'est pas un doublon" buttonClassName={buttonClass} testId="release-duplicate">
-        {() => (
+        {(close) => (
           <>
             <p className="text-sm" data-testid="sheet-effect">
               {releaseEffect}
             </p>
-            <ActionForm action={resolveDuplicate} submitLabel="Libérer la ligne" buttonClassName={buttonClass}>
+            <ActionForm onDone={close} action={resolveDuplicate} submitLabel="Libérer la ligne" buttonClassName={buttonClass}>
               <input type="hidden" name="bank_transaction_id" value={lineId} />
               <input type="hidden" name="decision" value="release" />
               <input type="hidden" name="idempotency_key" value={idempotencyKey} />
@@ -137,12 +145,12 @@ export function ResolveDuplicate({
         )}
       </ConfirmSheet>
       <ConfirmSheet label="Doublon confirmé" title="Confirmer le doublon" buttonClassName={dangerButtonClass} testId="confirm-duplicate">
-        {() => (
+        {(close) => (
           <>
             <p className="text-sm">
               La ligne est la même opération qu&apos;une ligne déjà importée : elle ne sera jamais comptabilisée.
             </p>
-            <ActionForm action={resolveDuplicate} submitLabel="Confirmer le doublon" buttonClassName={buttonClass}>
+            <ActionForm onDone={close} action={resolveDuplicate} submitLabel="Confirmer le doublon" buttonClassName={buttonClass}>
               <input type="hidden" name="bank_transaction_id" value={lineId} />
               <input type="hidden" name="decision" value="duplicate" />
               <input type="hidden" name="idempotency_key" value={idempotencyKey} />

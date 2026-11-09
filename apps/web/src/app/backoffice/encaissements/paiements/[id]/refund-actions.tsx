@@ -38,14 +38,14 @@ export function RequestRefund({
   const [payee, setPayee] = useState(payerIbanValid ? "payer" : "other");
   return (
     <ConfirmSheet label="Rembourser" title="Rembourser le payeur" buttonClassName={secondaryClass} testId="request-refund">
-      {() => (
+      {(close) => (
         <>
           <p className="text-sm" data-testid="sheet-effect">
             {left} restent sur ce paiement. La demande crée une référence de virement « RFD… » : exécutez le virement
             dans la banque avec cette référence. Le remboursement est comptabilisé quand son débit apparaît sur le
             relevé du compte de fonds de tiers ; jamais plus que ce qui reste du paiement.
           </p>
-          <ActionForm action={requestRefund} submitLabel="Demander le remboursement" buttonClassName={buttonClass}>
+          <ActionForm onDone={close} action={requestRefund} submitLabel="Demander le remboursement" buttonClassName={buttonClass}>
             <input type="hidden" name="payment_id" value={paymentId} />
             <input type="hidden" name="expected_left_minor" value={leftMinor} />
             <input type="hidden" name="expected_review_reason" value={reviewReason ?? ""} />
@@ -122,13 +122,13 @@ export function CancelRefund({
 }) {
   return (
     <ConfirmSheet label="Annuler" title="Annuler ce remboursement" buttonClassName={dangerButtonClass} testId="cancel-refund">
-      {() => (
+      {(close) => (
         <>
           <p className="text-sm">
             Confirmez que le virement {reference} n&apos;a pas été exécuté dans la banque. Le paiement retrouvera la
             situation qu&apos;il avait avant la demande.
           </p>
-          <ActionForm action={cancelRefund} submitLabel="Confirmer l'annulation" buttonClassName={buttonClass}>
+          <ActionForm onDone={close} action={cancelRefund} submitLabel="Confirmer l'annulation" buttonClassName={buttonClass}>
             <input type="hidden" name="payment_id" value={paymentId} />
             <input type="hidden" name="refund_request_id" value={refundId} />
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />
