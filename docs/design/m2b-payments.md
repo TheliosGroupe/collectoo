@@ -441,7 +441,9 @@ Never on the amount alone. Every match writes `payment_match` (method, rule vers
 allocate(amount, slots[(item, due_date, issue_date, component, family, avail > 0)], policy, designation, as_of)
   order families inside an item: interest → (indemnity, charge, cost if policy.accessory_rank = before_principal)
                                   → principal → (accessories if after_principal) → unclassified (unless held)
-  debts = designated items (in designation order)
+  each item's demand capped at its net: min over t ≥ D of the sum of ALL its components
+        (held and negative ones included), the excess trimmed from its lowest-ranked slots
+  debts = designated items (as a set, in the legal order below among themselves)
         + items with due_date ≤ as_of, by due_date, then issue_date
         + items not yet due, by due_date
   equal sort keys form one tie group
@@ -454,7 +456,7 @@ allocate(amount, slots[(item, due_date, issue_date, component, family, avail > 0
   return lines, remainder                                         -- remainder = U, never > 0 unless every slot is empty
 ```
 
-- **Available amount** of a slot at D = `min_{t ≥ D}` of that 1100 account's running balance (§2 #6). Items or components at or below zero (credit notes, overpaid, negative balancing line) have no slot.
+- **Available amount** of a slot at D = `min_{t ≥ D}` of that 1100 account's running balance (§2 #6). Components at or below zero (credit notes, overpaid, negative balancing line) have no slot, but they count in the item's net: an item is never paid beyond the sum of all its components (M2b-4 review; whatever exceeds it stays as the remainder, an overpayment kept for the payer, decision #8). Designated items follow the legal order among themselves (M2b-4 review, founder to confirm).
 - **Effective date** D = `greatest(booking_date, servicing start)`, never in the future.
 - **Several payments on one account in a run:** processed in Python in (booking date, statement line) order, decrementing the in-memory slots. A payment dated before an existing allocation is still safe (I6); M3-13 re-allocates by date once interest exists.
 - **Designation** comes from item references in the remittance text (R3), or an ops entry whose evidence is dated on or before the payment (« lorsqu'il paie »); the excess over the designated items follows the legal order.
