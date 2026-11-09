@@ -6,8 +6,9 @@ exception queue », with zero wrong automatic matches). Run in CI and by `make e
 A synthetic world of files (`synth.reconciliation`) and a statement of credits with their ground
 truth go through the matching rules (`payments.matching`, the code the `payments.match` job runs).
 Prints the report; exits non-zero when the auto-match rate is below
-`evals/reconciliation/threshold`, when any automatic match is wrong, or when a credit expected in
-the queue is there for another reason. The integration tests assert the same through the
+`evals/reconciliation/threshold`, when any automatic match is wrong, when a credit expected in
+the queue is matched automatically even to the right file (founder #3: a policy violation), or
+when it is in the queue for another reason. The integration tests assert the same through the
 database.
 """
 
@@ -48,6 +49,17 @@ def run(accounts: int, credits: int, seed: int) -> tuple[Score, dict[str, float]
     return score, {"build_s": built - started, "match_s": matched - built}
 
 
+def failures(score: Score, threshold: float) -> list[str]:
+    """What fails the eval (empty: it passes)."""
+    checks = {
+        "rate": score.rate < threshold,
+        "wrong": bool(score.wrong),
+        "policy_violations": bool(score.policy_violations),
+        "bad_reason": bool(score.bad_reason),
+    }
+    return [name for name, failed in checks.items() if failed]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="reconciliation_eval")
     parser.add_argument("--accounts", type=int, default=50_000)
@@ -60,15 +72,18 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"reconciliation: auto {score.rate:.4f} ({score.auto}/{score.total}),"
         f" threshold {threshold:.2f},"
-        f" wrong {len(score.wrong)}, queue {score.queued}"
+        f" wrong {len(score.wrong)}, policy violations {len(score.policy_violations)},"
+        f" queue {score.queued}"
         f" (world {timing['build_s']:.1f}s, matching {timing['match_s']:.1f}s)"
     )
     print(json.dumps(report, indent=1, ensure_ascii=False))
-    for line in (*score.wrong[:20], *score.bad_reason[:20]):
+    for line in (*score.wrong[:20], *score.policy_violations[:20], *score.bad_reason[:20]):
         print(f"  {line}")
-    failed = score.rate < threshold or score.wrong or score.bad_reason
-    if failed:
-        print("FAILED: below the threshold, a wrong automatic match, or a queue reason differs")
+    if failed := failures(score, threshold):
+        print(
+            f"FAILED ({', '.join(failed)}): below the threshold, a wrong automatic match, an"
+            " automatic match founder decision #3 forbids, or a queue reason differs"
+        )
         return 1
     return 0
 

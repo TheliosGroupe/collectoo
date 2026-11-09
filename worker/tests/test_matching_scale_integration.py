@@ -101,6 +101,7 @@ def test_match_50k_payments_against_50k_files(
         f"\n  {logs[-1] if logs else '?'}\n" + json.dumps(result.report(), indent=1)
     )
     assert result.wrong == [], result.wrong[:5]
+    assert result.policy_violations == [], result.policy_violations[:5]  # founder #3
     assert result.bad_reason == [], result.bad_reason[:5]
     assert result.rate >= 0.95, result.report()
     assert result.ready_rate >= 0.95, result.report()  # and not held by the gating

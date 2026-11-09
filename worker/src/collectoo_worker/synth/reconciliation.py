@@ -6,14 +6,21 @@ numbers, parties, open balances, and the IBANs that already paid a file. `genera
 bank credits that pay them, each with its truth: the file it pays (or none) and what matching must
 do with it (`auto`, or the queue with the reason ops will see). The mix follows design §13:
 
-- 45 % structured RF (`CdtrRefInf`), the payer being the debtor or a third party;
+- 44.3 % structured RF (`CdtrRefInf`), the payer being the debtor or a third party;
 - 25 % RF in the free text: grouped by four, lower case, glued, split over two lines;
 - 5 % the 12 digits of the reference alone;
-- 15 % invoice, lease or loan numbers, backed by the payer's name (titles, word order, case, a
-  typo) or, for a third party, by the exact balance of the invoices cited;
+- 15 % invoice or loan numbers, backed by the payer's name (titles, word order, case, a typo) or,
+  for a third party, by the exact balance of the invoices cited; the debtors drawn are those
+  whose name backs a number (two words, or a word no other file has: rule R3);
 - 6 % no reference, from an IBAN that already paid that file and no other;
+- 0.7 % harder ones that must still match: a statement where an IBAN that paid file A pays
+  file B by its RF (the RF credit), a debtor citing a month only another lease has, from the IBAN
+  that paid his own lease (R4), a name written with Œ/Æ printed OE/AE by the bank;
 - 4 % deliberately unmatchable: name and amount only, an RF with one wrong digit or two digits
-  swapped, no information at all, an invoice number two files share, an IBAN that paid two files.
+  swapped (from a stranger, or from the IBAN that paid the file), two RFs one of which is
+  mistyped, no information at all, an invoice number two files share, an IBAN that paid two
+  files (earlier, or in this very statement), a month only another lease has at the same rent,
+  the next invoice number of a file whose name shares one common word with the payer's.
 
 Every name, IBAN and reference is synthetic (Faker fr_FR; valid check digits; random digits).
 """
@@ -23,7 +30,9 @@ from __future__ import annotations
 import hashlib
 import random
 import string
-from collections.abc import Sequence
+import unicodedata
+from collections import Counter
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
@@ -31,28 +40,41 @@ from typing import Any
 from faker import Faker
 
 from collectoo_worker.payments.matching import (
+    RARE_NAME_FILES,
     AccountInfo,
     Directory,
     ItemInfo,
     PaymentIn,
+    is_date_digits,
     is_lookup_token,
+    name_words,
     ref_key,
+    shared_words,
+    similarity,
 )
 from collectoo_worker.payments.rf import rf_format, rf_make
 from collectoo_worker.synth.camt053 import Entry, Tx
 from collectoo_worker.synth.ids import iban_fr
 
 MIX: tuple[tuple[str, float], ...] = (
-    ("rf_structured", 0.45),
+    ("rf_structured", 0.443),
     ("rf_text", 0.25),
     ("rf_body", 0.05),
     ("item_ref", 0.15),
     ("repeat_iban", 0.06),
-    ("name_amount", 0.01),
-    ("rf_typo", 0.01),
-    ("no_info", 0.008),
-    ("shared_ref", 0.007),
-    ("iban_two_files", 0.005),
+    ("joint_rf", 0.002),
+    ("month_key_iban", 0.002),
+    ("ligature", 0.003),
+    ("name_amount", 0.008),
+    ("rf_typo", 0.006),
+    ("no_info", 0.006),
+    ("shared_ref", 0.005),
+    ("iban_two_files", 0.004),
+    ("joint_noref", 0.002),
+    ("linked_rf_typo", 0.003),
+    ("two_rfs_typo", 0.002),
+    ("month_key", 0.002),
+    ("homonym_typo", 0.002),
 )
 EXPECT = {
     "rf_structured": "auto",
@@ -60,13 +82,29 @@ EXPECT = {
     "rf_body": "auto",
     "item_ref": "auto",
     "repeat_iban": "auto",
+    "joint_rf": "auto",
+    "month_key_iban": "auto",
+    "ligature": "auto",
     "name_amount": "no_match",
     "rf_typo": "no_match",
     "no_info": "no_match",
     "shared_ref": "ambiguous",
     "iban_two_files": "ambiguous",
+    "joint_noref": "ambiguous",
+    "linked_rf_typo": "no_match",
+    "two_rfs_typo": "no_match",
+    "month_key": "no_match",
+    "homonym_typo": "no_match",
 }
 OPEN = ("awaiting_first_letter", "in_collection", "arrangement", "legal")
+LIGATURE_NAMES = ("Lætitia {last}", "Le Cœur de {last}", "Sœurs {last} et Fils", "Bœuf {last} SARL")
+_LIGATURES = str.maketrans({"Œ": "OE", "œ": "oe", "Æ": "AE", "æ": "ae"})
+
+
+def bank_ascii(name: str) -> str:
+    """How a bank prints a name: ligatures written out, accents dropped (SEPA character set)."""
+    plain = unicodedata.normalize("NFKD", name.translate(_LIGATURES))
+    return "".join(c for c in plain if not unicodedata.combining(c))
 
 
 @dataclass(frozen=True)
@@ -119,6 +157,9 @@ def _id(seed: int, n: int) -> str:
     return f"{h[:8]}-{h[8:12]}-4{h[13:16]}-8{h[17:20]}-{h[20:32]}"
 
 
+_Made = tuple[str, str, tuple[str, ...], list[ItemInfo]]  # kind, file number, parties, items
+
+
 @dataclass
 class _Books:
     """Generators of one world: random draws and the invoice numbers already used."""
@@ -164,24 +205,80 @@ class _Books:
         ext = f"CC2025{n:06d}"
         return "loan", ext, names, [self.item(n, 0, ext, self.rng.randint(50_000, 2_500_000))]
 
+    def month_pair(self, n: int, k: int) -> list[_Made]:
+        """Two leases at the same rent; the second also owes a month no other file has (written
+        as YYYY-MM, MM/YYYY, YYYY-MM-DD or DD/MM/YYYY): what a payer citing it must not match."""
+        rent = self.rng.randint(45_000, 180_000)
+        year, month = 1990 + k // 12, k % 12 + 1
+        written = (
+            f"{year}-{month:02d}",
+            f"{month:02d}/{year}",
+            f"{year}-{month:02d}-01",
+            f"01/{month:02d}/{year}",
+        )[k % 4]
+        out: list[_Made] = []
+        for j, extra in enumerate(((), (written,))):
+            m = n + j
+            name = f"{self.fake.last_name().upper()} {self.fake.first_name()}"
+            months = [
+                f"2026-{x:02d}" for x in self.rng.sample(range(5, 11), self.rng.randint(1, 3))
+            ]
+            refs = [*months, *extra]
+            items = [self.item(m, i, ref, rent) for i, ref in enumerate(refs)]
+            out.append(("rent", f"BAIL-{m:06d}", (name,), items))
+        return out
+
+    def homonym_pair(self, n: int) -> list[_Made]:
+        """Two companies with consecutive invoice numbers whose names share one surname (« Guillot »
+        and « Guillot et Fils » or « Guillot S.A.S. », 62 % and 100 % alike): a typo in the number
+        must not match the other one by name."""
+        last = self.fake.last_name()
+        names = (
+            self.rng.choice((last, f"{last} SA", f"{last} SARL")),
+            self.rng.choice((f"{last} et Fils", f"{last} S.A.S.")),
+        )
+        out: list[_Made] = []
+        for j, name in enumerate(names):
+            ref = f"FA-2026-{len(self.martin_refs) + 1:05d}"
+            self.martin_refs.append(ref)
+            item = self.item(n + j, 0, ref, self.rng.randint(5_000, 900_000))
+            out.append(("invoice", f"MART-{n + j:06d}", (name,), [item]))
+        return out
+
+    def ligature(self, n: int, k: int) -> tuple[str, str, tuple[str, ...], list[ItemInfo]]:
+        """A party whose name has Œ or Æ (the bank prints OE, AE)."""
+        name = LIGATURE_NAMES[k % len(LIGATURE_NAMES)].format(last=self.fake.last_name())
+        ext = f"CC2025{n:06d}"
+        return "loan", ext, (name,), [self.item(n, 0, ext, self.rng.randint(50_000, 2_500_000))]
+
 
 def synthetic_world(accounts: int, seed: int = 1) -> World:
     """Files of three clients: B2B invoices (two invoicing styles), rent, consumer loans. A few
     invoice numbers are shared by two clients' files; a quarter of the debtors already paid from
-    their IBAN (the IBAN memory); a few IBANs paid two files (a parent paying for two children)."""
+    their IBAN (the IBAN memory); a few IBANs paid two files (a parent paying for two children).
+    Then, for the hard cases: pairs of leases at the same rent where one owes a month no other
+    file has, pairs of companies with consecutive invoice numbers and one shared surname, and
+    parties whose names have ligatures."""
     rng = random.Random(seed)
     fake = Faker("fr_FR")
     fake.seed_instance(seed)
     books = _Books(rng, fake, seed)
-    out: list[WorldAccount] = []
-    bodies: set[str] = set()
+    made: list[_Made] = []
     for n in range(accounts):
         roll = rng.random()
         make = books.invoices if roll < 0.4 else books.lease if roll < 0.65 else books.loan
-        kind, ext, names, items = make(n)
-        closed = rng.random() < 0.02
-        if closed:
-            items = [ItemInfo(i.id, i.ref, 0) for i in items]
+        made.append(make(n))
+    for k in range(min(max(2, accounts // 125), 432)):  # 432 distinct months, 1990 to 2025
+        made += books.month_pair(len(made), k)
+    for _ in range(max(2, accounts // 500)):
+        made += books.homonym_pair(len(made))
+    for k in range(max(4, accounts // 250)):
+        made.append(books.ligature(len(made), k))
+    out: list[WorldAccount] = []
+    bodies: set[str] = set()
+    for n, (kind, ext, names, drawn) in enumerate(made):
+        closed = n < accounts and rng.random() < 0.02
+        items = [ItemInfo(i.id, i.ref, 0) for i in drawn] if closed else drawn
         body = f"{rng.randrange(10**12):012d}"
         while body in bodies:
             body = f"{rng.randrange(10**12):012d}"
@@ -190,7 +287,10 @@ def synthetic_world(accounts: int, seed: int = 1) -> World:
         out.append(
             WorldAccount(_id(seed, n), ext, kind, status, rf_make(body), names, tuple(items))
         )
-    return with_history(World(out), rng)
+    world = with_history(World(out), rng)
+    for a, _, _ in month_pairs(world):  # the debtor who cites the other lease's month paid before
+        world.iban_links.setdefault(debtor_iban(a.id), {a.id: 1})
+    return world
 
 
 def with_history(world: World, rng: random.Random) -> World:
@@ -238,6 +338,44 @@ class Credit:
         )
 
 
+def _owners(world: World) -> dict[str, set[str]]:
+    """Files per reference key (file and invoice numbers)."""
+    owners: dict[str, set[str]] = {}
+    for a in world.accounts:
+        for key in {ref_key(a.external_ref), *(i.key for i in a.items)}:
+            owners.setdefault(key, set()).add(a.id)
+    return owners
+
+
+def _workable(a: WorldAccount) -> bool:
+    return a.status in OPEN and a.balance_minor > 0 and a.rf is not None
+
+
+def month_pairs(world: World) -> list[tuple[WorldAccount, WorldAccount, ItemInfo]]:
+    """(A, Y, month): leases where Y owes a month (a date) no other file has, and A, another
+    lease, owes an item of exactly that amount. A's debtor citing that month must not pay Y."""
+    owners = _owners(world)
+    rents: dict[int, list[WorldAccount]] = {}
+    for a in world.accounts:
+        if a.kind == "rent" and _workable(a):
+            for amount in {i.balance_minor for i in a.items}:
+                rents.setdefault(amount, []).append(a)
+    out = []
+    for y in world.accounts:
+        if y.kind != "rent" or not _workable(y):
+            continue
+        for i in y.items:
+            if is_date_digits(i.key) and owners[i.key] == {y.id} and i.balance_minor > 0:
+                others = sorted(
+                    (a for a in rents.get(i.balance_minor, ()) if a.id != y.id),
+                    key=lambda a: a.external_ref,
+                )
+                if others:
+                    out.append((others[0], y, i))
+    out.sort(key=lambda x: x[1].external_ref)
+    return out
+
+
 @dataclass
 class _Pools:
     """Which files each scenario may pay, so that its expectation holds by construction."""
@@ -249,14 +387,20 @@ class _Pools:
     unique_items: list[tuple[WorldAccount, ItemInfo]]
     shared_items: list[tuple[WorldAccount, ItemInfo]]
     linked_ibans: set[str]
+    # Unique invoices of files whose debtor's name backs a number by itself (rule R3: two words,
+    # or a word no other file has): what a debtor citing their own invoice is matched by.
+    named_items: list[tuple[WorldAccount, ItemInfo]] = field(default_factory=list)
+    months: list[tuple[WorldAccount, WorldAccount, ItemInfo]] = field(default_factory=list)
+    # (A, A's invoice, X, X's invoice): consecutive numbers, names sharing one common word only.
+    homonyms: list[tuple[WorldAccount, ItemInfo, WorldAccount, ItemInfo]] = field(
+        default_factory=list
+    )
+    ligatures: list[tuple[WorldAccount, ItemInfo]] = field(default_factory=list)
 
     @classmethod
     def of(cls, world: World) -> _Pools:
-        open_ = [a for a in world.accounts if a.status in OPEN and a.balance_minor > 0 and a.rf]
-        owners: dict[str, set[str]] = {}
-        for a in world.accounts:
-            for key in {ref_key(a.external_ref), *(i.key for i in a.items)}:
-                owners.setdefault(key, set()).add(a.id)
+        open_ = [a for a in world.accounts if _workable(a)]
+        owners = _owners(world)
         ids = {a.id for a in open_}
         files = world.by_id()
         by_iban = [(iban, links) for iban, links in world.iban_links.items()]
@@ -283,11 +427,61 @@ class _Pools:
                     unique.append((a, i))
                 elif len(owners[i.key]) == 2 and owners[i.key] <= ids:
                     shared.append((a, i))
-        return cls(world, open_, single, two, unique, shared, set(world.iban_links))
+        words: Counter[str] = Counter()  # files per name word, as the name index counts them
+        for a in world.accounts:
+            words.update({w for n in a.names for w in name_words(n) if len(w) >= 3})
+
+        def named(a: WorldAccount) -> bool:
+            for n in a.names:
+                ws = set(name_words(n))  # « Joubert Joubert SARL » is one word
+                if len(ws) >= 2 or (len(ws) == 1 and words[min(ws)] <= RARE_NAME_FILES):
+                    return True
+            return False
+
+        return cls(
+            world,
+            open_,
+            single,
+            two,
+            unique,
+            shared,
+            set(world.iban_links),
+            named_items=[(a, i) for a, i in unique if named(a)],
+            months=month_pairs(world),
+            homonyms=_homonyms(world, unique, owners),
+            ligatures=[(a, i) for a, i in unique if any(set("ŒœÆæ") & set(n) for n in a.names)],
+        )
+
+
+def _homonyms(
+    world: World, unique: Sequence[tuple[WorldAccount, ItemInfo]], owners: dict[str, set[str]]
+) -> list[tuple[WorldAccount, ItemInfo, WorldAccount, ItemInfo]]:
+    """Files A and X with consecutive FA-2026 numbers whose names share exactly one word, a word
+    other files have too, close enough (60 %) for the old rule to take the name as backing."""
+    items = {i.key: (a, i) for a, i in unique}
+    out = []
+    for a, i in unique:
+        if not i.ref.startswith("FA-2026-"):
+            continue
+        number = int(i.ref[-5:])
+        for step in (-1, 1):
+            nxt = ref_key(f"FA-2026-{number + step:05d}")
+            if nxt not in items or len(owners.get(nxt, ())) != 1:
+                continue
+            x, j = items[nxt]
+            if x.id == a.id:
+                continue
+            payer, party = a.names[0], x.names[0]
+            if len(shared_words(payer, party)) == 1 and similarity(payer, party) >= 0.6:
+                out.append((a, i, x, j))
+    out.sort(key=lambda t: (t[1].ref, t[3].ref))
+    return out
 
 
 class _Writer:
-    def __init__(self, world: World, seed: int, earlier: Sequence[Credit] = ()) -> None:
+    def __init__(
+        self, world: World, seed: int, earlier: Sequence[Credit] = (), joints: int = 0
+    ) -> None:
         self.rng = random.Random(seed)
         self.fake = Faker("fr_FR")
         self.fake.seed_instance(seed)
@@ -296,6 +490,28 @@ class _Writer:
         for c in earlier:
             if c.truth is not None:
                 self.taken[c.truth] = self.taken.get(c.truth, 0) + c.amount_minor
+        self.joints = self._reserve(joints)
+        self.used: Counter[str] = Counter()  # credits written per paired scenario
+        self.single_of = {a.id: iban for a, iban in self.p.single_link}
+
+    def _reserve(self, n: int) -> list[tuple[str, str, WorldAccount, WorldAccount]]:
+        """(IBAN, payer, A, B): an IBAN that paid file A only, which this statement sees pay file B
+        by its RF and send a credit without reference (a parent paying two children's files). No
+        other scenario uses these IBANs, so what the RF teaches changes nothing else."""
+        months = {f.id for pair in self.p.months for f in pair[:2]}  # they pay a whole rent
+        pool = [(a, iban) for a, iban in self.p.single_link if a.id not in months]
+        others = [b for b in self.p.open_ if b.id not in months]
+        if n <= 0 or not pool or len(others) < 2:
+            return []
+        out = []
+        for a, iban in self.rng.sample(pool, min(n, len(pool))):
+            b = self.pick(others)
+            while b.id == a.id:
+                b = self.rng.choice(others)
+            out.append((iban, self.fake.name(), a, b))
+        reserved = {iban for iban, _, _, _ in out}
+        self.p.single_link = [x for x in self.p.single_link if x[1] not in reserved]
+        return out
 
     def left(self, a: WorldAccount) -> int:
         return a.balance_minor - self.taken.get(a.id, 0)
@@ -356,19 +572,131 @@ class _Writer:
         """A credit of that scenario (one with an empty pool pays by structured RF instead)."""
         if scenario in ("rf_structured", "rf_text", "rf_body"):
             return self._by_reference(scenario, self.pick(self.p.open_))
-        if scenario == "item_ref" and self.p.unique_items:
-            return self._by_invoice(*self.pick(self.p.unique_items, lambda x: x[0]))
-        write = {
+        write: Callable[[], Credit | None] | None = {
+            "item_ref": self._item_ref if self.p.unique_items else None,
             "repeat_iban": self._repeat_iban if self.p.single_link else None,
             "name_amount": self._name_amount,
             "rf_typo": self._rf_typo,
             "shared_ref": self._shared_ref if self.p.shared_items else None,
             "iban_two_files": self._iban_two_files if self.p.two_files else None,
             "no_info": self._no_info,
+            "joint_rf": self._joint_rf,
+            "joint_noref": self._joint_noref,
+            "linked_rf_typo": self._linked_rf_typo if self.p.single_link else None,
+            "two_rfs_typo": self._two_rfs_typo if len(self.p.open_) >= 2 else None,
+            "month_key": self._month_key,
+            "month_key_iban": self._month_key_iban,
+            "homonym_typo": self._homonym_typo if self.p.homonyms else None,
+            "ligature": self._ligature if self.p.ligatures else None,
         }.get(scenario)
-        if write is not None:
-            return write()
+        written = write() if write is not None else None
+        if written is not None:
+            return written
         return self._by_reference("rf_structured", self.pick(self.p.open_))
+
+    # -- the hard cases (review of M2b-3) -------------------------------------------------------
+
+    def _joint(self, scenario: str) -> tuple[str, str, WorldAccount, WorldAccount] | None:
+        k = self.used[scenario]
+        self.used[scenario] += 1
+        return self.joints[k] if k < len(self.joints) else None
+
+    def _joint_rf(self) -> Credit | None:
+        """The IBAN that paid A pays B by its RF (matched; it teaches the memory B)."""
+        if (pair := self._joint("joint_rf")) is None:
+            return None
+        iban, name, _, b = pair
+        amount = self.amount(b, share=0.1)
+        return Credit(amount, name, iban, (), b.rf, b.id, "auto", "joint_rf")
+
+    def _joint_noref(self) -> Credit | None:
+        """…and, in the same statement, a credit without reference: A or B, ops decide."""
+        if (pair := self._joint("joint_noref")) is None:
+            return None
+        iban, name, _, b = pair
+        amount = self.amount(b, share=0.05)
+        return Credit(amount, name, iban, ("VIREMENT",), None, b.id, "ambiguous", "joint_noref")
+
+    def _linked_rf_typo(self) -> Credit:
+        """From the IBAN that paid file A only, a mistyped RF (A's own, or another file's): the
+        payer named something; the IBAN memory must not decide for them."""
+        a, iban = self.pick(self.p.single_link, lambda x: x[0])
+        target = a if self.rng.random() < 0.5 else self.pick(self.p.open_)
+        bad = _typo(target.rf or "", self.rng)
+        label = self.rng.choice(("LOYER", "REGLT", "Ref"))
+        structured = self.rng.random() < 0.5
+        text = () if structured else (f"{label} {rf_format(bad)}",)
+        ref = bad if structured else None
+        name = self.as_payer(a.names[0])
+        amount = self.amount(target, share=0.1)
+        return Credit(amount, name, iban, text, ref, target.id, "no_match", "linked_rf_typo")
+
+    def _two_rfs_typo(self) -> Credit:
+        """A's RF and B's mistyped one: the payer pays two files, the valid RF does not take all."""
+        a = self.pick(self.p.open_)
+        b = self.pick(self.p.open_)
+        while b.id == a.id:
+            b = self.rng.choice(self.p.open_)
+        good, bad = a.rf or "", _typo(b.rf or "", self.rng)
+        styles: tuple[tuple[tuple[str, ...], str | None], ...] = (
+            ((f"REGLT {rf_format(good)} ET {rf_format(bad)}",), None),
+            ((f"ET {rf_format(bad)}",), good),
+            ((f"REGLT {rf_format(good)}",), bad),
+        )
+        text, ref = self.rng.choice(styles)
+        amount = self.amount(a, share=0.1) + self.amount(b, share=0.1)
+        name, iban = self.stranger(), self.fresh_iban()
+        return Credit(amount, name, iban, text, ref, a.id, "no_match", "two_rfs_typo")
+
+    def _month(self, *, linked: bool) -> tuple[WorldAccount, ItemInfo] | None:
+        pool = [m for m in self.p.months if not linked or m[0].id in self.single_of]
+        if not pool:
+            return None
+        for _ in range(30):
+            a, _, month = self.rng.choice(pool)
+            if self.left(a) >= month.balance_minor:
+                self.taken[a.id] = self.taken.get(a.id, 0) + month.balance_minor
+                return a, month
+        return None
+
+    def _month_key(self) -> Credit | None:
+        """A's debtor pays his rent citing a month only lease Y has, at the same rent, from a new
+        IBAN: a month names no file, so ops decide."""
+        if (found := self._month(linked=False)) is None:
+            return None
+        a, month = found
+        text = (self.rng.choice(("LOYER", "Loyer", "loyer du")) + f" {month.ref}",)
+        name = self.as_payer(a.names[0])
+        iban = self.fresh_iban()
+        return Credit(month.balance_minor, name, iban, text, None, a.id, "no_match", "month_key")
+
+    def _month_key_iban(self) -> Credit | None:
+        """The same, from the IBAN that paid A only: R4 matches A (the month is not a number)."""
+        if (found := self._month(linked=True)) is None:
+            return None
+        a, month = found
+        text = (self.rng.choice(("LOYER", "Loyer", "loyer du")) + f" {month.ref}",)
+        name, iban = self.as_payer(a.names[0]), self.single_of[a.id]
+        return Credit(month.balance_minor, name, iban, text, None, a.id, "auto", "month_key_iban")
+
+    def _homonym_typo(self) -> Credit:
+        """A's debtor cites the next invoice number, X's, whose name shares one common word with
+        his (« GUILLOT » and « Guillot et Fils »): not a backing name, ops decide."""
+        a, _, x, other = self.pick(self.p.homonyms, lambda t: t[0])
+        text = (self.rng.choice(("REGLT FACT", "VIR FACTURE N")) + f" {other.ref}",)
+        amount = self.amount(a)
+        if amount in (other.balance_minor, x.balance_minor):  # never X's exact balance
+            amount -= 1
+            self.taken[a.id] -= 1
+        name = self.as_payer(a.names[0], typo=False)
+        return Credit(amount, name, self.fresh_iban(), text, None, a.id, "no_match", "homonym_typo")
+
+    def _ligature(self) -> Credit:
+        """A loan of « Lætitia Durand », paid by « LAETITIA DURAND » citing its number."""
+        a, item = self.pick(self.p.ligatures, lambda x: x[0])
+        text = (self.rng.choice(("ECHEANCE PRET", "Remboursement credit n°")) + f" {item.ref}",)
+        name = bank_ascii(self.as_payer(a.names[0], typo=False))
+        return Credit(self.amount(a), name, self.fresh_iban(), text, None, a.id, "auto", "ligature")
 
     def _repeat_iban(self) -> Credit:
         a, iban = self.pick(self.p.single_link, lambda x: x[0])
@@ -445,31 +773,33 @@ class _Writer:
             text = rng.choice(((f"REF {grouped}",), (f"PAIEMENT {body}",), (f"Dossier {grouped}",)))
         return Credit(self.amount(a), name, iban, text, creditor_ref, a.id, "auto", scenario)
 
-    def _by_invoice(self, a: WorldAccount, item: ItemInfo) -> Credit:
+    def _invoice_text(self, a: WorldAccount, item: ItemInfo) -> tuple[str, ...]:
         rng = self.rng
+        texts: tuple[tuple[str, ...], ...]
         if a.kind == "rent":
-            text: tuple[str, ...] = rng.choice(
-                ((f"LOYER {item.ref} {a.external_ref}",), (f"Loyer bail {a.external_ref}",))
-            )
+            texts = ((f"LOYER {item.ref} {a.external_ref}",), (f"Loyer bail {a.external_ref}",))
         elif a.kind == "loan":
-            text = rng.choice(
-                ((f"ECHEANCE PRET {item.ref}",), (f"Remboursement credit n°{item.ref}",))
-            )
+            texts = ((f"ECHEANCE PRET {item.ref}",), (f"Remboursement credit n°{item.ref}",))
         else:
-            text = rng.choice(((f"REGLT FACT {item.ref}",), (f"VIR FACTURE N {item.ref}",)))
-        if rng.random() < 0.2 and self.taken.get(a.id, 0) == 0:  # a third party pays it to the cent
-            self.taken[a.id] = self.taken.get(a.id, 0) + item.balance_minor
-            return Credit(
-                item.balance_minor,
-                self.stranger(),
-                self.fresh_iban(),
-                text,
-                None,
-                a.id,
-                "auto",
-                "item_ref",
-            )
-        name = self.as_payer(rng.choice(a.names))
+            texts = ((f"REGLT FACT {item.ref}",), (f"VIR FACTURE N {item.ref}",))
+        return rng.choice(texts)
+
+    def _item_ref(self) -> Credit:
+        """An invoice or loan number: a third party pays it to the cent (one time in five, while
+        nothing was paid on the file), else the debtor, whose name backs a number by itself."""
+        if self.rng.random() < 0.2:
+            for _ in range(30):
+                a, item = self.rng.choice(self.p.unique_items)
+                if self.taken.get(a.id, 0) == 0:
+                    self.taken[a.id] = item.balance_minor
+                    text = self._invoice_text(a, item)
+                    payer, iban = self.stranger(), self.fresh_iban()
+                    return Credit(
+                        item.balance_minor, payer, iban, text, None, a.id, "auto", "item_ref"
+                    )
+        a, item = self.pick(self.p.named_items or self.p.unique_items, lambda x: x[0])
+        text = self._invoice_text(a, item)
+        name = self.as_payer(self.rng.choice(a.names))
         return Credit(self.amount(a), name, self.fresh_iban(), text, None, a.id, "auto", "item_ref")
 
 
@@ -499,8 +829,13 @@ def generate_credits(
 ) -> list[Credit]:
     """n credits in the mix's exact proportions, in a random order. `earlier`: credits already
     paid to the files (an earlier statement): nobody pays a file more than it still owes."""
-    w = _Writer(world, seed, earlier)
-    scenarios = [name for name, k in mix_counts(n).items() for _ in range(k)]
+    counts = mix_counts(n)
+    # The paired credits go together (one RF, one bare credit from the same IBAN).
+    pairs = min(counts["joint_rf"], counts["joint_noref"])
+    counts["rf_structured"] += counts["joint_rf"] + counts["joint_noref"] - 2 * pairs
+    counts["joint_rf"] = counts["joint_noref"] = pairs
+    w = _Writer(world, seed, earlier, joints=pairs)
+    scenarios = [name for name, k in counts.items() for _ in range(k)]
     w.rng.shuffle(scenarios)
     return [w.credit(s) for s in scenarios]
 
@@ -566,7 +901,9 @@ class Score:
     queued: int = 0
     missed: dict[str, int] = field(default_factory=dict)  # expected auto, queued (per scenario)
     bad_reason: list[str] = field(default_factory=list)  # expected in the queue for another reason
-    auto_unexpected: int = 0  # expected in the queue, matched automatically to the right file
+    # Expected in the queue, matched automatically to the right file all the same: founder #3
+    # forbids it (a name and an amount, a mistyped reference…), so it fails like a wrong match.
+    policy_violations: list[str] = field(default_factory=list)
     gated: int = 0  # matched automatically to the right file, then held for ops by the gating
     by_scenario: dict[str, list[int]] = field(default_factory=dict)  # [count, auto]
 
@@ -584,7 +921,9 @@ class Score:
             if account != c.truth:
                 self.wrong.append(f"{line} ({c.scenario}): matched {account}, truth {c.truth}")
             elif c.expect != "auto":
-                self.auto_unexpected += 1
+                self.policy_violations.append(
+                    f"{line} ({c.scenario}): matched {account} automatically, expected {c.expect}"
+                )
             self.gated += int(gated)
             return
         self.queued += 1
@@ -613,7 +952,7 @@ class Score:
             "queued": self.queued,
             "missed_by_scenario": dict(sorted(self.missed.items())),
             "queued_with_another_reason": len(self.bad_reason),
-            "auto_where_queue_expected": self.auto_unexpected,
+            "policy_violations": len(self.policy_violations),
             "by_scenario": {
                 k: {"credits": v[0], "auto": v[1]} for k, v in sorted(self.by_scenario.items())
             },

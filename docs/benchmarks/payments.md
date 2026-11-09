@@ -79,5 +79,8 @@ and a word index of the servicer's party names; R5–R6; COPY the decisions and 
 - **Eval in Python** (`make eval`, CI `py` job): 100,000 credits × 50,000 files: world 8 s,
   matching 16 s, **95.5 % automatic, 0 wrong, 4.5 % queued**, every queued credit with its expected
   reason. Through the database (integration test, 600 files, 1,500 credits): 95.5–95.6 %, 0 wrong.
+  After the review fixes (ADR-0013, M2b-3 review fixes; hard cases added to the statement): world
+  7 s, matching 11 s, **96.0 % automatic, 0 wrong, 0 policy violations, 4.0 % queued**; the
+  database runs above were not repeated.
 - Design estimate (§8.4): 10–20 s for 100k lines against 500k references.
 
