@@ -767,3 +767,51 @@ def test_a_direct_payment_whose_job_dies_is_refused_not_left_in_progress() -> No
             "select status, refusal_code from public.direct_payment where id = %s", (ident,)
         ).fetchone()
     assert row == ("refused", "failed")
+
+
+def test_a_direct_payment_the_ledger_refuses_is_refused_failed_at_once() -> None:
+    """Review fix (tests-ux #2): a plan the ledger refuses (planted here on this file's entries)
+    would fail the same way on every retry: the job refuses the request `failed` at once."""
+    tenant = bank_tenant()
+    store = storage()
+    loan = create_file(
+        tenant,
+        File(
+            f"H-{uuid.uuid4().hex[:6]}",
+            "b2b",
+            "Refus SA",
+            [Item("F-1", {"principal": 30_000}, date(2026, 7, 1))],
+        ),
+    )
+    doc = evidence(tenant, loan.id)
+    name = f"test_refuse_{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            f"""create function public.{name}() returns trigger language plpgsql as $$
+                begin raise exception 'ledger: planted refusal' using errcode = 'LG007'; end $$"""
+        )
+        conn.execute(
+            f"""create trigger {name} before insert on public.ledger_entry for each row
+                when (new.account_id = '{loan.id}' and new.source_type = 'direct_payment')
+                execute function public.{name}()"""
+        )
+    try:
+        out = api(
+            tenant,
+            "select public.record_direct_payment(%s, %s, '{}'::uuid[], '10000', '2026-10-20', %s,"
+            " 'relevé client')",
+            str(uuid.uuid4()),
+            loan.id,
+            doc,
+        )
+        drain(store)
+    finally:
+        with psycopg.connect(DB) as conn, conn.transaction():
+            conn.execute(f"drop trigger {name} on public.ledger_entry")
+            conn.execute(f"drop function public.{name}()")
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            "select status, refusal_code, entry_id from public.direct_payment where id = %s",
+            (out["direct_payment_id"],),
+        ).fetchone()
+    assert row == ("refused", "failed", None)
