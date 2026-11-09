@@ -62,13 +62,14 @@ export type Notification = {
 };
 
 /**
- * A notification as the page lists it: recorded for the client, and sent only once its delivery is recorded (the
- * delivery itself comes later): the page never says the client was informed before it was (M2b-4 review).
+ * A notification as the page lists it: recorded for the client, and delivered only once a member of the client read
+ * it in the client space (M2b-5 feed; webhooks come later): the page never says the client was informed before it
+ * was (M2b-4 review).
  */
 export function notificationText(n: Notification, when: (iso: string) => string): string {
   const what = NOTIFICATION_LABEL[n.kind] ?? n.kind;
   return n.delivered_at
-    ? `${what} · notification envoyée à ${n.client_name} le ${when(n.delivered_at)}`
+    ? `${what} · notification remise à ${n.client_name} dans son espace client le ${when(n.delivered_at)}`
     : `${what} · notification enregistrée pour ${n.client_name} le ${when(n.created_at)} (envoi : à venir)`;
 }
 

@@ -1081,6 +1081,50 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"receipt": {
+                  Row: {
+                    "account_id": string,"client_organization_id": string,"document_id": string,"id": string,"issued_at": string,"kind": string,"known_at": string,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"payment_id": string,"pdf_sha256": string,"portfolio_id": string,"recipient_party_id": string | null,"renderer_version": string,"template_version": string,"version": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id": string,"client_organization_id": string,"document_id": string,"id"?: string,"issued_at"?: string,"kind": string,"known_at": string,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"payment_id": string,"pdf_sha256": string,"portfolio_id": string,"recipient_party_id"?: string | null,"renderer_version": string,"template_version": string,"version": number
+                  }
+                  Update: {
+                    "account_id"?: string,"client_organization_id"?: string,"document_id"?: string,"id"?: string,"issued_at"?: string,"kind"?: string,"known_at"?: string,"number"?: string,"organization_id"?: string,"payload"?: NonNullable<Json>,"payload_sha256"?: string,"payment_id"?: string,"pdf_sha256"?: string,"portfolio_id"?: string,"recipient_party_id"?: string | null,"renderer_version"?: string,"template_version"?: string,"version"?: number
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "receipt_account_fk"
+      columns: ["account_id","organization_id","client_organization_id","portfolio_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id","organization_id","client_organization_id","portfolio_id"]
+    },{
+      foreignKeyName: "receipt_document_id_fkey"
+      columns: ["document_id"]
+isOneToOne: true
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "receipt_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "receipt_payment_id_fkey"
+      columns: ["payment_id"]
+isOneToOne: false
+      referencedRelation: "payment"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "receipt_recipient_party_id_fkey"
+      columns: ["recipient_party_id"]
+isOneToOne: false
+      referencedRelation: "party"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"validation_issue": {
                   Row: {
                     "batch_id": string,"code": string,"created_at": string,"file_id": string,"id": number,"message": string,"raw_value": string | null,"row_number": number | null,"severity": string,"source_column": string | null,"target": string | null
@@ -1145,6 +1189,11 @@ isOneToOne: false
 "client_money_balances":
 { Args: { "p_as_of"?: string,"p_client_organization_id": string,"p_known_at"?: string }; Returns: {
               "currency": string,"held_minor": number,"payable_minor": number,"unallocated_minor": number
+            }[]
+                           },
+"client_payment_feed":
+{ Args: { "p_after"?: string,"p_client": string,"p_limit"?: number }; Returns: {
+              "account_id": string,"amount_minor": string,"booking_date": string,"created_at": string,"currency": string,"cursor": string,"debtor_name": string,"delivered_at": string,"effective_date": string,"file_reference": string,"first_view": boolean,"kind": string,"lines": Json,"notification_id": string,"reason": string,"receipt_id": string,"receipt_kind": string,"receipt_number": string,"receipt_version": number
             }[]
                            },
 "close_bank_account":

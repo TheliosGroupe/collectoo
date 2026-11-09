@@ -92,13 +92,13 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
-      - name: Worker integration tests (queue, storage, commit, statements, matching, allocation)
+      - name: Worker integration tests (queue, storage, commit, statements, matching, allocation, receipts)
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen && uv run pytest -m integration --ignore-glob='*scale_integration.py'
 
   scale:
-    name: Scale runs (50k boarding, statement, matching, allocation)
+    name: Scale runs (50k boarding, statement, matching, allocation; 5k receipts)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -122,6 +122,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
       - name: 50k scale runs (each must stay under its own time budget)
+        env:
+          RECEIPT_FILES: "5000"  # rendering ~10 ms a receipt: 50k is the benchmark (docs/benchmarks/payments.md)
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen && uv run pytest -m integration -s tests/*scale_integration.py

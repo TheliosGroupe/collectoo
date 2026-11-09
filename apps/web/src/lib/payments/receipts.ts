@@ -1,0 +1,123 @@
+import type { Tone } from "@/lib/payments/statements";
+
+/**
+ * M2b-5: receipts (R124-6) and the client payment feed (R124-5). Pure helpers, unit-tested. The worker builds each
+ * receipt from the ledger and renders its PDF; these pages list the versions and the feed. Amounts arrive as text
+ * (integer minor units): they never pass through a JS number.
+ */
+
+export type ReceiptVersion = {
+  id: string;
+  number: string;
+  version: number;
+  kind: string;
+  known_at: string;
+  issued_at: string;
+  pdf_sha256: string;
+  account_id: string;
+};
+
+/** What a receipt version is (receipt.kind). */
+export const RECEIPT_KIND: Record<string, { label: string; tone: Tone }> = {
+  original: { label: "Originale", tone: "ok" },
+  update: { label: "Mise à jour", tone: "ok" },
+  void: { label: "Annulée", tone: "neutral" },
+};
+
+/** The versions of a payment's receipt, latest first: the latest is in force, the others replaced (kept). */
+export function receiptVersions(rows: ReceiptVersion[]): (ReceiptVersion & { current: boolean; label: string })[] {
+  const sorted = [...rows].sort((a, b) => b.version - a.version);
+  return sorted.map((r, i) => ({
+    ...r,
+    current: i === 0,
+    label:
+      r.version === 1
+        ? "Version 1"
+        : `Version ${r.version} – ${r.kind === "void" ? "annule" : "remplace"} la version ${r.version - 1}`,
+  }));
+}
+
+/** A SHA-256 short enough for a phone, long enough to compare by eye. */
+export function shortHash(sha: string): string {
+  return sha.length > 16 ? `${sha.slice(0, 8)}…${sha.slice(-8)}` : sha;
+}
+
+export function receiptFileName(r: Pick<ReceiptVersion, "number" | "version">): string {
+  return `${r.number}-v${r.version}.pdf`;
+}
+
+/**
+ * Whether the page should wait for a receipt version the worker has not issued yet: a payment on a file without
+ * one, an entry posted after the latest version was read, or a payment off its file whose receipt is not void yet.
+ * A payment waiting for its allocation gets its receipt after it (the allocation queues it).
+ */
+export function receiptPending(o: {
+  hasFile: boolean;
+  waitingForAllocation: boolean;
+  receipts: Pick<ReceiptVersion, "version" | "kind" | "known_at">[];
+  lastChangeAt: string | null;
+}): boolean {
+  if (o.waitingForAllocation) return false;
+  const latest = [...o.receipts].sort((a, b) => b.version - a.version)[0];
+  if (!o.hasFile) return latest !== undefined && latest.kind !== "void";
+  if (!latest) return true;
+  return o.lastChangeAt !== null && Date.parse(o.lastChangeAt) > Date.parse(latest.known_at);
+}
+
+/** A row of `client_payment_feed`. */
+export type FeedRow = {
+  notification_id: string;
+  cursor: string;
+  created_at: string;
+  kind: string;
+  reason: string | null;
+  account_id: string | null;
+  file_reference: string | null;
+  debtor_name: string | null;
+  amount_minor: string;
+  currency: string;
+  booking_date: string;
+  effective_date: string | null;
+  lines: { item_ref: string; item_kind: string; due_date: string | null; component: string; amount_minor: string }[];
+  receipt_id: string | null;
+  receipt_number: string | null;
+  receipt_version: number | null;
+  receipt_kind: string | null;
+  delivered_at: string | null;
+  first_view: boolean;
+};
+
+/** What the client is told (client_notification.kind), in French. */
+export const FEED_KIND: Record<string, { label: string; tone: Tone; amount: string }> = {
+  payment_allocated: { label: "Paiement imputé", tone: "ok", amount: "imputés" },
+  payment_allocation_reversed: { label: "Imputation annulée", tone: "action", amount: "désimputés" },
+  payment_forwarded: { label: "Paiement reversé sans imputation", tone: "ok", amount: "reversés sans imputation" },
+  payment_held: { label: "Paiement mis en attente", tone: "action", amount: "reçus, non imputés" },
+};
+
+export function feedKind(kind: string): { label: string; tone: Tone; amount: string } {
+  return FEED_KIND[kind] ?? { label: kind, tone: "neutral", amount: "" };
+}
+
+/** Why (client_notification.reason, a code: never ops' own words), in French. */
+export const FEED_REASON: Record<string, string> = {
+  hold_blocks_allocation:
+    "Une procédure en cours sur ce dossier (surendettement ou procédure collective) empêche l'imputation : le paiement est conservé, il n'est ni imputé ni reversé.",
+  ops_correction: "Imputation corrigée par nos services.",
+  file_recalled: "Dossier rappelé : le paiement vous est reversé sans être imputé.",
+  before_servicing_start:
+    "Paiement antérieur à la date d'arrêté du portefeuille : il vous est reversé sans être imputé.",
+  client_ratification: "Paiement reversé sur votre ratification.",
+};
+
+export function feedReason(reason: string | null): string | null {
+  if (!reason) return null;
+  return FEED_REASON[reason] ?? null;
+}
+
+/** The link to a receipt version and its words (« Quittance Q-2026-000001 · version 2 (annulée) »). */
+export function feedReceiptLabel(row: Pick<FeedRow, "receipt_number" | "receipt_version" | "receipt_kind">): string | null {
+  if (!row.receipt_number || row.receipt_version === null) return null;
+  const base = `Quittance ${row.receipt_number} · version ${row.receipt_version}`;
+  return row.receipt_kind === "void" ? `${base} (annulée)` : base;
+}

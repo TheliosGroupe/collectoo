@@ -199,7 +199,7 @@ describe("payment page (M2b-4 review fixes)", () => {
     expect(text).toBe("Imputation · notification enregistrée pour Boulangerie Durand le 2026-11-09 (envoi : à venir)");
     expect(text).not.toMatch(/inform|R124/i);
     expect(notificationText({ ...recorded, delivered_at: "2026-11-10T08:00:00Z" }, at)).toBe(
-      "Imputation · notification envoyée à Boulangerie Durand le 2026-11-10",
+      "Imputation · notification remise à Boulangerie Durand dans son espace client le 2026-11-10",
     );
     expect(notificationText({ ...recorded, kind: "payment_held" }, at)).toContain("Paiement retenu");
   });

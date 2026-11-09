@@ -11,7 +11,8 @@ payments matched before it (backfill). One transaction (the queue's, exactly onc
    job's start (`known_at`); a version is due only when it differs from the current one (the job is
    idempotent), a void one when the payment left its file; numbers are drawn for first versions;
 3. render each PDF (`payments.receipt_pdf`, deterministic) and upload it to the private bucket
-   `documents` at its key (the same key and bytes if a failed attempt is replayed);
+   `documents` at its key (the same key and bytes if a failed attempt is replayed), uploads running
+   alongside the rendering (`UPLOADS` at a time);
 4. `private.receipt_issue`: one `document` (SHA-256) and one `receipt` row per version.
 
 At most `CHUNK` payments per run: the rest of a longer list is queued in the same transaction. No
@@ -23,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import psycopg
@@ -35,6 +37,7 @@ from collectoo_worker.runtime.storage import Storage
 Conn = psycopg.Connection[Any]
 log = logging.getLogger("collectoo.payments")
 CHUNK = int(os.environ.get("RECEIPTS_CHUNK", "200"))  # design §9: 200 per message
+UPLOADS = int(os.environ.get("RECEIPTS_UPLOADS", "8"))  # concurrent uploads to Storage
 BUCKET = "documents"
 
 
@@ -57,10 +60,15 @@ def run_receipts(conn: Conn, storage: Storage, payload: dict[str, Any]) -> dict[
     ).fetchall()
     prepared = time.monotonic()
     rendered: list[tuple[str, str]] = []
-    for payment_id, number, version, kind, known_at, path, body in rows:
-        pdf = render_receipt(ReceiptDocument(number, int(version), kind, known_at, body))
-        storage.upload(BUCKET, path, pdf, "application/pdf")
-        rendered.append((payment_id, pdf_sha256(pdf)))
+    # Rendering is CPU-bound (one at a time); uploads wait on the network: they run alongside.
+    with ThreadPoolExecutor(max_workers=UPLOADS) as pool:
+        uploads = []
+        for payment_id, number, version, kind, known_at, path, body in rows:
+            pdf = render_receipt(ReceiptDocument(number, int(version), kind, known_at, body))
+            uploads.append(pool.submit(storage.upload, BUCKET, path, pdf, "application/pdf"))
+            rendered.append((payment_id, pdf_sha256(pdf)))
+        for upload in uploads:
+            upload.result()  # a failed upload fails the job (retried by the queue)
     stored = time.monotonic()
     with (
         conn.cursor() as cur,

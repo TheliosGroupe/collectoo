@@ -20,6 +20,7 @@ import {
 } from "@/lib/payments/allocation";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import { METHOD_LABEL, RULE_LABEL, formatRf, reviewReason } from "@/lib/payments/matching";
+import { RECEIPT_KIND, type ReceiptVersion, receiptPending, receiptVersions, shortHash } from "@/lib/payments/receipts";
 import { money } from "@/lib/payments/statements";
 import { Forward, Reallocate, ReleaseHold, ReverseAllocation, UnassignHere, UseForOtherFile } from "./payment-actions";
 
@@ -36,7 +37,7 @@ function frenchDateTime(iso: string): string {
  * ledger), the notifications recorded for the client (and whether they were sent), and the actions on it for admins
  * and ops managers: reverse an allocation, allocate again, release a held payment on the judge's authorisation,
  * forward to the client, use an overpayment for another file of the debtor. Every action is a command checked in SQL
- * against what this page showed.
+ * against what this page showed. M2b-5: the receipt (R124-6) and its versions, each PDF with its SHA-256.
  */
 export default async function PaymentPage({ params }: PageProps<"/backoffice/encaissements/paiements/[id]">) {
   const { id } = await params;
@@ -53,6 +54,12 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   }
   const p = d.payment;
   const cur = p.currency;
+  const { data: receiptRows } = await supabase
+    .from("receipt")
+    .select("id, number, version, kind, known_at, issued_at, pdf_sha256, account_id")
+    .eq("payment_id", p.id)
+    .order("version", { ascending: false });
+  const receipts = receiptVersions((receiptRows ?? []) as ReceiptVersion[]);
   const figures = positionFigures(d.position);
   const forwarded = BigInt(figures.forwarded) > BigInt(0);
   const status = paymentStatus(p.status, { forwarded });
@@ -65,10 +72,20 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   const docs = d.documents.map((x) => ({ id: x.id, label: `${x.kind} · classé le ${frenchDateTime(x.created_at)}` }));
   const lastAssign = [...d.matches].reverse().find((m) => m.action === "assign");
   const anyAction = Object.values(actions).some(Boolean);
+  const lastChangeAt = [p.matched_at, ...d.entries.map((e) => e.posted_at)]
+    .filter((x): x is string => x !== null)
+    .sort()
+    .at(-1) ?? null;
+  const receiptWaiting = receiptPending({
+    hasFile: p.account_id !== null,
+    waitingForAllocation: waiting,
+    receipts,
+    lastChangeAt,
+  });
 
   return (
     <WidePage title={`Paiement de ${money(p.amount_minor, cur)}`} back={back}>
-      <AutoRefresh active={waiting} abandonable={false} everyMs={2000} maxMs={5 * 60_000} />
+      <AutoRefresh active={waiting || receiptWaiting} abandonable={false} everyMs={2000} maxMs={5 * 60_000} />
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={status.tone} testId="payment-status">
           {status.label}
@@ -183,6 +200,56 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
         ) : null}
         <p className="mt-3 text-xs text-zinc-600 dark:text-zinc-400" data-testid="applied-order">
           {APPLIED_ORDER}
+        </p>
+      </Section>
+
+      <Section title="Quittance" testId="payment-receipt">
+        {receipts.length === 0 ? (
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            {p.account_id === null
+              ? "Pas de quittance : aucun dossier n'est rattaché à ce paiement."
+              : "Quittance en cours d'établissement (après l'imputation)."}
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-2 text-sm">
+            {receipts.map((r) => (
+              <li
+                key={r.id}
+                className="flex flex-wrap items-baseline justify-between gap-2 border-t border-zinc-100 pt-2 first:border-0 first:pt-0 dark:border-zinc-800"
+                data-testid="receipt-version"
+              >
+                <span>
+                  <span className="font-medium">{r.number}</span> · {r.label}
+                  <span className="ml-2 inline-flex gap-1 align-middle">
+                    <Badge tone={(RECEIPT_KIND[r.kind] ?? RECEIPT_KIND.update).tone}>
+                      {(RECEIPT_KIND[r.kind] ?? { label: r.kind }).label}
+                    </Badge>
+                    {r.current ? <Badge tone="neutral">En vigueur</Badge> : null}
+                  </span>
+                  <span className="block text-xs text-zinc-600 dark:text-zinc-400">
+                    établie le {frenchDateTime(r.known_at)} · SHA-256 <span className="font-mono">{shortHash(r.pdf_sha256)}</span>
+                  </span>
+                </span>
+                <a
+                  href={`/backoffice/quittances/${r.id}`}
+                  className="underline underline-offset-4"
+                  data-testid="receipt-pdf"
+                  aria-label={`Quittance ${r.number}, version ${r.version} (PDF)`}
+                >
+                  PDF
+                </a>
+              </li>
+            ))}
+          </ul>
+        )}
+        {receiptWaiting && receipts.length > 0 ? (
+          <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400" data-testid="receipt-pending">
+            Nouvelle version en cours d&apos;établissement.
+          </p>
+        ) : null}
+        <p className="mt-3 text-xs text-zinc-600 dark:text-zinc-400">
+          Établie à partir de la comptabilité, sans solde restant dû avant le calcul des intérêts ; le payeur n&apos;y est
+          nommé que s&apos;il est partie au dossier. Envoi au débiteur : à venir.
         </p>
       </Section>
 
