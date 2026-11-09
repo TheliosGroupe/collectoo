@@ -3,7 +3,7 @@
 -- §6, §7, §8.1, §9, §11, §13; ADR-0013 (M2b-6 addendum). The worker's debit job is played here through ops' link_debit
 -- (same posting function) and private.apply_debit_decisions; the direct-payment job through private.post_direct_payment.
 begin;
-select plan(117);
+select plan(123);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -160,7 +160,8 @@ create or replace function pg_temp.entries(p_n text) returns text language sql a
   where e.payment_id = pg_temp.pay(p_n);
 $$;
 create or replace function pg_temp.refund_of(p_n text) returns uuid language sql as $$
-  select id from public.refund_request where payment_id = pg_temp.pay(p_n) order by status = 'cancelled', requested_at desc, id limit 1;
+  select id from public.refund_request where payment_id = pg_temp.pay(p_n)
+  order by status = 'requested' desc, status = 'cancelled', requested_at desc, id limit 1;
 $$;
 create or replace function pg_temp.rfd_of(p_n text) returns text language sql as $$
   select end_to_end_id from public.refund_request where id = pg_temp.refund_of(p_n);
@@ -368,6 +369,25 @@ select is(pg_temp.state('02'), 'partially_allocated/overpayment', 'the payment i
 select is((select status from public.refund_request where id = pg_temp.refund_of('02')), 'bounced', 'the request bounced');
 select is(pg_temp.left_of('02'), '5000', 'its 5 000 left again');
 
+-- A partial return while a refund is pending waits for ops to cancel the refund first ---------------------------------
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.request_refund('k-refund-0030', pg_temp.pay('02'), '1000', null, null, 'overpayment',
+  'overpayment', '5000', 'remboursement partiel')$$, 'a partial refund asked');
+reset role;
+select pg_temp.line('t4', 'debit', 'return', 1000, '2026-11-05', 'E2E-02');
+set local role authenticated;
+select pg_temp.as_user('01');
+select throws_ok($$select public.link_debit('k-link-0050', pg_temp.ln('t4'), 'return', pg_temp.pay('02'), null, '25000',
+  'retour partiel')$$, '23514', 'debit link refused: refund_pending', 'a partial return waits while a refund is pending');
+select lives_ok($$select public.cancel_refund('k-cancel-0030', pg_temp.refund_of('02'), 'retour bancaire en cours')$$,
+  'ops cancel the refund');
+select lives_ok($$select public.link_debit('k-link-0051', pg_temp.ln('t4'), 'return', pg_temp.pay('02'), null, '25000',
+  'retour partiel')$$, 'then link the partial return');
+reset role;
+select is(pg_temp.state('02'), 'matched/partial_return', 'every allocation undone, the rest (24 000) waits for ops');
+select is(pg_temp.left_of('02'), '24000', 'what is left: 25 000 − 1 000 returned');
+
 -- A bank return (founder #13; design §2 #3): allocations reversed at the RETURN date, cash_out, returned ----------
 select pg_temp.line('t1', 'debit', 'return', 40000, '2026-11-03', 'E2E-01');
 set local role authenticated;
@@ -429,7 +449,10 @@ set local role authenticated;
 select pg_temp.as_user('01');
 select lives_ok($$select public.forward_payment('k-fwd-0001', pg_temp.pay('05'), null, '3000', null, 'dossier rappelé')$$,
   'a recalled file''s payment forwarded to the client');
+reset role;
 select pg_temp.line('t3', 'debit', 'return', 3000, '2026-11-04', 'E2E-05');
+set local role authenticated;
+select pg_temp.as_user('01');
 select lives_ok($$select public.link_debit('k-link-0040', pg_temp.ln('t3'), 'return', pg_temp.pay('05'), null, '3000',
   'retour bancaire')$$, 'its return linked');
 reset role;
@@ -533,11 +556,11 @@ select throws_ok($$update public.direct_payment set reason = 'x' where account_i
 -- Read access (founder #18) ---------------------------------------------------------------------------------------------
 set local role authenticated;
 select pg_temp.as_user('01');
-select ok((select count(*) from public.refund_request) = 2 and (select count(*) from public.bank_debit_link) = 6
+select ok((select count(*) from public.refund_request) = 3 and (select count(*) from public.bank_debit_link) = 7
           and (select count(*) from public.bank_debit_review) = 1 and (select count(*) from public.bank_duplicate_resolution) = 2,
   'money staff read the refunds, links, reviews and duplicate decisions of their servicer');
 select is((select count(*)::int from public.debit_queue('a-classer')), 1, 'the queue lists the line left to ops');
-select is((select count(*)::int from public.debit_queue('traites')), 8, 'and the lines decided');
+select is((select count(*)::int from public.debit_queue('traites')), 9, 'and the lines decided');
 select pg_temp.as_user('05');
 select ok((select count(*) from public.refund_request) + (select count(*) from public.bank_debit_link)
           + (select count(*) from public.bank_debit_review) + (select count(*) from public.direct_payment)

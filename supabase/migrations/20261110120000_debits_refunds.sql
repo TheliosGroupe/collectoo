@@ -600,7 +600,7 @@ begin
       when d.pay_status = 'returned' then 'already_returned'
       when d.line_date < d.pay_date then 'before_payment'
       when d.line_minor > d.pay_minor - d.returned then 'amount_exceeds'
-      when d.line_minor < d.pay_minor - d.returned and d.line_minor > d.pay_minor - d.returned - d.pending then 'refund_pending'
+      when d.line_minor < d.pay_minor - d.returned and d.pending > 0 then 'refund_pending'  -- partial: cancel it first
       when d.method = 'ops' and d.expected_left_minor is distinct from d.pay_minor - d.returned then 'payment_changed' end
     when d.kind = 'refund' then case
       when d.direction <> 'debit' or d.line_kind not in ('refund_out', 'other_debit', 'return') then 'not_a_refund'
@@ -2590,6 +2590,16 @@ create policy payment_check_run_read on public.payment_check_run for select to a
   using (organization_id = any ((select private.money_staff_org_ids())::uuid[]));
 create policy payment_check_result_read on public.payment_check_result for select to authenticated
   using (organization_id = any ((select private.money_staff_org_ids())::uuid[]));
+
+------------------------------------------------------------------------------------------
+-- Statement triggers that join their two transition tables (new_rows ⋈ old_rows on the payment) cache the plan of the
+-- session's first, small update; a nested loop reused for a 50k-row update compares every pair (the 50k match apply
+-- took minutes instead of seconds). No nested loop there, whatever the first update was (the same setting as the M2b-5
+-- review fix of these two functions; idempotent).
+------------------------------------------------------------------------------------------
+
+alter function private.payment_after_update() set enable_nestloop = off;
+alter function private.receipts_after_payment() set enable_nestloop = off;
 
 ------------------------------------------------------------------------------------------
 -- Privileges

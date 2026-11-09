@@ -214,10 +214,10 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("invalid IBAN")) return "iban_invalid";
   if (message.includes("cannot be refunded from here")) return "refund_not_possible";
   if (message.includes("no longer pending")) return "refund_not_pending";
-  if (message.includes("a refund is pending")) return "refund_pending";
+  if (message.includes("a refund is pending") || message.includes("debit link refused: refund_pending"))
+    return "refund_pending";
   if (message.includes("already_linked")) return "already_linked";
-  if (message.includes("amount_exceeds") || message.includes("amount_differs") || message.includes("refund_pending"))
-    return "link_amount";
+  if (message.includes("amount_exceeds") || message.includes("amount_differs")) return "link_amount";
   if (message.includes("debit link refused")) return "link_refused";
   if (message.includes("already decided")) return "already_decided";
   if (message.includes("client's statement is required")) return "direct_evidence";

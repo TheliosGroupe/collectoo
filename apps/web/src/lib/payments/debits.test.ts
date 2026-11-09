@@ -139,6 +139,7 @@ describe("errors of the M2b-6 commands", () => {
       ["debit link refused: payment_changed", "payment_changed"],
       ["debit link refused: already_linked", "already_linked"],
       ["debit link refused: amount_exceeds", "link_amount"],
+      ["debit link refused: refund_pending", "refund_pending"],
       ["debit link refused: not_a_return", "link_refused"],
       ["duplicate: already decided: reload the page", "already_decided"],
       ["direct payment: the client's statement is required, filed on this file", "direct_evidence"],
