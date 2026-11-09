@@ -258,6 +258,24 @@ test("ops resolve the payments the rules leave to them", async ({ page }, testIn
   await expect(cards.first().getByTestId("queue-text")).toHaveText("SOLDE");
 
   // A file held for a collective proceeding: the sheet says the payment will be held, not allocated.
+  // The payment searched onto d is allocated first: a hold placed before the worker allocates it holds it too
+  // (rightly), and it would come back here to decide (the receipts jobs share the queue and can delay it).
+  const { data: dLine, error: dLineError } = await admin
+    .from("bank_transaction")
+    .select("id")
+    .eq("organization_id", tenant.servicerId)
+    .eq("acct_svcr_ref", "E2E-4")
+    .single();
+  if (dLineError) throw dLineError;
+  await expect
+    .poll(
+      async () => {
+        const { data } = await admin.from("payment").select("status").eq("bank_transaction_id", dLine.id).single();
+        return data?.status;
+      },
+      { timeout: 60_000 },
+    )
+    .toBe("allocated");
   const { data: proof, error: proofError } = await admin
     .from("document")
     .insert({
@@ -298,6 +316,7 @@ test("ops resolve the payments the rules leave to them", async ({ page }, testIn
   // A page past the last one (its payments were just resolved) says how many are left and leads back.
   // The count depends on the payments queue (matching, allocation and receipts jobs run in turn):
   // reload until the background jobs have settled rather than read a page rendered mid-way.
+  // (A count of 2 means the hold reached d's payment before its allocation: see the wait above.)
   const pastEnd = page.getByTestId("queue-past-end");
   await expect(async () => {
     await page.goto("/backoffice/encaissements/a-traiter?page=2");
