@@ -1331,4 +1331,50 @@ The plans rest on no statistics (M2b lessons): keyed lookups, `NOT EXISTS`, part
 
 ## 24. Founder decisions
 
-See the numbered list returned with this document (to be copied here with the answers, as in `m2b-payments.md` §17).
+**Answered 2026-11-09: all defaults accepted (« All ok »).** These decisions bind the M2c PRs; the open questions of §23 keep their conservative defaults until counsel or the accountant answers.
+
+1. How often do we pay clients? Twice a month (1st and 16th), weekly if the mandate asks, plus an automatic extra run before any one-month deadline.
+Default: yes.
+Why: a single monthly run misses the one-month limit for money collected just after it.
+2. When must the money reach the client? By the shorter of the mandate's delay and one calendar month from the day it hit our account (booking or value date, whichever is earlier), with no weekend or holiday extension.
+Default: yes.
+Why: safest reading of R124-6 until counsel answers.
+3. Do we deduct our commission from what we pay the client? Only when the mandate has a netting clause; otherwise we pay the gross amount and invoice the commission, payable within 30 days to our own account. Our standard mandate includes the clause.
+Default: yes.
+Why: the law lets the parties agree a set-off; without a clause we do not impose one.
+4. What earns commission? What we allocate to the client's claims (principal, interest, fees alike); nothing on money passed on without allocation (recalled file, cut-off, ratification) or paid to the client directly, unless the mandate says so.
+Default: yes.
+Why: the fee is what the agreement says (R124-3 3°), nothing implied.
+5. Which fee grids do we support now? A rate per claim type or component, tiers on what a file has brought in, a rate set by claim size or age at boarding, and a minimum per file (never above what the file brought in); new rates only for the future.
+Default: yes.
+Why: covers the usual French grids with one engine; fixed fees and success fees come later.
+6. A collection is undone after we invoiced it (bank return, mistake): do we issue a credit note on the original invoice?
+Default: yes, unless the mandate says the fee stays due.
+Why: no fee on money that did not stay collected.
+7. Money already paid to the client comes back (unpaid cheque, recall): we advance it from our own account the same day, so no other client's money covers it; we take it back from the client's next payments only if the mandate has a claw-back clause, otherwise we send a repayment request. No hold-back.
+Default: yes.
+Why: one creditor's money must never cover another's; holding funds needs a clause.
+8. A bank takes back more than what is left of a payment (OQ-34): who pays?
+Default: we bear it as a loss and pursue the payer.
+Why: never charged to another client.
+9. Our commission leaves the dedicated account by a separate transfer to our own account the day the clients' payments are debited, and bank fees on the dedicated account are our cost.
+Default: yes.
+Why: our money should not sit on the client account, and clients are always paid first.
+10. How is a client's payout IBAN changed? Only with its RIB, confirmed by a second person (the client's administrator in the portal, or a second admin of ours); the first payment to a new IBAN is flagged.
+Default: yes.
+Why: a changed IBAN is the classic fraud.
+11. Who approves payments to clients? One admin or ops manager, with no second approver per run.
+Default: yes.
+Why: the IBAN control covers the fraud path; speed keeps us within deadlines.
+12. Invoices: one numbering series for invoices and credit notes (FC-2026-000001, restarting each 1 January), one invoice per payment run and mandate, PDF until the e-invoicing platform.
+Default: yes; your accountant confirms, and tell us if the company is not a micro or SME.
+Why: tax doctrine allows a yearly series; e-invoicing is compulsory for micro/SMEs from 1 September 2027.
+13. Which clients can we serve in M2c? Only businesses established in mainland France, in euros; others are refused when their portfolio is confirmed.
+Default: yes; please confirm you have no other.
+Why: overseas departments, foreign and consumer clients need other VAT and invoice rules.
+14. One dedicated client-money account per currency pays all clients; a second one is refused.
+Default: yes.
+Why: keeps the cash checks and our commission transfers exact.
+15. Payments to clients go in a bank file (pain.001) that ops download and upload to the bank; pending refunds go in the same file; we keep the bank's name check on.
+Default: yes; please send your bank's file specifications.
+Why: no bank connection needed, one upload, and the name check catches wrong IBANs.
