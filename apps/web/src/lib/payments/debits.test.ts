@@ -152,6 +152,11 @@ describe("returns (founder #13; design §2 #3)", () => {
         "refund_not_pending",
         // not stored: the queue's reason for an other debit of a requested refund's amount
         "refund_amount_match",
+        // M2c-1: our own transfers and credits
+        "top_up_not_found",
+        "top_up_differs",
+        "client_credit",
+        "own_transfer_out",
       ].sort(),
     );
   });
@@ -201,7 +206,7 @@ describe("suspected duplicates (review M2b-6)", () => {
     expect(returned).toContain("« À classer »");
     expect(returned).toContain("Aucun paiement n'est créé");
     expect(releaseEffect({ direction: "debit", heldKind: "refund_out", amount })).toContain("retour ou un remboursement");
-    expect(releaseEffect({ direction: "debit", heldKind: "other_debit", amount })).toContain("non comptabilisée");
+    expect(releaseEffect({ direction: "debit", heldKind: "other_debit", amount })).toContain("frais bancaires");
     // reading not told: a credit's sheet gives both outcomes, never a bare promise of a payment
     const unknown = releaseEffect({ direction: "credit", heldKind: null, amount });
     expect(unknown).toContain("lecture faite à l'import");

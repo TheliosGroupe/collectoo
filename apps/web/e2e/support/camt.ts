@@ -21,7 +21,7 @@ export type Credit = {
 export type Debit = {
   ref: string;
   amountMinor: bigint;
-  kind: "return" | "refund" | "fee";
+  kind: "return" | "refund" | "fee" | "other";
   /** return: the end-to-end id of the credit it takes back; refund: our RFD reference. */
   e2e?: string;
   name?: string;
@@ -93,7 +93,11 @@ export function camt053Lines(iban: string, day: string, credits: Credit[], debit
 function debitEntry(day: string): (d: Debit) => string {
   return (d) => {
     const code =
-      d.kind === "return" ? ["PMNT", "RCDT", "RRTN"] : d.kind === "refund" ? ["PMNT", "ICDT", "ESCT"] : ["PMNT", "MDOP", "FEES"];
+      d.kind === "return"
+        ? ["PMNT", "RCDT", "RRTN"]
+        : d.kind === "refund" || d.kind === "other"
+          ? ["PMNT", "ICDT", "ESCT"]
+          : ["PMNT", "MDOP", "FEES"];
     const head =
       `<Ntry><Amt Ccy="EUR">${amount(d.amountMinor)}</Amt><CdtDbtInd>DBIT</CdtDbtInd>` +
       (d.kind === "return" ? "<RvslInd>true</RvslInd>" : "") +
@@ -101,6 +105,8 @@ function debitEntry(day: string): (d: Debit) => string {
       `<AcctSvcrRef>N${esc(d.ref)}</AcctSvcrRef>` +
       `<BkTxCd><Domn><Cd>${code[0]}</Cd><Fmly><Cd>${code[1]}</Cd><SubFmlyCd>${code[2]}</SubFmlyCd></Fmly></Domn></BkTxCd>`;
     if (d.kind === "fee") return `${head}<AddtlNtryInf>FRAIS DE TENUE DE COMPTE</AddtlNtryInf></Ntry>`;
+    // M2c-1: a debit the bank does not code as a charge (ops book it as a fee, or explain it)
+    if (d.kind === "other") return `${head}<AddtlNtryInf>PRELEVEMENT ABONNEMENT BANQUE EN LIGNE</AddtlNtryInf></Ntry>`;
     return (
       head +
       `<NtryDtls><TxDtls><Refs><AcctSvcrRef>${esc(d.ref)}</AcctSvcrRef><EndToEndId>${esc(d.e2e ?? "NOTPROVIDED")}</EndToEndId></Refs>` +
