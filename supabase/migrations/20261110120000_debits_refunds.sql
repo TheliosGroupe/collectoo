@@ -320,8 +320,10 @@ create trigger bank_duplicate_resolution_append_only before update or delete or 
 alter table public.bank_duplicate_resolution enable always trigger bank_duplicate_resolution_append_only;
 
 -- The parser's reading of a line held as a duplicate, from the import's stage rows (same transaction as the insert).
--- Fires on every import's insert (up to 250k lines): a scan of the new rows and, for each held one only, one key
--- lookup of its stage row (lateral: no plan cached for a small first insert can turn into a pairwise join).
+-- Fires on every import's insert (up to 250k lines): one scan of the new rows and, for each held one only, one key
+-- lookup of its stage row. The lateral subquery is kept as such (offset 0): flattened into a join, the planner may put
+-- the stage outside and scan every new row for each stage row when the stage's statistics are stale (CI: 251 s for a
+-- 50k import); kept lateral, the new rows are always outside, whatever the statistics.
 create or replace function private.bank_transaction_held_kind()
 returns trigger
 language plpgsql
@@ -334,7 +336,8 @@ begin
   select n.id, s.kind, s.method
   from new_rows n
   cross join lateral (select x.kind, x.method from private.bank_import_stage x
-                      where x.statement_id = n.statement_id and x.line_no = n.line_no) s
+                      where x.statement_id = n.statement_id and x.line_no = n.line_no
+                      offset 0) s
   where n.kind = 'suspected_duplicate' and s.kind in ('debtor_credit', 'return', 'refund_out', 'other_debit', 'batch_unsplit')
   on conflict (bank_transaction_id) do nothing;
   return null;
@@ -1386,6 +1389,7 @@ create or replace function private.payment_check_result_guard()
 returns trigger
 language plpgsql
 set search_path = ''
+set enable_nestloop = off  -- the new rows joined to the runs: hash join, never a pairwise scan
 as $$
 begin
   if exists (select 1 from new_rows n join public.payment_check_run r on r.id = n.run_id
