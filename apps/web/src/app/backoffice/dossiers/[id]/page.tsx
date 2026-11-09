@@ -35,7 +35,7 @@ const ACCOUNT_STATUS: Record<string, string> = {
  * M2b-4 « Dossier » (design §12.4, minimal, read-only): reference, client, debtor, RF reference, balances per
  * item and component from the ledger, holds, payments; and « Appliquer l'avoir » when the engine proposes to apply
  * a credit note (founder #7: compensation must be invoked, one tap). Staff who read the portfolio; actions for
- * admins and ops managers.
+ * admins and ops managers. M2b-5: each payment's receipt (its latest version, PDF).
  */
 export default async function FilePage({ params }: PageProps<"/backoffice/dossiers/[id]">) {
   const { id } = await params;
@@ -56,6 +56,19 @@ export default async function FilePage({ params }: PageProps<"/backoffice/dossie
   const { items, total } = itemBalances(d.balances);
   const debtor = d.parties.find((p) => p.role === "borrower")?.name ?? d.parties[0]?.name ?? "";
   const held = blockingHold(d.holds);
+  // M2b-5: each payment's receipt as it stands (its latest version), read under RLS
+  const { data: receiptRows } = d.payments.length
+    ? await supabase
+        .from("receipt")
+        .select("id, payment_id, number, version, kind")
+        .in(
+          "payment_id",
+          d.payments.map((p) => p.id),
+        )
+        .order("version", { ascending: false })
+    : { data: [] };
+  const receiptOf = new Map<string, { id: string; number: string; version: number; kind: string }>();
+  for (const r of receiptRows ?? []) if (!receiptOf.has(r.payment_id)) receiptOf.set(r.payment_id, r);
 
   return (
     <WidePage title={`Dossier ${a.external_ref}`} back={back}>
@@ -153,6 +166,7 @@ export default async function FilePage({ params }: PageProps<"/backoffice/dossie
           <ul className="flex flex-col gap-2 text-sm">
             {d.payments.map((p) => {
               const s = paymentStatus(p.status, { forwarded: p.forwarded });
+              const receipt = receiptOf.get(p.id);
               return (
                 <li key={p.id} className="flex flex-wrap items-center justify-between gap-2" data-testid="file-payment">
                   {d.can_act ? (
@@ -164,9 +178,19 @@ export default async function FilePage({ params }: PageProps<"/backoffice/dossie
                       {money(p.amount_minor, p.currency)} reçu le {frenchDate(p.booking_date)}
                     </span>
                   )}
-                  <span className="flex gap-1">
+                  <span className="flex flex-wrap items-center gap-1">
                     <Badge tone={s.tone}>{s.label}</Badge>
                     {p.review_reason ? <Badge tone={reviewReason(p.review_reason).tone}>{reviewReason(p.review_reason).label}</Badge> : null}
+                    {receipt ? (
+                      <a
+                        href={`/backoffice/quittances/${receipt.id}`}
+                        className="text-xs underline underline-offset-4"
+                        data-testid="file-payment-receipt"
+                      >
+                        Quittance {receipt.number} v{receipt.version}
+                        {receipt.kind === "void" ? " (annulée)" : ""}
+                      </a>
+                    ) : null}
                   </span>
                 </li>
               );

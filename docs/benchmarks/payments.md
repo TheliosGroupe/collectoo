@@ -156,3 +156,45 @@ payment and file through `ledger_post_set`, plan headers, notifications, payment
   question in PROGRESS).
 - Design estimate (§8.5): ~50k entries and ~350k postings in 20–30 s.
 
+
+## Receipts (M2-10, M2b-5)
+
+`worker/tests/test_receipts_scale_integration.py` boards `RECEIPT_FILES` files from the synthetic EU loan tape (as the
+M2-09 run), pays each by its RF reference (partial, exact and over amounts), imports, matches and allocates them with
+the receipt jobs left aside (as before receipts existed), then runs the migration's backfill
+(`private.queue_receipt_backfill`: one job per 200 payments) and the `payments.receipts` jobs. It checks set-based that
+every payment on a file has exactly one receipt number with one version (v1), totals adding up to the payment, a PDF
+hash per version. CI runs it at 5,000 files (`RECEIPT_FILES=5000` in the `scale` job); 50,000 is the benchmark.
+
+A job is one transaction under the servicer's receipts lock: `receipt_prepare` (payloads built in SQL from the ledger,
+the versions due, numbers drawn), rendering one PDF at a time (reportlab, invariant, uncompressed, DejaVu Sans
+subsets) while up to 8 uploads to Storage run alongside on a kept-alive HTTP client, then `receipt_issue` (documents
+and receipts).
+
+### Result (2026-11-09, cloud session VM: 4 vCPU, 16 GB RAM, local Supabase stack)
+
+| Run | Receipts | Jobs | Per job: prepare / render + store / record | Total | Per receipt |
+|---|---|---|---|---|---|
+| uploads one after the other (2,000 files) | 2,000 | 10 × 200 | 0.14 / 4.3 / 0.03 s | 44.1 s | 22.0 ms |
+| 8 uploads alongside the rendering (2,000 files) | 2,000 | 10 × 200 | 0.15 / 1.9–2.0 / 0.03 s | 22.5 s | 11.3 ms |
+| **50,000 files** (boarded, imported, matched, allocated in 153 s) | 50,000 | 250 × 200 | 0.16–0.18 / 1.8–2.1 / 0.04 s | **578.4 s** | **11.6 ms** |
+
+- **Where the time goes:** rendering, ~9 ms a receipt on one core (two font subsets of ~36 KB each are built per PDF);
+  the SQL is ~1 ms a receipt (prepare and record), the uploads overlap the rendering. A PDF is ~87 KB (uncompressed,
+  for bytes that do not depend on the zlib build): ~4.3 GB per 50,000 receipts.
+- **Design risk R8** estimated 20–40 min for 50k receipts: ~10 min, in background jobs that never hold the allocation
+  lock. Receipts of one servicer are issued one job at a time (one number counter); several servicers run in
+  parallel. Faster later if needed: render in a process pool (4 cores), or lighter font subsets.
+- **Allocation unchanged by the receipt triggers** (M2b-5, fresh database): the 50k allocation run posts 8.2–9.2 s per
+  10k job as before (the statement-level triggers on `ledger_entry` and `payment` add one `pgmq.send` per 200
+  payments); the test's total, 56.9 s, also counts taking the 250 receipt jobs off the queue unrun.
+- **Review fixes (2026-11-09, 5,000 files, fresh database):** `receipt_payload` now uses keyed lookups whatever the
+  statistics (hash and merge joins off): before the tables were analysed, its totals scanned every posting and
+  `receipt_prepare` took 0.64–0.83 s a job of 200 (0.58 s against 0.13 s with the statistics wiped and restored in one
+  transaction); now 0.07–0.13 s a job either way. The payer rule (`private.payer_is_party`, plpgsql) costs ~46 µs a
+  party (the word-set comparison it replaces ~175 µs). Rendering is unchanged (1.99–2.69 s a job); the 5,000-file
+  test passes in 79.8 s.
+- **Client feed** (`client_payment_feed`, review #10), 60,000 notifications of one client, measured with the
+  plpgsql generic plan in use: 8.4–12.5 ms a page for a reader limited to a portfolio that holds only the oldest 50
+  rows (the client index is walked to them), 2.3–2.6 ms for staff after a cursor 50,000 rows deep, 3.7–4.2 ms for that
+  reader's last page. No other index or query shape needed at this size.

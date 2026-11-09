@@ -27,9 +27,9 @@ FILES = int(os.environ.get("MATCH_FILES", "50000"))
 CREDITS = int(os.environ.get("MATCH_CREDITS", "50000"))
 
 
-def _board(tenant: dict[str, Any], tmp_path: Path) -> None:
+def _board(tenant: dict[str, Any], tmp_path: Path, count: int = FILES) -> None:
     """Upload, mapping, commit, confirmation: the files are confirmed, with balances and RFs."""
-    generate(FILES, tmp_path)
+    generate(count, tmp_path)
     store = storage()
     files = [tmp_path / f"{t}.csv" for t in ("t1_counterparty", "t2_1_borrower_loan", "t3_loan")]
     batch = board(tenant, store, *files)

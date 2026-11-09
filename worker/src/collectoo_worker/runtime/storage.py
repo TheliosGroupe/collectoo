@@ -22,6 +22,7 @@ class SupabaseStorage:
         self._base = url.rstrip("/") + "/storage/v1/object"
         self._headers = {"apikey": secret_key}
         self._timeout = timeout_s
+        self._client = httpx.Client()  # kept alive (thread-safe): receipts upload many small files
 
     def download(self, bucket: str, path: str, dest: Path) -> Path:
         url = f"{self._base}/{quote(bucket)}/{quote(path)}"
@@ -36,7 +37,7 @@ class SupabaseStorage:
         self, bucket: str, path: str, data: bytes, content_type: str = "application/octet-stream"
     ) -> None:
         url = f"{self._base}/{quote(bucket)}/{quote(path)}"
-        resp = httpx.post(
+        resp = self._client.post(
             url,
             headers={**self._headers, "Content-Type": content_type, "x-upsert": "true"},
             content=data,

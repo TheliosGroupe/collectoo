@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { LogoutButton } from "@/components/logout";
 import { Page } from "@/components/ui";
@@ -26,6 +27,15 @@ export default async function ClientPage() {
             <li key={p.id}>{p.name}</li>
           ))}
         </ul>
+      </section>
+      <section className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+        <h2 className="font-medium">Paiements</h2>
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+          Les paiements de vos débiteurs, leur imputation et leurs quittances.
+        </p>
+        <Link href="/client/paiements" className="mt-2 inline-block text-sm font-medium underline underline-offset-4" data-testid="client-payments-link">
+          Paiements reçus
+        </Link>
       </section>
       <LogoutButton />
     </Page>

@@ -131,11 +131,18 @@ def create_file(tenant: dict[str, Any], f: File, *, party_of: File | None = None
     return f
 
 
-def statement(
-    tenant: dict[str, Any], store: Storage, credits: Sequence[Credit], prefix: str, day: date
+def statement(  # noqa: PLR0913 - the statement's identity
+    tenant: dict[str, Any],
+    store: Storage,
+    credits: Sequence[Credit],
+    prefix: str,
+    day: date,
+    *,
+    receipts: bool = False,
 ) -> dict[str, str]:
-    """Imported, matched and allocated (the payments queue drained); payment id per line."""
-    sid = pay(tenant, store, credits, prefix=prefix, start=day, days=1)
+    """Imported, matched and allocated (the payments queue drained; with `receipts`, the receipts
+    issued too); payment id per line."""
+    sid = pay(tenant, store, credits, prefix=prefix, start=day, days=1, receipts=receipts)
     with psycopg.connect(DB) as conn:
         rows = conn.execute(
             """select t.acct_svcr_ref, p.id::text from public.bank_transaction t
