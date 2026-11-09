@@ -263,14 +263,14 @@ isOneToOne: false
                   ]
                 },"bank_debit_review": {
                   Row: {
-                    "bank_transaction_id": string,"candidates": NonNullable<Json>,"checked_at": string,"organization_id": string,"reason": string
+                    "bank_transaction_id": string,"candidates": NonNullable<Json>,"checked_at": string,"detail": string | null,"organization_id": string,"reason": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "bank_transaction_id": string,"candidates"?: NonNullable<Json>,"checked_at"?: string,"organization_id": string,"reason": string
+                    "bank_transaction_id": string,"candidates"?: NonNullable<Json>,"checked_at"?: string,"detail"?: string | null,"organization_id": string,"reason": string
                   }
                   Update: {
-                    "bank_transaction_id"?: string,"candidates"?: NonNullable<Json>,"checked_at"?: string,"organization_id"?: string,"reason"?: string
+                    "bank_transaction_id"?: string,"candidates"?: NonNullable<Json>,"checked_at"?: string,"detail"?: string | null,"organization_id"?: string,"reason"?: string
                   }
                   Relationships: [
                     {
