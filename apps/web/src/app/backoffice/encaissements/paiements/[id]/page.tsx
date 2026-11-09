@@ -20,7 +20,15 @@ import {
   rowFileLabel,
 } from "@/lib/payments/allocation";
 import { frenchDate } from "@/lib/payments/bank-accounts";
-import { LINK_KIND, REFUND_REASON, REFUND_STATUS, minorToInput, refundReasons, refundable } from "@/lib/payments/debits";
+import {
+  LINK_KIND,
+  REFUND_REASON,
+  REFUND_STATUS,
+  minorToInput,
+  refundReasons,
+  refundable,
+  returnedNote,
+} from "@/lib/payments/debits";
 import { METHOD_LABEL, RULE_LABEL, formatRf, reviewReason } from "@/lib/payments/matching";
 import { RECEIPT_KIND, type ReceiptVersion, receiptPending, receiptVersions, shortHash } from "@/lib/payments/receipts";
 import { money } from "@/lib/payments/statements";
@@ -117,8 +125,12 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
       ) : null}
       {p.status === "returned" ? (
         <InfoNote>
-          La banque a repris ce paiement : ses imputations sont annulées à la date du retour, sa quittance est annulée et
-          le client en est informé.
+          <span data-testid="returned-note">
+            {returnedNote(
+              { hasFile: p.account_id !== null, notifications: d.notifications, latestReceiptKind: receipts[0]?.kind ?? null },
+              frenchDateTime,
+            )}
+          </span>
         </InfoNote>
       ) : null}
 
@@ -231,7 +243,9 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
           <p className="text-sm text-zinc-600 dark:text-zinc-400">
             {p.account_id === null
               ? "Pas de quittance : aucun dossier n'est rattaché à ce paiement."
-              : "Quittance en cours d'établissement (après l'imputation)."}
+              : p.status === "returned"
+                ? "Aucune quittance n'a été établie pour ce paiement."
+                : "Quittance en cours d'établissement (après l'imputation)."}
           </p>
         ) : (
           <ul className="flex flex-col gap-2 text-sm">

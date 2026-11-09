@@ -12,6 +12,7 @@ import {
   refundReasons,
   refundable,
   returnEffect,
+  returnedNote,
 } from "./debits";
 
 describe("refunds (founder #8, #9, #11, #12)", () => {
@@ -46,13 +47,72 @@ describe("refunds (founder #8, #9, #11, #12)", () => {
 
 describe("returns (founder #13; design §2 #3)", () => {
   it("says what a return does before ops confirm it", () => {
-    const full = returnEffect({ amount: "200,00 €", left: "0,00 €", full: true, dateFr: "03/11/2026" });
-    expect(full).toContain("annulées au 03/11/2026 (date du retour)");
-    expect(full).toContain("client en sera informé");
+    const full = returnEffect({ amount: "200,00 €", left: "0,00 €", full: true, dateFr: "03/11/2026", hasFile: true });
+    expect(full).toContain("annulés au 03/11/2026 (date du retour)");
+    expect(full).toContain("Notification enregistrée pour le client (envoi : à venir)");
+    expect(full).not.toContain("informé");
     expect(full).toContain("quittance annulée");
-    const partial = returnEffect({ amount: "40,00 €", left: "60,00 €", full: false, dateFr: "02/11/2026" });
+    const partial = returnEffect({ amount: "40,00 €", left: "60,00 €", full: false, dateFr: "02/11/2026", hasFile: true });
     expect(partial).toContain("Il restera 60,00 € du paiement");
     expect(partial).not.toContain("quittance annulée");
+  });
+
+  it("promises no receipt, imputation or client for a payment on no file (review M2b-6)", () => {
+    const full = returnEffect({ amount: "50,00 €", left: "0,00 €", full: true, dateFr: "05/11/2026", hasFile: false });
+    expect(full).toContain("rattaché à aucun dossier");
+    expect(full).toContain("comptabilisé au 05/11/2026");
+    expect(full).not.toContain("quittance annulée");
+    expect(full).not.toContain("factures");
+    expect(full).not.toContain("Notification");
+    expect(full).toContain("« retourné »");
+  });
+
+  it("words a returned payment's note from what happened (review M2b-6)", () => {
+    const when = (iso: string) => iso.slice(0, 10);
+    const n = (kind: string, reason: string | null, delivered_at: string | null = null) => ({
+      kind,
+      reason,
+      created_at: "2026-11-05T09:00:00Z",
+      client_name: "Martin SAS",
+      delivered_at,
+    });
+    // allocated, receipt void, the client's notification recorded but not read yet
+    const allocated = returnedNote(
+      {
+        hasFile: true,
+        notifications: [n("payment_allocated", null), n("payment_allocation_reversed", "bank_return"), n("payment_returned", "bank_return")],
+        latestReceiptKind: "void",
+      },
+      when,
+    );
+    expect(allocated).toContain("Ses imputations sont annulées à la date du retour");
+    expect(allocated).toContain("Sa quittance est annulée.");
+    expect(allocated).toContain("notification enregistrée pour Martin SAS le 2026-11-05 (envoi : à venir)");
+    expect(allocated).not.toContain("informé");
+    // read in the client space: delivered
+    const read = returnedNote(
+      { hasFile: true, notifications: [n("payment_returned", "bank_return", "2026-11-06T08:00:00Z")], latestReceiptKind: "void" },
+      when,
+    );
+    expect(read).toContain("notification remise à Martin SAS dans son espace client le 2026-11-06");
+    // held on its file (never imputed), receipt still in force: nothing about imputations, the void version to come
+    const held = returnedNote(
+      { hasFile: true, notifications: [n("payment_held", "hold_blocks_allocation"), n("payment_returned", "bank_return")], latestReceiptKind: "original" },
+      when,
+    );
+    expect(held).not.toContain("imputations");
+    expect(held).toContain("L'annulation de sa quittance est en cours.");
+    // forwarded: its remittance cancelled, no invoice
+    const forwarded = returnedNote(
+      { hasFile: true, notifications: [n("payment_forward_reversed", "bank_return"), n("payment_returned", "bank_return")], latestReceiptKind: null },
+      when,
+    );
+    expect(forwarded).toContain("Son reversement au client est annulé");
+    expect(forwarded).not.toContain("factures");
+    expect(forwarded).not.toContain("quittance");
+    // on no file: no receipt, no client
+    const unmatched = returnedNote({ hasFile: false, notifications: [], latestReceiptKind: null }, when);
+    expect(unmatched).toBe("La banque a repris ce paiement. Il n'est rattaché à aucun dossier : ni quittance, ni information d'un client.");
   });
 
   it("names lines and the job's reasons in French", () => {

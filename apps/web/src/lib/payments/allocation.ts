@@ -79,10 +79,14 @@ export type Notification = {
  * was (M2b-4 review).
  */
 export function notificationText(n: Notification, when: (iso: string) => string): string {
-  const what = NOTIFICATION_LABEL[n.kind] ?? n.kind;
+  return `${NOTIFICATION_LABEL[n.kind] ?? n.kind} · ${notificationState(n, when)}`;
+}
+
+/** Whether a notification was delivered, in the words above (« notification enregistrée … (envoi : à venir) »). */
+export function notificationState(n: Notification, when: (iso: string) => string): string {
   return n.delivered_at
-    ? `${what} · notification remise à ${n.client_name} dans son espace client le ${when(n.delivered_at)}`
-    : `${what} · notification enregistrée pour ${n.client_name} le ${when(n.created_at)} (envoi : à venir)`;
+    ? `notification remise à ${n.client_name} dans son espace client le ${when(n.delivered_at)}`
+    : `notification enregistrée pour ${n.client_name} le ${when(n.created_at)} (envoi : à venir)`;
 }
 
 export type Line = {

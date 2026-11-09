@@ -256,6 +256,7 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
                     left: money((BigInt(p.left_minor) - BigInt(row.amount_minor)).toString(), cur),
                     full,
                     dateFr: frenchDate(row.booking_date),
+                    hasFile: Boolean(p.file_reference),
                   })}
                   idempotencyKey={randomUUID()}
                 />
