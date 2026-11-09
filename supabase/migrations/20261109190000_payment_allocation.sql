@@ -694,7 +694,11 @@ begin
     status = case when u.allocated + coalesce(s.total, 0) = 0 then 'matched'
                   when u.amount_minor - u.moved - coalesce(s.total, 0) = 0 then 'allocated'
                   else 'partially_allocated' end,
-    review_reason = case when t.outcome <> 'allocate' then t.outcome
+    -- an overpayment ops sent to another file that is now gated or owes nothing: back to where ops sent it from
+    -- (the payment's own file is not the one held or closed)
+    review_reason = case when t.outcome <> 'allocate' and t.account_id <> p.account_id
+                           then case when u.allocated = 0 then 'nothing_due' else 'overpayment' end
+                         when t.outcome <> 'allocate' then t.outcome
                          when u.amount_minor - u.moved - coalesce(s.total, 0) = 0 then null
                          else 'overpayment' end,
     allocation_instruction = null
@@ -934,7 +938,10 @@ begin
   update public.payment
   set status = case when pos.allocated_minor = 0 then 'matched'
                     when pos.unallocated_minor = 0 then 'allocated' else 'partially_allocated' end,
-      review_reason = 'allocation_reversed', allocation_instruction = null
+      -- what is left once another file's allocation remains is an overpayment again (founder #8)
+      review_reason = case when pos.allocated_minor > 0 and pos.unallocated_minor > 0 then 'overpayment'
+                           else 'allocation_reversed' end,
+      allocation_instruction = null
   where id = p.id;
   perform private.regate_account(p_account_id);  -- the file's other payments may find something due again
   v_result := jsonb_build_object('payment_id', p.id, 'account_id', p_account_id, 'reversals', to_jsonb(v_reversals));

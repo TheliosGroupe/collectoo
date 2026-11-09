@@ -301,6 +301,22 @@ def test_an_overpayment_stays_unallocated_or_pays_another_file_of_the_same_debto
     assert state(p) == ("allocated", None)
     assert allocations(p) == [("A-1", "principal", 10_000), ("B-1", "principal", 15_000)]
     assert [k for k, _ in _notifications(p)] == ["payment_allocated", "payment_allocated"]
+    # reversed on the other file: what is left is an overpayment again (never the client's)
+    on_b = [e for e in _live_entries(p) if e not in _entries_on(p, a.id)]
+    ops(tenant, "select public.reverse_allocation(%s, %s, %s, %s::uuid[], %s)",
+        str(uuid.uuid4()), p, b.id, on_b, "demande retirée")  # fmt: skip
+    assert state(p) == ("partially_allocated", "overpayment")
+    assert allocations(p) == [("A-1", "principal", 10_000)]
+
+
+def _entries_on(payment: str, account: str) -> list[str]:
+    with psycopg.connect(DB) as conn:
+        rows = conn.execute(
+            """select id::text from public.ledger_entry
+               where payment_id = %s and account_id = %s and entry_type = 'allocation'""",
+            (payment, account),
+        ).fetchall()
+    return [r[0] for r in rows]
 
 
 def test_a_held_payment_tells_the_client_and_is_allocated_on_the_judges_authorisation() -> None:

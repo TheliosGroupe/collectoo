@@ -111,3 +111,39 @@ and a word index of the servicer's party names; R5–R6; COPY the decisions and 
   other integration tests and ~105 s once four 50k worlds are loaded (8 s on a fresh stack), with or
   without the queue's new indexes: to profile before production volumes (M2b-2).
 
+## Allocation (M2-09, M2b-4)
+
+`worker/tests/test_allocation_scale_integration.py` boards 50,000 files from the synthetic EU loan tape (as the
+matching benchmark: consumer and professional loans with principal, accrued interest, other balances and a balancing
+line), imports a 50,000-credit statement paying each file by its structured RF reference (partial 10–60 %, the exact
+balance, more than the balance, half), matches it, then runs the `payments.allocate` jobs: 10,000 payments per job and
+transaction, the continuation queued. It checks set-based that Σ received = Σ allocated + Σ unallocated, that no
+receivable an allocation credited is below zero, that client money is closed (Σ5120 + Σ4710 + Σ4670 = 0), that every
+allocation entry has its client notification, and that no consumer loan's unclassified amount was paid. `ALLOC_FILES`
+changes the size.
+
+Each job: the allocation lock; the ready payments in processing order, their files locked `FOR KEY SHARE`, the
+payments `FOR UPDATE SKIP LOCKED`; the files' receivables as per-date balance profiles (one aggregate over an analysed
+temp table of the files); the plans in Python; COPY; `private.post_allocations` (set-based checks, one entry per
+payment and file through `ledger_post_set`, plan headers, notifications, payment states).
+
+### Result (2026-11-09, cloud session VM: 4 vCPU, 16 GB RAM, local Supabase stack)
+
+| Run | Payments | Entries | Jobs | Per job: load / plan / post | Total |
+|---|---|---|---|---|---|
+| first version | 50,000 | 50,000 | 5 × 10k | 1.1 / 0.3 / 8.9 s | **51.9 s** |
+| notifications without foreign keys, positions by index (full integration suite, after the other 50k runs) | 50,000 | 50,000 | 5 × 10k | 1.1–1.3 / 0.3–0.4 / 8.2–9.0 s | **50.4 s** |
+- **Where the time goes** (one 10k job, 7,674 entries, `pg_stat_statements` with nested statements, first version):
+  `ledger_post_set` 4.8 s — of which the deferred per-entry checks at commit 2.35 s (**0.31 ms per entry**: design risk
+  R1 estimated 0.2–0.4 ms; checks I2–I6 by key lookups), the entry insert with its foreign keys and guard 1.1 s, the
+  request checks of `_lps_e` 0.5 s; the 10k payment updates 1.4 s (row triggers: guard, change log); the client
+  notifications 0.5 s (five foreign-key checks per row); plan headers 0.2 s; the 1343-1 re-check below 0.1 s.
+- **Fixes:** `client_notification` without foreign keys (a set-based guard with key lookups checks the same references,
+  as `ledger_posting`): notifications 0.5 → 0.1 s per 10k; payment positions read by one index lookup per payment
+  (lateral) instead of a join whose plan depended on the statistics of entries posted a moment ago.
+- **R1 verdict:** the per-entry checks are within the design's estimate (~11 s per 50k) and run in the background job,
+  10k at a time (the allocation lock is held ~10 s per chunk; ops commands wait at most 2 s, then « réessayez »). The
+  whole posting path is above the design's 20–30 s for 50k; the statement-level fallback is not needed yet (open
+  question in PROGRESS).
+- Design estimate (§8.5): ~50k entries and ~350k postings in 20–30 s.
+

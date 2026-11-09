@@ -211,6 +211,29 @@ Computed with Python `Decimal`, round half-up to the cent at each posting. Scrip
 
 **Statement at 2026-09-30: 480.00 + 3.55 + 3.29 = 486.84 € — TO VALIDATE**
 
+## 6b. Allocation of payments (imputation) — M2b-4
+
+Implemented by the pure waterfall `worker/src/collectoo_worker/payments/allocation.py` (engine version `alloc-1`), posted by the job `payments.allocate` (ADR-0013, M2b-4 addendum; design `docs/design/m2b-payments.md` §8.5). Texts (read on LibreJustice, quoted in the design §3): C. civ. [1342-10](https://librejustice.fr/norm/fr/code-civil/1342-10), [1343-1](https://librejustice.fr/norm/fr/code-civil/1343-1), [1305-3](https://librejustice.fr/norm/fr/code-civil/1305-3), [1347](https://librejustice.fr/norm/fr/code-civil/1347), [1347-1](https://librejustice.fr/norm/fr/code-civil/1347-1), [1347-4](https://librejustice.fr/norm/fr/code-civil/1347-4) (« S'il y a plusieurs dettes compensables, les règles d'imputation des paiements sont transposables. »).
+
+**Order (not configurable: founder #5, OQ-19).**
+1. **Debts** = claim items of the file. First the items the debtor **designated** when paying (invoice numbers in the remittance text, or a document ops filed), in the order named — an item not yet due included (1305-3: the term benefits the debtor). The rest follows the legal order.
+2. Then **due items** (due date ≤ the allocation date), **oldest due date first**, then oldest issue date (« la plus ancienne », OQ-21; « plus d'intérêt d'acquitter » is not encoded). An item without a due date counts as due, after the dated ones (a defaulted loan's single item). An unknown issue date sorts last.
+3. Equal keys form one **tie group, shared pro rata** to its items' open amounts (« toutes choses égales, elle se fait proportionnellement »).
+4. Then **items not yet due**, by due date.
+5. **Inside each item**: interest family first (1343-1); then the accessories (indemnity, charge, cost) where the policy ranks them — `before_principal` by default (§6 example 3; OQ-7 for the B2B €40, which does not exist before M3); principal; then the seller's **unclassified** amounts (EU 3.11, balancing line) — **never by allocation for consumer loans** (regimes `consumer_credit_*`, `consumer_mortgage`) until ops classify them (founder #6, OQ-18).
+
+**Pro rata to the cent (largest remainder).** For a group of demand D and an amount R < D: share_i = ⌊R × d_i / D⌋ in exact integers, then one minor unit to each item by decreasing remainder (R × d_i mod D), ties by item id, until Σ shares = R. Each share is spent in its item's family order. Example: 300,01 € on two invoices of 500,00 € due the same day → 150,01 € and 150,00 €.
+
+**Available amount.** On a receivable at the allocation date D: the lowest running balance from D on (an allocation dated D never makes a later date negative). Items or components at or below zero (credit notes, overpaid invoices, a negative balancing line) are not paid. **Allocation date** = the booking date, or the servicing start if later (a payment before the cut-off waits for ops: founder #10).
+
+**What is not allocated stays unallocated.** If every payable slot is exhausted, the rest is an **overpayment**: it stays in pooled 4710 tagged by the payment, is never passed to the client (founder #8), and is refunded to the payer (M2b-6) or, on the debtor's written request, allocated on another file of his (same client).
+
+**Credit notes (1347).** A credit (credit note, overpaid invoice) is compensated only when invoked: proposed per file — the oldest credit against the first group of **due** invoices in the order above (1347-1: « exigibles »; 1347-4: the imputation rules transpose), pro rata on ties — dated when both were due, not before servicing start, principal only — and applied by one ops tap. Payments of a file with a pending proposal wait until it is applied (or ops allocate without it).
+
+**Worked example (design §8.2, test `worker/tests/test_allocation_integration.py`).** M-0042 (B2B): F-101 1 500,00 € due 10/06, F-102 800,00 € due 15/07, F-103 400,00 € due 20/08, F-104 300,00 € due 15/12, AV-105 −200,00 €. AV-105 applied on F-101 at the cut-off (F-101 → 1 300,00 €). P1 2 000,00 € citing F-103 → F-103 400,00, F-101 1 300,00, F-102 300,00; F-104 is not due and not reached. L-9 (consumer credit): interest 120,00, principal 5 000,00, other balances 30,00; P2 5 200,00 € → interest 120,00, principal 5 000,00; the 30,00 are held; 80,00 € overpayment.
+
+**Re-run by date (M3, founder #16).** The waterfall is a pure function of (amount, slots at D, policy, designation, D); each allocation entry keeps its inputs hash and its plan (policy, designation). M3-13 re-allocates earlier payments by reversing their entries at their dates and posting the waterfall's result on the balances including accrued interest; with nothing changed, a re-run gives the same lines (property and integration tests).
+
 ## 7. What I need from you (golden cases)
 
 For each of the four M3 claim types: 2–3 anonymised real files with contract terms, schedule, events (due dates, notice, acceleration, judgment), payments, and the **expected statement** at a given date from a source you trust (bank décompte, bailiff décompte or judgment). These become the golden tests; the engine must match to the cent or we document why not.
