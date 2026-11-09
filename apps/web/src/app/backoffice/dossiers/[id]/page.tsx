@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import Link from "next/link";
+import { AutoRefresh } from "@/components/auto-refresh";
 import { Badge, InfoNote, Section, Stats, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import {
@@ -13,9 +14,11 @@ import {
   proposalSummary,
 } from "@/lib/payments/allocation";
 import { frenchDate } from "@/lib/payments/bank-accounts";
+import { DIRECT_REFUSAL, DIRECT_STATUS } from "@/lib/payments/debits";
 import { reviewReason } from "@/lib/payments/matching";
 import { money } from "@/lib/payments/statements";
 import { ApplyCreditNote } from "./credit-note";
+import { RecordDirectPayment } from "./direct-payment";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -69,9 +72,19 @@ export default async function FilePage({ params }: PageProps<"/backoffice/dossie
     : { data: [] };
   const receiptOf = new Map<string, { id: string; number: string; version: number; kind: string }>();
   for (const r of receiptRows ?? []) if (!receiptOf.has(r.payment_id)) receiptOf.set(r.payment_id, r);
+  // M2b-6: payments the debtor made to the client directly (declared from the client's statement)
+  const direct = d.direct_payments ?? [];
+  const directWaiting = direct.some((x) => x.status === "requested");
+  const docs = (d.documents ?? []).map((x) => ({
+    id: x.id,
+    label: `${x.kind} · classé le ${frenchDate(x.created_at.slice(0, 10))}`,
+  }));
+  const itemChoices = items.filter((it) => it.kind !== "credit_note").map((it) => ({ id: it.id, ref: it.ref }));
+  const today = new Intl.DateTimeFormat("fr-CA", { timeZone: "Europe/Paris" }).format(new Date());
 
   return (
     <WidePage title={`Dossier ${a.external_ref}`} back={back}>
+      <AutoRefresh active={directWaiting} abandonable={false} everyMs={2000} maxMs={60_000} />
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={a.status.startsWith("closed") ? "neutral" : "ok"} testId="file-status">
           {ACCOUNT_STATUS[a.status] ?? a.status}
@@ -198,6 +211,46 @@ export default async function FilePage({ params }: PageProps<"/backoffice/dossie
           </ul>
         )}
       </Section>
+
+      {direct.length > 0 || d.can_act ? (
+        <Section title="Paiements reçus directement par le client" testId="file-direct-payments">
+          {direct.length === 0 ? (
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucun paiement direct déclaré.</p>
+          ) : (
+            <ul className="flex flex-col gap-2 text-sm">
+              {direct.map((x) => (
+                <li key={x.id} className="border-t border-zinc-100 pt-2 first:border-0 first:pt-0 dark:border-zinc-800" data-testid="direct-payment-row">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">
+                      {money(x.amount_minor, x.currency)} payés le {frenchDate(x.paid_on)}
+                    </span>
+                    <Badge tone={(DIRECT_STATUS[x.status] ?? DIRECT_STATUS.requested).tone} testId="direct-payment-status">
+                      {(DIRECT_STATUS[x.status] ?? { label: x.status }).label}
+                    </Badge>
+                  </span>
+                  {x.refusal_code ? (
+                    <span className="block text-xs text-red-800 dark:text-red-300">{DIRECT_REFUSAL[x.refusal_code] ?? x.refusal_code}</span>
+                  ) : null}
+                  {x.items.length > 0 ? (
+                    <span className="block text-xs text-zinc-600 dark:text-zinc-400">Factures désignées : {x.items.join(", ")}</span>
+                  ) : null}
+                  {x.lines.length > 0 ? (
+                    <span className="block text-xs text-zinc-600 dark:text-zinc-400" data-testid="direct-payment-lines">
+                      Imputé : {x.lines.map((l) => `${l.item_ref} ${componentLabel(l.component).toLowerCase()} ${money(l.amount_minor, x.currency)}`).join(" · ")}
+                    </span>
+                  ) : null}
+                  {x.reason ? <span className="block text-xs text-zinc-600 dark:text-zinc-400">Motif interne : {x.reason}</span> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+          {d.can_act && a.status !== "staged" && !a.status.startsWith("closed") ? (
+            <div className="mt-3">
+              <RecordDirectPayment accountId={a.id} items={itemChoices} docs={docs} today={today} idempotencyKey={randomUUID()} />
+            </div>
+          ) : null}
+        </Section>
+      ) : null}
     </WidePage>
   );
 }

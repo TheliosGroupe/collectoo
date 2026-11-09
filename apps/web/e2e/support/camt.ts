@@ -13,6 +13,18 @@ export type Credit = {
   ustrd?: string[];
   /** Structured creditor reference (CdtrRefInf/Ref), e.g. an RF reference. */
   rf?: string;
+  /** The payer's end-to-end id (NOTPROVIDED when absent). */
+  e2e?: string;
+};
+
+/** M2b-6: a debit of the statement — a payment's return (reversal, RtrInf reason), our refund (RFD…), a fee. */
+export type Debit = {
+  ref: string;
+  amountMinor: bigint;
+  kind: "return" | "refund" | "fee";
+  /** return: the end-to-end id of the credit it takes back; refund: our RFD reference. */
+  e2e?: string;
+  name?: string;
 };
 
 function esc(text: string): string {
@@ -37,10 +49,16 @@ export function ibanFr(n: number): string {
 }
 
 export function camt053(iban: string, day: string, credits: Credit[]): string {
-  const total = credits.reduce((s, c) => s + c.amountMinor, BigInt(0));
+  return camt053Lines(iban, day, credits, [], BigInt(0));
+}
+
+/** A one-day statement of credits and debits, from an opening balance (the previous statement's closing). */
+export function camt053Lines(iban: string, day: string, credits: Credit[], debits: Debit[], opening: bigint): string {
+  const total =
+    opening + credits.reduce((s, c) => s + c.amountMinor, BigInt(0)) - debits.reduce((s, d) => s + d.amountMinor, BigInt(0));
   const bal = (code: string, minor: bigint) =>
-    `<Bal><Tp><CdOrPrtry><Cd>${code}</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">${amount(minor)}</Amt>` +
-    `<CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>${day}</Dt></Dt></Bal>`;
+    `<Bal><Tp><CdOrPrtry><Cd>${code}</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">${amount(minor < BigInt(0) ? -minor : minor)}</Amt>` +
+    `<CdtDbtInd>${minor < BigInt(0) ? "DBIT" : "CRDT"}</CdtDbtInd><Dt><Dt>${day}</Dt></Dt></Bal>`;
   const entries = credits.map((c) => {
     const remittance =
       (c.ustrd ?? []).map((u) => `<Ustrd>${esc(u)}</Ustrd>`).join("") +
@@ -49,7 +67,7 @@ export function camt053(iban: string, day: string, credits: Credit[]): string {
       `<Ntry><Amt Ccy="EUR">${amount(c.amountMinor)}</Amt><CdtDbtInd>CRDT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>` +
       `<BookgDt><Dt>${day}</Dt></BookgDt><ValDt><Dt>${day}</Dt></ValDt><AcctSvcrRef>N${esc(c.ref)}</AcctSvcrRef>` +
       `<BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RCDT</Cd><SubFmlyCd>ESCT</SubFmlyCd></Fmly></Domn></BkTxCd>` +
-      `<NtryDtls><TxDtls><Refs><AcctSvcrRef>${esc(c.ref)}</AcctSvcrRef><EndToEndId>NOTPROVIDED</EndToEndId></Refs>` +
+      `<NtryDtls><TxDtls><Refs><AcctSvcrRef>${esc(c.ref)}</AcctSvcrRef><EndToEndId>${esc(c.e2e ?? "NOTPROVIDED")}</EndToEndId></Refs>` +
       `<Amt Ccy="EUR">${amount(c.amountMinor)}</Amt><CdtDbtInd>CRDT</CdtDbtInd>` +
       `<RltdPties><Dbtr><Pty><Nm>${esc(c.name)}</Nm></Pty></Dbtr><DbtrAcct><Id><IBAN>${c.iban}</IBAN></Id></DbtrAcct></RltdPties>` +
       (remittance ? `<RmtInf>${remittance}</RmtInf>` : "") +
@@ -63,9 +81,34 @@ export function camt053(iban: string, day: string, credits: Credit[]): string {
     `<Stmt><Id>STMT-E2E-${day}</Id><ElctrncSeqNb>1</ElctrncSeqNb><CreDtTm>${day}T20:00:00</CreDtTm>` +
     `<FrToDt><FrDtTm>${day}T00:00:00</FrDtTm><ToDtTm>${day}T23:59:59</ToDtTm></FrToDt>` +
     `<Acct><Id><IBAN>${iban}</IBAN></Id><Ccy>EUR</Ccy></Acct>` +
-    bal("OPBD", BigInt(0)) +
+    bal("OPBD", opening) +
     bal("CLBD", total) +
     entries.join("") +
+    debits.map(debitEntry(day)).join("") +
     `</Stmt></BkToCstmrStmt></Document>\n`
   );
+}
+
+/** A debit entry as banks write them (the worker's synthetic renderer writes the same shapes). */
+function debitEntry(day: string): (d: Debit) => string {
+  return (d) => {
+    const code =
+      d.kind === "return" ? ["PMNT", "RCDT", "RRTN"] : d.kind === "refund" ? ["PMNT", "ICDT", "ESCT"] : ["PMNT", "MDOP", "FEES"];
+    const head =
+      `<Ntry><Amt Ccy="EUR">${amount(d.amountMinor)}</Amt><CdtDbtInd>DBIT</CdtDbtInd>` +
+      (d.kind === "return" ? "<RvslInd>true</RvslInd>" : "") +
+      `<Sts><Cd>BOOK</Cd></Sts><BookgDt><Dt>${day}</Dt></BookgDt><ValDt><Dt>${day}</Dt></ValDt>` +
+      `<AcctSvcrRef>N${esc(d.ref)}</AcctSvcrRef>` +
+      `<BkTxCd><Domn><Cd>${code[0]}</Cd><Fmly><Cd>${code[1]}</Cd><SubFmlyCd>${code[2]}</SubFmlyCd></Fmly></Domn></BkTxCd>`;
+    if (d.kind === "fee") return `${head}<AddtlNtryInf>FRAIS DE TENUE DE COMPTE</AddtlNtryInf></Ntry>`;
+    return (
+      head +
+      `<NtryDtls><TxDtls><Refs><AcctSvcrRef>${esc(d.ref)}</AcctSvcrRef><EndToEndId>${esc(d.e2e ?? "NOTPROVIDED")}</EndToEndId></Refs>` +
+      `<Amt Ccy="EUR">${amount(d.amountMinor)}</Amt><CdtDbtInd>DBIT</CdtDbtInd>` +
+      (d.name ? `<RltdPties><Cdtr><Pty><Nm>${esc(d.name)}</Nm></Pty></Cdtr></RltdPties>` : "") +
+      `<RmtInf><Ustrd>${d.kind === "return" ? "RETOUR MD06" : "REMBOURSEMENT"}</Ustrd></RmtInf>` +
+      (d.kind === "return" ? "<RtrInf><Rsn><Cd>MD06</Cd></Rsn></RtrInf>" : "") +
+      `</TxDtls></NtryDtls></Ntry>`
+    );
+  };
 }

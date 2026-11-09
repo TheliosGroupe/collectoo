@@ -86,6 +86,8 @@ export const FEED_KIND: Record<string, { label: string; tone: Tone; amount: stri
   payment_allocation_reversed: { label: "Imputation annulée", tone: "action", amount: "désimputés" },
   payment_forwarded: { label: "Paiement reversé sans imputation", tone: "ok", amount: "reversés sans imputation" },
   payment_held: { label: "Paiement mis en attente", tone: "action", amount: "reçus, non imputés" },
+  payment_forward_reversed: { label: "Reversement annulé", tone: "action", amount: "repris" },
+  payment_returned: { label: "Paiement retourné par la banque", tone: "action", amount: "repris par la banque" },
 };
 
 export function feedKind(kind: string): { label: string; tone: Tone; amount: string } {
@@ -101,6 +103,8 @@ export const FEED_REASON: Record<string, string> = {
   before_servicing_start:
     "Paiement antérieur à la date d'arrêté du portefeuille : il vous est reversé sans être imputé.",
   client_ratification: "Paiement reversé sur votre ratification.",
+  bank_return:
+    "La banque du payeur a repris ce paiement (retour ou contestation) : son imputation est annulée à la date du retour et les factures retrouvent leur solde.",
 };
 
 export function feedReason(reason: string | null): string | null {

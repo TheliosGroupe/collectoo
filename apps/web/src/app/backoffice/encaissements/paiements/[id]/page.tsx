@@ -5,11 +5,12 @@ import { Badge, InfoNote, Section, Stats, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import {
   APPLIED_ORDER,
-  ENTRY_LABEL,
+  type Entry,
   type PaymentDetail,
   REALLOCATE_TEXT,
   allocationRows,
   componentLabel,
+  entryLabel,
   liveAllocations,
   notificationText,
   paymentActions,
@@ -19,10 +20,12 @@ import {
   rowFileLabel,
 } from "@/lib/payments/allocation";
 import { frenchDate } from "@/lib/payments/bank-accounts";
+import { LINK_KIND, REFUND_REASON, REFUND_STATUS, minorToInput, refundReasons, refundable } from "@/lib/payments/debits";
 import { METHOD_LABEL, RULE_LABEL, formatRf, reviewReason } from "@/lib/payments/matching";
 import { RECEIPT_KIND, type ReceiptVersion, receiptPending, receiptVersions, shortHash } from "@/lib/payments/receipts";
 import { money } from "@/lib/payments/statements";
 import { Forward, Reallocate, ReleaseHold, ReverseAllocation, UnassignHere, UseForOtherFile } from "./payment-actions";
+import { CancelRefund, RequestRefund } from "./refund-actions";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -75,7 +78,13 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   const left = money(d.position.unallocated_minor, cur);
   const docs = d.documents.map((x) => ({ id: x.id, label: `${x.kind} · classé le ${frenchDateTime(x.created_at)}` }));
   const lastAssign = [...d.matches].reverse().find((m) => m.action === "assign");
-  const anyAction = Object.values(actions).some(Boolean);
+  // M2b-6: refunds (one pending at a time) and the bank lines linked to this payment (returns, refunds)
+  const refunds = d.refunds ?? [];
+  const pendingRefund = refunds.find((r) => r.status === "requested") ?? null;
+  const bankLines = d.bank_lines ?? [];
+  const canRefund = refundable(p, d.position.unallocated_minor);
+  const returned = BigInt(d.position.returned_minor) > BigInt(0);
+  const anyAction = Object.values(actions).some(Boolean) || canRefund;
   const receiptWaiting = receiptPending({ waitingForAllocation: waiting, jobQueued: receiptJobQueued ?? null });
 
   return (
@@ -96,6 +105,22 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
         ) : null}
       </div>
       {reason?.help ? <InfoNote>{reason.help}</InfoNote> : null}
+      {pendingRefund ? (
+        <InfoNote>
+          Remboursement de {money(pendingRefund.amount_minor, cur)} demandé : exécutez le virement dans la banque vers
+          l&apos;IBAN …{pendingRefund.payee_iban_end} avec la référence{" "}
+          <span className="font-mono font-medium" data-testid="refund-reference">
+            {pendingRefund.end_to_end_id}
+          </span>
+          . Il sera comptabilisé quand son débit apparaîtra sur le relevé.
+        </InfoNote>
+      ) : null}
+      {p.status === "returned" ? (
+        <InfoNote>
+          La banque a repris ce paiement : ses imputations sont annulées à la date du retour, sa quittance est annulée et
+          le client en est informé.
+        </InfoNote>
+      ) : null}
 
       <Stats
         items={[
@@ -104,6 +129,9 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
           { label: "Imputé", value: money(figures.allocated, cur), testId: "payment-allocated" },
           ...(forwarded ? [{ label: "Reversé au client", value: money(figures.forwarded, cur), testId: "payment-forwarded" }] : []),
           { label: "Non imputé", value: left, testId: "payment-unallocated" },
+          ...(returned
+            ? [{ label: "Ressorti (remboursé ou retourné)", value: money(d.position.returned_minor, cur), testId: "payment-returned" }]
+            : []),
         ]}
       />
 
@@ -248,10 +276,64 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
         </p>
       </Section>
 
+      {refunds.length > 0 || bankLines.length > 0 ? (
+        <Section title="Remboursements et retours" testId="payment-money-out">
+          <ul className="flex flex-col gap-2 text-sm">
+            {refunds.map((r) => (
+              <li
+                key={r.id}
+                className="flex flex-wrap items-start justify-between gap-2 border-t border-zinc-100 pt-2 first:border-0 first:pt-0 dark:border-zinc-800"
+                data-testid="refund-row"
+              >
+                <span className="min-w-0">
+                  <span className="font-medium">Remboursement {money(r.amount_minor, cur)}</span>{" "}
+                  <Badge tone={(REFUND_STATUS[r.status] ?? REFUND_STATUS.requested).tone}>
+                    {(REFUND_STATUS[r.status] ?? { label: r.status }).label}
+                  </Badge>
+                  <span className="block text-xs text-zinc-600 dark:text-zinc-400">
+                    {REFUND_REASON[r.reason_code]?.label ?? r.reason_code} · à {r.payee_name} (IBAN …{r.payee_iban_end}
+                    {r.payee_is_payer ? ", celui du payeur" : ", autre compte"}) · référence{" "}
+                    <span className="font-mono">{r.end_to_end_id}</span>
+                  </span>
+                  <span className="block text-xs text-zinc-600 dark:text-zinc-400">
+                    Demandé le {frenchDateTime(r.requested_at)}
+                    {r.executed_on ? ` · débité le ${frenchDate(r.executed_on)}` : ""}
+                    {r.cancelled_at ? ` · annulé le ${frenchDateTime(r.cancelled_at)} (${r.cancel_reason ?? ""})` : ""}
+                  </span>
+                  <span className="block text-xs text-zinc-600 dark:text-zinc-400">Motif interne : {r.reason}</span>
+                </span>
+                {r.status === "requested" ? (
+                  <CancelRefund paymentId={p.id} refundId={r.id} reference={r.end_to_end_id} idempotencyKey={randomUUID()} />
+                ) : null}
+              </li>
+            ))}
+            {bankLines.map((l) => (
+              <li
+                key={l.bank_transaction_id}
+                className="border-t border-zinc-100 pt-2 first:border-0 first:pt-0 dark:border-zinc-800"
+                data-testid="bank-line-row"
+              >
+                <span className="font-medium">{LINK_KIND[l.kind] ?? l.kind}</span> ·{" "}
+                {l.direction === "debit" ? "−" : "+"} {money(l.amount_minor, cur)} au {frenchDate(l.booking_date)}
+                {l.return_reason ? ` · motif bancaire ${l.return_reason}` : ""}
+                <span className="block text-xs text-zinc-600 dark:text-zinc-400">
+                  {l.method === "auto" ? "Rapproché automatiquement" : "Rapproché par un gestionnaire"} le{" "}
+                  {frenchDateTime(l.decided_at)}
+                  {l.reason ? ` · ${l.reason}` : ""} ·{" "}
+                  <Link href={`/backoffice/encaissements/releves/${l.statement_id}`} className="underline underline-offset-4">
+                    relevé
+                  </Link>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
+
       {anyAction ? (
         <Section title="Actions" testId="payment-actions">
           <div className="flex flex-col gap-3">
-            {[...live.entries()].map(([account, entries]) => {
+            {[...(actions.reverse ? live : new Map<string, Entry[]>()).entries()].map(([account, entries]) => {
               const total = entries.reduce((s, e) => s + BigInt(e.amount_minor ?? "0"), BigInt(0));
               const fileRef = entries[0].external_ref ?? "";
               return (
@@ -300,6 +382,20 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
                 idempotencyKey={randomUUID()}
               />
             ) : null}
+            {canRefund ? (
+              <RequestRefund
+                paymentId={p.id}
+                left={left}
+                leftInput={minorToInput(d.position.unallocated_minor)}
+                leftMinor={d.position.unallocated_minor}
+                reviewReason={p.review_reason}
+                reasons={refundReasons(p.status, p.review_reason)}
+                payerName={p.payer_name}
+                payerIbanEnd={p.payer_iban_end}
+                payerIbanValid={p.payer_iban_valid ?? false}
+                idempotencyKey={randomUUID()}
+              />
+            ) : null}
             {actions.unassign ? <UnassignHere paymentId={p.id} idempotencyKey={randomUUID()} /> : null}
           </div>
         </Section>
@@ -313,7 +409,7 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
             {d.entries.map((e) => (
               <li key={e.entry_id} className="flex flex-wrap items-baseline justify-between gap-2 border-t border-zinc-100 pt-2 first:border-0 first:pt-0 dark:border-zinc-800" data-testid="payment-entry">
                 <span>
-                  {ENTRY_LABEL[e.entry_type] ?? e.entry_type}
+                  {entryLabel(e)}
                   {e.external_ref ? ` · ${e.external_ref}` : ""} · au {frenchDate(e.effective_date)}
                   {e.reversed_by ? <span className="ml-2 text-xs text-zinc-600 dark:text-zinc-400">(annulée)</span> : null}
                   {e.reason ? <span className="block text-xs text-zinc-600 dark:text-zinc-400">{e.reason}</span> : null}

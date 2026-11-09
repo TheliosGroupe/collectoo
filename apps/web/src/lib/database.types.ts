@@ -217,6 +217,102 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"bank_debit_link": {
+                  Row: {
+                    "bank_account_id": string,"bank_transaction_id": string,"cash_entry_id": string | null,"decided_at": string,"decided_by": string | null,"kind": string,"method": string,"organization_id": string,"payment_id": string | null,"reason": string | null,"refund_request_id": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "bank_account_id": string,"bank_transaction_id": string,"cash_entry_id"?: string | null,"decided_at"?: string,"decided_by"?: string | null,"kind": string,"method": string,"organization_id": string,"payment_id"?: string | null,"reason"?: string | null,"refund_request_id"?: string | null
+                  }
+                  Update: {
+                    "bank_account_id"?: string,"bank_transaction_id"?: string,"cash_entry_id"?: string | null,"decided_at"?: string,"decided_by"?: string | null,"kind"?: string,"method"?: string,"organization_id"?: string,"payment_id"?: string | null,"reason"?: string | null,"refund_request_id"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "bank_debit_link_bank_transaction_id_fkey"
+      columns: ["bank_transaction_id"]
+isOneToOne: true
+      referencedRelation: "bank_transaction"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "bank_debit_link_cash_entry_id_fkey"
+      columns: ["cash_entry_id"]
+isOneToOne: true
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "bank_debit_link_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "bank_debit_link_payment_fk"
+      columns: ["payment_id","organization_id"]
+isOneToOne: false
+      referencedRelation: "payment"
+      referencedColumns: ["id","organization_id"]
+    },{
+      foreignKeyName: "bank_debit_link_refund_request_id_fkey"
+      columns: ["refund_request_id"]
+isOneToOne: false
+      referencedRelation: "refund_request"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"bank_debit_review": {
+                  Row: {
+                    "bank_transaction_id": string,"candidates": NonNullable<Json>,"checked_at": string,"organization_id": string,"reason": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "bank_transaction_id": string,"candidates"?: NonNullable<Json>,"checked_at"?: string,"organization_id": string,"reason": string
+                  }
+                  Update: {
+                    "bank_transaction_id"?: string,"candidates"?: NonNullable<Json>,"checked_at"?: string,"organization_id"?: string,"reason"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "bank_debit_review_bank_transaction_id_fkey"
+      columns: ["bank_transaction_id"]
+isOneToOne: true
+      referencedRelation: "bank_transaction"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "bank_debit_review_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"bank_duplicate_resolution": {
+                  Row: {
+                    "bank_account_id": string,"bank_transaction_id": string,"decided_at": string,"decided_by": string,"decision": string,"organization_id": string,"reason": string,"released_kind": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "bank_account_id": string,"bank_transaction_id": string,"decided_at"?: string,"decided_by": string,"decision": string,"organization_id": string,"reason": string,"released_kind"?: string | null
+                  }
+                  Update: {
+                    "bank_account_id"?: string,"bank_transaction_id"?: string,"decided_at"?: string,"decided_by"?: string,"decision"?: string,"organization_id"?: string,"reason"?: string,"released_kind"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "bank_duplicate_resolution_bank_transaction_id_fkey"
+      columns: ["bank_transaction_id"]
+isOneToOne: true
+      referencedRelation: "bank_transaction"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "bank_duplicate_resolution_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"bank_statement": {
                   Row: {
                     "bank_account_id": string,"bank_check": Json | null,"closing_booked_minor": number | null,"counts": Json | null,"created_at": string,"created_by": string | null,"currency": string,"electronic_seq_no": number | null,"error": string | null,"error_code": string | null,"file_name": string,"file_sha256": string,"finished_at": string | null,"format": string,"format_version": string | null,"from_date": string | null,"id": string,"idempotency_key": string | null,"opening_booked_minor": number | null,"organization_id": string,"sections": Json | null,"size_bytes": number,"status": string,"stmt_id": string | null,"storage_bucket": string,"storage_path": string,"to_date": string | null,"updated_at": string,"uploaded_at": string | null,"warnings": NonNullable<Json>
@@ -498,6 +594,50 @@ isOneToOne: false
                   }
                   Relationships: [
                     
+                  ]
+                },"direct_payment": {
+                  Row: {
+                    "account_id": string,"amount_minor": number,"client_organization_id": string,"currency": string,"decided_at": string | null,"entry_id": string | null,"evidence_document_id": string,"id": string,"item_ids": (string)[],"organization_id": string,"paid_on": string,"portfolio_id": string,"reason": string,"refusal_code": string | null,"requested_at": string,"requested_by": string,"status": string,"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id": string,"amount_minor": number,"client_organization_id": string,"currency": string,"decided_at"?: string | null,"entry_id"?: string | null,"evidence_document_id": string,"id"?: string,"item_ids"?: (string)[],"organization_id": string,"paid_on": string,"portfolio_id": string,"reason": string,"refusal_code"?: string | null,"requested_at"?: string,"requested_by": string,"status"?: string,"updated_at"?: string
+                  }
+                  Update: {
+                    "account_id"?: string,"amount_minor"?: number,"client_organization_id"?: string,"currency"?: string,"decided_at"?: string | null,"entry_id"?: string | null,"evidence_document_id"?: string,"id"?: string,"item_ids"?: (string)[],"organization_id"?: string,"paid_on"?: string,"portfolio_id"?: string,"reason"?: string,"refusal_code"?: string | null,"requested_at"?: string,"requested_by"?: string,"status"?: string,"updated_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "direct_payment_account_fk"
+      columns: ["account_id","organization_id","client_organization_id","portfolio_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id","organization_id","client_organization_id","portfolio_id"]
+    },{
+      foreignKeyName: "direct_payment_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "direct_payment_entry_id_fkey"
+      columns: ["entry_id"]
+isOneToOne: true
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "direct_payment_evidence_document_id_fkey"
+      columns: ["evidence_document_id"]
+isOneToOne: false
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "direct_payment_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
                   ]
                 },"document": {
                   Row: {
@@ -945,6 +1085,52 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"payment_check_result": {
+                  Row: {
+                    "amount_minor": number | null,"code": string,"count": number | null,"currency": string | null,"details": NonNullable<Json>,"id": string,"oldest_days": number | null,"organization_id": string,"run_id": string,"severity": string,"subject_id": string | null,"subject_type": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "amount_minor"?: number | null,"code": string,"count"?: number | null,"currency"?: string | null,"details"?: NonNullable<Json>,"id"?: string,"oldest_days"?: number | null,"organization_id": string,"run_id": string,"severity": string,"subject_id"?: string | null,"subject_type": string
+                  }
+                  Update: {
+                    "amount_minor"?: number | null,"code"?: string,"count"?: number | null,"currency"?: string | null,"details"?: NonNullable<Json>,"id"?: string,"oldest_days"?: number | null,"organization_id"?: string,"run_id"?: string,"severity"?: string,"subject_id"?: string | null,"subject_type"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "payment_check_result_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "payment_check_result_run_id_fkey"
+      columns: ["run_id"]
+isOneToOne: false
+      referencedRelation: "payment_check_run"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"payment_check_run": {
+                  Row: {
+                    "alerts": number | null,"finished_at": string | null,"id": string,"organization_id": string,"started_at": string,"summary": Json | null,"violations": number | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "alerts"?: number | null,"finished_at"?: string | null,"id"?: string,"organization_id": string,"started_at"?: string,"summary"?: Json | null,"violations"?: number | null
+                  }
+                  Update: {
+                    "alerts"?: number | null,"finished_at"?: string | null,"id"?: string,"organization_id"?: string,"started_at"?: string,"summary"?: Json | null,"violations"?: number | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "payment_check_run_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"payment_match": {
                   Row: {
                     "account_id": string,"action": string,"client_organization_id": string,"decided_at": string,"decided_by": string | null,"designation": Json | null,"evidence": NonNullable<Json>,"iban_link": boolean,"id": string,"method": string,"organization_id": string,"payment_id": string,"portfolio_id": string,"reason": string | null,"review_reason": string | null,"rule": string | null,"rule_version": string,"trigger": string
@@ -1125,6 +1311,62 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"refund_request": {
+                  Row: {
+                    "amount_minor": number,"bank_account_id": string,"bank_transaction_id": string | null,"bounce_entry_id": string | null,"bounce_transaction_id": string | null,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"cash_out_entry_id": string | null,"currency": string,"end_to_end_id": string,"executed_on": string | null,"id": string,"organization_id": string,"payee_iban": string,"payee_is_payer": boolean,"payee_name": string,"payment_id": string,"prior_review_reason": string | null,"prior_status": string,"reason": string,"reason_code": string,"requested_at": string,"requested_by": string,"status": string,"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "amount_minor": number,"bank_account_id": string,"bank_transaction_id"?: string | null,"bounce_entry_id"?: string | null,"bounce_transaction_id"?: string | null,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"cash_out_entry_id"?: string | null,"currency": string,"end_to_end_id": string,"executed_on"?: string | null,"id"?: string,"organization_id": string,"payee_iban": string,"payee_is_payer": boolean,"payee_name": string,"payment_id": string,"prior_review_reason"?: string | null,"prior_status": string,"reason": string,"reason_code": string,"requested_at"?: string,"requested_by": string,"status"?: string,"updated_at"?: string
+                  }
+                  Update: {
+                    "amount_minor"?: number,"bank_account_id"?: string,"bank_transaction_id"?: string | null,"bounce_entry_id"?: string | null,"bounce_transaction_id"?: string | null,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"cash_out_entry_id"?: string | null,"currency"?: string,"end_to_end_id"?: string,"executed_on"?: string | null,"id"?: string,"organization_id"?: string,"payee_iban"?: string,"payee_is_payer"?: boolean,"payee_name"?: string,"payment_id"?: string,"prior_review_reason"?: string | null,"prior_status"?: string,"reason"?: string,"reason_code"?: string,"requested_at"?: string,"requested_by"?: string,"status"?: string,"updated_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "refund_request_bank_fk"
+      columns: ["bank_account_id","organization_id","currency"]
+isOneToOne: false
+      referencedRelation: "bank_account"
+      referencedColumns: ["id","organization_id","currency"]
+    },{
+      foreignKeyName: "refund_request_bank_transaction_id_fkey"
+      columns: ["bank_transaction_id"]
+isOneToOne: true
+      referencedRelation: "bank_transaction"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "refund_request_bounce_entry_id_fkey"
+      columns: ["bounce_entry_id"]
+isOneToOne: true
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "refund_request_bounce_transaction_id_fkey"
+      columns: ["bounce_transaction_id"]
+isOneToOne: true
+      referencedRelation: "bank_transaction"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "refund_request_cash_out_entry_id_fkey"
+      columns: ["cash_out_entry_id"]
+isOneToOne: true
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "refund_request_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "refund_request_payment_fk"
+      columns: ["payment_id","organization_id"]
+isOneToOne: false
+      referencedRelation: "payment"
+      referencedColumns: ["id","organization_id"]
+    }
+                  ]
                 },"validation_issue": {
                   Row: {
                     "batch_id": string,"code": string,"created_at": string,"file_id": string,"id": number,"message": string,"raw_value": string | null,"row_number": number | null,"severity": string,"source_column": string | null,"target": string | null
@@ -1186,6 +1428,9 @@ isOneToOne: false
 "assign_payment":
 { Args: { "p_designation": Json,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string,"p_splits": Json }; Returns: Json
                            },
+"cancel_refund":
+{ Args: { "p_idempotency_key": string,"p_reason": string,"p_refund_request_id": string }; Returns: Json
+                           },
 "client_money_balances":
 { Args: { "p_as_of"?: string,"p_client_organization_id": string,"p_known_at"?: string }; Returns: {
               "currency": string,"held_minor": number,"payable_minor": number,"unallocated_minor": number
@@ -1217,6 +1462,14 @@ isOneToOne: false
 "custom_access_token_hook":
 { Args: { "event": Json }; Returns: Json
                            },
+"debit_link_options":
+{ Args: { "p_bank_transaction_id": string }; Returns: Json
+                           },
+"debit_queue":
+{ Args: { "p_limit"?: number,"p_offset"?: number,"p_tab"?: string }; Returns: {
+              "age_days": number,"amount_minor": string,"bank_account_id": string,"bank_transaction_id": string,"booking_date": string,"candidates": Json,"counterparty_iban_end": string,"counterparty_name": string,"currency": string,"decided_at": string,"decided_payment_id": string,"decision": string,"direction": string,"end_to_end_id": string,"kind": string,"original_end_to_end_id": string,"remittance_text": string,"return_reason": string,"review_reason": string,"statement_id": string,"total": number
+            }[]
+                           },
 "forward_payment":
 { Args: { "p_client_organization_id": string,"p_evidence_document_id": string,"p_expected_minor": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
                            },
@@ -1225,6 +1478,9 @@ isOneToOne: false
                            },
 "lift_account_hold":
 { Args: { "p_hold_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: undefined
+                           },
+"link_debit":
+{ Args: { "p_bank_transaction_id": string,"p_expected_left_minor": string,"p_idempotency_key": string,"p_kind": string,"p_payment_id": string,"p_reason": string,"p_refund_request_id": string }; Returns: Json
                            },
 "match_queue_accounts":
 { Args: { "p_account_ids": (string)[] }; Returns: {
@@ -1245,11 +1501,23 @@ isOneToOne: false
 "receipt_job_pending":
 { Args: { "p_payment_id": string }; Returns: boolean
                            },
+"record_direct_payment":
+{ Args: { "p_account_id": string,"p_amount_minor": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_item_ids": (string)[],"p_paid_on": string,"p_reason": string }; Returns: Json
+                           },
 "register_bank_account":
 { Args: { "p_bic"?: string,"p_currency": string,"p_feed": string,"p_iban": string,"p_idempotency_key": string,"p_label": string,"p_opened_on"?: string,"p_organization_id": string }; Returns: string
                            },
 "release_hold_payment":
 { Args: { "p_evidence_document_id": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
+                           },
+"request_payment_checks":
+{ Args: { "p_organization_id": string }; Returns: Json
+                           },
+"request_refund":
+{ Args: { "p_amount_minor": string,"p_expected_left_minor": string,"p_expected_review_reason": string,"p_idempotency_key": string,"p_payee_iban": string,"p_payee_name": string,"p_payment_id": string,"p_reason": string,"p_reason_code": string }; Returns: Json
+                           },
+"resolve_duplicate":
+{ Args: { "p_bank_transaction_id": string,"p_idempotency_key": string,"p_is_duplicate": boolean,"p_reason": string }; Returns: Json
                            },
 "retire_payment_reference":
 { Args: { "p_idempotency_key": string,"p_reason": string,"p_reference_id": string }; Returns: string

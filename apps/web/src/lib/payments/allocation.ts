@@ -42,8 +42,18 @@ export const ENTRY_LABEL: Record<string, string> = {
   allocation: "Imputation",
   reversal: "Imputation annulée",
   forward: "Reversé au client sans imputation",
-  cash_out: "Restitution ou retour",
+  cash_out: "Sortie du compte de fonds de tiers (remboursement ou retour)",
 };
+
+/** An entry's words: a reversal says what it undid (an allocation, a forward, a refund that came back). */
+export function entryLabel(e: Pick<Entry, "entry_type" | "reverses_type">): string {
+  if (e.entry_type === "reversal") {
+    if (e.reverses_type === "forward") return "Reversement annulé";
+    if (e.reverses_type === "cash_out") return "Remboursement revenu impayé";
+    return "Imputation annulée";
+  }
+  return ENTRY_LABEL[e.entry_type] ?? e.entry_type;
+}
 
 /** What a notification for the client is about (client_notification.kind). */
 export const NOTIFICATION_LABEL: Record<string, string> = {
@@ -51,6 +61,8 @@ export const NOTIFICATION_LABEL: Record<string, string> = {
   payment_allocation_reversed: "Annulation de l'imputation",
   payment_forwarded: "Reversement sans imputation",
   payment_held: "Paiement retenu (procédure)",
+  payment_forward_reversed: "Annulation du reversement (retour bancaire)",
+  payment_returned: "Paiement retourné par la banque",
 };
 
 export type Notification = {
@@ -92,6 +104,7 @@ export type Entry = {
   account_id: string | null;
   external_ref: string | null;
   reverses_entry_id: string | null;
+  reverses_type?: string | null;
   reversed_by: string | null;
   amount_minor: string | null;
   lines: Line[];
@@ -106,6 +119,7 @@ export type PaymentDetail = {
     value_date: string | null;
     payer_name: string | null;
     payer_iban_end: string | null;
+    payer_iban_valid?: boolean;
     remittance_text: string | null;
     creditor_reference: string | null;
     end_to_end_id: string | null;
@@ -120,7 +134,13 @@ export type PaymentDetail = {
     method: string;
   };
   // allocated_minor counts forwards (design §7); forwarded_minor tells them apart
-  position: { allocated_minor: string; unallocated_minor: string; returned_minor: string; forwarded_minor: string };
+  position: {
+    allocated_minor: string;
+    unallocated_minor: string;
+    returned_minor: string;
+    forwarded_minor: string;
+    left_minor?: string; // amount - what went back out (returns, refunds): what a return may take
+  };
   file: {
     account_id: string;
     external_ref: string;
@@ -148,6 +168,38 @@ export type PaymentDetail = {
   notifications: Notification[];
   documents: { id: string; kind: string; created_at: string }[];
   other_files: { account_id: string; external_ref: string }[];
+  // M2b-6
+  refunds?: Refund[];
+  bank_lines?: BankLine[];
+};
+
+export type Refund = {
+  id: string;
+  amount_minor: string;
+  payee_name: string;
+  payee_iban_end: string;
+  payee_is_payer: boolean;
+  end_to_end_id: string;
+  reason_code: string;
+  reason: string;
+  status: string;
+  requested_at: string;
+  executed_on: string | null;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
+};
+
+export type BankLine = {
+  bank_transaction_id: string;
+  kind: string;
+  method: string;
+  booking_date: string;
+  amount_minor: string;
+  direction: string;
+  return_reason: string | null;
+  statement_id: string;
+  decided_at: string;
+  reason: string | null;
 };
 
 /** Allocation entries still in force (not reversed), per file: what « Désimputer » acts on. */
@@ -220,7 +272,13 @@ export function blockingHold(holds: { kind: string }[]): boolean {
 }
 
 /** Reasons ops may send back to allocation from (« Imputer »). */
-const REALLOCATE_FROM = new Set(["allocation_reversed", "nothing_due", "credit_note_to_apply", "before_servicing_start"]);
+const REALLOCATE_FROM = new Set([
+  "allocation_reversed",
+  "nothing_due",
+  "credit_note_to_apply",
+  "before_servicing_start",
+  "partial_return",
+]);
 const CLOSED = new Set(["closed_paid", "closed_settled", "closed_uncollectable", "closed_recalled"]);
 
 /** Which actions the payment page offers (the SQL commands check again; this only hides what cannot work). */
@@ -237,7 +295,7 @@ export function paymentActions(d: Pick<PaymentDetail, "payment" | "position" | "
   const left = BigInt(d.position.unallocated_minor);
   const live = liveAllocations(d.entries);
   return {
-    reverse: live.size > 0,
+    reverse: live.size > 0 && p.status !== "refund_pending", // a pending refund is cancelled first (M2b-6)
     allocate:
       (p.status === "matched" && p.review_reason !== null && REALLOCATE_FROM.has(p.review_reason)) ||
       // its own file's allocation reversed while another file keeps its share: back to its file
@@ -254,7 +312,12 @@ export function paymentActions(d: Pick<PaymentDetail, "payment" | "position" | "
       d.other_files.length > 0 &&
       ((p.status === "partially_allocated" && p.review_reason === "overpayment") ||
         (p.status === "matched" && p.review_reason === "nothing_due")),
-    unassign: p.status === "matched" && allocated === BigInt(0) && p.account_id !== null,
+    // nothing allocated and nothing gone back out (a partial return keeps the payment on its file)
+    unassign:
+      p.status === "matched" &&
+      allocated === BigInt(0) &&
+      BigInt(d.position.returned_minor) === BigInt(0) &&
+      p.account_id !== null,
   };
 }
 
@@ -266,6 +329,8 @@ export const REALLOCATE_TEXT: Record<string, string> = {
     "Le paiement sera imputé sans appliquer l'avoir du dossier (la compensation n'est pas invoquée).",
   before_servicing_start:
     "Le solde du cédant ne tient pas compte de ce paiement : il sera imputé à la date d'arrêté, dans l'ordre appliqué.",
+  partial_return:
+    "Ce qui reste du paiement après le retour partiel sera imputé sur ce dossier, à partir de la date du retour, dans l'ordre appliqué.",
 };
 
 /** A file's open status as words. */
@@ -350,6 +415,22 @@ export type AccountDetail = {
     forwarded: boolean;
   }[];
   proposal: Proposal | null;
+  // M2b-6: payments the debtor made to the client directly (the client's statement), and the file's documents
+  direct_payments?: DirectPayment[];
+  documents?: { id: string; kind: string; created_at: string }[] | null;
+};
+
+export type DirectPayment = {
+  id: string;
+  amount_minor: string;
+  currency: string;
+  paid_on: string;
+  status: string;
+  refusal_code: string | null;
+  requested_at: string;
+  reason: string | null;
+  items: string[];
+  lines: { item_ref: string; component: string; amount_minor: string }[];
 };
 
 export type ItemBalance = {
