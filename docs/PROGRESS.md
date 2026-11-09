@@ -33,7 +33,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - Local check: Supabase CLI 2.122.1 + local stack start in ~2 min (cold) / ~35 s (cached).
 
 ## In progress
-- **M2b-5 (M2-10, M2-11), in progress** on branch `m2b5`: receipts (R124-6) and the client payment feed (R124-5) — receipt payload built in SQL from the ledger, deterministic PDF (reportlab, embedded DejaVu Sans), versions on every change of the allocation, private storage with SHA-256, the receipts job (with a backfill of earlier allocations), `client_payment_feed` and the client-space page, receipt versions on the payment page.
+- **M2b-5 (M2-10, M2-11), in progress** on branch `m2b5`: receipts (R124-6) and the client payment feed (R124-5). Done so far: migration `20261110090000_receipts_feed.sql` (`receipt` versions, payload built in SQL from the ledger, payer named only if a party, queueing from the ledger and the payment, backfill, `client_payment_feed` marking delivery, RLS and storage policy), worker job `payments.receipts` with a deterministic PDF (reportlab 4.4.10, DejaVu Sans committed, golden hash), pgTAP 014 (79), unit and integration tests. Next: client-space feed page, receipt versions on the payment page, E2E, docs.
 
 ## Next
 - Performance before production volumes: RLS on `account` / `party` (and tables keyed by them) calls `can_read_portfolio()` per row; with 157k accounts locally a client's `count(*)` took 41 s. Apply the ledger's pattern (`= any ((select private.readable_portfolio_ids())::uuid[])`, evaluated once per query) and add a scale check.
