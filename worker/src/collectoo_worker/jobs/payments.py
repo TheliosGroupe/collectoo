@@ -6,6 +6,8 @@
   booked by one `cash_in` entry (Dr 5120 / Cr 4710). One transaction: the queue's (exactly once).
   It queues `match` in the same transaction.
 - `match` (M2-08): which file each waiting payment pays (`jobs.matching`).
+- `allocate` (M2-09): which debts each ready payment pays, in the legal order (`jobs.allocation`);
+  queued by the payment trigger whenever a payment becomes ready.
 
 A file that cannot be imported is refused (`rejected`, with a stable code the back-office words
 in French): parse errors before anything is written, refusals of the SQL import (closed bank
@@ -29,6 +31,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
+from collectoo_worker.jobs.allocation import run_allocate
 from collectoo_worker.jobs.matching import run_match
 from collectoo_worker.payments.camt053 import parse_camt053
 from collectoo_worker.payments.csv_import import CsvProfile, parse_csv
@@ -63,6 +66,8 @@ def make_handler(storage: Storage) -> Any:
             import_statement(conn, storage, str(payload["statement_id"]))
         elif kind == "match":
             run_match(conn, payload)
+        elif kind == "allocate":
+            run_allocate(conn, payload)
         else:
             raise ValueError(f"unknown payments job type: {kind!r}")
 

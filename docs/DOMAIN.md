@@ -105,6 +105,10 @@ Contents: [1. Glossary](#1-glossary-fr--en) · [2. Conventions](#2-modelling-con
 | Reversement sans imputation | Forward to the client without allocation | `ledger_entry(entry_type = forward)` | Recall, ratification (1342-2) |
 | Retour, restitution | Bank return, refund to the payer | `ledger_entry(entry_type = cash_out)` | |
 | Application d'un avoir | Credit note applied | `ledger_entry(entry_type = netting)` | 1347 (invoked by ops) |
+| Règles d'imputation | Allocation policy | `allocation_policy` (accessory rank, unclassified amounts held or last; the legal order has no column) | M2b-4, founder #5 |
+| Trop-perçu | Overpayment | what is left of a payment after allocation, in pooled 4710 tagged by the payment; `review_reason = overpayment` | Never passed to the client (founder #8) |
+| Information du créancier | Creditor notification | `client_notification` (one per allocation, forward, reversal entry; one per held payment) | R124-5, CPCE-06 |
+| Imputation annulée | Allocation reversed | `ledger_entry(entry_type = reversal)` of an allocation; `review_reason = allocation_reversed` | Ops decide next |
 
 ### 1.4 Collection process
 
@@ -520,6 +524,9 @@ erDiagram
     bank_statement ||--o{ bank_transaction : contains
     bank_transaction ||--o| payment : "debtor credit"
     payment ||--o{ payment_match : "matched"
+    payment ||--o{ client_notification : "told to the client"
+    ledger_entry ||--o| client_notification : "one per entry"
+    allocation_run ||--o{ ledger_entry : "posts allocations"
     account ||--o{ payment_reference : "paid with"
     remittance_run ||--o{ remittance_line : contains
     remittance_line }o--|| ledger_entry : "posts"
@@ -606,6 +613,23 @@ erDiagram
         text remittance_text
         text creditor_reference
     }
+    client_notification {
+        uuid id PK
+        uuid client_organization_id
+        uuid payment_id
+        uuid ledger_entry_id UK "null for payment_held"
+        text kind "payment_allocated|payment_forwarded|payment_allocation_reversed|payment_held"
+        text reason "a code, never the ops motif: ops_correction|file_recalled|before_servicing_start|client_ratification|hold_blocks_allocation"
+    }
+    allocation_policy {
+        uuid id PK
+        uuid client_organization_id "null: servicer default"
+        uuid portfolio_id "null: client scope"
+        int version
+        date effective_from
+        text accessory_rank "before_principal|after_principal"
+        text unclassified "last|held"
+    }
     payment_match {
         uuid payment_id FK
         uuid account_id FK
@@ -639,6 +663,8 @@ erDiagram
 
 **Reconciliation (M2b-3, ADR-0013, design §8.4).** After each import, the worker's rules decide which file each new payment pays — deterministic, in order, no model:
 R1 a valid RF reference in the structured field; R2 an RF in the free text (spaces, case, line breaks tolerated) or its 12 digits alone; R3 invoice or file numbers that all name one file (a date — 2026-11, 11/2026, 05/11/2026 — never names a file; it only designates that file's invoices), backed by a second signal (an IBAN that already paid it; the payer's name at least 60 % close to a party's and sharing two words with it, or one word that no other file of the servicer has; or the exact balance of the cited invoices or of the file, unless every number cited is digits only or a date); R4 an IBAN that paid this open file and no other file — closed files and files it pays elsewhere in the same statement included — within what is left to pay; R5 the exact balance and a name at least 85 % close: a suggestion only; R6 anything else, with up to 3 ranked hints. An amount alone, or a name and an amount, never matches automatically; two files named, or an RF the payer wrote that names none of our files (check digits that fail, another creditor's reference), go to ops — the reference shown as written. Names are compared without titles, legal forms (also spelt « S.A.R.L. ») or accents, ligatures written out (Œ → OE); surname particles (Le, De, Du…) count as words, and an initial must agree with the other name's first names. Two parties with the same two-word name stay a known risk: a mistyped invoice number from one matches the other (ADR-0013). A matched payment is then **gated**: file not confirmed (`account_not_confirmed`: it waits, and is matched again when the batch is confirmed), closed, other currency, before servicing started, held for surendettement or a collective proceeding (`hold_blocks_allocation`), nothing left to pay. Ops work the rest in « Paiements à traiter »: accept the one-tap suggestion (only the file the sheet named: if a rematch proposed another file meanwhile, nothing is assigned and the page says so), choose among the files proposed, search a file, or take a payment off a wrong file (unassign; the rules never propose that file again). The confirmation sheet states what the gating will do (allocated next, or held and why) before anything is sent. Every decision is kept in `payment_match`; the payer's words that named invoices become the payment's designation. A rolled-back batch leaves the payments that waited for its files `no_mandate`, also when it is rolled back while a match run decides them. A hold placed or lifted during a run is never missed (the run and the hold commands lock the file). A run takes at most 50,000 payments and queues the rest.
+
+**Allocation (M2b-4, ADR-0013, design §8.5).** A payment matched to a file with nothing left to decide (`matched`, no review reason) is **ready**; the payment trigger queues the allocation job of its servicer. The job (bounded runs of 10,000 payments, under the servicer's allocation lock) plans each payment with the worker's waterfall — no model: the invoices the payer named first (even not yet due; among them the same legal order), then due invoices oldest due date first (then issue date; equal ones shared pro rata, the leftover cent to the lowest item id), then invoices not yet due; inside each invoice interest first, then the accessories where the policy ranks them (none before M3), principal, the seller's unclassified amounts last — never for consumer loans until ops classify them. What a payment can take from a receivable at its date D is the lowest balance that receivable has from D on, and from an invoice or loan as a whole the lowest balance of all its components together from D on (a negative balancing line counts): the excess is an overpayment. One `allocation` entry per (payment, file), dated the booking date or the servicing start if later, with its plan kept (`private.allocation_plan`: policy, designation, inputs hash) so M3 can re-run allocations by date. Outcomes: `allocated` (nothing left), `partially_allocated` + `overpayment` (the rest stays in 4710 for the payment), or still `matched` with a reason (`nothing_due`, `credit_note_to_apply`, or a gate: closed file, other currency, before servicing start, hold). A file with a credit note that can be compensated with a due invoice holds its payments (`credit_note_to_apply`) until ops apply it from the file page (one `netting` entry, dated when both were due, compensation invoked: 1347) or allocate without it. Ops reverse an allocation from the payment page (a reversal at the allocation's date; the payment then waits, `allocation_reversed`), send a payment to allocation again, release a held payment on the judge's authorisation, forward a payment the client recalled or already counted (`forward` entry, 4710 → 4670), or use an overpayment for another file of the same debtor on his written request. The client is told of every allocation, reversal, forward and held payment (`client_notification`).
 
 **Line kinds:** `debtor_credit` a debtor's transfer, direct debit, card or cheque credit; `batch_unsplit` a batch booking whose details do not add up (a credit is still one payment); `return` the bank undoes an earlier movement (return reason, reversal indicator, return bank transaction code; either direction; also a batch that cannot be split, when the entry or any of its details says so); `refund_out` our refund (end-to-end id `RFD…`); `other_debit` fees and anything else debited; `suspected_duplicate` a CSV line with the day, amount and direction of an earlier line and a similar label (held for ops); `psp_payout` M5.
 
@@ -1194,6 +1220,35 @@ stateDiagram-v2
 | Other account | A file already sent for another bank account of the servicer is refused at upload and at import; so is a CSV whose bank operation (id, day, amount, direction) is on another account (`imported_on_other_account`) |
 | Refusal | Nothing of the import is written; the statement keeps a stable code, worded in French on the page |
 | Warnings | Opening balance ≠ the closing of the statement covering the day before, or a sequence gap: « relevé manquant ? » (not checked when an imported statement already covers that day); dates overlapping an imported statement |
+
+### 4.6 Payment (M2b-3, M2b-4)
+
+```mermaid
+stateDiagram-v2
+    [*] --> unmatched : credit imported, cash_in posted
+    unmatched --> matched : rule or ops assign a file (gated: a reason, or ready)
+    matched --> allocated : allocation posted, nothing left
+    matched --> partially_allocated : allocation posted, overpayment left in 4710
+    matched --> allocated : forwarded to the client (recall, before cut-off, ratification)
+    partially_allocated --> allocated : rest allocated on another file of the debtor (written request)
+    allocated --> matched : ops reverse the allocation (allocation_reversed)
+    partially_allocated --> matched : ops reverse the allocation (allocation_reversed)
+    allocated --> partially_allocated : another file's allocation reversed (overpayment again)
+    allocated --> partially_allocated : its own file's reversed, another file's kept (allocation_reversed)
+    partially_allocated --> allocated : « Imputer » after its own file's reversal (allocated there again)
+    matched --> unmatched : ops unassign (nothing allocated)
+    unmatched --> allocated : forwarded on the client's ratification (rolled-back batch)
+```
+
+| Status | Ledger position | Review reasons met in M2b-4 |
+|---|---|---|
+| `matched` | nothing allocated (A = 0) | none (ready: the job allocates), `nothing_due`, `credit_note_to_apply`, `allocation_reversed`, the gates of M2b-3 |
+| `partially_allocated` | A > 0, something left (U > 0) | `overpayment`; `allocation_reversed` (its own file's allocation reversed while another file keeps its share: « Imputer » sends it back to its file); none (ops sent the rest to another file, or back to its own: waiting for the job) |
+| `allocated` | A > 0 (allocations and forwards), U = 0 | none |
+
+Gates, first that applies (match runs, the job and the confirmation sheet alike): file not confirmed, closed, other currency, **an active surendettement or collective-proceeding hold, then** booked before the servicing start (review fix: the hold is reported first, so the client is told), nothing left to pay, a credit note to compensate (job only). Ops' decisions add up: « Lever le blocage » (the judge's authorisation) and « Imputer » (the cut-off checked, a credit note not invoked, nothing due checked) each add the gate shown to the payment's released set (`allocation_instruction.releases`, every decision kept in `decisions`), which the job consumes when it allocates; a payment behind two gates passes both. A held file's payments are never forwarded to the client and its credit notes are not applied while the hold is active.
+
+Refunds, returns and their states (`refund_pending`, `refunded`, `returned`) come with M2b-6.
 
 ## 5. Open questions (❓ founder)
 

@@ -66,7 +66,7 @@ jobs:
   db:
     name: Database (migrations, pgTAP)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: supabase/setup-cli@v1
@@ -92,10 +92,39 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
-      - name: Worker integration tests (queue, storage, commit, statements, matching, 50k scale runs)
+      - name: Worker integration tests (queue, storage, commit, statements, matching, allocation)
         run: |
           eval "$(./scripts/local-env.sh)"
-          cd worker && uv sync --frozen && uv run pytest -m integration
+          cd worker && uv sync --frozen && uv run pytest -m integration --ignore-glob='*scale_integration.py'
+
+  scale:
+    name: Scale runs (50k boarding, statement, matching, allocation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: supabase/setup-cli@v1
+        id: supabase_cli
+        continue-on-error: true  # GitHub release downloads sometimes 504: fallback below
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Install the Supabase CLI (fallback with longer retries)
+        if: steps.supabase_cli.outcome == 'failure'
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 -o "$RUNNER_TEMP/supabase.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
+          supabase --version
+      - run: supabase start
+      - run: supabase db reset
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: worker/uv.lock
+      - name: 50k scale runs (each must stay under its own time budget)
+        run: |
+          eval "$(./scripts/local-env.sh)"
+          cd worker && uv sync --frozen && uv run pytest -m integration -s tests/*scale_integration.py
 
   catalogue:
     name: EU template catalogue is reproducible

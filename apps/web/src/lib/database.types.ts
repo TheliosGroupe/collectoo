@@ -113,6 +113,64 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"allocation_policy": {
+                  Row: {
+                    "accessory_rank": string,"client_organization_id": string | null,"created_at": string,"created_by": string | null,"effective_from": string,"id": string,"organization_id": string,"portfolio_id": string | null,"reason": string,"unclassified": string,"version": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "accessory_rank": string,"client_organization_id"?: string | null,"created_at"?: string,"created_by"?: string | null,"effective_from": string,"id"?: string,"organization_id": string,"portfolio_id"?: string | null,"reason": string,"unclassified": string,"version": number
+                  }
+                  Update: {
+                    "accessory_rank"?: string,"client_organization_id"?: string | null,"created_at"?: string,"created_by"?: string | null,"effective_from"?: string,"id"?: string,"organization_id"?: string,"portfolio_id"?: string | null,"reason"?: string,"unclassified"?: string,"version"?: number
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "allocation_policy_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "allocation_policy_created_by_fkey"
+      columns: ["created_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "allocation_policy_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "allocation_policy_portfolio_id_fkey"
+      columns: ["portfolio_id"]
+isOneToOne: false
+      referencedRelation: "portfolio"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"allocation_run": {
+                  Row: {
+                    "finished_at": string | null,"id": string,"organization_id": string,"started_at": string,"summary": NonNullable<Json>,"trigger": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "finished_at"?: string | null,"id"?: string,"organization_id": string,"started_at"?: string,"summary"?: NonNullable<Json>,"trigger": string
+                  }
+                  Update: {
+                    "finished_at"?: string | null,"id"?: string,"organization_id"?: string,"started_at"?: string,"summary"?: NonNullable<Json>,"trigger"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "allocation_run_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"app_user": {
                   Row: {
                     "created_at": string,"display_name": string | null,"email": string | null,"id": string,"updated_at": string
@@ -369,6 +427,20 @@ isOneToOne: false
                   }
                   Update: {
                     "code"?: string,"family"?: string,"label_fr"?: string
+                  }
+                  Relationships: [
+                    
+                  ]
+                },"client_notification": {
+                  Row: {
+                    "account_id": string | null,"client_organization_id": string,"created_at": string,"delivered_at": string | null,"id": string,"kind": string,"ledger_entry_id": string | null,"organization_id": string,"payment_id": string,"portfolio_id": string | null,"reason": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id"?: string | null,"client_organization_id": string,"created_at"?: string,"delivered_at"?: string | null,"id"?: string,"kind": string,"ledger_entry_id"?: string | null,"organization_id": string,"payment_id": string,"portfolio_id"?: string | null,"reason"?: string | null
+                  }
+                  Update: {
+                    "account_id"?: string | null,"client_organization_id"?: string,"created_at"?: string,"delivered_at"?: string | null,"id"?: string,"kind"?: string,"ledger_entry_id"?: string | null,"organization_id"?: string,"payment_id"?: string,"portfolio_id"?: string | null,"reason"?: string | null
                   }
                   Relationships: [
                     
@@ -831,14 +903,14 @@ isOneToOne: false
                   ]
                 },"payment": {
                   Row: {
-                    "account_id": string | null,"amount_minor": number,"bank_account_id": string | null,"bank_transaction_id": string | null,"booking_date": string,"candidate_account_id": string | null,"channel": string,"client_organization_id": string | null,"created_at": string,"creditor_reference": string | null,"currency": string,"designation": Json | null,"end_to_end_id": string | null,"id": string,"match_method": string | null,"matched_at": string | null,"method": string,"organization_id": string,"payer_iban": string | null,"payer_name": string | null,"portfolio_id": string | null,"remittance_text": string | null,"review_reason": string | null,"status": string,"updated_at": string,"value_date": string | null
+                    "account_id": string | null,"allocation_instruction": Json | null,"amount_minor": number,"bank_account_id": string | null,"bank_transaction_id": string | null,"booking_date": string,"candidate_account_id": string | null,"channel": string,"client_organization_id": string | null,"created_at": string,"creditor_reference": string | null,"currency": string,"designation": Json | null,"end_to_end_id": string | null,"id": string,"match_method": string | null,"matched_at": string | null,"method": string,"organization_id": string,"payer_iban": string | null,"payer_name": string | null,"portfolio_id": string | null,"remittance_text": string | null,"review_reason": string | null,"status": string,"updated_at": string,"value_date": string | null
                   }
                   ComputedFields: never
                   Insert: {
-                    "account_id"?: string | null,"amount_minor": number,"bank_account_id"?: string | null,"bank_transaction_id"?: string | null,"booking_date": string,"candidate_account_id"?: string | null,"channel": string,"client_organization_id"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency": string,"designation"?: Json | null,"end_to_end_id"?: string | null,"id"?: string,"match_method"?: string | null,"matched_at"?: string | null,"method": string,"organization_id": string,"payer_iban"?: string | null,"payer_name"?: string | null,"portfolio_id"?: string | null,"remittance_text"?: string | null,"review_reason"?: string | null,"status"?: string,"updated_at"?: string,"value_date"?: string | null
+                    "account_id"?: string | null,"allocation_instruction"?: Json | null,"amount_minor": number,"bank_account_id"?: string | null,"bank_transaction_id"?: string | null,"booking_date": string,"candidate_account_id"?: string | null,"channel": string,"client_organization_id"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency": string,"designation"?: Json | null,"end_to_end_id"?: string | null,"id"?: string,"match_method"?: string | null,"matched_at"?: string | null,"method": string,"organization_id": string,"payer_iban"?: string | null,"payer_name"?: string | null,"portfolio_id"?: string | null,"remittance_text"?: string | null,"review_reason"?: string | null,"status"?: string,"updated_at"?: string,"value_date"?: string | null
                   }
                   Update: {
-                    "account_id"?: string | null,"amount_minor"?: number,"bank_account_id"?: string | null,"bank_transaction_id"?: string | null,"booking_date"?: string,"candidate_account_id"?: string | null,"channel"?: string,"client_organization_id"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency"?: string,"designation"?: Json | null,"end_to_end_id"?: string | null,"id"?: string,"match_method"?: string | null,"matched_at"?: string | null,"method"?: string,"organization_id"?: string,"payer_iban"?: string | null,"payer_name"?: string | null,"portfolio_id"?: string | null,"remittance_text"?: string | null,"review_reason"?: string | null,"status"?: string,"updated_at"?: string,"value_date"?: string | null
+                    "account_id"?: string | null,"allocation_instruction"?: Json | null,"amount_minor"?: number,"bank_account_id"?: string | null,"bank_transaction_id"?: string | null,"booking_date"?: string,"candidate_account_id"?: string | null,"channel"?: string,"client_organization_id"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency"?: string,"designation"?: Json | null,"end_to_end_id"?: string | null,"id"?: string,"match_method"?: string | null,"matched_at"?: string | null,"method"?: string,"organization_id"?: string,"payer_iban"?: string | null,"payer_name"?: string | null,"portfolio_id"?: string | null,"remittance_text"?: string | null,"review_reason"?: string | null,"status"?: string,"updated_at"?: string,"value_date"?: string | null
                   }
                   Relationships: [
                     {
@@ -1052,8 +1124,17 @@ isOneToOne: false
               "balance_minor": number,"claim_item_id": string,"component": string,"currency": string
             }[]
                            },
+"account_detail":
+{ Args: { "p_account_id": string }; Returns: Json
+                           },
 "add_boarding_file":
 { Args: { "p_batch_id": string,"p_file_name": string,"p_sha256": string,"p_size_bytes": number }; Returns: Json
+                           },
+"allocate_payment":
+{ Args: { "p_account_id": string,"p_evidence_document_id": string,"p_expected_reason": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
+                           },
+"apply_credit_note":
+{ Args: { "p_account_id": string,"p_idempotency_key": string,"p_proposal_key": string }; Returns: Json
                            },
 "approve_mapping":
 { Args: { "p_batch_id": string,"p_overrides"?: Json }; Returns: undefined
@@ -1087,6 +1168,9 @@ isOneToOne: false
 "custom_access_token_hook":
 { Args: { "event": Json }; Returns: Json
                            },
+"forward_payment":
+{ Args: { "p_client_organization_id": string,"p_evidence_document_id": string,"p_expected_minor": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
+                           },
 "ledger_balance":
 { Args: { "p_as_of"?: string,"p_known_at"?: string,"p_ledger_account_id": string }; Returns: number
                            },
@@ -1098,9 +1182,12 @@ isOneToOne: false
               "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"holds": (string)[],"pending_minor": string,"rf": string,"servicing_start": string,"status": string
             }[]
                            },
+"payment_detail":
+{ Args: { "p_payment_id": string }; Returns: Json
+                           },
 "payment_queue":
 { Args: { "p_client"?: string,"p_limit"?: number,"p_max_minor"?: number,"p_min_days"?: number,"p_min_minor"?: number,"p_offset"?: number,"p_reason"?: string,"p_tab"?: string }; Returns: {
-              "account_id": string,"age_days": number,"amount_minor": string,"booking_date": string,"candidate_account_id": string,"client_organization_id": string,"creditor_reference": string,"currency": string,"match_method": string,"matched_at": string,"payer_iban_end": string,"payer_name": string,"payment_id": string,"remittance_text": string,"review_reason": string,"status": string,"total": number
+              "account_id": string,"age_days": number,"amount_minor": string,"booking_date": string,"candidate_account_id": string,"client_organization_id": string,"creditor_reference": string,"currency": string,"forwarded": boolean,"match_method": string,"matched_at": string,"payer_iban_end": string,"payer_name": string,"payment_id": string,"remittance_text": string,"review_reason": string,"status": string,"total": number
             }[]
                            },
 "place_account_hold":
@@ -1109,8 +1196,14 @@ isOneToOne: false
 "register_bank_account":
 { Args: { "p_bic"?: string,"p_currency": string,"p_feed": string,"p_iban": string,"p_idempotency_key": string,"p_label": string,"p_opened_on"?: string,"p_organization_id": string }; Returns: string
                            },
+"release_hold_payment":
+{ Args: { "p_evidence_document_id": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
+                           },
 "retire_payment_reference":
 { Args: { "p_idempotency_key": string,"p_reason": string,"p_reference_id": string }; Returns: string
+                           },
+"reverse_allocation":
+{ Args: { "p_account_id": string,"p_entry_ids": (string)[],"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
                            },
 "rollback_boarding_batch":
 { Args: { "p_batch_id": string,"p_reason": string }; Returns: undefined
@@ -1119,6 +1212,9 @@ isOneToOne: false
 { Args: { "p_payment_id": string,"p_query": string }; Returns: {
               "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"found_by": string,"holds": (string)[],"pending_minor": string,"rf": string,"servicing_start": string,"status": string
             }[]
+                           },
+"set_allocation_policy":
+{ Args: { "p_accessory_rank": string,"p_client_organization_id": string,"p_effective_from": string,"p_idempotency_key": string,"p_organization_id": string,"p_portfolio_id": string,"p_reason": string,"p_unclassified": string }; Returns: string
                            },
 "set_control_totals":
 { Args: { "p_batch_id": string,"p_rows": number,"p_total_minor": number }; Returns: undefined

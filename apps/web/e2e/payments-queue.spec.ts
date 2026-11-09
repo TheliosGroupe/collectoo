@@ -233,15 +233,25 @@ test("ops resolve the payments the rules leave to them", async ({ page }, testIn
   await search.getByRole("button", { name: "Confirmer l'affectation" }).click();
   await expect(page.getByText("Aucun paiement à traiter")).toBeVisible();
 
-  // « Rapprochés »: every payment has its file; a wrong one is taken off, with a reason.
+  // « Rapprochés »: every payment has its file (and is allocated by the worker, M2b-4); a wrong one is taken
+  // off from its page: the allocation reversed first, then the payment unassigned, with a reason.
   await page.getByTestId("queue-tabs").getByRole("link", { name: "Rapprochés" }).click();
   await expect(cards).toHaveCount(5);
   await reviewShot(page, testInfo, "m2-payments-matched");
   const accepted = cards.filter({ has: soldeText });
-  await accepted.getByTestId("unassign").getByRole("button", { name: "Désaffecter" }).click();
+  await accepted.getByTestId("queue-payment-link").click();
+  await expect(page.getByTestId("payment-status")).toHaveText("Imputé", { timeout: 60_000 });
+  await page.getByTestId("reverse-allocation").getByRole("button").first().click();
+  const reverse = page.getByRole("dialog", { name: "Annuler cette imputation" });
+  await reverse.getByLabel("Motif interne (non transmis au client)").fill("Homonyme : autre débiteur");
+  await reverse.getByRole("button", { name: "Confirmer l'annulation" }).click();
+  await expect(page.getByTestId("payment-reason")).toHaveText("Imputation annulée");
+  await page.getByTestId("unassign").getByRole("button", { name: "Désaffecter" }).click();
   const undo = page.getByRole("dialog", { name: "Désaffecter ce paiement" });
-  await undo.getByLabel("Motif (gardé dans l'historique)").fill("Homonyme : autre débiteur");
+  await undo.getByLabel("Motif interne (non transmis au client)").fill("Homonyme : autre débiteur");
   await undo.getByRole("button", { name: "Confirmer" }).click();
+  await expect(page.getByTestId("payment-status")).toHaveText("Sans dossier");
+  await page.goto("/backoffice/encaissements/a-traiter?onglet=rapproches");
   await expect(cards).toHaveCount(4);
   await page.getByTestId("queue-tabs").getByRole("link", { name: "À traiter" }).click();
   await expect(cards).toHaveCount(1, { timeout: 30_000 });

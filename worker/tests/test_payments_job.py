@@ -39,7 +39,7 @@ def _error(sqlstate: str) -> psycopg.Error:
 def test_an_unknown_job_type_is_an_error() -> None:
     handle = make_handler(_NoStorage())
     with pytest.raises(ValueError, match="unknown payments job type"):
-        handle({"type": "allocate"}, None)
+        handle({"type": "receipts"}, None)  # M2b-5
 
 
 def test_a_match_job_with_an_unknown_trigger_is_an_error() -> None:

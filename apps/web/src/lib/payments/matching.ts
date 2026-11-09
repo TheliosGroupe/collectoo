@@ -60,8 +60,21 @@ export const REVIEW_REASON: Record<string, { label: string; tone: Tone; help: st
     tone: "action",
     help: "Le dossier ne présente plus de solde : vérifiez le dossier, sinon le paiement sera remboursé au payeur.",
   },
-  overpayment: { label: "Trop-perçu", tone: "action", help: "Une partie du paiement dépasse le solde du dossier." },
-  credit_note_to_apply: { label: "Avoir à appliquer", tone: "action", help: "Un avoir du dossier reste à appliquer." },
+  overpayment: {
+    label: "Trop-perçu",
+    tone: "action",
+    help: "Le paiement dépasse ce que le dossier doit : le reste demeure sur le compte de fonds de tiers et n'est jamais reversé au client. Il sera remboursé au payeur, ou imputé sur un autre dossier du débiteur à sa demande écrite.",
+  },
+  credit_note_to_apply: {
+    label: "Avoir à appliquer",
+    tone: "action",
+    help: "Un avoir du dossier peut être compensé avec ses factures échues : appliquez-le depuis la page du dossier (la compensation doit être invoquée, art. 1347 C. civ.) ; le paiement sera ensuite imputé.",
+  },
+  allocation_reversed: {
+    label: "Imputation annulée",
+    tone: "action",
+    help: "Une imputation de ce paiement a été annulée : imputez-le à nouveau, ou désaffectez-le s'il ne concerne pas ce dossier.",
+  },
   partial_return: { label: "Retour partiel", tone: "action", help: "La banque a retourné une partie du paiement." },
 };
 
@@ -80,6 +93,9 @@ export const REASON_FILTERS: { value: string; label: string }[] = [
   "before_servicing_start",
   "hold_blocks_allocation",
   "nothing_due",
+  "overpayment",
+  "credit_note_to_apply",
+  "allocation_reversed",
   "waiting",
 ].map((value) => ({ value, label: reviewReason(value).label }));
 
@@ -209,8 +225,9 @@ export function gatingOutcome(file: QueueAccount, paid: { currency: string; book
   if (file.status === "staged") return "account_not_confirmed";
   if (file.status.startsWith("closed")) return "account_closed";
   if (paid.currency.trim() !== file.currency.trim()) return "currency_mismatch";
-  if (!file.servicing_start || paid.booking_date < file.servicing_start) return "before_servicing_start";
+  // the hold before the cut-off (M2b-4 review): a payment held for its file is reported, and its client told
   if (file.holds.length > 0) return "hold_blocks_allocation";
+  if (!file.servicing_start || paid.booking_date < file.servicing_start) return "before_servicing_start";
   if (BigInt(file.balance_minor) - BigInt(file.pending_minor) <= BigInt(0)) return "nothing_due";
   return null;
 }
