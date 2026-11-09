@@ -4,7 +4,9 @@ aside (as before receipts existed); then the migration's backfill queues the rec
 per job) and the jobs render and store them. Prints the timings (docs/benchmarks/payments.md;
 design risk R8) and checks set-based that every payment on a file has exactly one receipt number
 with one version, its payload's totals adding up to the payment, a stored PDF hash per version.
-RECEIPT_FILES changes the size (CI: 5,000, rendering takes ~10 ms a receipt; benchmark: 50,000)."""
+RECEIPT_FILES changes the size (CI: 5,000, rendering takes ~10 ms a receipt; benchmark: 50,000).
+The receipt jobs run with the ledger's statistics as CI met them in the allocation scale test
+(ledger_entry not analysed yet): the payloads' ledger lookups must not rest on fresh statistics."""
 
 import logging
 import os
@@ -17,6 +19,7 @@ from integration_helpers import DB, one, storage
 from reconciliation_helpers import pay
 from statement_helpers import bank_tenant
 from statement_helpers import drain as drain_payments
+from stats_helpers import analyse, forget_statistics, frozen_statistics
 from test_allocation_scale_integration import _credits, _files
 from test_matching_scale_integration import _board
 
@@ -40,13 +43,18 @@ def test_receipts_for_allocated_payments_at_scale(
     with psycopg.connect(DB) as conn, conn.transaction():
         jobs = one(conn, "select private.queue_receipt_backfill(%s)", (org,))
     caplog.clear()
-    drain_payments(store, receipts=True)
-    issued = time.monotonic()
+    ledger = ("public.ledger_entry", "public.ledger_posting", "public.ledger_account")
+    with frozen_statistics(*ledger) as conn:
+        analyse(conn, "public.ledger_account", "public.ledger_posting")
+        forget_statistics("public.ledger_entry")
+        started_receipts = time.monotonic()
+        drain_payments(store, receipts=True)
+        issued = time.monotonic()
     logs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("receipts ")]
     print(
         f"\n{len(files)} files boarded, {len(credits)} credits imported, matched and allocated in"
-        f" {allocated - started:.0f}s; {jobs} receipt jobs in {issued - allocated:.1f}s"
-        f" ({(issued - allocated) / max(len(credits), 1) * 1000:.1f} ms per receipt)"
+        f" {allocated - started:.0f}s; {jobs} receipt jobs in {issued - started_receipts:.1f}s"
+        f" ({(issued - started_receipts) / max(len(credits), 1) * 1000:.1f} ms per receipt)"
         "\n  first: " + (logs[0] if logs else "-") + "\n  last: " + (logs[-1] if logs else "-")
     )
     with psycopg.connect(DB) as conn:

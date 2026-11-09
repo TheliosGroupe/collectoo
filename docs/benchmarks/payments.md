@@ -227,3 +227,62 @@ of the payments (1,000 full returns, by each payment's end-to-end id), imported 
   (ingest 6.4 s), re-import 4.3 s; matching 50k imported + matched in 29.8 s (apply 11.6 s); receipts 5k in 56.8 s
   (11.4 ms each). One earlier matching run took 475 s to ingest while the VM's disk was full (orphaned storage objects
   from earlier runs); with space freed it ran as above.
+
+## Plan robustness (2026-11-09, migration `20261110130000`)
+
+The CI scale job met plans that rested on fresh statistics: `private.payment_positions` took 439 s for a 10k-payment
+allocation chunk and `private.bank_import_entry_known` 133 s for a 50k import. `enable_hashjoin = off` /
+`enable_mergejoin = off` forbid join methods, not a join order: with a table loaded and not analysed yet, the forced
+nested loop started from the wrong side. The migration makes the order structural (keyed laterals that cannot be pulled
+up, `LIMIT` or `OFFSET 0`; correlated scalar lookups by key; a lateral or subquery holding only the key, so no other
+index can serve it); where one pass is the right plan, nested loops are forbidden instead (a hash join). Same results:
+pgTAP compares every redefined function with a copy of the body it replaces (positions, unassign, receipt payloads byte
+for byte and their golden hashes, payment pages, the debit job's candidates, the statement-import lookups with
+multiplicity).
+
+Adverse states, set on purpose (perf stack, same VM; the database after the scale tests: 117k payments on files,
+1.27M postings, 169.5k bank lines; statistics changed inside a transaction, rolled back). « Zero density » is a table
+analysed while its pages held no visible row (emptied then vacuumed, or analysed during an uncommitted load): the planner
+counts one row whatever the table holds, and every index scan costs about the same.
+
+| Function | State | Before | After |
+|---|---|---|---|
+| `payment_positions` | `ledger_entry` never analysed, 10k postings in the 4710 pool, 10k payments | 222.4 s | 0.06 s |
+| allocation scale test | the same state, every run | 543 s for 30k (over its 240 s budget) | 58–69 s for 50k |
+| `unassign_payment` (its 4710 sum) | any | the whole pool (10k postings, 26 ms, growing) | 0.24 ms |
+| `receipt_payload` | `ledger_entry` not analysed | 3,000 payloads 67.3 s | 0.84 s |
+| `receipt_payload` | `account`, `claim_item`, `party`, `account_party` at zero density | 50 receipts 10.9 s (`55b594b`) | 15 ms; 2,000 in 0.48 s |
+| `bank_import_entry_known` | the account estimated at 1 line (13.5k in fact), 50k import | ingest 117.4 s | 6.5–6.9 s |
+| `bank_import_entry_known` | a 63.5k-line account analysed as 3 bank entries (batch bookings), no page all-visible | 300 new lines 7.5 s (`55b594b`, ~21 min for 50k) | one pass (hash semi-join) |
+| `bank_import_entry_known` | `bank_transaction` at zero density, 50k lines on 25 entries | 2,001 new lines 66 s with a probe kept to the index (`f8271de`, ~27 min for 50k); 4.5 s as merged | 41 ms (hash semi-join) |
+| `bank_import_lines_elsewhere` | `bank_transaction` stale, 50k CSV lines | 196.8 s | 0.07 s |
+| `bank_import_lines_elsewhere` | `bank_transaction` at zero density, 50k CSV lines against a 63.5k-line account | 282.7 s (as merged); `55b594b` 1.9 s for 300 lines (~5 min for 50k) | 89 ms (hash join) |
+| `payment_detail` | `ledger_entry` never analysed | 200 pages 0.58 s | 0.42 s |
+| `payment_detail` | every table it reads at zero density | 1 page > 300 s (cancelled) | 3.7 ms a page (2,000 in 7.3 s) |
+| `debit_candidates`, refund lookup | 2,000 refund lines, 20k refunds at zero density / analysed at 20 refunds | 4.5 s / 0.88 s | 3.5 ms / 3.5 ms |
+| `debit_candidates`, payment lookups | 2,000 returns naming payments, `payment` and `bank_transaction` at zero density | > 120 s (cancelled) | 14.3 s (see below) |
+| `debit_candidates`, final query | 1,244 lines, every table at zero density (169k payments) | 10.0 s (plain left joins: 145M rows removed) | 0.41 s (keyed laterals) |
+
+- `55b594b` is the first version of this migration (never merged); the verifier's review found its probes still
+  depended on estimates (a `LIMIT 1` divides a scan's cost by the rows it expects: on batch-booked lines a seq scan per
+  new line looked cheaper; `= any (others)` read a whole index per line at zero density). A second review found that
+  forcing the probe onto an index was not enough either: at zero density the planner chose an index where the account
+  is not the leading column and read every line of the account per new line. Both statement-import checks are now hash
+  joins (one pass over each side, nested loops and merge joins off), whatever the statistics. 016 checks them by what
+  they read (`pg_stat_xact_user_tables`): the account's lines read in one pass (`55b594b`: 301 seq scans, 1.8M rows),
+  the other accounts' lines in one pass (`55b594b`: 5,000 index probes).
+- `payment_detail`: the lists ordered by a date then the id read their rows in a key-only subquery: with the order
+  passed down, a table at zero density was read whole through its primary key (188 ms a page with the keyed lookups
+  alone).
+- Left as it was: in `debit_candidates`, the line a return names by its bank transaction id is found on (bank account,
+  tx id); at zero density every index led by or holding the bank account costs the same, and the planner may read the
+  account's lines for each such return (394 of the 2,000 returns above: the 14.3 s). Bounded by one chunk (2,000 lines),
+  and only until `bank_transaction` is analysed.
+- `debit_link_options` (reviewed, unchanged): at most 60 payments, then their positions in one call; what remains linear
+  is the index range of the bank account's payments up to the line's date, sorted for « same amount first » (8–17 ms
+  at 20k payments, measured in the M2b-6 review).
+- Scale tests after the migration (clean `supabase db reset`, one pytest run in CI order, `RECEIPT_FILES=5000`): 5
+  passed in 506.9 s. Allocation 50k in 58.7 s (post 8.6–9.5 s per 10k chunk, with `ledger_entry`'s statistics cleared);
+  1,000 returns 22.7 s; nightly checks 1.6 s. Matching: 50k imported + matched in 32.7 s (ingest 6.8 s, the account
+  estimated at 3 lines before it). Receipts: 25 jobs in 55.2 s (prepare 0.09–0.10 s per 200). Statement: 20.6 s
+  (ingest 7.0 s), re-import 4.3 s. Boarding 50k: 88 s.
