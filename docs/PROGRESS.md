@@ -31,6 +31,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 
 ## Next
 - Performance before production volumes: RLS on `account` / `party` (and tables keyed by them) calls `can_read_portfolio()` per row; with 157k accounts locally a client's `count(*)` took 41 s. Apply the ledger's pattern (`= any ((select private.readable_portfolio_ids())::uuid[])`, evaluated once per query) and add a scale check.
+- Performance at volume: `private.ingest_statement` (M2b-2) takes ~8 s for a 50k statement on a fresh database but ~105 s once four 50k datasets are loaded (`docs/benchmarks/payments.md`); profile and fix before production volumes (likely stats-dependent plans on `bank_transaction` / `payment`).
 - EU T5 (historical collections) files are now blocked at validation: staging needs a `month_offset` per row that the EU template does not carry and the mapping cannot set yet. Making it mappable or derived (from a reporting date) is a product decision for when a seller sends T5.
 
 ## Decisions
