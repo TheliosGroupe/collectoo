@@ -2,7 +2,7 @@
 -- §6, §10, §13; ADR-0013 (M2b-5 addendum). The worker's receipts job is played here: private.receipt_begin, then
 -- private.receipt_prepare, then the rendered PDFs' hashes written into pg_temp._receipt_pdf, then private.receipt_issue.
 begin;
-select plan(131);
+select plan(133);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -612,5 +612,93 @@ select ok((select bool_and('enable_nestloop=off' = any (coalesce(p.proconfig, '{
            from pg_proc p join pg_namespace n on n.oid = p.pronamespace
            where n.nspname = 'private' and p.proname in ('receipts_after_payment', 'payment_after_update')),
   'triggers joining old and new payment rows never reuse a nested-loop plan (50k-row updates)');
+
+-- 20261110130000 (plan robustness): receipt_payload reaches the ledger from the payment's entries now; the payloads
+-- are those of the function it replaced (20261110090000, copied below), byte for byte, for every payment on a file.
+create function pg_temp.receipt_payload_applied(p_payment_id uuid)
+returns table (recipient_party_id uuid, payload jsonb)
+language sql
+stable
+as $$
+  select d.party_id,
+         jsonb_build_object(
+           'schema', 1,
+           'state', 'issued',
+           'issuer', jsonb_build_object('name', s.legal_name),
+           'creditor', jsonb_build_object('name', c.legal_name),
+           'file', jsonb_build_object('reference', a.external_ref),
+           'debtor', jsonb_build_object('name', d.name),
+           -- founder #15: named only if the payer is certainly a party to the file, by the party's own name
+           'payer', jsonb_build_object('name', pp.name, 'third_party', pp.name is null),
+           'payment', jsonb_build_object('amount_minor', p.amount_minor::text, 'currency', p.currency,
+                                         'exponent', cur.minor_exponent, 'method', p.method,
+                                         'booking_date', p.booking_date, 'value_date', p.value_date,
+                                         'reference', p.end_to_end_id),
+           'allocation', coalesce(l.lines, '[]'),
+           'totals', jsonb_build_object(
+             'allocated_minor', t.allocated::text,
+             'forwarded_minor', t.forwarded::text,
+             'returned_minor', t.returned::text,
+             'unallocated_minor', (p.amount_minor - t.allocated - t.forwarded - t.returned)::text),
+           'first_letter', null)
+  from public.payment p
+  join public.account a on a.id = p.account_id
+  join public.organization s on s.id = p.organization_id
+  join public.organization c on c.id = a.client_organization_id
+  join public.currency cur on cur.code = p.currency
+  cross join lateral (
+    select (array_agg(ap.party_id order by pa.display_name, pa.id))[1] as party_id,
+           (array_agg(pa.display_name order by pa.display_name, pa.id))[1] as name
+    from public.account_party ap join public.party pa on pa.id = ap.party_id
+    where ap.account_id = a.id and ap.role = 'borrower') d
+  cross join lateral (
+    select (array_agg(pa.display_name order by pa.display_name, pa.id)
+              filter (where private.payer_is_party(p.payer_name, pa.kind, pa.display_name, pa.first_name,
+                                                   pa.last_name)))[1] as name
+    from public.account_party ap
+    join public.party pa on pa.id = ap.party_id
+    where ap.account_id = a.id and p.payer_name is not null) pp
+  -- what the payment's entries moved out of 4710 (net of reversals): allocated, forwarded, returned (M2b-6)
+  cross join lateral (
+    select coalesce(sum(lp.amount_minor) filter (where x.k = 'allocation'), 0)::bigint as allocated,
+           coalesce(sum(lp.amount_minor) filter (where x.k = 'forward'), 0)::bigint as forwarded,
+           coalesce(sum(lp.amount_minor) filter (where x.k = 'cash_out'), 0)::bigint as returned
+    from (select e.id, coalesce(r.entry_type, e.entry_type) as k from public.ledger_entry e
+          left join public.ledger_entry r on r.id = e.reverses_entry_id
+          where e.payment_id = p.id) x
+    join public.ledger_posting lp on lp.entry_id = x.id
+    join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment') t
+  -- the allocation per item and component, from the postings of the live allocation entries (net of reversals); the
+  -- payment's own file first, in a total order (review #3: tied lines would change the hash with the plan). The
+  -- component is a code: the locked template words it for the debtor (review #2), never the ledger's staff label.
+  left join lateral (
+    select jsonb_agg(jsonb_build_object('file_reference', fa.external_ref, 'item_ref', i.ref, 'item_kind', i.kind,
+                                        'due_date', i.due_date, 'component', x.component,
+                                        'amount_minor', x.amount::text)
+                     order by (fa.id <> a.id), fa.external_ref, fa.id, i.due_date nulls last, i.ref, i.kind, i.id,
+                              lc.sort_order) as lines
+    from (select la.claim_item_id, la.component, -sum(lp.amount_minor) as amount
+          from public.ledger_entry e
+          left join public.ledger_entry r on r.id = e.reverses_entry_id
+          join public.ledger_posting lp on lp.entry_id = e.id
+          join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'debtor_receivable'
+          where e.payment_id = p.id and coalesce(r.entry_type, e.entry_type) = 'allocation'
+          group by la.claim_item_id, la.component
+          having sum(lp.amount_minor) <> 0) x
+    join public.claim_item i on i.id = x.claim_item_id
+    join public.account fa on fa.id = i.account_id
+    join public.ledger_component lc on lc.code = x.component) l on true
+  where p.id = p_payment_id;
+$$;
+select ok((select count(*) from public.payment p where p.account_id is not null) >= 5
+          and exists (select 1 from public.ledger_entry e where e.payment_id is not null and e.entry_type = 'reversal'),
+  'payments on files, reversals among their entries');
+select is((select string_agg(p.id || ' ' || coalesce(b.recipient_party_id::text, '-') || ' ' || b.payload::text, e'\n'
+                             order by p.id)
+           from public.payment p cross join lateral private.receipt_payload(p.id) b where p.account_id is not null),
+          (select string_agg(p.id || ' ' || coalesce(b.recipient_party_id::text, '-') || ' ' || b.payload::text, e'\n'
+                             order by p.id)
+           from public.payment p cross join lateral pg_temp.receipt_payload_applied(p.id) b where p.account_id is not null),
+  'receipt payloads: those of the function it replaced, byte for byte');
 select * from finish();
 rollback;

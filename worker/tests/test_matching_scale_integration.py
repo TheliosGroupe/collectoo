@@ -2,7 +2,9 @@
 run), a statement of earlier payments (what teaches the IBAN memory), then a 50,000-credit
 statement imported and matched by the `payments.match` job. Prints the job's timings
 (docs/benchmarks/payments.md) and asserts the acceptance numbers: ≥ 95 % automatic, none wrong,
-every other credit in the queue with its reason. MATCH_FILES / MATCH_CREDITS change the sizes."""
+every other credit in the queue with its reason. MATCH_FILES / MATCH_CREDITS change the sizes.
+Both imports run with bank_transaction's statistics taken before the account had any line (as CI met
+them: the lookups of a 50k import must not rest on fresh statistics)."""
 
 import json
 import logging
@@ -18,6 +20,7 @@ import pytest
 from integration_helpers import DB, as_user, board, drain, one, storage
 from reconciliation_helpers import pay, score, world_from_db
 from statement_helpers import bank_tenant
+from stats_helpers import analyse, estimated_rows, frozen_statistics, lines_of_another_account
 
 from collectoo_worker.bench import generate
 from collectoo_worker.synth.reconciliation import generate_credits, history_credits, with_history
@@ -73,6 +76,10 @@ def _match_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.getMessage().startswith("match ")]
 
 
+def _import_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if " imported: " in r.getMessage()]
+
+
 def test_match_50k_payments_against_50k_files(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -84,21 +91,37 @@ def test_match_50k_payments_against_50k_files(
     boarded = time.monotonic()
     world = with_history(world_from_db(tenant), random.Random(3))
     history = history_credits(world, seed=3)
-    hist_started = time.monotonic()
-    # matching only (the allocation of these payments is measured by the allocation scale test)
-    hist = score(pay(tenant, store, history, prefix="H", days=2, allocate=False), history, "H")
-    hist_s = time.monotonic() - hist_started
-    assert hist.wrong == [] and hist.auto == hist.total
     credits = generate_credits(world, CREDITS, seed=4, earlier=history)
-    main_started = time.monotonic()
-    statement = pay(tenant, store, credits, prefix="M", days=5, allocate=False)
-    main_s = time.monotonic() - main_started
+    # bank_transaction analysed while this account had no line, not again until both imports are
+    # done (CI: the 50k import's lookups planned for 1 line of the account, 13.5k in fact; its entry
+    # check took 133 s)
+    lines_of_another_account(store, tenant["bank"])
+    with frozen_statistics("public.bank_transaction") as conn:
+        analyse(conn, "public.bank_transaction")
+        hist_started = time.monotonic()
+        # matching only (the allocation of these payments is measured by the allocation scale test)
+        hist = score(pay(tenant, store, history, prefix="H", days=2, allocate=False), history, "H")
+        hist_s = time.monotonic() - hist_started
+        assert hist.wrong == [] and hist.auto == hist.total
+        estimate = estimated_rows(
+            conn,
+            "select 1 from public.bank_transaction where bank_account_id = %s",
+            (tenant["bank"],),
+        )
+        assert estimate < len(history) // 100, estimate  # the state the imports must not mind
+        main_started = time.monotonic()
+        statement = pay(tenant, store, credits, prefix="M", days=5, allocate=False)
+        main_s = time.monotonic() - main_started
     result = score(statement, credits, "M")
     logs = _match_logs(caplog)
+    imports = _import_logs(caplog)
+    ingest_s = float(imports[-1].rsplit(" ingest ", 1)[1].rstrip("s")) if imports else 0.0
     print(
         f"\n{len(world.accounts)} files boarded in {boarded - started:.0f}s;"
         f" history: {len(history)} credits imported + matched in {hist_s:.1f}s;"
         f" statement: {len(credits)} credits imported + matched in {main_s:.1f}s"
+        f" (lines of the account estimated at {estimate} before it)"
+        f"\n  {imports[-1] if imports else '?'}"
         f"\n  {logs[-1] if logs else '?'}\n" + json.dumps(result.report(), indent=1)
     )
     assert result.wrong == [], result.wrong[:5]
@@ -107,3 +130,5 @@ def test_match_50k_payments_against_50k_files(
     assert result.rate >= 0.95, result.report()
     assert result.ready_rate >= 0.95, result.report()  # and not held by the gating
     assert main_s < 240
+    # the import's lookups keyed whatever the statistics (its entry check alone took 133 s in CI)
+    assert 0 < ingest_s < 60, imports[-1:]

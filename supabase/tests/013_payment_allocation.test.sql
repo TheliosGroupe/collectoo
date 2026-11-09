@@ -2,7 +2,7 @@
 -- addendum). The worker's waterfall is played here by writing plans into pg_temp._alloc_target / _alloc_line and calling
 -- private.post_allocations, as the payments.allocate job does in one transaction.
 begin;
-select plan(159);
+select plan(165);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -751,6 +751,45 @@ reset role;
 select is((select count(*)::int from public.client_notification n where n.reason is not null
            and n.reason not in ('hold_blocks_allocation', 'ops_correction', 'file_recalled', 'before_servicing_start',
                                 'client_ratification')), 0, 'every reason the client reads is a code');
+
+-- 20261110130000 (plan robustness): payment_positions and unassign_payment reach a payment's 4710 postings from its
+-- entries now; same results as the queries they replaced.
+select is(
+  (select jsonb_agg(jsonb_build_array(x.payment_id, x.amount_minor, x.allocated_minor, x.returned_minor,
+                                      x.unallocated_minor) order by x.payment_id)
+   from private.payment_positions(array(select id from public.payment)) x),
+  (select jsonb_agg(jsonb_build_array(p.id, p.amount_minor, coalesce(s.a, 0), coalesce(s.r, 0),
+                                      p.amount_minor - coalesce(s.a, 0) - coalesce(s.r, 0)) order by p.id)
+   from public.payment p
+   left join lateral (
+     select sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) in ('allocation', 'forward')) as a,
+            sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) = 'cash_out') as r
+     from public.ledger_entry e
+     left join public.ledger_entry t on t.id = e.reverses_entry_id
+     join public.ledger_posting lp on lp.entry_id = e.id
+     join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment'
+     where e.payment_id = p.id) s on true),
+  'payment positions: those of the query it replaced, for every payment');
+select ok((select count(distinct e.entry_type) from public.ledger_entry e
+           where e.payment_id is not null and e.entry_type in ('allocation', 'forward', 'reversal')) = 3,
+  'allocations, forwards and reversals among them');
+create temp table _rob as
+select (select p.id from public.payment p where p.status in ('allocated', 'partially_allocated') and p.account_id is not null
+        order by p.id limit 1) as allocated,
+       (select p.id from public.payment p where p.status = 'matched' and p.account_id is not null
+          and exists (select 1 from public.ledger_entry e where e.payment_id = p.id and e.entry_type = 'reversal')
+          and not exists (select 1 from public.ledger_entry e where e.payment_id = p.id and e.entry_type = 'forward')
+        order by p.id limit 1) as reversed;
+grant select on _rob to authenticated;
+select isnt((select allocated from _rob), null, 'a payment with money allocated');
+select isnt((select reversed from _rob), null, 'a payment whose allocation was reversed (its entries net to zero on 4710)');
+set local role authenticated;
+select pg_temp.as_user('01');
+select throws_ok($$select public.unassign_payment('key-rob-unassign-01', (select allocated from _rob), 'mauvais dossier')$$,
+  '23514', 'money of this payment is allocated: reverse the allocation first', 'unassign: refused while money is allocated');
+select is(public.unassign_payment('key-rob-unassign-02', (select reversed from _rob), 'mauvais dossier') ->> 'payment_id',
+  (select reversed::text from _rob), 'unassign: allowed once its allocation is reversed');
+reset role;
 
 select * from finish();
 rollback;
