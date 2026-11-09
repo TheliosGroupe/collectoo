@@ -296,10 +296,14 @@ test("ops resolve the payments the rules leave to them", async ({ page }, testIn
   await held.getByRole("button", { name: "Annuler" }).click();
 
   // A page past the last one (its payments were just resolved) says how many are left and leads back.
-  await page.goto("/backoffice/encaissements/a-traiter?page=2");
+  // The count depends on the payments queue (matching, allocation and receipts jobs run in turn):
+  // reload until the background jobs have settled rather than read a page rendered mid-way.
   const pastEnd = page.getByTestId("queue-past-end");
-  await expect(pastEnd).toContainText("Plus rien sur cette page : 1 paiement à traiter au total.");
-  await expect(page.getByTestId("queue-tabs")).toContainText("À traiter (1)");
+  await expect(async () => {
+    await page.goto("/backoffice/encaissements/a-traiter?page=2");
+    await expect(pastEnd).toContainText("Plus rien sur cette page : 1 paiement à traiter au total.", { timeout: 2_000 });
+    await expect(page.getByTestId("queue-tabs")).toContainText("À traiter (1)", { timeout: 2_000 });
+  }).toPass({ timeout: 30_000 });
   await reviewShot(page, testInfo, "m2-payments-past-end");
   await pastEnd.getByRole("link", { name: "Revenir à la dernière page" }).click();
   await expect(page).toHaveURL(/\/backoffice\/encaissements\/a-traiter$/);
