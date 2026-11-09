@@ -7,7 +7,7 @@ import {
   statementListHref,
   statementListQuery,
 } from "@/lib/payments/statements";
-import { type StatementRow, STATEMENT_COLUMNS, StatementSummary } from "./statement-summary";
+import { type MatchCounts, type StatementRow, STATEMENT_COLUMNS, StatementSummary } from "./statement-summary";
 import { type BankAccountOption, StatementUploadForm } from "./upload-form";
 
 /**
@@ -39,6 +39,10 @@ export default async function StatementsPage({ searchParams }: PageProps<"/backo
     .map((a) => ({ id: a.id, label: a.label, feed: a.feed, currency: a.currency, ibanEnd: a.iban.slice(-4) }));
   const rows = (statements ?? []) as unknown as StatementRow[];
   const total = count ?? 0;
+  const { data: matchRows } = rows.length
+    ? await supabase.rpc("statement_match_counts", { p_statement_ids: rows.map((r) => r.id) })
+    : { data: [] };
+  const matches = new Map<string, MatchCounts>((matchRows ?? []).map((m) => [m.statement_id, m]));
   const filtered = q.compte !== null || q.statut !== "tous";
 
   return (
@@ -52,6 +56,9 @@ export default async function StatementsPage({ searchParams }: PageProps<"/backo
             CPCE), en attente d&apos;affectation à un dossier. Un même fichier, ou les opérations déjà importées d&apos;un
             relevé qui chevauche, ne sont jamais comptés deux fois.
           </InfoNote>
+          <Link href="/backoffice/encaissements/a-traiter" className={`${buttonClass} text-center`} data-testid="queue-link">
+            Paiements à traiter
+          </Link>
           <Section title="Importer un relevé" testId="import-statement">
             <StatementUploadForm accounts={options} />
           </Section>
@@ -109,7 +116,7 @@ export default async function StatementsPage({ searchParams }: PageProps<"/backo
                       déposé le {new Date(s.created_at).toLocaleDateString("fr-FR", { timeZone: "Europe/Paris" })}
                     </span>
                   </div>
-                  <StatementSummary s={s} />
+                  <StatementSummary s={s} match={matches.get(s.id)} />
                 </li>
               ))}
             </ul>

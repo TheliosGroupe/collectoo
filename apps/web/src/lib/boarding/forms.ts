@@ -71,6 +71,15 @@ export type ErrorCode =
   | "opened_future"
   | "account_holds_money"
   | "already_closed"
+  | "already_matched"
+  | "file_not_confirmed"
+  | "split_not_available"
+  | "unknown_file"
+  | "not_matched"
+  | "payment_allocated"
+  | "busy"
+  | "designation_invalid"
+  | "none_selected"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -103,6 +112,17 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   account_holds_money:
     "Ce compte détient encore des fonds de tiers : il ne peut pas être clôturé tant que son solde n'est pas nul.",
   already_closed: "Ce compte est déjà clôturé. Rechargez la page.",
+  already_matched: "Ce paiement est déjà affecté à un dossier : désaffectez-le d'abord. Rechargez la page.",
+  file_not_confirmed:
+    "Ce dossier n'est pas encore confirmé : le paiement lui sera rapproché automatiquement à la confirmation du lot.",
+  split_not_available:
+    "Un paiement est affecté à un seul dossier pour l'instant : la répartition sur plusieurs dossiers viendra avec l'imputation.",
+  unknown_file: "Dossier introuvable pour ce servicer.",
+  not_matched: "Ce paiement n'est affecté à aucun dossier. Rechargez la page.",
+  payment_allocated: "Une partie de ce paiement est déjà imputée : annulez d'abord l'imputation.",
+  busy: "Ce paiement est en cours de rapprochement automatique : réessayez dans un instant.",
+  designation_invalid: "Les factures désignées doivent appartenir à ce dossier.",
+  none_selected: "Cochez au moins un paiement.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 

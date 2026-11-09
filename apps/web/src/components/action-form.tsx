@@ -10,22 +10,30 @@ import { type ActionResult, errorText } from "@/lib/boarding/forms";
  * action fails (React's automatic form reset is avoided), the button shows the pending state
  * (no double submission) and the error is shown inline from a fixed list of messages.
  */
-export function ActionForm({
+export function ActionForm<R extends ActionResult = ActionResult>({
   action,
+  onDone,
   submitLabel,
   pendingLabel = "Patientez…",
   buttonClassName,
   className,
   resetOnSuccess = false,
+  id,
+  testId,
   children,
 }: {
-  action: (formData: FormData) => Promise<ActionResult>;
+  action: (formData: FormData) => Promise<R>;
+  /** Called with the action's result when it succeeded (before the page refreshes). */
+  onDone?: (result: Extract<R, { ok: true }>) => void;
   submitLabel: string;
   pendingLabel?: string;
   buttonClassName: string;
   className?: string;
   /** Empty the fields once the action succeeded (a form that adds a row). */
   resetOnSuccess?: boolean;
+  /** Fields elsewhere on the page join this form with `form={id}` (bulk selection). */
+  id?: string;
+  testId?: string;
   children?: ReactNode;
 }) {
   const router = useRouter();
@@ -43,13 +51,14 @@ export function ActionForm({
       if ("error" in result) setError(errorText(result.error));
       else {
         if (resetOnSuccess) form.reset();
+        onDone?.(result as Extract<R, { ok: true }>);
         router.refresh();
       }
     });
   }
 
   return (
-    <form onSubmit={onSubmit} className={className}>
+    <form onSubmit={onSubmit} className={className} id={id} data-testid={testId}>
       {children}
       {error ? <ErrorNote>{error}</ErrorNote> : null}
       <button type="submit" disabled={pending} aria-busy={pending} className={buttonClassName}>

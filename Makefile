@@ -50,8 +50,9 @@ test-db:          ## pgTAP (needs `make up`)
 bench-boarding:   ## 1M-loan boarding benchmark (time + peak memory); results: docs/benchmarks/boarding.md
 	cd worker && uv run python -m collectoo_worker.bench --loans 1000000 --out ../tmp/bench
 
-eval:             ## AI eval suites (golden datasets in worker/evals)
+eval:             ## Eval suites: AI mapping (golden datasets) and reconciliation (synthetic statement, ≥ 95 %, 0 wrong)
 	cd worker && uv run python -m collectoo_worker.ai.evals mapping
+	cd worker && uv run python -m collectoo_worker.payments.reconciliation_eval
 
 test-integration: ## Worker tests against the local stack (needs `make up`)
 	eval "$$(./scripts/local-env.sh)" && cd worker && uv run pytest -m integration
