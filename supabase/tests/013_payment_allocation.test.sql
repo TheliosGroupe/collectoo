@@ -2,7 +2,7 @@
 -- addendum). The worker's waterfall is played here by writing plans into pg_temp._alloc_target / _alloc_line and calling
 -- private.post_allocations, as the payments.allocate job does in one transaction.
 begin;
-select plan(159);
+select plan(167);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -752,5 +752,195 @@ select is((select count(*)::int from public.client_notification n where n.reason
            and n.reason not in ('hold_blocks_allocation', 'ops_correction', 'file_recalled', 'before_servicing_start',
                                 'client_ratification')), 0, 'every reason the client reads is a code');
 
+-- 20261110130000 (plan robustness): payment_positions and unassign_payment reach a payment's 4710 postings from its
+-- entries now; same results as the queries they replaced.
+select is(
+  (select jsonb_agg(jsonb_build_array(x.payment_id, x.amount_minor, x.allocated_minor, x.returned_minor,
+                                      x.unallocated_minor) order by x.payment_id)
+   from private.payment_positions(array(select id from public.payment)) x),
+  (select jsonb_agg(jsonb_build_array(p.id, p.amount_minor, coalesce(s.a, 0), coalesce(s.r, 0),
+                                      p.amount_minor - coalesce(s.a, 0) - coalesce(s.r, 0)) order by p.id)
+   from public.payment p
+   left join lateral (
+     select sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) in ('allocation', 'forward')) as a,
+            sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) = 'cash_out') as r
+     from public.ledger_entry e
+     left join public.ledger_entry t on t.id = e.reverses_entry_id
+     join public.ledger_posting lp on lp.entry_id = e.id
+     join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment'
+     where e.payment_id = p.id) s on true),
+  'payment positions: those of the query it replaced, for every payment');
+select ok((select count(distinct e.entry_type) from public.ledger_entry e
+           where e.payment_id is not null and e.entry_type in ('allocation', 'forward', 'reversal')) = 3,
+  'allocations, forwards and reversals among them');
+create temp table _rob as
+select (select p.id from public.payment p where p.status in ('allocated', 'partially_allocated') and p.account_id is not null
+        order by p.id limit 1) as allocated,
+       (select p.id from public.payment p where p.status = 'matched' and p.account_id is not null
+          and exists (select 1 from public.ledger_entry e where e.payment_id = p.id and e.entry_type = 'reversal')
+          and not exists (select 1 from public.ledger_entry e where e.payment_id = p.id and e.entry_type = 'forward')
+        order by p.id limit 1) as reversed;
+grant select on _rob to authenticated;
+select isnt((select allocated from _rob), null, 'a payment with money allocated');
+select isnt((select reversed from _rob), null, 'a payment whose allocation was reversed (its entries net to zero on 4710)');
+set local role authenticated;
+select pg_temp.as_user('01');
+select throws_ok($$select public.unassign_payment('key-rob-unassign-01', (select allocated from _rob), 'mauvais dossier')$$,
+  '23514', 'money of this payment is allocated: reverse the allocation first', 'unassign: refused while money is allocated');
+select is(public.unassign_payment('key-rob-unassign-02', (select reversed from _rob), 'mauvais dossier') ->> 'payment_id',
+  (select reversed::text from _rob), 'unassign: allowed once its allocation is reversed');
+reset role;
+
+
+-- 20261110130000 (plan robustness): payment_detail drives from the payment's entries and reaches every row it names by
+-- key now; the page is that of the function it replaced (20261110120000 as merged, copied below), for every payment
+-- (allocations, forwards, reversals, notifications, another servicer's payments).
+create function pg_temp.payment_detail_applied(p_payment_id uuid)
+returns jsonb
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  p public.payment;
+  v jsonb;
+begin
+  select * into p from public.payment where id = p_payment_id and organization_id = any (private.money_staff_org_ids());
+  if not found then
+    return null;
+  end if;
+  select jsonb_build_object(
+    'payment', jsonb_build_object(
+      'id', p.id, 'amount_minor', p.amount_minor::text, 'currency', p.currency, 'booking_date', p.booking_date,
+      'value_date', p.value_date, 'payer_name', p.payer_name, 'payer_iban_end', right(p.payer_iban, 4),
+      'payer_iban_valid', coalesce(private.iban_valid(private.rf_normalise(p.payer_iban)), false),
+      'remittance_text', p.remittance_text, 'creditor_reference', p.creditor_reference, 'end_to_end_id', p.end_to_end_id,
+      'status', p.status, 'review_reason', p.review_reason, 'account_id', p.account_id, 'match_method', p.match_method,
+      'matched_at', p.matched_at, 'designation', p.designation, 'instruction', p.allocation_instruction,
+      'channel', p.channel, 'method', p.method),
+    'position', (select jsonb_build_object('allocated_minor', x.allocated_minor::text,
+                                           'unallocated_minor', x.unallocated_minor::text,
+                                           'returned_minor', x.returned_minor::text,
+                                           'left_minor', (x.amount_minor - x.returned_minor)::text,
+                                           'forwarded_minor', (select coalesce(sum(lp.amount_minor), 0)
+                                                               from public.ledger_entry e
+                                                               left join public.ledger_entry t on t.id = e.reverses_entry_id
+                                                               join public.ledger_posting lp on lp.entry_id = e.id
+                                                               join public.ledger_account la on la.id = lp.ledger_account_id
+                                                                 and la.book = 'unallocated_payment'
+                                                               where e.payment_id = p.id
+                                                                 and coalesce(t.entry_type, e.entry_type) = 'forward')::text)
+                 from private.payment_positions(array[p.id]) x),
+    'file', (select jsonb_build_object('account_id', a.id, 'external_ref', a.external_ref, 'status', a.status,
+                                       'client_organization_id', a.client_organization_id, 'client_name', c.legal_name,
+                                       'currency', a.currency, 'legal_regime', a.legal_regime,
+                                       'debtor_name', (select min(pa.display_name) from public.account_party ap
+                                                       join public.party pa on pa.id = ap.party_id
+                                                       where ap.account_id = a.id and ap.role = 'borrower'),
+                                       'holds', coalesce((select jsonb_agg(h.kind order by h.kind)
+                                                          from public.account_hold h
+                                                          where h.account_id = a.id and h.ended_at is null
+                                                            and h.kind in ('surendettement', 'collective_proceeding')),
+                                                         '[]'))
+             from public.account a join public.organization c on c.id = a.client_organization_id
+             where a.id = p.account_id),
+    'matches', coalesce((select jsonb_agg(jsonb_build_object('action', m.action, 'account_id', m.account_id,
+                                                             'external_ref', a.external_ref, 'method', m.method,
+                                                             'rule', m.rule, 'trigger', m.trigger, 'reason', m.reason,
+                                                             'review_reason', m.review_reason, 'decided_at', m.decided_at,
+                                                             'by_ops', m.decided_by is not null)
+                                          order by m.decided_at, m.id)
+                         from public.payment_match m join public.account a on a.id = m.account_id
+                         where m.payment_id = p.id), '[]'),
+    'entries', coalesce((select jsonb_agg(jsonb_build_object(
+                           'entry_id', e.id, 'entry_type', e.entry_type, 'effective_date', e.effective_date,
+                           'posted_at', e.posted_at, 'reason', e.reason, 'account_id', e.account_id,
+                           'ops_note', (select o.note from private.payment_ops_note o where o.entry_id = e.id),
+                           'external_ref', (select a.external_ref from public.account a where a.id = e.account_id),
+                           'reverses_entry_id', e.reverses_entry_id,
+                           'reverses_type', (select t.entry_type from public.ledger_entry t where t.id = e.reverses_entry_id),
+                           'reversed_by', (select r.id from public.ledger_entry r where r.reverses_entry_id = e.id),
+                           'amount_minor', (select sum(lp.amount_minor) from public.ledger_posting lp
+                                            join public.ledger_account la on la.id = lp.ledger_account_id
+                                            where lp.entry_id = e.id and la.book = 'unallocated_payment')::text,
+                           'lines', (select coalesce(jsonb_agg(jsonb_build_object(
+                                              'claim_item_id', la.claim_item_id, 'item_ref', i.ref, 'item_kind', i.kind,
+                                              'due_date', i.due_date, 'component', la.component,
+                                              'amount_minor', (-lp.amount_minor)::text)
+                                            order by lp.line_no), '[]')
+                                     from public.ledger_posting lp
+                                     join public.ledger_account la on la.id = lp.ledger_account_id
+                                     join public.claim_item i on i.id = la.claim_item_id
+                                     where lp.entry_id = e.id and la.book = 'debtor_receivable'))
+                         order by e.posted_at, e.id)
+                         from public.ledger_entry e where e.payment_id = p.id), '[]'),
+    'notifications', coalesce((select jsonb_agg(jsonb_build_object('kind', n.kind, 'created_at', n.created_at,
+                                                                   'client_name', c.legal_name, 'reason', n.reason,
+                                                                   'ledger_entry_id', n.ledger_entry_id,
+                                                                   'delivered_at', n.delivered_at)
+                                                order by n.created_at, n.id)
+                               from public.client_notification n
+                               join public.organization c on c.id = n.client_organization_id
+                               where n.payment_id = p.id), '[]'),
+    'refunds', coalesce((select jsonb_agg(jsonb_build_object(
+                           'id', q.id, 'amount_minor', q.amount_minor::text, 'payee_name', q.payee_name,
+                           'payee_iban_end', right(q.payee_iban, 4), 'payee_is_payer', q.payee_is_payer,
+                           'end_to_end_id', q.end_to_end_id, 'reason_code', q.reason_code, 'reason', q.reason,
+                           'status', q.status, 'requested_at', q.requested_at, 'executed_on', q.executed_on,
+                           'cancelled_at', q.cancelled_at, 'cancel_reason', q.cancel_reason)
+                         order by q.requested_at, q.id)
+                         from public.refund_request q where q.payment_id = p.id), '[]'),
+    'bank_lines', coalesce((select jsonb_agg(jsonb_build_object(
+                              'bank_transaction_id', l.bank_transaction_id, 'kind', l.kind, 'method', l.method,
+                              'booking_date', t.booking_date, 'amount_minor', t.amount_minor::text,
+                              'direction', t.direction, 'return_reason', t.return_reason,
+                              'statement_id', t.statement_id, 'decided_at', l.decided_at, 'reason', l.reason)
+                            order by t.booking_date, l.decided_at)
+                            from public.bank_debit_link l join public.bank_transaction t on t.id = l.bank_transaction_id
+                            where l.payment_id = p.id), '[]'),
+    'documents', coalesce((select jsonb_agg(jsonb_build_object('id', d.id, 'kind', d.kind, 'created_at', d.created_at)
+                                            order by d.created_at desc, d.id)
+                           from public.document d where p.account_id is not null and d.account_id = p.account_id), '[]'),
+    'other_files', coalesce((select jsonb_agg(jsonb_build_object('account_id', o.id, 'external_ref', o.external_ref)
+                                              order by o.external_ref)
+                             from public.account o
+                             where p.account_id is not null and o.id <> p.account_id
+                               and o.status not in ('staged', 'closed_paid', 'closed_settled', 'closed_uncollectable',
+                                                    'closed_recalled')
+                               and o.currency = p.currency
+                               and exists (select 1 from public.account_party x
+                                           join public.account_party y on y.party_id = x.party_id
+                                           where x.account_id = p.account_id and y.account_id = o.id
+                                             and x.role in ('borrower', 'co_borrower')
+                                             and y.role in ('borrower', 'co_borrower'))), '[]')
+  ) into v;
+  return v;
+end;
+$$;
+-- The borrower of payment 02's file is on other files: as borrower (D-21) and as co-borrower (D-22), listed; on a
+-- closed file (D-23), on a staged one (D-24) and as guarantor only (D-25), not listed.
+select pg_temp.file('21', '20000000-0000-0000-0000-0000000000a2', 'in_collection', 'commercial_b2b', 'Autre 21');
+select pg_temp.file('22', '20000000-0000-0000-0000-0000000000a2', 'in_collection', 'commercial_b2b', 'Autre 22');
+select pg_temp.file('23', '20000000-0000-0000-0000-0000000000a2', 'closed_paid', 'commercial_b2b', 'Autre 23');
+select pg_temp.file('24', '20000000-0000-0000-0000-0000000000a2', 'staged', 'commercial_b2b', 'Autre 24');
+select pg_temp.file('25', '20000000-0000-0000-0000-0000000000a2', 'in_collection', 'commercial_b2b', 'Autre 25');
+insert into public.account_party (account_id, party_id, role, capacity)
+select pg_temp.f(x.n), ap.party_id, x.role, 'legal_entity'
+from public.account_party ap
+cross join (values ('21', 'borrower'), ('22', 'co_borrower'), ('23', 'borrower'), ('24', 'borrower'),
+                   ('25', 'guarantor')) x (n, role)
+where ap.account_id = (select account_id from public.payment where id = pg_temp.pay('02')) and ap.role = 'borrower';
+
+select pg_temp.as_user('01');
+select is((select string_agg(p.id || ' ' || coalesce(public.payment_detail(p.id)::text, '-'), e'\n' order by p.id)
+           from public.payment p),
+          (select string_agg(p.id || ' ' || coalesce(pg_temp.payment_detail_applied(p.id)::text, '-'), e'\n'
+                             order by p.id)
+           from public.payment p),
+  'the payment page: that of the function it replaced, for every payment');
+select is(public.payment_detail(pg_temp.pay('02')) -> 'other_files',
+  jsonb_build_array(jsonb_build_object('account_id', pg_temp.f('21'), 'external_ref', 'D-21'),
+                    jsonb_build_object('account_id', pg_temp.f('22'), 'external_ref', 'D-22')),
+  'the debtor''s other open files, from its parties (borrower or co-borrower; not closed, staged or as guarantor)');
 select * from finish();
 rollback;

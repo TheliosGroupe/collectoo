@@ -4,12 +4,15 @@ amounts), imported and matched, then allocated by the `payments.allocate` jobs (
 Prints the timings (docs/benchmarks/payments.md; design risk R1: the per-entry checks at commit) and
 checks the money set-based: every allocation within the payment and the receivables, Σ allocated +
 unallocated = Σ received, client money closed (I8), one client notification per allocation entry.
-ALLOC_FILES changes the size."""
+The allocation runs with the ledger's statistics as CI met them (ledger_entry not analysed yet, the
+4710 pool estimated at a few postings): its lookups must not rest on fresh statistics. ALLOC_FILES
+changes the size."""
 
 import logging
 import os
 import random
 import time
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,7 @@ from integration_helpers import DB, one, storage
 from reconciliation_helpers import pay
 from statement_helpers import bank_tenant
 from statement_helpers import drain as drain_payments
+from stats_helpers import analyse, estimated_rows, forget_statistics, frozen_statistics
 from test_matching_scale_integration import _board
 
 from collectoo_worker.synth.reconciliation import Credit
@@ -73,15 +77,27 @@ def test_allocate_50k_payments(tmp_path: Path, caplog: pytest.LogCaptureFixture)
     files = [f for f in _files(tenant) if f[2] > 0][:FILES]
     credits = _credits(files)
     pay(tenant, store, credits, prefix="A", days=5, allocate=False)  # imported and matched only
-    matched = time.monotonic()
-    with psycopg.connect(DB) as conn:  # what the match queued (taken off above), timed on its own
+    # CI (M2b-6): ledger_account and ledger_posting analysed (the pool: one 4710 account, a few
+    # cash_in postings), ledger_entry not analysed yet, none of them again while the jobs run
+    # (payment_positions then read every posting of the pool for each payment: 439 s a chunk)
+    ledger = ("public.ledger_entry", "public.ledger_posting", "public.ledger_account")
+    with frozen_statistics(*ledger) as conn:
+        analyse(conn, "public.ledger_account", "public.ledger_posting")
+        forget_statistics("public.ledger_entry")
+        # the state the jobs must not mind: a payment's entries guessed by default (no statistics)
+        entries = estimated_rows(
+            conn, "select 1 from public.ledger_entry where payment_id = %s", (str(uuid.uuid4()),)
+        )
+        assert entries >= 100, entries
+        matched = time.monotonic()
+        # what the match queued (taken off above), timed on its own
         conn.execute(
             "select pgmq.send('payments', jsonb_build_object('type', 'allocate',"
             " 'organization_id', %s::text))",
             (str(tenant["servicer"]),),
         )
-    drain_payments(store)  # the allocation jobs: 10k payments each, then their continuation
-    allocated = time.monotonic()
+        drain_payments(store)  # the allocation jobs: 10k payments each, then their continuation
+        allocated = time.monotonic()
     logs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("allocate ")]
     print(
         f"\n{len(files)} files boarded in {boarded - started:.0f}s; {len(credits)} credits imported"
