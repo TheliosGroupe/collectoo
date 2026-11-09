@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { adminClient, createMandate, createMember, createTenant, type Tenant } from "./support/admin";
@@ -12,6 +13,9 @@ import { reviewShot } from "./screenshot";
  * reference; an invoice number backed by the payer's name); the rest waits in « Paiements à traiter »:
  * a name and an amount (a suggestion, accepted in one tap), no information (ops search the file), two files
  * named (ops choose). A wrong file is then undone from « Rapprochés ». Synthetic names and IBANs.
+ * Review fixes: a one-tap accept assigns only the file the sheet named (a rematch in between makes it skip,
+ * and ops are told); the sheet words what the gating will do; a page past the last one leads back; the
+ * phone sheet never runs off the screen.
  */
 const BANK_IBAN = "FR7630004000031234567890143"; // synthetic
 const DAY = "2026-11-02";
@@ -121,7 +125,7 @@ test("ops resolve the payments the rules leave to them", async ({ page }, testIn
   test.setTimeout(300_000);
   await loginAsStaff(page, await createMember(tenant.servicerId, "ops_manager"));
   await boardAndConfirm(page);
-  const { credits: paid, b, d } = credits(await confirmedFiles());
+  const { credits: paid, a, b, d } = credits(await confirmedFiles());
 
   // The statement: the import books the money, then the match job runs.
   await page.goto("/backoffice/encaissements");
@@ -153,12 +157,52 @@ test("ops resolve the payments the rules leave to them", async ({ page }, testIn
   await expect(unknown.getByTestId("accept-suggestion")).toHaveCount(0);
   await reviewShot(page, testInfo, "m2-payments-queue");
 
+  // A rematch proposes another file after the page was drawn (played here on the candidate row): the
+  // sheet still names the file ops saw, so nothing is assigned, and the page says why.
+  const admin = adminClient();
+  const { data: line, error: lineError } = await admin
+    .from("bank_transaction")
+    .select("id")
+    .eq("organization_id", tenant.servicerId)
+    .eq("acct_svcr_ref", "E2E-3")
+    .single();
+  if (lineError) throw lineError;
+  const { data: solde } = await admin.from("payment").select("id").eq("bank_transaction_id", line.id).single();
+  const { data: shown } = await admin
+    .from("payment_match_candidate")
+    .select("account_id")
+    .eq("payment_id", solde!.id)
+    .eq("rank", 1)
+    .single();
+  const setRank1 = async (account: string) => {
+    const { error } = await admin
+      .from("payment_match_candidate")
+      .update({ account_id: account })
+      .eq("payment_id", solde!.id)
+      .eq("rank", 1);
+    if (error) throw error;
+  };
+
   // A name and an amount: one tap, a sheet that says what will happen, then confirm.
   await suggestion.getByTestId("accept-suggestion").getByRole("button").first().click();
   const sheet = page.getByRole("dialog", { name: "Accepter la suggestion" });
   await expect(sheet).toContainText("sera rattaché au dossier");
+  await expect(sheet.getByTestId("sheet-effect")).toContainText("Il sera imputé sur ses factures");
   await reviewShot(page, testInfo, "m2-payment-accept");
+  await setRank1(a.id);
   await sheet.getByRole("button", { name: "Confirmer l'affectation" }).click();
+  await expect(page.getByTestId("queue-notice")).toContainText(
+    "Aucune suggestion acceptée ; 1 paiement ignoré : suggestion modifiée entre-temps (1)",
+  );
+  await expect(cards).toHaveCount(3);
+  await expect(suggestion.getByTestId("accept-suggestion")).toContainText(`Affecter à ${a.ref}`); // what is proposed now
+  await reviewShot(page, testInfo, "m2-payments-accept-skipped");
+  // the next rematch proposes the first file again: accepted this time
+  await setRank1(shown!.account_id);
+  await page.reload();
+  await suggestion.getByTestId("accept-suggestion").getByRole("button").first().click();
+  await page.getByRole("dialog", { name: "Accepter la suggestion" }).getByRole("button", { name: "Confirmer l'affectation" }).click();
+  await expect(page.getByTestId("queue-notice")).toContainText("1 suggestion acceptée.");
   await expect(cards).toHaveCount(2);
 
   // Two files named: ops choose the second.
@@ -173,6 +217,18 @@ test("ops resolve the payments the rules leave to them", async ({ page }, testIn
   await search.getByLabel("Dossier, facture, référence RF ou nom du débiteur").fill(d.ref);
   await search.getByRole("button", { name: "Chercher" }).click();
   await search.getByTestId("search-results").getByRole("radio").first().check();
+  if (testInfo.project.name === "mobile") {
+    // the sheet is never taller than the screen: it scrolls inside, the search box stays reachable
+    const style = await search.evaluate((el) => {
+      const css = getComputedStyle(el);
+      return { overflowY: css.overflowY, maxHeight: css.maxHeight };
+    });
+    expect(style.overflowY).toBe("auto");
+    expect(style.maxHeight).not.toBe("none");
+    const box = await search.boundingBox();
+    expect(box!.y).toBeGreaterThanOrEqual(0);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(page.viewportSize()!.height + 1);
+  }
   await search.getByLabel("Motif (gardé dans l'historique)").fill("Courriel du débiteur du 02/11");
   await search.getByRole("button", { name: "Confirmer l'affectation" }).click();
   await expect(page.getByText("Aucun paiement à traiter")).toBeVisible();
@@ -190,6 +246,54 @@ test("ops resolve the payments the rules leave to them", async ({ page }, testIn
   await page.getByTestId("queue-tabs").getByRole("link", { name: "À traiter" }).click();
   await expect(cards).toHaveCount(1, { timeout: 30_000 });
   await expect(cards.first().getByTestId("queue-text")).toHaveText("SOLDE");
+
+  // A file held for a collective proceeding: the sheet says the payment will be held, not allocated.
+  const { data: proof, error: proofError } = await admin
+    .from("document")
+    .insert({
+      organization_id: tenant.servicerId,
+      client_organization_id: tenant.clientId,
+      account_id: d.id,
+      kind: "evidence",
+      storage_path: `e2e/${randomUUID()}.pdf`,
+      sha256: "a".repeat(64),
+      mime_type: "application/pdf",
+    })
+    .select("id")
+    .single();
+  if (proofError) throw proofError;
+  const { error: holdError } = await admin.from("account_hold").insert({
+    organization_id: tenant.servicerId,
+    client_organization_id: tenant.clientId,
+    portfolio_id: tenant.portfolioId,
+    account_id: d.id,
+    kind: "collective_proceeding",
+    scope: ["outbound", "payment_requests", "accruals"],
+    evidence_document_id: proof.id,
+    reason: "Jugement d'ouverture (E2E)",
+  });
+  if (holdError) throw holdError;
+  await cards.first().getByTestId("search-file").getByRole("button", { name: "Chercher un dossier" }).click();
+  const held = page.getByRole("dialog", { name: "Affecter à un dossier" });
+  await held.getByLabel("Dossier, facture, référence RF ou nom du débiteur").fill(d.ref);
+  await held.getByRole("button", { name: "Chercher" }).click();
+  await held.getByTestId("search-results").getByRole("radio").first().check();
+  await expect(held.getByTestId("sheet-effect")).toContainText(
+    "Le dossier est bloqué (surendettement ou procédure collective) : le paiement sera mis en attente",
+  );
+  await expect(held.getByTestId("sheet-effect")).not.toContainText("imputé sur ses factures");
+  await reviewShot(page, testInfo, "m2-payment-assign-held");
+  await held.getByRole("button", { name: "Annuler" }).click();
+
+  // A page past the last one (its payments were just resolved) says how many are left and leads back.
+  await page.goto("/backoffice/encaissements/a-traiter?page=2");
+  const pastEnd = page.getByTestId("queue-past-end");
+  await expect(pastEnd).toContainText("Plus rien sur cette page : 1 paiement à traiter au total.");
+  await expect(page.getByTestId("queue-tabs")).toContainText("À traiter (1)");
+  await reviewShot(page, testInfo, "m2-payments-past-end");
+  await pastEnd.getByRole("link", { name: "Revenir à la dernière page" }).click();
+  await expect(page).toHaveURL(/\/backoffice\/encaissements\/a-traiter$/);
+  await expect(cards).toHaveCount(1);
 });
 
 test("collectors do not see the payments to process", async ({ page }) => {

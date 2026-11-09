@@ -1,19 +1,81 @@
 "use client";
 
-import { type ReactNode, useId, useState, useTransition } from "react";
+import { type ReactNode, useEffect, useId, useState, useSyncExternalStore, useTransition } from "react";
 import { ActionForm } from "@/components/action-form";
 import { ErrorNote, buttonClass, dangerButtonClass, inlineButtonClass, inputClass } from "@/components/ui";
 import { errorText } from "@/lib/boarding/forms";
-import { type QueueAccount, fileLabel, pendingText } from "@/lib/payments/matching";
-import { money } from "@/lib/payments/statements";
+import {
+  type AcceptResult,
+  type QueueAccount,
+  acceptNotice,
+  fileLabel,
+  gatingOutcome,
+  outcomeText,
+  pendingText,
+} from "@/lib/payments/matching";
+import { type Tone, money } from "@/lib/payments/statements";
 import { acceptSuggestions, assignPayment, searchFiles, unassignPayment } from "./actions";
 
 const secondaryClass =
   "rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900";
 
+/** The payment a sheet acts on: its id, its amount as shown, and what the gating reads of it. */
+export type PaymentFacts = { id: string; amount: string; currency: string; booking_date: string };
+
+// What the last accept did, shown above the list: it outlives the card or form that sent it (a card
+// leaves the queue once accepted; a skipped one may lose its button when its suggestion changed).
+type Notice = { text: string; tone: Tone } | null;
+let notice: Notice = null;
+const listeners = new Set<() => void>();
+function showNotice(next: Notice) {
+  notice = next;
+  for (const listener of listeners) listener();
+}
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+function noticeOf(result: Extract<AcceptResult, { ok: true }>) {
+  showNotice(acceptNotice(result.accepted, result.skipped));
+}
+
+const NOTICE_CLASS: Record<string, string> = {
+  ok: "bg-emerald-50 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
+  action: "bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
+};
+
 /**
- * A button that opens a confirmation sheet: at the bottom of the screen on a phone, in place on a
- * desktop. The sheet says what will happen before anything is sent.
+ * « 2 suggestions acceptées ; 1 paiement ignoré : suggestion modifiée entre-temps (1)… ». It survives the
+ * refresh that follows an action; the page keys it by its URL, so another tab, filter or page clears it.
+ */
+export function QueueNotice() {
+  useEffect(() => () => showNotice(null), []);
+  const current = useSyncExternalStore(
+    subscribe,
+    () => notice,
+    () => null,
+  );
+  if (!current) return null;
+  return (
+    <div
+      role="status"
+      data-testid="queue-notice"
+      className={`flex items-start justify-between gap-3 rounded-md px-3 py-2 text-sm ${NOTICE_CLASS[current.tone] ?? NOTICE_CLASS.action}`}
+    >
+      <span>{current.text}</span>
+      <button type="button" className="text-xs underline" onClick={() => showNotice(null)}>
+        Fermer
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A button that opens a confirmation sheet: at the bottom of the screen on a phone (never taller than
+ * the screen: it scrolls inside), in place on a desktop. The sheet says what will happen before anything
+ * is sent.
  */
 function ConfirmSheet({
   label,
@@ -42,7 +104,7 @@ function ConfirmSheet({
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
-            className="fixed inset-x-0 bottom-0 z-20 flex flex-col gap-3 rounded-t-xl border-t border-zinc-200 bg-white p-4 shadow-lg sm:static sm:mt-3 sm:rounded-lg sm:border sm:shadow-none dark:border-zinc-800 dark:bg-zinc-950"
+            className="fixed inset-x-0 bottom-0 z-20 flex max-h-[85dvh] flex-col gap-3 overflow-y-auto overscroll-contain rounded-t-xl border-t border-zinc-200 bg-white p-4 shadow-lg sm:static sm:mt-3 sm:max-h-none sm:overflow-visible sm:rounded-lg sm:border sm:shadow-none dark:border-zinc-800 dark:bg-zinc-950"
           >
             <h3 id={titleId} className="font-medium">
               {title}
@@ -58,27 +120,28 @@ function ConfirmSheet({
   );
 }
 
-function Effect({ amount, file }: { amount: string; file: QueueAccount }) {
+/** What the assignment will do: the file, its balance, then what the gating will say (as SQL does). */
+function Effect({ payment, file }: { payment: PaymentFacts; file: QueueAccount }) {
   const pending = pendingText(file);
+  const outcome = gatingOutcome(file, payment);
   return (
-    <p className="text-sm">
-      Le paiement de <strong>{amount}</strong> sera rattaché au dossier <strong>{file.external_ref}</strong> (
+    <p className="text-sm" data-testid="sheet-effect">
+      Le paiement de <strong>{payment.amount}</strong> sera rattaché au dossier <strong>{file.external_ref}</strong> (
       {file.client_name}
       {file.debtor_name ? `, ${file.debtor_name}` : ""}). Solde du dossier : {money(file.balance_minor, file.currency)}
-      {pending ? ` (${pending})` : ""}. Il sera imputé sur ses factures à l&apos;étape suivante, dans l&apos;ordre légal.
+      {pending ? ` (${pending})` : ""}.{" "}
+      <span className={outcome ? "font-medium text-amber-900 dark:text-amber-200" : undefined}>{outcomeText(outcome)}</span>
     </p>
   );
 }
 
 /** The best suggestion as one button (« Affecter à M-0042 · … »), then a sheet stating the effect. */
 export function AcceptSuggestion({
-  paymentId,
-  amount,
+  payment,
   file,
   idempotencyKey,
 }: {
-  paymentId: string;
-  amount: string;
+  payment: PaymentFacts;
   file: QueueAccount;
   idempotencyKey: string;
 }) {
@@ -89,11 +152,20 @@ export function AcceptSuggestion({
       buttonClassName={`${inlineButtonClass} w-full text-left sm:w-auto`}
       testId="accept-suggestion"
     >
-      {() => (
+      {(close) => (
         <>
-          <Effect amount={amount} file={file} />
-          <ActionForm action={acceptSuggestions} submitLabel="Confirmer l'affectation" buttonClassName={buttonClass}>
-            <input type="hidden" name="payment_id" value={paymentId} />
+          <Effect payment={payment} file={file} />
+          <ActionForm
+            action={acceptSuggestions}
+            onDone={(result) => {
+              noticeOf(result);
+              close();
+            }}
+            submitLabel="Confirmer l'affectation"
+            buttonClassName={buttonClass}
+          >
+            {/* the file this sheet names: the command assigns it only if it is still the suggestion */}
+            <input type="hidden" name="item" value={`${payment.id}:${file.account_id}`} />
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />
           </ActionForm>
         </>
@@ -128,13 +200,11 @@ function AssignForm({
 
 /** One of the files the rules proposed (several possible): ops choose it, with a reason. */
 export function ChooseFile({
-  paymentId,
-  amount,
+  payment,
   file,
   idempotencyKey,
 }: {
-  paymentId: string;
-  amount: string;
+  payment: PaymentFacts;
   file: QueueAccount;
   idempotencyKey: string;
 }) {
@@ -147,9 +217,9 @@ export function ChooseFile({
     >
       {() => (
         <>
-          <Effect amount={amount} file={file} />
+          <Effect payment={payment} file={file} />
           <AssignForm
-            paymentId={paymentId}
+            paymentId={payment.id}
             accountId={file.account_id}
             idempotencyKey={idempotencyKey}
             defaultReason="Choix parmi les dossiers proposés"
@@ -161,15 +231,7 @@ export function ChooseFile({
 }
 
 /** Search a file by reference (file, invoice, RF) or debtor name, then assign with a reason. */
-export function SearchAndAssign({
-  paymentId,
-  amount,
-  idempotencyKey,
-}: {
-  paymentId: string;
-  amount: string;
-  idempotencyKey: string;
-}) {
+export function SearchAndAssign({ payment, idempotencyKey }: { payment: PaymentFacts; idempotencyKey: string }) {
   const [query, setQuery] = useState("");
   const [files, setFiles] = useState<(QueueAccount & { found_by: string })[] | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -181,7 +243,7 @@ export function SearchAndAssign({
     setFailed(false);
     setChosen(null);
     startTransition(async () => {
-      const result = await searchFiles(paymentId, query);
+      const result = await searchFiles(payment.id, query);
       if ("error" in result) setFailed(true);
       else setFiles(result.files);
     });
@@ -236,8 +298,8 @@ export function SearchAndAssign({
           ) : null}
           {file ? (
             <>
-              <Effect amount={amount} file={file} />
-              <AssignForm paymentId={paymentId} accountId={file.account_id} idempotencyKey={idempotencyKey} defaultReason="" />
+              <Effect payment={payment} file={file} />
+              <AssignForm paymentId={payment.id} accountId={file.account_id} idempotencyKey={idempotencyKey} defaultReason="" />
             </>
           ) : null}
         </>
@@ -270,11 +332,15 @@ export function Unassign({ paymentId, idempotencyKey }: { paymentId: string; ide
   );
 }
 
-/** Bulk acceptance on desktop: the checked payments' one-tap suggestions (fields join by form id). */
+/**
+ * Bulk acceptance on desktop: the checked payments' one-tap suggestions (fields join by form id; each
+ * checkbox carries « payment:file », the file its card shows).
+ */
 export function BulkAccept({ idempotencyKey, count }: { idempotencyKey: string; count: number }) {
   return (
     <ActionForm
       action={acceptSuggestions}
+      onDone={noticeOf}
       id="bulk-accept"
       testId="bulk-accept"
       submitLabel={`Accepter les suggestions cochées (${count} proposées sur cette page)`}

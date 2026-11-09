@@ -2,11 +2,17 @@ import { describe, expect, it } from "vitest";
 import { errorText } from "@/lib/boarding/forms";
 import { money } from "@/lib/payments/statements";
 import {
+  QUEUE_PAGE_SIZE,
   REASON_FILTERS,
+  acceptNotice,
   ageBadge,
   autoShare,
   eurosToMinor,
   fileLabel,
+  gatingOutcome,
+  lastPage,
+  outcomeText,
+  parseAcceptItems,
   formatRf,
   highlight,
   matchingErrorCode,
@@ -29,6 +35,8 @@ const FILE = {
   balance_minor: "80000",
   pending_minor: "0",
   rf: "RF60482193057612",
+  servicing_start: "2026-01-01",
+  holds: [] as string[],
 };
 
 describe("queue labels", () => {
@@ -149,5 +157,76 @@ describe("the queue's URL", () => {
   it("gives the share matched automatically, rounded down", () => {
     expect(autoShare(955, 1000)).toBe("95 %");
     expect(autoShare(0, 0)).toBe("–");
+  });
+});
+
+
+describe("what the confirmation sheet promises (= the SQL gating, first that applies)", () => {
+  const PAID = { currency: "EUR", booking_date: "2026-10-05" };
+  it("allocation only when the gating lets the payment through", () => {
+    expect(gatingOutcome(FILE, PAID)).toBeNull();
+    expect(outcomeText(null)).toContain("imputé sur ses factures");
+  });
+  it.each([
+    [{ status: "staged" }, PAID, "account_not_confirmed"],
+    [{ status: "closed_recalled" }, PAID, "account_closed"],
+    [{ status: "closed_paid", holds: ["surendettement"] }, PAID, "account_closed"],
+    [{}, { ...PAID, currency: "USD" }, "currency_mismatch"],
+    [{}, { ...PAID, booking_date: "2025-12-31" }, "before_servicing_start"],
+    [{ servicing_start: null }, PAID, "before_servicing_start"],
+    [{ holds: ["collective_proceeding"] }, PAID, "hold_blocks_allocation"],
+    [{ pending_minor: "80000" }, PAID, "nothing_due"],
+    [{ balance_minor: "0" }, PAID, "nothing_due"],
+    [{ balance_minor: "99999999999999999", pending_minor: "99999999999999998" }, PAID, null],
+  ] as const)("%o, paid %o -> %s", (change, paid, reason) => {
+    expect(gatingOutcome({ ...FILE, ...change }, paid)).toBe(reason);
+  });
+  it("never promises an allocation the gating holds or refuses", () => {
+    for (const reason of ["account_closed", "currency_mismatch", "before_servicing_start", "hold_blocks_allocation", "nothing_due"]) {
+      expect(outcomeText(reason)).toContain("attente");
+      expect(outcomeText(reason)).not.toContain("imputé sur ses factures");
+    }
+    expect(outcomeText("hold_blocks_allocation")).toContain("procédure collective");
+    expect(outcomeText("account_not_confirmed")).toContain("pas encore confirmé");
+  });
+});
+
+describe("accepting suggestions: the file ops saw, and what was skipped", () => {
+  const P = "00000000-0000-0000-0000-0000000000f1";
+  const A = "00000000-0000-0000-0000-0000000000a1";
+  it("reads « payment:file » pairs, refusing anything else", () => {
+    expect(parseAcceptItems([`${P}:${A}`])).toEqual([{ payment_id: P, account_id: A }]);
+    expect(parseAcceptItems([P])).toBeNull();
+    expect(parseAcceptItems([`${P}:x`])).toBeNull();
+    expect(parseAcceptItems([])).toEqual([]);
+  });
+  it("says how many were accepted", () => {
+    expect(acceptNotice(1, [])).toEqual({ text: "1 suggestion acceptée.", tone: "ok" });
+    expect(acceptNotice(3, []).text).toBe("3 suggestions acceptées.");
+  });
+  it("says which were skipped, and why", () => {
+    const n = acceptNotice(2, [
+      { payment_id: P, reason: "suggestion_changed" },
+      { payment_id: A, reason: "suggestion_changed" },
+      { payment_id: A, reason: "not_waiting" },
+    ]);
+    expect(n.tone).toBe("action");
+    expect(n.text).toBe(
+      "2 suggestions acceptées ; 3 paiements ignorés : suggestion modifiée entre-temps (2), déjà traité (1). Vérifiez les propositions à jour.",
+    );
+    expect(acceptNotice(0, [{ payment_id: P, reason: "no_suggestion" }]).text).toBe(
+      "Aucune suggestion acceptée ; 1 paiement ignoré : plus de suggestion (1). Vérifiez les propositions à jour.",
+    );
+  });
+  it("asks to tick a payment when none is", () => {
+    expect(errorText("none_selected")).toBe("Cochez au moins un paiement.");
+  });
+});
+
+describe("a page past the last one", () => {
+  it("knows the last page of a total", () => {
+    expect(lastPage(0)).toBe(1);
+    expect(lastPage(QUEUE_PAGE_SIZE)).toBe(1);
+    expect(lastPage(QUEUE_PAGE_SIZE + 1)).toBe(2);
   });
 });

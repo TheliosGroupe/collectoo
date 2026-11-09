@@ -4,7 +4,10 @@ Queued by the import (`trigger: import`, every payment never tried), by a batch 
 (`rematch`: the payments left to ops are matched again, founder #11) and by `unassign_payment`
 (`ops`: fresh suggestions for that payment). One transaction (the queue's, exactly once):
 
-1. lock the target payments (skip those an ops command holds right now);
+1. lock the target payments (skip those an ops command holds right now), at most `CHUNK` of them in
+   processing order (booking date, statement, line): a backlog is never one unbounded transaction.
+   When the chunk is full, the job queues its continuation (`after`: where this chunk ended) in the
+   same transaction, so a redelivered message replays the same chunk and the rest follows once;
 2. read their signals (`payments.matching.read_signals`) and load only what they point to: the
    references, invoice and file numbers, IBANs, then those files (items, balances, parties) —
    set-based, through temporary tables analysed before they are joined (no plan rests on the
@@ -19,8 +22,10 @@ Nothing is posted: allocation is M2b-4. The rules decide; no model, no LLM (CLAU
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Iterable, Sequence
+from datetime import date
 from typing import Any
 
 import psycopg
@@ -44,6 +49,16 @@ Conn = psycopg.Connection[Any]
 log = logging.getLogger("collectoo.payments")
 TRIGGERS = ("import", "rematch", "ops")
 QUEUED = ("no_match", "ambiguous", "account_not_confirmed")
+# Payments per run (one transaction): ~2 KB each in the worker; 50k in ~20 s
+# (docs/benchmarks/payments.md).
+CHUNK = int(os.environ.get("MATCH_CHUNK", "50000"))
+# Processing order of a run (booking date, statement, line): the rules see payments in this order,
+# and a run is cut into chunks along it. A payment without a bank line (PSP, M5) sorts first in its
+# day.
+STATEMENT = "coalesce(t.statement_id, '00000000-0000-0000-0000-000000000000'::uuid)"
+LINE = "coalesce(t.line_no, 0)"
+ORDER_COLUMNS = f"p.booking_date, {STATEMENT}, {LINE}, p.id"
+ORDER_KEY = f"({ORDER_COLUMNS})"
 
 
 def run_match(conn: Conn, payload: dict[str, Any]) -> dict[str, Any]:
@@ -52,12 +67,17 @@ def run_match(conn: Conn, payload: dict[str, Any]) -> dict[str, Any]:
     if trigger not in TRIGGERS:
         raise ValueError(f"unknown match trigger: {trigger!r}")
     ids = [str(x) for x in payload.get("payment_ids") or []]
+    after = _cursor(payload.get("after"))
     started = time.monotonic()
     # One match run per servicer at a time: two runs never decide the same payment twice.
     conn.execute("select pg_advisory_xact_lock(hashtext('payments_match:' || %s))", (org,))
-    payments = load_targets(conn, org, trigger, ids)
+    payments, last = load_targets(conn, org, trigger, ids, after=after, limit=CHUNK)
     if not payments:
         return {"decided": 0}
+    if last is not None:
+        # The chunk is full: the rest follows in the next job (same transaction: exactly once).
+        follow = {**payload, "after": [last[0].isoformat(), last[1], last[2], last[3]]}
+        conn.execute("select pgmq.send('payments', %s)", (Jsonb(follow),))
     signals = [read_signals(p) for p in payments]
     directory = load_directory(conn, org, signals)
     loaded = time.monotonic()
@@ -73,11 +93,12 @@ def run_match(conn: Conn, payload: dict[str, Any]) -> dict[str, Any]:
     decided = time.monotonic()
     result = apply(conn, org, trigger, payments, decisions)
     log.info(
-        "match %s (%s): %d payments, %d automatic; load %.1fs, rules %.1fs (remainder load %.1fs),"
-        " apply %.1fs",
+        "match %s (%s): %d payments%s, %d automatic; load %.1fs, rules %.1fs"
+        " (remainder load %.1fs), apply %.1fs",
         org,
         trigger,
         len(payments),
+        " (chunk full: the rest is queued)" if last is not None else "",
         sum(1 for d in decisions if d.automatic),
         loaded - started,
         decided - loaded - remainder_s,
@@ -90,30 +111,59 @@ def run_match(conn: Conn, payload: dict[str, Any]) -> dict[str, Any]:
 # -- targets ------------------------------------------------------------------------------------
 
 
-def load_targets(conn: Conn, org: str, trigger: str, ids: list[str]) -> list[PaymentIn]:
-    """Payments waiting for a file, in processing order (booking date, statement line). Locked;
-    a payment an ops command holds is skipped (that command decides it)."""
+Cursor = tuple[date, str, int, str]  # (booking date, statement, line, payment): processing order
+
+
+def _cursor(value: Any) -> Cursor | None:
+    """Where the previous chunk of this run ended (the job's `after`), or None."""
+    if not value:
+        return None
+    day, statement, line, payment = value
+    return date.fromisoformat(str(day)), str(statement), int(line), str(payment)
+
+
+def load_targets(  # noqa: PLR0913 - the run's scope
+    conn: Conn,
+    org: str,
+    trigger: str,
+    ids: list[str],
+    *,
+    after: Cursor | None = None,
+    limit: int = CHUNK,
+) -> tuple[list[PaymentIn], Cursor | None]:
+    """Payments waiting for a file, in processing order (booking date, statement line), at most
+    `limit` after `after`. Locked; a payment an ops command holds is skipped (that command decides
+    it). Returns them and, when the chunk is full, where it ends (the next chunk starts there)."""
+    params: list[Any]
     if trigger == "ops":
         where, params = "p.id = any(%s::uuid[])", [ids]
     elif trigger == "rematch":
         where, params = "(p.review_reason is null or p.review_reason = any(%s))", [list(QUEUED)]
     else:
         where, params = "p.review_reason is null", []
+    if after is not None:
+        where += f" and {ORDER_KEY} > (%s::date, %s::uuid, %s::integer, %s::uuid)"
+        params += [*after]
     locked = conn.execute(
-        f"""select p.id from public.payment p
+        f"""select p.id, p.booking_date, {STATEMENT}, {LINE}
+            from public.payment p
+            left join public.bank_transaction t on t.id = p.bank_transaction_id
             where p.organization_id = %s and p.status = 'unmatched' and p.account_id is null
               and {where}
-            order by p.id
-            for update skip locked""",  # noqa: S608 - fixed fragments, values bound
-        (org, *params),
+            order by {ORDER_COLUMNS}
+            limit %s
+            for update of p skip locked""",  # noqa: S608 - fixed fragments, values bound
+        (org, *params, limit),
     ).fetchall()
     if not locked:
-        return []
+        return [], None
+    end = locked[-1]
+    last = (end[1], str(end[2]), int(end[3]), str(end[0])) if len(locked) >= limit else None
     rows = conn.execute(
-        """select p.id::text, p.amount_minor, p.currency, p.booking_date, p.payer_name,
+        f"""select p.id::text, p.amount_minor, p.currency, p.booking_date, p.payer_name,
                   p.payer_iban, p.remittance_text, p.creditor_reference,
                   t.ultimate_counterparty_name,
-                  coalesce(h.by_ops, false), coalesce(h.left_files, '{}')
+                  coalesce(h.by_ops, false), coalesce(h.left_files, '{{}}')
            from public.payment p
            left join public.bank_transaction t on t.id = p.bank_transaction_id
            left join (select m.payment_id, bool_or(m.decided_by is not null) as by_ops,
@@ -122,10 +172,10 @@ def load_targets(conn: Conn, org: str, trigger: str, ids: list[str]) -> list[Pay
                       from public.payment_match m where m.payment_id = any(%s::uuid[])
                       group by m.payment_id) h on h.payment_id = p.id
            where p.id = any(%s::uuid[])
-           order by p.booking_date, t.statement_id, t.line_no, p.id""",
+           order by {ORDER_COLUMNS}""",  # noqa: S608 - fixed fragment
         ([r[0] for r in locked], [r[0] for r in locked]),
     ).fetchall()
-    return [
+    payments = [
         PaymentIn(
             id=r[0],
             amount_minor=int(r[1]),
@@ -141,6 +191,7 @@ def load_targets(conn: Conn, org: str, trigger: str, ids: list[str]) -> list[Pay
         )
         for r in rows
     ]
+    return payments, last
 
 
 # -- directory -----------------------------------------------------------------------------------

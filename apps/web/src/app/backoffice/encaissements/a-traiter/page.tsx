@@ -15,6 +15,7 @@ import {
   fileLabel,
   formatRf,
   highlight,
+  lastPage,
   minorToEuros,
   queueHref,
   queueQuery,
@@ -22,7 +23,15 @@ import {
   signalText,
 } from "@/lib/payments/matching";
 import { money } from "@/lib/payments/statements";
-import { AcceptSuggestion, BulkAccept, ChooseFile, SearchAndAssign, Unassign } from "./queue-actions";
+import {
+  AcceptSuggestion,
+  BulkAccept,
+  ChooseFile,
+  type PaymentFacts,
+  QueueNotice,
+  SearchAndAssign,
+  Unassign,
+} from "./queue-actions";
 
 const NO_SUGGESTION_HELP =
   "Aucune règle ne désigne un dossier : cherchez-le par sa référence, un numéro de facture, la référence RF ou le nom du débiteur.";
@@ -78,18 +87,27 @@ export default async function QueuePage({ searchParams }: PageProps<"/backoffice
   }
   const clients = (orgs ?? []).filter((o) => o.kind !== "servicer");
 
-  const { data } = await supabase.rpc("payment_queue", {
+  const filters = {
     p_tab: q.onglet,
     p_reason: q.motif ?? undefined,
     p_client: q.client ?? undefined,
     p_min_minor: bigintParam(q.min),
     p_max_minor: bigintParam(q.max),
     p_min_days: q.age ?? undefined,
+  };
+  const { data } = await supabase.rpc("payment_queue", {
+    ...filters,
     p_offset: (q.page - 1) * QUEUE_PAGE_SIZE,
     p_limit: QUEUE_PAGE_SIZE,
   });
   const rows = (data ?? []) as Row[];
-  const total = rows[0]?.total ?? 0;
+  let total = rows[0]?.total ?? 0;
+  if (rows.length === 0 && q.page > 1) {
+    // Past the last page (the payments of this page were just resolved): the total is still the tab's.
+    const { data: first } = await supabase.rpc("payment_queue", { ...filters, p_offset: 0, p_limit: 1 });
+    total = ((first ?? []) as Row[])[0]?.total ?? 0;
+  }
+  const pastEnd = rows.length === 0 && total > 0;
   const ids = rows.map((r) => r.payment_id);
   const [{ data: cands }, { data: decisions }] = await Promise.all([
     ids.length
@@ -204,9 +222,21 @@ export default async function QueuePage({ searchParams }: PageProps<"/backoffice
       </form>
       </details>
 
+      <QueueNotice key={queueHref(q)} />
       {q.onglet === "a-traiter" && acceptable > 1 ? <BulkAccept idempotencyKey={randomUUID()} count={acceptable} /> : null}
 
-      {rows.length === 0 ? (
+      {pastEnd ? (
+        <div className="flex flex-col gap-2 rounded-md bg-sky-50 px-3 py-2 text-sm text-sky-900 dark:bg-sky-950 dark:text-sky-200" data-testid="queue-past-end">
+          <p>
+            Plus rien sur cette page : {total} paiement{total > 1 ? "s" : ""}{" "}
+            {q.onglet === "a-traiter" ? "à traiter" : "rapproché" + (total > 1 ? "s" : "")} au total
+            {filtered ? " avec ces filtres" : ""}.
+          </p>
+          <Link href={queueHref(q, { page: lastPage(total) })} className="font-medium underline">
+            Revenir à la dernière page
+          </Link>
+        </div>
+      ) : rows.length === 0 ? (
         <InfoNote>
           {filtered
             ? "Aucun paiement ne correspond à ces filtres."
@@ -228,7 +258,7 @@ export default async function QueuePage({ searchParams }: PageProps<"/backoffice
         </ul>
       )}
 
-      {total > QUEUE_PAGE_SIZE ? (
+      {total > QUEUE_PAGE_SIZE && !pastEnd ? (
         <nav className="flex items-center justify-between gap-3 text-sm" aria-label="Pages">
           {q.page > 1 ? <Link href={queueHref(q, { page: q.page - 1 })}>← Précédents</Link> : <span />}
           <span className="text-zinc-600 dark:text-zinc-400">
@@ -253,6 +283,7 @@ function PaymentCard({
   files: Map<string, QueueAccount>;
 }) {
   const amount = money(r.amount_minor, r.currency);
+  const payment: PaymentFacts = { id: r.payment_id, amount, currency: r.currency, booking_date: r.booking_date };
   const reason = reviewReason(r.status === "matched" && r.review_reason === null ? "ready" : r.review_reason);
   const age = ageBadge(r.age_days);
   const file = r.account_id ? files.get(r.account_id) : undefined;
@@ -271,8 +302,8 @@ function PaymentCard({
         {topFile ? (
           <input
             type="checkbox"
-            name="payment_id"
-            value={r.payment_id}
+            name="item"
+            value={`${r.payment_id}:${topFile.account_id}`}
             form="bulk-accept"
             aria-label={`Sélectionner le paiement de ${amount}`}
             className="hidden h-4 w-4 sm:inline"
@@ -345,7 +376,7 @@ function PaymentCard({
         <div className="flex flex-col gap-3">
           {topFile ? (
             <div className="flex flex-col gap-1">
-              <AcceptSuggestion paymentId={r.payment_id} amount={amount} file={topFile} idempotencyKey={randomUUID()} />
+              <AcceptSuggestion payment={payment} file={topFile} idempotencyKey={randomUUID()} />
               <p className="text-xs text-zinc-600 dark:text-zinc-400">{signalText(top.rule, top.signals)}</p>
             </div>
           ) : null}
@@ -360,7 +391,7 @@ function PaymentCard({
                       <span className="block text-xs text-zinc-600 dark:text-zinc-400">{signalText(c.rule, c.signals)}</span>
                     </span>
                     {f.status !== "staged" ? (
-                      <ChooseFile paymentId={r.payment_id} amount={amount} file={f} idempotencyKey={randomUUID()} />
+                      <ChooseFile payment={payment} file={f} idempotencyKey={randomUUID()} />
                     ) : (
                       <span className="text-xs">Dossier pas encore confirmé</span>
                     )}
@@ -369,7 +400,7 @@ function PaymentCard({
               })}
             </ul>
           ) : null}
-          <SearchAndAssign paymentId={r.payment_id} amount={amount} idempotencyKey={randomUUID()} />
+          <SearchAndAssign payment={payment} idempotencyKey={randomUUID()} />
         </div>
       ) : null}
       {r.status === "matched" ? <Unassign paymentId={r.payment_id} idempotencyKey={randomUUID()} /> : null}
