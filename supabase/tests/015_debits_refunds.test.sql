@@ -3,7 +3,7 @@
 -- §6, §7, §8.1, §9, §11, §13; ADR-0013 (M2b-6 addendum). The worker's debit job is played here through ops' link_debit
 -- (same posting function) and private.apply_debit_decisions; the direct-payment job through private.post_direct_payment.
 begin;
-select plan(163);
+select plan(169);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -491,6 +491,106 @@ reset role;
 select is((select minor from private.bank_unposted('80000000-0000-0000-0000-0000000000aa', '2026-11-04')), 290::bigint,
   'explained, still not booked: the explained gap (I9)');
 
+-- 20261110130000 (plan robustness) redefines private.debit_candidates (keyed lookups that hold the key alone); the
+-- rows must be those of the function it replaced (20261110120000 as merged, copied below), with multiplicity.
+create function pg_temp.debit_candidates_applied(p_organization_id uuid, p_after_date date, p_after_id uuid,
+                                                    p_limit integer)
+returns table (line_id uuid, line_kind text, direction text, bank_account_id uuid, amount_minor bigint,
+               booking_date date, payment_id uuid, refund_request_id uuid, via text, cand_bank_account_id uuid,
+               cand_amount_minor bigint, cand_left_minor bigint, cand_unallocated_minor bigint,
+               cand_pending_minor bigint, cand_status text, cand_date date, cand_payment_status text,
+               cand_free_from date)
+language plpgsql
+set search_path = ''
+set enable_hashjoin = off
+set enable_mergejoin = off
+as $$
+#variable_conflict use_column
+begin
+  drop table if exists pg_temp._dc_line;
+  create temp table _dc_line on commit drop as
+  select x.* from (
+    select t.id, coalesce(r.released_kind, t.kind) as kind, t.direction, t.bank_account_id, t.amount_minor,
+           t.booking_date, t.end_to_end_id, t.original_end_to_end_id, t.tx_id
+    from public.bank_transaction t
+    left join public.bank_duplicate_resolution r on r.bank_transaction_id = t.id
+    where t.organization_id = p_organization_id
+      and t.kind in ('return', 'refund_out', 'suspected_duplicate')
+      and (p_after_date is null or (t.booking_date, t.id) > (p_after_date, p_after_id))
+      and (t.kind <> 'suspected_duplicate' or r.decision = 'released')
+      and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id)
+    order by t.booking_date, t.id) x
+  where (x.direction = 'debit' and x.kind in ('return', 'refund_out')) or (x.direction = 'credit' and x.kind = 'return')
+  order by x.booking_date, x.id
+  limit greatest(coalesce(p_limit, 10000), 1);
+  analyze pg_temp._dc_line;
+
+  drop table if exists pg_temp._dc_cand;
+  create temp table _dc_cand on commit drop as
+  -- a return of a credit: the payment that carries its end-to-end id, or whose line carries its bank transaction id
+  select x.id as line_id, c.payment_id, null::uuid as refund_request_id, c.via
+  from pg_temp._dc_line x
+  cross join lateral (
+    select p.id as payment_id, 'end_to_end_id'::text as via from public.payment p
+    where p.end_to_end_id = coalesce(x.original_end_to_end_id, x.end_to_end_id) and p.bank_account_id = x.bank_account_id
+    union
+    select p.id, 'tx_id' from public.bank_transaction o join public.payment p on p.bank_transaction_id = o.id
+    where x.tx_id is not null and o.bank_account_id = x.bank_account_id and o.tx_id = x.tx_id and o.direction = 'credit'
+  ) c
+  where x.direction = 'debit' and x.kind = 'return'
+  union all
+  -- our refund: the request whose RFD id the debit carries; a refund that came back: the one the credit names
+  select x.id, q.payment_id, q.id, 'end_to_end_id'
+  from pg_temp._dc_line x
+  join public.refund_request q
+    on q.end_to_end_id = case when x.direction = 'debit' then x.end_to_end_id
+                              else coalesce(x.original_end_to_end_id, x.end_to_end_id) end
+   and q.organization_id = p_organization_id and q.bank_account_id = x.bank_account_id   -- never another tenant's
+  where x.kind = 'refund_out' or (x.direction = 'credit' and x.kind = 'return');
+  create index on pg_temp._dc_cand (line_id);
+  analyze pg_temp._dc_cand;
+
+  -- Each payment named, once: its position, its pending refunds, its free-from date (keyed lookups per payment).
+  drop table if exists pg_temp._dc_pos;
+  create temp table _dc_pos on commit drop as
+  select x.payment_id, x.amount_minor - x.returned_minor as left_minor, x.unallocated_minor,
+         coalesce((select sum(z.amount_minor) from public.refund_request z
+                   where z.payment_id = x.payment_id and z.status = 'requested'), 0)::bigint as pending_minor,
+         (select max(e.effective_date) from public.ledger_entry e
+          join public.ledger_entry v on v.id = e.reverses_entry_id
+          where e.payment_id = x.payment_id and e.effective_date > v.effective_date) as free_from
+  from private.payment_positions(array(select distinct y.payment_id from pg_temp._dc_cand y
+                                       where y.payment_id is not null)) x;
+  alter table pg_temp._dc_pos add primary key (payment_id);
+  analyze pg_temp._dc_pos;
+
+  return query
+  select x.id, x.kind, x.direction, x.bank_account_id, x.amount_minor, x.booking_date, c.payment_id, c.refund_request_id,
+         c.via, coalesce(q.bank_account_id, p.bank_account_id), coalesce(q.amount_minor, p.amount_minor),
+         pos.left_minor, pos.unallocated_minor, pos.pending_minor,
+         coalesce(q.status, p.status), coalesce(q.executed_on, p.booking_date), p.status, pos.free_from
+  from pg_temp._dc_line x
+  left join pg_temp._dc_cand c on c.line_id = x.id
+  left join public.payment p on p.id = c.payment_id
+  left join public.refund_request q on q.id = c.refund_request_id
+  left join pg_temp._dc_pos pos on pos.payment_id = c.payment_id
+  order by x.booking_date, x.id, c.payment_id;
+end;
+$$;
+create function pg_temp.dc_same(p_org uuid) returns boolean language plpgsql as $$
+declare v boolean;
+begin
+  drop table if exists pg_temp._dc_new;
+  drop table if exists pg_temp._dc_old;
+  create temp table _dc_new as select * from private.debit_candidates(p_org, null, null, 100);
+  create temp table _dc_old as select * from pg_temp.debit_candidates_applied(p_org, null, null, 100);
+  select not exists (select * from pg_temp._dc_new except all select * from pg_temp._dc_old)
+     and not exists (select * from pg_temp._dc_old except all select * from pg_temp._dc_new)
+     and exists (select 1 from pg_temp._dc_new)
+    into v;
+  return v;
+end $$;
+
 -- The job's reviews: what it leaves to ops ------------------------------------------------------------------------
 select pg_temp.line('u1', 'debit', 'return', 1234, '2026-11-05', 'E2E-INCONNU');
 select private.debit_link_begin();
@@ -502,6 +602,8 @@ select is((select count(*)::int from private.debit_candidates('00000000-0000-000
            where line_id = pg_temp.ln('u1')), 1, 'the job looks at it again at each run');
 select is((select count(*)::int from private.debit_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100)
            where line_id in (pg_temp.ln('t1'), pg_temp.ln('r1'), pg_temp.ln('x1'))), 0, 'linked lines are done');
+select ok(pg_temp.dc_same('00000000-0000-0000-0000-0000000000aa'),
+  'debit candidates: the rows of the function they replaced (a line without any, linked lines left out)');
 
 -- CSV suspected duplicates (design §8.3 step 5): released or confirmed ---------------------------------------------
 select pg_temp.line('d1', 'credit', 'suspected_duplicate', 15000, '2026-10-06', null, '80000000-0000-0000-0000-0000000000ab',
@@ -658,6 +760,8 @@ select results_eq($$select refund_request_id, cand_status, cand_payment_status
                     where line_id = pg_temp.ln('b6')$$,
   $$values (pg_temp.refund_of('06'), 'executed'::text, 'returned'::text)$$,
   'the job sees the refund the credit names, and that its payment was returned since (payments.debits: to ops)');
+select ok(pg_temp.dc_same('00000000-0000-0000-0000-0000000000aa'),
+  'debit candidates: the same rows with a refund that came back (its request by RFD id)');
 set local role authenticated;
 select pg_temp.as_user('01');
 select throws_ok($$select public.link_debit('k-link-0060', pg_temp.ln('b6'), 'refund_returned', null, pg_temp.refund_of('06'),
@@ -687,6 +791,8 @@ select results_eq($$select cand_left_minor, cand_free_from
                     where line_id = pg_temp.ln('t7a')$$,
   $$values (6000::bigint, '2026-11-02'::date)$$,
   'the earlier line is exactly what is left now, but dated before the payment''s free-from date');
+select ok(pg_temp.dc_same('00000000-0000-0000-0000-0000000000aa'),
+  'debit candidates: the same rows with returns of a payment by its end-to-end id');
 set local role authenticated;
 select pg_temp.as_user('01');
 select throws_ok($$select public.link_debit('k-link-0071', pg_temp.ln('t7a'), 'return', pg_temp.pay('07'), null, '6000',
@@ -821,6 +927,8 @@ values (md5('bb-line')::uuid, '00000000-0000-0000-0000-0000000000bb', '80000000-
 select is((select count(*)::int from private.debit_candidates('00000000-0000-0000-0000-0000000000bb', null, null, 100)
            where line_id = md5('bb-line')::uuid and refund_request_id is null), 1,
   'tenant isolation: another servicer''s line naming our RFD id finds none of our refunds');
+select ok(pg_temp.dc_same('00000000-0000-0000-0000-0000000000bb'),
+  'debit candidates: the same rows for another servicer''s line naming our RFD id');
 select private.debit_link_begin();
 insert into pg_temp._debit_review (bank_transaction_id, reason, candidates)
 values (md5('bb-line')::uuid, 'no_candidate',
@@ -856,5 +964,142 @@ select is((select count(*)::int from public.direct_payment where account_id = pg
 select is((private.run_payment_checks('00000000-0000-0000-0000-0000000000aa') ->> 'violations')::int, 0,
   'after all of it, the books still hold');
 
+
+-- 20261110130000 (plan robustness): payment_detail drives from the payment's entries and reaches every row it names by
+-- key now; the page is that of the function it replaced (20261110120000 as merged, copied below), for every payment
+-- (returns, refunds, bank lines linked, direct payments).
+create function pg_temp.payment_detail_applied(p_payment_id uuid)
+returns jsonb
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  p public.payment;
+  v jsonb;
+begin
+  select * into p from public.payment where id = p_payment_id and organization_id = any (private.money_staff_org_ids());
+  if not found then
+    return null;
+  end if;
+  select jsonb_build_object(
+    'payment', jsonb_build_object(
+      'id', p.id, 'amount_minor', p.amount_minor::text, 'currency', p.currency, 'booking_date', p.booking_date,
+      'value_date', p.value_date, 'payer_name', p.payer_name, 'payer_iban_end', right(p.payer_iban, 4),
+      'payer_iban_valid', coalesce(private.iban_valid(private.rf_normalise(p.payer_iban)), false),
+      'remittance_text', p.remittance_text, 'creditor_reference', p.creditor_reference, 'end_to_end_id', p.end_to_end_id,
+      'status', p.status, 'review_reason', p.review_reason, 'account_id', p.account_id, 'match_method', p.match_method,
+      'matched_at', p.matched_at, 'designation', p.designation, 'instruction', p.allocation_instruction,
+      'channel', p.channel, 'method', p.method),
+    'position', (select jsonb_build_object('allocated_minor', x.allocated_minor::text,
+                                           'unallocated_minor', x.unallocated_minor::text,
+                                           'returned_minor', x.returned_minor::text,
+                                           'left_minor', (x.amount_minor - x.returned_minor)::text,
+                                           'forwarded_minor', (select coalesce(sum(lp.amount_minor), 0)
+                                                               from public.ledger_entry e
+                                                               left join public.ledger_entry t on t.id = e.reverses_entry_id
+                                                               join public.ledger_posting lp on lp.entry_id = e.id
+                                                               join public.ledger_account la on la.id = lp.ledger_account_id
+                                                                 and la.book = 'unallocated_payment'
+                                                               where e.payment_id = p.id
+                                                                 and coalesce(t.entry_type, e.entry_type) = 'forward')::text)
+                 from private.payment_positions(array[p.id]) x),
+    'file', (select jsonb_build_object('account_id', a.id, 'external_ref', a.external_ref, 'status', a.status,
+                                       'client_organization_id', a.client_organization_id, 'client_name', c.legal_name,
+                                       'currency', a.currency, 'legal_regime', a.legal_regime,
+                                       'debtor_name', (select min(pa.display_name) from public.account_party ap
+                                                       join public.party pa on pa.id = ap.party_id
+                                                       where ap.account_id = a.id and ap.role = 'borrower'),
+                                       'holds', coalesce((select jsonb_agg(h.kind order by h.kind)
+                                                          from public.account_hold h
+                                                          where h.account_id = a.id and h.ended_at is null
+                                                            and h.kind in ('surendettement', 'collective_proceeding')),
+                                                         '[]'))
+             from public.account a join public.organization c on c.id = a.client_organization_id
+             where a.id = p.account_id),
+    'matches', coalesce((select jsonb_agg(jsonb_build_object('action', m.action, 'account_id', m.account_id,
+                                                             'external_ref', a.external_ref, 'method', m.method,
+                                                             'rule', m.rule, 'trigger', m.trigger, 'reason', m.reason,
+                                                             'review_reason', m.review_reason, 'decided_at', m.decided_at,
+                                                             'by_ops', m.decided_by is not null)
+                                          order by m.decided_at, m.id)
+                         from public.payment_match m join public.account a on a.id = m.account_id
+                         where m.payment_id = p.id), '[]'),
+    'entries', coalesce((select jsonb_agg(jsonb_build_object(
+                           'entry_id', e.id, 'entry_type', e.entry_type, 'effective_date', e.effective_date,
+                           'posted_at', e.posted_at, 'reason', e.reason, 'account_id', e.account_id,
+                           'ops_note', (select o.note from private.payment_ops_note o where o.entry_id = e.id),
+                           'external_ref', (select a.external_ref from public.account a where a.id = e.account_id),
+                           'reverses_entry_id', e.reverses_entry_id,
+                           'reverses_type', (select t.entry_type from public.ledger_entry t where t.id = e.reverses_entry_id),
+                           'reversed_by', (select r.id from public.ledger_entry r where r.reverses_entry_id = e.id),
+                           'amount_minor', (select sum(lp.amount_minor) from public.ledger_posting lp
+                                            join public.ledger_account la on la.id = lp.ledger_account_id
+                                            where lp.entry_id = e.id and la.book = 'unallocated_payment')::text,
+                           'lines', (select coalesce(jsonb_agg(jsonb_build_object(
+                                              'claim_item_id', la.claim_item_id, 'item_ref', i.ref, 'item_kind', i.kind,
+                                              'due_date', i.due_date, 'component', la.component,
+                                              'amount_minor', (-lp.amount_minor)::text)
+                                            order by lp.line_no), '[]')
+                                     from public.ledger_posting lp
+                                     join public.ledger_account la on la.id = lp.ledger_account_id
+                                     join public.claim_item i on i.id = la.claim_item_id
+                                     where lp.entry_id = e.id and la.book = 'debtor_receivable'))
+                         order by e.posted_at, e.id)
+                         from public.ledger_entry e where e.payment_id = p.id), '[]'),
+    'notifications', coalesce((select jsonb_agg(jsonb_build_object('kind', n.kind, 'created_at', n.created_at,
+                                                                   'client_name', c.legal_name, 'reason', n.reason,
+                                                                   'ledger_entry_id', n.ledger_entry_id,
+                                                                   'delivered_at', n.delivered_at)
+                                                order by n.created_at, n.id)
+                               from public.client_notification n
+                               join public.organization c on c.id = n.client_organization_id
+                               where n.payment_id = p.id), '[]'),
+    'refunds', coalesce((select jsonb_agg(jsonb_build_object(
+                           'id', q.id, 'amount_minor', q.amount_minor::text, 'payee_name', q.payee_name,
+                           'payee_iban_end', right(q.payee_iban, 4), 'payee_is_payer', q.payee_is_payer,
+                           'end_to_end_id', q.end_to_end_id, 'reason_code', q.reason_code, 'reason', q.reason,
+                           'status', q.status, 'requested_at', q.requested_at, 'executed_on', q.executed_on,
+                           'cancelled_at', q.cancelled_at, 'cancel_reason', q.cancel_reason)
+                         order by q.requested_at, q.id)
+                         from public.refund_request q where q.payment_id = p.id), '[]'),
+    'bank_lines', coalesce((select jsonb_agg(jsonb_build_object(
+                              'bank_transaction_id', l.bank_transaction_id, 'kind', l.kind, 'method', l.method,
+                              'booking_date', t.booking_date, 'amount_minor', t.amount_minor::text,
+                              'direction', t.direction, 'return_reason', t.return_reason,
+                              'statement_id', t.statement_id, 'decided_at', l.decided_at, 'reason', l.reason)
+                            order by t.booking_date, l.decided_at)
+                            from public.bank_debit_link l join public.bank_transaction t on t.id = l.bank_transaction_id
+                            where l.payment_id = p.id), '[]'),
+    'documents', coalesce((select jsonb_agg(jsonb_build_object('id', d.id, 'kind', d.kind, 'created_at', d.created_at)
+                                            order by d.created_at desc, d.id)
+                           from public.document d where p.account_id is not null and d.account_id = p.account_id), '[]'),
+    'other_files', coalesce((select jsonb_agg(jsonb_build_object('account_id', o.id, 'external_ref', o.external_ref)
+                                              order by o.external_ref)
+                             from public.account o
+                             where p.account_id is not null and o.id <> p.account_id
+                               and o.status not in ('staged', 'closed_paid', 'closed_settled', 'closed_uncollectable',
+                                                    'closed_recalled')
+                               and o.currency = p.currency
+                               and exists (select 1 from public.account_party x
+                                           join public.account_party y on y.party_id = x.party_id
+                                           where x.account_id = p.account_id and y.account_id = o.id
+                                             and x.role in ('borrower', 'co_borrower')
+                                             and y.role in ('borrower', 'co_borrower'))), '[]')
+  ) into v;
+  return v;
+end;
+$$;
+
+select pg_temp.as_user('01');
+select is((select string_agg(p.id || ' ' || coalesce(public.payment_detail(p.id)::text, '-'), e'\n' order by p.id)
+           from public.payment p),
+          (select string_agg(p.id || ' ' || coalesce(pg_temp.payment_detail_applied(p.id)::text, '-'), e'\n'
+                             order by p.id)
+           from public.payment p),
+  'the payment page: that of the function it replaced, for every payment');
+select ok((select count(*) from public.payment p where (public.payment_detail(p.id) -> 'bank_lines') <> '[]') >= 1
+          and (select count(*) from public.payment p where (public.payment_detail(p.id) -> 'refunds') <> '[]') >= 1,
+  'bank lines linked and refunds among them');
 select * from finish();
 rollback;

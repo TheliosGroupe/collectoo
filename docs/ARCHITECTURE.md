@@ -132,6 +132,7 @@ Conventions:
 - Commands and outbound sends carry an idempotency key with a unique constraint.
 - Core tables have a trigger writing to `private.change_log` (table, row id, op, old/new JSON diff, actor, at). Cheap, and it settles disputes.
 - Ownership over time: `claim_ownership(account_id, owner_org_id, servicer_org_id, mandate_id, valid_from, valid_to)`. Servicer ≠ owner from day one (phase C ready).
+- Plans that hold whatever the statistics (ADR-0013 #21, migration `20261110130000`): `enable_hashjoin = off` / `enable_mergejoin = off` only forbid join methods, they never fix a join order (a forced nested loop with stale statistics put the 4710 pool outside: 439 s in CI). A per-row lookup is made structural instead: it drives from the row it is about through a lateral subquery that cannot be pulled up (`LIMIT`, or `OFFSET 0`; outer conditions are not pushed into it either, so a lateral holding only a key can only use that key's index) and reaches every other row by key (a correlated scalar lookup, e.g. the book of a posting's account). Where one pass over a set is the right plan, nested loops are forbidden instead, so the join is a hash join, linear whatever the estimates. Tests check what such a function reads (`pg_stat_xact_user_tables`: seq scans, probes), not how long it takes.
 
 ## 5. Multi-tenancy and RLS
 
