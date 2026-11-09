@@ -185,3 +185,6 @@ and receipts).
 - **Design risk R8** estimated 20–40 min for 50k receipts: ~10 min, in background jobs that never hold the allocation
   lock. Receipts of one servicer are issued one job at a time (one number counter); several servicers run in
   parallel. Faster later if needed: render in a process pool (4 cores), or lighter font subsets.
+- **Allocation unchanged by the receipt triggers** (M2b-5, fresh database): the 50k allocation run posts 8.2–9.2 s per
+  10k job as before (the statement-level triggers on `ledger_entry` and `payment` add one `pgmq.send` per 200
+  payments); the test's total, 56.9 s, also counts taking the 250 receipt jobs off the queue unrun.
