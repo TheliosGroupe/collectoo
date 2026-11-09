@@ -5,6 +5,7 @@ released on the judge's authorisation, forward of a recalled file's payment. Cli
 (M2-11): one per allocation, reversal and forward entry, one per held payment."""
 
 import threading
+import time
 import uuid
 from datetime import date
 from typing import Any
@@ -26,6 +27,7 @@ from allocation_helpers import (
     statement,
 )
 from integration_helpers import DB, as_user, one, storage
+from reconciliation_helpers import pay
 from statement_helpers import bank_tenant
 from statement_helpers import drain as drain_payments
 
@@ -378,6 +380,167 @@ def test_a_payment_on_a_recalled_file_is_forwarded_to_the_client() -> None:
             (p,),
         )
     assert payable == -4_000
+
+
+def test_a_payment_before_the_cut_off_on_a_held_file_is_allocated_after_both_decisions() -> None:
+    """Review fixes #3, #4, #8: booked before the servicing start on a file under surendettement.
+    The hold is reported first (the client is told); the judge's authorisation and the cut-off
+    checked with the client add up, in two decisions, and the payment is allocated at the cut-off
+    (it used to alternate between the two gates for ever)."""
+    tenant = bank_tenant()
+    f = create_file(
+        tenant,
+        File(f"H-{uuid.uuid4().hex[:6]}", "consumer", "Paul Avant",
+             [Item("PRET-H", {"principal": 80_000}, None, kind="loan_principal")]),
+    )  # fmt: skip
+    hold = "select public.place_account_hold(%s, %s, 'surendettement', 'C. conso L722-5', %s, %s)"
+    ops(tenant, hold, str(uuid.uuid4()), f.id, evidence(tenant, f.id), "recevabilité")
+    store = storage()
+    p = statement(tenant, store, [credit(20_000, "ECHEANCE", rf=f.rf)], "BH", date(2026, 9, 20))[
+        line_ref("BH", 1)
+    ]
+    assert state(p) == ("matched", "hold_blocks_allocation")  # not hidden behind the cut-off
+    assert _notifications(p) == [("payment_held", None)]
+    ops(tenant, "select public.release_hold_payment(%s, %s, %s, %s)",
+        str(uuid.uuid4()), p, evidence(tenant, f.id), "autorisation du JCP")  # fmt: skip
+    drain_payments(store)
+    assert state(p) == ("matched", "before_servicing_start")  # the next gate; the release is kept
+    ops(tenant, "select public.allocate_payment(%s, %s, %s, null, null, %s)",
+        str(uuid.uuid4()), p, "before_servicing_start", "solde du cédant vérifié")  # fmt: skip
+    drain_payments(store)
+    assert state(p) == ("allocated", None)
+    assert allocations(p) == [("PRET-H", "principal", 20_000)]
+    with psycopg.connect(DB) as conn:
+        day = one(
+            conn,
+            "select effective_date from public.ledger_entry where payment_id = %s"
+            " and entry_type = 'allocation'",
+            (p,),
+        )
+    assert day == date(2026, 9, 30)  # at the cut-off
+    assert [k for k, _ in _notifications(p)] == ["payment_held", "payment_allocated"]
+
+
+def test_a_held_file_is_not_compensated_and_its_payment_is_allocated_without_it() -> None:
+    """Review fixes #5 and #3: compensation is not invoked while the file is held (the netting is
+    refused); on the judge's authorisation, ops allocate without it, in two decisions."""
+    tenant = bank_tenant()
+    f = create_file(
+        tenant,
+        File(f"K-{uuid.uuid4().hex[:6]}", "b2b", "Avoir Bloqué SAS",
+             [Item("K-1", {"principal": 30_000}, date(2026, 8, 1)),
+              Item("AV-K", {"principal": -5_000}, None, kind="credit_note")]),
+    )  # fmt: skip
+    hold = "select public.place_account_hold(%s, %s, 'collective_proceeding', 'L622-7', %s, %s)"
+    ops(tenant, hold, str(uuid.uuid4()), f.id, evidence(tenant, f.id), "jugement d'ouverture")
+    store = storage()
+    p = statement(tenant, store, [credit(10_000, "REGLT", rf=f.rf)], "CK", DAY)[line_ref("CK", 1)]
+    assert state(p) == ("matched", "hold_blocks_allocation")
+    proposal = _proposal(tenant, f.id)
+    with pytest.raises(psycopg.errors.CheckViolation, match="compensation is not invoked"):
+        ops(tenant, "select public.apply_credit_note(%s, %s, %s)",
+            str(uuid.uuid4()), f.id, proposal["proposal_key"])  # fmt: skip
+    ops(tenant, "select public.release_hold_payment(%s, %s, %s, %s)",
+        str(uuid.uuid4()), p, evidence(tenant, f.id), "autorisation du juge")  # fmt: skip
+    drain_payments(store)
+    assert state(p) == ("matched", "credit_note_to_apply")
+    ops(tenant, "select public.allocate_payment(%s, %s, %s, null, null, %s)",
+        str(uuid.uuid4()), p, "credit_note_to_apply", "compensation non invoquée")  # fmt: skip
+    drain_payments(store)
+    assert state(p) == ("allocated", None)
+    assert allocations(p) == [("K-1", "principal", 10_000)]
+    assert balances(f)[("AV-K", "principal")] == -5_000  # nothing netted
+
+
+def test_reversing_its_own_file_while_another_file_keeps_its_share_lets_ops_allocate_it_again() -> (
+    None
+):
+    """Review fix #13: the payment's own file owes that money again; it is not an overpayment
+    (never « to refund ») and « Imputer » sends it back to its file."""
+    tenant = bank_tenant()
+    a = create_file(
+        tenant,
+        File(f"A-{uuid.uuid4().hex[:6]}", "b2b", "Debiteur Double SAS",
+             [Item("A-1", {"principal": 10_000}, date(2026, 8, 1))]),
+    )  # fmt: skip
+    b = create_file(
+        tenant,
+        File(f"B-{uuid.uuid4().hex[:6]}", "b2b", "Debiteur Double SAS",
+             [Item("B-1", {"principal": 50_000}, date(2026, 8, 15))]),
+        party_of=a,
+    )  # fmt: skip
+    store = storage()
+    p = statement(tenant, store, [credit(25_000, "REGLT", rf=a.rf)], "RA", DAY)[line_ref("RA", 1)]
+    ops(tenant, "select public.allocate_payment(%s, %s, 'overpayment', %s, %s, %s)",
+        str(uuid.uuid4()), p, b.id, evidence(tenant, a.id), "courrier du débiteur")  # fmt: skip
+    drain_payments(store)
+    assert state(p) == ("allocated", None)
+    ops(tenant, "select public.reverse_allocation(%s, %s, %s, %s::uuid[], %s)",
+        str(uuid.uuid4()), p, a.id, _entries_on(p, a.id), "désignation à vérifier")  # fmt: skip
+    assert state(p) == ("partially_allocated", "allocation_reversed")
+    ops(tenant, "select public.allocate_payment(%s, %s, %s, null, null, %s)",
+        str(uuid.uuid4()), p, "allocation_reversed", "désignation vérifiée")  # fmt: skip
+    drain_payments(store)
+    assert state(p) == ("allocated", None)
+    assert allocations(p) == [("B-1", "principal", 15_000), ("A-1", "principal", 10_000)]
+
+
+def test_a_gating_run_racing_the_job_never_stamps_a_gate_on_an_allocated_payment() -> None:
+    """Review fix #9: the file is gated again (a hold, an unassignment) while the job allocates one
+    of its payments. The gating read the payment as matched; its write waits for the job, then
+    finds the payment allocated and leaves it (compare and set), instead of stamping it held."""
+    tenant = bank_tenant()
+    f = create_file(
+        tenant,
+        File(f"G-{uuid.uuid4().hex[:6]}", "b2b", "Course SA",
+             [Item("G-1", {"principal": 10_000}, date(2026, 8, 1))]),
+    )  # fmt: skip
+    proof = evidence(tenant, f.id)
+    store = storage()
+    sid = pay(tenant, store, [credit(4_000, "REGLT", rf=f.rf)], prefix="GR", start=DAY, days=1,
+              allocate=False)  # fmt: skip
+    with psycopg.connect(DB) as conn:
+        p = str(one(conn, """select p.id from public.payment p
+                             join public.bank_transaction t on t.id = p.bank_transaction_id
+                             where t.statement_id = %s""", (sid,)))  # fmt: skip
+    assert state(p) == ("matched", None)  # ready, the job not run yet
+    errors: list[BaseException] = []
+
+    def regate() -> None:
+        try:
+            with psycopg.connect(DB) as conn, conn.transaction():
+                conn.execute(
+                    """insert into public.account_hold (organization_id, client_organization_id,
+                         portfolio_id, account_id, kind, scope, evidence_document_id, reason)
+                       values (%s, %s, %s, %s, 'surendettement', '{outbound}', %s, 'course')""",
+                    (tenant["servicer"], tenant["client"], tenant["portfolio"], f.id, proof),
+                )
+                conn.execute("select private.regate_account(%s)", (f.id,))
+        except BaseException as exc:  # reported below
+            errors.append(exc)
+
+    with psycopg.connect(DB) as job:
+        with job.transaction():
+            run_allocate(job, {"organization_id": str(tenant["servicer"])})
+            thread = threading.Thread(target=regate)
+            thread.start()
+            # the gating's write waits for the job's row lock (autocommit: a fresh view each time)
+            with psycopg.connect(DB, autocommit=True) as watch:
+                for _ in range(100):
+                    waiting = one(
+                        watch,
+                        """select count(*) from pg_stat_activity
+                           where wait_event_type = 'Lock' and query like %s""",
+                        ("%regate_account%",),
+                    )
+                    if waiting:
+                        break
+                    time.sleep(0.05)
+            assert waiting == 1, errors
+        thread.join(10)
+    assert errors == []
+    assert state(p) == ("allocated", None)
+    assert _notifications(p) == [("payment_allocated", "allocation")]
 
 
 def test_commands_wait_for_a_running_allocation_at_most_two_seconds() -> None:

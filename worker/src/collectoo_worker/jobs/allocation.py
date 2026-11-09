@@ -13,8 +13,10 @@ lifted or an ops decision. One transaction (the queue's, exactly once):
    queues its continuation (`after`: where it ended) in the same transaction;
 3. load the files: status, currency, regime, servicing start, blocking holds, allocation policies,
    each receivable's postings summed per date, and the credit-note proposals of files with a credit;
-4. plan each payment with the pure waterfall (`payments.allocation`), in order, on in-memory
-   balances: a later payment of the same file sees what an earlier one took, as the ledger will;
+4. gate each payment (`gate`: closed file, other currency, hold, before the servicing start, credit
+   note to apply; every gate ops released is passed), then plan it with the pure waterfall
+   (`payments.allocation`), in order, on in-memory balances: a later payment of the same file sees
+   what an earlier one took, as the ledger will;
 5. COPY the plans and call `private.post_allocations`, which re-checks them and posts set-based (one
    `allocation` entry per payment and file, the client notification, the payment's state).
 
@@ -74,7 +76,9 @@ class Target:
     account_id: str  # the payment's file, or the other file ops named for an overpayment (#8)
     own_file: bool
     designation: tuple[str, ...]
-    release: str | None  # the gate ops let it pass (payment.allocation_instruction.release)
+    # the gates ops let it pass (payment.allocation_instruction.releases): a set, each decision
+    # added to it, so a payment behind two gates passes both (review fix)
+    releases: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -118,18 +122,21 @@ class Plan:
 def gate(t: Target, f: FileFacts) -> str | None:
     """What keeps a payment from allocation on this file now (design §8.4, first that applies),
     unless ops let it pass that gate (the judge's authorisation, the cut-off checked with the
-    client, a credit note not invoked). Mirrors the backstop in private.post_allocations."""
+    client, a credit note not invoked); every gate ops released is passed. The hold comes before
+    the cut-off: a payment booked before the servicing start on a held file is reported held, and
+    the client told (founder #12, #17). Mirrors private.gate_assignments and the backstop in
+    private.post_allocations."""
     if f.status in CLOSED:
         return "account_closed"
     if t.currency != f.currency:
         return "currency_mismatch"  # 1343-3: never converted (founder #9)
+    if f.holds and "hold_blocks_allocation" not in t.releases:
+        return "hold_blocks_allocation"  # L722-5, L622-7 (founder #12)
     if f.servicing_start is None or (
-        t.booking_date < f.servicing_start and t.release != "before_servicing_start"
+        t.booking_date < f.servicing_start and "before_servicing_start" not in t.releases
     ):
         return "before_servicing_start"  # founder #10
-    if f.holds and t.release != "hold_blocks_allocation":
-        return "hold_blocks_allocation"  # L722-5, L622-7 (founder #12)
-    if f.credit_note and t.release != "credit_note_to_apply":
+    if f.credit_note and "credit_note_to_apply" not in t.releases:
         return "credit_note_to_apply"  # 1347: ops invoke compensation first (founder #7)
     return None
 
@@ -268,7 +275,7 @@ def load_targets(
     locked = conn.execute(
         f"""select p.id::text, p.currency, p.booking_date, p.account_id::text,
                    coalesce(p.allocation_instruction ->> 'account_id', p.account_id::text),
-                   p.designation, p.allocation_instruction ->> 'release'
+                   p.designation, p.allocation_instruction -> 'releases'
             from public.payment p
             where p.id = any(%s::uuid[]) and {READY}
             for update of p skip locked""",  # noqa: S608 - fixed fragment
@@ -296,7 +303,7 @@ def load_targets(
                 account_id=str(x[4]),
                 own_file=x[4] == x[3],
                 designation=tuple(str(i) for i in items),
-                release=x[6],
+                releases=frozenset(str(r) for r in (x[6] or ())),
             )
         )
     return targets, last, len(rows) - len(by_id)

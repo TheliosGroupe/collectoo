@@ -2,7 +2,7 @@
 -- addendum). The worker's waterfall is played here by writing plans into pg_temp._alloc_target / _alloc_line and calling
 -- private.post_allocations, as the payments.allocate job does in one transaction.
 begin;
-select plan(114);
+select plan(159);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -34,7 +34,8 @@ insert into public.bank_account (id, organization_id, iban, currency, label, fee
    'Fonds de tiers', 'camt053', '2026-01-01');
 
 -- Files (servicing starts at the cut-off 2026-09-30, openings posted then); items (file, item, ref, kind, due date).
-create or replace function pg_temp.file(p_n text, p_portfolio uuid, p_status text, p_regime text, p_name text)
+create or replace function pg_temp.file(p_n text, p_portfolio uuid, p_status text, p_regime text, p_name text,
+                                        p_start date default '2026-09-30')
 returns void language sql as $$
   insert into public.account (id, organization_id, client_organization_id, portfolio_id, claim_type_code, external_ref,
                               legal_regime, currency, status)
@@ -45,7 +46,7 @@ returns void language sql as $$
   insert into public.claim_ownership_period (account_id, owner_organization_id, servicer_organization_id, mandate_type,
                                              valid_from)
   select ('a1000000-0000-0000-0000-0000000000' || p_n)::uuid, p.client_organization_id, p.organization_id,
-         'mandate_amicable', '2026-09-30'
+         'mandate_amicable', p_start
   from public.portfolio p where p.id = p_portfolio;
   insert into public.party (id, organization_id, client_organization_id, kind, display_name)
   select ('b1000000-0000-0000-0000-0000000000' || p_n)::uuid, p.organization_id, p.client_organization_id,
@@ -66,15 +67,19 @@ $$;
 create or replace function pg_temp.f(p_n text) returns uuid language sql as $$
   select ('a1000000-0000-0000-0000-0000000000' || p_n)::uuid;
 $$;
-create or replace function pg_temp.owe(p_n text, p_i text, p_component text, p_amount bigint) returns void language sql as $$
+create or replace function pg_temp.owe_at(p_n text, p_i text, p_component text, p_amount bigint, p_date date)
+returns void language sql as $$
   select entry_id from private.ledger_post(
-    (select organization_id from public.account where id = pg_temp.f(p_n)), 'adjustment', '2026-09-30',
-    'alloc-owe-' || p_n || p_i || p_component,
+    (select organization_id from public.account where id = pg_temp.f(p_n)), 'adjustment', p_date,
+    'alloc-owe-' || p_n || p_i || p_component || p_date,
     jsonb_build_array(
       jsonb_build_object('book', 'debtor_receivable', 'amount_minor', p_amount, 'currency', 'EUR',
                          'claim_item_id', pg_temp.it(p_n, p_i), 'component', p_component),
       jsonb_build_object('book', 'owner_claim', 'amount_minor', -p_amount, 'currency', 'EUR', 'component', p_component)),
     jsonb_build_object('account_id', pg_temp.f(p_n), 'reason', 'ouverture (test)'));
+$$;
+create or replace function pg_temp.owe(p_n text, p_i text, p_component text, p_amount bigint) returns void language sql as $$
+  select pg_temp.owe_at(p_n, p_i, p_component, p_amount, '2026-09-30');
 $$;
 select pg_temp.file('01', '20000000-0000-0000-0000-0000000000a1', 'in_collection', 'commercial_b2b', 'Durand SA');
 select pg_temp.item('01', '1', 'invoice', '2026-08-01');
@@ -417,8 +422,8 @@ select lives_ok($$select public.allocate_payment('key-alloc-imp-0002', pg_temp.p
   'désignation vérifiée')$$, 'ops send it to allocation again');
 reset role;
 select is(pg_temp.state('01'), 'matched/-', 'ready again');
-select is((select allocation_instruction ->> 'release' from public.payment where id = pg_temp.pay('01')),
-  'allocation_reversed', 'with the ops decision the job follows');
+select is((select allocation_instruction -> 'releases' from public.payment where id = pg_temp.pay('01')),
+  '["allocation_reversed"]'::jsonb, 'with the ops decision the job follows');
 select is((select count(*)::int from pgmq.q_payments where message ->> 'type' = 'allocate'
            and message ->> 'organization_id' = '00000000-0000-0000-0000-0000000000aa') - (select n from _queued)::int, 1,
   'and the allocation job is queued');
@@ -529,6 +534,223 @@ select is(public.account_detail(pg_temp.f('02')), null, 'not a file outside it')
 select is((public.account_detail(pg_temp.f('01')) ->> 'can_act')::boolean, false, 'and cannot act on payments');
 select is((select count(*)::int from public.client_notification), 0, 'collectors do not read client notifications');
 reset role;
+
+-- Review fixes (M2b-4 review) -------------------------------------------------------------------------------------
+
+-- An item as a whole is never taken below zero (#0): its components summed, a negative balancing line included (the
+-- seller's components above the legal balance 3.12), at every date from the allocation's on; the rest of the payment
+-- stays an overpayment (founder #8).
+select pg_temp.file('07', '20000000-0000-0000-0000-0000000000a1', 'in_collection', 'commercial_b2b', 'Écart SA');
+select pg_temp.item('07', '1', 'invoice', '2026-07-01');
+select pg_temp.owe('07', '1', 'principal', 10000);
+select pg_temp.owe('07', '1', 'balancing_line', -2000);
+select pg_temp.item('07', '2', 'invoice', '2026-08-01');
+select pg_temp.owe('07', '2', 'principal', 5000);
+select pg_temp.owe_at('07', '2', 'balancing_line', -1000, '2026-10-20');
+select pg_temp.payment(n, a) from (values ('08', 10000), ('09', 5000)) v (n, a);
+select pg_temp.match('08', '07');
+select pg_temp.match('09', '07');
+select pg_temp.plan('08', '07', 'allocate', '[["1", "principal", 10000]]');
+select throws_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'LG007', null, 'never more than an item owes as a whole: a negative balancing line counts (3.12)');
+select pg_temp.plan('09', '07', 'allocate', '[["2", "principal", 5000]]');
+select throws_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'LG007', null, 'nor what the item will owe at a later date (a negative line dated after the payment)');
+select private.allocation_begin();
+insert into pg_temp._alloc_target (payment_id, ord, account_id, outcome, effective_date, policy, inputs_hash) values
+  (pg_temp.pay('08'), 1, pg_temp.f('07'), 'allocate', '2026-10-05', '{"unclassified": "last"}', repeat('0', 64)),
+  (pg_temp.pay('09'), 2, pg_temp.f('07'), 'allocate', '2026-10-05', '{"unclassified": "last"}', repeat('0', 64));
+insert into pg_temp._alloc_line (payment_id, seq, claim_item_id, component, amount_minor) values
+  (pg_temp.pay('08'), 1, pg_temp.it('07', '1'), 'principal', 5000),
+  (pg_temp.pay('09'), 1, pg_temp.it('07', '1'), 'principal', 5000);
+select throws_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'LG007', null, 'two payments of a run together: never more than the item owes');
+select pg_temp.plan('08', '07', 'allocate', '[["1", "principal", 8000]]');
+select lives_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'up to what the item owes as a whole');
+select is(pg_temp.state('08'), 'partially_allocated/overpayment', 'the rest is an overpayment, never the client''s');
+select is(pg_temp.balance('07', '1') + pg_temp.balance('07', '1', 'balancing_line'), 0::bigint,
+  'the item owes nothing more');
+select pg_temp.plan('09', '07', 'allocate', '[["2", "principal", 4000]]');
+select lives_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'up to what the item still owes at every later date');
+-- The same definition as the waterfall's cap: every component counts, the held ones too (a consumer loan's
+-- unclassified amounts, never paid by allocation, founder #6): principal 100,00 + other balances 30,00 (held) −
+-- balancing line 50,00 = 80,00 owed; 80,00 of principal may be allocated, not a cent more.
+select pg_temp.file('12', '20000000-0000-0000-0000-0000000000a1', 'in_collection', 'consumer_credit_ccd2', 'Paul Écart');
+select pg_temp.item('12', '1', 'loan_principal', null);
+select pg_temp.owe('12', '1', 'principal', 10000);
+select pg_temp.owe('12', '1', 'other_balances', 3000);
+select pg_temp.owe('12', '1', 'balancing_line', -5000);
+select pg_temp.payment('15', 9000);
+select pg_temp.match('15', '12');
+select pg_temp.plan('15', '12', 'allocate', '[["1", "principal", 8001]]');
+select throws_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'LG007', null, 'a held component counts in what the item owes, a negative line too: not a cent above it');
+select pg_temp.plan('15', '12', 'allocate', '[["1", "principal", 8000]]');
+select lives_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'what the waterfall caps the item at (held amounts included) is allocated');
+
+-- A held file's payments are never forwarded (#2): surendettement, collective proceeding (L722-5, L622-7; founder #12:
+-- refunded, or allocated on the judge's authorisation).
+select pg_temp.payment(n, a) from (values ('10', 2500), ('11', 1500)) v (n, a);
+select pg_temp.match('10', '06', 'before_servicing_start');
+select pg_temp.file('08', '20000000-0000-0000-0000-0000000000a1', 'in_collection', 'commercial_b2b', 'Rappel Bloqué SA');
+select pg_temp.item('08', '1', 'invoice', '2026-08-01');
+select pg_temp.owe('08', '1', 'principal', 10000);
+select pg_temp.file('09', '20000000-0000-0000-0000-0000000000a1', 'in_collection', 'commercial_b2b', 'Avoir Bloqué SA');
+select pg_temp.file('10', '20000000-0000-0000-0000-0000000000a1', 'in_collection', 'commercial_b2b', 'Deux Portes SA',
+                    '2026-10-10');
+insert into public.document (id, organization_id, client_organization_id, account_id, kind, storage_path, sha256, mime_type)
+select ('d1000000-0000-0000-0000-0000000000' || n)::uuid, '00000000-0000-0000-0000-0000000000aa',
+       '00000000-0000-0000-0000-0000000000a1', pg_temp.f(n), 'evidence', 'test/alloc-' || n || '.pdf', repeat('c', 64),
+       'application/pdf'
+from unnest(array['08', '09', '10']) n;
+insert into public.account_hold (organization_id, client_organization_id, portfolio_id, account_id, kind, scope,
+                                 evidence_document_id, reason)
+select '00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a1', '20000000-0000-0000-0000-0000000000a1',
+       pg_temp.f(n), k, array['outbound', 'payment_requests'], ('d1000000-0000-0000-0000-0000000000' || n)::uuid,
+       'jugement ou recevabilité'
+from (values ('08', 'collective_proceeding'), ('09', 'surendettement'), ('10', 'surendettement')) v (n, k);
+update public.account set status = 'closed_recalled' where id = pg_temp.f('08');
+select pg_temp.match('11', '08', 'account_closed');
+set local role authenticated;
+select pg_temp.as_user('01');
+select is(public.payment_detail(pg_temp.pay('10')) -> 'file' -> 'holds', '["surendettement"]'::jsonb,
+  'the payment page knows the file is held');
+select throws_ok($$select public.forward_payment('key-alloc-fwd-0101', pg_temp.pay('10'), null, '2500', null, 'antérieur')$$,
+  '23514', 'the file is held (surendettement or collective proceeding): its payments are not forwarded',
+  'a payment before the cut-off on a held file is not forwarded to the client');
+select throws_ok($$select public.forward_payment('key-alloc-fwd-0102', pg_temp.pay('11'), null, '1500', null, 'rappel')$$,
+  '23514', 'the file is held (surendettement or collective proceeding): its payments are not forwarded',
+  'nor a payment on a recalled file under a collective proceeding');
+reset role;
+
+-- Compensation is not invoked on a held file (#5: L622-7 I allows compensation of connected claims only, which the
+-- code cannot tell; L722-5): the credit note is shown, not applied.
+select pg_temp.item('09', '1', 'invoice', '2026-08-01');
+select pg_temp.item('09', '2', 'credit_note', null);
+select pg_temp.owe('09', '1', 'principal', 10000);
+select pg_temp.owe('09', '2', 'principal', -3000);
+set local role authenticated;
+select pg_temp.as_user('01');
+select ok(public.account_detail(pg_temp.f('09')) -> 'proposal' is not null, 'the credit note of a held file is shown');
+select throws_ok($$select public.apply_credit_note('key-alloc-cn-0101', pg_temp.f('09'),
+  public.account_detail(pg_temp.f('09')) -> 'proposal' ->> 'proposal_key')$$, '23514',
+  'the file is held (surendettement or collective proceeding): compensation is not invoked',
+  'but not applied while surendettement or a collective proceeding holds the file');
+reset role;
+select is((select count(*)::int from public.ledger_entry where account_id = pg_temp.f('09') and entry_type = 'netting'), 0,
+  'nothing is netted');
+
+-- Two gates (#3, #4, #8): booked before the servicing start on a held file. The hold is reported first (the client is
+-- told); each ops decision adds to the gates released, none is lost at the next gate.
+select pg_temp.item('10', '1', 'invoice', '2026-08-01');
+select pg_temp.owe_at('10', '1', 'principal', 10000, '2026-10-10');
+select pg_temp.payment('12', 5000);
+select pg_temp.match('12', '10');
+select private.regate_account(pg_temp.f('10'));
+select is(pg_temp.state('12'), 'matched/hold_blocks_allocation', 'before the cut-off on a held file: the hold is reported');
+select is((select count(*)::int from public.client_notification where payment_id = pg_temp.pay('12') and kind = 'payment_held'),
+  1, 'and the client is told the payment is held');
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.release_hold_payment('key-alloc-rel-0101', pg_temp.pay('12'),
+  'd1000000-0000-0000-0000-000000000010', 'autorisation du juge')$$, 'ops file the judge''s authorisation');
+reset role;
+select pg_temp.plan('12', '10', 'allocate', '[["1", "principal", 5000]]', '2026-10-10');
+select throws_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'LG006', null, 'the cut-off is not checked yet: not allocated');
+select pg_temp.plan('12', '10', 'before_servicing_start');
+select lives_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'the job gates it at the cut-off');
+select is(pg_temp.state('12'), 'matched/before_servicing_start', 'the next gate');
+select is((select allocation_instruction -> 'releases' from public.payment where id = pg_temp.pay('12')),
+  '["hold_blocks_allocation"]'::jsonb, 'the judge''s authorisation is kept');
+set local role authenticated;
+select pg_temp.as_user('01');
+select lives_ok($$select public.allocate_payment('key-alloc-imp-0101', pg_temp.pay('12'), 'before_servicing_start', null,
+  null, 'solde du cédant vérifié')$$, 'ops check the cut-off with the client');
+reset role;
+select is((select allocation_instruction -> 'releases' from public.payment where id = pg_temp.pay('12')),
+  '["before_servicing_start", "hold_blocks_allocation"]'::jsonb, 'both gates are released');
+select is((select jsonb_array_length(allocation_instruction -> 'decisions') from public.payment where id = pg_temp.pay('12')),
+  2, 'each decision is kept (who, when, why, the evidence)');
+select private.regate_account(pg_temp.f('10'));
+select is(pg_temp.state('12'), 'matched/-', 'a hold command meanwhile honours both');
+select pg_temp.plan('12', '10', 'allocate', '[["1", "principal", 5000]]', '2026-10-10');
+select lives_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'allocated at the servicing start, as both decisions allow');
+select is(pg_temp.state('12'), 'allocated/-', 'allocated');
+select is((select allocation_instruction from public.payment where id = pg_temp.pay('12')), null,
+  'the decisions are consumed by the allocation');
+
+-- A payment sent to another file is gated there, by the job, never on its own file's facts (#9).
+select pg_temp.payment('13', 1000);
+select pg_temp.match('13', '10', 'nothing_due');
+update public.payment
+set review_reason = null,
+    allocation_instruction = jsonb_build_object('releases', jsonb_build_array('overpayment'), 'account_id', pg_temp.f('01'))
+where id = pg_temp.pay('13');
+select private.regate_account(pg_temp.f('10'));
+select is(pg_temp.state('13'), 'matched/-', 'a hold command on its own file leaves a payment sent to another file alone');
+select is((select count(*)::int from public.client_notification where payment_id = pg_temp.pay('13')), 0,
+  'its own file''s client is not told it is held');
+
+-- A collector reads, on a file of his portfolios, only the payments of portfolios he reads (#7).
+insert into public.portfolio (id, organization_id, client_organization_id, name) values
+  ('20000000-0000-0000-0000-0000000000a3', '00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a1', 'P3');
+select pg_temp.file('11', '20000000-0000-0000-0000-0000000000a3', 'in_collection', 'commercial_b2b', 'Autre Portefeuille SA');
+select pg_temp.item('11', '1', 'invoice', '2026-08-01');
+select pg_temp.owe('11', '1', 'principal', 1000);
+select pg_temp.payment('14', 3000);
+select pg_temp.match('14', '11', 'nothing_due');
+update public.payment
+set review_reason = null,
+    allocation_instruction = jsonb_build_object('releases', jsonb_build_array('overpayment'), 'account_id', pg_temp.f('01'))
+where id = pg_temp.pay('14');
+select pg_temp.plan('14', '01', 'allocate', '[["1", "principal", 1000]]');
+select lives_ok($$select private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1')$$,
+  'a payment of portfolio P3 pays a file of P1 (same client and debtor, on request)');
+set local role authenticated;
+select pg_temp.as_user('02');
+select is((select count(*)::int from jsonb_array_elements(public.account_detail(pg_temp.f('01')) -> 'payments') x
+           where x ->> 'id' = pg_temp.pay('14')::text), 0,
+  'a collector does not see it on the P1 file: he does not read P3');
+select pg_temp.as_user('01');
+select is((select count(*)::int from jsonb_array_elements(public.account_detail(pg_temp.f('01')) -> 'payments') x
+           where x ->> 'id' = pg_temp.pay('14')::text), 1, 'ops do');
+reset role;
+select ok(pg_get_functiondef('public.account_detail(uuid)'::regprocedure) !~* 'or\s+p\.id\s+in\s*\(',
+  'the file page lists its payments by indexed lookups, never an OR over a subquery (a scan of every payment, #6)');
+
+-- The client reads codes, never ops' motif (#12); staff keep the motif; the page tells delivery (#11) and a forward
+-- from an allocation (#16).
+select is((select reason from public.client_notification where payment_id = pg_temp.pay('01')
+           and kind = 'payment_allocation_reversed'), 'ops_correction', 'a reversal tells the client a reason code');
+select is((select count(*)::int from public.ledger_entry where payment_id = pg_temp.pay('01') and entry_type = 'reversal'
+           and reason ~ 'mauvais dossier'), 0, 'ops'' motif is not in the reversal entry the client reads either');
+select is((select reason from public.client_notification where payment_id = pg_temp.pay('03')), 'file_recalled',
+  'a forward tells why with a code');
+select throws_ok($$insert into public.client_notification (organization_id, client_organization_id, account_id, payment_id,
+  kind, reason) values ('00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a1', pg_temp.f('06'),
+  pg_temp.pay('10'), 'payment_held', 'Homonyme : Jean Martin')$$, '23514', null, 'a notification''s reason is a code');
+set local role authenticated;
+select pg_temp.as_user('01');
+select is((select x ->> 'ops_note' from jsonb_array_elements(public.payment_detail(pg_temp.pay('01')) -> 'entries') x
+           where x ->> 'entry_type' = 'reversal'), 'mauvais dossier', 'ops read the motif on the payment page');
+select ok(public.payment_detail(pg_temp.pay('01')) -> 'notifications' -> 0 ? 'delivered_at',
+  'the payment page knows whether a notification was delivered');
+select is(public.payment_detail(pg_temp.pay('03')) -> 'position' ->> 'forwarded_minor', '4000',
+  'the payment page tells a forward from an allocation');
+select is((public.account_detail(pg_temp.f('04')) -> 'payments' -> 0 ->> 'forwarded')::boolean, true,
+  'and so does the file page');
+select is((select q.forwarded from public.payment_queue('rapproches') q where q.payment_id = pg_temp.pay('03')), true,
+  'and « Rapprochés »');
+reset role;
+select is((select count(*)::int from public.client_notification n where n.reason is not null
+           and n.reason not in ('hold_blocks_allocation', 'ops_correction', 'file_recalled', 'before_servicing_start',
+                                'client_ratification')), 0, 'every reason the client reads is a code');
 
 select * from finish();
 rollback;

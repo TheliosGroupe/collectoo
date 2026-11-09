@@ -7,7 +7,8 @@ import { allocatePayment, forwardPayment, releaseHold, reverseAllocation, unassi
 
 type Doc = { id: string; label: string };
 
-function Reason({ label = "Motif (gardé dans l'historique)" }: { label?: string }) {
+/** Ops' motif: kept for staff, never in what the client reads (the client is given a reason code). */
+function Reason({ label = "Motif interne (non transmis au client)" }: { label?: string }) {
   return (
     <label className="flex flex-col gap-1 text-sm">
       {label}
@@ -41,19 +42,20 @@ function DocumentChoice({ docs, label, required }: { docs: Doc[]; label: string;
   );
 }
 
-/** « Désimputer » one file's allocation: the entries the page showed, reversed at their date. */
+/** « Désimputer » one file's allocation: the entries the page showed, reversed at their date (the effect worded by
+ * the file reversed: the payment's own, or another file of the debtor). */
 export function ReverseAllocation({
   paymentId,
   accountId,
   fileRef,
-  amount,
+  effect,
   entryIds,
   idempotencyKey,
 }: {
   paymentId: string;
   accountId: string;
   fileRef: string;
-  amount: string;
+  effect: string;
   entryIds: string[];
   idempotencyKey: string;
 }) {
@@ -67,9 +69,7 @@ export function ReverseAllocation({
       {() => (
         <>
           <p className="text-sm" data-testid="sheet-effect">
-            {amount} imputés sur le dossier {fileRef} seront contre-passés à la date de l&apos;imputation : les factures
-            retrouvent leur solde, le client est informé de l&apos;annulation. Le paiement attendra ensuite votre
-            décision (réimputer, ou désaffecter s&apos;il ne concerne pas ce dossier).
+            {effect}
           </p>
           <ActionForm action={reverseAllocation} submitLabel="Confirmer l'annulation" buttonClassName={buttonClass}>
             <input type="hidden" name="payment_id" value={paymentId} />
@@ -180,7 +180,9 @@ export function ReleaseHold({ paymentId, docs, idempotencyKey }: { paymentId: st
         <>
           <p className="text-sm" data-testid="sheet-effect">
             Le dossier reste bloqué (surendettement ou procédure collective). Ce paiement seul sera imputé, sur
-            autorisation du juge (art. L722-5 C. conso, L622-7 C. com.), classée dans ce dossier.
+            autorisation du juge (art. L722-5 C. conso, L622-7 C. com.), classée dans ce dossier ; s&apos;il attend
+            encore une autre décision (paiement antérieur à la reprise, avoir à appliquer), il reviendra ici, cette
+            autorisation conservée.
           </p>
           <ActionForm action={releaseHold} submitLabel="Imputer ce paiement" buttonClassName={buttonClass}>
             <input type="hidden" name="payment_id" value={paymentId} />
@@ -215,7 +217,8 @@ export function Forward({
       {() => (
         <>
           <p className="text-sm" data-testid="sheet-effect">
-            {left} seront dus à {client}, sans toucher à la créance du débiteur. Le client est informé.
+            {left} seront dus à {client}, sans toucher à la créance du débiteur. Notification enregistrée pour le client
+            (envoi : à venir).
           </p>
           <ActionForm action={forwardPayment} submitLabel="Confirmer le reversement" buttonClassName={buttonClass}>
             <input type="hidden" name="payment_id" value={paymentId} />

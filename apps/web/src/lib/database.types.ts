@@ -1187,7 +1187,7 @@ isOneToOne: false
                            },
 "payment_queue":
 { Args: { "p_client"?: string,"p_limit"?: number,"p_max_minor"?: number,"p_min_days"?: number,"p_min_minor"?: number,"p_offset"?: number,"p_reason"?: string,"p_tab"?: string }; Returns: {
-              "account_id": string,"age_days": number,"amount_minor": string,"booking_date": string,"candidate_account_id": string,"client_organization_id": string,"creditor_reference": string,"currency": string,"match_method": string,"matched_at": string,"payer_iban_end": string,"payer_name": string,"payment_id": string,"remittance_text": string,"review_reason": string,"status": string,"total": number
+              "account_id": string,"age_days": number,"amount_minor": string,"booking_date": string,"candidate_account_id": string,"client_organization_id": string,"creditor_reference": string,"currency": string,"forwarded": boolean,"match_method": string,"matched_at": string,"payer_iban_end": string,"payer_name": string,"payment_id": string,"remittance_text": string,"review_reason": string,"status": string,"total": number
             }[]
                            },
 "place_account_hold":

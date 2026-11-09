@@ -133,6 +133,15 @@ payment and file through `ledger_post_set`, plan headers, notifications, payment
 |---|---|---|---|---|---|
 | first version | 50,000 | 50,000 | 5 × 10k | 1.1 / 0.3 / 8.9 s | **51.9 s** |
 | notifications without foreign keys, positions by index (full integration suite, after the other 50k runs) | 50,000 | 50,000 | 5 × 10k | 1.1–1.3 / 0.3–0.4 / 8.2–9.0 s | **50.4 s** |
+| before the review fixes, fresh database (same session as the next row) | 50,000 | 50,000 | 5 × 10k | 1.1–1.4 / 0.3–0.4 / 8.8–9.3 s | **53.3 s** |
+| review fixes (item-level backstop: one keyed lateral lookup per payment and item; releases as a set), fresh database | 50,000 | 50,000 | 5 × 10k | 1.1–1.3 / 0.3–0.4 / 8.2–9.0 s | **50.8 s** |
+| review fixes, full integration suite (after the other 50k runs) | 50,000 | 50,000 | 5 × 10k | — | **50.2 s** |
+- **Review fixes:** the item-level backstop of `post_allocations` (no item below what it owes as a whole) costs no
+  measurable time (within run-to-run noise). The file page's payment list (`account_detail`) was a sequential scan of
+  every payment (an OR over an IN subquery): 36.6 ms at 50,013 payments, 23.6 ms with a parallel scan at 164,400; two
+  index lookups now: 0.5 ms and 0.1 ms. Observation, same code: on a fresh database where the ten small allocation integration tests ran first,
+  the 50k import + match took 252 s instead of 23 s (stale statistics of tables analysed while tiny; see PROGRESS
+  « Next », ingest at volume).
 - **Where the time goes** (one 10k job, 7,674 entries, `pg_stat_statements` with nested statements, first version):
   `ledger_post_set` 4.8 s — of which the deferred per-entry checks at commit 2.35 s (**0.31 ms per entry**: design risk
   R1 estimated 0.2–0.4 ms; checks I2–I6 by key lookups), the entry insert with its foreign keys and guard 1.1 s, the

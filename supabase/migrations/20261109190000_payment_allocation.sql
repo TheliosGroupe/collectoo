@@ -2,7 +2,7 @@
 -- Design: docs/design/m2b-payments.md §6 (allocation_policy, client_notification), §7 (payment states), §8 (postings,
 -- worked example, waterfall, job), §9 (commands), §12 (pages); decisions: docs/adr/0013-payments-allocation-client-money.md
 -- (founder #4–#12, #16–#18; M2b-4 addendum). Forward-only: nothing of 20261109090000 / 120000 / 150000 is edited;
--- private.regate_account and public.payment_queue are redefined.
+-- private.assign_begin, private.gate_assignments, private.regate_account and public.payment_queue are redefined.
 --
 -- What changes for money:
 --   * the allocation job (worker, collectoo_worker.jobs.allocation) computes each ready payment's lines with the pure
@@ -15,7 +15,11 @@
 --   * ops commands: reverse an allocation (reversal at its date), allocate again or on another file of the same
 --     debtor at his written request, release a held payment on the judge's authorisation, forward a payment to the
 --     client (recall, before the cut-off, ratification), apply a credit note (netting, compensation invoked: 1347);
---   * the client is told of every allocation, forward, reversal and held payment (client_notification, R124-5).
+--   * a notification for the client is recorded for every allocation, forward, reversal and held payment
+--     (client_notification, R124-5; delivered later), with a reason code, never ops' motif (kept internal);
+--   * review fixes (M2b-4 review, ADR-0013): an item never allocated below what it owes as a whole, holds gated before
+--     the cut-off, ops' releases cumulative, no forward and no compensation on a held file, compare-and-set regating,
+--     the file page's payments by index (the gating functions and payment_queue are redefined for these).
 
 ------------------------------------------------------------------------------------------
 -- Payments: a new review reason, the ops decision the allocation job follows next, the job's index
@@ -29,14 +33,38 @@ alter table public.payment drop constraint payment_review_reason_check,
     'currency_mismatch', 'before_servicing_start', 'hold_blocks_allocation', 'nothing_due',
     'credit_note_to_apply', 'partial_return', 'allocation_reversed'));
 
--- What ops decided for the next allocation of this payment: the gate it may pass (`release`: a judge's authorisation
--- for a held payment, the cut-off checked with the client, a credit note not invoked…), or another file of the same
--- debtor for an overpayment (`account_id`, on his written request: founder #8). Consumed by the allocation job.
+-- What ops decided for the next allocation of this payment: the gates it may pass (`releases`, a set: a judge's
+-- authorisation for a held payment, the cut-off checked with the client, a credit note not invoked…; each decision
+-- added to the set, never replacing it, so a payment behind two gates passes both: review fix), each decision kept
+-- (`decisions`: who, when, why, the evidence), or another file of the same debtor for an overpayment (`account_id`,
+-- on his written request: founder #8). Consumed by the allocation job when it allocates.
 alter table public.payment add column allocation_instruction jsonb check (
   allocation_instruction is null
   or (jsonb_typeof(allocation_instruction) = 'object'
-      and allocation_instruction ->> 'release' in ('allocation_reversed', 'nothing_due', 'credit_note_to_apply',
-                                                   'before_servicing_start', 'hold_blocks_allocation', 'overpayment')));
+      and jsonb_typeof(allocation_instruction -> 'releases') = 'array'
+      and jsonb_array_length(allocation_instruction -> 'releases') >= 1
+      and (allocation_instruction -> 'releases')
+          <@ '["allocation_reversed", "nothing_due", "credit_note_to_apply", "before_servicing_start",
+               "hold_blocks_allocation", "overpayment"]'::jsonb
+      and jsonb_typeof(coalesce(allocation_instruction -> 'decisions', '[]')) = 'array'));
+
+-- An ops decision added to what the payment already has (its file's gates; another file's instruction is dropped).
+create or replace function private.instruction_release(p_old jsonb, p_gate text, p_decision jsonb)
+returns jsonb
+language sql
+immutable
+set search_path = ''
+as $$
+  select jsonb_build_object(
+    'releases', (select jsonb_agg(distinct x.v order by x.v)
+                 from jsonb_array_elements_text(coalesce(p_old -> 'releases', '[]') || to_jsonb(p_gate)) x (v)),
+    'decisions', coalesce(p_old -> 'decisions', '[]') || jsonb_build_array(p_decision || jsonb_build_object('release', p_gate)))
+  where p_old is null or p_old ->> 'account_id' is null
+  union all
+  select jsonb_build_object('releases', jsonb_build_array(p_gate),
+                            'decisions', jsonb_build_array(p_decision || jsonb_build_object('release', p_gate)))
+  where p_old ->> 'account_id' is not null;
+$$;
 
 -- A decision about one file is void once the payment leaves that file.
 create or replace function private.payment_instruction_reset()
@@ -175,7 +203,10 @@ create table public.client_notification (
   ledger_entry_id uuid unique,
   kind text not null check (kind in ('payment_allocated', 'payment_forwarded', 'payment_allocation_reversed',
                                      'payment_held')),
-  reason text check (length(btrim(reason)) between 1 and 2000),
+  -- a code, never ops' free text (review fix: the client reads this row; a motif may name a third party). The motif
+  -- stays with staff (private.payment_ops_note).
+  reason text check (reason in ('hold_blocks_allocation', 'ops_correction', 'file_recalled', 'before_servicing_start',
+                                'client_ratification')),
   created_at timestamptz not null default now(),
   delivered_at timestamptz,
   constraint client_notification_entry check ((kind = 'payment_held') = (ledger_entry_id is null)),
@@ -253,6 +284,21 @@ alter table public.client_notification enable always trigger client_notification
 create trigger client_notification_no_delete before delete or truncate on public.client_notification
   for each statement execute function private.refuse_delete();
 alter table public.client_notification enable always trigger client_notification_no_delete;
+
+-- Ops' motif for an entry they posted (a reversal, a forward): internal (review fix). The entry and the client's
+-- notification carry a fixed wording or a code; the payment page shows the motif to admins and ops managers.
+create table private.payment_ops_note (
+  entry_id uuid primary key references public.ledger_entry (id),
+  payment_id uuid not null,
+  command text not null check (command in ('reverse_allocation', 'forward_payment')),
+  note text not null check (length(btrim(note)) between 1 and 2000),
+  decided_by uuid,
+  created_at timestamptz not null default now()
+);
+create index payment_ops_note_payment_idx on private.payment_ops_note (payment_id);
+create trigger payment_ops_note_append_only before update or delete or truncate on private.payment_ops_note
+  for each statement execute function private.refuse_change();
+alter table private.payment_ops_note enable always trigger payment_ops_note_append_only;
 
 ------------------------------------------------------------------------------------------
 -- After payment updates (set-based, one firing per statement): a payment newly held for its file tells the client
@@ -429,10 +475,118 @@ end;
 $$;
 
 ------------------------------------------------------------------------------------------
--- Gating again on hold changes (redefined from 20261109150000): the M2b-4 states are left alone (an allocation ops
--- reversed, a credit note to apply), and an ops release lets a payment pass the gate it names.
+-- Gating (redefined from 20261109150000, review fixes): the hold before the servicing start (a payment booked before
+-- the cut-off on a held file is reported held: the client is told, founder #12, #17), and the gates ops released
+-- (`releases`, a set) are passed, every one of them. Match runs fill no release: their gating is unchanged otherwise.
 ------------------------------------------------------------------------------------------
 
+create or replace function private.assign_begin()
+returns void
+language plpgsql
+set search_path = ''
+as $$
+begin
+  drop table if exists pg_temp._assign;
+  create temp table _assign (
+    ord bigint not null,
+    payment_id uuid primary key,
+    account_id uuid not null,
+    method text not null,
+    rule text,
+    rule_version text not null,
+    evidence jsonb not null default '{}',
+    designation jsonb,
+    teaches boolean not null default false,
+    review_reason text,
+    releases text[] not null default '{}'   -- the gates ops let this payment pass (regate only)
+  ) on commit drop;
+end;
+$$;
+
+create or replace function private.gate_assignments()
+returns void
+language plpgsql
+set search_path = ''
+as $$
+begin
+  analyze pg_temp._assign;
+  drop table if exists pg_temp._gate_file;
+  create temp table _gate_file (
+    account_id uuid primary key,
+    status text,
+    currency char(3),
+    servicing_start date,
+    holds bigint not null default 0,
+    balance bigint not null default 0,
+    pending bigint not null default 0
+  ) on commit drop;
+  insert into pg_temp._gate_file (account_id) select distinct g.account_id from pg_temp._assign g;
+  analyze pg_temp._gate_file;
+  perform 1 from pg_temp._gate_file f join public.account a on a.id = f.account_id
+  order by a.id for key share of a;
+
+  update pg_temp._assign g set review_reason = 'no_mandate'
+  where not exists (select 1 from public.account a where a.id = g.account_id);
+  delete from pg_temp._gate_file f where not exists (select 1 from public.account a where a.id = f.account_id);
+  update pg_temp._gate_file f set status = a.status, currency = a.currency
+  from public.account a where a.id = f.account_id;
+  update pg_temp._gate_file f set servicing_start = s.valid_from
+  from (select o.account_id, min(o.valid_from) as valid_from
+        from pg_temp._gate_file x join public.claim_ownership_period o on o.account_id = x.account_id
+        group by o.account_id) s
+  where s.account_id = f.account_id;
+  update pg_temp._gate_file f set holds = h.n
+  from (select h.account_id, count(*) as n
+        from pg_temp._gate_file x join public.account_hold h on h.account_id = x.account_id
+        where h.ended_at is null and h.kind in ('surendettement', 'collective_proceeding')
+        group by h.account_id) h
+  where h.account_id = f.account_id;
+  update pg_temp._gate_file f set balance = b.balance
+  from (select la.account_id, sum(lp.amount_minor) as balance
+        from pg_temp._gate_file x
+        join public.ledger_account la on la.account_id = x.account_id and la.book = 'debtor_receivable'
+        join public.ledger_posting lp on lp.ledger_account_id = la.id
+        group by la.account_id) b
+  where b.account_id = f.account_id;
+  -- (NOT EXISTS, never NOT IN: NOT IN over a subquery is a plain subplan once _assign outgrows hash
+  -- memory, one scan of it per matched payment; NOT EXISTS is an anti-join at any size)
+  update pg_temp._gate_file f set pending = d.pending
+  from (select p.account_id, sum(p.amount_minor) as pending
+        from pg_temp._gate_file x join public.payment p on p.account_id = x.account_id and p.status = 'matched'
+        where not exists (select 1 from pg_temp._assign y where y.payment_id = p.id)
+        group by p.account_id) d
+  where d.account_id = f.account_id;
+  analyze pg_temp._gate_file;
+
+  update pg_temp._assign g set review_reason = case
+      when f.status = 'staged' then 'account_not_confirmed'
+      when f.status in ('closed_paid', 'closed_settled', 'closed_uncollectable', 'closed_recalled') then 'account_closed'
+      when p.currency <> f.currency then 'currency_mismatch'
+      when f.holds > 0 and not ('hold_blocks_allocation' = any (g.releases)) then 'hold_blocks_allocation'
+      when f.servicing_start is null
+           or (p.booking_date < f.servicing_start and not ('before_servicing_start' = any (g.releases)))
+        then 'before_servicing_start'
+    end
+  from pg_temp._gate_file f, public.payment p
+  where f.account_id = g.account_id and p.id = g.payment_id;
+
+  update pg_temp._assign g set review_reason = 'nothing_due'
+  from (select x.payment_id,
+               f.balance - f.pending - coalesce(sum(p.amount_minor) over (
+                 partition by x.account_id order by x.ord rows between unbounded preceding and 1 preceding), 0) as due
+        from pg_temp._assign x
+        join pg_temp._gate_file f on f.account_id = x.account_id
+        join public.payment p on p.id = x.payment_id
+        where x.review_reason is null) y
+  where g.payment_id = y.payment_id and y.due <= 0 and not ('nothing_due' = any (g.releases));
+end;
+$$;
+
+-- Gating again on hold changes, a reversal or an unassignment (redefined from 20261109150000): the M2b-4 states are
+-- left alone (an allocation ops reversed, a credit note to apply), the gates ops released are passed, and a payment
+-- ops sent to another file is that file's (the job gates it there). Compare and set (review fix): only a payment still
+-- matched to this file, not sent elsewhere, is written — a payment the allocation job changed meanwhile is skipped
+-- (READ COMMITTED re-checks these conditions on the row the job committed).
 create or replace function private.regate_account(p_account_id uuid)
 returns void
 language plpgsql
@@ -440,19 +594,18 @@ set search_path = ''
 as $$
 begin
   perform private.assign_begin();
-  insert into pg_temp._assign (ord, payment_id, account_id, method, rule_version)
-  select row_number() over (order by p.booking_date, p.created_at, p.id), p.id, p.account_id, p.match_method, 'regate'
+  insert into pg_temp._assign (ord, payment_id, account_id, method, rule_version, releases)
+  select row_number() over (order by p.booking_date, p.created_at, p.id), p.id, p.account_id, p.match_method, 'regate',
+         array(select jsonb_array_elements_text(p.allocation_instruction -> 'releases'))
   from public.payment p
-  where p.account_id = p_account_id and p.status = 'matched'
+  where p.account_id = p_account_id and p.status = 'matched' and p.allocation_instruction ->> 'account_id' is null
     and (p.review_reason is null or p.review_reason in ('account_closed', 'currency_mismatch', 'before_servicing_start',
                                                         'hold_blocks_allocation', 'nothing_due'));
   perform private.gate_assignments();
-  update pg_temp._assign g set review_reason = null
-  from public.payment p
-  where p.id = g.payment_id and g.review_reason = p.allocation_instruction ->> 'release';
   update public.payment p set review_reason = g.review_reason
   from pg_temp._assign g
-  where p.id = g.payment_id and p.review_reason is distinct from g.review_reason;
+  where p.id = g.payment_id and p.review_reason is distinct from g.review_reason
+    and p.status = 'matched' and p.account_id = p_account_id and p.allocation_instruction ->> 'account_id' is null;
 end;
 $$;
 
@@ -529,7 +682,7 @@ begin
   select t.payment_id, t.ord, t.account_id, t.outcome, t.effective_date, t.policy, t.designation, t.inputs_hash,
          p.organization_id as payment_org, p.amount_minor, p.currency as payment_currency, p.booking_date, p.status,
          p.review_reason, coalesce((p.allocation_instruction ->> 'account_id')::uuid, p.account_id) as payment_target,
-         p.allocation_instruction ->> 'release' as released,
+         coalesce(p.allocation_instruction -> 'releases', '[]') as released,
          a.organization_id as account_org, a.client_organization_id, a.portfolio_id, a.status as account_status,
          a.currency as account_currency, s.start as servicing_start, coalesce(h.n, 0) as holds,
          row_number() over (order by t.ord)::integer as entry_no
@@ -561,8 +714,8 @@ begin
          or t.account_currency <> t.payment_currency
          or t.servicing_start is null or t.effective_date <> greatest(t.booking_date, t.servicing_start)
          or t.effective_date > v_today
-         or (t.booking_date < t.servicing_start and t.released is distinct from 'before_servicing_start')
-         or (t.holds > 0 and t.released is distinct from 'hold_blocks_allocation'));
+         or (t.booking_date < t.servicing_start and not (t.released ? 'before_servicing_start'))
+         or (t.holds > 0 and not (t.released ? 'hold_blocks_allocation')));
   if v_bad is not null then
     raise exception 'allocation: payment % may not be allocated on this file now', v_bad using errcode = 'LG006';
   end if;
@@ -596,6 +749,37 @@ begin
   where x.s > u.amount_minor - u.moved;
   if v_bad is not null then
     raise exception 'allocation: payment % would allocate more than is left of it', v_bad using errcode = 'LG007';
+  end if;
+
+  -- An item as a whole (review fix): no allocation takes an item's receivable — every component summed, negative ones
+  -- included (a negative balancing line: the seller's components above the legal balance 3.12) — below zero at any
+  -- date from the allocation's on. What it does not owe stays an overpayment (founder #8). Each check is the lowest
+  -- running total of the item from that date on, less this run's allocations on the item up to that one (in date
+  -- order): one keyed lateral lookup per (payment, item), whatever the statistics of the ledger.
+  drop table if exists pg_temp._alloc_item;
+  create temp table _alloc_item on commit drop as
+  select x.payment_id, x.claim_item_id, x.effective_date,
+         sum(x.amount) over (partition by x.claim_item_id order by x.effective_date, x.ord
+                             rows between unbounded preceding and current row) as cum
+  from (select t.payment_id, t.ord, t.effective_date, l.claim_item_id, sum(l.amount_minor) as amount
+        from pg_temp._alloc_t t join pg_temp._alloc_line l on l.payment_id = t.payment_id
+        where t.outcome = 'allocate'
+        group by t.payment_id, t.ord, t.effective_date, l.claim_item_id) x;
+  select min(z.payment_id::text) into v_bad
+  from pg_temp._alloc_item z
+  cross join lateral (
+    select least(coalesce(sum(g.s) filter (where g.d <= z.effective_date), 0),
+                 min(g.bal) filter (where g.d > z.effective_date)) as low
+    from (select q.effective_date as d, sum(q.amount_minor) as s,
+                 sum(sum(q.amount_minor)) over (order by q.effective_date) as bal
+          from public.ledger_account la
+          join public.ledger_posting q on q.ledger_account_id = la.id
+          where la.claim_item_id = z.claim_item_id and la.book = 'debtor_receivable'
+          group by q.effective_date) g) w
+  where w.low - z.cum < 0;
+  if v_bad is not null then
+    raise exception 'allocation: payment % would take an item below what it owes as a whole', v_bad
+      using errcode = 'LG007';
   end if;
 
   -- 1343-1 « Le paiement partiel s'impute d'abord sur les intérêts »: no principal of an item while that item's
@@ -701,7 +885,10 @@ begin
                          when t.outcome <> 'allocate' then t.outcome
                          when u.amount_minor - u.moved - coalesce(s.total, 0) = 0 then null
                          else 'overpayment' end,
-    allocation_instruction = null
+    -- ops' decisions are consumed by an allocation (or void back from another file); a payment stopped at another
+    -- gate of its own file keeps them, so the gates ops released stay released (review fix)
+    allocation_instruction = case when t.outcome = 'allocate' or t.account_id <> p.account_id then null
+                                  else p.allocation_instruction end
   from pg_temp._alloc_t t
   join pg_temp._alloc_u u on u.payment_id = t.payment_id
   left join (select l.payment_id, sum(l.amount_minor) as total from pg_temp._alloc_line l group by l.payment_id) s
@@ -784,12 +971,16 @@ begin
   end if;
   select * into src from public.account where id = p.account_id;
   if p_account_id is null or p_account_id = p.account_id then
-    if p.status <> 'matched' or p.review_reason is null
-       or p.review_reason not in ('allocation_reversed', 'nothing_due', 'credit_note_to_apply', 'before_servicing_start') then
+    -- (partially allocated: ops reversed the allocation on this file while another file's remains — what this file
+    -- owes again is allocated here, never left as an overpayment: review fix)
+    if not ((p.status = 'matched'
+             and p.review_reason in ('allocation_reversed', 'nothing_due', 'credit_note_to_apply', 'before_servicing_start'))
+            or (p.status = 'partially_allocated' and p.review_reason = 'allocation_reversed')) then
       raise exception 'this payment cannot be sent to allocation from here' using errcode = 'check_violation';
     end if;
-    v_instruction := jsonb_build_object('release', p.review_reason, 'reason', v_reason, 'decided_by', auth.uid(),
-                                        'decided_at', now());
+    v_instruction := private.instruction_release(p.allocation_instruction, p.review_reason,
+                                                 jsonb_build_object('reason', v_reason, 'decided_by', auth.uid(),
+                                                                    'decided_at', now()));
   else
     -- An overpayment (or a payment with nothing due on its file) for another file of the same debtor, on his
     -- written request, filed as evidence.
@@ -818,9 +1009,12 @@ begin
     if v_left <= 0 then
       raise exception 'nothing is left of this payment' using errcode = 'check_violation';
     end if;
-    v_instruction := jsonb_build_object('release', 'overpayment', 'account_id', dst.id,
-                                        'evidence_document_id', p_evidence_document_id, 'reason', v_reason,
-                                        'decided_by', auth.uid(), 'decided_at', now());
+    v_instruction := jsonb_build_object(
+      'releases', jsonb_build_array('overpayment'), 'account_id', dst.id,
+      'decisions', jsonb_build_array(jsonb_build_object('release', 'overpayment', 'account_id', dst.id,
+                                                        'evidence_document_id', p_evidence_document_id,
+                                                        'reason', v_reason, 'decided_by', auth.uid(),
+                                                        'decided_at', now())));
   end if;
   update public.payment set allocation_instruction = v_instruction, review_reason = null where id = p.id;
   v_result := jsonb_build_object('payment_id', p.id, 'account_id', coalesce(p_account_id, p.account_id),
@@ -866,9 +1060,10 @@ begin
     raise exception 'the judge''s authorisation is required, filed on this file' using errcode = 'check_violation';
   end if;
   update public.payment
-  set allocation_instruction = jsonb_build_object('release', 'hold_blocks_allocation',
-                                                  'evidence_document_id', p_evidence_document_id, 'reason', v_reason,
-                                                  'decided_by', auth.uid(), 'decided_at', now()),
+  set allocation_instruction = private.instruction_release(
+        p.allocation_instruction, 'hold_blocks_allocation',
+        jsonb_build_object('evidence_document_id', p_evidence_document_id, 'reason', v_reason, 'decided_by', auth.uid(),
+                           'decided_at', now())),
       review_reason = null
   where id = p.id;
   v_result := jsonb_build_object('payment_id', p.id, 'queued', true);
@@ -925,21 +1120,29 @@ begin
   if v_live <> v_shown then
     raise exception 'the allocation changed: reload the page' using errcode = 'check_violation';
   end if;
+  -- The client reads the reversal entry and its notification: a fixed wording and a code; ops' motif stays internal
+  -- (review fix: a motif may name a third party).
   for e in select x.id, x.client_organization_id, x.portfolio_id from public.ledger_entry x
            where x.id = any (v_live) order by x.effective_date, x.id loop
-    select r.entry_id into v_rev from private.ledger_reverse(e.id, 'unalloc:' || e.id, v_reason) r;
+    select r.entry_id into v_rev
+    from private.ledger_reverse(e.id, 'unalloc:' || e.id, 'Imputation annulée par le gestionnaire') r;
     v_reversals := v_reversals || v_rev;
     insert into public.client_notification (organization_id, client_organization_id, portfolio_id, account_id,
                                             payment_id, ledger_entry_id, kind, reason)
     values (p.organization_id, e.client_organization_id, e.portfolio_id, p_account_id, p.id, v_rev,
-            'payment_allocation_reversed', v_reason);
+            'payment_allocation_reversed', 'ops_correction');
+    insert into private.payment_ops_note (entry_id, payment_id, command, note, decided_by)
+    values (v_rev, p.id, 'reverse_allocation', v_reason, auth.uid());
   end loop;
   select * into pos from private.payment_positions(array[p.id]);
   update public.payment
   set status = case when pos.allocated_minor = 0 then 'matched'
                     when pos.unallocated_minor = 0 then 'allocated' else 'partially_allocated' end,
-      -- what is left once another file's allocation remains is an overpayment again (founder #8)
-      review_reason = case when pos.allocated_minor > 0 and pos.unallocated_minor > 0 then 'overpayment'
+      -- another file's allocation reversed while this file's remains: what is left is an overpayment again (founder
+      -- #8); this file's own allocation reversed: it waits for ops, whatever another file keeps (review fix: this
+      -- file may owe it again; « Imputer » sends it back here)
+      review_reason = case when pos.allocated_minor > 0 and pos.unallocated_minor > 0 and p_account_id <> p.account_id
+                             then 'overpayment'
                            else 'allocation_reversed' end,
       allocation_instruction = null
   where id = p.id;
@@ -973,6 +1176,7 @@ declare
   v_client uuid;
   pos record;
   v_entry uuid;
+  v_code text;
 begin
   select * into p from public.payment where id = p_payment_id for update;
   if not found or not private.has_role(p.organization_id, array['admin', 'ops_manager']) then
@@ -996,9 +1200,19 @@ begin
     raise exception 'the amount changed: reload the page' using errcode = 'check_violation';
   end if;
   if p.account_id is not null then
-    select * into a from public.account where id = p.account_id;
+    -- KEY SHARE: a hold placed meanwhile (place_account_hold locks the file FOR UPDATE) waits for this command, or
+    -- this command sees it
+    select * into a from public.account where id = p.account_id for key share;
     if not (p.status = 'matched' and (a.status = 'closed_recalled' or p.review_reason = 'before_servicing_start')) then
       raise exception 'a payment on a file is forwarded only when the client recalled the file or for a payment before the cut-off'
+        using errcode = 'check_violation';
+    end if;
+    -- Surendettement or a collective proceeding: paying a prior debt needs the judge's authorisation (L722-5,
+    -- L622-7); a held payment is refunded, or allocated on that authorisation (founder #12), never forwarded (review
+    -- fix: the hold may hide behind the recall or the cut-off gate).
+    if exists (select 1 from public.account_hold h where h.account_id = a.id and h.ended_at is null
+                 and h.kind in ('surendettement', 'collective_proceeding')) then
+      raise exception 'the file is held (surendettement or collective proceeding): its payments are not forwarded'
         using errcode = 'check_violation';
     end if;
     if p_client_organization_id is not null and p_client_organization_id <> a.client_organization_id then
@@ -1024,18 +1238,28 @@ begin
       raise exception 'the client''s ratification is required (a document of that client)' using errcode = 'check_violation';
     end if;
   end if;
+  -- Why, as the client reads it (the entry and its notification): a fixed wording and a code; ops' motif stays
+  -- internal (review fix).
+  v_code := case when p.account_id is null then 'client_ratification'
+                 when a.status = 'closed_recalled' then 'file_recalled'
+                 else 'before_servicing_start' end;
   perform private.ledger_post_set_begin();
   insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key,
                                   client_organization_id, payment_id, source_type, source_id, reason)
   values (1, p.organization_id, 'forward', private.paris_today(), 'forward:' || p.id || ':' || md5(p_idempotency_key),
-          v_client, p.id, 'payment', p.id::text, v_reason);
+          v_client, p.id, 'payment', p.id::text,
+          case v_code when 'file_recalled' then 'Reversement sans imputation : dossier rappelé'
+                      when 'before_servicing_start' then 'Reversement sans imputation : paiement antérieur à la reprise'
+                      else 'Reversement sans imputation : ratification du client' end);
   insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency) values
     (1, 1, 'unallocated_payment', pos.unallocated_minor, p.currency),
     (1, 2, 'client_payable', -pos.unallocated_minor, p.currency);
   select x.entry_id into v_entry from private.ledger_post_set() x;
   insert into public.client_notification (organization_id, client_organization_id, portfolio_id, account_id, payment_id,
                                           ledger_entry_id, kind, reason)
-  values (p.organization_id, v_client, p.portfolio_id, p.account_id, p.id, v_entry, 'payment_forwarded', v_reason);
+  values (p.organization_id, v_client, p.portfolio_id, p.account_id, p.id, v_entry, 'payment_forwarded', v_code);
+  insert into private.payment_ops_note (entry_id, payment_id, command, note, decided_by)
+  values (v_entry, p.id, 'forward_payment', v_reason, auth.uid());
   update public.payment set status = 'allocated', review_reason = null, allocation_instruction = null where id = p.id;
   v_result := jsonb_build_object('payment_id', p.id, 'entry_id', v_entry, 'amount_minor', pos.unallocated_minor::text);
   perform private.command_record('forward_payment', p_idempotency_key, v_request, v_result);
@@ -1062,13 +1286,22 @@ declare
   v_total bigint;
   v_entry uuid;
 begin
-  select * into a from public.account where id = p_account_id;
+  -- KEY SHARE: a hold placed meanwhile waits for this command, or this command sees it
+  select * into a from public.account where id = p_account_id for key share;
   if not found or not private.has_role(a.organization_id, array['admin', 'ops_manager']) then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
   end if;
   v_result := private.command_replay('apply_credit_note', p_idempotency_key, v_request);
   if v_result is not null then
     return v_result;
+  end if;
+  -- Surendettement or a collective proceeding (review fix): compensation is a payment; L622-7 I forbids paying a prior
+  -- debt except by compensation of connected claims, which the code cannot tell, and L722-5 forbids paying a prior
+  -- debt without the judge's authorisation. Not invoked while such a hold is active (OQ-23, OQ-24).
+  if exists (select 1 from public.account_hold h where h.account_id = a.id and h.ended_at is null
+               and h.kind in ('surendettement', 'collective_proceeding')) then
+    raise exception 'the file is held (surendettement or collective proceeding): compensation is not invoked'
+      using errcode = 'check_violation';
   end if;
   -- the allocation lock first, as the allocation job: the proposal reads balances that allocations change
   perform pg_advisory_xact_lock(hashtext('payments:' || a.organization_id::text));
@@ -1182,16 +1415,32 @@ begin
       'status', p.status, 'review_reason', p.review_reason, 'account_id', p.account_id, 'match_method', p.match_method,
       'matched_at', p.matched_at, 'designation', p.designation, 'instruction', p.allocation_instruction,
       'channel', p.channel, 'method', p.method),
+    -- allocated_minor counts forwards (design §7); forwarded_minor tells them apart (review fix: a forward is not an
+    -- allocation, the debt is untouched)
     'position', (select jsonb_build_object('allocated_minor', x.allocated_minor::text,
                                            'unallocated_minor', x.unallocated_minor::text,
-                                           'returned_minor', x.returned_minor::text)
+                                           'returned_minor', x.returned_minor::text,
+                                           'forwarded_minor', (select coalesce(sum(lp.amount_minor), 0)
+                                                               from public.ledger_entry e
+                                                               left join public.ledger_entry t on t.id = e.reverses_entry_id
+                                                               join public.ledger_posting lp on lp.entry_id = e.id
+                                                               join public.ledger_account la on la.id = lp.ledger_account_id
+                                                                 and la.book = 'unallocated_payment'
+                                                               where e.payment_id = p.id
+                                                                 and coalesce(t.entry_type, e.entry_type) = 'forward')::text)
                  from private.payment_positions(array[p.id]) x),
     'file', (select jsonb_build_object('account_id', a.id, 'external_ref', a.external_ref, 'status', a.status,
                                        'client_organization_id', a.client_organization_id, 'client_name', c.legal_name,
                                        'currency', a.currency, 'legal_regime', a.legal_regime,
                                        'debtor_name', (select min(pa.display_name) from public.account_party ap
                                                        join public.party pa on pa.id = ap.party_id
-                                                       where ap.account_id = a.id and ap.role = 'borrower'))
+                                                       where ap.account_id = a.id and ap.role = 'borrower'),
+                                       -- active holds that block allocation (no forward, no compensation meanwhile)
+                                       'holds', coalesce((select jsonb_agg(h.kind order by h.kind)
+                                                          from public.account_hold h
+                                                          where h.account_id = a.id and h.ended_at is null
+                                                            and h.kind in ('surendettement', 'collective_proceeding')),
+                                                         '[]'))
              from public.account a join public.organization c on c.id = a.client_organization_id
              where a.id = p.account_id),
     'matches', coalesce((select jsonb_agg(jsonb_build_object('action', m.action, 'account_id', m.account_id,
@@ -1205,6 +1454,7 @@ begin
     'entries', coalesce((select jsonb_agg(jsonb_build_object(
                            'entry_id', e.id, 'entry_type', e.entry_type, 'effective_date', e.effective_date,
                            'posted_at', e.posted_at, 'reason', e.reason, 'account_id', e.account_id,
+                           'ops_note', (select o.note from private.payment_ops_note o where o.entry_id = e.id),
                            'external_ref', (select a.external_ref from public.account a where a.id = e.account_id),
                            'reverses_entry_id', e.reverses_entry_id,
                            'reversed_by', (select r.id from public.ledger_entry r where r.reverses_entry_id = e.id),
@@ -1224,7 +1474,8 @@ begin
                          from public.ledger_entry e where e.payment_id = p.id), '[]'),
     'notifications', coalesce((select jsonb_agg(jsonb_build_object('kind', n.kind, 'created_at', n.created_at,
                                                                    'client_name', c.legal_name, 'reason', n.reason,
-                                                                   'ledger_entry_id', n.ledger_entry_id)
+                                                                   'ledger_entry_id', n.ledger_entry_id,
+                                                                   'delivered_at', n.delivered_at)
                                                 order by n.created_at, n.id)
                                from public.client_notification n
                                join public.organization c on c.id = n.client_organization_id
@@ -1261,12 +1512,14 @@ declare
   a public.account;
   v jsonb;
   v_money boolean;
+  v_readable uuid[];
 begin
   select * into a from public.account where id = p_account_id;
   if not found or not (a.organization_id = any (private.staff_org_ids())) or not private.can_read_portfolio(a.portfolio_id) then
     return null;
   end if;
   v_money := a.organization_id = any (private.money_staff_org_ids());
+  v_readable := case when v_money then '{}'::uuid[] else private.readable_portfolio_ids() end;
   select jsonb_build_object(
     'account', jsonb_build_object('id', a.id, 'external_ref', a.external_ref, 'status', a.status, 'currency', a.currency,
                                   'legal_regime', a.legal_regime, 'claim_type', a.claim_type_code,
@@ -1292,15 +1545,25 @@ begin
                                                            'legal_basis', h.legal_basis, 'reason', h.reason)
                                         order by h.started_at)
                        from public.account_hold h where h.account_id = a.id and h.ended_at is null), '[]'),
+    -- The file's payments and those with an entry on it (another file's overpayment used here): two indexed lookups
+    -- (payment_account_idx, ledger_entry_account_idx), never an OR over a subquery, which scans every payment of
+    -- every servicer (review fix). Callers who do not handle money see only payments of portfolios they read (a
+    -- payment of another portfolio used here: review fix, founder #18).
     'payments', coalesce((select jsonb_agg(x.j order by x.booking_date desc, x.id) from (
                             select p.id, p.booking_date,
                                    jsonb_build_object('id', p.id, 'amount_minor', p.amount_minor::text,
                                                       'currency', p.currency, 'booking_date', p.booking_date,
                                                       'status', p.status, 'review_reason', p.review_reason,
-                                                      'payer_name', p.payer_name) as j
-                            from public.payment p
-                            where p.account_id = a.id or p.id in (select e.payment_id from public.ledger_entry e
-                                                                   where e.account_id = a.id and e.payment_id is not null)
+                                                      'payer_name', p.payer_name,
+                                                      'forwarded', exists (select 1 from public.ledger_entry f
+                                                                           where f.payment_id = p.id
+                                                                             and f.entry_type = 'forward')) as j
+                            from (select y.id from public.payment y where y.account_id = a.id
+                                  union
+                                  select e.payment_id from public.ledger_entry e
+                                  where e.account_id = a.id and e.payment_id is not null) ids
+                            join public.payment p on p.id = ids.id
+                            where v_money or p.portfolio_id = any (v_readable)
                             order by p.booking_date desc, p.id limit 50) x), '[]'),
     'proposal', case when v_money then (
                   select jsonb_build_object(
@@ -1320,16 +1583,17 @@ end;
 $$;
 
 -- « Rapprochés » (redefined from 20261109150000): every payment with a file and nothing left to decide — matched and
--- waiting for the allocation, allocated, forwarded — latest first (ops reverse a wrong one from its page). The other
--- tab is unchanged.
-create or replace function public.payment_queue(p_tab text default 'a-traiter', p_reason text default null,
-                                                p_client uuid default null, p_min_minor bigint default null,
-                                                p_max_minor bigint default null, p_min_days integer default null,
-                                                p_offset integer default 0, p_limit integer default 20)
+-- waiting for the allocation, allocated, forwarded — latest first (ops reverse a wrong one from its page); a forwarded
+-- payment says so (`forwarded`: review fix, a forward is not an allocation). The other tab is unchanged.
+drop function public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer);
+create function public.payment_queue(p_tab text default 'a-traiter', p_reason text default null,
+                                     p_client uuid default null, p_min_minor bigint default null,
+                                     p_max_minor bigint default null, p_min_days integer default null,
+                                     p_offset integer default 0, p_limit integer default 20)
 returns table (payment_id uuid, amount_minor text, currency char(3), booking_date date, age_days integer,
                payer_name text, payer_iban_end text, remittance_text text, creditor_reference text, status text,
                review_reason text, match_method text, matched_at timestamptz, account_id uuid,
-               candidate_account_id uuid, client_organization_id uuid, total bigint)
+               candidate_account_id uuid, client_organization_id uuid, total bigint, forwarded boolean)
 language plpgsql
 stable
 set search_path = ''
@@ -1353,15 +1617,17 @@ begin
     return query
     select p.id, p.amount_minor::text, p.currency, p.booking_date, (v_today - p.booking_date)::integer, p.payer_name,
            right(p.payer_iban, 4), p.remittance_text, p.creditor_reference, p.status, p.review_reason, p.match_method,
-           p.matched_at, p.account_id, p.candidate_account_id, p.client_organization_id, v_total
-    from public.payment p
-    where p.organization_id = any (v_orgs) and p.account_id is not null and p.review_reason is null
-      and (p_client is null or p.client_organization_id = p_client)
-      and (p_min_minor is null or p.amount_minor >= p_min_minor)
-      and (p_max_minor is null or p.amount_minor <= p_max_minor)
-      and (v_before is null or p.booking_date <= v_before)
-    order by p.matched_at desc, p.booking_date, p.id
-    offset v_offset limit v_limit;
+           p.matched_at, p.account_id, p.candidate_account_id, p.client_organization_id, v_total,
+           exists (select 1 from public.ledger_entry f where f.payment_id = p.id and f.entry_type = 'forward')
+    from (select p.* from public.payment p
+          where p.organization_id = any (v_orgs) and p.account_id is not null and p.review_reason is null
+            and (p_client is null or p.client_organization_id = p_client)
+            and (p_min_minor is null or p.amount_minor >= p_min_minor)
+            and (p_max_minor is null or p.amount_minor <= p_max_minor)
+            and (v_before is null or p.booking_date <= v_before)
+          order by p.matched_at desc, p.booking_date, p.id
+          offset v_offset limit v_limit) p
+    order by p.matched_at desc, p.booking_date, p.id;
     return;
   end if;
 
@@ -1380,7 +1646,7 @@ begin
   select p.id, p.amount_minor::text, p.currency, p.booking_date, (v_today - p.booking_date)::integer, p.payer_name,
          right(p.payer_iban, 4), p.remittance_text, p.creditor_reference, p.status, p.review_reason, p.match_method,
          p.matched_at, p.account_id, p.candidate_account_id, coalesce(p.client_organization_id, c.client_organization_id),
-         v_total
+         v_total, false  -- a forwarded payment has nothing left to decide: never in this tab
   from (select p.* from public.payment p
         where p.organization_id = any (v_orgs) and (p.status = 'unmatched' or p.review_reason is not null)
           and (p_reason is null or p.review_reason = p_reason or (p_reason = 'waiting' and p.review_reason is null))
@@ -1407,9 +1673,10 @@ alter table public.allocation_policy enable row level security;
 alter table public.allocation_run enable row level security;
 alter table public.client_notification enable row level security;
 alter table private.allocation_plan enable row level security;
+alter table private.payment_ops_note enable row level security;
 revoke all on public.allocation_policy, public.allocation_run, public.client_notification
   from public, anon, authenticated;
-revoke all on private.allocation_plan from public, anon, authenticated;
+revoke all on private.allocation_plan, private.payment_ops_note from public, anon, authenticated;
 grant select on public.allocation_policy, public.allocation_run, public.client_notification to authenticated;
 
 create policy allocation_policy_read on public.allocation_policy for select to authenticated using (
@@ -1430,7 +1697,8 @@ revoke execute on function private.payment_instruction_reset(), private.allocati
   private.client_notification_guard(), private.client_notification_update_guard(), private.payment_after_update(),
   private.receivable_low(uuid, date), private.receivable_high(uuid, date), private.payment_positions(uuid[]),
   private.credit_note_proposals(uuid[]), private.regate_account(uuid), private.allocation_begin(),
-  private.post_allocations(uuid, text, text), private.document_of_file(uuid, uuid)
+  private.post_allocations(uuid, text, text), private.document_of_file(uuid, uuid),
+  private.instruction_release(jsonb, text, jsonb), private.assign_begin(), private.gate_assignments()
   from public, anon, authenticated, service_role;
 -- The worker (service_role) runs the allocation job.
 grant execute on function private.allocation_begin(), private.post_allocations(uuid, text, text),
@@ -1441,13 +1709,13 @@ revoke execute on function public.allocate_payment(text, uuid, text, uuid, uuid,
   public.release_hold_payment(text, uuid, uuid, text), public.reverse_allocation(text, uuid, uuid, uuid[], text),
   public.forward_payment(text, uuid, uuid, text, uuid, text), public.apply_credit_note(text, uuid, text),
   public.set_allocation_policy(text, uuid, uuid, uuid, text, text, date, text), public.payment_detail(uuid),
-  public.account_detail(uuid)
+  public.account_detail(uuid), public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer)
   from public, anon;
 grant execute on function public.allocate_payment(text, uuid, text, uuid, uuid, text),
   public.release_hold_payment(text, uuid, uuid, text), public.reverse_allocation(text, uuid, uuid, uuid[], text),
   public.forward_payment(text, uuid, uuid, text, uuid, text), public.apply_credit_note(text, uuid, text),
   public.set_allocation_policy(text, uuid, uuid, uuid, text, text, date, text), public.payment_detail(uuid),
-  public.account_detail(uuid)
+  public.account_detail(uuid), public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer)
   to authenticated;
 
 ------------------------------------------------------------------------------------------

@@ -4,15 +4,19 @@ import { AutoRefresh } from "@/components/auto-refresh";
 import { Badge, InfoNote, Section, Stats, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import {
+  APPLIED_ORDER,
   ENTRY_LABEL,
-  NOTIFICATION_LABEL,
   type PaymentDetail,
   REALLOCATE_TEXT,
   allocationRows,
   componentLabel,
   liveAllocations,
+  notificationText,
   paymentActions,
   paymentStatus,
+  positionFigures,
+  reverseEffect,
+  rowFileLabel,
 } from "@/lib/payments/allocation";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import { METHOD_LABEL, RULE_LABEL, formatRf, reviewReason } from "@/lib/payments/matching";
@@ -29,9 +33,10 @@ function frenchDateTime(iso: string): string {
 
 /**
  * M2b-4 « Paiement » (design §12.3): what was paid, how it was allocated per invoice and component (from the
- * ledger), what the client was told, and the actions on it for admins and ops managers: reverse an allocation,
- * allocate again, release a held payment on the judge's authorisation, forward to the client, use an overpayment
- * for another file of the debtor. Every action is a command checked in SQL against what this page showed.
+ * ledger), the notifications recorded for the client (and whether they were sent), and the actions on it for admins
+ * and ops managers: reverse an allocation, allocate again, release a held payment on the judge's authorisation,
+ * forward to the client, use an overpayment for another file of the debtor. Every action is a command checked in SQL
+ * against what this page showed.
  */
 export default async function PaymentPage({ params }: PageProps<"/backoffice/encaissements/paiements/[id]">) {
   const { id } = await params;
@@ -48,7 +53,9 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   }
   const p = d.payment;
   const cur = p.currency;
-  const status = paymentStatus(p.status);
+  const figures = positionFigures(d.position);
+  const forwarded = BigInt(figures.forwarded) > BigInt(0);
+  const status = paymentStatus(p.status, { forwarded });
   const reason = p.review_reason ? reviewReason(p.review_reason) : null;
   const waiting = (p.status === "matched" || p.status === "partially_allocated") && p.review_reason === null;
   const rows = allocationRows(d.entries);
@@ -82,7 +89,8 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
         items={[
           { label: "Reçu le", value: frenchDate(p.booking_date) },
           { label: "Montant", value: money(p.amount_minor, cur), testId: "payment-amount" },
-          { label: "Imputé", value: money(d.position.allocated_minor, cur), testId: "payment-allocated" },
+          { label: "Imputé", value: money(figures.allocated, cur), testId: "payment-allocated" },
+          ...(forwarded ? [{ label: "Reversé au client", value: money(figures.forwarded, cur), testId: "payment-forwarded" }] : []),
           { label: "Non imputé", value: left, testId: "payment-unallocated" },
         ]}
       />
@@ -153,7 +161,11 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
                       {r.line.due_date ? (
                         <span className="block text-xs text-zinc-600 dark:text-zinc-400">échéance {frenchDate(r.line.due_date)}</span>
                       ) : null}
-                      {live.size > 1 && r.file ? <span className="block text-xs">dossier {r.file}</span> : null}
+                      {rowFileLabel(r.file, d.file?.external_ref, live.size) ? (
+                        <span className="block text-xs" data-testid="allocation-row-file">
+                          dossier {rowFileLabel(r.file, d.file?.external_ref, live.size)}
+                        </span>
+                      ) : null}
                     </td>
                     <td className="py-1.5 pr-3">{componentLabel(r.line.component)}</td>
                     <td className="py-1.5 text-right tabular-nums">{money(r.minor.toString(), cur)}</td>
@@ -163,16 +175,14 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
             </table>
           </div>
         )}
-        {BigInt(d.position.unallocated_minor) > BigInt(0) && BigInt(d.position.allocated_minor) > BigInt(0) ? (
+        {p.review_reason === "overpayment" && BigInt(d.position.unallocated_minor) > BigInt(0) ? (
           <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200" data-testid="overpayment-note">
             Montant non imputé : {left}. Il reste sur le compte de fonds de tiers, n&apos;est jamais reversé au client et sera
             remboursé au payeur, ou imputé sur un autre dossier du débiteur à sa demande écrite.
           </p>
         ) : null}
-        <p className="mt-3 text-xs text-zinc-600 dark:text-zinc-400">
-          Ordre légal : factures désignées par le débiteur, puis factures échues de la plus ancienne à la plus récente (au
-          prorata à date égale), puis factures non échues ; dans chaque facture, intérêts avant principal (art. 1342-10 et
-          1343-1 C. civ.).
+        <p className="mt-3 text-xs text-zinc-600 dark:text-zinc-400" data-testid="applied-order">
+          {APPLIED_ORDER}
         </p>
       </Section>
 
@@ -181,13 +191,19 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
           <div className="flex flex-col gap-3">
             {[...live.entries()].map(([account, entries]) => {
               const total = entries.reduce((s, e) => s + BigInt(e.amount_minor ?? "0"), BigInt(0));
+              const fileRef = entries[0].external_ref ?? "";
               return (
                 <ReverseAllocation
                   key={account}
                   paymentId={p.id}
                   accountId={account}
-                  fileRef={entries[0].external_ref ?? ""}
-                  amount={money(total.toString(), cur)}
+                  fileRef={fileRef}
+                  effect={reverseEffect({
+                    amount: money(total.toString(), cur),
+                    fileRef,
+                    ownFile: account === p.account_id,
+                    othersRemain: live.size > 1,
+                  })}
                   entryIds={entries.map((e) => e.entry_id)}
                   idempotencyKey={randomUUID()}
                 />
@@ -239,6 +255,11 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
                   {e.external_ref ? ` · ${e.external_ref}` : ""} · au {frenchDate(e.effective_date)}
                   {e.reversed_by ? <span className="ml-2 text-xs text-zinc-600 dark:text-zinc-400">(annulée)</span> : null}
                   {e.reason ? <span className="block text-xs text-zinc-600 dark:text-zinc-400">{e.reason}</span> : null}
+                  {e.ops_note ? (
+                    <span className="block text-xs text-zinc-600 dark:text-zinc-400" data-testid="entry-ops-note">
+                      Motif interne : {e.ops_note}
+                    </span>
+                  ) : null}
                 </span>
                 <span className="tabular-nums">{money(e.amount_minor, cur)}</span>
               </li>
@@ -247,15 +268,13 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
         )}
       </Section>
 
-      <Section title="Client informé (art. R124-5 CPCE)" testId="payment-notifications">
+      <Section title="Information du client" testId="payment-notifications">
         {d.notifications.length === 0 ? (
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">Rien à signaler au client pour l&apos;instant.</p>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucune notification pour le client pour l&apos;instant.</p>
         ) : (
           <ul className="flex flex-col gap-1 text-sm">
             {d.notifications.map((n, i) => (
-              <li key={i}>
-                {NOTIFICATION_LABEL[n.kind] ?? n.kind} · {n.client_name} · {frenchDateTime(n.created_at)}
-              </li>
+              <li key={i}>{notificationText(n, frenchDateTime)}</li>
             ))}
           </ul>
         )}

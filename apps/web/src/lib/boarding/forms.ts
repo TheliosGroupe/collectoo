@@ -89,6 +89,8 @@ export type ErrorCode =
   | "not_same_debtor"
   | "not_forwardable"
   | "allocation_busy"
+  | "already_reversed"
+  | "file_held"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -142,6 +144,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   not_forwardable:
     "Ce paiement ne peut pas être reversé au client : seul un paiement sans imputation, sur un dossier rappelé ou antérieur à l'arrêté, peut l'être.",
   allocation_busy: "Une imputation est en cours pour ce servicer : réessayez dans un instant.",
+  already_reversed: "Cette imputation a déjà été annulée entre-temps : rechargez la page.",
+  file_held:
+    "Le dossier est bloqué (surendettement ou procédure collective) : ni reversement au client ni compensation tant que le blocage est en place. Rechargez la page.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 
