@@ -217,3 +217,7 @@ of the payments (1,000 full returns, by each payment's end-to-end id), imported 
 - Returns arrive a few a day in practice; the job is bounded (20,000 lines per run, continuation) and holds the
   allocation lock only while it posts. If volumes need it: reverse set-based (one `ledger_post_set` call for every
   reversal) instead of one `ledger_reverse` per entry.
+- The other scale runs on the branch merged with main (same VM) are unchanged: statement 50k imported in 19.8 s
+  (ingest 6.4 s), re-import 4.3 s; matching 50k imported + matched in 29.8 s (apply 11.6 s); receipts 5k in 56.8 s
+  (11.4 ms each). One earlier matching run took 475 s to ingest while the VM's disk was full (orphaned storage objects
+  from earlier runs); with space freed it ran as above.

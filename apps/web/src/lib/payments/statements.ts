@@ -75,15 +75,16 @@ const LINE_KIND: Record<string, string> = {
 type LineGroup = { direction?: "credit" | "debit"; kinds: string[] };
 
 /**
- * Filters of a statement's lines. « Encaissements » are exactly the lines booked as payments (credits a
- * debtor paid, an unsplit batch credit); everything else not held is « à classer », an unsplit debit
- * batch included: what the bank check counts as not booked.
+ * Filters of a statement's lines, by kind. « Encaissements » are exactly the lines booked as payments (credits a
+ * debtor paid, an unsplit batch credit); everything else not held is « Autres opérations », an unsplit debit batch
+ * included: what the import left out of the payments. Since M2b-6 these are classified on « Débits et retours » (a
+ * return or our refund booked, a fee explained, the rest to classify); each line's state says where it stands.
  */
 export const LINE_FILTERS: Record<string, { label: string; groups: LineGroup[] | null }> = {
   toutes: { label: "Toutes", groups: null },
   encaissements: { label: "Encaissements", groups: [{ direction: "credit", kinds: ["debtor_credit", "batch_unsplit"] }] },
-  "a-classer": {
-    label: "À classer",
+  autres: {
+    label: "Autres opérations",
     groups: [{ kinds: ["return", "refund_out", "other_debit", "psp_payout"] }, { direction: "debit", kinds: ["batch_unsplit"] }],
   },
   doublons: { label: "Doublons possibles", groups: [{ kinds: ["suspected_duplicate"] }] },
