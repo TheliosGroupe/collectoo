@@ -54,11 +54,15 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   }
   const p = d.payment;
   const cur = p.currency;
-  const { data: receiptRows } = await supabase
-    .from("receipt")
-    .select("id, number, version, kind, known_at, issued_at, pdf_sha256, account_id")
-    .eq("payment_id", p.id)
-    .order("version", { ascending: false });
+  const [{ data: receiptRows }, { data: receiptJobQueued }] = await Promise.all([
+    supabase
+      .from("receipt")
+      .select("id, number, version, kind, known_at, issued_at, pdf_sha256, account_id")
+      .eq("payment_id", p.id)
+      .order("version", { ascending: false }),
+    // whether a receipts job naming this payment is still to run (review #18: the job's outcome ends the wait)
+    supabase.rpc("receipt_job_pending", { p_payment_id: p.id }),
+  ]);
   const receipts = receiptVersions((receiptRows ?? []) as ReceiptVersion[]);
   const figures = positionFigures(d.position);
   const forwarded = BigInt(figures.forwarded) > BigInt(0);
@@ -72,16 +76,7 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   const docs = d.documents.map((x) => ({ id: x.id, label: `${x.kind} · classé le ${frenchDateTime(x.created_at)}` }));
   const lastAssign = [...d.matches].reverse().find((m) => m.action === "assign");
   const anyAction = Object.values(actions).some(Boolean);
-  const lastChangeAt = [p.matched_at, ...d.entries.map((e) => e.posted_at)]
-    .filter((x): x is string => x !== null)
-    .sort()
-    .at(-1) ?? null;
-  const receiptWaiting = receiptPending({
-    hasFile: p.account_id !== null,
-    waitingForAllocation: waiting,
-    receipts,
-    lastChangeAt,
-  });
+  const receiptWaiting = receiptPending({ waitingForAllocation: waiting, jobQueued: receiptJobQueued ?? null });
 
   return (
     <WidePage title={`Paiement de ${money(p.amount_minor, cur)}`} back={back}>

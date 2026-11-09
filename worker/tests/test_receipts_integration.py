@@ -25,6 +25,8 @@ from statement_helpers import bank_tenant
 from statement_helpers import drain as drain_payments
 
 from collectoo_worker.jobs import receipts as receipts_job
+from collectoo_worker.payments.matching import NAME_NOISE, name_words
+from collectoo_worker.runtime.storage import Storage
 from collectoo_worker.synth.reconciliation import line_ref
 
 pytestmark = pytest.mark.integration
@@ -174,8 +176,8 @@ def test_each_payment_on_a_file_gets_one_receipt_from_the_ledger_and_regenerates
         assert payload["payment"]["amount_minor"] == str(amount)
     assert r1["payload"]["totals"]["unallocated_minor"] == "0"
     assert r2["payload"]["totals"]["unallocated_minor"] == "8000"  # « Montant non imputé »
-    # founder #15: the payer is named only when he is a party to the file
-    assert r1["payload"]["payer"] == {"name": "VERDIER SAS", "third_party": False}
+    # founder #15: the payer is named only when he is a party to the file, by the party's own name
+    assert r1["payload"]["payer"] == {"name": "Verdier SAS", "third_party": False}
     assert r2["payload"]["payer"] == {"name": None, "third_party": True}
     assert "GENERALE" not in json.dumps(r2["payload"])
     assert r1["payload"]["debtor"] == {"name": "Verdier SAS"}
@@ -242,6 +244,181 @@ def test_a_reversal_issues_a_new_version_and_leaving_the_file_a_void_one() -> No
     )  # fmt: skip
     assert v4["payload"]["debtor"] == {"name": "Autre SAS"}
     assert _payload_lines(v4["payload"]) == [("W-1", "principal", 30_000)]
+
+
+def _hold_receipt_jobs(tenant: dict[str, Any], seconds: int) -> int:
+    """Receipt jobs of the servicer kept out of sight for `seconds` (a backlog, a retry backoff);
+    0 brings them back."""
+    with psycopg.connect(DB) as conn, conn.transaction():
+        return int(
+            one(
+                conn,
+                """select count(*) from pgmq.q_payments q
+                   cross join lateral pgmq.set_vt('payments', q.msg_id, %s::integer) v
+                   where q.message ->> 'type' = 'receipts'
+                     and q.message ->> 'organization_id' = %s""",
+                (seconds, str(tenant["servicer"])),
+            )
+        )
+
+
+def test_a_payment_moved_before_its_receipts_jobs_run_gets_a_void_version_first() -> None:
+    """Review #1: ops reverse, unassign and assign the payment to another file, and the allocation
+    there runs, all before the receipts jobs queued meanwhile (a backlog): the first file still
+    gets its void version, then the new file its update."""
+    tenant = bank_tenant()
+    a, _ = _files(tenant)
+    other = create_file(
+        tenant,
+        File(f"W-{uuid.uuid4().hex[:6]}", "b2b", "Autre SAS",
+             [Item("W-1", {"principal": 90_000}, date(2026, 8, 1))]),
+    )  # fmt: skip
+    store = storage()
+    p = statement(tenant, store, [credit(30_000, "REGLT", rf=a.rf)], "MV", DAY, receipts=True)[
+        line_ref("MV", 1)
+    ]
+    (v1,) = _receipts(p)
+    with psycopg.connect(DB) as conn:
+        entries = [
+            r[0]
+            for r in conn.execute(
+                "select id::text from public.ledger_entry where payment_id = %s", (p,)
+            ).fetchall()
+        ]
+    ops(tenant, "select public.reverse_allocation(%s, %s, %s, %s::uuid[], %s)",
+        str(uuid.uuid4()), p, a.id, entries, "mauvais dossier")  # fmt: skip
+    ops(tenant, "select public.unassign_payment(%s, %s, %s)", str(uuid.uuid4()), p,
+        "ne concerne pas ce dossier")  # fmt: skip
+    ops(tenant, "select public.assign_payment(%s, %s, %s, null, %s)", str(uuid.uuid4()), p,
+        json.dumps([{"account_id": other.id}]), "bon dossier")  # fmt: skip
+    assert _hold_receipt_jobs(tenant, 3600) == 2  # the reversal's and the unassignment's
+    drain_payments(store, receipts=True)  # the allocation on the new file first, its receipts job
+    assert state(p) == ("allocated", None)
+    assert _hold_receipt_jobs(tenant, 0) == 2
+    drain_payments(store, receipts=True)  # then the late jobs: nothing more
+    assert [(r["version"], r["kind"], r["account_id"]) for r in _receipts(p)] == [
+        (1, "original", a.id),
+        (2, "void", a.id),
+        (3, "update", other.id),
+    ]
+    *_, v2, v3 = _receipts(p)
+    assert v2["number"] == v3["number"] == v1["number"]
+    assert v2["payload"]["file"] == v1["payload"]["file"] and "allocation" not in v2["payload"]
+    assert _payload_lines(v3["payload"]) == [("W-1", "principal", 30_000)]
+
+
+class FlakyStorage:
+    """The real bucket, but one upload fails (the n-th) and every upload is recorded."""
+
+    def __init__(self, inner: Storage, fail_at: int | None) -> None:
+        self.inner, self.fail_at, self.uploads = inner, fail_at, 0
+        self.paths: list[str] = []
+
+    def download(self, bucket: str, path: str, dest: Path) -> Path:
+        return self.inner.download(bucket, path, dest)
+
+    def upload(
+        self, bucket: str, path: str, data: bytes, content_type: str = "application/octet-stream"
+    ) -> None:
+        self.uploads += 1
+        if self.uploads == self.fail_at:
+            raise RuntimeError("storage unavailable (test)")
+        self.inner.upload(bucket, path, data, content_type)
+        self.paths.append(path)
+
+    def remove(self, bucket: str, paths: list[str]) -> None:
+        self.inner.remove(bucket, paths)
+
+
+def _objects(paths: list[str]) -> int:
+    with psycopg.connect(DB) as conn:
+        return int(
+            one(
+                conn,
+                "select count(*) from storage.objects where bucket_id = 'documents' "
+                "and name = any(%s)",
+                (paths,),
+            )
+        )
+
+
+@pytest.mark.parametrize("fail", ["upload", "issue"])
+def test_a_failed_attempt_removes_the_pdfs_it_uploaded(
+    fail: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #11: the PDFs are uploaded before the transaction that records them commits; when the
+    attempt fails (an upload, or recording them), it removes what it uploaded: no PDF of a
+    receipt that does not exist stays in the bucket."""
+    tenant = bank_tenant()
+    a, _ = _files(tenant)
+    store = storage()
+    ids = statement(tenant, store, [credit(1_000, "R", rf=a.rf) for _ in range(3)], "FA", DAY)
+    flaky = FlakyStorage(store, 3 if fail == "upload" else None)
+    if fail == "issue":  # refused by receipt_issue's check, after every upload
+        monkeypatch.setattr(receipts_job, "TEMPLATE_VERSION", "NOT A VERSION")
+    message = {
+        "type": "receipts",
+        "organization_id": str(tenant["servicer"]),
+        "payment_ids": sorted(ids.values()),
+    }
+    with pytest.raises(Exception), psycopg.connect(DB) as conn, conn.transaction():  # noqa: B017
+        receipts_job.run_receipts(conn, flaky, message)
+    assert len(flaky.paths) == (2 if fail == "upload" else 3)
+    assert _objects(flaky.paths) == 0
+    assert all(_receipts(p) == [] for p in ids.values())
+
+
+def test_the_sweep_removes_receipt_pdfs_no_document_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review #11: what a killed attempt left (no document row) is removed by the daily sweep, under
+    the servicer's receipts lock; recorded receipts and other servicers' objects stay."""
+    tenant = bank_tenant()
+    a, _ = _files(tenant)
+    store = storage()
+    p = statement(tenant, store, [credit(1_000, "R", rf=a.rf)], "SW", DAY, receipts=True)[
+        line_ref("SW", 1)
+    ]
+    (kept,) = _receipts(p)
+    stranger = make_tenant()
+    orphans = [f"receipts/{tenant['servicer']}/2026/Q-2026-99999{n}-v1.pdf" for n in range(3)]
+    elsewhere = f"receipts/{stranger['servicer']}/2026/Q-2026-999999-v1.pdf"
+    for path in [*orphans, elsewhere]:
+        store.upload("documents", path, b"%PDF-1.4 orphan", "application/pdf")
+    monkeypatch.setattr(receipts_job, "SWEEP_AGE", "0 seconds")
+    monkeypatch.setattr(receipts_job, "SWEEP_LIMIT", 2)  # more than one batch: it queues the rest
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            "select pgmq.send('payments', %s)",
+            (Jsonb({"type": "receipts_sweep", "organization_id": str(tenant["servicer"])}),),
+        )
+    drain_payments(store)
+    assert _objects(orphans) == 0
+    assert _objects([kept["storage_path"], elsewhere]) == 2
+    store.remove("documents", [elsewhere])
+
+
+def test_the_receipt_name_words_are_the_matching_rules_words() -> None:
+    """The payer rule compares word sets built in SQL (private.name_word_set) with the matching
+    rules' list (payments.matching NAME_NOISE): both give the same words for the same name."""
+    names = [
+        "M. Jean-Pierre DUPONT",
+        "M OU MME LILAS JEAN-PIERRE ET MARIE",
+        "S.A.R.L. Les Jardins de l'Œuvre",
+        "SOCIETE GENERALE POUR M DURAND",
+        "MME VVE DUPONT JEAN",
+        "J P DUPONT",
+        "Dupont d'Argent",
+        "Élodie Bérénice Ñúñez",
+        "CŒUR & FILS SAS",
+        "SCI 2000",
+        "Straße",
+        "Le Roux De Sousa",
+        *sorted(NAME_NOISE),
+        *(f"{w} DURAND JEAN" for w in sorted(NAME_NOISE)),
+    ]
+    with psycopg.connect(DB) as conn:
+        for name in names:
+            sql = one(conn, "select private.name_word_set(%s)", (name,))
+            assert sorted(sql) == sorted(set(name_words(name))), name
 
 
 def test_the_backfill_issues_receipts_for_allocations_made_before_receipts() -> None:

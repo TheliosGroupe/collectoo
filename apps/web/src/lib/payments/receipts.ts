@@ -47,21 +47,14 @@ export function receiptFileName(r: Pick<ReceiptVersion, "number" | "version">): 
 }
 
 /**
- * Whether the page should wait for a receipt version the worker has not issued yet: a payment on a file without
- * one, an entry posted after the latest version was read, or a payment off its file whose receipt is not void yet.
- * A payment waiting for its allocation gets its receipt after it (the allocation queues it).
+ * Whether the page should wait for a receipt version: only while a receipts job naming the payment is queued, running
+ * or waiting for a retry (`receipt_job_pending`). The job's outcome decides, not the times of the latest entry and
+ * version: a job that found the receipt unchanged (an allocation reversed and made again with the same lines) issues
+ * nothing and ends the wait like one that issued a version (review #18). A payment waiting for its allocation gets its
+ * receipt after it (the allocation queues the job). Not told (`null`): no wait.
  */
-export function receiptPending(o: {
-  hasFile: boolean;
-  waitingForAllocation: boolean;
-  receipts: Pick<ReceiptVersion, "version" | "kind" | "known_at">[];
-  lastChangeAt: string | null;
-}): boolean {
-  if (o.waitingForAllocation) return false;
-  const latest = [...o.receipts].sort((a, b) => b.version - a.version)[0];
-  if (!o.hasFile) return latest !== undefined && latest.kind !== "void";
-  if (!latest) return true;
-  return o.lastChangeAt !== null && Date.parse(o.lastChangeAt) > Date.parse(latest.known_at);
+export function receiptPending(o: { waitingForAllocation: boolean; jobQueued: boolean | null }): boolean {
+  return !o.waitingForAllocation && o.jobQueued === true;
 }
 
 /** A row of `client_payment_feed`. */

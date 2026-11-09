@@ -1242,6 +1242,9 @@ isOneToOne: false
 "place_account_hold":
 { Args: { "p_account_id": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string,"p_legal_basis": string,"p_reason": string }; Returns: string
                            },
+"receipt_job_pending":
+{ Args: { "p_payment_id": string }; Returns: boolean
+                           },
 "register_bank_account":
 { Args: { "p_bic"?: string,"p_currency": string,"p_feed": string,"p_iban": string,"p_idempotency_key": string,"p_label": string,"p_opened_on"?: string,"p_organization_id": string }; Returns: string
                            },

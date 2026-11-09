@@ -2,7 +2,7 @@
 -- §6, §10, §13; ADR-0013 (M2b-5 addendum). The worker's receipts job is played here: private.receipt_begin, then
 -- private.receipt_prepare, then the rendered PDFs' hashes written into pg_temp._receipt_pdf, then private.receipt_issue.
 begin;
-select plan(79);
+select plan(130);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -199,7 +199,7 @@ select is(private.name_word_set('M. Jean-Pierre DUPONT'), array['DUPONT', 'JEAN'
 select is(private.name_word_set('S.A.R.L. Les Jardins de l''Œuvre'), array['DE', 'JARDINS', 'OEUVRE'],
   'legal forms spelt out, joining words and elisions dropped, ligatures written out');
 select is(private.name_word_set('M OU MME LILAS JEAN-PIERRE'), private.name_word_set('Jean-Pierre Lilas'),
-  'the same person written by a bank');
+  'the same words (the payer rule still reads the joint account as a third party: review #14)');
 select is(private.name_word_set('SAS'), '{}'::text[], 'a name of noise words only has no words');
 
 -- Queueing (design §10: the job runs after any change of an identified payment) ---------------------
@@ -229,8 +229,8 @@ select is((select array[payload #>> '{issuer,name}', payload #>> '{creditor,name
   'issuer, acting for the client, the file and its debtor');
 select is((select recipient_party_id from _p where n = '01'), 'b1000000-0000-0000-0000-000000000001'::uuid,
   'the receipt is for the file''s debtor (R124-6)');
-select is((select payload -> 'payer' from _p where n = '01'), '{"name": "DURAND S.A.", "third_party": false}'::jsonb,
-  'a payer who is a party is named as the bank gives him');
+select is((select payload -> 'payer' from _p where n = '01'), '{"name": "Durand SA", "third_party": false}'::jsonb,
+  'a payer who is a party is named by the party''s own name, not the bank''s string');
 select is((select payload -> 'payer' from _p where n = '02'), '{"name": null, "third_party": true}'::jsonb,
   'a joint account naming someone else too is a third party: no name');
 select is((select payload -> 'payer' from _p where n = '03'), '{"name": null, "third_party": true}'::jsonb,
@@ -241,9 +241,9 @@ select is((select payload -> 'payment' from _p where n = '01'),
   'the payment as the bank reported it, the amount as text');
 select is((select payload -> 'allocation' from _p where n = '01'),
   '[{"file_reference": "D-01", "item_ref": "F-011", "item_kind": "invoice", "due_date": "2026-08-01",
-     "component": "principal", "component_label": "Principal", "amount_minor": "50000"},
+     "component": "principal", "amount_minor": "50000"},
     {"file_reference": "D-01", "item_ref": "F-012", "item_kind": "invoice", "due_date": "2026-09-01",
-     "component": "principal", "component_label": "Principal", "amount_minor": "10000"}]'::jsonb,
+     "component": "principal", "amount_minor": "10000"}]'::jsonb,
   'the allocation per item and component, oldest due first');
 select is((select payload -> 'totals' from _p where n = '01'),
   '{"allocated_minor": "60000", "forwarded_minor": "0", "returned_minor": "0", "unallocated_minor": "0"}'::jsonb,
@@ -262,7 +262,7 @@ select ok((select bool_and(not (payload ? 'remaining_minor') and payload::text !
            from _p), 'no remaining balance before M3 (founder #14), no hold named');
 select is((select payload ->> 'first_letter' from _p where n = '01'), null, 'no first letter before M4 (R124-4)');
 select is((select encode(sha256(convert_to(payload::text, 'UTF8')), 'hex') from _p where n = '01'),
-  'a0ea25cae5988a9290104dfd9bd1eb3a787ac7bf65d42dfff0c4719a13d529cb',
+  'f442e0019ef2d17f59d87a88ac4e30820b5e1ab2f306c0150f61a85da6885603',
   'golden payload hash (canonical jsonb), pinned to the payload schema 1');
 
 -- Issuing (the job played) --------------------------------------------------------------------------
@@ -436,6 +436,177 @@ reset role;
 select is((select count(*)::int from public.client_notification
            where client_organization_id = '00000000-0000-0000-0000-0000000000a2' and delivered_at is not null), 0,
   'staff reading is no delivery');
+
+-- Review fixes (M2b-5 review) ---------------------------------------------------------------------------
+-- #0/#14/#17 (founder #15): the payer is named only when he is certainly a party to the file.
+select is(private.payer_is_party(x.payer, x.kind, x.display_name, x.first_name, x.last_name), x.expected, x.why)
+from (values
+  ('DURAND S.A.', 'legal_entity', 'Durand SA', null, null, true, 'a company paying under its name, legal form spelt out'),
+  ('DURAND', 'legal_entity', 'Durand SA', null, null, true, 'a company under its bare name'),
+  ('M OU MME DURAND', 'legal_entity', 'Durand SA', null, null, false, 'a household''s joint account is not the company'),
+  ('J DURAND', 'legal_entity', 'Durand SA', null, null, false, 'an initial is a person, not the company'),
+  ('MME DURAND', 'legal_entity', 'Durand SA', null, null, false, 'a title is a person, not the company'),
+  ('M. DURAND', 'legal_entity', 'Durand SA', null, null, false, 'M. is a title'),
+  ('EPOUX DURAND', 'legal_entity', 'Durand SA', null, null, false, 'a married couple is not the company'),
+  ('RIVIERE ET FILS', 'legal_entity', 'Rivière et Fils', null, null, true, 'a joining word of the company''s own name'),
+  ('RIVIERE & FILS', 'legal_entity', 'Rivière et Fils', null, null, true, '« & » reads ET'),
+  ('LES JARDINS DE L OEUVRE', 'legal_entity', 'S.A.R.L. Les Jardins de l''Œuvre', null, null, true,
+   'an elision and LES of the company''s own name'),
+  ('SAS', 'legal_entity', 'SAS', null, null, false, 'a name of noise words only names nobody'),
+  ('MME DUPONT', 'natural_person', 'J. Dupont', null, null, false, 'a surname alone never names a person'),
+  ('J DUPONT', 'natural_person', 'J. Dupont', null, null, false, 'nor an initial-only name'),
+  ('M DUPONT JEAN', 'natural_person', 'Dupont Jean', 'Jean', null, true, 'first name and surname, a title'),
+  ('DUPONT JEAN', 'natural_person', 'Dupont Jean', 'Jean', null, true, 'first name and surname'),
+  ('MME VVE DUPONT JEAN', 'natural_person', 'Dupont Jean', 'Jean', null, false, 'his widow is someone else'),
+  ('M ET MME DUPONT JEAN', 'natural_person', 'Dupont Jean', 'Jean', null, false, 'a joint account: someone else too'),
+  ('M OU MME LILAS JEAN-PIERRE', 'natural_person', 'Jean-Pierre Lilas', null, null, false,
+   'a joint account, even with the same words'),
+  ('M MME DUPONT JEAN', 'natural_person', 'Dupont Jean', 'Jean', null, false, 'two titles: two people'),
+  ('DUPONT JEAN P', 'natural_person', 'Dupont Jean', 'Jean', null, false, 'an initial the party''s name does not have'),
+  ('M DUPONT JEAN', 'natural_person', 'J. Dupont', 'Jean', 'Dupont', true, 'first and last name when they are known'),
+  (null, 'legal_entity', 'Durand SA', null, null, false, 'no name: a third party')
+) x (payer, kind, display_name, first_name, last_name, expected, why);
+-- the payload names the party by its own name, never by the bank's string
+insert into public.party (id, organization_id, client_organization_id, kind, display_name, first_name)
+values ('b1000000-0000-0000-0000-0000000000f4', '00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a1',
+        'natural_person', 'Dupont Jean', 'Jean');
+insert into public.account_party (account_id, party_id, role, capacity)
+values (pg_temp.f('04'), 'b1000000-0000-0000-0000-0000000000f4', 'co_borrower', 'consumer');
+select pg_temp.payment('07', 100, 'M OU MME DURAND', 6);
+select pg_temp.payment('08', 100, 'MME VVE DUPONT JEAN', 6);
+select pg_temp.payment('09', 100, 'M DUPONT JEAN', 6);
+select pg_temp.match('07', '01');
+select pg_temp.match('08', '04');
+select pg_temp.match('09', '04');
+select results_eq($$select n, b.payload -> 'payer' from unnest(array['07', '08', '09']) n
+                    cross join lateral private.receipt_payload(pg_temp.pay(n)) b order by n$$,
+  $$values ('07', '{"name": null, "third_party": true}'::jsonb), ('08', '{"name": null, "third_party": true}'::jsonb),
+           ('09', '{"name": "Dupont Jean", "third_party": false}'::jsonb)$$,
+  'a household paying for a company, a widow: third parties; the co-borrower himself: named by his own name');
+
+-- #3/#5/#9: the allocation lines are in a total order (two items of one file with the same reference and due date)
+select pg_temp.file('05', '20000000-0000-0000-0000-0000000000a1', 'Égalité SA');
+insert into public.claim_item (id, account_id, kind, ref, due_date, original_minor) values
+  (pg_temp.it('05', '1'), pg_temp.f('05'), 'invoice', 'X-1', '2026-08-01', 50000),
+  (pg_temp.it('05', '2'), pg_temp.f('05'), 'instalment', 'X-1', '2026-08-01', 50000);
+select entry_id from private.ledger_post('00000000-0000-0000-0000-0000000000aa', 'adjustment', '2026-09-30', 'rcpt-owe-tie',
+  jsonb_build_array(
+    jsonb_build_object('book', 'debtor_receivable', 'amount_minor', 50000, 'currency', 'EUR',
+                       'claim_item_id', pg_temp.it('05', '1'), 'component', 'principal'),
+    jsonb_build_object('book', 'debtor_receivable', 'amount_minor', 50000, 'currency', 'EUR',
+                       'claim_item_id', pg_temp.it('05', '2'), 'component', 'principal'),
+    jsonb_build_object('book', 'owner_claim', 'amount_minor', -100000, 'currency', 'EUR', 'component', 'principal')),
+  jsonb_build_object('account_id', pg_temp.f('05'), 'reason', 'ouverture (test)'));
+select pg_temp.payment('10', 60000, 'EGALITE', 7);
+select pg_temp.match('10', '05');
+select pg_temp.allocate('10', '05', '[["1", 30000], ["2", 30000]]');
+set local enable_hashagg = on;
+create temp table _tie1 as select payload from private.receipt_payload(pg_temp.pay('10'));
+set local enable_hashagg = off;
+set local enable_nestloop = off;
+create temp table _tie2 as select payload from private.receipt_payload(pg_temp.pay('10'));
+reset enable_hashagg;
+reset enable_nestloop;
+select is((select jsonb_path_query_array(payload, '$.allocation[*].item_kind') from _tie1),
+  '["instalment", "invoice"]'::jsonb, 'tied lines: item kind, then item, decide');
+select is((select encode(sha256(convert_to(payload::text, 'UTF8')), 'hex') from _tie2),
+  (select encode(sha256(convert_to(payload::text, 'UTF8')), 'hex') from _tie1),
+  'the payload hash does not depend on the plan');
+select ok((select bool_and(not (l ? 'component_label')) from _tie1, jsonb_array_elements(payload -> 'allocation') l),
+  'no back-office component label in the payload (#2: the template words each component)');
+
+-- #1/#7/#12/#16: a payment moved to another file before its receipts job ran gets a void version on its first file
+select pg_temp.payment('06', 2500, 'INCONNU', 5);
+select pg_temp.match('06', '03', 'hold_blocks_allocation');      -- held on D-03 (P1bis)
+select is(pg_temp.receipts('06'), 1, 'a held payment: its receipt on D-03');
+select pg_temp.match('06', '04', 'nothing_due');                 -- moved to D-04 (P1) before any job ran
+insert into public.document (id, organization_id, client_organization_id, account_id, kind, storage_path, sha256, mime_type)
+values ('d1000000-0000-0000-0000-0000000000f6', '00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a1',
+        pg_temp.f('04'), 'receipt', 'receipts/test/moved.pdf', repeat('c', 64), 'application/pdf');
+select throws_ok(format($$insert into public.receipt (organization_id, client_organization_id, portfolio_id, account_id,
+  payment_id, number, version, kind, payload, payload_sha256, template_version, renderer_version, known_at, document_id,
+  pdf_sha256) values ('00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a1',
+  '20000000-0000-0000-0000-0000000000a1', pg_temp.f('04'), pg_temp.pay('06'), %L, 2, 'update', '{}',
+  encode(sha256(convert_to('{}'::jsonb::text, 'UTF8')), 'hex'), 'x', 'x', now(), 'd1000000-0000-0000-0000-0000000000f6',
+  repeat('c', 64))$$, (select number from public.receipt where payment_id = pg_temp.pay('06'))),
+  '23514', null, 'a version on another file never directly follows one in force (a void comes first)');
+select is(pg_temp.receipts('06'), 1, 'the job finds it on another file: one version');
+select results_eq($$select version, kind, account_id from public.receipt where payment_id = pg_temp.pay('06')
+                    order by version$$,
+  $$values (1, 'original'::text, pg_temp.f('03')), (2, 'void'::text, pg_temp.f('03'))$$,
+  'first a void version about the file it left');
+select is(pg_temp.queued('06'), 3, 'and the payment queued again for its new file');
+select is(pg_temp.receipts('06'), 1, 'the next run issues the new file''s version');
+select results_eq($$select version, kind, account_id, portfolio_id from public.receipt
+                    where payment_id = pg_temp.pay('06') and version = 3$$,
+  $$values (3, 'update'::text, pg_temp.f('04'), '20000000-0000-0000-0000-0000000000a1'::uuid)$$,
+  'version 3 on the new file');
+select is(pg_temp.receipts('06'), 0, 'then nothing more');
+
+-- #8/#13: the feed links the receipt of the row's own file, one the reader can read
+set local role authenticated;
+select pg_temp.as_user('03', 'aal1');
+select is((select array_agg(receipt_version || ' ' || receipt_kind order by receipt_number)
+           from public.client_payment_feed('00000000-0000-0000-0000-0000000000a1') where file_reference = 'D-03'),
+  array['1 original', '2 void'], 'a row about D-03 links D-03''s receipt (void once the payment left), not D-04''s');
+select pg_temp.as_user('06', 'aal1');
+create temp table _feed06 as select * from public.client_payment_feed('00000000-0000-0000-0000-0000000000a1');
+select is((select array_agg(receipt_version || ' ' || receipt_kind order by receipt_number) from _feed06),
+  array['1 original', '2 void'], 'a user limited to P1bis is never shown a P1 receipt');
+select ok((select bool_and(exists (select 1 from public.receipt r where r.id = f.receipt_id)) from _feed06 f
+           where f.receipt_id is not null), 'every receipt the feed links is one the reader can read');
+-- #13: receipt documents are read like their receipt
+select is((select array_agg(distinct account_id) from public.document where kind = 'receipt'), array[pg_temp.f('03')],
+  'a client user limited to P1bis reads the receipt documents of P1bis only');
+select pg_temp.as_user('02');
+select is((select array_agg(distinct account_id) from public.document where kind = 'receipt'), array[pg_temp.f('03')],
+  'a collector reads the receipt documents of his portfolios only');
+select is((select count(*)::int from public.document where kind <> 'receipt'
+           and client_organization_id = '00000000-0000-0000-0000-0000000000a1'), 1, 'other documents as before');
+select pg_temp.as_user('01');
+select is((select count(*)::int from public.document where kind = 'receipt'),
+  (select count(*)::int from public.receipt), 'ops read the document of every receipt they read');
+select pg_temp.as_user('03', 'aal1');
+select is((select count(*)::int from public.document d where d.kind = 'receipt'
+           and d.client_organization_id <> '00000000-0000-0000-0000-0000000000a1'), 0,
+  'a client reads no other client''s receipt documents');
+
+-- #18: the payment page waits only while a receipts job naming the payment is queued
+select pg_temp.as_user('01');
+select is(public.receipt_job_pending(pg_temp.pay('06')), true, 'a queued job: the page waits');
+select pg_temp.as_user('02');
+select is(public.receipt_job_pending(pg_temp.pay('06')), null, 'collectors are not told');
+select pg_temp.as_user('03', 'aal1');
+select is(public.receipt_job_pending(pg_temp.pay('06')), null, 'nor clients');
+select pg_temp.as_user('05');
+select is(public.receipt_job_pending(pg_temp.pay('06')), null, 'nor another servicer');
+reset role;
+select count(pgmq.delete('payments', msg_id)) from pgmq.q_payments
+where message ->> 'type' = 'receipts' and message -> 'payment_ids' ? pg_temp.pay('06')::text;
+set local role authenticated;
+select pg_temp.as_user('01');
+select is(public.receipt_job_pending(pg_temp.pay('06')), false,
+  'no job left: the page shows what was issued, even if nothing new was');
+reset role;
+
+-- #11/#15/#19: receipt PDFs no document names are swept (one servicer, older than the safe age)
+insert into storage.objects (bucket_id, name, created_at, updated_at) values
+  ('documents', 'receipts/00000000-0000-0000-0000-0000000000aa/2026/Q-2026-999998-v1.pdf', now() - interval '2 days',
+   now() - interval '2 days'),
+  ('documents', 'receipts/00000000-0000-0000-0000-0000000000aa/2026/Q-2026-999999-v1.pdf', now(), now()),
+  ('documents', 'receipts/00000000-0000-0000-0000-0000000000bb/2026/Q-2026-999997-v1.pdf', now() - interval '2 days',
+   now() - interval '2 days'),
+  ('documents', (select storage_path from public.document d join public.receipt r on r.document_id = d.id
+                 where r.payment_id = pg_temp.pay('02')), now() - interval '2 days', now() - interval '2 days');
+select is(array(select private.receipt_orphan_objects('00000000-0000-0000-0000-0000000000aa', interval '1 hour', 100)),
+  array['receipts/00000000-0000-0000-0000-0000000000aa/2026/Q-2026-999998-v1.pdf'],
+  'an old receipt object of the servicer that no document names: swept; a recent one, a recorded one, another servicer''s: kept');
+select ok(has_function_privilege('service_role', 'private.receipt_orphan_objects(uuid, interval, integer)', 'execute')
+          and not has_function_privilege('authenticated', 'private.receipt_orphan_objects(uuid, interval, integer)', 'execute')
+          and not has_function_privilege('authenticated', 'private.queue_receipt_sweep()', 'execute'),
+  'only the worker sweeps');
+select is((select schedule from cron.job where jobname = 'receipts-sweep'), '23 2 * * *', 'the sweep is queued daily');
+select is(private.queue_receipt_sweep() >= 1, true, 'one sweep job per servicer');
 
 select * from finish();
 rollback;

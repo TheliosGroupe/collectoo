@@ -127,7 +127,7 @@ test("receipts on the payment page; the client reads its payment feed", async ({
   expect(createHash("sha256").update(bytes).digest("hex")).toBe(stored!.pdf_sha256);
   const payload = stored!.payload as { totals: { unallocated_minor: string }; payer: { name: string | null } };
   expect(payload.totals.unallocated_minor).toBe("20000");
-  expect(payload.payer.name).toBe("DIALLO"); // a party to the file: named (founder #15)
+  expect(payload.payer.name).toBe("Diallo"); // a party to the file: named, by the party's own name (founder #15)
   await reviewShot(page, testInfo, "m2-payment-receipt");
 
   // Rivière: a third party paid (never named); reversing the allocation issues version 2
@@ -144,6 +144,7 @@ test("receipts on the payment page; the client reads its payment feed", async ({
   await expect(page.getByTestId("payment-reason")).toHaveText("Imputation annulée");
   await expect(page.getByTestId("receipt-version")).toHaveCount(2, { timeout: 60_000 });
   await expect(page.getByTestId("receipt-version").first()).toContainText("Version 2 – remplace la version 1");
+  await expect(page.getByTestId("receipt-pending")).toHaveCount(0); // the job ran: nothing more to wait for
   await expect(page.getByTestId("receipt-version").nth(1)).not.toContainText("En vigueur");
   await reviewShot(page, testInfo, "m2-payment-receipt-versions");
 

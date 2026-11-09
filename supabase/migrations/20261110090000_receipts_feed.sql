@@ -16,18 +16,61 @@
 --   * `client_payment_feed`: what the client is told (client_notification: allocated, forwarded, reversed, held), the
 --     amounts read from the entries' postings, the receipt of each payment; a client member reading it marks the rows
 --     delivered (portal delivery);
---   * read access: receipts and their PDF by money staff and whoever reads the portfolio (clients included, design §6;
---     collectors their portfolios, founder #18).
--- No remaining balance on the receipt until M3 computes interest (founder #14); the payer is named only when he is a
--- party to the file, otherwise « versement d'un tiers » (founder #15, GDPR art. 5(1)(c)); no legal mention the law
--- does not require (OQ-22 open: the content is the design's conservative list).
+--   * read access: receipts, their document row and their PDF by money staff and whoever reads the portfolio (clients
+--     included, design §6; collectors their portfolios, founder #18);
+--   * `receipt_job_pending`: whether the payment page should wait for a version (a receipts job naming it is queued);
+--   * a daily sweep of receipt PDFs no document names (an attempt that failed after its uploads).
+-- No remaining balance on the receipt until M3 computes interest (founder #14); the payer is named, by the party's own
+-- name, only when he is certainly a party to the file, otherwise « versement d'un tiers » (founder #15, GDPR art.
+-- 5(1)(c)); no legal mention the law does not require (OQ-22 open: the content is the design's conservative list).
+-- Review fixes (before the first deploy, edited in place): the payer rule, a void version when a payment was moved
+-- before its job ran, a total order of the allocation lines, the feed's receipt per row and readable, receipt
+-- documents scoped like receipts, the pending state and the sweep.
 
 ------------------------------------------------------------------------------------------
--- The payer's name, compared with the file's parties (founder #15): the words of a name, upper case, accents and
--- ligatures written out, titles, legal forms and joining words dropped (the matching rules' list, payments.matching
--- NAME_NOISE), initials dropped. The payer is a party only when his words are exactly a party's words: a joint
--- account (« M OU MME DUPONT JEAN ET MARIE ») or an initial is never enough, so a third party's name is never printed.
+-- The payer's name, compared with the file's parties (founder #15). The payer is named only when he is certainly a
+-- party (review M2b-5 #0/#14/#17), and then by the party's own name, never by the bank's string: a third party's name
+-- never enters the payload.
 ------------------------------------------------------------------------------------------
+
+-- The tokens of a name as a bank or a tape writes it, in order: upper case, accents and ligatures written out, « & »
+-- read as ET, split on anything but letters and digits (titles, joining words and initials kept).
+create or replace function private.name_tokens(p_name text)
+returns text[]
+language sql
+immutable
+parallel safe
+set search_path = ''
+as $$
+  select coalesce(array_agg(t.w order by t.n), '{}')
+  from regexp_split_to_table(
+         upper(translate(
+           replace(replace(replace(replace(replace(replace(replace(coalesce(p_name, ''),
+             '&', ' ET '), 'Œ', 'OE'), 'œ', 'oe'), 'Æ', 'AE'), 'æ', 'ae'), 'ß', 'ss'), 'ẞ', 'SS'),
+           'ÀÁÂÃÄÅàáâãäåÇçÈÉÊËèéêëÌÍÎÏìíîïÑñÒÓÔÕÖØòóôõöøÙÚÛÜùúûüÝýÿŸ',
+           'AAAAAAaaaaaaCcEEEEeeeeIIIIiiiiNnOOOOOOooooooUUUUuuuuYyyY')),
+         '[^A-Z0-9]+') with ordinality t (w, n)
+  where t.w <> '';
+$$;
+
+-- The words of a name (its tokens): titles, legal forms and joining words dropped (the matching rules' list,
+-- payments.matching NAME_NOISE), initials dropped; a set, sorted.
+create or replace function private.name_words(p_tokens text[])
+returns text[]
+language sql
+immutable
+parallel safe
+set search_path = ''
+as $$
+  select coalesce(array_agg(distinct w order by w), '{}')
+  from unnest(p_tokens) w
+  where length(w) > 1
+    and w <> all (array['MR', 'MME', 'MLLE', 'MM', 'MMES', 'MRS', 'MONSIEUR', 'MADAME', 'MADEMOISELLE',
+                        'OU', 'ET', 'LES', 'CHEZ',
+                        'SAS', 'SASU', 'SARL', 'EURL', 'SA', 'SCI', 'SNC', 'SCP', 'SELARL', 'SELAS', 'EI',
+                        'EIRL', 'STE', 'SOCIETE', 'ETS', 'ETABLISSEMENTS', 'CIE', 'GROUPE',
+                        'EPOUX', 'EPOUSE', 'VEUVE', 'VVE']);
+$$;
 
 create or replace function private.name_word_set(p_name text)
 returns text[]
@@ -36,20 +79,77 @@ immutable
 parallel safe
 set search_path = ''
 as $$
-  select coalesce(array_agg(distinct w order by w), '{}')
-  from regexp_split_to_table(
-         upper(translate(
-           replace(replace(replace(replace(replace(replace(coalesce(p_name, ''),
-             'Œ', 'OE'), 'œ', 'oe'), 'Æ', 'AE'), 'æ', 'ae'), 'ß', 'ss'), 'ẞ', 'SS'),
-           'ÀÁÂÃÄÅàáâãäåÇçÈÉÊËèéêëÌÍÎÏìíîïÑñÒÓÔÕÖØòóôõöøÙÚÛÜùúûüÝýÿŸ',
-           'AAAAAAaaaaaaCcEEEEeeeeIIIIiiiiNnOOOOOOooooooUUUUuuuuYyyY')),
-         '[^A-Z0-9]+') w
-  where length(w) > 1
-    and w <> all (array['MR', 'MME', 'MLLE', 'MM', 'MMES', 'MRS', 'MONSIEUR', 'MADAME', 'MADEMOISELLE',
-                        'OU', 'ET', 'LES', 'CHEZ',
-                        'SAS', 'SASU', 'SARL', 'EURL', 'SA', 'SCI', 'SNC', 'SCP', 'SELARL', 'SELAS', 'EI',
-                        'EIRL', 'STE', 'SOCIETE', 'ETS', 'ETABLISSEMENTS', 'CIE', 'GROUPE',
-                        'EPOUX', 'EPOUSE', 'VEUVE', 'VVE']);
+  select private.name_words(private.name_tokens(p_name));
+$$;
+
+-- Is the payer certainly this party? Only when the bank's name says nothing the party's own name does not:
+--   * the same words (titles, legal forms, joining words and initials aside);
+--   * no joint or marital word the party's name does not hold (OU, ET, EPOUX, EPOUSE, VEUVE, VVE, MM, MMES, LES, CHEZ:
+--     a joint account, a household, someone else's widow), and at most one title (« M MME »: two people);
+--   * no initial the party's name does not hold (« J DURAND »; letters spelling a legal form, « S.A.R.L. », are not
+--     initials; M is a title);
+--   * a company: no title the company's name does not hold (« MME DURAND » is a person, not « Durand SA »);
+--   * a person: at least two words, first name and surname, compared with first and last name when the last name is
+--     known (never a surname alone, never an initial-only name such as « J. Dupont »).
+-- Called per party of each receipt's file: the word sets are compared first (most payers stop there).
+create or replace function private.payer_is_party(p_payer text, p_kind text, p_display_name text, p_first_name text,
+                                                  p_last_name text)
+returns boolean
+language plpgsql
+immutable
+parallel safe
+set search_path = ''
+as $$
+declare
+  v_titles constant text[] := array['M', 'MR', 'MME', 'MLLE', 'MRS', 'MONSIEUR', 'MADAME', 'MADEMOISELLE'];
+  v_joint constant text[] := array['OU', 'ET', 'EPOUX', 'EPOUSE', 'VEUVE', 'VVE', 'MM', 'MMES', 'LES', 'CHEZ'];
+  v_forms constant text[] := array['SAS', 'SASU', 'SARL', 'EURL', 'SA', 'SCI', 'SNC', 'SCP', 'SELARL', 'SELAS', 'EI',
+                                   'EIRL'];
+  v_pay text[] := private.name_tokens(p_payer);
+  v_own text[];
+  v_words text[];
+  v_run text[] := '{}';
+  v_titled integer := 0;
+  t text;
+  i text;
+begin
+  if cardinality(v_pay) = 0 then
+    return false;
+  end if;
+  v_own := private.name_tokens(case when p_kind = 'natural_person' and p_last_name is not null
+                                    then concat_ws(' ', p_first_name, p_last_name) else p_display_name end);
+  v_words := private.name_words(v_own);
+  if cardinality(v_words) < (case when p_kind = 'natural_person' then 2 else 1 end)
+     or private.name_words(v_pay) <> v_words then
+    return false;
+  end if;
+  -- the payer's tokens in order, a sentinel last
+  foreach t in array v_pay || array[''] loop
+    if t = any (v_titles) then
+      v_titled := v_titled + 1;
+      if v_titled > 1 or (p_kind <> 'natural_person' and t <> all (v_own)) then
+        return false;    -- two people, or a person rather than the company
+      end if;
+    end if;
+    if t = any (v_joint) and t <> all (v_own) then
+      return false;      -- a joint account, a household, a widow…
+    end if;
+    if t ~ '^[A-Z]$' then
+      v_run := v_run || t;
+      continue;
+    end if;
+    -- the end of a run of single letters: a legal form spelt out (S.A.R.L.), or initials (M is a title)
+    if cardinality(v_run) > 0 and array_to_string(v_run, '') <> all (v_forms) then
+      foreach i in array v_run loop
+        if i <> 'M' and i <> all (v_own) then
+          return false;  -- an initial the party's name does not have
+        end if;
+      end loop;
+    end if;
+    v_run := '{}';
+  end loop;
+  return true;
+end;
 $$;
 
 ------------------------------------------------------------------------------------------
@@ -117,6 +217,8 @@ begin
      or (n.version > 1 and (prev.id is null or prev.number <> n.number))
      or (n.kind <> 'void' and p.account_id is distinct from n.account_id)
      or (n.kind = 'void' and prev.account_id is distinct from n.account_id)
+     -- a version in force about another file is voided first (review #7): the first file's client keeps a void one
+     or (n.kind = 'update' and prev.kind <> 'void' and prev.account_id is distinct from n.account_id)
      or d.organization_id is distinct from n.organization_id
      or d.client_organization_id is distinct from n.client_organization_id
      or d.account_id is distinct from n.account_id
@@ -144,11 +246,15 @@ alter table public.receipt enable always trigger receipt_append_only;
 ------------------------------------------------------------------------------------------
 
 -- The receipt of a payment on its file: its recipient (the file's borrower: lowest name, then id) and its payload.
+-- Keyed lookups whatever the statistics (hash and merge joins off): on a fresh database the totals scanned every
+-- posting, ~3 ms a receipt.
 create or replace function private.receipt_payload(p_payment_id uuid)
 returns table (recipient_party_id uuid, payload jsonb)
 language sql
 stable
 set search_path = ''
+set enable_hashjoin = off
+set enable_mergejoin = off
 as $$
   select d.party_id,
          jsonb_build_object(
@@ -158,8 +264,8 @@ as $$
            'creditor', jsonb_build_object('name', c.legal_name),
            'file', jsonb_build_object('reference', a.external_ref),
            'debtor', jsonb_build_object('name', d.name),
-           -- founder #15: the bank's name only if the payer is a party to the file
-           'payer', jsonb_build_object('name', case when pp.party then p.payer_name end, 'third_party', not pp.party),
+           -- founder #15: named only if the payer is certainly a party to the file, by the party's own name
+           'payer', jsonb_build_object('name', pp.name, 'third_party', pp.name is null),
            'payment', jsonb_build_object('amount_minor', p.amount_minor::text, 'currency', p.currency,
                                          'exponent', cur.minor_exponent, 'method', p.method,
                                          'booking_date', p.booking_date, 'value_date', p.value_date,
@@ -182,13 +288,12 @@ as $$
     from public.account_party ap join public.party pa on pa.id = ap.party_id
     where ap.account_id = a.id and ap.role = 'borrower') d
   cross join lateral (
-    select coalesce(bool_or(private.name_word_set(pa.display_name) = w.words
-                            or private.name_word_set(concat_ws(' ', pa.first_name, pa.last_name)) = w.words), false)
-           as party
-    from (select private.name_word_set(p.payer_name) as words) w
-    join public.account_party ap on ap.account_id = a.id
+    select (array_agg(pa.display_name order by pa.display_name, pa.id)
+              filter (where private.payer_is_party(p.payer_name, pa.kind, pa.display_name, pa.first_name,
+                                                   pa.last_name)))[1] as name
+    from public.account_party ap
     join public.party pa on pa.id = ap.party_id
-    where cardinality(w.words) > 0) pp
+    where ap.account_id = a.id and p.payer_name is not null) pp
   -- what the payment's entries moved out of 4710 (net of reversals): allocated, forwarded, returned (M2b-6)
   cross join lateral (
     select coalesce(sum(lp.amount_minor) filter (where x.k = 'allocation'), 0)::bigint as allocated,
@@ -200,12 +305,14 @@ as $$
     join public.ledger_posting lp on lp.entry_id = x.id
     join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment') t
   -- the allocation per item and component, from the postings of the live allocation entries (net of reversals); the
-  -- payment's own file first
+  -- payment's own file first, in a total order (review #3: tied lines would change the hash with the plan). The
+  -- component is a code: the locked template words it for the debtor (review #2), never the ledger's staff label.
   left join lateral (
     select jsonb_agg(jsonb_build_object('file_reference', fa.external_ref, 'item_ref', i.ref, 'item_kind', i.kind,
                                         'due_date', i.due_date, 'component', x.component,
-                                        'component_label', lc.label_fr, 'amount_minor', x.amount::text)
-                     order by (fa.id <> a.id), fa.external_ref, i.due_date nulls last, i.ref, lc.sort_order) as lines
+                                        'amount_minor', x.amount::text)
+                     order by (fa.id <> a.id), fa.external_ref, fa.id, i.due_date nulls last, i.ref, i.kind, i.id,
+                              lc.sort_order) as lines
     from (select la.claim_item_id, la.component, -sum(lp.amount_minor) as amount
           from public.ledger_entry e
           left join public.ledger_entry r on r.id = e.reverses_entry_id
@@ -274,9 +381,10 @@ $$;
 
 -- The receipts to issue for these payments of the servicer: a version whenever the payload differs from the current
 -- version's (same payload: nothing, the job is idempotent). A payment on its file gets its receipt unless it is ready
--- for allocation (the allocation follows and queues the job again); a payment that left its file (or came back from
--- the bank, M2b-6) gets a void version if its current one is not void. Numbers are drawn for first versions, in
--- processing order (booking date, payment). Returns what the worker renders.
+-- for allocation (the allocation follows and queues the job again); a payment whose current version is about another
+-- file than its own now (it left its file, was moved to another before this job ran, or came back from the bank,
+-- M2b-6) gets a void version first. Numbers are drawn for first versions, in processing order (booking date,
+-- payment). Returns what the worker renders.
 create or replace function private.receipt_prepare(p_organization_id uuid, p_payment_ids uuid[])
 returns table (payment_id uuid, number text, version integer, kind text, known_at timestamptz, storage_path text,
                payload jsonb)
@@ -317,15 +425,28 @@ begin
                                  order by r.version desc limit 1) cur on true
               cross join lateral (
                 select case
+                  -- a version in force about another file than the payment's: void it first, whatever the payment's
+                  -- state now (it left its file, came back from the bank, or was moved to another file before this
+                  -- job ran: review #1)
+                  when cur.kind is not null and cur.kind <> 'void'
+                       and (p.account_id is null or p.status = 'returned' or cur.account_id is distinct from p.account_id)
+                    then 'void'
                   when p.account_id is not null and p.status <> 'returned'
                        and not (p.status in ('matched', 'partially_allocated') and p.review_reason is null)
                     then 'issued'
-                  when (p.account_id is null or p.status = 'returned') and cur.kind is not null and cur.kind <> 'void'
-                    then 'void'
                 end as state) s
               left join lateral private.receipt_payload(p.id) b on s.state = 'issued'
               where s.state is not null) x) y
   where y.sha is distinct from y.cur_sha;
+
+  -- A payment voided on a file it left while it is already on another: queued again, so the next run issues its new
+  -- file's version (one version per payment and run). Ready for allocation there, the next run skips it and its
+  -- allocation queues it.
+  perform private.queue_receipts(coalesce(jsonb_agg(jsonb_build_object('organization_id', p_organization_id,
+                                                                       'payment_id', r.payment_id)), '[]'))
+  from pg_temp._receipt_new r
+  join public.payment p on p.id = r.payment_id
+  where r.kind = 'void' and p.account_id is not null and p.status <> 'returned';
 
   select count(*) into v_new from pg_temp._receipt_new r where r.number is null;
   if v_new > 0 then
@@ -481,7 +602,8 @@ $$;
 -- cursor of the last row read (`after`). Amounts from the entry's 4670 postings (allocation, forward, reversal) or,
 -- for a held payment, its amount; the items an allocation (or its reversal) credited; the payment's receipt as the
 -- client last had it. Read by the client's members (their portfolios) and the servicer's admins and ops managers.
--- A client member reading rows marks them delivered (once; portal delivery, M2b-4's delivered_at).
+-- A client member reading rows marks them delivered (once; portal delivery, M2b-4's delivered_at). Each row links the
+-- receipt of its own file, one the reader can read (review #8, #13).
 ------------------------------------------------------------------------------------------
 
 drop index if exists public.client_notification_client_idx;
@@ -562,9 +684,14 @@ begin
                      join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'debtor_receivable'
                      join public.claim_item i on i.id = la.claim_item_id
                      where lp.entry_id = page.ledger_entry_id) l on page.ledger_entry_id is not null
+  -- the receipt of the row's own file as this client last had it (another file's of the payment only when the row's
+  -- file has none: an overpayment used on another file of the debtor), never one the reader cannot read (review #8,
+  -- #13); one table, keyed by payment
   left join lateral (select x.id, x.number, x.version, x.kind from public.receipt x
                      where x.payment_id = page.payment_id and x.client_organization_id = p_client
-                     order by x.version desc limit 1) r on true
+                       and (coalesce(v_staff, false) or x.portfolio_id = any (v_readable))
+                     order by (x.account_id is not distinct from page.account_id) desc, x.version desc
+                     limit 1) r on true
   order by page.created_at desc, page.id desc;
 end;
 $$;
@@ -601,22 +728,90 @@ $$;
 create policy receipt_object_read on storage.objects for select to authenticated
   using (bucket_id = 'documents' and name like 'receipts/%' and private.can_read_receipt_object(name));
 
+-- A receipt's document row is read like its receipt (review #13): document_read lets every member of the client and
+-- every staff member read the client's documents, a receipt is scoped by portfolio (founder #18). The subquery runs
+-- under receipt_read, keyed by the unique document_id.
+create policy document_receipt_scope on public.document as restrictive for select to authenticated
+  using (kind <> 'receipt' or exists (select 1 from public.receipt r where r.document_id = document.id));
+
+------------------------------------------------------------------------------------------
+-- The payment page waits for a receipt version only while a receipts job naming the payment is queued, running or
+-- waiting for a retry (review #18: a job that issues nothing, the payload unchanged, ends the wait). Money staff of the
+-- payment's servicer only (null otherwise: the payment page is theirs).
+------------------------------------------------------------------------------------------
+
+create or replace function public.receipt_job_pending(p_payment_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (select 1 from pgmq.q_payments q
+                 where q.message ->> 'type' = 'receipts' and q.message -> 'payment_ids' ? p.id::text)
+  from public.payment p
+  where p.id = p_payment_id and p.organization_id = any (private.money_staff_org_ids());
+$$;
+
+------------------------------------------------------------------------------------------
+-- Receipt PDFs that no document names (review #11): an attempt that failed after its uploads removes them itself, but
+-- a killed worker or a failed removal leaves them. A daily job (`receipts_sweep`, one per servicer, pg_cron) lists
+-- those of one servicer whose object is older than the given age, under the servicer's receipts lock (no job of the
+-- servicer is uploading meanwhile), and the worker deletes them through Storage.
+------------------------------------------------------------------------------------------
+
+create or replace function private.receipt_orphan_objects(p_organization_id uuid, p_older_than interval,
+                                                          p_limit integer)
+returns setof text
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select o.name
+  from storage.objects o
+  where o.bucket_id = 'documents' and o.name like 'receipts/' || p_organization_id::text || '/%'
+    and greatest(o.created_at, o.updated_at) < now() - p_older_than
+    and not exists (select 1 from public.document d where d.storage_bucket = 'documents' and d.storage_path = o.name)
+  order by o.name
+  limit greatest(coalesce(p_limit, 1000), 1);
+$$;
+
+create or replace function private.queue_receipt_sweep()
+returns integer
+language sql
+security definer
+set search_path = ''
+as $$
+  with sent as (
+    select pgmq.send('payments', jsonb_build_object('type', 'receipts_sweep', 'organization_id', o.id)) as msg_id
+    from public.organization o
+    where o.kind = 'servicer')
+  select count(*)::integer from sent;
+$$;
+
+select cron.schedule('receipts-sweep', '23 2 * * *', 'select private.queue_receipt_sweep()');
+
 ------------------------------------------------------------------------------------------
 -- Privileges
 ------------------------------------------------------------------------------------------
 
-revoke execute on function private.name_word_set(text), private.receipt_guard(), private.receipt_payload(uuid),
+revoke execute on function private.name_tokens(text), private.name_words(text[]), private.name_word_set(text),
+  private.payer_is_party(text, text, text, text, text), private.receipt_guard(), private.receipt_payload(uuid),
   private.receipt_void_payload(jsonb), private.receipt_begin(), private.receipt_prepare(uuid, uuid[]),
   private.receipt_issue(text, text), private.queue_receipts(jsonb), private.receipts_after_entry(),
-  private.receipts_after_payment(), private.queue_receipt_backfill(uuid), private.can_read_receipt_object(text)
+  private.receipts_after_payment(), private.queue_receipt_backfill(uuid), private.can_read_receipt_object(text),
+  private.receipt_orphan_objects(uuid, interval, integer), private.queue_receipt_sweep()
   from public, anon, authenticated, service_role;
--- The worker (service_role) runs the receipts job.
+-- The worker (service_role) runs the receipts job and the sweep.
 grant execute on function private.receipt_begin(), private.receipt_prepare(uuid, uuid[]),
-  private.receipt_issue(text, text) to service_role;
+  private.receipt_issue(text, text), private.receipt_orphan_objects(uuid, interval, integer) to service_role;
 -- The storage policy runs as the reader.
 grant execute on function private.can_read_receipt_object(text) to authenticated;
 revoke execute on function public.client_payment_feed(uuid, text, integer) from public, anon;
 grant execute on function public.client_payment_feed(uuid, text, integer) to authenticated;
+revoke execute on function public.receipt_job_pending(uuid) from public, anon;
+grant execute on function public.receipt_job_pending(uuid) to authenticated;
 
 ------------------------------------------------------------------------------------------
 -- Backfill: payments matched before this migration (M2b-4 allocations, held payments) get their receipts.

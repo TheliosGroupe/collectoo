@@ -1,17 +1,26 @@
 """M2-10 receipts, without the database: French formatting of the payload (amounts « 1 234,56 € »,
 dates « 09/11/2026 »), the locked template's text (snapshot), the third-party payer rule (founder
 #15), versions and void receipts, and a deterministic PDF: the same receipt renders to the same
-bytes, pinned by a golden SHA-256 for a fixed synthetic receipt (design §13 M2-10, risk R7)."""
+bytes, pinned by a golden SHA-256 for a fixed synthetic receipt (design §13 M2-10, risk R7),
+whatever reportlab settings the environment holds (review #4); amounts never wrap (review #6);
+components in the template's own debtor-facing words (review #2)."""
 
 import copy
 import hashlib
+import json
+import os
+import subprocess
+import sys
+from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from collectoo_worker.payments import receipt_pdf
 from collectoo_worker.payments.receipt_pdf import RENDERER_VERSION, render_receipt
 from collectoo_worker.payments.receipts import (
     NBSP,
@@ -29,9 +38,9 @@ from collectoo_worker.payments.receipts import (
 
 # Pinned to TEMPLATE_VERSION and RENDERER_VERSION: a change of either (or of reportlab, the font,
 # the layout) changes the bytes; stored receipts keep their PDF, new ones carry the new versions.
-GOLDEN_TEMPLATE = "quittance-fr-1"
-GOLDEN_RENDERER = "reportlab-4.4.10/dejavu-2.37/r1"
-GOLDEN_PDF_SHA256 = "41477476288bbb3872f05199282d1f1cae47b609580a2ad1b4dfe2c90044a47e"
+GOLDEN_TEMPLATE = "quittance-fr-2"
+GOLDEN_RENDERER = "reportlab-4.4.10/dejavu-2.37/r2"
+GOLDEN_PDF_SHA256 = "8e1f450ce3f1062e50243b5937850491bffad8a4f95e26add4d04a913833dfcb"
 KNOWN_AT = datetime(2026, 11, 9, 10, 15, 30, tzinfo=UTC)
 
 
@@ -82,7 +91,6 @@ def _line(ref: str, due: str | None, amount: str, file: str = "M-0042") -> dict[
         "item_kind": "invoice",
         "due_date": due,
         "component": "principal",
-        "component_label": "Principal",
         "amount_minor": amount,
     }
 
@@ -256,10 +264,84 @@ def test_the_first_letter_is_recalled_when_there_is_one() -> None:
 
 
 def test_unknown_codes_fall_back_to_what_the_payload_says() -> None:
-    line = _line("X-9", None, "100") | {"item_kind": "credit_note", "component_label": None}
+    line = _line("X-9", None, "100") | {"item_kind": "credit_note", "component": "new_code"}
     view = receipt_view(doc(allocation=[line], payment=payload()["payment"] | {"method": "?"}))
-    assert view.allocation[0].item == "X-9" and view.allocation[0].nature == "principal"
+    assert view.allocation[0].item == "X-9" and view.allocation[0].nature == "new_code"
     assert ("Mode de paiement", "Autre") in [(r.label, r.value) for r in view.payment]
+
+
+def test_an_eu_loan_receipt_words_each_component_for_the_debtor() -> None:
+    """Review #2: the template's own words per component code, never the ledger's staff labels
+    (« … déclarés par le cédant », « Écart au solde légal déclaré »): the client may never have
+    bought the claim, and the balancing line is an internal reconciliation."""
+    staff = {
+        "accrued_interest": "Intérêts échus déclarés par le cédant",
+        "other_balances": "Autres sommes déclarées par le cédant",
+        "balancing_line": "Écart au solde légal déclaré",
+    }
+    lines = [
+        {
+            "file_reference": "L-0007",
+            "item_ref": "PRET-L",
+            "item_kind": "loan_principal",
+            "due_date": None,
+            "component": component,
+            "component_label": staff.get(component, "Principal"),  # a stale label: ignored
+            "amount_minor": amount,
+        }
+        for component, amount in (
+            ("accrued_interest", "12000"),
+            ("principal", "500000"),
+            ("other_balances", "3000"),
+            ("balancing_line", "150"),
+        )
+    ]
+    loan = payload(
+        file={"reference": "L-0007"},
+        debtor={"name": "Lilas Dupont"},
+        payer={"name": None, "third_party": True},
+        allocation=lines,
+        totals={
+            "allocated_minor": "515150",
+            "forwarded_minor": "0",
+            "returned_minor": "0",
+            "unallocated_minor": "4850",
+        },
+        payment=payload()["payment"] | {"amount_minor": "520000"},
+    )
+    text = plain(receipt_text(ReceiptDocument("Q-2026-000007", 1, "original", KNOWN_AT, loan)))
+    assert text == "\n".join(
+        [
+            "Quittance",
+            "N° Q-2026-000007",
+            "Version 1",
+            "Établie le 09/11/2026",
+            "",
+            "Émetteur : Collectoo SAS, agissant pour le compte de Martin SAS",
+            "Débiteur : Lilas Dupont",
+            "Dossier : L-0007",
+            "",
+            "Paiement reçu",
+            "Montant reçu : 5 200,00 €",
+            "Date de réception : 12/10/2026",
+            "Date de valeur : 12/10/2026",
+            "Mode de paiement : Virement SEPA",
+            "Payeur : Versement d'un tiers",
+            "Référence de l'opération : E2E-2026-0001",
+            "",
+            "Imputation",
+            "Prêt PRET-L | \u2013 | Intérêts | 120,00 €",
+            "Prêt PRET-L | \u2013 | Principal | 5 000,00 €",
+            "Prêt PRET-L | \u2013 | Autres sommes | 30,00 €",
+            "Prêt PRET-L | \u2013 | Autres sommes | 1,50 €",
+            "",
+            "Total imputé : 5 151,50 €",
+            "Montant non imputé : 48,50 €",
+            "",
+            "Quittance n° Q-2026-000007 · version 1",
+        ]
+    )
+    assert "cédant" not in text and "Écart" not in text and "solde" not in text
 
 
 # -- the PDF -------------------------------------------------------------------------------------
@@ -288,3 +370,105 @@ def test_a_long_allocation_runs_over_several_pages() -> None:
     lines = [_line(f"F-{n:04d}", "2026-08-01", "100") for n in range(120)]
     pdf = render_receipt(doc(allocation=lines))
     assert pdf.count(b"/Type /Page\n") >= 2
+
+
+def test_an_amount_never_wraps_inside_its_cell() -> None:
+    """Review #6: reportlab breaks lines at U+202F, so a large amount split mid-number. Amounts are
+    drawn as one unbreakable token, in a column wide enough for the widest."""
+    huge = "123456789000"  # 1 234 567 890,00 €, in the narrow 5-column layout
+    lines = [_line("F-1", "2026-08-01", huge), _line("B-1", None, "100", file="B-77")]
+    totals = payload()["totals"] | {
+        "allocated_minor": huge + "00",
+        "unallocated_minor": huge + "00",
+    }
+    view = receipt_view(doc(allocation=lines, totals=totals))
+    assert view.show_file_column
+    styles = receipt_pdf._styles()
+    width = receipt_pdf.FRAME_WIDTH
+    for table in (
+        receipt_pdf._allocation(view, styles, width),
+        receipt_pdf._totals(view, styles, width),
+    ):
+        layout = cast(Any, table)  # reportlab keeps the cells and widths it lays out
+        amounts = [row[-1] for row in layout._cellvalues]
+        table.wrap(width, 800)
+        widths: list[float] = layout._colWidths
+        assert sum(widths) <= width + 0.01
+        for amount in amounts:
+            amount.wrap(widths[-1], 800)
+            assert len(amount.blPara.lines) == 1, amount.text
+            assert amount.minWidth() <= widths[-1] + 1e-6, amount.text  # and fits its column
+    assert render_receipt(doc(allocation=lines, totals=totals)).startswith(b"%PDF-")
+
+
+# -- reportlab's configuration never reaches the bytes (review #4) ---------------------------------
+
+RENDER = """
+import hashlib, json, sys
+from datetime import datetime
+from collectoo_worker.payments.receipt_pdf import render_receipt
+from collectoo_worker.payments.receipts import ReceiptDocument
+row = json.load(sys.stdin)
+doc = ReceiptDocument(row["number"], row["version"], row["kind"],
+                      datetime.fromisoformat(row["known_at"]), row["payload"])
+print(hashlib.sha256(render_receipt(doc)).hexdigest())
+"""
+RL_ENV = {
+    "RL_invariant": "0",
+    "RL_ttfAsciiReadable": "0",
+    "RL_pdfMultiLine": "1",
+    "RL_pdfComments": "1",
+    "RL_canvas_basefontname": "Courier",
+    "RL_documentLang": "fr-FR",
+    "RL_paraFontSizeHeightOffset": "0",
+    "RL_spaceShrinkage": "0.3",
+    "RL_useA85": "0",
+}
+
+
+def _render_elsewhere(
+    env: dict[str, str], cwd: Path, script: str = RENDER
+) -> subprocess.CompletedProcess[str]:
+    row = asdict(doc()) | {"known_at": KNOWN_AT.isoformat()}
+    return subprocess.run(  # noqa: S603 - our interpreter, our code
+        [sys.executable, "-c", script],
+        input=json.dumps(row),
+        capture_output=True,
+        text=True,
+        env={k: v for k, v in os.environ.items() if not k.startswith("RL_")} | env,
+        cwd=cwd,
+        check=False,
+    )
+
+
+def test_reportlab_settings_of_the_environment_do_not_change_the_bytes(tmp_path: Path) -> None:
+    """RL_* variables, a reportlab_settings.py on the path, ~/.reportlab_settings and the
+    reportlab_mods hooks are ignored: the renderer uses reportlab's own defaults."""
+    on_path = tmp_path / "path"
+    on_path.mkdir()
+    (on_path / "reportlab_settings.py").write_text("pdfComments = 1\nttfAsciiReadable = 0\n")
+    (on_path / "reportlab_mods.py").write_text("raise SystemExit('reportlab_mods must not run')\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".reportlab_settings").write_text("pdfMultiLine = 1\ncanvas_basefontname = 'Courier'\n")
+    (home / ".reportlab_mods").write_text("raise SystemExit('~/.reportlab_mods must not run')\n")
+    pythonpath = os.pathsep.join(filter(None, [str(on_path), os.environ.get("PYTHONPATH")]))
+    for env in (
+        RL_ENV,
+        RL_ENV | {"PYTHONPATH": pythonpath},
+        {"HOME": str(home)},
+        RL_ENV | {"HOME": str(home)},
+    ):
+        out = _render_elsewhere(env, tmp_path)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == GOLDEN_PDF_SHA256, env
+
+
+def test_the_renderer_refuses_a_reportlab_configured_before_it(tmp_path: Path) -> None:
+    """Imported first by other code under RL_* variables, reportlab's import-time copies may differ:
+    rendering then refuses rather than produce other bytes."""
+    script = "import reportlab.platypus\n" + RENDER
+    out = _render_elsewhere({"RL_pdfComments": "1"}, tmp_path, script)
+    assert out.returncode != 0
+    assert "reportlab was configured outside the receipt renderer" in out.stderr
+    assert "pdfComments" in out.stderr

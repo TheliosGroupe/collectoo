@@ -6,8 +6,10 @@ ISO. This module only formats them (« 1 234,56 € », « 09/11/2026 ») and la
 template (`TEMPLATE_VERSION`); `receipt_pdf` draws exactly this view. No amount is computed here, no
 model or LLM is involved, and the receipt carries no mention the law does not require (COMPLIANCE
 OQ-22): no remaining balance until M3 computes interest (founder #14), the payer named only when
-he is a party to the file, otherwise « Versement d'un tiers » (founder #15; the SQL leaves a third
-party's name out of the payload altogether).
+he is certainly a party to the file, otherwise « Versement d'un tiers » (founder #15; the SQL
+decides, and leaves a third party's name out of the payload altogether). Each allocated component
+is worded here for the debtor (`COMPONENT_LABEL`), never with the ledger's back-office labels
+(« … déclarés par le cédant », « Écart au solde légal déclaré »: review #2).
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-TEMPLATE_VERSION = "quittance-fr-1"
+TEMPLATE_VERSION = "quittance-fr-2"  # 2: debtor-facing component words (review #2)
 PARIS = ZoneInfo("Europe/Paris")
 NNBSP = "\u202f"  # thousands separator, as Intl fr-FR prints it (the web pages)
 NBSP = "\u00a0"  # between the amount and the currency sign
@@ -38,6 +40,15 @@ ITEM_KIND_LABEL = {
     "rent_period": "Loyer",
     "judgment_head": "Condamnation",
     "loan_principal": "Prêt",
+}
+# What a component of an item is, in the debtor's words (ledger_component codes). The ledger's own
+# labels describe the seller's tape for staff; a receipt states no cession, nor an internal
+# reconciliation line. An unknown code prints as it is.
+COMPONENT_LABEL = {
+    "principal": "Principal",
+    "accrued_interest": "Intérêts",
+    "other_balances": "Autres sommes",
+    "balancing_line": "Autres sommes",
 }
 CURRENCY_SIGN = {"EUR": "€"}
 
@@ -220,7 +231,7 @@ def _line(x: Mapping[str, Any], money: Callable[[int | str], str]) -> Allocation
         file=str(x.get("file_reference") or ""),
         item=item,
         due=format_date(x.get("due_date")) or DASH,
-        nature=str(x.get("component_label") or x["component"]),
+        nature=COMPONENT_LABEL.get(str(x["component"]), str(x["component"])),
         amount=money(x["amount_minor"]),
     )
 

@@ -42,18 +42,18 @@ describe("receipt versions (M2-10)", () => {
     expect(shortHash("abc")).toBe("abc");
   });
 
-  it("waits for a version the worker has not issued yet", () => {
-    const base = { hasFile: true, waitingForAllocation: false, lastChangeAt: "2026-11-09T09:00:00Z" };
-    expect(receiptPending({ ...base, receipts: [] })).toBe(true);
-    expect(receiptPending({ ...base, receipts: [version(1, "original")] })).toBe(false);
-    // a reversal posted after the version was read: a new one is coming
-    expect(receiptPending({ ...base, lastChangeAt: "2026-11-09T11:00:00Z", receipts: [version(1, "original")] })).toBe(true);
+  it("waits only while a receipts job naming the payment is queued", () => {
+    // review #18: v1 read at 10:00, reversed and allocated again at 11:00 with the same lines; the job issued nothing
+    const reallocated = { hasFile: true, receipts: [version(1, "original")], lastChangeAt: "2026-11-09T11:00:00Z" };
+    const base = { ...reallocated, waitingForAllocation: false };
+    // the job ran and found the payload unchanged: no wait, although the latest entry is later than v1
+    expect(receiptPending({ ...base, jobQueued: false })).toBe(false);
+    // a reversal, an unassignment…: the job is queued, a version may come
+    expect(receiptPending({ ...base, jobQueued: true })).toBe(true);
     // the allocation comes first, then its receipt
-    expect(receiptPending({ ...base, waitingForAllocation: true, receipts: [] })).toBe(false);
-    // off its file: a void version is coming, unless it is there
-    expect(receiptPending({ ...base, hasFile: false, receipts: [version(1, "original")] })).toBe(true);
-    expect(receiptPending({ ...base, hasFile: false, receipts: [version(1, "original"), version(2, "void")] })).toBe(false);
-    expect(receiptPending({ ...base, hasFile: false, receipts: [] })).toBe(false);
+    expect(receiptPending({ waitingForAllocation: true, jobQueued: true })).toBe(false);
+    // not told (not money staff, or the call failed): no wait
+    expect(receiptPending({ ...base, jobQueued: null })).toBe(false);
   });
 });
 

@@ -188,3 +188,13 @@ and receipts).
 - **Allocation unchanged by the receipt triggers** (M2b-5, fresh database): the 50k allocation run posts 8.2–9.2 s per
   10k job as before (the statement-level triggers on `ledger_entry` and `payment` add one `pgmq.send` per 200
   payments); the test's total, 56.9 s, also counts taking the 250 receipt jobs off the queue unrun.
+- **Review fixes (2026-11-09, 5,000 files, fresh database):** `receipt_payload` now uses keyed lookups whatever the
+  statistics (hash and merge joins off): before the tables were analysed, its totals scanned every posting and
+  `receipt_prepare` took 0.64–0.83 s a job of 200 (0.58 s against 0.13 s with the statistics wiped and restored in one
+  transaction); now 0.07–0.13 s a job either way. The payer rule (`private.payer_is_party`, plpgsql) costs ~46 µs a
+  party (the word-set comparison it replaces ~175 µs). Rendering is unchanged (1.99–2.69 s a job); the 5,000-file
+  test passes in 79.8 s.
+- **Client feed** (`client_payment_feed`, review #10), 60,000 notifications of one client, measured with the
+  plpgsql generic plan in use: 8.4–12.5 ms a page for a reader limited to a portfolio that holds only the oldest 50
+  rows (the client index is walked to them), 2.3–2.6 ms for staff after a cursor 50,000 rows deep, 3.7–4.2 ms for that
+  reader's last page. No other index or query shape needed at this size.

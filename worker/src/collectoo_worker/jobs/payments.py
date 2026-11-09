@@ -10,6 +10,7 @@
   queued by the payment trigger whenever a payment becomes ready.
 - `receipts` (M2-10): the receipt versions of payments whose position or file changed
   (`jobs.receipts`); queued by the ledger and payment triggers, 200 payments per message.
+- `receipts_sweep`: receipt PDFs no document names (a killed attempt's), daily per servicer.
 
 A file that cannot be imported is refused (`rejected`, with a stable code the back-office words
 in French): parse errors before anything is written, refusals of the SQL import (closed bank
@@ -35,7 +36,7 @@ from psycopg.types.json import Jsonb
 
 from collectoo_worker.jobs.allocation import run_allocate
 from collectoo_worker.jobs.matching import run_match
-from collectoo_worker.jobs.receipts import run_receipts
+from collectoo_worker.jobs.receipts import run_receipt_sweep, run_receipts
 from collectoo_worker.payments.camt053 import parse_camt053
 from collectoo_worker.payments.csv_import import CsvProfile, parse_csv
 from collectoo_worker.payments.statement import STAGE_COLUMNS, ParsedStatement, StatementRejected
@@ -73,6 +74,8 @@ def make_handler(storage: Storage) -> Any:
             run_allocate(conn, payload)
         elif kind == "receipts":
             run_receipts(conn, storage, payload)
+        elif kind == "receipts_sweep":
+            run_receipt_sweep(conn, storage, payload)
         else:
             raise ValueError(f"unknown payments job type: {kind!r}")
 
