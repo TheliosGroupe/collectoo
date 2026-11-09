@@ -1,6 +1,6 @@
 # M2b Payments: synthesized design (M2-06 … M2-11, with M2-12 hooks)
 
-Status: design for the M2b PRs (implementation follows, one PR per slice, §14). Founder decisions §17 answered 2026-11-08 (all defaults); ADR-0013 records the decisions; M2b-1 implemented on branch `m2b1` (merged); M2b-2 on branch `m2b2` (choices where this design was open: ADR-0013, M2b-2 addendum). Produced by a three-design panel (ledger-first, ops-first, compliance-first) and a judge. Checked against branch `m2b`: migrations up to `20261108190000_commit_job.sql`, ADR-0012, `docs/design/m2a-ledger.md`. Every legal text in §3 was re-read by the judge on LibreJustice on 2026-11-08 (version in force, unless another date is given).
+Status: design for the M2b PRs (implementation follows, one PR per slice, §14). Founder decisions §17 answered 2026-11-08 (all defaults); ADR-0013 records the decisions; M2b-1 implemented on branch `m2b1` (merged); M2b-2 on branch `m2b2` (choices where this design was open: ADR-0013, M2b-2 addendum); M2b-3 on branch `m2b3` (ADR-0013, M2b-3 addendum). Produced by a three-design panel (ledger-first, ops-first, compliance-first) and a judge. Checked against branch `m2b`: migrations up to `20261108190000_commit_job.sql`, ADR-0012, `docs/design/m2a-ledger.md`. Every legal text in §3 was re-read by the judge on LibreJustice on 2026-11-08 (version in force, unless another date is given).
 
 ---
 

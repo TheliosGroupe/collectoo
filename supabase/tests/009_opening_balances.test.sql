@@ -221,7 +221,8 @@ select throws_ok($$ select * from private.ledger_post('00000000-0000-0000-0000-0
 select throws_ok($$ insert into public.ledger_entry (organization_id, client_organization_id, portfolio_id, account_id, entry_type,
                      effective_date, line_count, idempotency_key, request_hash, boarding_batch_id)
   select organization_id, client_organization_id, portfolio_id, account_id, 'opening', effective_date, 2, 'opening-again-001',
-         request_hash, boarding_batch_id from public.ledger_entry limit 1 $$, '23505', null,
+         request_hash, boarding_batch_id from public.ledger_entry
+  where entry_type = 'opening' and organization_id = '00000000-0000-0000-0000-00000000000a' limit 1 $$, '23505', null,
   'one opening per account');
 
 select * from finish();
