@@ -11,6 +11,12 @@
 - `receipts` (M2-10): the receipt versions of payments whose position or file changed
   (`jobs.receipts`); queued by the ledger and payment triggers, 200 payments per message.
 - `receipts_sweep`: receipt PDFs no document names (a killed attempt's), daily per servicer.
+- `process_debits` (M2b-6): what the statements' debits are — a payment's return (its allocations
+  reversed at the return date, the cash_out, the client told), our refund executed, a refund that
+  came back — or left to ops (`jobs.debits`); queued by the import, a refund request, a release.
+- `direct_payment` (M2b-6): a payment the debtor made to the client directly, planned by the
+  waterfall and booked as an adjustment of the receivables (`jobs.debits`).
+- `invariants` (M2b-6): the nightly checks of the payments books (`private.run_payment_checks`).
 
 A file that cannot be imported is refused (`rejected`, with a stable code the back-office words
 in French): parse errors before anything is written, refusals of the SQL import (closed bank
@@ -35,6 +41,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from collectoo_worker.jobs.allocation import run_allocate
+from collectoo_worker.jobs.debits import run_direct_payment, run_invariants, run_process_debits
 from collectoo_worker.jobs.matching import run_match
 from collectoo_worker.jobs.receipts import run_receipt_sweep, run_receipts
 from collectoo_worker.payments.camt053 import parse_camt053
@@ -76,6 +83,12 @@ def make_handler(storage: Storage) -> Any:
             run_receipts(conn, storage, payload)
         elif kind == "receipts_sweep":
             run_receipt_sweep(conn, storage, payload)
+        elif kind == "process_debits":
+            run_process_debits(conn, payload)
+        elif kind == "direct_payment":
+            run_direct_payment(conn, payload)
+        elif kind == "invariants":
+            run_invariants(conn, payload)
         else:
             raise ValueError(f"unknown payments job type: {kind!r}")
 
@@ -151,6 +164,12 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
                 "select pgmq.send('payments', %s)",
                 (Jsonb({"type": "match", "organization_id": str(org), "trigger": "import"}),),
             )
+            # M2b-6 (design §8.3 step 7): the debits, returns and refunds of the statement.
+            if any(line.kind in ("return", "refund_out") for line in parsed.lines):
+                conn.execute(
+                    "select pgmq.send('payments', %s)",
+                    (Jsonb({"type": "process_debits", "organization_id": str(org)}),),
+                )
     except psycopg.Error as exc:
         if not deterministic(exc):
             raise

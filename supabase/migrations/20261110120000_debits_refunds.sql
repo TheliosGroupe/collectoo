@@ -28,8 +28,8 @@
 --     duplicates (alerts).
 --
 -- Redefined: private.client_notification_guard, private.bank_unposted, private.payment_insert_guard,
--- public.allocate_payment (from `partial_return` too), public.payment_detail, public.account_detail,
--- public.client_payment_feed.
+-- private.post_allocations (dated after a partial return's reversals), public.allocate_payment (from `partial_return`
+-- too), public.payment_detail, public.account_detail, public.client_payment_feed.
 
 ------------------------------------------------------------------------------------------
 -- Payments: ops may send what is left after a partial return to allocation again; states the refunds and returns keep
@@ -320,16 +320,21 @@ create trigger bank_duplicate_resolution_append_only before update or delete or 
 alter table public.bank_duplicate_resolution enable always trigger bank_duplicate_resolution_append_only;
 
 -- The parser's reading of a line held as a duplicate, from the import's stage rows (same transaction as the insert).
+-- Fires on every import's insert (up to 250k lines): a scan of the new rows and, for each held one only, one key
+-- lookup of its stage row (lateral: no plan cached for a small first insert can turn into a pairwise join).
 create or replace function private.bank_transaction_held_kind()
 returns trigger
 language plpgsql
 set search_path = ''
+set enable_hashjoin = off
+set enable_mergejoin = off
 as $$
 begin
   insert into private.bank_line_held_kind (bank_transaction_id, kind, method)
   select n.id, s.kind, s.method
   from new_rows n
-  join private.bank_import_stage s on s.statement_id = n.statement_id and s.line_no = n.line_no
+  cross join lateral (select x.kind, x.method from private.bank_import_stage x
+                      where x.statement_id = n.statement_id and x.line_no = n.line_no) s
   where n.kind = 'suspected_duplicate' and s.kind in ('debtor_credit', 'return', 'refund_out', 'other_debit', 'batch_unsplit')
   on conflict (bank_transaction_id) do nothing;
   return null;
@@ -1812,6 +1817,282 @@ begin
                                  'queued', true);
   perform private.command_record('allocate_payment', p_idempotency_key, v_request, v_result);
   return v_result;
+end;
+$$;
+
+------------------------------------------------------------------------------------------
+-- The allocation's date after a partial return (redefined from 20261109190000; one change): an allocation is dated
+-- greatest(booking date, servicing start, the latest date at which an allocation of the payment was reversed after its
+-- own date). A bank return reverses the allocations at the return date (design §2 #3): what is left of the payment is
+-- free again from then on only, so « Imputer » after a partial return allocates it from the return date (I4).
+------------------------------------------------------------------------------------------
+
+create or replace function private.post_allocations(p_organization_id uuid, p_trigger text, p_engine_version text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  p_run_id uuid;
+  v_bad text;
+  v_today date := private.paris_today();
+  v_interest text[];
+  v_principal text[];
+  v_summary jsonb;
+begin
+  if p_engine_version is null or p_engine_version !~ '^[a-z0-9.-]{1,40}$' then
+    raise exception 'allocation: engine version required' using errcode = 'LG006';
+  end if;
+  if p_trigger is null or p_trigger not in ('ready', 'continuation') then
+    raise exception 'allocation: unknown trigger %', p_trigger using errcode = 'LG006';
+  end if;
+  -- the allocation lock (design §5.2): the caller holds it already when it read the balances
+  perform pg_advisory_xact_lock(hashtext('payments:' || p_organization_id::text));
+  insert into public.allocation_run (organization_id, trigger) values (p_organization_id, p_trigger)
+  returning id into p_run_id;
+  analyze pg_temp._alloc_target;
+  analyze pg_temp._alloc_line;
+
+  drop table if exists pg_temp._alloc_t;
+  create temp table _alloc_t on commit drop as
+  select t.payment_id, t.ord, t.account_id, t.outcome, t.effective_date, t.policy, t.designation, t.inputs_hash,
+         p.organization_id as payment_org, p.amount_minor, p.currency as payment_currency, p.booking_date, p.status,
+         p.review_reason, coalesce((p.allocation_instruction ->> 'account_id')::uuid, p.account_id) as payment_target,
+         coalesce(p.allocation_instruction -> 'releases', '[]') as released,
+         a.organization_id as account_org, a.client_organization_id, a.portfolio_id, a.status as account_status,
+         a.currency as account_currency, s.start as servicing_start, coalesce(h.n, 0) as holds,
+         nb.d as not_before,
+         row_number() over (order by t.ord)::integer as entry_no
+  from pg_temp._alloc_target t
+  left join public.payment p on p.id = t.payment_id
+  left join public.account a on a.id = t.account_id
+  left join lateral (select min(o.valid_from) as start from public.claim_ownership_period o
+                     where o.account_id = t.account_id) s on true
+  left join lateral (select count(*) as n from public.account_hold x
+                     where x.account_id = t.account_id and x.ended_at is null
+                       and x.kind in ('surendettement', 'collective_proceeding')) h on true
+  -- M2b-6: the money of an allocation reversed at a later date (a bank return: design §2 #3) is back from that date
+  -- only, so the payment is allocated again from then on (I4)
+  left join lateral (select max(e.effective_date) as d from public.ledger_entry e
+                     join public.ledger_entry r on r.id = e.reverses_entry_id
+                     where e.payment_id = t.payment_id and e.effective_date > r.effective_date) nb on true;
+  alter table pg_temp._alloc_t add primary key (payment_id);
+  analyze pg_temp._alloc_t;
+
+  -- The run's payments: this servicer's, still ready, on the file the engine planned for.
+  select min(t.payment_id::text) into v_bad from pg_temp._alloc_t t
+  where t.payment_org is distinct from p_organization_id or t.account_org is distinct from p_organization_id
+     or t.status not in ('matched', 'partially_allocated') or t.review_reason is not null
+     or t.payment_target is distinct from t.account_id;
+  if v_bad is not null then
+    raise exception 'allocation: payment % is not ready for allocation on this file', v_bad using errcode = 'LG006';
+  end if;
+  -- Gates (design §8.4; the job read the same facts under the same locks): a confirmed open file, the payment's
+  -- currency (1343-3), not before servicing started unless ops checked it (#10), no surendettement or collective
+  -- proceeding unless a judge authorised it (#12); dated greatest(booking date, servicing start), never in the future.
+  select min(t.payment_id::text) into v_bad from pg_temp._alloc_t t
+  where t.outcome = 'allocate'
+    and (t.account_status = 'staged' or t.account_status like 'closed%'
+         or t.account_currency <> t.payment_currency
+         or t.servicing_start is null
+         or t.effective_date <> greatest(t.booking_date, t.servicing_start, coalesce(t.not_before, t.booking_date))
+         or t.effective_date > v_today
+         or (t.booking_date < t.servicing_start and not (t.released ? 'before_servicing_start'))
+         or (t.holds > 0 and not (t.released ? 'hold_blocks_allocation')));
+  if v_bad is not null then
+    raise exception 'allocation: payment % may not be allocated on this file now', v_bad using errcode = 'LG006';
+  end if;
+  -- Lines: only for allocations, on items of the planned file, with an allocation per line.
+  select min(l.payment_id::text) into v_bad
+  from pg_temp._alloc_line l
+  left join pg_temp._alloc_t t on t.payment_id = l.payment_id
+  left join public.claim_item i on i.id = l.claim_item_id
+  left join public.ledger_component c on c.code = l.component
+  where t.payment_id is null or t.outcome <> 'allocate' or i.account_id is distinct from t.account_id or c.code is null;
+  if v_bad is not null then
+    raise exception 'allocation: payment % has lines outside its plan or its file', v_bad using errcode = 'LG006';
+  end if;
+  select min(t.payment_id::text) into v_bad from pg_temp._alloc_t t
+  where t.outcome = 'allocate' and not exists (select 1 from pg_temp._alloc_line l where l.payment_id = t.payment_id);
+  if v_bad is not null then
+    raise exception 'allocation: payment % has no line', v_bad using errcode = 'LG006';
+  end if;
+
+  -- What is left of each payment (I4 before posting; ledger_entry_verify re-checks every date).
+  drop table if exists pg_temp._alloc_u;
+  create temp table _alloc_u on commit drop as
+  select t.payment_id, t.amount_minor, x.allocated_minor as allocated,
+         x.allocated_minor + x.returned_minor as moved
+  from pg_temp._alloc_t t
+  join private.payment_positions(array(select y.payment_id from pg_temp._alloc_t y)) x on x.payment_id = t.payment_id;
+  alter table pg_temp._alloc_u add primary key (payment_id);
+  select min(x.payment_id::text) into v_bad
+  from (select l.payment_id, sum(l.amount_minor) as s from pg_temp._alloc_line l group by l.payment_id) x
+  join pg_temp._alloc_u u on u.payment_id = x.payment_id
+  where x.s > u.amount_minor - u.moved;
+  if v_bad is not null then
+    raise exception 'allocation: payment % would allocate more than is left of it', v_bad using errcode = 'LG007';
+  end if;
+
+  -- An item as a whole (review fix): no allocation takes an item's receivable — every component summed, negative ones
+  -- included (a negative balancing line: the seller's components above the legal balance 3.12) — below zero at any
+  -- date from the allocation's on. What it does not owe stays an overpayment (founder #8). Each check is the lowest
+  -- running total of the item from that date on, less this run's allocations on the item up to that one (in date
+  -- order): one keyed lateral lookup per (payment, item), whatever the statistics of the ledger.
+  drop table if exists pg_temp._alloc_item;
+  create temp table _alloc_item on commit drop as
+  select x.payment_id, x.claim_item_id, x.effective_date,
+         sum(x.amount) over (partition by x.claim_item_id order by x.effective_date, x.ord
+                             rows between unbounded preceding and current row) as cum
+  from (select t.payment_id, t.ord, t.effective_date, l.claim_item_id, sum(l.amount_minor) as amount
+        from pg_temp._alloc_t t join pg_temp._alloc_line l on l.payment_id = t.payment_id
+        where t.outcome = 'allocate'
+        group by t.payment_id, t.ord, t.effective_date, l.claim_item_id) x;
+  select min(z.payment_id::text) into v_bad
+  from pg_temp._alloc_item z
+  cross join lateral (
+    select least(coalesce(sum(g.s) filter (where g.d <= z.effective_date), 0),
+                 min(g.bal) filter (where g.d > z.effective_date)) as low
+    from (select q.effective_date as d, sum(q.amount_minor) as s,
+                 sum(sum(q.amount_minor)) over (order by q.effective_date) as bal
+          from public.ledger_account la
+          join public.ledger_posting q on q.ledger_account_id = la.id
+          where la.claim_item_id = z.claim_item_id and la.book = 'debtor_receivable'
+          group by q.effective_date) g) w
+  where w.low - z.cum < 0;
+  if v_bad is not null then
+    raise exception 'allocation: payment % would take an item below what it owes as a whole', v_bad
+      using errcode = 'LG007';
+  end if;
+
+  -- 1343-1 « Le paiement partiel s'impute d'abord sur les intérêts »: no principal of an item while that item's
+  -- interest still has something available at the date, after this run's earlier plans (same file: date order) and
+  -- this entry's own interest lines.
+  select coalesce(array_agg(c.code) filter (where c.family = 'interest'), '{}'),
+         coalesce(array_agg(c.code) filter (where c.family = 'principal'), '{}')
+  into v_interest, v_principal from public.ledger_component c;
+  drop table if exists pg_temp._alloc_int;
+  create temp table _alloc_int on commit drop as
+  select x.payment_id, x.ord, x.effective_date, la.id as ledger_account_id
+  from (select distinct t.payment_id, t.ord, t.effective_date, l.claim_item_id
+        from pg_temp._alloc_t t join pg_temp._alloc_line l on l.payment_id = t.payment_id
+        where l.component = any (v_principal)) x
+  join public.ledger_account la on la.claim_item_id = x.claim_item_id and la.component = any (v_interest);
+  if exists (select from pg_temp._alloc_int) then
+    analyze pg_temp._alloc_int;
+    drop table if exists pg_temp._alloc_cum;
+    create temp table _alloc_cum on commit drop as
+    select y.ledger_account_id, y.ord, sum(y.amount) over (partition by y.ledger_account_id order by y.ord) as cum
+    from (select la.id as ledger_account_id, t.ord, sum(l.amount_minor) as amount
+          from pg_temp._alloc_t t
+          join pg_temp._alloc_line l on l.payment_id = t.payment_id and l.component = any (v_interest)
+          join public.ledger_account la on la.claim_item_id = l.claim_item_id and la.component = l.component
+          group by la.id, t.ord) y;
+    create index on pg_temp._alloc_cum (ledger_account_id, ord);
+    analyze pg_temp._alloc_cum;
+    select min(z.payment_id::text) into v_bad
+    from (select i.payment_id,
+                 private.receivable_low(i.ledger_account_id, i.effective_date)
+                 - coalesce((select c.cum from pg_temp._alloc_cum c
+                             where c.ledger_account_id = i.ledger_account_id and c.ord <= i.ord
+                             order by c.ord desc limit 1), 0) as left_over
+          from pg_temp._alloc_int i) z
+    where z.left_over > 0;
+    if v_bad is not null then
+      raise exception 'allocation: payment % pays principal while interest of the same debt is due (1343-1)', v_bad
+        using errcode = 'LG006';
+    end if;
+  end if;
+
+  -- One allocation entry per (payment, file): 4710 pool debit, 4670 credit to the file's client, one 1100 credit per
+  -- (item, component) in the waterfall's order, one 3100 debit per component.
+  perform private.ledger_post_set_begin();
+  insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key, account_id,
+                                  payment_id, source_type, source_id, engine_version, inputs_hash)
+  select t.entry_no, p_organization_id, 'allocation', t.effective_date,
+         'alloc:' || p_run_id || ':' || t.payment_id || ':' || t.account_id, t.account_id, t.payment_id,
+         'allocation_run', p_run_id::text, p_engine_version, t.inputs_hash
+  from pg_temp._alloc_t t where t.outcome = 'allocate';
+  insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency, claim_item_id, component)
+  select t.entry_no, 1, 'unallocated_payment', s.total, t.account_currency, null::uuid, null::text
+  from pg_temp._alloc_t t
+  join (select l.payment_id, sum(l.amount_minor) as total from pg_temp._alloc_line l group by l.payment_id) s
+    on s.payment_id = t.payment_id
+  union all
+  select t.entry_no, 2, 'client_payable', -s.total, t.account_currency, null, null
+  from pg_temp._alloc_t t
+  join (select l.payment_id, sum(l.amount_minor) as total from pg_temp._alloc_line l group by l.payment_id) s
+    on s.payment_id = t.payment_id
+  union all
+  select t.entry_no, 2 + row_number() over (partition by l.payment_id order by l.seq), 'debtor_receivable',
+         -l.amount_minor, t.account_currency, l.claim_item_id, l.component
+  from pg_temp._alloc_t t join pg_temp._alloc_line l on l.payment_id = t.payment_id
+  union all
+  select t.entry_no, 2 + n.lines + row_number() over (partition by c.payment_id order by c.component), 'owner_claim',
+         c.total, t.account_currency, null, c.component
+  from (select l.payment_id, l.component, sum(l.amount_minor) as total from pg_temp._alloc_line l
+        group by l.payment_id, l.component) c
+  join pg_temp._alloc_t t on t.payment_id = c.payment_id
+  join (select l.payment_id, count(*)::integer as lines from pg_temp._alloc_line l group by l.payment_id) n
+    on n.payment_id = c.payment_id;
+
+  drop table if exists pg_temp._alloc_posted;
+  create temp table _alloc_posted on commit drop as
+  select x.entry_no, x.entry_id, x.created from private.ledger_post_set() x;
+
+  insert into private.allocation_plan (entry_id, run_id, payment_id, account_id, effective_date, policy, designation,
+                                       inputs_hash, engine_version)
+  select x.entry_id, p_run_id, t.payment_id, t.account_id, t.effective_date, t.policy, t.designation, t.inputs_hash,
+         p_engine_version
+  from pg_temp._alloc_posted x join pg_temp._alloc_t t on t.entry_no = x.entry_no
+  where x.created;
+
+  -- R124-5: the client is told of each allocation (exactly once: unique entry).
+  insert into public.client_notification (organization_id, client_organization_id, portfolio_id, account_id,
+                                          payment_id, ledger_entry_id, kind)
+  select p_organization_id, t.client_organization_id, t.portfolio_id, t.account_id, t.payment_id, x.entry_id,
+         'payment_allocated'
+  from pg_temp._alloc_posted x join pg_temp._alloc_t t on t.entry_no = x.entry_no
+  where x.created;
+
+  -- The payments' states (design §7): allocated (nothing left), partially allocated (an overpayment, kept in 4710:
+  -- founder #8), or still matched with the reason the engine gave (gated, nothing due, credit note to apply).
+  update public.payment p set
+    status = case when u.allocated + coalesce(s.total, 0) = 0 then 'matched'
+                  when u.amount_minor - u.moved - coalesce(s.total, 0) = 0 then 'allocated'
+                  else 'partially_allocated' end,
+    -- an overpayment ops sent to another file that is now gated or owes nothing: back to where ops sent it from
+    -- (the payment's own file is not the one held or closed)
+    review_reason = case when t.outcome <> 'allocate' and t.account_id <> p.account_id
+                           then case when u.allocated = 0 then 'nothing_due' else 'overpayment' end
+                         when t.outcome <> 'allocate' then t.outcome
+                         when u.amount_minor - u.moved - coalesce(s.total, 0) = 0 then null
+                         else 'overpayment' end,
+    -- ops' decisions are consumed by an allocation (or void back from another file); a payment stopped at another
+    -- gate of its own file keeps them, so the gates ops released stay released (review fix)
+    allocation_instruction = case when t.outcome = 'allocate' or t.account_id <> p.account_id then null
+                                  else p.allocation_instruction end
+  from pg_temp._alloc_t t
+  join pg_temp._alloc_u u on u.payment_id = t.payment_id
+  left join (select l.payment_id, sum(l.amount_minor) as total from pg_temp._alloc_line l group by l.payment_id) s
+    on s.payment_id = t.payment_id
+  where p.id = t.payment_id;
+
+  select jsonb_build_object(
+    'run_id', p_run_id,
+    'payments', count(*),
+    'entries', (select count(*) from pg_temp._alloc_posted where created),
+    'allocated_minor', coalesce((select sum(l.amount_minor) from pg_temp._alloc_line l), 0)::text,
+    'outcomes', coalesce((select jsonb_object_agg(o.outcome, o.n) from (
+                  select t.outcome, count(*) as n from pg_temp._alloc_t t group by t.outcome) o), '{}'),
+    'overpayments', count(*) filter (where t.outcome = 'allocate'
+                                      and u.amount_minor - u.moved > (select sum(l.amount_minor) from pg_temp._alloc_line l
+                                                                       where l.payment_id = t.payment_id)))
+  into v_summary
+  from pg_temp._alloc_t t join pg_temp._alloc_u u on u.payment_id = t.payment_id;
+  update public.allocation_run set summary = v_summary, finished_at = now() where id = p_run_id;
+  return v_summary;
 end;
 $$;
 
