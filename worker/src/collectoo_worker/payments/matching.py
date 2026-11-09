@@ -173,6 +173,7 @@ class Directory:
     # amount (common amounts are left out by the loader), and accounts found by a name search.
     by_amount: dict[int, frozenset[str]] = field(default_factory=dict)
     by_name: dict[str, tuple[str, ...]] = field(default_factory=dict)  # payment id -> accounts
+    names: NameIndex | None = None
 
     @classmethod
     def build(
@@ -195,16 +196,56 @@ class Directory:
                     amounts.setdefault(amount, set()).add(a.id)
         d.tokens = {k: frozenset(v) for k, v in tokens.items()}
         d.by_amount = {k: frozenset(v) for k, v in amounts.items() if len(v) <= MAX_PER_AMOUNT}
+        d.names = NameIndex((a.id, n) for a in d.accounts.values() for n in a.names)
         return d
+
+    def search_names(self, rest: Iterable[PaymentIn]) -> None:
+        """Files whose party names are close to each payer's (R6 hints), from the name index."""
+        if self.names is None:
+            return
+        for p in rest:
+            found = self.names.search((p.payer_name, *p.other_names))
+            if found:
+                self.by_name[p.id] = found
 
 
 MAX_PER_AMOUNT = 20  # an amount shared by more files says nothing (design §8.4: k ≤ 20)
+MAX_PER_WORD = 200  # a surname shared by more files is no lead (MARTIN, DUPONT…)
+NAME_HINTS = 5
+
+
+class NameIndex:
+    """Files by the words of their parties' names (cleaned as `name_words`): a payer's name finds
+    the files sharing a rare enough word, ranked by trigram similarity. Hints for ops only."""
+
+    def __init__(self, pairs: Iterable[tuple[str, str]]) -> None:
+        self.names: dict[str, list[str]] = {}
+        self.words: dict[str, set[str]] = {}
+        for account, name in pairs:
+            self.names.setdefault(account, []).append(name)
+            for w in name_words(name):
+                if len(w) >= 3:
+                    self.words.setdefault(w, set()).add(account)
+
+    def search(self, payer: Sequence[str | None]) -> tuple[str, ...]:
+        found: set[str] = set()
+        for name in payer:
+            for w in name_words(name):
+                files = self.words.get(w, ())
+                if len(files) <= MAX_PER_WORD:
+                    found.update(files)
+        scored = [(best_similarity(payer, self.names[a]), a) for a in found]
+        best = sorted((s, a) for s, a in scored if s >= NAME_CORROBORATES)
+        best.sort(key=lambda x: (-x[0], x[1]))
+        return tuple(a for _, a in best[:NAME_HINTS])
 
 
 # -- signals --------------------------------------------------------------------------------------
 
 _NOT_ALNUM = re.compile(r"[^0-9A-Za-z]")
-_SPLIT = re.compile(r"[\s,;:()\[\]{}<>\"'«»!?*+=&@#|\\]+")
+# Chunks: what is left between characters that never sit inside a reference (only letters,
+# digits, - / . _ do), so « n°FA-2026-00042 » or « (FA-2026-00042) » give FA-2026-00042.
+_SPLIT = re.compile(r"[^0-9A-Za-z\-/._]+")
 _RUN = re.compile(r"[0-9A-Za-z]+")
 _DIGIT = re.compile(r"[0-9]")
 # "RF" and two check digits, then up to 21 characters; spaces and line breaks tolerated (design R2).
@@ -652,6 +693,8 @@ def match_all(
             out[p.id] = decision
     if rest and remainder is not None:
         remainder(rest)
+    elif rest:
+        directory.search_names(p for p, _ in rest)
     for p, s in rest:
         out[p.id] = matcher.weak(p, s)
     return [out[p.id] for p in payments]

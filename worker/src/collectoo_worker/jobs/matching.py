@@ -10,7 +10,7 @@ Queued by the import (`trigger: import`, every payment never tried), by a batch 
    set-based, through temporary tables analysed before they are joined (no plan rests on the
    statistics of tables just loaded);
 3. run rules R1-R4; for the payments left, load files whose balance equals the amount and files
-   whose party names are close (trigram index), then R5-R6;
+   whose party names are close (word index of the servicer's party names), then R5-R6;
 4. COPY the decisions and call `private.apply_match_results`, which gates and records them.
 
 Nothing is posted: allocation is M2b-4. The rules decide; no model, no LLM (CLAUDE.md).
@@ -33,6 +33,7 @@ from collectoo_worker.payments.matching import (
     Decision,
     Directory,
     ItemInfo,
+    NameIndex,
     PaymentIn,
     Signals,
     match_all,
@@ -43,8 +44,6 @@ Conn = psycopg.Connection[Any]
 log = logging.getLogger("collectoo.payments")
 TRIGGERS = ("import", "rematch", "ops")
 QUEUED = ("no_match", "ambiguous", "account_not_confirmed")
-NAME_SEARCH_THRESHOLD = 0.5  # pg_trgm: what the name search returns (the rules then score it)
-NAME_SEARCH_MAX = 20_000  # payments searched by name in one run (the rest keep their other hints)
 
 
 def run_match(conn: Conn, payload: dict[str, Any]) -> dict[str, Any]:
@@ -286,26 +285,19 @@ def load_remainder(
     for amount, account in rows:
         by_amount.setdefault(int(amount), set()).add(account)
     d.by_amount = {k: frozenset(v) for k, v in by_amount.items() if len(v) <= MAX_PER_AMOUNT}
-    named = [(p.id, p.payer_name) for p, _ in rest if p.payer_name][:NAME_SEARCH_MAX]
-    if named:
-        conn.execute(
-            "select set_config('pg_trgm.similarity_threshold', %s, true)",
-            (str(NAME_SEARCH_THRESHOLD),),
+    if any(p.payer_name for p, _ in rest):
+        # The servicer's party names in a word index (one read; a GIN trigram search per payer
+        # costs 7 to 100 ms, too slow for thousands of payers).
+        d.names = NameIndex(
+            (r[0], r[1])
+            for r in conn.execute(
+                """select ap.account_id::text, pa.display_name
+                   from public.party pa join public.account_party ap on ap.party_id = pa.id
+                   where pa.organization_id = %s""",
+                (org,),
+            )
         )
-        found = conn.execute(
-            """select n.pid, x.account_id::text
-               from unnest(%s::text[], %s::text[]) as n (pid, name)
-               cross join lateral (
-                 select ap.account_id, max(extensions.similarity(pa.display_name, n.name)) as sim
-                 from public.party pa join public.account_party ap on ap.party_id = pa.id
-                 where pa.organization_id = %s and pa.display_name operator(extensions.%%) n.name
-                 group by ap.account_id order by sim desc, ap.account_id limit 5) x""",
-            ([n[0] for n in named], [n[1] for n in named], org),
-        ).fetchall()
-        by_name: dict[str, list[str]] = {}
-        for pid, account in found:
-            by_name.setdefault(pid, []).append(account)
-        d.by_name = {k: tuple(v) for k, v in by_name.items()}
+        d.search_names(p for p, _ in rest)
     wanted = {a for v in d.by_amount.values() for a in v} | {
         a for v in d.by_name.values() for a in v
     }

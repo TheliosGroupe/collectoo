@@ -190,14 +190,20 @@ def synthetic_world(accounts: int, seed: int = 1) -> World:
         out.append(
             WorldAccount(_id(seed, n), ext, kind, status, rf_make(body), names, tuple(items))
         )
-    world = World(out)
-    open_ = [a for a in out if a.status in OPEN]
+    return with_history(World(out), rng)
+
+
+def with_history(world: World, rng: random.Random) -> World:
+    """The IBAN memory of a world: a quarter of the open files' debtors already paid from their
+    IBAN; 1 % of IBANs paid two files (a parent paying for two children)."""
+    open_ = [a for a in world.accounts if a.status in OPEN and a.balance_minor > 0]
+    links: dict[str, dict[str, int]] = {}
     for a in rng.sample(open_, len(open_) // 4):
-        world.iban_links[debtor_iban(a.id)] = {a.id: rng.randint(1, 3)}
-    for _ in range(max(1, len(open_) // 100)):
+        links[debtor_iban(a.id)] = {a.id: rng.randint(1, 3)}
+    for _ in range(max(1, len(open_) // 100) if len(open_) >= 2 else 0):
         a, b = rng.sample(open_, 2)
-        world.iban_links[iban_fr(rng)] = {a.id: 1, b.id: 1}
-    return world
+        links[iban_fr(rng)] = {a.id: 1, b.id: 1}
+    return World(world.accounts, links)
 
 
 # -- credits --------------------------------------------------------------------------------------

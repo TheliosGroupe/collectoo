@@ -180,3 +180,43 @@ def score(statement_id: str, credits: Sequence[Credit], prefix: str) -> Score:
         queue_reason = reason if not automatic else None
         s.add(c, line_ref(prefix, k), account if automatic else None, queue_reason)
     return s
+
+
+KIND_OF = {"b2b_invoice": "invoice", "b2c_invoice": "invoice", "rent": "rent"}
+
+
+def world_from_db(tenant: dict[str, Any]) -> World:
+    """The tenant's files as the generator needs them (references, items, balances, parties)."""
+    with psycopg.connect(DB) as conn:
+        files = conn.execute(
+            """select a.id::text, a.external_ref, a.claim_type_code, a.status, r.rf
+               from public.account a
+               left join public.payment_reference r on r.account_id = a.id and r.status = 'active'
+               where a.organization_id = %s order by a.external_ref""",
+            (tenant["servicer"],),
+        ).fetchall()
+        items: dict[str, list[ItemInfo]] = {}
+        for item, account, ref, balance in conn.execute(
+            """select i.id::text, i.account_id::text, i.ref, coalesce(sum(lp.amount_minor), 0)
+               from public.claim_item i
+               join public.account a on a.id = i.account_id and a.organization_id = %s
+               left join public.ledger_account la on la.claim_item_id = i.id
+               left join public.ledger_posting lp on lp.ledger_account_id = la.id
+               group by i.id, i.account_id, i.ref""",
+            (tenant["servicer"],),
+        ).fetchall():
+            items.setdefault(account, []).append(ItemInfo(item, ref, int(balance)))
+        names: dict[str, list[str]] = {}
+        for account, name in conn.execute(
+            """select ap.account_id::text, p.display_name from public.account_party ap
+               join public.party p on p.id = ap.party_id
+               where p.organization_id = %s order by ap.role, p.display_name""",
+            (tenant["servicer"],),
+        ).fetchall():
+            names.setdefault(account, []).append(name)
+    accounts = [
+        WorldAccount(aid, ref, KIND_OF.get(ct, "loan"), status, rf,
+                     tuple(names.get(aid, ("?",))), tuple(items.get(aid, ())))
+        for aid, ref, ct, status, rf in files
+    ]  # fmt: skip
+    return World(accounts)

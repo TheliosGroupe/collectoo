@@ -49,6 +49,44 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"account_hold": {
+                  Row: {
+                    "account_id": string,"client_organization_id": string,"created_at": string,"decided_by": string | null,"end_reason": string | null,"ended_at": string | null,"ended_by": string | null,"evidence_document_id": string | null,"id": string,"kind": string,"legal_basis": string | null,"organization_id": string,"portfolio_id": string,"reason": string,"scope": (string)[],"started_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id": string,"client_organization_id": string,"created_at"?: string,"decided_by"?: string | null,"end_reason"?: string | null,"ended_at"?: string | null,"ended_by"?: string | null,"evidence_document_id"?: string | null,"id"?: string,"kind": string,"legal_basis"?: string | null,"organization_id": string,"portfolio_id": string,"reason": string,"scope": (string)[],"started_at"?: string
+                  }
+                  Update: {
+                    "account_id"?: string,"client_organization_id"?: string,"created_at"?: string,"decided_by"?: string | null,"end_reason"?: string | null,"ended_at"?: string | null,"ended_by"?: string | null,"evidence_document_id"?: string | null,"id"?: string,"kind"?: string,"legal_basis"?: string | null,"organization_id"?: string,"portfolio_id"?: string,"reason"?: string,"scope"?: (string)[],"started_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "account_hold_account_fk"
+      columns: ["account_id","organization_id","client_organization_id","portfolio_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id","organization_id","client_organization_id","portfolio_id"]
+    },{
+      foreignKeyName: "account_hold_decided_by_fkey"
+      columns: ["decided_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "account_hold_ended_by_fkey"
+      columns: ["ended_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "account_hold_evidence_document_id_fkey"
+      columns: ["evidence_document_id"]
+isOneToOne: false
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"account_party": {
                   Row: {
                     "account_id": string,"cap_minor": number | null,"capacity": string,"created_at": string,"liability": string,"party_id": string,"role": string
@@ -835,6 +873,64 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"payment_match": {
+                  Row: {
+                    "account_id": string,"action": string,"client_organization_id": string,"decided_at": string,"decided_by": string | null,"designation": Json | null,"evidence": NonNullable<Json>,"iban_link": boolean,"id": string,"method": string,"organization_id": string,"payment_id": string,"portfolio_id": string,"reason": string | null,"review_reason": string | null,"rule": string | null,"rule_version": string,"trigger": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id": string,"action": string,"client_organization_id": string,"decided_at"?: string,"decided_by"?: string | null,"designation"?: Json | null,"evidence"?: NonNullable<Json>,"iban_link"?: boolean,"id"?: string,"method": string,"organization_id": string,"payment_id": string,"portfolio_id": string,"reason"?: string | null,"review_reason"?: string | null,"rule"?: string | null,"rule_version": string,"trigger": string
+                  }
+                  Update: {
+                    "account_id"?: string,"action"?: string,"client_organization_id"?: string,"decided_at"?: string,"decided_by"?: string | null,"designation"?: Json | null,"evidence"?: NonNullable<Json>,"iban_link"?: boolean,"id"?: string,"method"?: string,"organization_id"?: string,"payment_id"?: string,"portfolio_id"?: string,"reason"?: string | null,"review_reason"?: string | null,"rule"?: string | null,"rule_version"?: string,"trigger"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "payment_match_account_fk"
+      columns: ["account_id","organization_id","client_organization_id","portfolio_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id","organization_id","client_organization_id","portfolio_id"]
+    },{
+      foreignKeyName: "payment_match_decided_by_fkey"
+      columns: ["decided_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "payment_match_payment_fk"
+      columns: ["payment_id","organization_id"]
+isOneToOne: false
+      referencedRelation: "payment"
+      referencedColumns: ["id","organization_id"]
+    }
+                  ]
+                },"payment_match_candidate": {
+                  Row: {
+                    "acceptable": boolean,"account_id": string,"created_at": string,"organization_id": string,"payment_id": string,"rank": number,"rule": string,"signals": NonNullable<Json>
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "acceptable"?: boolean,"account_id": string,"created_at"?: string,"organization_id": string,"payment_id": string,"rank": number,"rule": string,"signals"?: NonNullable<Json>
+                  }
+                  Update: {
+                    "acceptable"?: boolean,"account_id"?: string,"created_at"?: string,"organization_id"?: string,"payment_id"?: string,"rank"?: number,"rule"?: string,"signals"?: NonNullable<Json>
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "payment_match_candidate_account_id_fkey"
+      columns: ["account_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "payment_match_candidate_payment_id_fkey"
+      columns: ["payment_id"]
+isOneToOne: false
+      referencedRelation: "payment"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"payment_reference": {
                   Row: {
                     "account_id": string,"client_organization_id": string,"created_at": string,"id": string,"organization_id": string,"portfolio_id": string,"retired_at": string | null,"retired_reason": string | null,"rf": string,"status": string
@@ -948,6 +1044,9 @@ isOneToOne: false
             "abandon_boarding_batch":
 { Args: { "p_batch_id": string,"p_reason": string }; Returns: undefined
                            },
+"accept_suggestions":
+{ Args: { "p_idempotency_key": string,"p_payment_ids": (string)[] }; Returns: Json
+                           },
 "account_balances":
 { Args: { "p_account_id": string,"p_as_of"?: string,"p_known_at"?: string }; Returns: {
               "balance_minor": number,"claim_item_id": string,"component": string,"currency": string
@@ -958,6 +1057,9 @@ isOneToOne: false
                            },
 "approve_mapping":
 { Args: { "p_batch_id": string,"p_overrides"?: Json }; Returns: undefined
+                           },
+"assign_payment":
+{ Args: { "p_designation": Json,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string,"p_splits": Json }; Returns: Json
                            },
 "client_money_balances":
 { Args: { "p_as_of"?: string,"p_client_organization_id": string,"p_known_at"?: string }; Returns: {
@@ -988,6 +1090,17 @@ isOneToOne: false
 "ledger_balance":
 { Args: { "p_as_of"?: string,"p_known_at"?: string,"p_ledger_account_id": string }; Returns: number
                            },
+"lift_account_hold":
+{ Args: { "p_hold_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: undefined
+                           },
+"match_queue_accounts":
+{ Args: { "p_account_ids": (string)[] }; Returns: {
+              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"pending_minor": string,"rf": string,"status": string
+            }[]
+                           },
+"place_account_hold":
+{ Args: { "p_account_id": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string,"p_legal_basis": string,"p_reason": string }; Returns: string
+                           },
 "register_bank_account":
 { Args: { "p_bic"?: string,"p_currency": string,"p_feed": string,"p_iban": string,"p_idempotency_key": string,"p_label": string,"p_opened_on"?: string,"p_organization_id": string }; Returns: string
                            },
@@ -997,14 +1110,27 @@ isOneToOne: false
 "rollback_boarding_batch":
 { Args: { "p_batch_id": string,"p_reason": string }; Returns: undefined
                            },
+"search_payment_files":
+{ Args: { "p_payment_id": string,"p_query": string }; Returns: {
+              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"found_by": string,"pending_minor": string,"rf": string,"status": string
+            }[]
+                           },
 "set_control_totals":
 { Args: { "p_batch_id": string,"p_rows": number,"p_total_minor": number }; Returns: undefined
+                           },
+"statement_match_counts":
+{ Args: { "p_statement_ids": (string)[] }; Returns: {
+              "automatic": number,"payments": number,"statement_id": string,"to_review": number
+            }[]
                            },
 "submit_boarding_batch":
 { Args: { "p_batch_id": string }; Returns: number
                            },
 "submit_statement_import":
 { Args: { "p_idempotency_key": string,"p_statement_id": string }; Returns: string
+                           },
+"unassign_payment":
+{ Args: { "p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
                            }
           }
           Enums: {

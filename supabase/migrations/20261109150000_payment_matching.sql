@@ -173,10 +173,12 @@ comment on table public.payment_match_candidate is
   'Files proposed for a payment left to ops (up to 3, ranked, with the signals that ranked them). Replaced each run.';
 
 -- IBAN memory (design R4): which files a payer's IBAN paid, by decisions that teach it (an RF, a cited number
--- that a second signal backed, ops). Internal: never exposed (third-party payer data).
+-- that a second signal backed, ops). Internal: never exposed (third-party payer data). The IBAN is kept as the
+-- worker reads it (no spaces, upper case); the worker checks its digits before it looks one up (a mod-97 check
+-- per row here costs seconds at 50k).
 create table private.payer_account_link (
   organization_id uuid not null references public.organization (id),
-  payer_iban text not null check (private.iban_valid(payer_iban)),
+  payer_iban text not null check (payer_iban ~ '^[A-Z]{2}[0-9]{2}[0-9A-Z]{11,30}$'),
   account_id uuid not null references public.account (id),
   confirmed_count integer not null default 0 check (confirmed_count >= 0),
   first_seen date not null,
@@ -296,10 +298,11 @@ begin
 
   drop table if exists pg_temp._assign_iban;
   create temp table _assign_iban on commit drop as
-  select g.payment_id, g.account_id, g.teaches, p.booking_date,
-         case when private.iban_valid(private.rf_normalise(p.payer_iban)) then private.rf_normalise(p.payer_iban) end as iban
-  from pg_temp._assign g join public.payment p on p.id = g.payment_id
-  where g.review_reason is distinct from 'account_not_confirmed' and p.payer_iban is not null;
+  select x.payment_id, x.account_id, x.teaches, x.booking_date,
+         case when x.iban ~ '^[A-Z]{2}[0-9]{2}[0-9A-Z]{11,30}$' then x.iban end as iban
+  from (select g.payment_id, g.account_id, g.teaches, p.booking_date, private.rf_normalise(p.payer_iban) as iban
+        from pg_temp._assign g join public.payment p on p.id = g.payment_id
+        where g.review_reason is distinct from 'account_not_confirmed' and p.payer_iban is not null) x;
 
   insert into public.payment_match (organization_id, payment_id, action, account_id, client_organization_id,
                                     portfolio_id, method, rule, rule_version, trigger, evidence, designation,
@@ -630,8 +633,7 @@ begin
   select jsonb_build_object(
     'accepted', (select count(*) from pg_temp._assign),
     'skipped', coalesce((select jsonb_agg(jsonb_build_object('payment_id', x, 'reason',
-                          case when p.status = 'unmatched' and p.review_reason = 'no_match' then 'no_suggestion'
-                               else 'not_waiting' end) order by x)
+                          case when p.status = 'unmatched' then 'no_suggestion' else 'not_waiting' end) order by x)
                          from unnest(v_ids) x join public.payment p on p.id = x
                          where x not in (select g.payment_id from pg_temp._assign g)), '[]'))
   into v_result;
@@ -703,6 +705,7 @@ begin
     where organization_id = p.organization_id and payer_iban = v_iban and account_id = a.id;
   end if;
   delete from public.payment_match_candidate where payment_id = p.id;
+  perform private.regate_account(a.id);  -- the file's other payments may find something left to pay
   -- fresh suggestions for ops (never this file again)
   perform pgmq.send('payments', jsonb_build_object('type', 'match', 'organization_id', p.organization_id,
                                                    'trigger', 'ops', 'payment_ids', jsonb_build_array(p.id)));
