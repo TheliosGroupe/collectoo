@@ -80,6 +80,15 @@ export type ErrorCode =
   | "busy"
   | "designation_invalid"
   | "none_selected"
+  | "allocation_changed"
+  | "payment_changed"
+  | "amount_changed"
+  | "proposal_changed"
+  | "authorisation_required"
+  | "request_required"
+  | "not_same_debtor"
+  | "not_forwardable"
+  | "allocation_busy"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -123,6 +132,16 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   busy: "Ce paiement est en cours de rapprochement automatique : réessayez dans un instant.",
   designation_invalid: "Les factures désignées doivent appartenir à ce dossier.",
   none_selected: "Cochez au moins un paiement.",
+  allocation_changed: "L'imputation de ce paiement a changé entre-temps : rechargez la page.",
+  payment_changed: "Ce paiement a changé entre-temps : rechargez la page.",
+  amount_changed: "Le montant restant de ce paiement a changé entre-temps : rechargez la page.",
+  proposal_changed: "La proposition d'avoir a changé entre-temps : rechargez la page.",
+  authorisation_required: "Choisissez l'autorisation du juge, classée dans ce dossier.",
+  request_required: "Choisissez la demande écrite du débiteur, classée dans l'un des deux dossiers.",
+  not_same_debtor: "L'autre dossier doit être un dossier ouvert du même débiteur, chez le même client.",
+  not_forwardable:
+    "Ce paiement ne peut pas être reversé au client : seul un paiement sans imputation, sur un dossier rappelé ou antérieur à l'arrêté, peut l'être.",
+  allocation_busy: "Une imputation est en cours pour ce servicer : réessayez dans un instant.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 

@@ -22,6 +22,7 @@ import {
   reviewReason,
   signalText,
 } from "@/lib/payments/matching";
+import { paymentStatus } from "@/lib/payments/allocation";
 import { money } from "@/lib/payments/statements";
 import {
   AcceptSuggestion,
@@ -171,7 +172,7 @@ export default async function QueuePage({ searchParams }: PageProps<"/backoffice
       <InfoNote>
         {q.onglet === "a-traiter"
           ? "Les règles de rapprochement (référence RF, numéro de facture confirmé, IBAN connu) affectent seules les paiements sûrs ; les autres attendent ici une décision. Un nom et un montant ne sont jamais qu'une suggestion."
-          : "Paiements rattachés à un dossier, prêts pour l'imputation. Un paiement affecté au mauvais dossier se désaffecte ici tant que rien n'est imputé."}
+          : "Paiements rattachés à un dossier : imputés, ou en cours d'imputation. Une imputation erronée s'annule depuis la page du paiement ; un paiement sans imputation se désaffecte ici."}
       </InfoNote>
 
       <details open={filtered} className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800" data-testid="queue-filter-panel">
@@ -285,6 +286,7 @@ function PaymentCard({
   const amount = money(r.amount_minor, r.currency);
   const payment: PaymentFacts = { id: r.payment_id, amount, currency: r.currency, booking_date: r.booking_date };
   const reason = reviewReason(r.status === "matched" && r.review_reason === null ? "ready" : r.review_reason);
+  const position = r.review_reason === null && r.status !== "matched" && r.status !== "unmatched" ? paymentStatus(r.status) : null;
   const age = ageBadge(r.age_days);
   const file = r.account_id ? files.get(r.account_id) : undefined;
   const waitingFor = r.review_reason === "account_not_confirmed" && r.candidate_account_id ? files.get(r.candidate_account_id) : undefined;
@@ -313,7 +315,11 @@ function PaymentCard({
           {amount}
         </span>
         <Badge tone={age.tone}>{age.text}</Badge>
-        {r.status !== "matched" || r.review_reason ? (
+        {position ? (
+          <Badge tone={position.tone} testId="queue-reason">
+            {position.label}
+          </Badge>
+        ) : r.status !== "matched" || r.review_reason ? (
           <Badge tone={reason.tone} testId="queue-reason">
             {reason.label}
           </Badge>
@@ -404,6 +410,15 @@ function PaymentCard({
         </div>
       ) : null}
       {r.status === "matched" ? <Unassign paymentId={r.payment_id} idempotencyKey={randomUUID()} /> : null}
+      {r.status !== "unmatched" ? (
+        <Link
+          href={`/backoffice/encaissements/paiements/${r.payment_id}`}
+          className="text-sm font-medium underline underline-offset-4"
+          data-testid="queue-payment-link"
+        >
+          Voir le paiement et son imputation
+        </Link>
+      ) : null}
     </li>
   );
 }

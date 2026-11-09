@@ -16,7 +16,7 @@ import {
 import { type Tone, money } from "@/lib/payments/statements";
 import { acceptSuggestions, assignPayment, searchFiles, unassignPayment } from "./actions";
 
-const secondaryClass =
+export const secondaryClass =
   "rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900";
 
 /** The payment a sheet acts on: its id, its amount as shown, and what the gating reads of it. */
@@ -77,7 +77,7 @@ export function QueueNotice() {
  * the screen: it scrolls inside), in place on a desktop. The sheet says what will happen before anything
  * is sent.
  */
-function ConfirmSheet({
+export function ConfirmSheet({
   label,
   title,
   buttonClassName,
