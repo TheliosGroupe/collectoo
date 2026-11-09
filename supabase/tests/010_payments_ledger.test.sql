@@ -180,8 +180,8 @@ select is(
   array[has_function_privilege('service_role', 'private.ledger_post_set()', 'execute'),
         has_function_privilege('authenticated', 'private.ledger_post_set()', 'execute'),
         has_function_privilege('service_role', 'private.issue_payment_references(uuid)', 'execute'),
-        has_function_privilege('anon', 'public.register_bank_account(text, uuid, text, text, text, text, text, date)', 'execute'),
-        has_function_privilege('authenticated', 'public.register_bank_account(text, uuid, text, text, text, text, text, date)', 'execute')],
+        has_function_privilege('anon', 'public.register_bank_account(text, uuid, text, text, text, text, text, date, text)', 'execute'),
+        has_function_privilege('authenticated', 'public.register_bank_account(text, uuid, text, text, text, text, text, date, text)', 'execute')],
   array[false, false, false, false, true],
   'set posting and reference issuance are internal; the bank-account command is for signed-in users');
 
@@ -220,7 +220,7 @@ select throws_ok($$ insert into public.bank_account (organization_id, iban, curr
   '23514', null, 'an invalid IBAN is refused');
 select throws_ok($$ insert into public.bank_account (organization_id, purpose, iban, currency, label, feed, opened_on)
   values ('00000000-0000-0000-0000-00000000000a', 'own', 'FR1420041010050500013M02606', 'EUR', 'x', 'csv', '2026-01-01') $$,
-  '23514', null, 'only client_funds accounts exist before M2c');
+  '23514', null, 'an own account has no statement feed (its statements are not imported, M2c)');
 select throws_ok($$ insert into public.bank_account (organization_id, iban, currency, label, feed, opened_on)
   values ('00000000-0000-0000-0000-0000000000a1', 'FR1420041010050500013M02606', 'EUR', 'x', 'csv', '2026-01-01') $$,
   '23514', null, 'a bank account belongs to a servicer');
@@ -569,22 +569,23 @@ select is((select count(*)::int from public.payment_reference
 
 -- Bank-account commands --------------------------------------------------------------------------------
 select pg_temp.as_user('10000000-0000-0000-0000-000000000004', 'aal2');
+-- (in GBP: one active client_funds account per currency since M2c, and this servicer has its EUR and USD ones)
 set local role authenticated;
 insert into t select 'ba', public.register_bank_account('register-ba-0001', '00000000-0000-0000-0000-00000000000a',
-  'Compte séquestre', 'fr14 2004 1010 0505 0001 3m02 606', 'EUR', 'camt053', 'psstfrppxxx');
+  'Compte séquestre', 'fr14 2004 1010 0505 0001 3m02 606', 'GBP', 'camt053', 'psstfrppxxx');
 select is((select array[iban, bic, purpose, status] from public.bank_account where id = (select v from t where k = 'ba')),
   array['FR1420041010050500013M02606', 'PSSTFRPPXXX', 'client_funds', 'active'],
   'an admin registers a client_funds account (IBAN and BIC normalised)');
 select is(public.register_bank_account('register-ba-0001', '00000000-0000-0000-0000-00000000000a',
-  'Compte séquestre', 'fr14 2004 1010 0505 0001 3m02 606', 'EUR', 'camt053', 'psstfrppxxx'),
+  'Compte séquestre', 'fr14 2004 1010 0505 0001 3m02 606', 'GBP', 'camt053', 'psstfrppxxx'),
   (select v from t where k = 'ba'), 'a replay returns the same account');
 select throws_ok($$ select public.register_bank_account('register-ba-0001', '00000000-0000-0000-0000-00000000000a',
-  'Autre libellé', 'FR1420041010050500013M02606', 'EUR', 'camt053') $$, '22023', null,
+  'Autre libellé', 'FR1420041010050500013M02606', 'GBP', 'camt053') $$, '22023', null,
   'the same key for another request is refused');
 select throws_ok($$ select public.register_bank_account('register-ba-0002', '00000000-0000-0000-0000-00000000000a',
   'Faux', 'FR1420041010050500013M02607', 'EUR', 'camt053') $$, '23514', 'invalid IBAN', 'an invalid IBAN is refused');
 select throws_ok($$ select public.register_bank_account('register-ba-0003', '00000000-0000-0000-0000-00000000000a',
-  'Doublon', 'FR1420041010050500013M02606', 'EUR', 'csv') $$, '23505', 'this IBAN is already registered',
+  'Doublon', 'FR1420041010050500013M02606', 'GBP', 'csv') $$, '23505', 'this IBAN is already registered',
   'an IBAN is registered once per currency');
 select throws_ok($$ select public.close_bank_account('close-ba-0001', '80000000-0000-0000-0000-000000000001', 'moved') $$,
   '23514', 'the bank account still holds client money', 'an account holding client money cannot be closed');
