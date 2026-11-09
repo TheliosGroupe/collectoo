@@ -484,7 +484,7 @@ Estimate for 50k payments: ~50k entries and ~350k postings, ~20–30 s in the wo
 | `register_bank_account`, `close_bank_account` | admin | — |
 | `create_statement_upload`, `submit_statement_import` | admin, ops_manager | signed URL; enqueue import |
 | `assign_payment(key, payment, splits[{account, amount_text?}], designation?, reason)` | admin, ops_manager | sets the match; enqueues allocation (a split posts one entry per account; Σ ≤ U) |
-| `accept_suggestions(key, payment_ids ≤ 200)` | admin, ops_manager | bulk accept of top candidates |
+| `accept_suggestions(key, items ≤ 200)` | admin, ops_manager | bulk accept of top candidates; each item names the file the page showed (compare and set, ADR-0013 M2b-3 #14) |
 | `unassign_payment(key, payment, reason)` | admin, ops_manager | only while nothing is allocated |
 | `reverse_allocation(key, payment, account, reason)` | admin, ops_manager | reversal at the original date; payment back to `matched` |
 | `release_hold_payment(key, payment, evidence_document_id, reason)` | admin, ops_manager | allocate a held payment with the judge's or juge-commissaire's authorisation |

@@ -63,6 +63,8 @@ and a word index of the servicer's party names; R5–R6; COPY the decisions and 
 | first version | 50,000 × 50,000 | 48,219 (96.4 %) | 0 | 1,781 | 29.4 s | 4.8 / 0.7 / 1.9 / 21.3 s |
 | IBAN shape check in SQL, name word index | 50,000 × 50,000 | 48,245 (96.5 %) | **0** | 1,755 | **18.8 s** | 5.0 / 0.9 / 1.7 / 11.2 s |
 | 5,000 × 5,000 | 5,000 × 5,000 | 4,813 (96.3 %) | 0 | 187 | 3.0 s | 0.7 / 0.1 / 0.1 / 2.2 s |
+| before the review fixes (re-run, fresh stack) | 50,000 × 50,000 | 48,257 (96.5 %) | 0 | 1,743 | 17.6 s | 4.5 / 1.1 / 2.0 / 10.0 s |
+| review fixes: file locks, keyed gating, chunks of 50k | 50,000 × 50,000 | 48,238 (96.5 %) | **0** | 1,762 | **18.9 s** | 4.7 / 1.1 / 2.0 / 11.1 s |
 
 - 50,000 credits imported and matched end to end: 52.4 s (import job ≈ 17 s as above, then the match
   job); the 13,500 earlier credits: 8.0 s. The 50k boarding before it: 73 s.
@@ -83,4 +85,29 @@ and a word index of the servicer's party names; R5–R6; COPY the decisions and 
   7 s, matching 11 s, **96.0 % automatic, 0 wrong, 0 policy violations, 4.0 % queued**; the
   database runs above were not repeated.
 - Design estimate (§8.4): 10–20 s for 100k lines against 500k references.
+
+### Review fixes (2026-11-09)
+
+- **Gating locks the run's files** (`FOR KEY SHARE`, in id order) so that a hold placed or lifted, or a batch
+  rolled back, during the run is never missed: +0.1–0.3 s at 31k files (the payment updates' foreign keys
+  took the same locks later anyway).
+- **Keyed gating.** A first version built the gating table in one statement of left joins over aggregates.
+  After the other integration tests (statistics of `payment` taken while the new payments were all
+  unmatched), the planner estimated « payments already matched to these files » at one row and rescanned
+  that aggregate for each of 31k files: apply 41.7–44.0 s instead of 9.9 s (same sequence before the
+  fixes). The run's files are now a keyed, analysed table filled by one aggregate per fact, every join on
+  an indexed key: apply 10.9–11.1 s in that sequence and alone.
+- **`NOT IN (subquery)` → `NOT EXISTS`:** 250k rows × 4k outer rows (default `work_mem`): `NOT IN`
+  (plain subplan, the hash limit passed) 40.0 s; `NOT EXISTS` (hash anti-join, with or without
+  statistics) 25 ms.
+- **Chunks:** one job takes at most 50,000 payments (`MATCH_CHUNK`) and queues the rest; at exactly 50k
+  a second job finds nothing (a few ms).
+- **Queue reads** at 63,500 payments (1,757 to process, 61,743 ready), ops manager, RLS: « à traiter »
+  first page 5–10 ms (was 94–116 ms: the whole payment history was filtered), by reason 5 ms (was 92 ms),
+  last page 6 ms, by client 230 ms (RLS on `account` for each candidate file read, see « Next »);
+  « rapprochés » 68–82 ms (was 112 ms), last page 157 ms. pgTAP 012 pins it: a page reads ~30 buffers
+  with 5,000 older payments and no fresh statistics (343 before).
+- Unrelated, seen while measuring: `private.ingest_statement` of a 50k statement takes 28 s after the
+  other integration tests and ~105 s once four 50k worlds are loaded (8 s on a fresh stack), with or
+  without the queue's new indexes: to profile before production volumes (M2b-2).
 

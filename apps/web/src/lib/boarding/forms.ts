@@ -79,6 +79,7 @@ export type ErrorCode =
   | "payment_allocated"
   | "busy"
   | "designation_invalid"
+  | "none_selected"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -121,6 +122,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   payment_allocated: "Une partie de ce paiement est déjà imputée : annulez d'abord l'imputation.",
   busy: "Ce paiement est en cours de rapprochement automatique : réessayez dans un instant.",
   designation_invalid: "Les factures désignées doivent appartenir à ce dossier.",
+  none_selected: "Cochez au moins un paiement.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 

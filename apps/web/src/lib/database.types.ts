@@ -1045,7 +1045,7 @@ isOneToOne: false
 { Args: { "p_batch_id": string,"p_reason": string }; Returns: undefined
                            },
 "accept_suggestions":
-{ Args: { "p_idempotency_key": string,"p_payment_ids": (string)[] }; Returns: Json
+{ Args: { "p_idempotency_key": string,"p_items": Json }; Returns: Json
                            },
 "account_balances":
 { Args: { "p_account_id": string,"p_as_of"?: string,"p_known_at"?: string }; Returns: {
@@ -1095,7 +1095,7 @@ isOneToOne: false
                            },
 "match_queue_accounts":
 { Args: { "p_account_ids": (string)[] }; Returns: {
-              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"pending_minor": string,"rf": string,"status": string
+              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"holds": (string)[],"pending_minor": string,"rf": string,"servicing_start": string,"status": string
             }[]
                            },
 "payment_queue":
@@ -1117,7 +1117,7 @@ isOneToOne: false
                            },
 "search_payment_files":
 { Args: { "p_payment_id": string,"p_query": string }; Returns: {
-              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"found_by": string,"pending_minor": string,"rf": string,"status": string
+              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"found_by": string,"holds": (string)[],"pending_minor": string,"rf": string,"servicing_start": string,"status": string
             }[]
                            },
 "set_control_totals":

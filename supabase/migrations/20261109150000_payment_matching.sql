@@ -215,11 +215,25 @@ begin
 end;
 $$;
 
--- Gating (design §8.4), first that applies: file not confirmed (waits for the rematch at confirmation,
--- founder #11), closed (a recalled file is forwarded by ops), other currency (1343-3, no conversion: #9),
--- booked before servicing started (#10), active surendettement / collective proceeding hold (#12),
--- nothing left to pay. "Left to pay" = Σ receivable of the file − payments already matched to it and not
--- allocated − earlier payments of this batch on the same file.
+-- Gating (design §8.4), first that applies: file gone (its batch was rolled back: no mandate, 1342-2),
+-- file not confirmed (waits for the rematch at confirmation, founder #11), closed (a recalled file is
+-- forwarded by ops), other currency (1343-3, no conversion: #9), booked before servicing started (#10),
+-- active surendettement / collective proceeding hold (#12), nothing left to pay. "Left to pay" = Σ receivable
+-- of the file − payments already matched to it and not allocated − earlier payments of this batch on the
+-- same file.
+--
+-- Serialised with the hold commands and with a batch rollback (review fixes): the files are locked first,
+-- in id order, FOR KEY SHARE (an ordinary update of a file, such as its confirmation, does not wait).
+-- place_account_hold and lift_account_hold lock the file FOR UPDATE: a hold placed or lifted meanwhile
+-- has either committed, and the reads below see it, or waits for this transaction, and its own regate then
+-- sees these payments. A rollback deletes its files: either the delete committed first (the file is gone
+-- below: no_mandate) or it waits, and its trigger then sees the payment that waits for the file.
+--
+-- Plans that rest on no statistics of the tables a run has just changed (review fix): the run's files are
+-- a keyed, analysed table; each fact about them is one aggregate joined on that key, written into it. Every
+-- join has an index on its key on both sides (or is a hash join), so a stale estimate (payments matched a
+-- moment ago counted as none) can never make a nested loop rescan a whole side per row (one statement of
+-- left joins over the aggregates was planned so after a 50k import: 31 s for 31k files).
 create or replace function private.gate_assignments()
 returns void
 language plpgsql
@@ -228,25 +242,51 @@ as $$
 begin
   analyze pg_temp._assign;
   drop table if exists pg_temp._gate_file;
-  create temp table _gate_file on commit drop as
-  select f.account_id, f.status, f.currency, s.servicing_start, coalesce(h.n, 0) as holds,
-         coalesce(b.balance, 0) as balance, coalesce(d.pending, 0) as pending
-  from (select a.id as account_id, a.status, a.currency from public.account a
-        where a.id in (select g.account_id from pg_temp._assign g)) f
-  left join (select o.account_id, min(o.valid_from) as servicing_start from public.claim_ownership_period o
-             where o.account_id in (select g.account_id from pg_temp._assign g) group by o.account_id) s using (account_id)
-  left join (select h.account_id, count(*) as n from public.account_hold h
-             where h.account_id in (select g.account_id from pg_temp._assign g) and h.ended_at is null
-               and h.kind in ('surendettement', 'collective_proceeding')
-             group by h.account_id) h using (account_id)
-  left join (select la.account_id, sum(lp.amount_minor) as balance
-             from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
-             where la.account_id in (select g.account_id from pg_temp._assign g) and la.book = 'debtor_receivable'
-             group by la.account_id) b using (account_id)
-  left join (select p.account_id, sum(p.amount_minor) as pending from public.payment p
-             where p.account_id in (select g.account_id from pg_temp._assign g) and p.status = 'matched'
-               and p.id not in (select g.payment_id from pg_temp._assign g)
-             group by p.account_id) d using (account_id);
+  create temp table _gate_file (
+    account_id uuid primary key,
+    status text,
+    currency char(3),
+    servicing_start date,
+    holds bigint not null default 0,
+    balance bigint not null default 0,
+    pending bigint not null default 0
+  ) on commit drop;
+  insert into pg_temp._gate_file (account_id) select distinct g.account_id from pg_temp._assign g;
+  analyze pg_temp._gate_file;
+  perform 1 from pg_temp._gate_file f join public.account a on a.id = f.account_id
+  order by a.id for key share of a;
+
+  update pg_temp._assign g set review_reason = 'no_mandate'
+  where not exists (select 1 from public.account a where a.id = g.account_id);
+  delete from pg_temp._gate_file f where not exists (select 1 from public.account a where a.id = f.account_id);
+  update pg_temp._gate_file f set status = a.status, currency = a.currency
+  from public.account a where a.id = f.account_id;
+  update pg_temp._gate_file f set servicing_start = s.valid_from
+  from (select o.account_id, min(o.valid_from) as valid_from
+        from pg_temp._gate_file x join public.claim_ownership_period o on o.account_id = x.account_id
+        group by o.account_id) s
+  where s.account_id = f.account_id;
+  update pg_temp._gate_file f set holds = h.n
+  from (select h.account_id, count(*) as n
+        from pg_temp._gate_file x join public.account_hold h on h.account_id = x.account_id
+        where h.ended_at is null and h.kind in ('surendettement', 'collective_proceeding')
+        group by h.account_id) h
+  where h.account_id = f.account_id;
+  update pg_temp._gate_file f set balance = b.balance
+  from (select la.account_id, sum(lp.amount_minor) as balance
+        from pg_temp._gate_file x
+        join public.ledger_account la on la.account_id = x.account_id and la.book = 'debtor_receivable'
+        join public.ledger_posting lp on lp.ledger_account_id = la.id
+        group by la.account_id) b
+  where b.account_id = f.account_id;
+  -- (NOT EXISTS, never NOT IN: NOT IN over a subquery is a plain subplan once _assign outgrows hash
+  -- memory, one scan of it per matched payment; NOT EXISTS is an anti-join at any size)
+  update pg_temp._gate_file f set pending = d.pending
+  from (select p.account_id, sum(p.amount_minor) as pending
+        from pg_temp._gate_file x join public.payment p on p.account_id = x.account_id and p.status = 'matched'
+        where not exists (select 1 from pg_temp._assign y where y.payment_id = p.id)
+        group by p.account_id) d
+  where d.account_id = f.account_id;
   analyze pg_temp._gate_file;
 
   update pg_temp._assign g set review_reason = case
@@ -272,8 +312,8 @@ end;
 $$;
 
 -- Records pg_temp._assign: gates each assignment, sets the payment, writes its payment_match row (none for a
--- file not confirmed: it waits), teaches the IBAN memory, drops the old candidates. Returns the count per
--- review reason ("ready" when none).
+-- file not confirmed: it waits; none for a file gone: no mandate), teaches the IBAN memory, drops the old
+-- candidates. Returns the count per review reason ("ready" when none).
 create or replace function private.record_assignments(p_organization_id uuid, p_trigger text, p_decided_by uuid,
                                                       p_reason text)
 returns jsonb
@@ -285,14 +325,16 @@ declare
 begin
   perform private.gate_assignments();
 
+  -- no file yet (not confirmed: it waits), or no file any more (rolled back: no mandate, the file it named
+  -- kept as candidate, as account_deleted_payments does)
   update public.payment p set
-    account_id = case when g.review_reason = 'account_not_confirmed' then null else g.account_id end,
-    status = case when g.review_reason = 'account_not_confirmed' then 'unmatched' else 'matched' end,
-    match_method = case when g.review_reason = 'account_not_confirmed' then null else g.method end,
-    matched_at = case when g.review_reason = 'account_not_confirmed' then null else now() end,
-    designation = case when g.review_reason = 'account_not_confirmed' then null else g.designation end,
+    account_id = case when g.review_reason in ('account_not_confirmed', 'no_mandate') then null else g.account_id end,
+    status = case when g.review_reason in ('account_not_confirmed', 'no_mandate') then 'unmatched' else 'matched' end,
+    match_method = case when g.review_reason in ('account_not_confirmed', 'no_mandate') then null else g.method end,
+    matched_at = case when g.review_reason in ('account_not_confirmed', 'no_mandate') then null else now() end,
+    designation = case when g.review_reason in ('account_not_confirmed', 'no_mandate') then null else g.designation end,
     review_reason = g.review_reason,
-    candidate_account_id = case when g.review_reason = 'account_not_confirmed' then g.account_id end
+    candidate_account_id = case when g.review_reason in ('account_not_confirmed', 'no_mandate') then g.account_id end
   from pg_temp._assign g
   where p.id = g.payment_id and p.organization_id = p_organization_id;
 
@@ -302,7 +344,8 @@ begin
          case when x.iban ~ '^[A-Z]{2}[0-9]{2}[0-9A-Z]{11,30}$' then x.iban end as iban
   from (select g.payment_id, g.account_id, g.teaches, p.booking_date, private.rf_normalise(p.payer_iban) as iban
         from pg_temp._assign g join public.payment p on p.id = g.payment_id
-        where g.review_reason is distinct from 'account_not_confirmed' and p.payer_iban is not null) x;
+        where g.review_reason is distinct from 'account_not_confirmed'
+          and g.review_reason is distinct from 'no_mandate' and p.payer_iban is not null) x;
 
   insert into public.payment_match (organization_id, payment_id, action, account_id, client_organization_id,
                                     portfolio_id, method, rule, rule_version, trigger, evidence, designation,
@@ -313,7 +356,7 @@ begin
   from pg_temp._assign g
   join public.account a on a.id = g.account_id
   left join pg_temp._assign_iban i on i.payment_id = g.payment_id
-  where g.review_reason is distinct from 'account_not_confirmed'
+  where g.review_reason is distinct from 'account_not_confirmed' and g.review_reason is distinct from 'no_mandate'
   order by g.ord;
 
   insert into private.payer_account_link as l (organization_id, payer_iban, account_id, confirmed_count, first_seen,
@@ -376,6 +419,8 @@ $$;
 
 -- Applies the worker's decisions to the payments still waiting (ops may have decided meanwhile): automatic
 -- matches are recorded and gated; the others stay unmatched, in the queue with their reason and candidates.
+-- A file the rules chose and that is gone by now (its batch rolled back during the run) is kept in the
+-- batch: the gating says no_mandate (never "waiting" for a file that no longer exists).
 create or replace function private.apply_match_results(p_organization_id uuid, p_trigger text)
 returns jsonb
 language plpgsql
@@ -400,8 +445,9 @@ begin
   perform private.assign_begin();
   insert into pg_temp._assign (ord, payment_id, account_id, method, rule, rule_version, evidence, designation, teaches)
   select m.ord, m.payment_id, m.account_id, m.method, m.rule, m.rule_version, m.evidence, m.designation, m.teaches
-  from pg_temp._mr m join public.account a on a.id = m.account_id and a.organization_id = p_organization_id
-  where m.outcome = 'auto';
+  from pg_temp._mr m
+  where m.outcome = 'auto'
+    and not exists (select 1 from public.account a where a.id = m.account_id and a.organization_id <> p_organization_id);
   v_gates := private.record_assignments(p_organization_id, p_trigger, null, null);
 
   update public.payment p
@@ -551,11 +597,14 @@ begin
       raise exception 'invalid designation: invoices of this file only' using errcode = 'check_violation';
     end if;
     if v_source = 'document' then
+      -- the debtor's letter or e-mail, filed on this file (not any document of the client)
       v_doc := nullif(p_designation ->> 'evidence_document_id', '')::uuid;
       if v_doc is null or not exists (select 1 from public.document d where d.id = v_doc
                                         and d.organization_id = a.organization_id
-                                        and d.client_organization_id = a.client_organization_id) then
-        raise exception 'invalid designation: the document is required' using errcode = 'check_violation';
+                                        and d.client_organization_id = a.client_organization_id
+                                        and d.account_id = a.id) then
+        raise exception 'invalid designation: the document is required, filed on this file'
+          using errcode = 'check_violation';
       end if;
     end if;
     v_designation := jsonb_build_object('item_ids', to_jsonb(v_items), 'source', v_source,
@@ -576,9 +625,12 @@ begin
 end;
 $$;
 
--- Accept the single best suggestion of up to 200 payments of one servicer (bulk on desktop). A payment
--- that is not waiting any more, or has no one-tap suggestion, is skipped and said so.
-create or replace function public.accept_suggestions(p_idempotency_key text, p_payment_ids uuid[])
+-- Accept the single best suggestion of up to 200 payments of one servicer (one tap; bulk on desktop). Each
+-- item names the payment and the file ops were shown: the payment is assigned only if that file is still its
+-- one-tap suggestion (compare and set, under the payment's lock: a rematch may have replaced the candidates
+-- since the page was drawn). The others are skipped and said so: not_waiting (decided meanwhile),
+-- suggestion_changed (another file is proposed now), no_suggestion (no one-tap suggestion any more).
+create or replace function public.accept_suggestions(p_idempotency_key text, p_items jsonb)
 returns jsonb
 language plpgsql
 security definer
@@ -586,6 +638,8 @@ set search_path = ''
 set lock_timeout = '2s'
 as $$
 declare
+  v_uuid constant text := '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+  v_items jsonb;
   v_ids uuid[];
   v_org uuid;
   v_orgs bigint;
@@ -593,16 +647,26 @@ declare
   v_request jsonb;
   v_result jsonb;
 begin
-  select array_agg(distinct x order by x) into v_ids from unnest(p_payment_ids) x where x is not null;
-  if coalesce(cardinality(v_ids), 0) not between 1 and 200 then
-    raise exception 'between 1 and 200 payments' using errcode = 'check_violation';
+  if jsonb_typeof(p_items) is distinct from 'array' or jsonb_array_length(p_items) not between 1 and 200
+     or exists (select 1 from jsonb_array_elements(p_items) e
+                where jsonb_typeof(e) <> 'object' or coalesce(e ->> 'payment_id', '') !~ v_uuid
+                   or coalesce(e ->> 'account_id', '') !~ v_uuid) then
+    raise exception 'between 1 and 200 payments, each with the file shown' using errcode = 'check_violation';
+  end if;
+  select jsonb_agg(jsonb_build_object('payment_id', x.payment_id, 'account_id', x.account_id) order by x.payment_id),
+         array_agg(x.payment_id order by x.payment_id)
+  into v_items, v_ids
+  from (select distinct (e ->> 'payment_id')::uuid as payment_id, (e ->> 'account_id')::uuid as account_id
+        from jsonb_array_elements(p_items) e) x;
+  if cardinality(v_ids) <> (select count(distinct x) from unnest(v_ids) x) then
+    raise exception 'one file per payment' using errcode = 'check_violation';
   end if;
   select count(distinct p.organization_id), min(p.organization_id::text)::uuid, count(*)
   into v_orgs, v_org, v_found from public.payment p where p.id = any (v_ids);
   if v_found <> cardinality(v_ids) or v_orgs <> 1 or not private.has_role(v_org, array['admin', 'ops_manager']) then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
   end if;
-  v_request := jsonb_build_object('payment_ids', to_jsonb(v_ids));
+  v_request := jsonb_build_object('items', v_items);
   v_result := private.command_replay('accept_suggestions', p_idempotency_key, v_request);
   if v_result is not null then
     return v_result;
@@ -617,10 +681,12 @@ begin
               then jsonb_build_object('item_ids', c.signals -> 'designation', 'source', 'remittance_text',
                                       'captured_at', now()) end,
          true
-  from public.payment p
+  from jsonb_to_recordset(v_items) i (payment_id uuid, account_id uuid)
+  join public.payment p on p.id = i.payment_id
   join public.payment_match_candidate c on c.payment_id = p.id and c.rank = 1 and c.acceptable
+                                       and c.account_id = i.account_id
   join public.account a on a.id = c.account_id and a.organization_id = p.organization_id and a.status <> 'staged'
-  where p.id = any (v_ids) and p.status = 'unmatched' and p.account_id is null and p.review_reason = 'no_match';
+  where p.status = 'unmatched' and p.account_id is null and p.review_reason = 'no_match';
   -- a designation names invoices of the accepted file only
   update pg_temp._assign g set designation = null
   where g.designation is not null
@@ -632,10 +698,15 @@ begin
 
   select jsonb_build_object(
     'accepted', (select count(*) from pg_temp._assign),
-    'skipped', coalesce((select jsonb_agg(jsonb_build_object('payment_id', x, 'reason',
-                          case when p.status = 'unmatched' then 'no_suggestion' else 'not_waiting' end) order by x)
-                         from unnest(v_ids) x join public.payment p on p.id = x
-                         where x not in (select g.payment_id from pg_temp._assign g)), '[]'))
+    'skipped', coalesce((
+      select jsonb_agg(jsonb_build_object('payment_id', i.payment_id, 'reason',
+               case when p.status <> 'unmatched' or p.account_id is not null then 'not_waiting'
+                    when c.account_id is not null and c.account_id <> i.account_id then 'suggestion_changed'
+                    else 'no_suggestion' end) order by i.payment_id)
+      from jsonb_to_recordset(v_items) i (payment_id uuid, account_id uuid)
+      join public.payment p on p.id = i.payment_id
+      left join public.payment_match_candidate c on c.payment_id = i.payment_id and c.rank = 1 and c.acceptable
+      where not exists (select 1 from pg_temp._assign g where g.payment_id = i.payment_id)), '[]'))
   into v_result;
   perform private.command_record('accept_suggestions', p_idempotency_key, v_request, v_result);
   return v_result;
@@ -748,6 +819,7 @@ declare
   v_result jsonb;
   v_id uuid;
 begin
+  -- FOR UPDATE: serialised with the gating of a match run on this file (it holds the file FOR KEY SHARE)
   select * into a from public.account where id = p_account_id for update;
   if not found or not private.has_role(a.organization_id, array['admin', 'ops_manager']) then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
@@ -796,6 +868,11 @@ declare
   v_reason text := btrim(coalesce(p_reason, ''));
   v_request jsonb := jsonb_build_object('hold_id', p_hold_id, 'reason', btrim(coalesce(p_reason, '')));
 begin
+  -- The file first, FOR UPDATE, as place_account_hold does (same lock order): a match run gating payments to
+  -- this file holds it FOR KEY SHARE, so the lift waits for it (its regate then sees those payments), or the
+  -- run waits for the lift and its gating sees the hold ended.
+  perform 1 from public.account a where a.id = (select x.account_id from public.account_hold x where x.id = p_hold_id)
+  for update of a;
   select * into h from public.account_hold where id = p_hold_id for update;
   if not found or not private.has_role(h.organization_id, array['admin', 'ops_manager']) then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
@@ -819,10 +896,12 @@ $$;
 -- Reads for the back-office (money staff; bounded, milliseconds)
 ------------------------------------------------------------------------------------------
 
--- What the queue shows of proposed files: reference, client, debtor, what is left to pay (as text), RF.
+-- What the queue shows of proposed files: reference, client, debtor, what is left to pay (as text), RF, and
+-- what the gating reads (servicing start, active blocking holds), so the confirmation sheet states what an
+-- assignment will do (review fix: never promise an allocation the gating will hold).
 create or replace function public.match_queue_accounts(p_account_ids uuid[])
 returns table (account_id uuid, external_ref text, status text, client_name text, debtor_name text, currency char(3),
-               balance_minor text, pending_minor text, rf text)
+               balance_minor text, pending_minor text, rf text, servicing_start date, holds text[])
 language sql
 stable
 security definer
@@ -836,7 +915,11 @@ as $$
                    join public.ledger_posting lp on lp.ledger_account_id = la.id
                    where la.account_id = a.id and la.book = 'debtor_receivable'), 0)::text,
          coalesce((select sum(p.amount_minor) from public.payment p where p.account_id = a.id and p.status = 'matched'), 0)::text,
-         (select r.rf from public.payment_reference r where r.account_id = a.id and r.status = 'active')
+         (select r.rf from public.payment_reference r where r.account_id = a.id and r.status = 'active'),
+         (select min(o.valid_from) from public.claim_ownership_period o where o.account_id = a.id),
+         coalesce((select array_agg(h.kind order by h.kind) from public.account_hold h
+                   where h.account_id = a.id and h.ended_at is null
+                     and h.kind in ('surendettement', 'collective_proceeding')), '{}')
   from public.account a
   join public.organization c on c.id = a.client_organization_id
   where a.id = any (p_account_ids[1:100])
@@ -846,7 +929,7 @@ $$;
 -- Files ops may assign a payment to: by file, invoice or RF reference, else by debtor name (trigram).
 create or replace function public.search_payment_files(p_payment_id uuid, p_query text)
 returns table (account_id uuid, external_ref text, status text, client_name text, debtor_name text, currency char(3),
-               balance_minor text, pending_minor text, rf text, found_by text)
+               balance_minor text, pending_minor text, rf text, servicing_start date, holds text[], found_by text)
 language plpgsql
 stable
 security definer
@@ -883,7 +966,7 @@ begin
     from hits h group by h.id order by min(h.rank_) limit 10
   )
   select q.account_id, q.external_ref, q.status, q.client_name, q.debtor_name, q.currency, q.balance_minor,
-         q.pending_minor, q.rf, b.found_by
+         q.pending_minor, q.rf, q.servicing_start, q.holds, b.found_by
   from best b
   join public.match_queue_accounts(array[b.id]) q on q.account_id = b.id
   where q.status <> 'staged'
@@ -893,8 +976,17 @@ $$;
 
 -- The exception queue (design §12.2), oldest first: payments without a file or held for a reason; or, tab
 -- 'rapproches', the matched payments ready for allocation, latest first. The client is the file's, else the
--- candidate file's. Amounts as text; the payer's IBAN by its end only (design R10). Security invoker: RLS
--- applies (admins and ops managers read every payment of their servicer).
+-- candidate file's. Amounts as text; the payer's IBAN by its end only (design R10). Admins and ops managers
+-- of the servicer (security invoker: RLS applies too). `total` counts the whole filtered tab, whatever the
+-- page.
+-- Review fix: one query per tab (a CASE over the tab in WHERE matched no index, so every page filtered the
+-- servicer's whole payment history), each served by a partial index whose predicate is the tab's, led by
+-- the servicer: a page reads the queue, never the history, with or without fresh statistics.
+create index payment_queue_idx on public.payment (organization_id, booking_date, id)
+  where status = 'unmatched' or review_reason is not null;
+create index payment_ready_idx on public.payment (organization_id, matched_at desc, booking_date, id)
+  where status = 'matched' and review_reason is null;
+
 create or replace function public.payment_queue(p_tab text default 'a-traiter', p_reason text default null,
                                                 p_client uuid default null, p_min_minor bigint default null,
                                                 p_max_minor bigint default null, p_min_days integer default null,
@@ -903,29 +995,73 @@ returns table (payment_id uuid, amount_minor text, currency char(3), booking_dat
                payer_name text, payer_iban_end text, remittance_text text, creditor_reference text, status text,
                review_reason text, match_method text, matched_at timestamptz, account_id uuid,
                candidate_account_id uuid, client_organization_id uuid, total bigint)
-language sql
+language plpgsql
 stable
 set search_path = ''
 as $$
-  with q as (
-    select p.*, coalesce(p.client_organization_id, c.client_organization_id) as client_id
+declare
+  v_orgs uuid[] := private.money_staff_org_ids();
+  v_today date := (now() at time zone 'Europe/Paris')::date;
+  v_before date := (now() at time zone 'Europe/Paris')::date - p_min_days;
+  v_offset integer := greatest(coalesce(p_offset, 0), 0);
+  v_limit integer := least(greatest(coalesce(p_limit, 20), 1), 100);
+  v_total bigint;
+begin
+  if p_tab = 'rapproches' then
+    select count(*) into v_total
     from public.payment p
-    left join public.account c on c.id = p.candidate_account_id
-    where case when p_tab = 'rapproches' then p.status = 'matched' and p.review_reason is null
-               else p.status = 'unmatched' or p.review_reason is not null end
-      and (p_reason is null or p.review_reason = p_reason or (p_reason = 'waiting' and p.review_reason is null))
+    where p.organization_id = any (v_orgs) and p.status = 'matched' and p.review_reason is null
+      and (p_client is null or p.client_organization_id = p_client)
       and (p_min_minor is null or p.amount_minor >= p_min_minor)
       and (p_max_minor is null or p.amount_minor <= p_max_minor)
-      and (p_min_days is null or p.booking_date <= (now() at time zone 'Europe/Paris')::date - p_min_days)
-  )
-  select q.id, q.amount_minor::text, q.currency, q.booking_date,
-         ((now() at time zone 'Europe/Paris')::date - q.booking_date)::integer, q.payer_name, right(q.payer_iban, 4),
-         q.remittance_text, q.creditor_reference, q.status, q.review_reason, q.match_method, q.matched_at, q.account_id,
-         q.candidate_account_id, q.client_id, count(*) over ()
-  from q
-  where p_client is null or q.client_id = p_client
-  order by case when p_tab = 'rapproches' then q.matched_at end desc nulls last, q.booking_date, q.id
-  offset greatest(coalesce(p_offset, 0), 0) limit least(greatest(coalesce(p_limit, 20), 1), 100);
+      and (v_before is null or p.booking_date <= v_before);
+    return query
+    select p.id, p.amount_minor::text, p.currency, p.booking_date, (v_today - p.booking_date)::integer, p.payer_name,
+           right(p.payer_iban, 4), p.remittance_text, p.creditor_reference, p.status, p.review_reason, p.match_method,
+           p.matched_at, p.account_id, p.candidate_account_id, p.client_organization_id, v_total
+    from public.payment p
+    where p.organization_id = any (v_orgs) and p.status = 'matched' and p.review_reason is null
+      and (p_client is null or p.client_organization_id = p_client)
+      and (p_min_minor is null or p.amount_minor >= p_min_minor)
+      and (p_max_minor is null or p.amount_minor <= p_max_minor)
+      and (v_before is null or p.booking_date <= v_before)
+    order by p.matched_at desc, p.booking_date, p.id
+    offset v_offset limit v_limit;
+    return;
+  end if;
+
+  -- (the candidate file's client is read only to filter by client, and for the page's rows)
+  select count(*) into v_total
+  from public.payment p
+  where p.organization_id = any (v_orgs) and (p.status = 'unmatched' or p.review_reason is not null)
+    and (p_reason is null or p.review_reason = p_reason or (p_reason = 'waiting' and p.review_reason is null))
+    and (p_client is null
+         or coalesce(p.client_organization_id,
+                     (select c.client_organization_id from public.account c where c.id = p.candidate_account_id))
+            = p_client)
+    and (p_min_minor is null or p.amount_minor >= p_min_minor)
+    and (p_max_minor is null or p.amount_minor <= p_max_minor)
+    and (v_before is null or p.booking_date <= v_before);
+  return query
+  select p.id, p.amount_minor::text, p.currency, p.booking_date, (v_today - p.booking_date)::integer, p.payer_name,
+         right(p.payer_iban, 4), p.remittance_text, p.creditor_reference, p.status, p.review_reason, p.match_method,
+         p.matched_at, p.account_id, p.candidate_account_id, coalesce(p.client_organization_id, c.client_organization_id),
+         v_total
+  from (select p.* from public.payment p
+        where p.organization_id = any (v_orgs) and (p.status = 'unmatched' or p.review_reason is not null)
+          and (p_reason is null or p.review_reason = p_reason or (p_reason = 'waiting' and p.review_reason is null))
+          and (p_client is null
+               or coalesce(p.client_organization_id,
+                           (select c.client_organization_id from public.account c where c.id = p.candidate_account_id))
+                  = p_client)
+          and (p_min_minor is null or p.amount_minor >= p_min_minor)
+          and (p_max_minor is null or p.amount_minor <= p_max_minor)
+          and (v_before is null or p.booking_date <= v_before)
+        order by p.booking_date, p.id
+        offset v_offset limit v_limit) p
+  left join public.account c on c.id = p.candidate_account_id
+  order by p.booking_date, p.id;
+end;
 $$;
 
 -- Per statement: payments, matched by a rule, left to ops, not tried yet (the match job is queued) (security
@@ -944,6 +1080,28 @@ as $$
   join public.payment p on p.bank_transaction_id = t.id
   where t.statement_id = any (p_statement_ids[1:50])
   group by t.statement_id;
+$$;
+
+------------------------------------------------------------------------------------------
+-- Payments imported before this migration (M2b-2 is live) have never been tried: one match job per servicer
+-- that has some, now (review fix: they would otherwise wait for the next import of that servicer).
+------------------------------------------------------------------------------------------
+
+create or replace function private.queue_waiting_matches()
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v integer;
+begin
+  perform pgmq.send('payments', jsonb_build_object('type', 'match', 'organization_id', x.organization_id,
+                                                   'trigger', 'import'))
+  from (select distinct p.organization_id from public.payment p
+        where p.status = 'unmatched' and p.account_id is null and p.review_reason is null) x;
+  get diagnostics v = row_count;
+  return v;
+end;
 $$;
 
 ------------------------------------------------------------------------------------------
@@ -979,21 +1137,25 @@ create policy payment_match_candidate_read on public.payment_match_candidate for
 
 revoke execute on function private.ref_key(text), private.account_hold_guard(), private.assign_begin(),
   private.gate_assignments(), private.record_assignments(uuid, text, uuid, text), private.match_results_begin(),
-  private.apply_match_results(uuid, text), private.account_deleted_payments(), private.regate_account(uuid)
+  private.apply_match_results(uuid, text), private.account_deleted_payments(), private.regate_account(uuid),
+  private.queue_waiting_matches()
   from public, anon, authenticated, service_role;
 -- The worker (service_role) runs the match job: it reads reference keys and writes its decisions.
 grant execute on function private.ref_key(text), private.match_results_begin(), private.apply_match_results(uuid, text)
   to service_role;
 grant select on private.payer_account_link to service_role;
 revoke execute on function public.assign_payment(text, uuid, jsonb, jsonb, text),
-  public.accept_suggestions(text, uuid[]), public.unassign_payment(text, uuid, text),
+  public.accept_suggestions(text, jsonb), public.unassign_payment(text, uuid, text),
   public.place_account_hold(text, uuid, text, text, uuid, text), public.lift_account_hold(text, uuid, text),
   public.match_queue_accounts(uuid[]), public.search_payment_files(uuid, text), public.statement_match_counts(uuid[]),
   public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer)
   from public, anon;
 grant execute on function public.assign_payment(text, uuid, jsonb, jsonb, text),
-  public.accept_suggestions(text, uuid[]), public.unassign_payment(text, uuid, text),
+  public.accept_suggestions(text, jsonb), public.unassign_payment(text, uuid, text),
   public.place_account_hold(text, uuid, text, text, uuid, text), public.lift_account_hold(text, uuid, text),
   public.match_queue_accounts(uuid[]), public.search_payment_files(uuid, text), public.statement_match_counts(uuid[]),
   public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer)
   to authenticated;
+
+-- The payments already waiting (see private.queue_waiting_matches above).
+select private.queue_waiting_matches();

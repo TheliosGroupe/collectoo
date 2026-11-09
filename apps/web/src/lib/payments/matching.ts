@@ -183,6 +183,10 @@ export type QueueAccount = {
   balance_minor: string;
   pending_minor: string;
   rf: string | null;
+  /** First day of servicing (gating: a payment booked before it waits). */
+  servicing_start: string | null;
+  /** Active surendettement / collective proceeding holds (gating: the payment is held). */
+  holds: readonly string[];
 };
 
 /** « M-0042 · Martin SAS · solde 800,00 € » — what the one-tap button and the choices say. */
@@ -194,6 +198,85 @@ export function fileLabel(a: QueueAccount): string {
 /** Payments already matched to the file and not allocated yet, when there are some. */
 export function pendingText(a: QueueAccount): string | null {
   return a.pending_minor !== "0" ? `dont ${money(a.pending_minor, a.currency)} déjà reçus, à imputer` : null;
+}
+
+/**
+ * What the gating will say once this payment is assigned to this file: the SQL `private.gate_assignments`,
+ * first that applies (null: ready for allocation). The confirmation sheet words it, so it never promises an
+ * allocation that will be held or refused. Amounts compared as integers (BigInt), dates as ISO text.
+ */
+export function gatingOutcome(file: QueueAccount, paid: { currency: string; booking_date: string }): string | null {
+  if (file.status === "staged") return "account_not_confirmed";
+  if (file.status.startsWith("closed")) return "account_closed";
+  if (paid.currency.trim() !== file.currency.trim()) return "currency_mismatch";
+  if (!file.servicing_start || paid.booking_date < file.servicing_start) return "before_servicing_start";
+  if (file.holds.length > 0) return "hold_blocks_allocation";
+  if (BigInt(file.balance_minor) - BigInt(file.pending_minor) <= BigInt(0)) return "nothing_due";
+  return null;
+}
+
+const OUTCOME_TEXT: Record<string, string> = {
+  account_not_confirmed: "Le dossier n'est pas encore confirmé : le paiement ne peut pas y être affecté.",
+  account_closed:
+    "Le dossier est clôturé : le paiement sera mis en attente, sans imputation, pour être reversé au client (dossier rappelé) ou remboursé au payeur.",
+  currency_mismatch:
+    "Le paiement n'est pas dans la devise du dossier : il sera mis en attente, sans conversion ni imputation, et remboursé par défaut.",
+  before_servicing_start:
+    "Le paiement est antérieur à la reprise du dossier : il sera mis en attente, à vérifier avec le client avant toute imputation.",
+  hold_blocks_allocation:
+    "Le dossier est bloqué (surendettement ou procédure collective) : le paiement sera mis en attente, ni imputé ni reversé, jusqu'à décision.",
+  nothing_due:
+    "Le dossier ne présente plus rien à payer : le paiement sera mis en attente, à vérifier, sinon remboursé au payeur.",
+};
+
+/** The sentence the confirmation sheet ends with: what happens after the assignment. */
+export function outcomeText(reason: string | null): string {
+  if (reason === null) return "Il sera imputé sur ses factures à l'étape suivante, dans l'ordre légal.";
+  return OUTCOME_TEXT[reason] ?? reviewReason(reason).help;
+}
+
+/** A payment and the file the page showed for it, as accept_suggestions takes them. */
+export type AcceptItem = { payment_id: string; account_id: string };
+export type AcceptSkip = { payment_id: string; reason: string };
+export type AcceptResult = { ok: true; accepted: number; skipped: AcceptSkip[] } | { error: ErrorCode };
+
+/** « payment:file » values of the accept forms; null when one of them is not a pair of ids. */
+export function parseAcceptItems(values: string[]): AcceptItem[] | null {
+  const items: AcceptItem[] = [];
+  for (const v of values) {
+    const [payment, account, ...rest] = v.split(":");
+    if (rest.length > 0 || !UUID_RE.test(payment ?? "") || !UUID_RE.test(account ?? "")) return null;
+    items.push({ payment_id: payment, account_id: account });
+  }
+  return items;
+}
+
+const SKIP_LABEL: Record<string, string> = {
+  suggestion_changed: "suggestion modifiée entre-temps",
+  no_suggestion: "plus de suggestion",
+  not_waiting: "déjà traité",
+};
+
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n > 1 ? many : one}`;
+}
+
+/** What accept_suggestions did, in French: how many were accepted, which were skipped and why. */
+export function acceptNotice(accepted: number, skipped: AcceptSkip[]): { text: string; tone: Tone } {
+  const done = accepted === 0 ? "Aucune suggestion acceptée" : count(accepted, "suggestion acceptée", "suggestions acceptées");
+  if (skipped.length === 0) return { text: `${done}.`, tone: "ok" };
+  const reasons = new Map<string, number>();
+  for (const s of skipped) reasons.set(s.reason, (reasons.get(s.reason) ?? 0) + 1);
+  const why = [...reasons].map(([reason, n]) => `${SKIP_LABEL[reason] ?? reason} (${n})`).join(", ");
+  return {
+    text: `${done} ; ${count(skipped.length, "paiement ignoré", "paiements ignorés")} : ${why}. Vérifiez les propositions à jour.`,
+    tone: "action",
+  };
+}
+
+/** The last page of a tab holding `total` payments (a page past it shows a way back). */
+export function lastPage(total: number): number {
+  return Math.max(1, Math.ceil(total / QUEUE_PAGE_SIZE));
 }
 
 /** Errors of assign_payment / accept_suggestions / unassign_payment, as codes. */
