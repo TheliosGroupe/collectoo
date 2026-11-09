@@ -1350,7 +1350,7 @@ $$;
 create table public.payment_check_run (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organization (id),
-  started_at timestamptz not null default now(),
+  started_at timestamptz not null default clock_timestamp(),
   finished_at timestamptz,
   violations integer,
   alerts integer,
