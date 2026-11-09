@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { errorText } from "@/lib/boarding/forms";
 import { PURPOSE_LABEL, TOP_UP_STATUS, bankAccountErrorCode } from "./bank-accounts";
-import { CHECK_LABEL, DEBIT_REVIEW, LINK_KIND, debitErrorCode, feeEffect, lineKindLabel, lossEffect, ownCreditEffect } from "./debits";
+import {
+  CHECK_LABEL,
+  DEBIT_REVIEW,
+  LINK_KIND,
+  debitErrorCode,
+  explainable,
+  feeEffect,
+  lineKindLabel,
+  lossEffect,
+  offersPaymentLinks,
+  ownCreditEffect,
+  relayable,
+  relayedPaymentEffect,
+} from "./debits";
 
 /** M2c-1 (M2-12): the own account, top-ups, bank lines booked in the funds, the new checks — in French, from codes. */
 describe("bank accounts and top-ups", () => {
@@ -38,7 +51,8 @@ describe("bank lines booked in the funds", () => {
   it("says what each booking does before it is sent, never charging a client", () => {
     expect(feeEffect("12,00 €")).toContain("à la charge du cabinet");
     expect(feeEffect("12,00 €")).toContain("Aucun client");
-    expect(ownCreditEffect("200,00 €")).toContain("ce n'est le paiement d'aucun débiteur");
+    expect(ownCreditEffect("200,00 €")).toContain("approvisionnement du compte dédié par le cabinet");
+    expect(ownCreditEffect("200,00 €")).toContain("« Paiement d'un débiteur relayé par le cabinet »");
     const loss = lossEffect({ amount: "15,00 €", left: "10,00 €", excess: "5,00 €", dateFr: "07/11/2026", noneLeft: false });
     expect(loss).toContain("Le retour de 10,00 €");
     expect(loss).toContain("l'excédent de 5,00 € sera une perte à la charge du cabinet");
@@ -68,9 +82,83 @@ describe("bank lines booked in the funds", () => {
   });
 });
 
+/** Review M2c-1: « À classer » on our own transfers and credits, and a debtor's payment relayed by the servicer. */
+describe("our own transfers and credits to classify", () => {
+  it("offers a payment's return and our refunds only on the lines M2b reads as such", () => {
+    for (const kind of ["return", "refund_out", "other_debit"]) expect(offersPaymentLinks({ direction: "debit", kind }), kind).toBe(true);
+    expect(offersPaymentLinks({ direction: "credit", kind: "return" })).toBe(true);
+    // the database refuses these links (« debit link refused: not_a_return »): never offered
+    expect(offersPaymentLinks({ direction: "debit", kind: "transfer_out" })).toBe(false);
+    expect(offersPaymentLinks({ direction: "credit", kind: "own_transfer_in" })).toBe(false);
+    expect(offersPaymentLinks({ direction: "credit", kind: "client_transfer_in" })).toBe(false);
+    // they may still be classified with an explanation
+    for (const [direction, kind] of [
+      ["debit", "transfer_out"],
+      ["credit", "own_transfer_in"],
+      ["credit", "client_transfer_in"],
+    ])
+      expect(explainable({ direction, kind, namesPayment: false }), kind).toBe(true);
+  });
+  it("offers to relay a debtor's payment only on a credit from the own account without our TOP reference", () => {
+    expect(relayable({ direction: "credit", kind: "own_transfer_in", end_to_end_id: null })).toBe(true);
+    expect(relayable({ direction: "credit", kind: "own_transfer_in", end_to_end_id: "NOTPROVIDED" })).toBe(true);
+    // a debtor's own reference that only looks like ours stays relayable (TOPAZ-…, not 12 upper-case hex digits)
+    expect(relayable({ direction: "credit", kind: "own_transfer_in", end_to_end_id: "TOPAZ-2026-11" })).toBe(true);
+    // our top-up reference: a top-up, never a debtor's payment
+    expect(relayable({ direction: "credit", kind: "own_transfer_in", end_to_end_id: "TOP0123456789AB" })).toBe(false);
+    expect(relayable({ direction: "credit", kind: "client_transfer_in", end_to_end_id: null })).toBe(false);
+    expect(relayable({ direction: "debit", kind: "transfer_out", end_to_end_id: null })).toBe(false);
+  });
+  it("says what relaying a debtor's payment does before it is sent", () => {
+    const effect = relayedPaymentEffect({ amount: "300,00 €", dateFr: "05/11/2026" });
+    expect(effect).toContain("Le crédit de 300,00 € deviendra un paiement reçu");
+    expect(effect).toContain("au 05/11/2026 (date de la ligne)");
+    expect(effect).toContain("« Versement relayé par le cabinet »");
+    expect(effect).toContain("Il attendra dans « Paiements à traiter » d'être affecté au dossier du débiteur");
+    expect(effect).toContain("Le motif est conservé");
+    expect(effect).toContain("À ne pas utiliser pour un approvisionnement");
+    expect(LINK_KIND.relayed_payment).toBe("Paiement d'un débiteur relayé par le cabinet");
+  });
+  it("no longer tells ops that an own credit is never a debtor's payment", () => {
+    expect(DEBIT_REVIEW.top_up_not_found).toContain("paiement d'un débiteur reçu par le cabinet");
+    expect(DEBIT_REVIEW.top_up_not_found).not.toContain("sinon classez-le");
+    expect(ownCreditEffect("1,00 €")).not.toContain("aucun débiteur");
+  });
+  it("maps the release's refusals to French", () => {
+    const cases: [string, string][] = [
+      ["own credit release refused: not_own_credit", "not_own_credit"],
+      ["own credit release refused: already_booked", "already_booked"],
+      ["own credit release refused: already_linked", "already_linked"],
+      ["own credit release refused: reason_required", "reason_required"],
+      ["own credit release refused: something_new", "booking_refused"],
+      ["not allowed", "not_allowed"],
+    ];
+    for (const [message, code] of cases) {
+      expect(debitErrorCode(message), message).toBe(code);
+      expect(errorText(debitErrorCode(message))).not.toBe(errorText("unknown"));
+    }
+    expect(errorText("not_own_credit")).toContain("compte propre du cabinet");
+  });
+});
+
+describe("the law, and the servicer's own rules", () => {
+  it("never presents the one-account-per-currency rule or the fee rule as the law", () => {
+    expect(errorText("client_funds_exists")).toContain("le cabinet a choisi un seul compte dédié par devise");
+    expect(errorText("client_funds_exists")).not.toContain("R124");
+    expect(errorText("not_a_fee")).not.toContain("virement émis)");
+    expect(errorText("iban_taken")).toContain("pour un autre usage");
+  });
+});
+
 describe("the nightly checks of the two funds", () => {
   it("has French words for every new code", () => {
-    for (const code of ["own_fund_identity", "fund_mirror", "client_payable_debit", "remittance_completeness"]) {
+    for (const code of [
+      "own_fund_identity",
+      "fund_mirror",
+      "client_payable_debit",
+      "remittance_completeness",
+      "servicer_shortfall",
+    ]) {
       expect(CHECK_LABEL[code]?.label, code).toBeTruthy();
       expect(CHECK_LABEL[code]?.help, code).toBeTruthy();
     }

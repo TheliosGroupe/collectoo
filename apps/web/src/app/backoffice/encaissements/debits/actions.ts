@@ -53,6 +53,33 @@ export async function linkDebit(formData: FormData): Promise<ActionResult> {
   return done(error, onPayment ? payment : undefined);
 }
 
+/** public.release_own_credit (M2c-1 review): not in database.types.ts yet; drop this cast once the types are regenerated. */
+type ReleaseOwnCreditRpc = {
+  rpc(
+    fn: "release_own_credit",
+    args: { p_idempotency_key: string; p_bank_transaction_id: string; p_reason: string },
+  ): PromiseLike<{ data: unknown; error: { message: string } | null }>;
+};
+
+/** « Paiement d'un débiteur relayé par le cabinet »: an unbooked credit from the own account becomes a debtor's
+ * payment (on no file: « Paiements à traiter »), with ops' motif. Authorization (admin or ops manager at aal2) and every
+ * check are in SQL. */
+export async function releaseOwnCredit(formData: FormData): Promise<ActionResult> {
+  const key = field(formData, "idempotency_key");
+  const line = field(formData, "bank_transaction_id");
+  if (!UUID.test(key) || !UUID.test(line)) return { error: "unknown" };
+  const reason = field(formData, "reason");
+  if (!reason) return { error: "reason_required" };
+  const { supabase } = await staffSession();
+  const { error } = await (supabase as unknown as ReleaseOwnCreditRpc).rpc("release_own_credit", {
+    p_idempotency_key: key,
+    p_bank_transaction_id: line,
+    p_reason: reason,
+  });
+  if (!error) revalidatePath("/backoffice/encaissements/a-traiter");
+  return done(error);
+}
+
 /** « Libérer » / « Doublon confirmé »: a CSV line held as a suspected duplicate. */
 export async function resolveDuplicate(formData: FormData): Promise<ActionResult> {
   const key = field(formData, "idempotency_key");

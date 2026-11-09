@@ -33,8 +33,9 @@ type TopUp = {
 };
 
 /**
- * M2b-1, M2c-1: the servicer's bank accounts. The account dedicated to funds collected for creditors (CPCE R124-2,
- * one active per currency) is the only place debtor payments are booked; the servicer's own account (« compte propre »)
+ * M2b-1, M2c-1: the servicer's bank accounts. The account dedicated to funds collected for creditors (CPCE R124-2; one
+ * active per currency is the servicer's choice, founder #14, not the law) is the only place debtor payments are booked
+ * (one paid to the servicer's own account is booked from its relayed credit); the servicer's own account (« compte propre »)
  * receives its commission and tops the dedicated account up when the servicer owes it (a bank fee, a return after
  * remittance). Admins add and close accounts; admins and ops managers order top-ups; nobody else sees them (RLS).
  */
@@ -74,8 +75,9 @@ export default async function BankAccountsPage() {
   return (
     <WidePage title="Comptes bancaires" back={{ href: "/backoffice", label: "Back-office" }}>
       <InfoNote>
-        Le compte dédié aux fonds de tiers reçoit exclusivement les fonds encaissés pour le compte des créanciers (art. R124-2
-        CPCE) : un seul par devise, dont seuls les relevés sont importés et comptabilisés. Le compte propre du cabinet reçoit
+        Le compte dédié aux fonds de tiers est exclusivement affecté à la réception des fonds encaissés pour le compte des
+        créanciers (art. R124-2 CPCE). Le cabinet utilise un seul compte dédié par devise ; seuls ses relevés sont importés
+        et comptabilisés. Le compte propre du cabinet reçoit
         ses commissions et approvisionne le compte dédié quand le cabinet lui doit de l&apos;argent (frais bancaires, retour
         après reversement).
       </InfoNote>
@@ -273,7 +275,8 @@ export default async function BankAccountsPage() {
               <input type="hidden" name="purpose" value="own" readOnly />
               <p className="text-sm text-zinc-600 dark:text-zinc-400">
                 Le compte d&apos;exploitation du cabinet : ses relevés ne sont pas importés. Un crédit venant de cet IBAN sur
-                le compte dédié n&apos;est jamais pris pour le paiement d&apos;un débiteur.
+                le compte dédié n&apos;est jamais pris automatiquement pour le paiement d&apos;un débiteur : il se classe dans
+                « Débits et retours », comme approvisionnement ou comme paiement d&apos;un débiteur relayé par le cabinet.
               </p>
               <AccountFields currencies={currencies ?? []} today={today} labelPlaceholder="Compte propre – Banque" />
             </ActionForm>

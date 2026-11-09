@@ -24,7 +24,8 @@ function done(error: { message: string } | null): ActionResult {
   return { ok: true };
 }
 
-/** A client-funds account (R124-2, one active per currency) or, since M2c, the servicer's own account (no feed). */
+/** A client-funds account (R124-2; one active per currency is founder #14, not the law) or, since M2c, the servicer's own
+ * account (no feed). */
 export async function registerBankAccount(formData: FormData): Promise<ActionResult> {
   const key = field(formData, "idempotency_key");
   const organization = field(formData, "organization_id");
