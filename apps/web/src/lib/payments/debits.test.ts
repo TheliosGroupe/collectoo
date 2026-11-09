@@ -7,6 +7,7 @@ import {
   DIRECT_REFUSAL,
   checkLabel,
   debitErrorCode,
+  explainable,
   lineKindLabel,
   linkRefundEffect,
   minorToInput,
@@ -147,7 +148,10 @@ describe("returns (founder #13; design §2 #3)", () => {
         "partial_return",
         "payment_changed",
         "payment_returned",
+        "posting_failed",
         "refund_not_pending",
+        // not stored: the queue's reason for an other debit of a requested refund's amount
+        "refund_amount_match",
       ].sort(),
     );
   });
@@ -256,6 +260,11 @@ describe("errors of the M2b-6 commands", () => {
       ["debit link refused: amount_exceeds", "link_amount"],
       ["debit link refused: refund_pending", "refund_pending"],
       ["debit link refused: not_a_return", "link_refused"],
+      // review M2b-6: the database's new refusals have their own text
+      ["debit link refused: not_explainable", "not_explainable"],
+      ["debit link refused: before_previous_return", "link_before_return"],
+      ["debit link refused: payment_returned", "link_payment_returned"],
+      ["debit link refused: posting_failed (LG007: ledger: payment p would be overdrawn)", "link_posting_failed"],
       ["duplicate: already decided: reload the page", "already_decided"],
       ["direct payment: the client's statement is required, filed on this file", "direct_evidence"],
       ["payment x: a refund is pending: cancel it first (or none is: it cannot wait for one)", "refund_pending"],
@@ -267,5 +276,19 @@ describe("errors of the M2b-6 commands", () => {
       expect(errorText(debitErrorCode(message))).not.toBe(errorText("unknown"));
     }
     expect(debitErrorCode("something else")).toBe("unknown");
+  });
+});
+
+describe("classifying without booking", () => {
+  it("is never offered for a return or a refund leaving the account (review M2b-6)", () => {
+    expect(explainable({ direction: "debit", kind: "return" })).toBe(false);
+    expect(explainable({ direction: "debit", kind: "refund_out" })).toBe(false);
+    expect(explainable({ direction: "debit", kind: "other_debit" })).toBe(true);
+    // a credit undoing a fee stays explainable (ADR choice #7)
+    expect(explainable({ direction: "credit", kind: "return" })).toBe(true);
+  });
+  it("has a label for every review code the debit job writes", () => {
+    for (const code of ["posting_failed", "refund_amount_match", "payment_returned", "before_previous_return", "payment_changed"])
+      expect(DEBIT_REVIEW[code], code).toBeDefined();
   });
 });

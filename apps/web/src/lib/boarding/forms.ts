@@ -101,6 +101,10 @@ export type ErrorCode =
   | "already_linked"
   | "link_amount"
   | "link_refused"
+  | "not_explainable"
+  | "link_before_return"
+  | "link_payment_returned"
+  | "link_posting_failed"
   | "already_decided"
   | "direct_evidence"
   | "direct_date"
@@ -177,6 +181,13 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Le montant ne convient pas : il dépasse ce qui reste du paiement, ou n'est pas celui du remboursement demandé.",
   link_refused:
     "Ce rapprochement n'est pas possible pour cette ligne (sens, compte bancaire, date ou état) : vérifiez la ligne et rechargez la page.",
+  not_explainable:
+    "Un retour ou un remboursement sortant ne se classe pas sans comptabiliser : liez-le au paiement concerné.",
+  link_before_return:
+    "Cette ligne est antérieure à un retour déjà comptabilisé sur ce paiement : elle ne peut pas être liée à sa date.",
+  link_payment_returned:
+    "Le paiement de ce remboursement a été retourné par la banque : ce montant revenu ne peut pas encore être comptabilisé.",
+  link_posting_failed: "La comptabilisation a été refusée pour cette ligne : vérifiez-la ou signalez-la au support.",
   already_decided: "Cette ligne a déjà été traitée : rechargez la page.",
   direct_evidence: "Choisissez le relevé du client, classé dans ce dossier.",
   direct_date: "La date doit être passée, et postérieure à la reprise du dossier.",

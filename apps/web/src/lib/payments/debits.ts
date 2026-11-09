@@ -87,7 +87,17 @@ export const DEBIT_REVIEW: Record<string, string> = {
     "Remboursement revenu alors que son paiement a été retourné par la banque : rien n'est comptabilisé, la façon de le comptabiliser reste à décider.",
   before_previous_return:
     "Ligne antérieure à un retour déjà comptabilisé sur ce paiement, à une date plus récente : elle ne peut pas être liée à sa date.",
+  posting_failed: "La comptabilisation a été refusée pour cette ligne : liez-la à un autre paiement ou signalez-la au support.",
+  refund_amount_match: "Débit du montant d'un remboursement demandé sur ce compte : s'il s'agit de ce remboursement, liez-le.",
 };
+
+/**
+ * Whether a line may be classified without booking (« Classer sans comptabiliser »): never a return or one of our
+ * refunds leaving the account (review M2b-6: money out for a payment is always booked; the database refuses it too).
+ */
+export function explainable(o: { direction: string; kind: string }): boolean {
+  return !(o.direction === "debit" && (o.kind === "return" || o.kind === "refund_out"));
+}
 
 /**
  * What a return does, before ops confirm it (full or partial). A payment on no file has nothing imputed, no receipt
@@ -301,6 +311,10 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("a refund is pending") || message.includes("debit link refused: refund_pending"))
     return "refund_pending";
   if (message.includes("already_linked")) return "already_linked";
+  if (message.includes("not_explainable")) return "not_explainable";
+  if (message.includes("before_previous_return")) return "link_before_return";
+  if (message.includes("payment_returned")) return "link_payment_returned";
+  if (message.includes("posting_failed")) return "link_posting_failed";
   if (message.includes("amount_exceeds") || message.includes("amount_differs")) return "link_amount";
   if (message.includes("debit link refused")) return "link_refused";
   if (message.includes("already decided")) return "already_decided";

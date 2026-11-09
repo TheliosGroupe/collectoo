@@ -2286,7 +2286,7 @@ returns table (bank_transaction_id uuid, statement_id uuid, bank_account_id uuid
                amount_minor text, currency char(3), booking_date date, age_days integer, counterparty_name text,
                counterparty_iban_end text, remittance_text text, end_to_end_id text, original_end_to_end_id text,
                return_reason text, review_reason text, candidates jsonb, decision text, decided_at timestamptz,
-               decided_payment_id uuid, total bigint)
+               decided_payment_id uuid, total bigint, held_kind text)
 language plpgsql
 security definer
 set search_path = ''
@@ -2374,7 +2374,9 @@ begin
                   '[]'::jsonb),
          coalesce(l.kind, case r.decision when 'duplicate' then 'duplicate'
                                            when 'released' then 'released' end),
-         coalesce(l.decided_at, r.decided_at), l.payment_id, v_total
+         coalesce(l.decided_at, r.decided_at), l.payment_id, v_total,
+         -- a held duplicate: how the import read it (the « Libérer » sheet says what it becomes)
+         case when t.kind = 'suspected_duplicate' then (select h.kind from private.held_line_kind(t.id) h) end
   from (select * from pg_temp._dq x
         order by (case when p_tab = 'traites' then x.created_at end) desc nulls last, x.booking_date, x.id
         offset v_offset limit v_limit) t

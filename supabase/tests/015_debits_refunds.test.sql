@@ -3,7 +3,7 @@
 -- §6, §7, §8.1, §9, §11, §13; ADR-0013 (M2b-6 addendum). The worker's debit job is played here through ops' link_debit
 -- (same posting function) and private.apply_debit_decisions; the direct-payment job through private.post_direct_payment.
 begin;
-select plan(161);
+select plan(162);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -517,6 +517,8 @@ select pg_temp.as_user('02');
 select throws_ok($$select public.resolve_duplicate('k-dup-0001', pg_temp.ln('d1'), false, 'x')$$, '42501', null,
   'a collector cannot decide');
 select pg_temp.as_user('01');
+select is((select held_kind from public.debit_queue('doublons', 0, 100) where bank_transaction_id = pg_temp.ln('d1')),
+  'debtor_credit', 'the duplicates tab says how the import read a held line (the « Libérer » sheet names one outcome)');
 select is(public.resolve_duplicate('k-dup-0002', pg_temp.ln('d1'), false, 'deux loyers') ->> 'kind', 'debtor_credit',
   'released as the credit it was');
 select is(public.resolve_duplicate('k-dup-0003', pg_temp.ln('d2'), true, 'même opération') ->> 'decision', 'duplicate',

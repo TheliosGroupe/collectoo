@@ -5,6 +5,7 @@ import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import {
   DEBIT_REVIEW,
+  explainable,
   LINK_KIND,
   lineKindLabel,
   linkRefundEffect,
@@ -303,7 +304,7 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
           idempotencyKey={randomUUID()}
         />
       ))}
-      <Explain lineId={row.bank_transaction_id} idempotencyKey={randomUUID()} />
+      {explainable(row) ? <Explain lineId={row.bank_transaction_id} idempotencyKey={randomUUID()} /> : null}
     </div>
   );
 }

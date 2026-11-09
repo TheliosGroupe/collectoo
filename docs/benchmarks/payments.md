@@ -211,10 +211,16 @@ of the payments (1,000 full returns, by each payment's end-to-end id), imported 
 | Step | Size | Time |
 |---|---|---|
 | Allocation (unchanged by M2b-6: `post_allocations` redefined with one more keyed lookup) | 50,000 payments, 5 jobs | 57.7 s (post 8.2–9.4 s per 10k) |
-| Returns statement imported + linked (job `process_debits`) | 1,000 returns | 21.2 s (~21 ms a return: one keyed reversal per allocation, its commit-time checks, three notifications) |
-| Nightly checks | 50,000 payments, ~350,000 postings | 1.6 s (0 violations; 1 alert: overpayments older than 20 days) |
+| Returns statement imported + linked (job `process_debits`) | 1,000 returns | 21.2 s at first, 24.8–29.6 s after the review fixes; the job itself 2.5 s (~3 ms a return in SQL), the rest is the import |
+| Nightly checks | 50,000 payments, ~350,000 postings | 1.6 s, 1.7–1.8 s after the review fixes (one statement, one snapshot); 0 violations |
 
-- Returns arrive a few a day in practice; the job is bounded (20,000 lines per run, continuation) and holds the
+- Review fixes (same VM, rolled-back fixtures):
+  - `debit_link_options` with 20,000 payments on one bank account: 415–463 ms → 8.4–16.5 ms a call (the page makes one
+    per line shown, up to 20).
+  - `debit_candidates`: 3,000 lines 530–592 ms → 53–63 ms; 20,000 lines 22.9–25.2 s → 0.42–0.79 s.
+  - `process_debits` chunk 2,000 (was 20,000): 2,000 returns in 6.5 s end to end (SQL 5.7 s), 83 s when one line is refused
+    and the chunk is retried line by line (1,999 posted, 1 to ops); all far below the queue's 300 s visibility timeout.
+- Returns arrive a few a day in practice; the job is bounded (2,000 lines per run, continuation) and holds the
   allocation lock only while it posts. If volumes need it: reverse set-based (one `ledger_post_set` call for every
   reversal) instead of one `ledger_reverse` per entry.
 - The other scale runs on the branch merged with main (same VM) are unchanged: statement 50k imported in 19.8 s

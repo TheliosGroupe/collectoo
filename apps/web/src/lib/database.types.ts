@@ -1467,7 +1467,7 @@ isOneToOne: false
                            },
 "debit_queue":
 { Args: { "p_limit"?: number,"p_offset"?: number,"p_tab"?: string }; Returns: {
-              "age_days": number,"amount_minor": string,"bank_account_id": string,"bank_transaction_id": string,"booking_date": string,"candidates": Json,"counterparty_iban_end": string,"counterparty_name": string,"currency": string,"decided_at": string,"decided_payment_id": string,"decision": string,"direction": string,"end_to_end_id": string,"kind": string,"original_end_to_end_id": string,"remittance_text": string,"return_reason": string,"review_reason": string,"statement_id": string,"total": number
+              "age_days": number,"amount_minor": string,"bank_account_id": string,"bank_transaction_id": string,"booking_date": string,"candidates": Json,"counterparty_iban_end": string,"counterparty_name": string,"currency": string,"decided_at": string,"decided_payment_id": string,"decision": string,"direction": string,"end_to_end_id": string,"held_kind": string,"kind": string,"original_end_to_end_id": string,"remittance_text": string,"return_reason": string,"review_reason": string,"statement_id": string,"total": number
             }[]
                            },
 "forward_payment":
