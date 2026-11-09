@@ -1,9 +1,10 @@
 """Ledger model (M2-04): entries, lines and their invariants, without I/O.
 
-The database enforces the same rules (supabase/migrations/20261108170000_ledger.sql and, for
-payments, 20261109090000_payments_ledger.sql); this module lets the worker build and check an
-entry before sending it, and is the reference for the property tests. Amounts are signed integer
-minor units (+ debit, - credit). No floats.
+The database enforces the same rules (supabase/migrations/20261108170000_ledger.sql, for
+payments 20261109090000_payments_ledger.sql, and for the two funds of M2c
+20261111090000_remittance_funds.sql); this module lets the worker build and check an entry before
+sending it, and is the reference for the property tests. Amounts are signed integer minor units
+(+ debit, - credit). No floats.
 """
 
 from __future__ import annotations
@@ -31,6 +32,16 @@ class Book(StrEnum):
     CLIENT_PAYABLE = "client_payable"
     SERVICER_REVENUE = "servicer_revenue"
     CLIENT_MONEY_CASH = "client_money_cash"
+    # M2c (ADR-0014): the servicer's money on the dedicated account, and the servicer's fund
+    DUE_TO_SERVICER = "due_to_servicer"
+    DUE_FROM_CLIENT_FUNDS = "due_from_client_funds"
+    OWN_CASH = "own_cash"
+    COMMISSION_RECEIVABLE = "commission_receivable"
+    CLIENT_ADVANCE_RECEIVABLE = "client_advance_receivable"
+    VAT_COLLECTED = "vat_collected"
+    VAT_PENDING = "vat_pending"
+    BANK_FEES = "bank_fees"
+    SERVICER_LOSSES = "servicer_losses"
 
 
 class Component(StrEnum):
@@ -49,6 +60,20 @@ class EntryType(StrEnum):
     FORWARD = "forward"
     CASH_OUT = "cash_out"
     NETTING = "netting"
+    # M2c: the funds (design m2c-remittances §5.2)
+    COMMISSION_INVOICE = "commission_invoice"
+    COMMISSION_CREDIT_NOTE = "commission_credit_note"
+    CLIENT_SETTLEMENT = "client_settlement"
+    REMITTANCE = "remittance"
+    SERVICER_SWEEP = "servicer_sweep"
+    SERVICER_TOP_UP = "servicer_top_up"
+    BANK_FEE = "bank_fee"
+    CLIENT_ADVANCE = "client_advance"
+    SERVICER_LOSS = "servicer_loss"
+    CLIENT_PAYMENT_OWN = "client_payment_own"
+    CLIENT_PAYMENT_DEDICATED = "client_payment_dedicated"
+    CLIENT_REFUND_OWN = "client_refund_own"
+    ADVANCE_WRITE_OFF = "advance_write_off"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,12 +91,35 @@ BOOKS: Mapping[Book, BookSpec] = {
     Book.OWNER_CLAIM: BookSpec("3100", "owner", "owner", -1, True),
     Book.UNALLOCATED_PAYMENT: BookSpec("4710", "client", "client", -1, True),
     Book.CLIENT_PAYABLE: BookSpec("4670", "client", "client", -1, True),
-    Book.SERVICER_REVENUE: BookSpec("7060", "client", "servicer", -1, True),
+    Book.SERVICER_REVENUE: BookSpec("7060", "client", "servicer", -1, False),
     Book.CLIENT_MONEY_CASH: BookSpec("5120", "bank", "client", 1, False),
+    Book.DUE_TO_SERVICER: BookSpec("4679", "pooled", "client", -1, False),
+    Book.DUE_FROM_CLIENT_FUNDS: BookSpec("4689", "pooled", "servicer", 1, False),
+    Book.OWN_CASH: BookSpec("5122", "bank", "servicer", 1, False),
+    Book.COMMISSION_RECEIVABLE: BookSpec("4111", "client", "servicer", 1, False),
+    Book.CLIENT_ADVANCE_RECEIVABLE: BookSpec("4112", "client", "servicer", 1, False),
+    Book.VAT_COLLECTED: BookSpec("44571", "pooled", "servicer", -1, False),
+    Book.VAT_PENDING: BookSpec("44574", "pooled", "servicer", -1, False),
+    Book.BANK_FEES: BookSpec("6270", "pooled", "servicer", 1, False),
+    Book.SERVICER_LOSSES: BookSpec("6780", "pooled", "servicer", 1, False),
 }
 CLAIM_BOOKS = frozenset({Book.DEBTOR_RECEIVABLE, Book.OWNER_CLAIM})
-# Books holding money of the clients (money_of = client): closed in every entry (I2, ADR-0013).
+# The dedicated-account fund (money_of = client: 5120, 4710, 4670, 4679) and the servicer's fund:
+# each closed in every entry, per currency (I2', ADR-0014).
 CLIENT_MONEY_BOOKS = frozenset(b for b, spec in BOOKS.items() if spec.money_of == "client")
+SERVICER_FUND_BOOKS = frozenset(b for b, spec in BOOKS.items() if spec.money_of == "servicer")
+# The only crossing between the funds: 4679 and 4689 mirror each other in every entry (I12).
+MIRROR_BOOKS = frozenset({Book.DUE_TO_SERVICER, Book.DUE_FROM_CLIENT_FUNDS})
+BANK_BOOKS = frozenset({Book.CLIENT_MONEY_CASH, Book.OWN_CASH})
+# Books of one client (the line names it); the other non-claim books are pooled (4710 may name one).
+CLIENT_BOOKS = frozenset(
+    {
+        Book.CLIENT_PAYABLE,
+        Book.SERVICER_REVENUE,
+        Book.COMMISSION_RECEIVABLE,
+        Book.CLIENT_ADVANCE_RECEIVABLE,
+    }
+)
 # Mirrors public.ledger_entry_type.allowed_books (a test compares them). Since M2b an adjustment
 # cannot move client money; no payment type reaches 7060 (M2-12).
 ALLOWED_BOOKS: Mapping[EntryType, frozenset[Book]] = {
@@ -82,6 +130,72 @@ ALLOWED_BOOKS: Mapping[EntryType, frozenset[Book]] = {
     EntryType.FORWARD: frozenset({Book.UNALLOCATED_PAYMENT, Book.CLIENT_PAYABLE}),
     EntryType.CASH_OUT: frozenset({Book.UNALLOCATED_PAYMENT, Book.CLIENT_MONEY_CASH}),
     EntryType.NETTING: frozenset({Book.DEBTOR_RECEIVABLE}),
+    # M2c: no type touches 1100, 3100 or 4710; 7060 only through the two commission types.
+    EntryType.COMMISSION_INVOICE: frozenset(
+        {Book.COMMISSION_RECEIVABLE, Book.SERVICER_REVENUE, Book.VAT_PENDING, Book.VAT_COLLECTED}
+    ),
+    EntryType.COMMISSION_CREDIT_NOTE: frozenset(
+        {Book.COMMISSION_RECEIVABLE, Book.SERVICER_REVENUE, Book.VAT_PENDING, Book.VAT_COLLECTED}
+    ),
+    EntryType.CLIENT_SETTLEMENT: frozenset(
+        {
+            Book.CLIENT_PAYABLE,
+            Book.DUE_TO_SERVICER,
+            Book.DUE_FROM_CLIENT_FUNDS,
+            Book.COMMISSION_RECEIVABLE,
+            Book.CLIENT_ADVANCE_RECEIVABLE,
+            Book.VAT_PENDING,
+            Book.VAT_COLLECTED,
+        }
+    ),
+    EntryType.REMITTANCE: frozenset({Book.CLIENT_PAYABLE, Book.CLIENT_MONEY_CASH}),
+    EntryType.SERVICER_SWEEP: frozenset(
+        {Book.DUE_TO_SERVICER, Book.CLIENT_MONEY_CASH, Book.OWN_CASH, Book.DUE_FROM_CLIENT_FUNDS}
+    ),
+    EntryType.SERVICER_TOP_UP: frozenset(
+        {Book.CLIENT_MONEY_CASH, Book.DUE_TO_SERVICER, Book.DUE_FROM_CLIENT_FUNDS, Book.OWN_CASH}
+    ),
+    EntryType.BANK_FEE: frozenset(
+        {Book.DUE_TO_SERVICER, Book.CLIENT_MONEY_CASH, Book.BANK_FEES, Book.DUE_FROM_CLIENT_FUNDS}
+    ),
+    EntryType.CLIENT_ADVANCE: frozenset(
+        {
+            Book.DUE_TO_SERVICER,
+            Book.CLIENT_PAYABLE,
+            Book.CLIENT_ADVANCE_RECEIVABLE,
+            Book.DUE_FROM_CLIENT_FUNDS,
+        }
+    ),
+    EntryType.SERVICER_LOSS: frozenset(
+        {
+            Book.DUE_TO_SERVICER,
+            Book.CLIENT_MONEY_CASH,
+            Book.SERVICER_LOSSES,
+            Book.DUE_FROM_CLIENT_FUNDS,
+        }
+    ),
+    EntryType.CLIENT_PAYMENT_OWN: frozenset(
+        {
+            Book.OWN_CASH,
+            Book.COMMISSION_RECEIVABLE,
+            Book.CLIENT_ADVANCE_RECEIVABLE,
+            Book.VAT_PENDING,
+            Book.VAT_COLLECTED,
+        }
+    ),
+    EntryType.CLIENT_PAYMENT_DEDICATED: frozenset(
+        {
+            Book.CLIENT_MONEY_CASH,
+            Book.DUE_TO_SERVICER,
+            Book.DUE_FROM_CLIENT_FUNDS,
+            Book.COMMISSION_RECEIVABLE,
+            Book.CLIENT_ADVANCE_RECEIVABLE,
+            Book.VAT_PENDING,
+            Book.VAT_COLLECTED,
+        }
+    ),
+    EntryType.CLIENT_REFUND_OWN: frozenset({Book.COMMISSION_RECEIVABLE, Book.OWN_CASH}),
+    EntryType.ADVANCE_WRITE_OFF: frozenset({Book.SERVICER_LOSSES, Book.CLIENT_ADVANCE_RECEIVABLE}),
 }
 # Posted only by private.ledger_post_set (from other definer functions), never by ledger_post.
 PAYMENT_ENTRY_TYPES = frozenset(
@@ -93,6 +207,50 @@ PAYMENT_ENTRY_TYPES = frozenset(
         EntryType.NETTING,
     }
 )
+# The M2c entries of the funds, posted only by private.ledger_post_set too.
+FUND_ENTRY_TYPES = frozenset(
+    {
+        EntryType.COMMISSION_INVOICE,
+        EntryType.COMMISSION_CREDIT_NOTE,
+        EntryType.CLIENT_SETTLEMENT,
+        EntryType.REMITTANCE,
+        EntryType.SERVICER_SWEEP,
+        EntryType.SERVICER_TOP_UP,
+        EntryType.BANK_FEE,
+        EntryType.CLIENT_ADVANCE,
+        EntryType.SERVICER_LOSS,
+        EntryType.CLIENT_PAYMENT_OWN,
+        EntryType.CLIENT_PAYMENT_DEDICATED,
+        EntryType.CLIENT_REFUND_OWN,
+        EntryType.ADVANCE_WRITE_OFF,
+    }
+)
+# Each M2c entry names its document (C. com. R123-174): the source types each may name.
+FUND_SOURCE_TYPES: Mapping[EntryType, frozenset[str]] = {
+    EntryType.COMMISSION_INVOICE: frozenset({"commission_invoice"}),
+    EntryType.COMMISSION_CREDIT_NOTE: frozenset({"commission_invoice"}),
+    EntryType.CLIENT_SETTLEMENT: frozenset({"remittance_run"}),
+    EntryType.REMITTANCE: frozenset({"bank_transfer", "bank_transaction"}),
+    EntryType.SERVICER_SWEEP: frozenset({"bank_transfer", "bank_transaction"}),
+    EntryType.SERVICER_TOP_UP: frozenset({"bank_transfer", "bank_transaction"}),
+    EntryType.BANK_FEE: frozenset({"bank_transaction"}),
+    EntryType.CLIENT_ADVANCE: frozenset({"client_advance"}),
+    EntryType.SERVICER_LOSS: frozenset({"bank_transaction"}),
+    EntryType.CLIENT_PAYMENT_OWN: frozenset({"document"}),
+    EntryType.CLIENT_PAYMENT_DEDICATED: frozenset({"bank_transaction"}),
+    EntryType.CLIENT_REFUND_OWN: frozenset({"document"}),
+    EntryType.ADVANCE_WRITE_OFF: frozenset({"document"}),
+}
+# Never reversed (a credit note corrects an invoice; a settlement survives a returned payout).
+NEVER_REVERSED = frozenset(
+    {
+        EntryType.CASH_IN,
+        EntryType.COMMISSION_INVOICE,
+        EntryType.COMMISSION_CREDIT_NOTE,
+        EntryType.CLIENT_SETTLEMENT,
+        EntryType.ADVANCE_WRITE_OFF,
+    }
+)
 PAYMENT_TAGGED = frozenset({EntryType.ALLOCATION, EntryType.FORWARD, EntryType.CASH_OUT})
 REQUIRES_REASON = frozenset(
     {
@@ -101,6 +259,11 @@ REQUIRES_REASON = frozenset(
         EntryType.FORWARD,
         EntryType.CASH_OUT,
         EntryType.NETTING,
+        EntryType.SERVICER_LOSS,
+        EntryType.CLIENT_PAYMENT_OWN,
+        EntryType.CLIENT_PAYMENT_DEDICATED,
+        EntryType.CLIENT_REFUND_OWN,
+        EntryType.ADVANCE_WRITE_OFF,
     }
 )
 
@@ -154,6 +317,13 @@ class OverdrawnError(LedgerError):
     sqlstate = "LG007"
 
 
+class ClientMoneyShortError(LedgerError):
+    """A client's 4670 would be in debit at commit: its money would come from another client or
+    the servicer (I13). Cover the shortfall first (an advance from the servicer's money)."""
+
+    sqlstate = "LG008"
+
+
 ERRORS_BY_SQLSTATE: Mapping[str, type[LedgerError]] = {
     "LG000": AppendOnlyError,
     "LG001": UnbalancedEntryError,
@@ -163,6 +333,7 @@ ERRORS_BY_SQLSTATE: Mapping[str, type[LedgerError]] = {
     "LG005": OpeningMismatchError,
     "LG006": InvalidRequestError,
     "LG007": OverdrawnError,
+    "LG008": ClientMoneyShortError,
 }
 
 
@@ -191,11 +362,11 @@ class Line:
             raise InvalidRequestError(f"currency must be 3 capital letters, got {self.currency!r}")
         self._check_dimensions()
 
-    def _check_dimensions(self) -> None:
+    def _check_dimensions(self) -> None:  # noqa: PLR0912 - one rule per book, as in SQL
         """Which of item, component, client and bank account each book's line carries."""
-        if (self.bank_account_id is not None) != (self.book is Book.CLIENT_MONEY_CASH):
+        if (self.bank_account_id is not None) != (self.book in BANK_BOOKS):
             raise InvalidRequestError("a cash line, and only a cash line, names its bank account")
-        if self.book is Book.CLIENT_MONEY_CASH:
+        if self.book in BANK_BOOKS:
             if self.claim_item_id or self.component or self.client_organization_id:
                 raise InvalidRequestError("a cash line has no item, component or client")
         elif self.book is Book.DEBTOR_RECEIVABLE:
@@ -211,8 +382,14 @@ class Line:
         else:
             if self.claim_item_id is not None or self.component is not None:
                 raise InvalidRequestError("client lines have no item or component")
-            if self.client_organization_id is None and self.book is not Book.UNALLOCATED_PAYMENT:
+            if self.client_organization_id is None and self.book in CLIENT_BOOKS:
                 raise InvalidRequestError(f"a {self.book} line names its client")
+            if (
+                self.client_organization_id is not None
+                and self.book not in CLIENT_BOOKS
+                and self.book is not Book.UNALLOCATED_PAYMENT
+            ):
+                raise InvalidRequestError(f"a {self.book} line is pooled (no client)")
 
     def negated(self) -> Line:
         return replace(self, amount_minor=-self.amount_minor)
@@ -252,12 +429,165 @@ def mirror_by_component(lines: Iterable[Line]) -> dict[tuple[str, str], int]:
 
 
 def client_money_by_currency(lines: Iterable[Line]) -> dict[str, int]:
-    """Net movement of the client-money books (5120, 4710, 4670): zero in every entry (I2)."""
+    """Net movement of the client fund (5120, 4710, 4670, 4679): zero in every entry (I2')."""
     out: dict[str, int] = defaultdict(int)
     for line in lines:
         if line.book in CLIENT_MONEY_BOOKS:
             out[line.currency] += line.amount_minor
     return dict(out)
+
+
+def servicer_fund_by_currency(lines: Iterable[Line]) -> dict[str, int]:
+    """Net movement of the servicer's fund (4689, 5122, 4111, 4112, 4457x, 7060, 6270, 6780):
+    zero in every entry (I2')."""
+    out: dict[str, int] = defaultdict(int)
+    for line in lines:
+        if line.book in SERVICER_FUND_BOOKS:
+            out[line.currency] += line.amount_minor
+    return dict(out)
+
+
+def mirror_by_currency(lines: Iterable[Line]) -> dict[str, int]:
+    """Net movement of 4679 + 4689: zero in every entry (I12), money crosses the funds only so."""
+    out: dict[str, int] = defaultdict(int)
+    for line in lines:
+        if line.book in MIRROR_BOOKS:
+            out[line.currency] += line.amount_minor
+    return dict(out)
+
+
+def _counts(lines: list[Line]) -> tuple[dict[Book, int], dict[Book, int]]:
+    """Lines per book, and debits per book."""
+    n: dict[Book, int] = defaultdict(int)
+    d: dict[Book, int] = defaultdict(int)
+    for x in lines:
+        n[x.book] += 1
+        if x.amount_minor > 0:
+            d[x.book] += 1
+    return n, d
+
+
+def _vat_pair(n: dict[Book, int], d: dict[Book, int], lines: list[Line]) -> bool:
+    """At most one VAT pair, +44574 v / -44571 v (VAT moved from pending to due)."""
+    vatp, vatc = Book.VAT_PENDING, Book.VAT_COLLECTED
+    moved = sum(x.amount_minor for x in lines if x.book in (vatp, vatc))
+    return n[vatp] == n[vatc] <= 1 and d[vatp] == n[vatp] and d[vatc] == 0 and moved == 0
+
+
+def _settled(n: dict[Book, int], d: dict[Book, int]) -> bool:
+    """4111 and 4112 at most once each, at least one of them; an advance is only credited."""
+    com, adv = Book.COMMISSION_RECEIVABLE, Book.CLIENT_ADVANCE_RECEIVABLE
+    return n[com] <= 1 and n[adv] <= 1 and n[com] + n[adv] >= 1 and d[adv] == 0
+
+
+# The four-line types: the debit and credit book of each fund, + debit / - credit (§5.2).
+_FOUR_LINES: Mapping[EntryType, tuple[Book, Book, Book, Book]] = {
+    # debit (client fund), credit (client fund), debit (servicer fund), credit (servicer fund)
+    EntryType.SERVICER_SWEEP: (
+        Book.DUE_TO_SERVICER,
+        Book.CLIENT_MONEY_CASH,
+        Book.OWN_CASH,
+        Book.DUE_FROM_CLIENT_FUNDS,
+    ),
+    EntryType.SERVICER_TOP_UP: (
+        Book.CLIENT_MONEY_CASH,
+        Book.DUE_TO_SERVICER,
+        Book.DUE_FROM_CLIENT_FUNDS,
+        Book.OWN_CASH,
+    ),
+    EntryType.BANK_FEE: (
+        Book.DUE_TO_SERVICER,
+        Book.CLIENT_MONEY_CASH,
+        Book.BANK_FEES,
+        Book.DUE_FROM_CLIENT_FUNDS,
+    ),
+    EntryType.CLIENT_ADVANCE: (
+        Book.DUE_TO_SERVICER,
+        Book.CLIENT_PAYABLE,
+        Book.CLIENT_ADVANCE_RECEIVABLE,
+        Book.DUE_FROM_CLIENT_FUNDS,
+    ),
+    EntryType.SERVICER_LOSS: (
+        Book.DUE_TO_SERVICER,
+        Book.CLIENT_MONEY_CASH,
+        Book.SERVICER_LOSSES,
+        Book.DUE_FROM_CLIENT_FUNDS,
+    ),
+}
+# The two-line types: (debit book, credit book).
+_TWO_LINES: Mapping[EntryType, tuple[Book, Book]] = {
+    EntryType.REMITTANCE: (Book.CLIENT_PAYABLE, Book.CLIENT_MONEY_CASH),
+    EntryType.CLIENT_REFUND_OWN: (Book.COMMISSION_RECEIVABLE, Book.OWN_CASH),
+    EntryType.ADVANCE_WRITE_OFF: (Book.SERVICER_LOSSES, Book.CLIENT_ADVANCE_RECEIVABLE),
+}
+
+
+def has_fund_shape(entry_type: EntryType, lines: Iterable[Line]) -> bool:  # noqa: PLR0911
+    """I3': the shape of an M2c entry, as the database checks it (one currency)."""
+    ls = list(lines)
+    if len({x.currency for x in ls}) != 1:
+        return False
+    n, d = _counts(ls)
+    total = len(ls)
+    com, rev = Book.COMMISSION_RECEIVABLE, Book.SERVICER_REVENUE
+    vatp, vatc, adv = Book.VAT_PENDING, Book.VAT_COLLECTED, Book.CLIENT_ADVANCE_RECEIVABLE
+    pay, dts, dfc = Book.CLIENT_PAYABLE, Book.DUE_TO_SERVICER, Book.DUE_FROM_CLIENT_FUNDS
+    cash, own = Book.CLIENT_MONEY_CASH, Book.OWN_CASH
+    if entry_type in _FOUR_LINES:
+        books = _FOUR_LINES[entry_type]
+        return (
+            total == 4 and all(n[b] == 1 for b in books) and [d[b] for b in books] == [1, 0, 1, 0]
+        )
+    if entry_type in _TWO_LINES:
+        dr, cr = _TWO_LINES[entry_type]
+        return total == 2 and n[dr] == 1 and d[dr] == 1 and n[cr] == 1 and d[cr] == 0
+    if entry_type is EntryType.COMMISSION_INVOICE:
+        return (
+            n[com] == d[com] == 1
+            and n[rev] == 1
+            and d[rev] == 0
+            and n[vatp] + n[vatc] <= 1
+            and d[vatp] == d[vatc] == 0
+            and total == 2 + n[vatp] + n[vatc]
+        )
+    if entry_type is EntryType.COMMISSION_CREDIT_NOTE:
+        return (
+            n[com] == 1
+            and d[com] == 0
+            and n[rev] == d[rev] == 1
+            and n[vatp] <= 1
+            and n[vatc] <= 1
+            and d[vatp] == n[vatp]
+            and d[vatc] == n[vatc]
+            and total == 2 + n[vatp] + n[vatc]
+        )
+    if entry_type is EntryType.CLIENT_SETTLEMENT:
+        return (
+            n[pay] == n[dts] == n[dfc] == 1
+            and _settled(n, d)
+            and _vat_pair(n, d, ls)
+            and total == 3 + n[com] + n[adv] + n[vatp] + n[vatc]
+        )
+    if entry_type is EntryType.CLIENT_PAYMENT_OWN:
+        return (
+            n[own] == d[own] == 1
+            and _settled(n, d)
+            and d[com] == 0
+            and _vat_pair(n, d, ls)
+            and total == 1 + n[com] + n[adv] + n[vatp] + n[vatc]
+        )
+    if entry_type is EntryType.CLIENT_PAYMENT_DEDICATED:
+        return (
+            n[cash] == d[cash] == 1
+            and n[dts] == 1
+            and d[dts] == 0
+            and n[dfc] == d[dfc] == 1
+            and _settled(n, d)
+            and d[com] == 0
+            and _vat_pair(n, d, ls)
+            and total == 3 + n[com] + n[adv] + n[vatp] + n[vatc]
+        )
+    return False
 
 
 def has_payment_shape(entry_type: EntryType, lines: Iterable[Line]) -> bool:
@@ -368,7 +698,7 @@ class EntryDraft:
         """Rules of private.ledger_post_set for a payment entry, before any ledger state (the
         payment and receivable checks, I4 and I6, need the ledger: see tests/ledger_machine.py)."""
         t = self.entry_type
-        if t not in PAYMENT_ENTRY_TYPES:
+        if t not in PAYMENT_ENTRY_TYPES | FUND_ENTRY_TYPES:
             raise InvalidRequestError(f"{t} entries are not posted as payment entries")
         if not 2 <= len(self.lines) <= MAX_LINES:
             raise InvalidRequestError(f"an entry has 2 to {MAX_LINES} lines, got {len(self.lines)}")
@@ -379,8 +709,15 @@ class EntryDraft:
             raise InvalidRequestError("allocation, forward and cash_out (only) name their payment")
         if (self.account_id is not None) != (t in (EntryType.ALLOCATION, EntryType.NETTING)):
             raise InvalidRequestError("allocation and netting (only) name their account")
-        if self.client_organization_id is not None and t is not EntryType.FORWARD:
-            raise InvalidRequestError("only a forward names its client")
+        client_lines = any(x.book in CLIENT_BOOKS for x in self.lines)
+        if self.client_organization_id is not None and (
+            t in (EntryType.ALLOCATION, EntryType.NETTING) or not client_lines
+        ):
+            raise InvalidRequestError("only entries with client lines and no account name a client")
+        if t in FUND_ENTRY_TYPES and (
+            self.source_type not in FUND_SOURCE_TYPES[t] or not self.source_id
+        ):
+            raise InvalidRequestError(f"a {t} entry names its document")
         if t is EntryType.CASH_IN and (self.source_type != "bank_statement" or not self.source_id):
             raise InvalidRequestError("a cash_in names its bank statement")
         if any(x.book is Book.UNALLOCATED_PAYMENT and x.client_organization_id for x in self.lines):
@@ -399,7 +736,14 @@ class EntryDraft:
             raise MirrorBrokenError("receivable/owner-claim mirror broken")
         if any(client_money_by_currency(self.lines).values()):
             raise UnbalancedEntryError("client money left open (closure)")
-        if not has_payment_shape(t, self.lines):
+        if any(servicer_fund_by_currency(self.lines).values()):
+            raise UnbalancedEntryError("the servicer's fund left open (closure)")
+        if any(mirror_by_currency(self.lines).values()):
+            raise UnbalancedEntryError("4679 and 4689 do not mirror each other")
+        if t in FUND_ENTRY_TYPES:
+            if not has_fund_shape(t, self.lines):
+                raise UnbalancedEntryError(f"not the shape of a {t} entry")
+        elif not has_payment_shape(t, self.lines):
             raise UnbalancedEntryError(f"not the shape of a {t} entry")
 
     def meta_json(self) -> dict[str, str]:

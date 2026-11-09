@@ -65,6 +65,7 @@ class Entry:
     txs: tuple[Tx, ...] = ()
     batch_count: int | None = None  # NtryDtls/Btch/NbOfTxs
     info: str | None = None  # AddtlNtryInf
+    payment_info_id: str | None = None  # NtryDtls/Btch/PmtInfId (our file's PmtInf, M2c)
 
     @property
     def signed(self) -> int:
@@ -524,8 +525,15 @@ def _entry(e: Entry, currency: str, v08: bool) -> str:
         _text("AcctSvcrRef", e.ref),
         _code(e.code),
     ]
-    if e.txs or e.batch_count:
-        batch = f"<Btch><NbOfTxs>{e.batch_count}</NbOfTxs></Btch>" if e.batch_count else ""
+    if e.txs or e.batch_count or e.payment_info_id:
+        batch = (
+            "<Btch>"
+            + _text("PmtInfId", e.payment_info_id)
+            + (f"<NbOfTxs>{e.batch_count}</NbOfTxs>" if e.batch_count else "")
+            + "</Btch>"
+            if e.batch_count or e.payment_info_id
+            else ""
+        )
         out.append(
             f"<NtryDtls>{batch}{''.join(_tx(t, e, currency, v08) for t in e.txs)}</NtryDtls>"
         )

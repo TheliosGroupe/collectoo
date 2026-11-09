@@ -8,7 +8,7 @@
 -- I19 flags them, which is checked last). Servicer bb: a statement imported, booked by the debit job's path and by ops,
 -- with 5120 = the bank's closing balance and no violation.
 begin;
-select plan(117);
+select plan(118);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -218,6 +218,11 @@ select is((select count(*)::int from pg_trigger
              and tgenabled = 'A'), 8, 'the funds'' triggers fire always (owner and replica included)');
 select is((select tgdeferrable and tginitdeferred from pg_trigger where tgname = 'client_payable_in_credit'), true,
   'the 4670 guard is checked at commit (LG008)');
+select is((select array_agg(proname::text || '=' || prosecdef::text order by proname) from pg_proc
+           where pronamespace = 'private'::regnamespace
+             and proname in ('client_payable_check', 'bank_line_booking_check', 'ledger_posting_client_payable')),
+  array['bank_line_booking_check=true', 'client_payable_check=true', 'ledger_posting_client_payable=true'],
+  'the funds'' commit checks run as their owner (a command''s commit runs them as the API''s role)');
 select is((select array_agg(relrowsecurity order by relname) from pg_class
            where oid in ('public.bank_transfer'::regclass, 'public.bank_line_booking'::regclass,
                          'private.client_payable_balance'::regclass, 'private.remittance_pending'::regclass)),

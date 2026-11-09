@@ -1242,6 +1242,7 @@ comment on table private.remittance_pending is
 create or replace function private.ledger_posting_client_payable()
 returns trigger
 language plpgsql
+security definer
 set search_path = ''
 set enable_nestloop = off
 set enable_mergejoin = off
@@ -1299,6 +1300,7 @@ alter table public.ledger_posting enable always trigger ledger_posting_client_pa
 create or replace function private.client_payable_check()
 returns trigger
 language plpgsql
+security definer
 set search_path = ''
 set enable_seqscan = off
 as $$
@@ -2356,6 +2358,7 @@ alter table public.bank_line_booking enable always trigger bank_line_booking_app
 create or replace function private.bank_line_booking_check()
 returns trigger
 language plpgsql
+security definer
 set search_path = ''
 set enable_seqscan = off
 as $$

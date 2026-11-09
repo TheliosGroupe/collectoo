@@ -82,29 +82,84 @@ METHOD_BY_FAMILY = {
     "MCRD": "card",
 }
 REFUND_PREFIX = "RFD"  # end-to-end ids of our own refunds (design §6 refund_request, M2b-6)
+# M2c (design m2c-remittances §12): our own transfers carry RMT (payout), SWP (sweep) or TOP
+# (top-up) and 12 upper-case hex digits as their end-to-end id.
+TOP_UP_ID_RE = re.compile(r"TOP[0-9A-F]{12}")
+TRANSFER_OUT_ID_RE = re.compile(r"(RMT|SWP)[0-9A-F]{12}")
+# Bank transaction sub-families of the bank's own charges (a fee on the dedicated account).
+CHARGE_SUBFAMILIES = frozenset({"CHRG", "FEES"})
 
 
-def classify(
+@dataclass(frozen=True, slots=True)
+class KnownIbans:
+    """IBANs the classification recognises: the servicer's own accounts (any status) and its
+    clients' payout accounts (registered from M2c-2). `private.statement_classification_ibans`."""
+
+    own: frozenset[str] = frozenset()
+    clients: frozenset[str] = frozenset()
+
+
+NO_IBANS = KnownIbans()
+
+
+def refine_kind(
+    kind: str,
+    direction: str,
+    end_to_end_id: str | None,
+    counterparty_iban: str | None,
+    ibans: KnownIbans = NO_IBANS,
+) -> str:
+    """Our own transfers recognised (twin of SQL `private.bank_line_refined_kind`, a parity test
+    compares them): a credit carrying our TOP id or from one of our own IBANs is ours
+    (`own_transfer_in`, never a debtor payment); one from a client's payout IBAN is the client's
+    (`client_transfer_in`); a debit carrying our RMT or SWP id, or to one of our own IBANs, is a
+    `transfer_out`. Readings of these kinds are read again from the facts; a return or our RFD
+    refund stays what it is."""
+    base = {
+        "own_transfer_in": "debtor_credit",
+        "client_transfer_in": "debtor_credit",
+        "transfer_out": "other_debit",
+    }.get(kind, kind)
+    e2e = end_to_end_id or ""
+    if base == "debtor_credit" and direction == "credit":
+        if TOP_UP_ID_RE.fullmatch(e2e) or (counterparty_iban in ibans.own):
+            return "own_transfer_in"
+        if counterparty_iban in ibans.clients:
+            return "client_transfer_in"
+        return "debtor_credit"
+    if base == "other_debit" and direction == "debit":
+        if TRANSFER_OUT_ID_RE.fullmatch(e2e) or (counterparty_iban in ibans.own):
+            return "transfer_out"
+        return "other_debit"
+    return base
+
+
+def classify(  # noqa: PLR0913 - the facts of the line that decide its kind
     direction: str,
     *,
     reversal: bool,
     return_reason: str | None,
     sub_family: str | None,
     end_to_end_id: str | None,
+    counterparty_iban: str | None = None,
+    ibans: KnownIbans = NO_IBANS,
 ) -> str:
-    """Kind of a line (design §8.3 step 6).
+    """Kind of a line (design §8.3 step 6; M2c §12).
 
     A line that undoes an earlier movement (return reason, reversal indicator or a return
     sub-family) is a `return`, in either direction: a credit that reverses a debit (a returned
-    refund, a fee taken back) is not a debtor payment (ADR-0013, M2b-2 addendum).
+    refund, a fee taken back) is not a debtor payment (ADR-0013, M2b-2 addendum). Then our own
+    transfers are recognised (`refine_kind`).
     """
     if return_reason or reversal or (sub_family in RETURN_SUBFAMILIES):
         return "return"
     if direction == "credit":
-        return "debtor_credit"
-    if end_to_end_id and end_to_end_id.startswith(REFUND_PREFIX):
-        return "refund_out"
-    return "other_debit"
+        kind = "debtor_credit"
+    elif end_to_end_id and end_to_end_id.startswith(REFUND_PREFIX):
+        kind = "refund_out"
+    else:
+        kind = "other_debit"
+    return refine_kind(kind, direction, end_to_end_id, counterparty_iban, ibans)
 
 
 def normalise_text(text: str | None) -> str:
@@ -141,6 +196,7 @@ class StatementLine:
     original_end_to_end_id: str | None = None
     batch_entry_ref: str | None = None
     entry_ref: str | None = None  # camt.053: the bank entry's own reference (Ntry/AcctSvcrRef)
+    payment_info_id: str | None = None  # camt.053 NtryDtls/Btch/PmtInfId (our file's PmtInf, M2c)
 
     @property
     def signed_minor(self) -> int:
@@ -173,6 +229,7 @@ STAGE_COLUMNS = (
     "entry_ref",
     "kind",
     "method",
+    "payment_info_id",
 )
 
 

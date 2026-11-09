@@ -40,8 +40,10 @@ from lxml import etree
 from collectoo_worker.payments.rf import rf_normalise
 from collectoo_worker.payments.statement import (
     METHOD_BY_FAMILY,
+    NO_IBANS,
     RETURN_SUBFAMILIES,
     DedupKeys,
+    KnownIbans,
     ParsedStatement,
     Section,
     StatementLine,
@@ -167,9 +169,11 @@ class _Reader:
         currency: str,
         exponent: int,
         max_lines: int = MAX_LINES,
+        ibans: KnownIbans = NO_IBANS,
     ) -> None:
         self.q = _Ns(ns)
         self.iban = iban
+        self.ibans = ibans
         self.currency = currency
         self.exponent = exponent
         self.max_lines = max_lines
@@ -275,6 +279,7 @@ class _Reader:
             ref=first(f, "AcctSvcrRef"),
             code=_code(f, "BkTxCd/"),
             info=first(f, "AddtlNtryInf"),
+            payment_info_id=_max35(next(iter(self.q.texts(ntry, "NtryDtls/Btch/PmtInfId")), None)),
         )
         txs = [self.q.flat(tx) for tx in ntry.findall(self.q.path("NtryDtls/TxDtls"))]
         counts = self.q.texts(ntry, "NtryDtls/Btch/NbOfTxs")
@@ -356,6 +361,8 @@ class _Reader:
             return_reason=return_reason,
             sub_family=sub_family,
             end_to_end_id=e2e,
+            counterparty_iban=rf_normalise(iban) if iban else None,
+            ibans=self.ibans,
         )
         if unsplit:
             # A batch that cannot be split is still a return when the entry or any of its details
@@ -412,6 +419,7 @@ class _Reader:
                 or (e2e if kind == "return" else None),
                 batch_entry_ref=(entry.ref or entry.where) if batch else None,
                 entry_ref=entry.ref,
+                payment_info_id=entry.payment_info_id,
             )
         )
 
@@ -465,6 +473,15 @@ class _Entry:
     ref: str | None
     code: str | None
     info: str | None
+    payment_info_id: str | None = None  # NtryDtls/Btch/PmtInfId
+
+
+MAX35 = 35  # ISO 20022 Max35Text
+
+
+def _max35(text: str | None) -> str | None:
+    """An ISO Max35Text kept as given (outside 1-35 characters it is not one: dropped)."""
+    return text if text is not None and 1 <= len(text) <= MAX35 else None
 
 
 def _provided(text: str | None) -> str | None:
@@ -553,9 +570,11 @@ def parse_camt053(  # noqa: PLR0913 - the bank account's settings and the reader
     exponent: int = 2,
     today: date | None = None,
     max_lines: int = MAX_LINES,
+    ibans: KnownIbans = NO_IBANS,
 ) -> ParsedStatement:
     """Parse a camt.053 file for the given bank account (IBAN and currency), or refuse it
-    (`file_too_large` beyond `max_lines` lines, while streaming)."""
+    (`file_too_large` beyond `max_lines` lines, while streaming). `ibans`: the servicer's own
+    and its clients' IBANs, to recognise our own transfers (M2c)."""
     with path.open("rb") as fh:
         head = fh.read(HEAD_BYTES)
     check_prolog(head)
@@ -565,7 +584,13 @@ def parse_camt053(  # noqa: PLR0913 - the bank account's settings and the reader
     version = found.group(1).decode("ascii")
     ns = found.group(0).decode("ascii")
     reader = _Reader(
-        ns, version, iban=iban, currency=currency, exponent=exponent, max_lines=max_lines
+        ns,
+        version,
+        iban=iban,
+        currency=currency,
+        exponent=exponent,
+        max_lines=max_lines,
+        ibans=ibans,
     )
     try:
         _read(path, ns, reader)

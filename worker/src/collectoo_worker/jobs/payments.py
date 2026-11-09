@@ -46,7 +46,13 @@ from collectoo_worker.jobs.matching import run_match
 from collectoo_worker.jobs.receipts import run_receipt_sweep, run_receipts
 from collectoo_worker.payments.camt053 import parse_camt053
 from collectoo_worker.payments.csv_import import CsvProfile, parse_csv
-from collectoo_worker.payments.statement import STAGE_COLUMNS, ParsedStatement, StatementRejected
+from collectoo_worker.payments.statement import (
+    NO_IBANS,
+    STAGE_COLUMNS,
+    KnownIbans,
+    ParsedStatement,
+    StatementRejected,
+)
 from collectoo_worker.runtime.storage import Storage
 
 Conn = psycopg.Connection[Any]
@@ -131,6 +137,15 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
     if row is None or row[0] != "uploaded":
         return "skipped"  # unknown, or already done by an earlier delivery
     _status, fmt, bucket, path, sha256, currency, iban, csv_profile, exponent, today, org = row
+    # M2c: our own accounts' and the clients' IBANs, to recognise our own transfers (the import
+    # classifies them again under its lock: a list read here is never the last word).
+    known = conn.execute(
+        """select coalesce(own_ibans, '{}'), coalesce(client_ibans, '{}')
+           from private.statement_classification_ibans(
+             (select bank_account_id from public.bank_statement where id = %s))""",
+        (statement_id,),
+    ).fetchone()
+    ibans = KnownIbans(frozenset(known[0]), frozenset(known[1])) if known else NO_IBANS
     started = time.monotonic()
     with tempfile.TemporaryDirectory() as tmp:
         local = storage.download(bucket, path, Path(tmp) / "statement")
@@ -146,6 +161,7 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
                 exponent=int(exponent),
                 csv_profile=csv_profile,
                 today=today,
+                ibans=ibans,
             )
         except StatementRejected as exc:
             reject(conn, statement_id, exc.code, exc.detail)
@@ -162,16 +178,28 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
         with conn.transaction():  # savepoint: a refused import leaves nothing behind
             stage(conn, statement_id, parsed)
             staged = time.monotonic()
-            conn.execute(
+            counts = conn.execute(
                 "select private.ingest_statement(%s, %s)", (statement_id, Jsonb(parsed.header()))
-            )
+            ).fetchone()
             # M2-08: the new payments are matched by the next job (same transaction: exactly once).
             conn.execute(
                 "select pgmq.send('payments', %s)",
                 (Jsonb({"type": "match", "organization_id": str(org), "trigger": "import"}),),
             )
-            # M2b-6 (design §8.3 step 7): the debits, returns and refunds of the statement.
-            if any(line.kind in ("return", "refund_out") for line in parsed.lines):
+            # M2b-6 (design §8.3 step 7): the debits, returns and refunds of the statement; M2c:
+            # its bank charges, our own transfers out and credits (as the import read them).
+            seen = dict(counts[0]) if counts and counts[0] else {}
+            if any(
+                int(seen.get(k) or 0)
+                for k in (
+                    "returns",
+                    "refunds_out",
+                    "other_debits",
+                    "transfers_out",
+                    "own_transfers_in",
+                    "client_transfers_in",
+                )
+            ) or any(line.kind in ("return", "refund_out") for line in parsed.lines):
                 conn.execute(
                     "select pgmq.send('payments', %s)",
                     (Jsonb({"type": "process_debits", "organization_id": str(org)}),),
@@ -211,15 +239,19 @@ def parse_file(  # noqa: PLR0913 - the bank account's settings
     exponent: int,
     csv_profile: dict[str, Any] | None,
     today: date,
+    ibans: KnownIbans = NO_IBANS,
 ) -> ParsedStatement:
     if fmt == "camt053":
-        return parse_camt053(path, iban=iban, currency=currency, exponent=exponent, today=today)
+        return parse_camt053(
+            path, iban=iban, currency=currency, exponent=exponent, today=today, ibans=ibans
+        )
     return parse_csv(
         path,
         currency=currency,
         exponent=exponent,
         profile=CsvProfile.from_json(csv_profile),
         today=today,
+        ibans=ibans,
     )
 
 

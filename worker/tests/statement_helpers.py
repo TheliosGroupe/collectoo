@@ -156,9 +156,10 @@ def money_state(bank: str) -> dict[str, Any]:
                from public.ledger_account la
                join public.ledger_posting p on p.ledger_account_id = la.id
                join public.ledger_entry e on e.id = p.entry_id
-               where la.bank_account_id = %s""",
+               where la.bank_account_id = %s and e.entry_type = 'cash_in'""",
             (bank,),
         ).fetchone()
+    # (the imports' cash_in only: since M2c-1 the debit job also books the bank's charges, bank_fee)
     assert payments is not None and cash is not None
     return {
         "lines": lines,
