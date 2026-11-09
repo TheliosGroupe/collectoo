@@ -11,13 +11,21 @@ duplicate): one transaction (the queue's, exactly once) under the servicer's deb
    payments, requests, bank accounts, then the allocation lock), re-checks, reverses the payment's
    allocations at the return date, books the cash_out, the payment's state, the client's
    notification, and replaces the reviews. A link refused on re-check (a command changed the
-   payment meanwhile) is retried by a later run.
+   payment meanwhile) is retried by a later run (`RETRIES` times at most, then left to ops). A
+   link the posting itself refuses (a ledger check) is left to ops (`posting_failed`) and the
+   others are posted: one bad line never stops a servicer's returns and refunds.
+
+`CHUNK` lines per transaction (2,000 by default): the transaction holds the servicer's allocation
+lock while it posts (~21 ms a return, docs/benchmarks/payments.md: ~45 s for a chunk, twice that
+if one line fails and the chunk is posted line by line), far below the queue's 300 s visibility
+timeout; the rest follows in a continuation message.
 
 `direct_payment` (design §8.1, §9): a payment the debtor made to the client directly, as the
 client's statement says: the waterfall (`payments.allocation`, the debts the client names as the
 designation) splits it at its date and `private.post_direct_payment` books one adjustment
 (-1100 / +3100), or the request is refused with a code (more than is due, nothing due, before the
-servicing start, file closed).
+servicing start, file closed; `failed` when the ledger refuses the plan, or when the job is
+dead-lettered: `jobs.payments.record_dead_job`) — never left « en cours » for good.
 
 `invariants` (design §9; pg_cron nightly, or « Lancer les contrôles »):
 `private.run_payment_checks`.
@@ -46,8 +54,9 @@ from collectoo_worker.payments.debits import (
 
 Conn = psycopg.Connection[Any]
 log = logging.getLogger("collectoo.payments")
-CHUNK = int(os.environ.get("DEBIT_CHUNK", "20000"))
+CHUNK = int(os.environ.get("DEBIT_CHUNK", "2000"))
 RETRY_DELAY_S = 5
+RETRIES = 5  # runs re-queued for lines skipped on re-check; then they wait for ops (`changed`)
 
 
 def run_process_debits(conn: Conn, payload: dict[str, Any]) -> dict[str, Any]:
@@ -78,17 +87,24 @@ def run_process_debits(conn: Conn, payload: dict[str, Any]) -> dict[str, Any]:
         return {"lines": 0}
     decisions = decide_all(lines, payments, refunds)
     summary = apply(conn, org, decisions)
-    if int(summary.get("skipped", 0)):
+    retry = int(payload.get("retry", 0))
+    if int(summary.get("skipped", 0)) and retry < RETRIES:
         conn.execute(
             "select pgmq.send('payments', %s, %s)",
-            (Jsonb({"type": "process_debits", "organization_id": org}), RETRY_DELAY_S),
+            (
+                Jsonb({"type": "process_debits", "organization_id": org, "retry": retry + 1}),
+                RETRY_DELAY_S,
+            ),
         )
     log.info(
-        "process_debits %s: %d lines, %d linked, %d to ops, %.1fs",
+        "process_debits %s: %d lines, %d linked, %d to ops, %s skipped, %s refused by the posting,"
+        " %.1fs",
         org,
         len(lines),
         sum(1 for d in decisions if d.linked),
         sum(1 for d in decisions if not d.linked),
+        summary.get("skipped", 0),
+        summary.get("failed", 0),
         time.monotonic() - started,
     )
     return summary
@@ -117,6 +133,8 @@ def _group(
         cand_pending,
         cand_status,
         cand_date,
+        cand_payment_status,
+        cand_free_from,
     ) in rows:
         key = str(line_id)
         lines.setdefault(key, DebitLine(key, kind, direction, str(bank), int(amount), booking))
@@ -130,6 +148,8 @@ def _group(
                     str(cand_status),
                     int(cand_unallocated or 0),
                     cand_date,
+                    str(cand_payment_status),
+                    cand_free_from,
                 )
             )
         elif payment_id is not None:
@@ -143,6 +163,7 @@ def _group(
                     str(cand_status),
                     cand_date,
                     str(via),
+                    cand_free_from,
                 )
             )
     ordered = sorted(lines.values(), key=lambda x: (x.booking_date, x.id))
@@ -215,10 +236,25 @@ def run_direct_payment(conn: Conn, payload: dict[str, Any]) -> str:
         {"claim_item_id": x.item_id, "component": x.component, "amount_minor": str(x.amount_minor)}
         for x in result.lines
     ]
-    conn.execute(
-        "select private.post_direct_payment(%s, %s, %s, %s)",
-        (ident, Jsonb(lines), ENGINE_VERSION, digest),
-    )
+    return _post(conn, ident, lines, digest)
+
+
+def _post(conn: Conn, ident: str, lines: list[dict[str, str]], digest: str) -> str:
+    from collectoo_worker.jobs.payments import deterministic  # noqa: PLC0415 - it imports this module
+
+    try:
+        with conn.transaction():  # savepoint: a plan the ledger refuses leaves nothing behind
+            conn.execute(
+                "select private.post_direct_payment(%s, %s, %s, %s)",
+                (ident, Jsonb(lines), ENGINE_VERSION, digest),
+            )
+    except psycopg.Error as exc:
+        if not deterministic(exc):
+            raise  # the machine, a lock: retried by the queue (then `failed` when dead-lettered)
+        # the ledger refuses this plan (an owner gap on the date, a receivable check): it would
+        # fail the same way on every retry; ops see it refused and record it again once fixed
+        log.warning("direct payment %s: refused by the ledger: %s", ident, exc)
+        return _refuse(conn, ident, "failed")
     return "posted"
 
 

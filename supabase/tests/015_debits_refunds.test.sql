@@ -3,7 +3,7 @@
 -- §6, §7, §8.1, §9, §11, §13; ADR-0013 (M2b-6 addendum). The worker's debit job is played here through ops' link_debit
 -- (same posting function) and private.apply_debit_decisions; the direct-payment job through private.post_direct_payment.
 begin;
-select plan(123);
+select plan(125);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -136,6 +136,13 @@ begin
   insert into pg_temp._alloc_line (payment_id, seq, claim_item_id, component, amount_minor)
   select pg_temp.pay(p_n), x.ord::integer, pg_temp.it(p_file, x.l ->> 0), 'principal', (x.l ->> 1)::bigint
   from jsonb_array_elements(p_lines) with ordinality as x (l, ord);
+  return private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1');
+end $$;
+-- The allocation job's decision for a payment its gates stop (no lines): what the worker posts for it.
+create or replace function pg_temp.gate(p_n text, p_file text, p_outcome text) returns jsonb language plpgsql as $$
+begin
+  perform private.allocation_begin();
+  insert into pg_temp._alloc_target (payment_id, ord, account_id, outcome) values (pg_temp.pay(p_n), 1, pg_temp.f(p_file), p_outcome);
   return private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1');
 end $$;
 create or replace function pg_temp.as_user(p_user text, p_aal text default 'aal2') returns void language sql as $$
@@ -365,15 +372,21 @@ select lives_ok($$select public.link_debit('k-link-0003', pg_temp.ln('b1'), 'ref
 reset role;
 select is(pg_temp.entries('02'), 'allocation@2026-10-05 cash_out@2026-10-21 reversal(cash_out)@2026-10-23',
   'the refund''s cash_out reversed at the credit''s date');
-select is(pg_temp.state('02'), 'partially_allocated/overpayment', 'the payment is back to its overpayment');
+select is(pg_temp.state('02'), 'partially_allocated/-',
+  'the payment''s state from its facts now: on its file, for the allocation job to gate again (not the reason of the refund)');
+select ok(exists (select 1 from pgmq.q_payments where message ->> 'type' = 'allocate'
+                  and message ->> 'organization_id' = '00000000-0000-0000-0000-0000000000aa'),
+  'the allocation job is queued for it');
 select is((select status from public.refund_request where id = pg_temp.refund_of('02')), 'bounced', 'the request bounced');
 select is(pg_temp.left_of('02'), '5000', 'its 5 000 left again');
+select pg_temp.gate('02', '02', 'nothing_due');
+select is(pg_temp.state('02'), 'partially_allocated/nothing_due', 'the job finds nothing more due on the file: for ops again');
 
 -- A partial return while a refund is pending waits for ops to cancel the refund first ---------------------------------
 set local role authenticated;
 select pg_temp.as_user('01');
 select lives_ok($$select public.request_refund('k-refund-0030', pg_temp.pay('02'), '1000', null, null, 'overpayment',
-  'overpayment', '5000', 'remboursement partiel')$$, 'a partial refund asked');
+  'nothing_due', '5000', 'remboursement partiel')$$, 'a partial refund asked');
 reset role;
 select pg_temp.line('t4', 'debit', 'return', 1000, '2026-11-05', 'E2E-02');
 set local role authenticated;

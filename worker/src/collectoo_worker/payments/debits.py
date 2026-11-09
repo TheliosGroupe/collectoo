@@ -12,13 +12,22 @@ these rules decide, deterministically and explainably (no model, no LLM):
   transaction id the line carries, booked on or before it, not returned, when the line takes back
   exactly what is left of it (amount - what already went back out). Anything else goes to ops: no
   candidate, two candidates (never guessed), less than what is left (a partial return: ops
-  decide), more than what is left. The posting then reverses the payment's allocations at the
-  return date and books the cash_out (SQL, `private.post_debit_links`).
+  decide), more than what is left, or dated before the payment's free-from date (its latest
+  reversal dated after the entry it reverses: until then its money was allocated or out, so a
+  cash_out at the line's date would overdraw it, I4). The posting then reverses the payment's
+  allocations at the return date and books the cash_out (SQL, `private.post_debit_links`).
 - **refund_out** (our refund, end-to-end id RFD...): linked to its request when the request is still
-  pending, on the same bank account, for the same amount, and the payment still has that much
-  unallocated. A refund is never booked above what is left of the payment (LG007 backstop).
+  pending, on the same bank account, for the same amount, not dated before the payment's
+  free-from date, and the payment still has that much unallocated. A refund is never booked
+  above what is left of the payment (LG007 backstop).
 - **return credit** (a credit undoing a debit): linked to our executed refund it names, same
-  amount, on or after the refund (the refund came back unpaid: its cash_out is reversed).
+  amount, on or after the refund (the refund came back unpaid: its cash_out is reversed) — unless
+  the bank has taken the payment back since: where that money goes is not decided (ops; open
+  question), so it is never booked automatically.
+
+The SQL re-checks every rule under its locks (the same codes): a line these rules link but the
+posting refuses is skipped (the facts changed meanwhile) or left to ops (`posting_failed`), never
+taking the other lines of the run down.
 
 Bank fees and other debits are never classified here: they stay explained gaps (founder #20).
 """
@@ -30,6 +39,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+Day = date  # (RefundCandidate has a field named `date`)
+
 # Review reasons (public.bank_debit_review.reason).
 NO_CANDIDATE = "no_candidate"
 AMBIGUOUS = "ambiguous"
@@ -37,9 +48,22 @@ AMOUNT_DIFFERS = "amount_differs"
 PARTIAL_RETURN = "partial_return"
 REFUND_NOT_PENDING = "refund_not_pending"
 ALREADY_RETURNED = "already_returned"
+PAYMENT_RETURNED = "payment_returned"  # a refund came back to a payment the bank took back since
+BEFORE_PREVIOUS_RETURN = "before_previous_return"  # dated before the payment's free-from date
+POSTING_FAILED = "posting_failed"  # the SQL posting refused it (written by the SQL, not here)
 
 REVIEW_REASONS = frozenset(
-    {NO_CANDIDATE, AMBIGUOUS, AMOUNT_DIFFERS, PARTIAL_RETURN, REFUND_NOT_PENDING, ALREADY_RETURNED}
+    {
+        NO_CANDIDATE,
+        AMBIGUOUS,
+        AMOUNT_DIFFERS,
+        PARTIAL_RETURN,
+        REFUND_NOT_PENDING,
+        ALREADY_RETURNED,
+        PAYMENT_RETURNED,
+        BEFORE_PREVIOUS_RETURN,
+        POSTING_FAILED,
+    }
 )
 
 
@@ -67,6 +91,9 @@ class PaymentCandidate:
     status: str
     booking_date: date
     via: str  # end_to_end_id | tx_id
+    # its latest reversal dated after the entry it reverses (a return, a refund that bounced, an
+    # allocation reversed later): nothing goes out of it before that date (I4)
+    free_from: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +107,8 @@ class RefundCandidate:
     status: str  # requested | executed | cancelled | bounced
     unallocated_minor: int  # what is left of the payment, unallocated (U)
     date: date  # the payment's booking date (requested) or the refund's execution date (executed)
+    payment_status: str = "unmatched"  # the payment's own status (returned: the bank took it back)
+    free_from: Day | None = None  # the payment's free-from date (see PaymentCandidate)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +170,8 @@ def _return(line: DebitLine, payments: Sequence[PaymentCandidate]) -> Decision:
     if len(live) > 1:
         return _review(line, AMBIGUOUS, signals)  # never guessed: a wrong return reopens a debt
     p = live[0]
+    if p.free_from is not None and line.booking_date < p.free_from:
+        return _review(line, BEFORE_PREVIOUS_RETURN, signals)  # its money was allocated then (I4)
     if line.amount_minor == p.left_minor:
         return Decision(line.id, "return", payment_id=p.payment_id, candidates=tuple(signals))
     if line.amount_minor < p.left_minor:
@@ -158,11 +189,11 @@ def _refund(line: DebitLine, refunds: Sequence[RefundCandidate]) -> Decision:
     if len(pending) != 1:
         return _review(line, REFUND_NOT_PENDING if not pending else AMBIGUOUS, signals)
     r = pending[0]
-    if (
-        r.amount_minor != line.amount_minor
-        or line.amount_minor > r.unallocated_minor
-        or line.booking_date < r.date
-    ):
+    if r.amount_minor != line.amount_minor or line.booking_date < r.date:
+        return _review(line, AMOUNT_DIFFERS, signals)
+    if r.free_from is not None and line.booking_date < r.free_from:
+        return _review(line, BEFORE_PREVIOUS_RETURN, signals)
+    if line.amount_minor > r.unallocated_minor:
         return _review(line, AMOUNT_DIFFERS, signals)
     return Decision(
         line.id,
@@ -184,6 +215,8 @@ def _refund_returned(line: DebitLine, refunds: Sequence[RefundCandidate]) -> Dec
     if len(executed) > 1:
         return _review(line, AMBIGUOUS, signals)
     r = executed[0]
+    if r.payment_status == "returned":
+        return _review(line, PAYMENT_RETURNED, signals)  # not booked: where it goes is not decided
     if r.amount_minor != line.amount_minor or line.booking_date < r.date:
         return _review(line, AMOUNT_DIFFERS, signals)
     return Decision(

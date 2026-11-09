@@ -96,15 +96,21 @@ def make_handler(storage: Storage) -> Any:
 
 
 def record_dead_job(payload: dict[str, Any], error: str, conn: Conn) -> None:
-    """The import failed for good: the statement says so (the back-office stops waiting)."""
-    if payload.get("type") != "import" or not payload.get("statement_id"):
-        return
-    conn.execute(
-        """update public.bank_statement
-           set status = 'failed', error_code = 'import_failed', error = %s, finished_at = now()
-           where id = %s and status = 'uploaded'""",
-        (error[:2000], str(payload["statement_id"])),
-    )
+    """A job failed for good: what it was for says so (the back-office stops waiting). An import:
+    the statement is `failed`. A payment made to the client directly: refused, `failed` (ops
+    record it again once the cause is fixed; the error stays in private.job_run)."""
+    if payload.get("type") == "import" and payload.get("statement_id"):
+        conn.execute(
+            """update public.bank_statement
+               set status = 'failed', error_code = 'import_failed', error = %s, finished_at = now()
+               where id = %s and status = 'uploaded'""",
+            (error[:2000], str(payload["statement_id"])),
+        )
+    elif payload.get("type") == "direct_payment" and payload.get("direct_payment_id"):
+        conn.execute(
+            "select private.refuse_direct_payment(%s, 'failed')",
+            (str(payload["direct_payment_id"]),),
+        )
 
 
 def deterministic(exc: psycopg.Error) -> bool:

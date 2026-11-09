@@ -46,6 +46,9 @@ from integration_helpers import DB, one, storage
 from psycopg.types.json import Jsonb
 from statement_helpers import bank_tenant, drain, upload
 
+from collectoo_worker.jobs.payments import make_handler, record_dead_job
+from collectoo_worker.runtime.queue import QueueConsumer
+
 pytestmark = pytest.mark.integration
 DAY = date(2026, 10, 12)
 REFUND_DAY = date(2026, 10, 21)
@@ -239,7 +242,9 @@ def test_a_refund_that_comes_back_unpaid_puts_the_money_back_on_the_payment() ->
         "auto",
     )
     assert _refund(asked["refund_request_id"])[0] == "bounced"
-    assert state(p) == ("partially_allocated", "overpayment")  # as when the refund was asked
+    # back on its file from its facts now, gated again by the allocation job: the file owes
+    # nothing more, so the 8 000 waits for ops again (founder #8)
+    assert state(p) == ("partially_allocated", "nothing_due")
     assert entries_of(p)[-2:] == [
         ("cash_out", None, REFUND_DAY, 8_000),
         ("reversal", "cash_out", back, -8_000),
@@ -339,16 +344,18 @@ def test_lines_the_job_cannot_decide_wait_for_ops() -> None:
     assert state(p) == ("allocated", None)
     # the bank check counts the open lines as explained gaps until they are linked
     assert _bank_check(s2) == 0
-    # ops explain the unknown RFD debit, and link the unknown return to the payment (a bank that
-    # drops the end-to-end id)
-    api(
-        tenant,
-        "select public.link_debit(%s, %s, 'explained', null, null, null,"
-        " 'frais repris par la banque')",
-        str(uuid.uuid4()),
-        rfd,
-    )
-    assert link_of(rfd) == ("explained", None, None, "ops")
+    # money that went out under our RFD id is booked, never only explained: it waits in « À
+    # classer » (and the nightly ageing alert) until ops link it to a refund
+    with pytest.raises(psycopg.errors.CheckViolation, match="not_explainable"):
+        api(
+            tenant,
+            "select public.link_debit(%s, %s, 'explained', null, null, null,"
+            " 'frais repris par la banque')",
+            str(uuid.uuid4()),
+            rfd,
+        )
+    assert link_of(rfd) is None and review_of(rfd) == "no_candidate"
+    # ops link the unknown return to the payment (a bank that drops the end-to-end id)
     api(
         tenant,
         "select public.link_debit(%s, %s, 'return', %s, null, '10000', 'retour sans référence')",
@@ -568,3 +575,195 @@ def test_the_nightly_checks_find_a_planted_inconsistency() -> None:
         )
     assert latest == 1
     assert state(p) == ("allocated", None)
+
+
+def _latest_alert_ids(tenant: dict[str, Any], code: str) -> list[str]:
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            """select r.details -> 'ids' from public.payment_check_result r
+               join public.payment_check_run x on x.id = r.run_id
+               where x.organization_id = %s and r.code = %s
+               order by x.started_at desc limit 1""",
+            (tenant["servicer"], code),
+        ).fetchone()
+    return [] if row is None else [str(i) for i in row[0]]
+
+
+def test_a_refund_that_comes_back_to_a_returned_payment_waits_for_ops_and_the_run_goes_on() -> None:
+    """Review fix (money #0, security #1): P2's overpayment refunded, then the bank takes the rest
+    of P2 back, then the refund comes back unpaid. Where that money goes is not decided (open
+    question): the line is never booked automatically, it waits for ops — and the other lines of
+    the same run (P1's return) are posted. Before the fix the run raised on the returned payment,
+    was retried, dead-lettered, and every later run failed the same way."""
+    tenant = bank_tenant()
+    store = storage()
+    m, lilas = _files(tenant)
+    prefix = f"QX{uuid.uuid4().hex[:4]}"
+    credits = [credit(200_000, rf=m.rf), credit(520_000, rf=lilas.rf)]
+    ids = statement(tenant, store, credits, prefix, DAY)
+    p1, p2 = ids[f"{prefix}000000000001"], ids[f"{prefix}000000000002"]
+    s1 = _statement_ids(tenant)[0]
+    asked = refund_request(tenant, p2, 8_000, "overpayment")
+    s2 = import_entries(
+        tenant,
+        store,
+        [refund_entry(8_000, asked["end_to_end_id"], f"R{prefix}", REFUND_DAY)],
+        day=REFUND_DAY,
+        opening=closing(s1),
+    )
+    assert state(p2) == ("allocated", None)
+    taken = date(2026, 10, 25)
+    s3 = import_entries(
+        tenant,
+        store,
+        [return_entry(512_000, _e2e(p2), f"T{prefix}", taken)],  # what is left of P2
+        day=taken,
+        opening=closing(s2),
+    )
+    assert state(p2) == ("returned", None)
+    back = date(2026, 10, 27)
+    import_entries(
+        tenant,
+        store,
+        [
+            bounce_entry(8_000, asked["end_to_end_id"], f"B{prefix}", back),
+            return_entry(200_000, _e2e(p1), f"U{prefix}", back),
+        ],
+        day=back,
+        opening=closing(s3),
+    )
+    bounce, p1_return = line_id(tenant, f"B{prefix}"), line_id(tenant, f"U{prefix}")
+    assert link_of(bounce) is None and review_of(bounce) == "payment_returned"
+    assert link_of(p1_return) == ("return", p1, None, "auto")  # the run went on
+    assert state(p1) == ("returned", None)
+    assert state(p2) == ("returned", None)  # nothing booked on it
+    assert _refund(asked["refund_request_id"])[0] == "executed"
+    # ops cannot book it on the returned payment either (a clear refusal, not a ledger error)
+    with pytest.raises(psycopg.errors.CheckViolation, match="payment_returned"):
+        api(
+            tenant,
+            "select public.link_debit(%s, %s, 'refund_returned', null, %s, null, 'retour')",
+            str(uuid.uuid4()),
+            bounce,
+            asked["refund_request_id"],
+        )
+    # the books hold; the 8 000 that came back stays visible to the nightly checks
+    assert sum(client_money(tenant).values()) == 0
+    run = checks(tenant)
+    assert violations(run["run_id"]) == []
+    assert bounce in _latest_alert_ids(tenant, "debit_unclassified")
+
+
+def test_a_return_dated_before_a_later_linked_return_waits_for_ops_and_the_run_goes_on() -> None:
+    """Review fix (money #1, performance #0): two partial returns of one payment; ops link the
+    later-dated one first (its allocation reversed on that date). The earlier-dated one would take
+    money out of the payment on a day it was still allocated (I4, LG007): it waits for ops with a
+    clear reason, and the other lines of the run (P1's return) are posted. Before the fix the run
+    raised LG007, was retried, dead-lettered, and every later run failed the same way."""
+    tenant = bank_tenant()
+    store = storage()
+    m, _ = _files(tenant)
+    a = create_file(
+        tenant,
+        File(
+            f"E-{uuid.uuid4().hex[:6]}",
+            "b2b",
+            "Ecart SA",
+            [Item("F-1", {"principal": 50_000}, date(2026, 7, 1))],
+        ),
+    )
+    prefix = f"OX{uuid.uuid4().hex[:4]}"
+    ids = statement(tenant, store, [credit(200_000, rf=m.rf), credit(50_000, rf=a.rf)], prefix, DAY)
+    p1, p = ids[f"{prefix}000000000001"], ids[f"{prefix}000000000002"]
+    s1 = _statement_ids(tenant)[0]
+    first, second = date(2026, 11, 1), date(2026, 11, 2)
+    s2 = import_entries(
+        tenant,
+        store,
+        [return_entry(30_000, _e2e(p), f"T{prefix}", first)],
+        day=first,
+        opening=closing(s1),
+    )
+    s3 = import_entries(
+        tenant,
+        store,
+        [return_entry(20_000, _e2e(p), f"V{prefix}", second)],
+        day=second,
+        opening=closing(s2),
+    )
+    early, late = line_id(tenant, f"T{prefix}"), line_id(tenant, f"V{prefix}")
+    assert review_of(early) == review_of(late) == "partial_return"
+    api(
+        tenant,
+        "select public.link_debit(%s, %s, 'return', %s, null, '50000', 'retour partiel')",
+        str(uuid.uuid4()),
+        late,
+        p,
+    )
+    assert state(p) == ("matched", "partial_return")  # 30 000 left: the early line's amount
+    later = date(2026, 11, 4)
+    import_entries(
+        tenant,
+        store,
+        [return_entry(200_000, _e2e(p1), f"U{prefix}", later)],
+        day=later,
+        opening=closing(s3),
+    )
+    assert link_of(early) is None and review_of(early) == "before_previous_return"
+    assert link_of(line_id(tenant, f"U{prefix}")) == ("return", p1, None, "auto")
+    assert state(p1) == ("returned", None)
+    with pytest.raises(psycopg.errors.CheckViolation, match="before_previous_return"):
+        api(
+            tenant,
+            "select public.link_debit(%s, %s, 'return', %s, null, '30000', 'retour partiel')",
+            str(uuid.uuid4()),
+            early,
+            p,
+        )
+    assert state(p) == ("matched", "partial_return")
+    assert sum(client_money(tenant).values()) == 0
+    assert violations(checks(tenant)["run_id"]) == []
+
+
+def test_a_direct_payment_whose_job_dies_is_refused_not_left_in_progress() -> None:
+    """Review fix (tests-ux #2): a dead-lettered direct-payment job records its failure on the
+    request (refused, `failed`): the page stops showing « En cours » for good."""
+    tenant = bank_tenant()
+    store = storage()
+    loan = create_file(
+        tenant,
+        File(
+            f"G-{uuid.uuid4().hex[:6]}",
+            "b2b",
+            "Echec SA",
+            [Item("F-1", {"principal": 30_000}, date(2026, 7, 1))],
+        ),
+    )
+    doc = evidence(tenant, loan.id)
+    out = api(
+        tenant,
+        "select public.record_direct_payment(%s, %s, '{}'::uuid[], '10000', '2026-10-20', %s,"
+        " 'relevé client')",
+        str(uuid.uuid4()),
+        loan.id,
+        doc,
+    )
+    ident = str(out["direct_payment_id"])
+    handle = make_handler(store)
+
+    def failing(payload: dict[str, Any], conn: psycopg.Connection[Any]) -> None:
+        if payload.get("direct_payment_id") == ident:
+            raise RuntimeError("the worker fails on this job")
+        handle(payload, conn)
+
+    # retried once at once, then dead-lettered (the other messages handled as usual)
+    consumer = QueueConsumer(
+        DB, "payments", failing, on_dead=record_dead_job, max_attempts=1, backoff_base_s=0
+    )
+    while consumer.poll_once():
+        pass
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            "select status, refusal_code from public.direct_payment where id = %s", (ident,)
+        ).fetchone()
+    assert row == ("refused", "failed")
