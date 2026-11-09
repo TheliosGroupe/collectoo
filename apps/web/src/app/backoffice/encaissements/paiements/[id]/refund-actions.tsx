@@ -36,14 +36,17 @@ export function RequestRefund({
   idempotencyKey: string;
 }) {
   const [payee, setPayee] = useState(payerIbanValid ? "payer" : "other");
+  // the bank may send the payer's IBAN without a name: request_refund needs one (its own, or the payer's)
+  const payerNamed = (payerName ?? "").trim() !== "";
   return (
     <ConfirmSheet label="Rembourser" title="Rembourser le payeur" buttonClassName={secondaryClass} testId="request-refund">
       {(close) => (
         <>
           <p className="text-sm" data-testid="sheet-effect">
-            {left} restent sur ce paiement. La demande crée une référence de virement « RFD… » : exécutez le virement
-            dans la banque avec cette référence. Le remboursement est comptabilisé quand son débit apparaît sur le
-            relevé du compte de fonds de tiers ; jamais plus que ce qui reste du paiement.
+            {left} restent sur ce paiement. La demande crée une référence « RFD… » : dans la banque, saisissez-la comme
+            « référence de bout en bout » du virement (pas seulement dans le libellé), c&apos;est elle qui fait reconnaître
+            son débit sur le relevé. Le remboursement est comptabilisé quand ce débit apparaît sur le relevé du compte
+            de fonds de tiers ; jamais plus que ce qui reste du paiement.
           </p>
           <ActionForm onDone={close} action={requestRefund} submitLabel="Demander le remboursement" buttonClassName={buttonClass}>
             <input type="hidden" name="payment_id" value={paymentId} />
@@ -65,7 +68,7 @@ export function RequestRefund({
                     checked={payee === "payer"}
                     onChange={() => setPayee("payer")}
                   />
-                  Le payeur ({payerName ?? "nom non transmis"}, IBAN …{payerIbanEnd})
+                  Le payeur ({payerNamed ? payerName : "nom non transmis"}, IBAN …{payerIbanEnd})
                 </label>
               ) : (
                 <p className="text-amber-900 dark:text-amber-200">La banque n&apos;a pas transmis d&apos;IBAN utilisable du payeur.</p>
@@ -82,9 +85,14 @@ export function RequestRefund({
                   </label>
                   <label className="flex flex-col gap-1">
                     Nom du bénéficiaire
-                    <input name="payee_name" required={!payerName} maxLength={140} defaultValue={payerName ?? ""} className={inputClass} />
+                    <input name="payee_name" required={!payerNamed} maxLength={140} defaultValue={payerName ?? ""} className={inputClass} />
                   </label>
                 </>
+              ) : !payerNamed ? (
+                <label className="flex flex-col gap-1">
+                  Nom du bénéficiaire (la banque ne l&apos;a pas transmis)
+                  <input name="payee_name" required maxLength={140} autoComplete="off" className={inputClass} />
+                </label>
               ) : null}
             </fieldset>
             <label className="flex flex-col gap-1 text-sm">

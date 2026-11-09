@@ -4,14 +4,18 @@ import { entryLabel, paymentActions } from "./allocation";
 import {
   CHECK_LABEL,
   DEBIT_REVIEW,
+  DIRECT_REFUSAL,
   checkLabel,
   debitErrorCode,
   lineKindLabel,
+  linkRefundEffect,
   minorToInput,
   normaliseIban,
   refundReasons,
   refundable,
+  releaseEffect,
   returnEffect,
+  returnedNote,
 } from "./debits";
 
 describe("refunds (founder #8, #9, #11, #12)", () => {
@@ -46,13 +50,86 @@ describe("refunds (founder #8, #9, #11, #12)", () => {
 
 describe("returns (founder #13; design §2 #3)", () => {
   it("says what a return does before ops confirm it", () => {
-    const full = returnEffect({ amount: "200,00 €", left: "0,00 €", full: true, dateFr: "03/11/2026" });
-    expect(full).toContain("annulées au 03/11/2026 (date du retour)");
-    expect(full).toContain("client en sera informé");
+    const full = returnEffect({ amount: "200,00 €", left: "0,00 €", full: true, dateFr: "03/11/2026", hasFile: true });
+    expect(full).toContain("annulés au 03/11/2026 (date du retour)");
+    expect(full).toContain("Notification enregistrée pour le client (envoi : à venir)");
+    expect(full).not.toContain("informé");
     expect(full).toContain("quittance annulée");
-    const partial = returnEffect({ amount: "40,00 €", left: "60,00 €", full: false, dateFr: "02/11/2026" });
+    const partial = returnEffect({ amount: "40,00 €", left: "60,00 €", full: false, dateFr: "02/11/2026", hasFile: true });
     expect(partial).toContain("Il restera 60,00 € du paiement");
     expect(partial).not.toContain("quittance annulée");
+  });
+
+  it("promises no receipt, imputation or client for a payment on no file (review M2b-6)", () => {
+    const full = returnEffect({ amount: "50,00 €", left: "0,00 €", full: true, dateFr: "05/11/2026", hasFile: false });
+    expect(full).toContain("rattaché à aucun dossier");
+    expect(full).toContain("comptabilisé au 05/11/2026");
+    expect(full).not.toContain("quittance annulée");
+    expect(full).not.toContain("factures");
+    expect(full).not.toContain("Notification");
+    expect(full).toContain("« retourné »");
+  });
+
+  it("words a returned payment's note from what happened (review M2b-6)", () => {
+    const when = (iso: string) => iso.slice(0, 10);
+    const n = (kind: string, reason: string | null, delivered_at: string | null = null) => ({
+      kind,
+      reason,
+      created_at: "2026-11-05T09:00:00Z",
+      client_name: "Martin SAS",
+      delivered_at,
+    });
+    // allocated, receipt void, the client's notification recorded but not read yet
+    const allocated = returnedNote(
+      {
+        hasFile: true,
+        notifications: [n("payment_allocated", null), n("payment_allocation_reversed", "bank_return"), n("payment_returned", "bank_return")],
+        latestReceiptKind: "void",
+      },
+      when,
+    );
+    expect(allocated).toContain("Ses imputations sont annulées à la date du retour");
+    expect(allocated).toContain("Sa quittance est annulée.");
+    expect(allocated).toContain("notification enregistrée pour Martin SAS le 2026-11-05 (envoi : à venir)");
+    expect(allocated).not.toContain("informé");
+    // read in the client space: delivered
+    const read = returnedNote(
+      { hasFile: true, notifications: [n("payment_returned", "bank_return", "2026-11-06T08:00:00Z")], latestReceiptKind: "void" },
+      when,
+    );
+    expect(read).toContain("notification remise à Martin SAS dans son espace client le 2026-11-06");
+    // held on its file (never imputed), receipt still in force: nothing about imputations, the void version to come
+    const held = returnedNote(
+      { hasFile: true, notifications: [n("payment_held", "hold_blocks_allocation"), n("payment_returned", "bank_return")], latestReceiptKind: "original" },
+      when,
+    );
+    expect(held).not.toContain("imputations");
+    expect(held).toContain("L'annulation de sa quittance est en cours.");
+    // forwarded: its remittance cancelled, no invoice
+    const forwarded = returnedNote(
+      { hasFile: true, notifications: [n("payment_forward_reversed", "bank_return"), n("payment_returned", "bank_return")], latestReceiptKind: null },
+      when,
+    );
+    expect(forwarded).toContain("Son reversement au client est annulé");
+    expect(forwarded).not.toContain("factures");
+    expect(forwarded).not.toContain("quittance");
+    // on no file: no receipt, no client
+    const unmatched = returnedNote({ hasFile: false, notifications: [], latestReceiptKind: null }, when);
+    expect(unmatched).toBe("La banque a repris ce paiement. Il n'est rattaché à aucun dossier : ni quittance, ni information d'un client.");
+  });
+
+  it("asks ops to check a refund's debit that does not carry its RFD reference (review M2b-6)", () => {
+    const named = linkRefundEffect({ direction: "debit", lineRef: "RFD0123456789AB", refundRef: "RFD0123456789AB", payee: "DIALLO" });
+    expect(named).toBe("Le débit est le virement RFD0123456789AB à DIALLO : le remboursement sera comptabilisé à la date du débit.");
+    // read as a plain debit (other_debit): no reference, or another one
+    for (const lineRef of [null, "NOTPROVIDED"]) {
+      const plain = linkRefundEffect({ direction: "debit", lineRef, refundRef: "RFD0123456789AB", payee: "DIALLO" });
+      expect(plain).toContain("ne porte pas la référence RFD0123456789AB");
+      expect(plain).toContain("vérifiez dans la banque");
+    }
+    expect(linkRefundEffect({ direction: "credit", lineRef: null, refundRef: "RFD0123456789AB", payee: "DIALLO" })).toContain(
+      "revenu impayé",
+    );
   });
 
   it("names lines and the job's reasons in French", () => {
@@ -60,7 +137,18 @@ describe("returns (founder #13; design §2 #3)", () => {
     expect(lineKindLabel("return", "credit")).toBe("Crédit annulant un débit");
     expect(lineKindLabel("refund_out", "debit")).toContain("RFD");
     expect(Object.keys(DEBIT_REVIEW).sort()).toEqual(
-      ["already_returned", "ambiguous", "amount_differs", "changed", "no_candidate", "partial_return", "refund_not_pending"].sort(),
+      [
+        "already_returned",
+        "ambiguous",
+        "amount_differs",
+        "before_previous_return",
+        "changed",
+        "no_candidate",
+        "partial_return",
+        "payment_changed",
+        "payment_returned",
+        "refund_not_pending",
+      ].sort(),
     );
   });
 
@@ -98,6 +186,26 @@ describe("returns (founder #13; design §2 #3)", () => {
   });
 });
 
+describe("suspected duplicates (review M2b-6)", () => {
+  it("says what « Libérer » does by what the import read the line as", () => {
+    const amount = "120,00 €";
+    expect(releaseEffect({ direction: "credit", heldKind: "debtor_credit", amount })).toContain("deviendra un paiement reçu de 120,00 €");
+    expect(releaseEffect({ direction: "credit", heldKind: "batch_unsplit", amount })).toContain("paiement reçu");
+    // a credit read as a return (« RETOUR VIR SEPA … »): no payment, no cash booked by the release
+    const returned = releaseEffect({ direction: "credit", heldKind: "return", amount });
+    expect(returned).not.toContain("deviendra un paiement");
+    expect(returned).toContain("« À classer »");
+    expect(returned).toContain("Aucun paiement n'est créé");
+    expect(releaseEffect({ direction: "debit", heldKind: "refund_out", amount })).toContain("retour ou un remboursement");
+    expect(releaseEffect({ direction: "debit", heldKind: "other_debit", amount })).toContain("non comptabilisée");
+    // reading not told: a credit's sheet gives both outcomes, never a bare promise of a payment
+    const unknown = releaseEffect({ direction: "credit", heldKind: null, amount });
+    expect(unknown).toContain("lecture faite à l'import");
+    expect(unknown).toContain("sans paiement");
+    expect(releaseEffect({ direction: "debit", heldKind: null, amount })).toContain("débit à traiter");
+  });
+});
+
 describe("nightly checks", () => {
   it("words every check code the SQL writes", () => {
     for (const code of [
@@ -126,6 +234,11 @@ describe("nightly checks", () => {
       expect(CHECK_LABEL[code], code).toBeDefined();
     expect(checkLabel("unknown_code")).toEqual({ label: "unknown_code", help: "" });
   });
+
+  it("words every refusal of a direct payment, a dead-lettered job included", () => {
+    for (const code of ["more_than_due", "nothing_due", "before_servicing_start", "file_closed", "failed"])
+      expect(DIRECT_REFUSAL[code], code).toBeDefined();
+  });
 });
 
 describe("errors of the M2b-6 commands", () => {
@@ -134,6 +247,8 @@ describe("errors of the M2b-6 commands", () => {
       ["refund: the reason does not match the payment's state", "refund_reason_mismatch"],
       ["refund: more than what is left of the payment", "refund_too_much"],
       ["refund: the payee's IBAN is required (the bank gave none)", "refund_iban_required"],
+      // the payer's IBAN without a name from the bank (review M2b-6): a clear error, not « L'action a échoué »
+      ["refund: the payee's name is required", "refund_name_required"],
       ["refund: invalid IBAN", "iban_invalid"],
       ["the payment changed: reload the page", "payment_changed"],
       ["debit link refused: payment_changed", "payment_changed"],

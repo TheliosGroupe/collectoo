@@ -3,7 +3,14 @@ import Link from "next/link";
 import { Badge, InfoNote, Section, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
-import { DEBIT_REVIEW, LINK_KIND, lineKindLabel, returnEffect } from "@/lib/payments/debits";
+import {
+  DEBIT_REVIEW,
+  LINK_KIND,
+  lineKindLabel,
+  linkRefundEffect,
+  releaseEffect,
+  returnEffect,
+} from "@/lib/payments/debits";
 import { money, signedMoney } from "@/lib/payments/statements";
 import { Explain, LinkRefund, LinkReturn, ResolveDuplicate } from "./debit-actions";
 
@@ -36,7 +43,19 @@ type Row = {
   decided_at: string | null;
   decided_payment_id: string | null;
   total: number;
+  /** « Doublons possibles »: what the import read the held line as, when the queue tells it (see heldKind) */
+  held_kind?: string | null;
 };
+
+/**
+ * What a held line was read as: the queue's `held_kind` when it returns one, or its `kind` when the « Doublons » tab
+ * returns the reading in place of `suspected_duplicate`; otherwise unknown (null), and the « Libérer » sheet says both
+ * outcomes (review M2b-6).
+ */
+function heldKind(r: Row): string | null {
+  if (r.held_kind) return r.held_kind;
+  return r.kind !== "suspected_duplicate" ? r.kind : null;
+}
 type Candidate = {
   payment_id?: string;
   refund_request_id?: string;
@@ -95,9 +114,10 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
   return (
     <WidePage title="Débits et retours" back={back}>
       <InfoNote>
-        Un retour de la banque annule les imputations du paiement à la date du retour et informe le client ; un
-        remboursement n&apos;est comptabilisé qu&apos;une fois son débit sur le relevé. Les frais bancaires ne sont pas
-        comptabilisés sur le compte de fonds de tiers : ils restent des écarts expliqués.
+        Un retour de la banque annule les imputations et reversements du paiement à la date du retour (notification
+        enregistrée pour le client de son dossier) ; un remboursement n&apos;est comptabilisé qu&apos;une fois son débit
+        sur le relevé. Les frais bancaires ne sont pas comptabilisés sur le compte de fonds de tiers : ils restent des
+        écarts expliqués.
       </InfoNote>
       <nav className="flex flex-wrap gap-2 text-sm" aria-label="Onglets">
         {Object.entries(TABS).map(([key, label]) => (
@@ -126,7 +146,9 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
               <li key={r.bank_transaction_id} className="flex flex-col gap-2 py-3" data-testid="debit-row">
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <span className="flex flex-wrap items-center gap-2">
-                    <Badge tone="neutral">{lineKindLabel(r.kind, r.direction)}</Badge>
+                    <Badge tone="neutral">
+                      {tab === "doublons" ? lineKindLabel("suspected_duplicate", r.direction) : lineKindLabel(r.kind, r.direction)}
+                    </Badge>
                     {tab !== "traites" ? <Badge tone={r.age_days >= 3 ? "action" : "neutral"}>J+{r.age_days}</Badge> : null}
                     {r.decision ? <Badge tone="ok">{LINK_KIND[r.decision] ?? r.decision}</Badge> : null}
                   </span>
@@ -170,11 +192,11 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
                 {tab === "doublons" ? (
                   <ResolveDuplicate
                     lineId={r.bank_transaction_id}
-                    releaseEffect={
-                      r.direction === "credit"
-                        ? `La ligne deviendra un paiement reçu de ${money(r.amount_minor, r.currency)} : comptabilisé sur le compte de fonds de tiers à la date du relevé, puis rapproché d'un dossier.`
-                        : "La ligne sera classée comme un débit à traiter (retour, remboursement ou frais)."
-                    }
+                    releaseEffect={releaseEffect({
+                      direction: r.direction,
+                      heldKind: heldKind(r),
+                      amount: money(r.amount_minor, r.currency),
+                    })}
                     idempotencyKey={randomUUID()}
                   />
                 ) : null}
@@ -198,7 +220,9 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
         ) : null}
         {tab === "frais" ? (
           <p className="mt-3 text-xs text-zinc-600 dark:text-zinc-400">
-            Non comptabilisés : demandez à la banque d&apos;imputer ses frais sur le compte d&apos;exploitation.
+            Non comptabilisés : demandez à la banque d&apos;imputer ses frais sur le compte d&apos;exploitation. Un débit du
+            montant d&apos;un remboursement demandé sur ce compte peut être ce remboursement, exécuté sans sa référence
+            RFD : il est aussi listé dans « À classer », où le lier.
           </p>
         ) : null}
       </Section>
@@ -256,6 +280,7 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
                     left: money((BigInt(p.left_minor) - BigInt(row.amount_minor)).toString(), cur),
                     full,
                     dateFr: frenchDate(row.booking_date),
+                    hasFile: Boolean(p.file_reference),
                   })}
                   idempotencyKey={randomUUID()}
                 />
@@ -269,11 +294,12 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
           refundId={q.refund_request_id}
           kind={row.direction === "debit" ? "refund" : "refund_returned"}
           label={`${row.direction === "debit" ? "Remboursement" : "Remboursement revenu"} ${q.end_to_end_id} · ${money(q.amount_minor, cur)}`}
-          effect={
-            row.direction === "debit"
-              ? `Le débit est le virement ${q.end_to_end_id} à ${q.payee_name} : le remboursement sera comptabilisé à la date du débit.`
-              : `Le virement ${q.end_to_end_id} est revenu impayé : le remboursement sera annulé à la date du crédit, et le montant redeviendra disponible sur le paiement.`
-          }
+          effect={linkRefundEffect({
+            direction: row.direction,
+            lineRef: row.end_to_end_id,
+            refundRef: q.end_to_end_id,
+            payee: q.payee_name,
+          })}
           idempotencyKey={randomUUID()}
         />
       ))}

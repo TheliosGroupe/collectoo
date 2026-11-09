@@ -33,7 +33,9 @@ export function signedMoney(direction: string, minor: string, currency: string):
 
 /** What a statement line is, and where it stands: payments are booked at import; since M2b-6 a debit linked to a
  * payment (its return) or to our refund is booked too, a line ops explained or a confirmed duplicate stays out of the
- * books, fees and other debits are explained gaps (founder #20); the rest waits to be classified. */
+ * books; an unlinked other debit is not booked and is either a fee (founder #20) or a line to classify (our refund
+ * debited without its RFD reference, a return the bank coded as a plain debit: review M2b-6); the rest waits to be
+ * classified. */
 export function lineState(line: {
   kind: string;
   direction: string;
@@ -57,7 +59,7 @@ export function lineState(line: {
   if (line.duplicate === "duplicate") return { kind, state: "Doublon confirmé · non comptabilisé", tone: "neutral" };
   if (line.kind === "suspected_duplicate" && line.duplicate !== "released")
     return { kind, state: "Retenu : doublon possible", tone: "action" };
-  if (line.kind === "other_debit") return { kind, state: "Non comptabilisé · écart expliqué (frais)", tone: "neutral" };
+  if (line.kind === "other_debit") return { kind, state: "Non comptabilisé · frais ou à classer", tone: "neutral" };
   return { kind, state: "Non comptabilisé · à classer", tone: "action" };
 }
 

@@ -70,9 +70,33 @@ describe("client payment feed (M2-11)", () => {
     for (const code of ["hold_blocks_allocation", "ops_correction", "file_recalled", "before_servicing_start", "client_ratification"]) {
       expect(FEED_REASON[code]).toBeTruthy();
     }
-    expect(feedReason("hold_blocks_allocation")).toContain("conservé");
-    expect(feedReason(null)).toBeNull();
-    expect(feedReason("mauvais dossier, voir avec Paul")).toBeNull();
+    const row = (kind: string, reason: string | null, effective_date: string | null = null) => ({ kind, reason, effective_date });
+    expect(feedReason(row("payment_held", "hold_blocks_allocation"))).toContain("conservé");
+    expect(feedReason(row("payment_allocated", null))).toBeNull();
+    expect(feedReason(row("payment_allocation_reversed", "mauvais dossier, voir avec Paul"))).toBeNull();
+  });
+
+  it("words a bank return by what each row records (review M2b-6)", () => {
+    // an allocation the return reversed: its invoices regain their balance, at the reversal's date
+    const reversed = feedReason({ kind: "payment_allocation_reversed", reason: "bank_return", effective_date: "2026-11-05" });
+    expect(reversed).toContain("son imputation est annulée au 05/11/2026");
+    expect(reversed).toContain("les factures retrouvent leur solde");
+    // a forward the return reversed: imputed nothing, so no invoice is mentioned
+    const forward = feedReason({ kind: "payment_forward_reversed", reason: "bank_return", effective_date: "2026-11-05" });
+    expect(forward).toContain("son reversement est annulé au 05/11/2026");
+    expect(forward).not.toContain("imputation");
+    expect(forward).not.toContain("factures");
+    // the return itself (a held or never-allocated payment gets only this row): nothing about imputations or invoices
+    const returned = feedReason({ kind: "payment_returned", reason: "bank_return", effective_date: "2026-11-05" });
+    expect(returned).toBe("La banque du payeur a repris ce montant (retour ou contestation).");
+    // no date known: the words fall back to the return's date
+    expect(feedReason({ kind: "payment_allocation_reversed", reason: "bank_return", effective_date: null })).toContain(
+      "annulée à la date du retour",
+    );
+    // the reasons that are not a return keep their own words whatever the kind
+    expect(feedReason({ kind: "payment_allocation_reversed", reason: "ops_correction", effective_date: "2026-11-05" })).toBe(
+      "Imputation corrigée par nos services.",
+    );
   });
 
   it("links the receipt the client last had, saying when it is void", () => {

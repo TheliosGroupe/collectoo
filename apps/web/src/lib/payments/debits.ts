@@ -1,4 +1,5 @@
 import type { ErrorCode } from "@/lib/boarding/forms";
+import { type Notification, notificationState } from "@/lib/payments/allocation";
 import type { Tone } from "@/lib/payments/statements";
 
 /**
@@ -80,14 +81,94 @@ export const DEBIT_REVIEW: Record<string, string> = {
   refund_not_pending: "Le remboursement nommé n'est plus en attente.",
   already_returned: "Le paiement nommé est déjà retourné ou remboursé.",
   changed: "Le paiement a changé pendant l'analyse : nouvel essai automatique.",
+  // review M2b-6: a line the posting refused is left to ops with its code
+  payment_changed: "Le paiement a changé pendant l'analyse : nouvel essai automatique.",
+  payment_returned:
+    "Remboursement revenu alors que son paiement a été retourné par la banque : rien n'est comptabilisé, la façon de le comptabiliser reste à décider.",
+  before_previous_return:
+    "Ligne antérieure à un retour déjà comptabilisé sur ce paiement, à une date plus récente : elle ne peut pas être liée à sa date.",
 };
 
-/** What a return does, before ops confirm it (full or partial). */
-export function returnEffect(o: { amount: string; left: string; full: boolean; dateFr: string }): string {
-  const head = `La banque reprend ${o.amount} sur ce paiement. Ses imputations seront annulées au ${o.dateFr} (date du retour) : les factures retrouvent leur solde, et le client en sera informé.`;
-  return o.full
-    ? `${head} Le paiement sera « retourné » et sa quittance annulée.`
-    : `${head} Il restera ${o.left} du paiement, en attente de votre décision (réimputer ou rembourser).`;
+/**
+ * What a return does, before ops confirm it (full or partial). A payment on no file has nothing imputed, no receipt
+ * and no client to tell (review M2b-6): the sheet says only that the return is booked. On a file, the return undoes
+ * whatever was imputed or remitted (a held payment had neither) and records a notification for the client, never
+ * « informed » before it is delivered (CPCE-06).
+ */
+export function returnEffect(o: { amount: string; left: string; full: boolean; dateFr: string; hasFile: boolean }): string {
+  const head = o.hasFile
+    ? `La banque reprend ${o.amount} sur ce paiement. Ses imputations et reversements, s'il y en a, seront annulés au ${o.dateFr} (date du retour) : les factures retrouvent leur solde. Notification enregistrée pour le client (envoi : à venir).`
+    : `La banque reprend ${o.amount} sur ce paiement, rattaché à aucun dossier : le retour est comptabilisé au ${o.dateFr} (date du retour), sans quittance ni information d'un client.`;
+  if (!o.full) return `${head} Il restera ${o.left} du paiement, en attente de votre décision (réimputer ou rembourser).`;
+  return o.hasFile ? `${head} Le paiement sera « retourné » et sa quittance annulée.` : `${head} Le paiement sera « retourné ».`;
+}
+
+/**
+ * The note on a returned payment, from what the page loaded (review M2b-6): the allocations and forwards the return
+ * reversed (its `bank_return` notifications), the receipt's latest version, and the return's own notification in the
+ * words of « Information du client » (recorded, or delivered: never « informed » before it is). A payment on no file
+ * had no receipt and no client to tell.
+ */
+export function returnedNote(
+  o: {
+    hasFile: boolean;
+    notifications: Notification[];
+    latestReceiptKind: string | null; // null: no receipt version
+  },
+  when: (iso: string) => string,
+): string {
+  const parts = ["La banque a repris ce paiement."];
+  const byReturn = (kind: string) => o.notifications.some((n) => n.kind === kind && n.reason === "bank_return");
+  if (byReturn("payment_allocation_reversed"))
+    parts.push("Ses imputations sont annulées à la date du retour : les factures retrouvent leur solde.");
+  if (byReturn("payment_forward_reversed")) parts.push("Son reversement au client est annulé à la date du retour.");
+  if (!o.hasFile) {
+    parts.push("Il n'est rattaché à aucun dossier : ni quittance, ni information d'un client.");
+    return parts.join(" ");
+  }
+  if (o.latestReceiptKind === "void") parts.push("Sa quittance est annulée.");
+  else if (o.latestReceiptKind !== null) parts.push("L'annulation de sa quittance est en cours.");
+  const told = [...o.notifications].reverse().find((n) => n.kind === "payment_returned");
+  if (told) parts.push(`Information du client : ${notificationState(told, when)}.`);
+  return parts.join(" ");
+}
+
+/**
+ * What linking a line to one of our refunds does. A debit that does not carry the refund's RFD id as its end-to-end
+ * reference (the bank read it as a plain debit, `other_debit`: review M2b-6) is linked on ops' word: the sheet asks
+ * them to check the transfer in the bank first.
+ */
+export function linkRefundEffect(o: { direction: string; lineRef: string | null; refundRef: string; payee: string }): string {
+  if (o.direction !== "debit")
+    return `Le virement ${o.refundRef} est revenu impayé : le remboursement sera annulé à la date du crédit, et le montant redeviendra disponible sur le paiement.`;
+  if (o.lineRef === o.refundRef)
+    return `Le débit est le virement ${o.refundRef} à ${o.payee} : le remboursement sera comptabilisé à la date du débit.`;
+  return `Le débit ne porte pas la référence ${o.refundRef} : vérifiez dans la banque qu'il s'agit bien du virement à ${o.payee}. Le remboursement sera comptabilisé à la date du débit.`;
+}
+
+/**
+ * What « Libérer » does to a CSV line held as a suspected duplicate (review M2b-6): the line becomes what the import
+ * read it as (`private.held_line_kind`), and only a debtor's credit (or an unsplit batch) becomes a payment. A credit
+ * read as a return (« RETOUR VIR SEPA … » in its label) books nothing and goes with the debits; a debit too. When the
+ * page is not told the reading (`heldKind` null), a credit's sheet says both outcomes rather than promise a payment.
+ */
+export function releaseEffect(o: { direction: string; heldKind: string | null; amount: string }): string {
+  const payment = `La ligne deviendra un paiement reçu de ${o.amount} : comptabilisé sur le compte de fonds de tiers à la date du relevé, puis rapproché d'un dossier.`;
+  const debits =
+    "La ligne sera traitée comme un retour ou un remboursement : rapprochée automatiquement si ses références le permettent, sinon listée dans « À classer ». Aucun paiement n'est créé.";
+  switch (o.heldKind) {
+    case "debtor_credit":
+    case "batch_unsplit":
+      return payment;
+    case "return":
+    case "refund_out":
+      return debits;
+    case "other_debit":
+      return "La ligne sera classée avec les frais et autres débits : non comptabilisée (écart expliqué avec le solde bancaire).";
+  }
+  return o.direction === "credit"
+    ? `La ligne reprendra la lecture faite à l'import. Lue comme un paiement du débiteur, elle deviendra un paiement reçu de ${o.amount}, comptabilisé sur le compte de fonds de tiers à la date du relevé puis rapproché d'un dossier ; lue comme un retour (libellé « RETOUR … »), elle sera traitée avec les débits et retours, sans paiement.`
+    : "La ligne sera classée comme un débit à traiter (retour, remboursement ou frais).";
 }
 
 /** Codes of the nightly checks (payment_check_result.code), in French. */
@@ -156,7 +237,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   refund_pending_ageing: {
     label: "Remboursements en attente depuis 5 jours ou plus",
-    help: "Le débit n'apparaît sur aucun relevé : vérifiez le virement dans la banque.",
+    help: "Aucun débit rapproché : vérifiez le virement dans la banque et sa référence RFD (« référence de bout en bout ») ; un débit sans cette référence se lie depuis « Débits et retours ».",
   },
   debit_unclassified: {
     label: "Débits à classer depuis 3 jours ou plus",
@@ -182,6 +263,8 @@ export const DIRECT_REFUSAL: Record<string, string> = {
   nothing_due: "Rien n'est dû sur ces factures à cette date",
   before_servicing_start: "Date antérieure à la reprise du dossier",
   file_closed: "Dossier clos",
+  // the job failed after its retries (review M2b-6: a dead-lettered direct payment is refused, never left « En cours »)
+  failed: "Le traitement a échoué après plusieurs essais : contactez le support",
 };
 
 export const DIRECT_STATUS: Record<string, { label: string; tone: Tone }> = {
@@ -211,6 +294,7 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("reason does not match")) return "refund_reason_mismatch";
   if (message.includes("more than what is left")) return "refund_too_much";
   if (message.includes("IBAN is required")) return "refund_iban_required";
+  if (message.includes("payee's name is required")) return "refund_name_required";
   if (message.includes("invalid IBAN")) return "iban_invalid";
   if (message.includes("cannot be refunded from here")) return "refund_not_possible";
   if (message.includes("no longer pending")) return "refund_not_pending";

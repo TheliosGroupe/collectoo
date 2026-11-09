@@ -94,6 +94,7 @@ export type ErrorCode =
   | "refund_reason_mismatch"
   | "refund_too_much"
   | "refund_iban_required"
+  | "refund_name_required"
   | "refund_not_possible"
   | "refund_not_pending"
   | "refund_pending"
@@ -165,6 +166,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   refund_reason_mismatch: "Ce motif de remboursement ne correspond pas à la situation du paiement : rechargez la page.",
   refund_too_much: "Le montant dépasse ce qui reste du paiement.",
   refund_iban_required: "La banque n'a pas transmis l'IBAN du payeur : saisissez l'IBAN du bénéficiaire.",
+  refund_name_required:
+    "La banque n'a pas transmis le nom du payeur : saisissez le nom du bénéficiaire (140 caractères au plus).",
   refund_not_possible:
     "Ce paiement ne peut pas être remboursé depuis ici (il attend son imputation, ou un remboursement est déjà demandé). Rechargez la page.",
   refund_not_pending: "Ce remboursement n'est plus en attente : rechargez la page.",

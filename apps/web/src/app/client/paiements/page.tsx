@@ -80,7 +80,7 @@ export default async function ClientPaymentsPage({ searchParams }: PageProps<"/c
       <ul className="flex flex-col gap-3" data-testid="feed">
         {rows.map((r) => {
           const kind = feedKind(r.kind);
-          const why = feedReason(r.reason);
+          const why = feedReason(r);
           const receipt = feedReceiptLabel(r);
           return (
             <li
