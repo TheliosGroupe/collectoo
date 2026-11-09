@@ -52,14 +52,14 @@ class File:
 
 
 def create_file(tenant: dict[str, Any], f: File, *, party_of: File | None = None) -> File:
-    """The file, its debtor (or `party_of`'s: the same debtor), items, ownership from the cut-off, an
-    RF reference, and the opening balances (one correction entry, as the match tests do)."""
+    """The file, its debtor (or `party_of`'s: the same debtor), items, ownership from the cut-off,
+    an RF reference, and the opening balances (one correction entry, as the match tests do)."""
     claim_type, regime, capacity = REGIMES[f.kind]
     f.rf = rf_make(f"{random.Random(f.id).randrange(10**12):012d}")
     with psycopg.connect(DB) as conn, conn.transaction():
         conn.execute(
-            """insert into public.account (id, organization_id, client_organization_id, portfolio_id,
-                 claim_type_code, external_ref, legal_regime, currency, status)
+            """insert into public.account (id, organization_id, client_organization_id,
+                 portfolio_id, claim_type_code, external_ref, legal_regime, currency, status)
                values (%s, %s, %s, %s, %s, %s, %s, 'EUR', %s)""",
             (f.id, tenant["servicer"], tenant["client"], tenant["portfolio"], claim_type, f.ref,
              regime, f.status),
@@ -70,9 +70,13 @@ def create_file(tenant: dict[str, Any], f: File, *, party_of: File | None = None
                     conn,
                     """insert into public.party (organization_id, client_organization_id, kind,
                          display_name) values (%s, %s, %s, %s) returning id""",
-                    (tenant["servicer"], tenant["client"],
-                     "legal_entity" if capacity == "legal_entity" else "natural_person", f.debtor),
-                )  # fmt: skip
+                    (
+                        tenant["servicer"],
+                        tenant["client"],
+                        "legal_entity" if capacity == "legal_entity" else "natural_person",
+                        f.debtor,
+                    ),
+                )
             )
         else:
             f.party_id = party_of.party_id
@@ -104,7 +108,9 @@ def create_file(tenant: dict[str, Any], f: File, *, party_of: File | None = None
             for comp, amount in i.balances.items():
                 if amount:
                     lines.append(
-                        Line(Book.DEBTOR_RECEIVABLE, amount, "EUR", uuid.UUID(i.id), Component(comp))
+                        Line(
+                            Book.DEBTOR_RECEIVABLE, amount, "EUR", uuid.UUID(i.id), Component(comp)
+                        )
                     )
                     per_component[comp] = per_component.get(comp, 0) + amount
         for comp, total in per_component.items():
@@ -128,7 +134,7 @@ def create_file(tenant: dict[str, Any], f: File, *, party_of: File | None = None
 def statement(
     tenant: dict[str, Any], store: Storage, credits: Sequence[Credit], prefix: str, day: date
 ) -> dict[str, str]:
-    """Imported, matched and allocated (the payments queue drained); payment id per line, in order."""
+    """Imported, matched and allocated (the payments queue drained); payment id per line."""
     sid = pay(tenant, store, credits, prefix=prefix, start=day, days=1)
     with psycopg.connect(DB) as conn:
         rows = conn.execute(
@@ -136,11 +142,13 @@ def statement(
                join public.payment p on p.bank_transaction_id = t.id where t.statement_id = %s""",
             (sid,),
         ).fetchall()
-    found = dict(rows)
+    found: dict[str, str] = dict(rows)
     return {line_ref(prefix, k): found[line_ref(prefix, k)] for k in range(1, len(credits) + 1)}
 
 
-def credit(amount: int, text: str = "VIREMENT", rf: str | None = None, name: str = "PAYEUR") -> Credit:
+def credit(
+    amount: int, text: str = "VIREMENT", rf: str | None = None, name: str = "PAYEUR"
+) -> Credit:
     iban = None  # no IBAN: nothing for the IBAN memory to learn across tests
     return Credit(amount, name, iban, (text,), rf, None, "auto", "allocation")
 
@@ -155,8 +163,8 @@ def state(payment: str) -> tuple[str, str | None]:
 
 
 def allocations(payment: str, live: bool = True) -> list[tuple[str, str, int]]:
-    """(item ref, component, amount credited) of the payment's allocation entries (live ones only, or
-    every one), in entry and line order."""
+    """(item ref, component, amount credited) of the payment's allocation entries (live ones
+    only, or every one), in entry and line order."""
     with psycopg.connect(DB) as conn:
         rows = conn.execute(
             """select i.ref, la.component, -lp.amount_minor
@@ -218,7 +226,13 @@ def evidence(tenant: dict[str, Any], account: str) -> str:
                 """insert into public.document (organization_id, client_organization_id, account_id,
                      kind, storage_path, sha256, mime_type)
                    values (%s, %s, %s, 'evidence', %s, %s, 'application/pdf') returning id""",
-                (tenant["servicer"], tenant["client"], account, f"test/{uuid.uuid4()}.pdf", "a" * 64),
+                (
+                    tenant["servicer"],
+                    tenant["client"],
+                    account,
+                    f"test/{uuid.uuid4()}.pdf",
+                    "a" * 64,
+                ),
             )
         )
 

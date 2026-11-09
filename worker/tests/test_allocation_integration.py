@@ -91,7 +91,8 @@ def _live_entries(payment: str) -> list[str]:
         rows = conn.execute(
             """select e.id::text from public.ledger_entry e
                where e.payment_id = %s and e.entry_type = 'allocation'
-                 and not exists (select 1 from public.ledger_entry r where r.reverses_entry_id = e.id)
+                 and not exists (select 1 from public.ledger_entry r
+                                 where r.reverses_entry_id = e.id)
                order by e.id""",
             (payment,),
         ).fetchall()
@@ -104,10 +105,11 @@ def _proposal(tenant: dict[str, Any], account: str) -> dict[str, Any]:
     return dict(detail["proposal"])
 
 
-def test_the_worked_example_end_to_end() -> None:  # noqa: PLR0915 - one story, step by step
-    """§8.2: the credit note is proposed and holds P1 until ops apply it; P1 then pays F-103 (named),
-    F-101 and part of F-102; P2 pays L-9's interest then principal, the consumer's unclassified
-    amount is held back and 80,00 € stay over (never passed to the client); P3 waits for ops."""
+def test_the_worked_example_end_to_end() -> None:
+    """§8.2: the credit note is proposed and holds P1 until ops apply it; P1 then pays F-103
+    (named), F-101 and part of F-102; P2 pays L-9's interest then principal, the consumer's
+    unclassified amount is held back and 80,00 € stay over (never passed to the client); P3 waits
+    for ops."""
     tenant = bank_tenant()
     m42, l9 = _example(tenant)
     store = storage()
@@ -135,7 +137,10 @@ def test_the_worked_example_end_to_end() -> None:  # noqa: PLR0915 - one story, 
     ]
     (e3,) = _live_entries(p2)
     lines = entry_lines(e3)
-    assert lines[:2] == [("unallocated_payment", None, None, 512_000), ("client_payable", None, None, -512_000)]
+    assert lines[:2] == [
+        ("unallocated_payment", None, None, 512_000),
+        ("client_payable", None, None, -512_000),
+    ]
     assert sorted(x for x in lines[2:] if x[0] == "owner_claim") == [
         ("owner_claim", None, "accrued_interest", 12_000),
         ("owner_claim", None, "principal", 500_000),
@@ -186,7 +191,8 @@ def test_the_worked_example_end_to_end() -> None:  # noqa: PLR0915 - one story, 
     with psycopg.connect(DB) as conn:
         plans = conn.execute(
             """select engine_version, length(inputs_hash), designation is not null
-               from private.allocation_plan where payment_id = any(%s::uuid[]) order by payment_id""",
+               from private.allocation_plan where payment_id = any(%s::uuid[])
+               order by payment_id""",
             ([p1, p2],),
         ).fetchall()
     assert sorted(plans) == [("alloc-1", 64, False), ("alloc-1", 64, True)]
@@ -199,9 +205,9 @@ def test_the_worked_example_end_to_end() -> None:  # noqa: PLR0915 - one story, 
 
 
 def test_a_reversed_allocation_waits_for_ops_and_reallocates_the_same_way() -> None:
-    """A mistaken allocation is reversed at its date (receivables restored, client told); the payment
-    waits (allocation_reversed); sent to allocation again, nothing having changed, it gives the same
-    lines (founder #16: M3 re-runs allocations by date the same way)."""
+    """A mistaken allocation is reversed at its date (receivables restored, client told); the
+    payment waits (allocation_reversed); sent to allocation again, nothing having changed, it gives
+    the same lines (founder #16: M3 re-runs allocations by date the same way)."""
     tenant = bank_tenant()
     f = create_file(
         tenant,
@@ -220,7 +226,11 @@ def test_a_reversed_allocation_waits_for_ops_and_reallocates_the_same_way() -> N
     ids = statement(tenant, store, [credit(10_001, "REGLT", rf=f.rf)], "RV", DAY)
     p = ids[line_ref("RV", 1)]
     first = allocations(p)
-    assert first == [("R-1", "principal", 5_001), ("R-2", "principal", 5_000)]  # leftover cent by id
+    # same due date: shared pro rata; the leftover cent goes to the lower item id
+    lower = min((f.item("R-1"), f.item("R-2")), key=lambda i: i.id).ref
+    assert sorted(first) == sorted(
+        [(ref, "principal", 5_001 if ref == lower else 5_000) for ref in ("R-1", "R-2")]
+    )
     before = balances(f)
     entries = _live_entries(p)
 
@@ -301,10 +311,12 @@ def test_a_held_payment_tells_the_client_and_is_allocated_on_the_judges_authoris
              [Item("PRET-S", {"principal": 80_000}, None, kind="loan_principal")]),
     )  # fmt: skip
     proof = evidence(tenant, f.id)
-    ops(tenant, "select public.place_account_hold(%s, %s, 'surendettement', 'C. conso L722-5', %s, %s)",
-        str(uuid.uuid4()), f.id, proof, "recevabilité")  # fmt: skip
+    hold = "select public.place_account_hold(%s, %s, 'surendettement', 'C. conso L722-5', %s, %s)"
+    ops(tenant, hold, str(uuid.uuid4()), f.id, proof, "recevabilité")
     store = storage()
-    p = statement(tenant, store, [credit(20_000, "ECHEANCE", rf=f.rf)], "HD", DAY)[line_ref("HD", 1)]
+    p = statement(tenant, store, [credit(20_000, "ECHEANCE", rf=f.rf)], "HD", DAY)[
+        line_ref("HD", 1)
+    ]
     assert state(p) == ("matched", "hold_blocks_allocation")
     assert _notifications(p) == [("payment_held", None)]
     with pytest.raises(psycopg.errors.CheckViolation, match="authorisation is required"):
@@ -366,7 +378,9 @@ def test_commands_wait_for_a_running_allocation_at_most_two_seconds() -> None:
     entries = _live_entries(p)
     errors: list[BaseException] = []
     with psycopg.connect(DB) as job, job.transaction():
-        job.execute("select pg_advisory_xact_lock(hashtext('payments:' || %s))", (str(tenant["servicer"]),))
+        job.execute(
+            "select pg_advisory_xact_lock(hashtext('payments:' || %s))", (str(tenant["servicer"]),)
+        )
 
         def reverse() -> None:
             try:

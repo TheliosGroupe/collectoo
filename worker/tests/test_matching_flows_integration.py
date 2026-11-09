@@ -128,7 +128,8 @@ def test_a_payment_waits_for_its_file_and_is_matched_at_confirmation(tmp_path: P
     drain(storage())  # the confirmation job posts the openings and queues the rematch
     drain_payments(storage())
     account, reason, method, status = outcomes(statement)[line_ref("W", 1)]
-    assert (account, reason, method, status) == (file, None, "item_ref", "matched")
+    # matched at confirmation, then allocated by the job the match queued (M2b-4)
+    assert (account, reason, method, status) == (file, None, "item_ref", "allocated")
     with psycopg.connect(DB) as conn:
         trigger = one(
             conn,
@@ -207,7 +208,10 @@ def test_ops_unassign_and_assign_and_the_iban_memory_follows() -> None:
 
     def credit(prefix: str, ref: str | None = None) -> str:
         c = Credit(10_000, "PARENT PAYEUR", iban, ("VIREMENT",), ref, None, "auto", "x")
-        return _payment(pay(tenant, store, [c], prefix=prefix, start=date(2026, 10, 6), days=1))
+        # matching only: the payments stay matched (allocated, they could not be unassigned)
+        return _payment(
+            pay(tenant, store, [c], prefix=prefix, start=date(2026, 10, 6), days=1, allocate=False)
+        )
 
     p1 = credit("P1", a.rf)  # R1: the RF of A, from IBAN X: X now paid A
     assert _links(tenant, iban) == {a.id: 1}
@@ -221,7 +225,7 @@ def test_ops_unassign_and_assign_and_the_iban_memory_follows() -> None:
     _ops(tenant, sql, key, p2, "le payeur règle aussi le dossier de sa fille")  # same key: replay
     with pytest.raises(psycopg.errors.InvalidParameterValue):
         _ops(tenant, sql, key, p2, "autre motif")  # the key of another request
-    drain_payments(store)  # fresh suggestions for ops, never the file the payment left
+    drain_payments(store, allocate=False)  # fresh suggestions, never the file the payment left
     with psycopg.connect(DB) as conn:
         status, reason = conn.execute(
             "select status, review_reason from public.payment where id = %s", (p2,)

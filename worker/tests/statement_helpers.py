@@ -76,8 +76,16 @@ def upload(
     return dict(target)
 
 
-def drain(store: Storage, **kwargs: Any) -> None:
-    consumer = QueueConsumer(DB, "payments", make_handler(store), on_dead=record_dead_job, **kwargs)
+def drain(store: Storage, *, allocate: bool = True, **kwargs: Any) -> None:
+    """Every job of the payments queue. `allocate=False`: allocation jobs are taken off the queue
+    without running (tests about matching keep their payments matched, ready for allocation)."""
+    handle = make_handler(store)
+
+    def handler(payload: dict[str, Any], conn: psycopg.Connection[Any]) -> None:
+        if allocate or payload.get("type") != "allocate":
+            handle(payload, conn)
+
+    consumer = QueueConsumer(DB, "payments", handler, on_dead=record_dead_job, **kwargs)
     while consumer.poll_once():
         pass
 

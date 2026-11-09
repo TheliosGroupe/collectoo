@@ -85,12 +85,13 @@ def test_match_50k_payments_against_50k_files(
     world = with_history(world_from_db(tenant), random.Random(3))
     history = history_credits(world, seed=3)
     hist_started = time.monotonic()
-    hist = score(pay(tenant, store, history, prefix="H", days=2), history, "H")
+    # matching only (the allocation of these payments is measured by the allocation scale test)
+    hist = score(pay(tenant, store, history, prefix="H", days=2, allocate=False), history, "H")
     hist_s = time.monotonic() - hist_started
     assert hist.wrong == [] and hist.auto == hist.total
     credits = generate_credits(world, CREDITS, seed=4, earlier=history)
     main_started = time.monotonic()
-    statement = pay(tenant, store, credits, prefix="M", days=5)
+    statement = pay(tenant, store, credits, prefix="M", days=5, allocate=False)
     main_s = time.monotonic() - main_started
     result = score(statement, credits, "M")
     logs = _match_logs(caplog)

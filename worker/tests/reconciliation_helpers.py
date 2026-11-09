@@ -142,15 +142,17 @@ def pay(  # noqa: PLR0913 - the statement's identity
     prefix: str,
     start: date = date(2026, 10, 5),
     days: int = 3,
+    allocate: bool = True,
 ) -> str:
-    """A camt.053 statement of these credits, imported and matched (the queue drained)."""
+    """A camt.053 statement of these credits, imported and matched (the queue drained; with
+    `allocate`, the payments ready for it are allocated too)."""
     entries = credit_entries(credits, start=start, days=days, prefix=prefix)
     end = start + timedelta(days=days - 1)
     doc = make_doc(
         entries, iban=tenant["iban"], from_date=start, to_date=end, stmt_id=f"S-{prefix}"
     )
     target = upload(tenant, store, render_camt053(doc, "08"), name=f"{prefix}.xml")
-    drain(store)
+    drain(store, allocate=allocate)
     return str(target["statement_id"])
 
 
