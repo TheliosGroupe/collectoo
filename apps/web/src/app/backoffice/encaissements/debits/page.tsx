@@ -3,7 +3,7 @@ import Link from "next/link";
 import { Badge, InfoNote, Section, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
-import { DEBIT_REVIEW, LINK_KIND, lineKindLabel, returnEffect } from "@/lib/payments/debits";
+import { DEBIT_REVIEW, LINK_KIND, lineKindLabel, releaseEffect, returnEffect } from "@/lib/payments/debits";
 import { money, signedMoney } from "@/lib/payments/statements";
 import { Explain, LinkRefund, LinkReturn, ResolveDuplicate } from "./debit-actions";
 
@@ -36,7 +36,19 @@ type Row = {
   decided_at: string | null;
   decided_payment_id: string | null;
   total: number;
+  /** « Doublons possibles »: what the import read the held line as, when the queue tells it (see heldKind) */
+  held_kind?: string | null;
 };
+
+/**
+ * What a held line was read as: the queue's `held_kind` when it returns one, or its `kind` when the « Doublons » tab
+ * returns the reading in place of `suspected_duplicate`; otherwise unknown (null), and the « Libérer » sheet says both
+ * outcomes (review M2b-6).
+ */
+function heldKind(r: Row): string | null {
+  if (r.held_kind) return r.held_kind;
+  return r.kind !== "suspected_duplicate" ? r.kind : null;
+}
 type Candidate = {
   payment_id?: string;
   refund_request_id?: string;
@@ -126,7 +138,9 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
               <li key={r.bank_transaction_id} className="flex flex-col gap-2 py-3" data-testid="debit-row">
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <span className="flex flex-wrap items-center gap-2">
-                    <Badge tone="neutral">{lineKindLabel(r.kind, r.direction)}</Badge>
+                    <Badge tone="neutral">
+                      {tab === "doublons" ? lineKindLabel("suspected_duplicate", r.direction) : lineKindLabel(r.kind, r.direction)}
+                    </Badge>
                     {tab !== "traites" ? <Badge tone={r.age_days >= 3 ? "action" : "neutral"}>J+{r.age_days}</Badge> : null}
                     {r.decision ? <Badge tone="ok">{LINK_KIND[r.decision] ?? r.decision}</Badge> : null}
                   </span>
@@ -170,11 +184,11 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
                 {tab === "doublons" ? (
                   <ResolveDuplicate
                     lineId={r.bank_transaction_id}
-                    releaseEffect={
-                      r.direction === "credit"
-                        ? `La ligne deviendra un paiement reçu de ${money(r.amount_minor, r.currency)} : comptabilisé sur le compte de fonds de tiers à la date du relevé, puis rapproché d'un dossier.`
-                        : "La ligne sera classée comme un débit à traiter (retour, remboursement ou frais)."
-                    }
+                    releaseEffect={releaseEffect({
+                      direction: r.direction,
+                      heldKind: heldKind(r),
+                      amount: money(r.amount_minor, r.currency),
+                    })}
                     idempotencyKey={randomUUID()}
                   />
                 ) : null}

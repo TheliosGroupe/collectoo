@@ -127,6 +127,31 @@ export function returnedNote(
   return parts.join(" ");
 }
 
+/**
+ * What « Libérer » does to a CSV line held as a suspected duplicate (review M2b-6): the line becomes what the import
+ * read it as (`private.held_line_kind`), and only a debtor's credit (or an unsplit batch) becomes a payment. A credit
+ * read as a return (« RETOUR VIR SEPA … » in its label) books nothing and goes with the debits; a debit too. When the
+ * page is not told the reading (`heldKind` null), a credit's sheet says both outcomes rather than promise a payment.
+ */
+export function releaseEffect(o: { direction: string; heldKind: string | null; amount: string }): string {
+  const payment = `La ligne deviendra un paiement reçu de ${o.amount} : comptabilisé sur le compte de fonds de tiers à la date du relevé, puis rapproché d'un dossier.`;
+  const debits =
+    "La ligne sera traitée comme un retour ou un remboursement : rapprochée automatiquement si ses références le permettent, sinon listée dans « À classer ». Aucun paiement n'est créé.";
+  switch (o.heldKind) {
+    case "debtor_credit":
+    case "batch_unsplit":
+      return payment;
+    case "return":
+    case "refund_out":
+      return debits;
+    case "other_debit":
+      return "La ligne sera classée avec les frais et autres débits : non comptabilisée (écart expliqué avec le solde bancaire).";
+  }
+  return o.direction === "credit"
+    ? `La ligne reprendra la lecture faite à l'import. Lue comme un paiement du débiteur, elle deviendra un paiement reçu de ${o.amount}, comptabilisé sur le compte de fonds de tiers à la date du relevé puis rapproché d'un dossier ; lue comme un retour (libellé « RETOUR … »), elle sera traitée avec les débits et retours, sans paiement.`
+    : "La ligne sera classée comme un débit à traiter (retour, remboursement ou frais).";
+}
+
 /** Codes of the nightly checks (payment_check_result.code), in French. */
 export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   client_money_identity: {

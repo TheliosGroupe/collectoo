@@ -11,6 +11,7 @@ import {
   normaliseIban,
   refundReasons,
   refundable,
+  releaseEffect,
   returnEffect,
   returnedNote,
 } from "./debits";
@@ -155,6 +156,26 @@ describe("returns (founder #13; design §2 #3)", () => {
     } as unknown as Parameters<typeof paymentActions>[0];
     expect(paymentActions(d).reverse).toBe(false);
     expect(paymentActions({ ...d, payment: { ...d.payment, status: "partially_allocated" } }).reverse).toBe(true);
+  });
+});
+
+describe("suspected duplicates (review M2b-6)", () => {
+  it("says what « Libérer » does by what the import read the line as", () => {
+    const amount = "120,00 €";
+    expect(releaseEffect({ direction: "credit", heldKind: "debtor_credit", amount })).toContain("deviendra un paiement reçu de 120,00 €");
+    expect(releaseEffect({ direction: "credit", heldKind: "batch_unsplit", amount })).toContain("paiement reçu");
+    // a credit read as a return (« RETOUR VIR SEPA … »): no payment, no cash booked by the release
+    const returned = releaseEffect({ direction: "credit", heldKind: "return", amount });
+    expect(returned).not.toContain("deviendra un paiement");
+    expect(returned).toContain("« À classer »");
+    expect(returned).toContain("Aucun paiement n'est créé");
+    expect(releaseEffect({ direction: "debit", heldKind: "refund_out", amount })).toContain("retour ou un remboursement");
+    expect(releaseEffect({ direction: "debit", heldKind: "other_debit", amount })).toContain("non comptabilisée");
+    // reading not told: a credit's sheet gives both outcomes, never a bare promise of a payment
+    const unknown = releaseEffect({ direction: "credit", heldKind: null, amount });
+    expect(unknown).toContain("lecture faite à l'import");
+    expect(unknown).toContain("sans paiement");
+    expect(releaseEffect({ direction: "debit", heldKind: null, amount })).toContain("débit à traiter");
   });
 });
 
