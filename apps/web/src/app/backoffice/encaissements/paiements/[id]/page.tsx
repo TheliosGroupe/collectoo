@@ -119,8 +119,9 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
           l&apos;IBAN …{pendingRefund.payee_iban_end} avec la référence{" "}
           <span className="font-mono font-medium" data-testid="refund-reference">
             {pendingRefund.end_to_end_id}
-          </span>
-          . Il sera comptabilisé quand son débit apparaîtra sur le relevé.
+          </span>{" "}
+          saisie comme « référence de bout en bout ». Il sera comptabilisé quand son débit apparaîtra sur le relevé ; un
+          débit sans cette référence se lie depuis « Débits et retours ».
         </InfoNote>
       ) : null}
       {p.status === "returned" ? (

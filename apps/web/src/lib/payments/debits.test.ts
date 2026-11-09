@@ -7,6 +7,7 @@ import {
   checkLabel,
   debitErrorCode,
   lineKindLabel,
+  linkRefundEffect,
   minorToInput,
   normaliseIban,
   refundReasons,
@@ -114,6 +115,20 @@ describe("returns (founder #13; design §2 #3)", () => {
     // on no file: no receipt, no client
     const unmatched = returnedNote({ hasFile: false, notifications: [], latestReceiptKind: null }, when);
     expect(unmatched).toBe("La banque a repris ce paiement. Il n'est rattaché à aucun dossier : ni quittance, ni information d'un client.");
+  });
+
+  it("asks ops to check a refund's debit that does not carry its RFD reference (review M2b-6)", () => {
+    const named = linkRefundEffect({ direction: "debit", lineRef: "RFD0123456789AB", refundRef: "RFD0123456789AB", payee: "DIALLO" });
+    expect(named).toBe("Le débit est le virement RFD0123456789AB à DIALLO : le remboursement sera comptabilisé à la date du débit.");
+    // read as a plain debit (other_debit): no reference, or another one
+    for (const lineRef of [null, "NOTPROVIDED"]) {
+      const plain = linkRefundEffect({ direction: "debit", lineRef, refundRef: "RFD0123456789AB", payee: "DIALLO" });
+      expect(plain).toContain("ne porte pas la référence RFD0123456789AB");
+      expect(plain).toContain("vérifiez dans la banque");
+    }
+    expect(linkRefundEffect({ direction: "credit", lineRef: null, refundRef: "RFD0123456789AB", payee: "DIALLO" })).toContain(
+      "revenu impayé",
+    );
   });
 
   it("names lines and the job's reasons in French", () => {

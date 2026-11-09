@@ -70,8 +70,8 @@ test("an ops manager imports a statement, the same file again, then an overlappi
   await reviewShot(page, testInfo, "m2-statement-imported");
   await page.getByRole("link", { name: "Autres opérations" }).click();
   await expect(lines).toHaveCount(first.lines.length - paidCount(first));
-  // M2b-6: a bank fee is an explained gap (never booked); the return names no payment we hold, so it waits for ops.
-  await expect(lines.filter({ hasText: "FRAIS TENUE DE COMPTE" })).toContainText("Non comptabilisé · écart expliqué (frais)");
+  // M2b-6: a bank fee is not booked (a fee, or a line to classify); the return names no payment we hold, so it waits for ops.
+  await expect(lines.filter({ hasText: "FRAIS TENUE DE COMPTE" })).toContainText("Non comptabilisé · frais ou à classer");
   await expect(lines.filter({ hasText: "RETOUR MD06" })).toContainText("Non comptabilisé · à classer");
 
   // The same file again: the page opens the statement already imported, nothing is booked twice.

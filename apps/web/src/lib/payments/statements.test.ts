@@ -58,7 +58,8 @@ describe("statement and line states", () => {
     );
     expect(lineState({ kind: "other_debit", direction: "debit", has_payment: false })).toEqual({
       kind: "Débit (frais, autre)",
-      state: "Non comptabilisé · écart expliqué (frais)",
+      // not booked: a fee, or a line to classify (our refund debited without its RFD reference, review M2b-6)
+      state: "Non comptabilisé · frais ou à classer",
       tone: "neutral",
     });
     expect(lineState({ kind: "return", direction: "debit", has_payment: false }).state).toBe("Non comptabilisé · à classer");

@@ -128,6 +128,19 @@ export function returnedNote(
 }
 
 /**
+ * What linking a line to one of our refunds does. A debit that does not carry the refund's RFD id as its end-to-end
+ * reference (the bank read it as a plain debit, `other_debit`: review M2b-6) is linked on ops' word: the sheet asks
+ * them to check the transfer in the bank first.
+ */
+export function linkRefundEffect(o: { direction: string; lineRef: string | null; refundRef: string; payee: string }): string {
+  if (o.direction !== "debit")
+    return `Le virement ${o.refundRef} est revenu impayé : le remboursement sera annulé à la date du crédit, et le montant redeviendra disponible sur le paiement.`;
+  if (o.lineRef === o.refundRef)
+    return `Le débit est le virement ${o.refundRef} à ${o.payee} : le remboursement sera comptabilisé à la date du débit.`;
+  return `Le débit ne porte pas la référence ${o.refundRef} : vérifiez dans la banque qu'il s'agit bien du virement à ${o.payee}. Le remboursement sera comptabilisé à la date du débit.`;
+}
+
+/**
  * What « Libérer » does to a CSV line held as a suspected duplicate (review M2b-6): the line becomes what the import
  * read it as (`private.held_line_kind`), and only a debtor's credit (or an unsplit batch) becomes a payment. A credit
  * read as a return (« RETOUR VIR SEPA … » in its label) books nothing and goes with the debits; a debit too. When the
@@ -218,7 +231,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   refund_pending_ageing: {
     label: "Remboursements en attente depuis 5 jours ou plus",
-    help: "Le débit n'apparaît sur aucun relevé : vérifiez le virement dans la banque.",
+    help: "Aucun débit rapproché : vérifiez le virement dans la banque et sa référence RFD (« référence de bout en bout ») ; un débit sans cette référence se lie depuis « Débits et retours ».",
   },
   debit_unclassified: {
     label: "Débits à classer depuis 3 jours ou plus",

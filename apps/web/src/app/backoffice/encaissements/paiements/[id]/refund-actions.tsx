@@ -43,9 +43,10 @@ export function RequestRefund({
       {(close) => (
         <>
           <p className="text-sm" data-testid="sheet-effect">
-            {left} restent sur ce paiement. La demande crée une référence de virement « RFD… » : exécutez le virement
-            dans la banque avec cette référence. Le remboursement est comptabilisé quand son débit apparaît sur le
-            relevé du compte de fonds de tiers ; jamais plus que ce qui reste du paiement.
+            {left} restent sur ce paiement. La demande crée une référence « RFD… » : dans la banque, saisissez-la comme
+            « référence de bout en bout » du virement (pas seulement dans le libellé), c&apos;est elle qui fait reconnaître
+            son débit sur le relevé. Le remboursement est comptabilisé quand ce débit apparaît sur le relevé du compte
+            de fonds de tiers ; jamais plus que ce qui reste du paiement.
           </p>
           <ActionForm onDone={close} action={requestRefund} submitLabel="Demander le remboursement" buttonClassName={buttonClass}>
             <input type="hidden" name="payment_id" value={paymentId} />
