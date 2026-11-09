@@ -198,3 +198,32 @@ and receipts).
   plpgsql generic plan in use: 8.4–12.5 ms a page for a reader limited to a portfolio that holds only the oldest 50
   rows (the client index is walked to them), 2.3–2.6 ms for staff after a cursor 50,000 rows deep, 3.7–4.2 ms for that
   reader's last page. No other index or query shape needed at this size.
+
+## Returns and nightly checks (M2b-6)
+
+`worker/tests/test_allocation_scale_integration.py` continues after its 50k allocations: one statement takes back 2 %
+of the payments (1,000 full returns, by each payment's end-to-end id), imported then linked by `payments.process_debits`
+(each payment's allocation reversed at the return date, its `cash_out`, `returned`, the client's notifications), then
+`private.run_payment_checks` runs over the whole servicer (50,000 payments). Same CI job (`scale`), ~25 s more.
+
+### Result (2026-11-09, cloud session VM: 4 vCPU, 16 GB RAM, local Supabase stack)
+
+| Step | Size | Time |
+|---|---|---|
+| Allocation (unchanged by M2b-6: `post_allocations` redefined with one more keyed lookup) | 50,000 payments, 5 jobs | 57.7 s (post 8.2–9.4 s per 10k) |
+| Returns statement imported + linked (job `process_debits`) | 1,000 returns | 21.2 s at first, 24.8–29.6 s after the review fixes; the job itself 2.5 s (~3 ms a return in SQL), the rest is the import |
+| Nightly checks | 50,000 payments, ~350,000 postings | 1.6 s, 1.7–1.8 s after the review fixes (one statement, one snapshot); 0 violations |
+
+- Review fixes (same VM, rolled-back fixtures):
+  - `debit_link_options` with 20,000 payments on one bank account: 415–463 ms → 8.4–16.5 ms a call (the page makes one
+    per line shown, up to 20).
+  - `debit_candidates`: 3,000 lines 530–592 ms → 53–63 ms; 20,000 lines 22.9–25.2 s → 0.42–0.79 s.
+  - `process_debits` chunk 2,000 (was 20,000): 2,000 returns in 6.5 s end to end (SQL 5.7 s), 83 s when one line is refused
+    and the chunk is retried line by line (1,999 posted, 1 to ops); all far below the queue's 300 s visibility timeout.
+- Returns arrive a few a day in practice; the job is bounded (2,000 lines per run, continuation) and holds the
+  allocation lock only while it posts. If volumes need it: reverse set-based (one `ledger_post_set` call for every
+  reversal) instead of one `ledger_reverse` per entry.
+- The other scale runs on the branch merged with main (same VM) are unchanged: statement 50k imported in 19.8 s
+  (ingest 6.4 s), re-import 4.3 s; matching 50k imported + matched in 29.8 s (apply 11.6 s); receipts 5k in 56.8 s
+  (11.4 ms each). One earlier matching run took 475 s to ingest while the VM's disk was full (orphaned storage objects
+  from earlier runs); with space freed it ran as above.

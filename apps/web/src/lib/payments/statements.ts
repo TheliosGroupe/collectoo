@@ -31,8 +31,18 @@ export function signedMoney(direction: string, minor: string, currency: string):
   return direction === "debit" ? `− ${text}` : `+ ${text}`;
 }
 
-/** What a statement line is, and where it stands in M2b-2 (payments are booked; the rest waits). */
-export function lineState(line: { kind: string; direction: string; has_payment: boolean }): {
+/** What a statement line is, and where it stands: payments are booked at import; since M2b-6 a debit linked to a
+ * payment (its return) or to our refund is booked too, a line ops explained or a confirmed duplicate stays out of the
+ * books; an unlinked other debit is not booked and is either a fee (founder #20) or a line to classify (our refund
+ * debited without its RFD reference, a return the bank coded as a plain debit: review M2b-6); the rest waits to be
+ * classified. */
+export function lineState(line: {
+  kind: string;
+  direction: string;
+  has_payment: boolean;
+  link?: string | null; // bank_debit_link.kind
+  duplicate?: string | null; // bank_duplicate_resolution.decision
+}): {
   kind: string;
   state: string;
   tone: Tone;
@@ -42,7 +52,14 @@ export function lineState(line: { kind: string; direction: string; has_payment: 
       ? "Débit groupé non ventilé"
       : (LINE_KIND[line.kind] ?? line.kind);
   if (line.has_payment) return { kind, state: "Comptabilisé · à affecter", tone: "ok" };
-  if (line.kind === "suspected_duplicate") return { kind, state: "Retenu : doublon possible", tone: "action" };
+  if (line.link === "return") return { kind, state: "Comptabilisé · retour du paiement", tone: "ok" };
+  if (line.link === "refund") return { kind, state: "Comptabilisé · remboursement exécuté", tone: "ok" };
+  if (line.link === "refund_returned") return { kind, state: "Comptabilisé · remboursement revenu", tone: "ok" };
+  if (line.link === "explained") return { kind, state: "Expliqué · non comptabilisé", tone: "neutral" };
+  if (line.duplicate === "duplicate") return { kind, state: "Doublon confirmé · non comptabilisé", tone: "neutral" };
+  if (line.kind === "suspected_duplicate" && line.duplicate !== "released")
+    return { kind, state: "Retenu : doublon possible", tone: "action" };
+  if (line.kind === "other_debit") return { kind, state: "Non comptabilisé · frais ou à classer", tone: "neutral" };
   return { kind, state: "Non comptabilisé · à classer", tone: "action" };
 }
 
@@ -60,15 +77,16 @@ const LINE_KIND: Record<string, string> = {
 type LineGroup = { direction?: "credit" | "debit"; kinds: string[] };
 
 /**
- * Filters of a statement's lines. « Encaissements » are exactly the lines booked as payments (credits a
- * debtor paid, an unsplit batch credit); everything else not held is « à classer », an unsplit debit
- * batch included: what the bank check counts as not booked.
+ * Filters of a statement's lines, by kind. « Encaissements » are exactly the lines booked as payments (credits a
+ * debtor paid, an unsplit batch credit); everything else not held is « Autres opérations », an unsplit debit batch
+ * included: what the import left out of the payments. Since M2b-6 these are classified on « Débits et retours » (a
+ * return or our refund booked, a fee explained, the rest to classify); each line's state says where it stands.
  */
 export const LINE_FILTERS: Record<string, { label: string; groups: LineGroup[] | null }> = {
   toutes: { label: "Toutes", groups: null },
   encaissements: { label: "Encaissements", groups: [{ direction: "credit", kinds: ["debtor_credit", "batch_unsplit"] }] },
-  "a-classer": {
-    label: "À classer",
+  autres: {
+    label: "Autres opérations",
     groups: [{ kinds: ["return", "refund_out", "other_debit", "psp_payout"] }, { direction: "debit", kinds: ["batch_unsplit"] }],
   },
   doublons: { label: "Doublons possibles", groups: [{ kinds: ["suspected_duplicate"] }] },

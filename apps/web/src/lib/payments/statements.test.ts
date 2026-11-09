@@ -58,9 +58,33 @@ describe("statement and line states", () => {
     );
     expect(lineState({ kind: "other_debit", direction: "debit", has_payment: false })).toEqual({
       kind: "Débit (frais, autre)",
-      state: "Non comptabilisé · à classer",
-      tone: "action",
+      // not booked: a fee, or a line to classify (our refund debited without its RFD reference, review M2b-6)
+      state: "Non comptabilisé · frais ou à classer",
+      tone: "neutral",
     });
+    expect(lineState({ kind: "return", direction: "debit", has_payment: false }).state).toBe("Non comptabilisé · à classer");
+  });
+
+  it("M2b-6: debits linked, explained, and duplicates decided", () => {
+    expect(lineState({ kind: "return", direction: "debit", has_payment: false, link: "return" })).toEqual({
+      kind: "Retour ou rejet",
+      state: "Comptabilisé · retour du paiement",
+      tone: "ok",
+    });
+    expect(lineState({ kind: "refund_out", direction: "debit", has_payment: false, link: "refund" }).state).toBe(
+      "Comptabilisé · remboursement exécuté",
+    );
+    expect(lineState({ kind: "return", direction: "credit", has_payment: false, link: "explained" }).tone).toBe("neutral");
+    expect(lineState({ kind: "suspected_duplicate", direction: "credit", has_payment: false, duplicate: "duplicate" }).state).toBe(
+      "Doublon confirmé · non comptabilisé",
+    );
+    // released: a credit becomes a payment; a debit waits to be classified
+    expect(lineState({ kind: "suspected_duplicate", direction: "credit", has_payment: true, duplicate: "released" }).state).toBe(
+      "Comptabilisé · à affecter",
+    );
+    expect(lineState({ kind: "suspected_duplicate", direction: "debit", has_payment: false, duplicate: "released" }).state).toBe(
+      "Non comptabilisé · à classer",
+    );
   });
 });
 
@@ -149,17 +173,17 @@ describe("line filters (review #15: direction counts)", () => {
   const booked = (l: { direction: string; kind: string }) =>
     l.direction === "credit" && ["debtor_credit", "batch_unsplit"].includes(l.kind);
 
-  it("« Encaissements » are exactly the lines booked as payments; the others are to classify or held", () => {
+  it("« Encaissements » are exactly the lines booked as payments; the others are other operations or held", () => {
     for (const line of allowed) {
-      const shown = ["encaissements", "a-classer", "doublons"].filter((k) => lineInFilter(k, line));
+      const shown = ["encaissements", "autres", "doublons"].filter((k) => lineInFilter(k, line));
       expect(shown, JSON.stringify(line)).toHaveLength(1);
       expect(lineInFilter("encaissements", line)).toBe(booked(line));
-      expect(lineInFilter("a-classer", line)).toBe(!booked(line) && line.kind !== "suspected_duplicate");
+      expect(lineInFilter("autres", line)).toBe(!booked(line) && line.kind !== "suspected_duplicate");
       expect(lineInFilter("toutes", line)).toBe(true);
     }
   });
-  it("an unsplit debit batch is to classify, not a receipt", () => {
-    expect(lineInFilter("a-classer", { direction: "debit", kind: "batch_unsplit" })).toBe(true);
+  it("an unsplit debit batch is another operation, not a receipt", () => {
+    expect(lineInFilter("autres", { direction: "debit", kind: "batch_unsplit" })).toBe(true);
     expect(lineInFilter("encaissements", { direction: "debit", kind: "batch_unsplit" })).toBe(false);
     expect(lineState({ kind: "batch_unsplit", direction: "debit", has_payment: false }).kind).toBe(
       "Débit groupé non ventilé",
@@ -168,11 +192,11 @@ describe("line filters (review #15: direction counts)", () => {
   it("gives PostgREST the same rule", () => {
     expect(lineFilterOr("toutes")).toBeNull();
     expect(lineFilterOr("encaissements")).toBe("and(direction.eq.credit,kind.in.(debtor_credit,batch_unsplit))");
-    expect(lineFilterOr("a-classer")).toBe(
+    expect(lineFilterOr("autres")).toBe(
       "kind.in.(return,refund_out,other_debit,psp_payout),and(direction.eq.debit,kind.in.(batch_unsplit))",
     );
     expect(lineFilterOr("doublons")).toBe("kind.in.(suspected_duplicate)");
-    expect(Object.keys(LINE_FILTERS)).toEqual(["toutes", "encaissements", "a-classer", "doublons"]);
+    expect(Object.keys(LINE_FILTERS)).toEqual(["toutes", "encaissements", "autres", "doublons"]);
   });
 });
 

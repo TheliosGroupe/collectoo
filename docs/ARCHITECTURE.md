@@ -247,6 +247,7 @@ Double-entry, append-only, integer minor units (ADR-0006).
 - Set-based guards: book allowed for the entry type, tenant/client/portfolio/account coherence, line currency and date = ledger account's and entry's (`LG002`).
 - `recovery_fee` lines on a debtor receivable require `account.enforceable_title_id` (CPCE-09, M3). Consumer-credit accounts only accept whitelisted components (INT-05, M3).
 - Debtor cash can only land on a `client_funds` bank ledger account (CPCE-02, M2b).
+- **Since M2b (ADR-0013):** client-money books (5120, 4710, 4670) closed in every entry (`LG001`); entry shapes per payment type; what is left of a payment never negative at any date, and an allocated or netted receivable never overdrawn from its date on (`LG007`); payment entry types (`cash_in`, `allocation`, `forward`, `cash_out`, `netting`) posted only through the set-based `private.ledger_post_set`; a `cash_in` is never reversed; every writer that lowers a payment or a receivable takes the servicer's allocation lock.
 
 **Chart of accounts (minimal):**
 
@@ -270,19 +271,36 @@ Double-entry, append-only, integer minor units (ADR-0006).
 | Interest accrual (engine) | Dr 1100:late_interest / Cr 3100:late_interest |
 | Payment arrives on PSP | Dr 5121 / Cr 4710 |
 | PSP payout to client-funds account | Dr 5120 / Cr 5121 |
-| Bank transfer received (CAMT.053) | Dr 5120 / Cr 4710 |
-| Allocation of a payment | cash side: Dr 4710 / Cr 4670 (client) · claim side: Dr 3100:X / Cr 1100:X per component (engine allocation) |
+| Bank transfer received (CAMT.053), per statement day (M2b-2) | Dr 5120 / Cr 4710 (pool) |
+| Allocation of a payment (M2b-4) | cash side: Dr 4710 / Cr 4670 (client) · claim side: Dr 3100:X / Cr 1100:X per component (engine allocation) |
+| Forward to the client without allocation (M2b-4) | Dr 4710 / Cr 4670 |
+| Credit note applied (M2b-4) | Dr 1100 (credit item) / Cr 1100 (invoice), principal |
+| Bank return or chargeback (M2b-6) | reversal of each live allocation and forward **at the return date**, then Dr 4710 / Cr 5120 (`cash_out`) at the return date |
+| Refund to the payer (M2b-6) | Dr 4710 / Cr 5120 (`cash_out`) at the date of its debit on the statement; a refund that bounces: its reversal |
+| Debtor paid the client directly (M2b-6) | Dr 3100:X / Cr 1100:X (`adjustment`, legal order; no client money) |
+| Bank fees on the client-funds account (M2b) | not booked: an explained gap (M2c books them on own cash) |
 | Remittance run | Dr 4670 (gross) / Cr 5120 (net paid to client) / Cr 7060 (commission, if the mandate allows netting) |
 | Commission cash moved to own bank | Dr 5122 / Cr 5120 |
 | Write-off / recall | Dr 3100:X / Cr 1100:X |
 
 **Balances** are `SUM(amount_minor)` over lines (views per account/component and per client). A rebuildable snapshot table may be added for speed; it is always verifiable against the lines. Property test: Σ5120 = Σ collected − Σ remitted − Σ commission moved (CPCE-02).
 
+**Nightly checks (M2b-6):** pg_cron queues `payments.invariants` per servicer; `private.run_payment_checks` writes a `payment_check_run` and its `payment_check_result` rows (violations: I8 client money closed per currency, each bank account's cash = its payments less what went back out, I11 cash_in = payments per statement day, each payment's position against its status, no negative per-file allocation, I6 no allocated receivable below zero, owner-claim mirror, one current receipt per identified payment, one notification per entry; alerts: statement continuity, bank balance at the last statement (I9), ageing of unmatched and unallocated money, pending refunds, debits to classify, duplicates, direct payments). Read on « Contrôles » (admins, ops managers).
+
 ## 9. Payments and reconciliation
 
 - **Stripe** (test mode): card and SEPA Direct Debit via Payment Links / Checkout created by the worker with `metadata.account_id` and an idempotency key. Webhooks (`checkout.session.completed`, `payment_intent.succeeded`, `charge.refunded`, `charge.dispute.created`, `payout.paid`) → worker-api, signature verified, stored raw in `payment_event`, processed idempotently by event id.
-- **SEPA transfers:** each account gets a structured reference (RF creditor reference, ISO 11649). Bank statements arrive as **CAMT.053** files (upload or SFTP pull later), parsed by the worker into `bank_transaction`, auto-matched by reference, then amount + name fuzzy match → ops review queue for the rest.
-- **Surendettement hold:** payments are not auto-allocated; they go to ops review (HOLD-01).
+- **SEPA transfers:** each account gets a structured reference (RF creditor reference, ISO 11649). Bank statements arrive as **CAMT.053** (or CSV) files uploaded by ops (SFTP pull later), parsed by the worker into `bank_transaction`, then (M2b, `docs/design/m2b-payments.md`):
+  - `payments.import`: lines deduplicated per bank account, one `payment` per debtor credit, one `cash_in` per statement day; queues `match` and, when the statement has returns or our refunds, `process_debits`;
+  - `payments.match`: deterministic rules R1–R6 (RF structured, RF in the text, corroborated invoice or file number, IBAN memory; suggestions otherwise) → gating (file not confirmed, closed, other currency, hold, before the cut-off, nothing due) → ops queue « Paiements à traiter »;
+  - `payments.allocate`: the legal-order waterfall (Python) posted set-based under the allocation lock; `client_notification` per entry (CPCE-06);
+  - `payments.receipts`: versioned deterministic PDF receipts built from the ledger (CPCE-07);
+  - `payments.process_debits` (M2b-6): returns linked to their payment (end-to-end id, bank transaction id), our refunds to their `refund_request` (`RFD…`), bounced refunds to the refund; the rest left to ops (« Débits et retours », `link_debit`); posting reverses allocations at the return date and books the `cash_out`;
+  - `payments.direct_payment` (M2b-6): a payment the debtor made to the client, planned by the waterfall, booked as an `adjustment`;
+  - `payments.invariants` (M2b-6, nightly): the checks above.
+  Ops commands (admins and ops managers at aal2, idempotency key + request hash, compare and set, ≤ 2 s lock wait): assign / accept / unassign, reverse / allocate again / release a hold / forward / apply a credit note, request / cancel a refund, link a debit, resolve a duplicate, record a direct payment. Lock order for every writer: files (`FOR KEY SHARE`), payments (`FOR UPDATE`), refund requests, bank accounts, then the servicer's allocation lock.
+- **Surendettement / collective proceeding hold:** payments are not auto-allocated; they are held (the client told) until ops refund them or allocate them on the judge's authorisation (HOLD-01, HOLD-02).
+- **Money leaving the client-funds account (M2b-6):** returns and chargebacks (allocations undone at the return date, the receipt voided, the client told), refunds (booked when the bank's debit shows them), never fees (founder #20). The ledger cash follows the bank: nothing leaves 5120 without a bank line.
 
 ```mermaid
 sequenceDiagram

@@ -79,6 +79,9 @@ class Target:
     # the gates ops let it pass (payment.allocation_instruction.releases): a set, each decision
     # added to it, so a payment behind two gates passes both (review fix)
     releases: frozenset[str] = frozenset()
+    # M2b-6: the latest date at which one of its allocations was reversed after its own date (a
+    # bank return reverses at the return date, design §2 #3): what is left is free from then on
+    not_before: date | None = None
 
 
 @dataclass
@@ -170,7 +173,7 @@ def plan_all(
             plans.append(Plan(t, reason))
             continue
         start = f.servicing_start or t.booking_date  # never None here: the gate checked it
-        at = max(t.booking_date, start)
+        at = max(t.booking_date, start, t.not_before or t.booking_date)
         policy = resolve_policy(policies, f, at)
         designation = t.designation if t.own_file else ()
         result, slots = f.balances.plan(t.amount_minor, policy, designation, at=at)
@@ -275,7 +278,10 @@ def load_targets(
     locked = conn.execute(
         f"""select p.id::text, p.currency, p.booking_date, p.account_id::text,
                    coalesce(p.allocation_instruction ->> 'account_id', p.account_id::text),
-                   p.designation, p.allocation_instruction -> 'releases'
+                   p.designation, p.allocation_instruction -> 'releases',
+                   (select max(e.effective_date) from public.ledger_entry e
+                    join public.ledger_entry r on r.id = e.reverses_entry_id
+                    where e.payment_id = p.id and e.effective_date > r.effective_date)
             from public.payment p
             where p.id = any(%s::uuid[]) and {READY}
             for update of p skip locked""",  # noqa: S608 - fixed fragment
@@ -304,6 +310,7 @@ def load_targets(
                 own_file=x[4] == x[3],
                 designation=tuple(str(i) for i in items),
                 releases=frozenset(str(r) for r in (x[6] or ())),
+                not_before=x[7],
             )
         )
     return targets, last, len(rows) - len(by_id)

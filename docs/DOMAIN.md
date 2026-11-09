@@ -103,7 +103,14 @@ Contents: [1. Glossary](#1-glossary-fr--en) · [2. Conventions](#2-modelling-con
 | Désignation (imputation) | Designation of the debts paid | `payment.designation` (invoices the payer named) | 1342-10 « lorsqu'il paie » |
 | Référence de paiement (RF) | RF creditor reference, ISO 11649 | `payment_reference` (RF + 14 digits, one active per account) | M2-06 |
 | Reversement sans imputation | Forward to the client without allocation | `ledger_entry(entry_type = forward)` | Recall, ratification (1342-2) |
-| Retour, restitution | Bank return, refund to the payer | `ledger_entry(entry_type = cash_out)` | |
+| Retour bancaire | Bank return, chargeback (a debit taking a payment back) | `bank_debit_link(kind = return)`: allocations reversed at the return date, then `ledger_entry(entry_type = cash_out)`; `payment.status = returned` | M2b-6, founder #13 |
+| Remboursement au payeur | Refund to the payer | `refund_request` (our end-to-end id `RFD…`, entered in the bank as the transfer's « référence de bout en bout »), booked as a `cash_out` when its debit is on a statement (`bank_debit_link(kind = refund)`) | M2b-6, founder #8, #9, #11; 1302-1 |
+| Remboursement revenu impayé | Refund bounced | `bank_debit_link(kind = refund_returned)`: the refund's `cash_out` reversed | M2b-6 |
+| Débit à classer | Debit to classify | a `return` / `refund_out` line without `bank_debit_link`, and an unlinked `other_debit` line with the amount of a refund waiting for its debit on the same bank account (our refund executed without its `RFD…` reference); `bank_debit_review` says why the job left it | M2b-6, « Débits et retours » |
+| Écart expliqué | Explained gap (not booked) | fees and other debits (`other_debit`; « frais ou à classer » on the statement page), lines ops explain (`bank_debit_link(kind = explained)`; never our refund, nor a return naming one of our payments) | Founder #20 |
+| Doublon possible | Suspected duplicate (CSV) | `bank_transaction(kind = suspected_duplicate)`, decided by `bank_duplicate_resolution` (released / duplicate) | M2b-6 |
+| Paiement direct au créancier | Payment made to the client directly | `direct_payment` → `ledger_entry(entry_type = adjustment, source_type = direct_payment)`: no client money moves | M2b-6, design §8.1 |
+| Contrôles des encaissements | Nightly payments checks | `payment_check_run`, `payment_check_result` (violations, ageing alerts) | M2b-6, design §9 |
 | Application d'un avoir | Credit note applied | `ledger_entry(entry_type = netting)` | 1347 (invoked by ops) |
 | Règles d'imputation | Allocation policy | `allocation_policy` (accessory rank, unclassified amounts held or last; the legal order has no column) | M2b-4, founder #5 |
 | Trop-perçu | Overpayment | what is left of a payment after allocation, in pooled 4710 tagged by the payment; `review_reason = overpayment` | Never passed to the client (founder #8) |
@@ -527,6 +534,13 @@ erDiagram
     payment ||--o{ client_notification : "told to the client"
     ledger_entry ||--o| client_notification : "one per entry"
     allocation_run ||--o{ ledger_entry : "posts allocations"
+    payment ||--o{ refund_request : "refunded by (one pending at a time)"
+    bank_transaction ||--o| bank_debit_link : "classified as"
+    bank_debit_link }o--o| payment : "returns or refunds"
+    bank_debit_link }o--o| refund_request : "executes / bounces"
+    bank_transaction ||--o| bank_duplicate_resolution : "held duplicate decided"
+    account ||--o{ direct_payment : "paid to the client directly"
+    direct_payment |o--o| ledger_entry : "adjustment"
     account ||--o{ payment_reference : "paid with"
     remittance_run ||--o{ remittance_line : contains
     remittance_line }o--|| ledger_entry : "posts"
@@ -626,8 +640,34 @@ erDiagram
         uuid client_organization_id
         uuid payment_id
         uuid ledger_entry_id UK "null for payment_held"
-        text kind "payment_allocated|payment_forwarded|payment_allocation_reversed|payment_held"
-        text reason "a code, never the ops motif: ops_correction|file_recalled|before_servicing_start|client_ratification|hold_blocks_allocation"
+        text kind "payment_allocated|payment_forwarded|payment_allocation_reversed|payment_held|payment_forward_reversed|payment_returned"
+        text reason "a code, never the ops motif: ops_correction|file_recalled|before_servicing_start|client_ratification|hold_blocks_allocation|bank_return"
+    }
+    refund_request {
+        uuid id PK
+        uuid payment_id FK
+        bigint amount_minor
+        text payee_iban "ISO 13616 checked; the payer's by default"
+        text end_to_end_id UK "RFD + 12 hex"
+        text reason_code "overpayment|currency_mismatch|no_mandate|unidentified|held_file|account_closed|partial_return|other"
+        text status "requested|executed|cancelled|bounced"
+    }
+    bank_debit_link {
+        uuid bank_transaction_id PK
+        text kind "return|refund|refund_returned|explained"
+        uuid payment_id FK
+        uuid refund_request_id FK
+        uuid cash_entry_id UK "cash_out, or the reversal of a refund's"
+        text method "auto|ops"
+    }
+    direct_payment {
+        uuid id PK
+        uuid account_id FK
+        bigint amount_minor
+        date paid_on "the client's statement"
+        uuid_array item_ids "the debts it names"
+        uuid evidence_document_id FK
+        text status "requested|posted|refused"
     }
     allocation_policy {
         uuid id PK
@@ -675,6 +715,8 @@ R1 a valid RF reference in the structured field; R2 an RF in the free text (spac
 **Allocation (M2b-4, ADR-0013, design §8.5).** A payment matched to a file with nothing left to decide (`matched`, no review reason) is **ready**; the payment trigger queues the allocation job of its servicer. The job (bounded runs of 10,000 payments, under the servicer's allocation lock) plans each payment with the worker's waterfall — no model: the invoices the payer named first (even not yet due; among them the same legal order), then due invoices oldest due date first (then issue date; equal ones shared pro rata, the leftover cent to the lowest item id), then invoices not yet due; inside each invoice interest first, then the accessories where the policy ranks them (none before M3), principal, the seller's unclassified amounts last — never for consumer loans until ops classify them. What a payment can take from a receivable at its date D is the lowest balance that receivable has from D on, and from an invoice or loan as a whole the lowest balance of all its components together from D on (a negative balancing line counts): the excess is an overpayment. One `allocation` entry per (payment, file), dated the booking date or the servicing start if later, with its plan kept (`private.allocation_plan`: policy, designation, inputs hash) so M3 can re-run allocations by date. Outcomes: `allocated` (nothing left), `partially_allocated` + `overpayment` (the rest stays in 4710 for the payment), or still `matched` with a reason (`nothing_due`, `credit_note_to_apply`, or a gate: closed file, other currency, before servicing start, hold). A file with a credit note that can be compensated with a due invoice holds its payments (`credit_note_to_apply`) until ops apply it from the file page (one `netting` entry, dated when both were due, compensation invoked: 1347) or allocate without it. Ops reverse an allocation from the payment page (a reversal at the allocation's date; the payment then waits, `allocation_reversed`), send a payment to allocation again, release a held payment on the judge's authorisation, forward a payment the client recalled or already counted (`forward` entry, 4710 → 4670), or use an overpayment for another file of the same debtor on his written request. The client is told of every allocation, reversal, forward and held payment (`client_notification`).
 
 **Receipts and the client feed (M2b-5, ADR-0013, design §10).** Every payment linked to a file — allocated, partially allocated, held or otherwise waiting for ops, forwarded — has a **receipt** (« quittance », R124-6): one number per payment (`Q-AAAA-NNNNNN`), and a new **version** whenever what it says changes (an allocation, its reversal, a forward, another file; returns and refunds in M2b-6); a payment taken off its file gets a **void** version, and a new one if it is assigned again (the void always comes first, also when the payment was already on another file when the receipt job ran). A payment waiting for its allocation has none yet (the allocation follows at once), nor one without a file. What a receipt says is built from the ledger: who issues it for which client, the debtor and the file, the payment as the bank reported it, the allocation per invoice and component (« Principal », « Intérêts », « Autres sommes »: the receipt's own words, never the tape's labels), what was not allocated, forwarded or returned — **never a remaining balance** until M3 computes interest — and the payer only when he is certainly a party to the file, by the party's own name (otherwise « Versement d'un tiers »: a joint account, someone's widow, an initial, or a title on a company's name is a third party). The worker renders it as a French PDF, the same bytes whenever it is rendered again (whatever reportlab settings the machine holds), stored with its SHA-256; staff and the client download it. Nothing is sent to debtors before M4 channels. The client reads « **Paiements reçus** » in its space: every payment allocated, reversed, forwarded or held on its files, with the amounts, the invoices paid and that file's receipt (one the reader may read); reading it records the delivery of those notifications (R124-5).
+
+**Money leaving the client-funds account (M2b-6, ADR-0013, design §2 #3, §8.1).** Every statement's debits, and its credits that undo a debit, are classified by the worker after the import (`payments.process_debits`, deterministic, no model): a **return** (R-transaction, chargeback, the bank reversing a credit) is linked to the one payment of the same bank account whose end-to-end id or bank transaction id it carries, when it takes back exactly what is left of the payment; our **refund** (end-to-end id `RFD…`) to its pending request; a credit bringing back our refund to that executed refund. Anything else waits on « Débits et retours » with why (no candidate, two candidates, a partial return, another amount), where ops link it (the payment's remaining amount as the page showed it, compare and set) or explain it (not booked, with a motif; never our refund nor a return whose references name one of our payments, which is linked or stays to classify — a return larger than what is left of its payment stays there, OQ-34; review fix). One line the posting refuses never stops the job: it goes to ops with its code (`payment_returned`, `before_previous_return`, `posting_failed`; `payment_changed` is decided again by the next run). A return **reverses the payment's live allocations and forwards at the return date** (an allocation dated later at its own date): the receivables come back, the client is told of each reversal and of the return (`payment_returned`); then a **cash_out** (Dr 4710 / Cr 5120) at the return date. Taken back in full, the payment is `returned` (final: its receipt gets a last, void version; a pending refund is cancelled); in part, what is left waits for ops (`partial_return`): « Imputer » allocates it again **from the return date**, or ops refund it. A **refund** is asked by ops (« Rembourser »: what is left of the payment, a reason code matching its state — overpayment, other currency, rolled-back batch, unidentified, held file, closed file, rest of a partial return, other — to the payer's IBAN unless another one is given, ISO 13616 checked) and executed in the bank with our `RFD…` reference as the transfer's « référence de bout en bout » (the end-to-end id the job recognises); it is **booked only when its debit appears on a statement** (a `cash_out` at the debit's date), never above what is left of the payment (`LG007`). A refund that comes back unpaid reverses its `cash_out` (after its payment was returned, it waits for ops instead: OQ-33). Fees and other debits are never booked in M2b (founder #20): with the lines ops explain, they are the explained gap between the bank's balance and the ledger cash; an other debit with the amount of a refund waiting for its debit on the same bank account is also listed to classify (our refund executed without its `RFD…` reference), and the statement page reads every unlinked other debit « Non comptabilisé · frais ou à classer ». A CSV line held as a **suspected duplicate** is released as what the import read it as (a debtor's credit or an unsplit batch becomes a payment and a `cash_in` of its statement day, then is matched; a return, our refund or another debit goes to the classification, a credit read as a return included) or confirmed (never booked). A **payment the debtor made to the client directly** is declared by ops from the client's statement (evidence filed on the file): the worker's waterfall splits it at its date (the invoices named first, then the legal order, interest first) and an `adjustment` lowers the receivables (−1100 / +3100); no client money moves, so no receipt and no notification; more than the file owes is refused. Every night (pg_cron), the **payments checks** verify the books per servicer — client money closed per currency, each bank account's cash = what its payments brought in less what went back out, `cash_in` = payments per statement day, each payment's position against its status, no allocated receivable below zero, the owner-claim mirror, one current receipt per identified payment, one notification per entry, statement continuity and the bank balance — and raise ageing alerts (money not allocated after 20 days, refunds pending after 5, debits and duplicates waiting after 3) on « Contrôles ».
 
 **Line kinds:** `debtor_credit` a debtor's transfer, direct debit, card or cheque credit; `batch_unsplit` a batch booking whose details do not add up (a credit is still one payment); `return` the bank undoes an earlier movement (return reason, reversal indicator, return bank transaction code; either direction; also a batch that cannot be split, when the entry or any of its details says so); `refund_out` our refund (end-to-end id `RFD…`); `other_debit` fees and anything else debited; `suspected_duplicate` a CSV line with the day, amount and direction of an earlier line and a similar label (held for ops); `psp_payout` M5.
 
@@ -1248,6 +1290,21 @@ stateDiagram-v2
     partially_allocated --> allocated : « Imputer » after its own file's reversal (allocated there again)
     matched --> unmatched : ops unassign (nothing allocated)
     unmatched --> allocated : forwarded on the client's ratification (rolled-back batch)
+    unmatched --> refund_pending : ops ask a refund (M2b-6)
+    matched --> refund_pending : ops ask a refund (held, other currency, closed…)
+    partially_allocated --> refund_pending : refund of the overpayment
+    refund_pending --> refunded : refund debit booked, nothing allocated
+    refund_pending --> allocated : refund debit booked, allocations kept
+    refund_pending --> unmatched : refund cancelled (back to its state)
+    allocated --> partially_allocated : refund bounced (back to its overpayment)
+    unmatched --> returned : bank return in full
+    matched --> returned : bank return in full
+    allocated --> returned : bank return in full (allocations reversed at the return date)
+    partially_allocated --> returned : bank return in full
+    refund_pending --> returned : bank return in full (refund cancelled)
+    allocated --> matched : partial return (partial_return: allocations reversed, the rest waits)
+    returned --> [*]
+    refunded --> [*]
 ```
 
 | Status | Ledger position | Review reasons met in M2b-4 |
@@ -1255,12 +1312,17 @@ stateDiagram-v2
 | `matched` | nothing allocated (A = 0) | none (ready: the job allocates), `nothing_due`, `credit_note_to_apply`, `allocation_reversed`, the gates of M2b-3 |
 | `partially_allocated` | A > 0, something left (U > 0) | `overpayment`; `allocation_reversed` (its own file's allocation reversed while another file keeps its share: « Imputer » sends it back to its file); none (ops sent the rest to another file, or back to its own: waiting for the job) |
 | `allocated` | A > 0 (allocations and forwards), U = 0 | none |
+| `refund_pending` (M2b-6) | a refund requested, not executed (U ≥ its amount) | none (the request keeps the state it came from) |
+| `refunded` (M2b-6) | A = 0, U = 0, R = amount | none |
+| `returned` (M2b-6) | A = 0, U = 0 (final) | none |
+
+M2b-6 adds `partial_return` (a partial bank return reversed every allocation: « Imputer » allocates the rest from the return date, or ops refund it). A payment waits for its refund while one is requested, and only then (a reversal meanwhile is refused); one refund at a time per payment. The nightly checks compare every payment's status with this table.
 
 Gates, first that applies (match runs, the job and the confirmation sheet alike): file not confirmed, closed, other currency, **an active surendettement or collective-proceeding hold, then** booked before the servicing start (review fix: the hold is reported first, so the client is told), nothing left to pay, a credit note to compensate (job only). Ops' decisions add up: « Lever le blocage » (the judge's authorisation) and « Imputer » (the cut-off checked, a credit note not invoked, nothing due checked) each add the gate shown to the payment's released set (`allocation_instruction.releases`, every decision kept in `decisions`), which the job consumes when it allocates; a payment behind two gates passes both. A held file's payments are never forwarded to the client and its credit notes are not applied while the hold is active.
 
 **Receipt** (M2b-5): `v1 original → vN update | void`, each version kept; a new version only when its content changes; `void` when the payment leaves its file, before anything about another file (a later file gives an `update`, same number); a bank return (M2b-6) voids it for good.
 
-Refunds, returns and their states (`refund_pending`, `refunded`, `returned`) come with M2b-6.
+**Bank lines** (M2b-6): `return` / `refund_out` lines are `unclassified → return_linked | refund_linked | refund_returned | explained` (the link is final; until then, `bank_debit_review` says why the job left them to ops; `explained` never for a debit, which is linked or stays unclassified: review fix); `other_debit` lines are explained gaps, or `unclassified → refund_linked | return_linked | explained` when listed to classify (the amount of a refund waiting for its debit on the same bank account); `suspected_duplicate` lines are `held → released | duplicate`.
 
 ## 5. Open questions (❓ founder)
 

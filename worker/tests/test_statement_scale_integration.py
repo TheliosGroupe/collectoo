@@ -10,8 +10,9 @@ from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
+import psycopg
 import pytest
-from integration_helpers import storage
+from integration_helpers import DB, storage
 from statement_helpers import START, bank_tenant, drain, money_state, paid_by_day, statement, upload
 
 from collectoo_worker.payments.camt053 import parse_camt053
@@ -32,8 +33,41 @@ def _timings(caplog: pytest.LogCaptureFixture) -> str:
     return found[-1].split(": ", 1)[1] if found else "?"
 
 
+def _empty_stage_statistics(conn: psycopg.Connection) -> None:
+    """The stage as autovacuum can leave it between two imports: emptied, its pages kept, counted
+    at zero rows (a planner reading 0 rows a page for whatever the next import stages). Plans over
+    the stage must not depend on it (CI: 251 s for a 50k import, M2b-6)."""
+    conn.execute(
+        """insert into private.bank_import_stage (statement_id, line_no, section_no, dedup_key,
+             direction, amount_minor, currency, booking_date, kind, method)
+           select '00000000-0000-0000-0000-00000000057a', g, 1, 'stale-' || g, 'credit', 1, 'EUR',
+                  date '2026-10-01', 'debtor_credit', 'sct'
+           from generate_series(1, 13500) g"""
+    )
+    conn.execute(
+        "delete from private.bank_import_stage"
+        " where statement_id = '00000000-0000-0000-0000-00000000057a'"
+    )
+    conn.execute("vacuum (truncate false) private.bank_import_stage")
+    stats = conn.execute(
+        "select reltuples, relpages from pg_class where oid = 'private.bank_import_stage'::regclass"
+    ).fetchone()
+    assert stats is not None and stats[0] == 0 and stats[1] > 0, stats
+
+
 def test_import_a_large_statement(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="collectoo.payments")
+    with psycopg.connect(DB, autocommit=True) as conn:
+        # autovacuum kept off the stage meanwhile: the statistics stay as set until the import
+        conn.execute("alter table private.bank_import_stage set (autovacuum_enabled = false)")
+        try:
+            _empty_stage_statistics(conn)
+            _import_a_large_statement(tmp_path, caplog)
+        finally:
+            conn.execute("alter table private.bank_import_stage reset (autovacuum_enabled)")
+
+
+def _import_a_large_statement(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     tenant = bank_tenant()
     store = storage()
     entries = generate_entries(LINES, seed=21, start=START, days=DAYS)

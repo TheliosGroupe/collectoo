@@ -91,6 +91,26 @@ export type ErrorCode =
   | "allocation_busy"
   | "already_reversed"
   | "file_held"
+  | "refund_reason_mismatch"
+  | "refund_too_much"
+  | "refund_iban_required"
+  | "refund_name_required"
+  | "refund_not_possible"
+  | "refund_not_pending"
+  | "refund_pending"
+  | "already_linked"
+  | "link_amount"
+  | "link_refused"
+  | "not_explainable"
+  | "link_before_return"
+  | "link_payment_returned"
+  | "link_posting_failed"
+  | "already_decided"
+  | "direct_evidence"
+  | "direct_date"
+  | "direct_items"
+  | "file_not_open"
+  | "amount_invalid"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -147,6 +167,33 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   already_reversed: "Cette imputation a déjà été annulée entre-temps : rechargez la page.",
   file_held:
     "Le dossier est bloqué (surendettement ou procédure collective) : ni reversement au client ni compensation tant que le blocage est en place. Rechargez la page.",
+  refund_reason_mismatch: "Ce motif de remboursement ne correspond pas à la situation du paiement : rechargez la page.",
+  refund_too_much: "Le montant dépasse ce qui reste du paiement.",
+  refund_iban_required: "La banque n'a pas transmis l'IBAN du payeur : saisissez l'IBAN du bénéficiaire.",
+  refund_name_required:
+    "La banque n'a pas transmis le nom du payeur : saisissez le nom du bénéficiaire (140 caractères au plus).",
+  refund_not_possible:
+    "Ce paiement ne peut pas être remboursé depuis ici (il attend son imputation, ou un remboursement est déjà demandé). Rechargez la page.",
+  refund_not_pending: "Ce remboursement n'est plus en attente : rechargez la page.",
+  refund_pending: "Un remboursement est demandé pour ce paiement : annulez-le d'abord.",
+  already_linked: "Cette ligne a déjà été traitée : rechargez la page.",
+  link_amount:
+    "Le montant ne convient pas : il dépasse ce qui reste du paiement, ou n'est pas celui du remboursement demandé.",
+  link_refused:
+    "Ce rapprochement n'est pas possible pour cette ligne (sens, compte bancaire, date ou état) : vérifiez la ligne et rechargez la page.",
+  not_explainable:
+    "Ce retour nomme l'un de nos paiements (ou c'est notre remboursement) : il ne se classe pas sans comptabiliser, liez-le au paiement concerné.",
+  link_before_return:
+    "Cette ligne est antérieure à un retour déjà comptabilisé sur ce paiement : elle ne peut pas être liée à sa date.",
+  link_payment_returned:
+    "Le paiement de ce remboursement a été retourné par la banque : ce montant revenu ne peut pas encore être comptabilisé.",
+  link_posting_failed: "La comptabilisation a été refusée pour cette ligne : vérifiez-la ou signalez-la au support.",
+  already_decided: "Cette ligne a déjà été traitée : rechargez la page.",
+  direct_evidence: "Choisissez le relevé du client, classé dans ce dossier.",
+  direct_date: "La date doit être passée, et postérieure à la reprise du dossier.",
+  direct_items: "Les factures désignées doivent appartenir à ce dossier.",
+  file_not_open: "Le dossier n'est pas ouvert.",
+  amount_invalid: "Montant invalide : saisissez un montant positif en euros (ex. 120,50).",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 

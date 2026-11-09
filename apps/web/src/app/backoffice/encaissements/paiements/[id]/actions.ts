@@ -2,8 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 import { staffSession } from "@/lib/auth/staff";
-import type { ActionResult } from "@/lib/boarding/forms";
+import { type ActionResult, parseEurosToMinor } from "@/lib/boarding/forms";
 import { allocationErrorCode } from "@/lib/payments/allocation";
+import { debitErrorCode, normaliseIban } from "@/lib/payments/debits";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const AMOUNT = /^\d{1,16}$/;
@@ -130,4 +131,63 @@ export async function unassignFromPage(formData: FormData): Promise<ActionResult
     p_reason: reason,
   });
   return done(payment, error);
+}
+
+/** M2b-6 commands: errors as codes (raw database text never reaches the page). */
+function debitDone(paymentId: string, error: { message: string } | null): ActionResult {
+  if (error) {
+    console.error("refund command failed", { error: error.message });
+    return { error: debitErrorCode(error.message) };
+  }
+  revalidatePath(`/backoffice/encaissements/paiements/${paymentId}`);
+  revalidatePath("/backoffice/encaissements/a-traiter");
+  return { ok: true };
+}
+
+/** « Rembourser » (founder #8, #9, #11, #12): what is left of the payment, to the payer's IBAN unless another one is
+ * given; the state the page showed (reason, what is left) is checked again in SQL. Nothing is booked now. */
+export async function requestRefund(formData: FormData): Promise<ActionResult> {
+  const key = field(formData, "idempotency_key");
+  const payment = field(formData, "payment_id");
+  const expectedLeft = field(formData, "expected_left_minor");
+  const expectedReason = field(formData, "expected_review_reason");
+  const code = field(formData, "reason_code");
+  if (!UUID.test(key) || !UUID.test(payment) || !AMOUNT.test(expectedLeft) || !code) return { error: "unknown" };
+  const amount = parseEurosToMinor(field(formData, "amount"));
+  if (amount === null || amount <= BigInt(0)) return { error: "amount_invalid" };
+  const reason = field(formData, "reason");
+  if (!reason) return { error: "reason_required" };
+  const useOther = field(formData, "payee") === "other";
+  const iban = useOther ? normaliseIban(field(formData, "payee_iban")) : null;
+  if (useOther && iban === null) return { error: "refund_iban_required" };
+  const { supabase } = await staffSession();
+  const { error } = await supabase.rpc("request_refund", {
+    p_idempotency_key: key,
+    p_payment_id: payment,
+    p_amount_minor: amount.toString(),
+    p_payee_iban: iban as string,
+    p_payee_name: (field(formData, "payee_name") || null) as string,
+    p_reason_code: code,
+    p_expected_review_reason: (expectedReason || null) as string,
+    p_expected_left_minor: expectedLeft,
+    p_reason: reason,
+  });
+  return debitDone(payment, error);
+}
+
+/** « Annuler le remboursement »: the transfer was not made (or the IBAN was wrong). */
+export async function cancelRefund(formData: FormData): Promise<ActionResult> {
+  const key = field(formData, "idempotency_key");
+  const payment = field(formData, "payment_id");
+  const refund = field(formData, "refund_request_id");
+  if (!UUID.test(key) || !UUID.test(payment) || !UUID.test(refund)) return { error: "unknown" };
+  const reason = field(formData, "reason");
+  if (!reason) return { error: "reason_required" };
+  const { supabase } = await staffSession();
+  const { error } = await supabase.rpc("cancel_refund", {
+    p_idempotency_key: key,
+    p_refund_request_id: refund,
+    p_reason: reason,
+  });
+  return debitDone(payment, error);
 }

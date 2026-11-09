@@ -10,11 +10,13 @@ import logging
 import os
 import random
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
+from debit_helpers import import_entries, return_entry
 from integration_helpers import DB, one, storage
 from reconciliation_helpers import pay
 from statement_helpers import bank_tenant
@@ -158,3 +160,55 @@ def test_allocate_50k_payments(tmp_path: Path, caplog: pytest.LogCaptureFixture)
         )
         assert unclassified == 0
     assert allocated - matched < 240
+    _returns(tenant, store, credits)
+
+
+def _returns(tenant: dict[str, Any], store: Any, credits: list[Credit]) -> None:
+    """M2b-6 at scale: 2 % of the payments taken back by the bank (one statement, full returns by
+    the payment's end-to-end id): imported, linked by `payments.process_debits` (allocations
+    reversed at the return date, cash_out, `returned`, the client told), then the nightly checks
+    over the whole servicer. Timed (docs/benchmarks/payments.md)."""
+    org = tenant["servicer"]
+    with psycopg.connect(DB) as conn:
+        chosen = conn.execute(
+            """select p.id::text, p.amount_minor, p.end_to_end_id from public.payment p
+               where p.organization_id = %s and p.end_to_end_id is not null
+               order by p.id limit %s""",
+            (org, max(1, len(credits) // 50)),
+        ).fetchall()
+    entries = [
+        return_entry(int(amount), str(e2e), f"RT{n:010d}", date(2026, 10, 20))
+        for n, (_pid, amount, e2e) in enumerate(chosen)
+    ]
+    opening = sum(c.amount_minor for c in credits)
+    started = time.monotonic()
+    import_entries(tenant, store, entries, day=date(2026, 10, 20), opening=opening)
+    returned = time.monotonic()
+    with psycopg.connect(DB) as conn:
+        run = one(conn, "select private.run_payment_checks(%s)", (org,))
+    checked = time.monotonic()
+    print(
+        f"  {len(entries)} returns imported + linked in {returned - started:.1f}s;"
+        f" nightly checks over {len(credits)} payments in {checked - returned:.1f}s:"
+        f" {run['by_code']}"
+    )
+    with psycopg.connect(DB) as conn:
+        statuses: dict[str, int] = dict(
+            conn.execute(
+                """select status, count(*) from public.payment
+                   where id = any(%s::uuid[]) group by status""",
+                ([c[0] for c in chosen],),
+            ).fetchall()
+        )
+        assert statuses == {"returned": len(chosen)}, statuses
+        money = one(
+            conn,
+            """select coalesce(sum(lp.amount_minor), 0) from public.ledger_account la
+               join public.ledger_posting lp on lp.ledger_account_id = la.id
+               where la.organization_id = %s
+                 and la.book in ('client_money_cash', 'unallocated_payment', 'client_payable')""",
+            (org,),
+        )
+        assert money == 0
+    assert run["violations"] == 0, run
+    assert returned - started < 120 and checked - returned < 120
