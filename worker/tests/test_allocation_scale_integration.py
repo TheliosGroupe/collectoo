@@ -112,13 +112,17 @@ def test_allocate_50k_payments(tmp_path: Path, caplog: pytest.LogCaptureFixture)
         assert positions is not None
         assert positions[0] == positions[1] + positions[2] and positions[3] == 0
         assert positions[0] == sum(c.amount_minor for c in credits)
-        # no receivable below zero; client money closed (I8)
+        # no receivable an allocation credited is below zero (a seller's negative balancing line is
+        # never a slot); client money closed (I8)
         negative = one(
             conn,
             """select count(*) from (
                  select la.id from public.ledger_account la
                  join public.ledger_posting lp on lp.ledger_account_id = la.id
                  where la.organization_id = %s and la.book = 'debtor_receivable'
+                   and exists (select 1 from public.ledger_posting q
+                               join public.ledger_entry e on e.id = q.entry_id
+                               where q.ledger_account_id = la.id and e.entry_type = 'allocation')
                  group by la.id having sum(lp.amount_minor) < 0) x""",
             (org,),
         )

@@ -163,14 +163,16 @@ alter table private.allocation_plan enable always trigger allocation_plan_append
 -- not copied: the feed (M2b-5) reads them from the entry's postings, which never change. Delivery is M7.
 ------------------------------------------------------------------------------------------
 
+-- No foreign keys (as ledger_posting): one set-based ALWAYS guard checks every reference against the payment, the
+-- entry and the file, whose rows are never deleted once they carry money; five key checks per row cost seconds at 50k.
 create table public.client_notification (
   id uuid primary key default gen_random_uuid(),
-  organization_id uuid not null references public.organization (id),
-  client_organization_id uuid not null references public.organization (id),
-  portfolio_id uuid references public.portfolio (id),
-  account_id uuid references public.account (id),
-  payment_id uuid not null references public.payment (id),
-  ledger_entry_id uuid unique references public.ledger_entry (id),
+  organization_id uuid not null,
+  client_organization_id uuid not null,
+  portfolio_id uuid,
+  account_id uuid,
+  payment_id uuid not null,
+  ledger_entry_id uuid unique,
   kind text not null check (kind in ('payment_allocated', 'payment_forwarded', 'payment_allocation_reversed',
                                      'payment_held')),
   reason text check (length(btrim(reason)) between 1 and 2000),
@@ -191,6 +193,9 @@ create or replace function private.client_notification_guard()
 returns trigger
 language plpgsql
 set search_path = ''
+set enable_hashjoin = off
+set enable_mergejoin = off
+set enable_bitmapscan = off
 as $$
 declare v_bad text;
 begin
@@ -201,6 +206,10 @@ begin
   left join public.ledger_entry t on t.id = e.reverses_entry_id
   left join public.account a on a.id = n.account_id
   where p.id is null or p.organization_id <> n.organization_id
+     or (n.ledger_entry_id is not null and e.id is null)
+     or (n.portfolio_id is not null and n.account_id is null
+         and not exists (select 1 from public.portfolio x where x.id = n.portfolio_id
+                           and x.client_organization_id = n.client_organization_id))
      or (n.account_id is not null and (a.id is null or a.organization_id <> n.organization_id
                                        or a.client_organization_id <> n.client_organization_id
                                        or a.portfolio_id is distinct from n.portfolio_id))
@@ -313,7 +322,8 @@ as $$
 $$;
 
 -- Position of payments from their tagged entries (I5: amount = allocated + unallocated + returned): allocated =
--- allocation and forward entries (net of reversals), returned = cash_out entries (M2b-6).
+-- allocation and forward entries (net of reversals), returned = cash_out entries (M2b-6). One index lookup per payment
+-- (lateral, on ledger_entry_payment_idx): no plan rests on the statistics of entries posted a moment ago.
 create or replace function private.payment_positions(p_payment_ids uuid[])
 returns table (payment_id uuid, amount_minor bigint, allocated_minor bigint, returned_minor bigint,
                unallocated_minor bigint)
@@ -323,17 +333,16 @@ set search_path = ''
 as $$
   select p.id, p.amount_minor, coalesce(s.a, 0)::bigint, coalesce(s.r, 0)::bigint,
          (p.amount_minor - coalesce(s.a, 0) - coalesce(s.r, 0))::bigint
-  from public.payment p
-  left join (select e.payment_id,
-                    sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) in ('allocation', 'forward')) as a,
-                    sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) = 'cash_out') as r
-             from public.ledger_entry e
-             left join public.ledger_entry t on t.id = e.reverses_entry_id
-             join public.ledger_posting lp on lp.entry_id = e.id
-             join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment'
-             where e.payment_id = any (p_payment_ids)
-             group by e.payment_id) s on s.payment_id = p.id
-  where p.id = any (p_payment_ids);
+  from (select distinct x from unnest(p_payment_ids) x) ids
+  join public.payment p on p.id = ids.x
+  left join lateral (
+    select sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) in ('allocation', 'forward')) as a,
+           sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) = 'cash_out') as r
+    from public.ledger_entry e
+    left join public.ledger_entry t on t.id = e.reverses_entry_id
+    join public.ledger_posting lp on lp.entry_id = e.id
+    join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment'
+    where e.payment_id = p.id) s on true;
 $$;
 
 ------------------------------------------------------------------------------------------
@@ -576,16 +585,10 @@ begin
   -- What is left of each payment (I4 before posting; ledger_entry_verify re-checks every date).
   drop table if exists pg_temp._alloc_u;
   create temp table _alloc_u on commit drop as
-  select t.payment_id, t.amount_minor,
-         coalesce(sum(lp.amount_minor) filter (where coalesce(r.entry_type, e.entry_type) in ('allocation', 'forward')), 0)
-           as allocated,
-         coalesce(sum(lp.amount_minor), 0) as moved
+  select t.payment_id, t.amount_minor, x.allocated_minor as allocated,
+         x.allocated_minor + x.returned_minor as moved
   from pg_temp._alloc_t t
-  left join public.ledger_entry e on e.payment_id = t.payment_id
-  left join public.ledger_entry r on r.id = e.reverses_entry_id
-  left join public.ledger_posting lp on lp.entry_id = e.id
-    and exists (select 1 from public.ledger_account la where la.id = lp.ledger_account_id and la.book = 'unallocated_payment')
-  group by t.payment_id, t.amount_minor;
+  join private.payment_positions(array(select y.payment_id from pg_temp._alloc_t y)) x on x.payment_id = t.payment_id;
   alter table pg_temp._alloc_u add primary key (payment_id);
   select min(x.payment_id::text) into v_bad
   from (select l.payment_id, sum(l.amount_minor) as s from pg_temp._alloc_line l group by l.payment_id) x
