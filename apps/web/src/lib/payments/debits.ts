@@ -273,6 +273,7 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("reason does not match")) return "refund_reason_mismatch";
   if (message.includes("more than what is left")) return "refund_too_much";
   if (message.includes("IBAN is required")) return "refund_iban_required";
+  if (message.includes("payee's name is required")) return "refund_name_required";
   if (message.includes("invalid IBAN")) return "iban_invalid";
   if (message.includes("cannot be refunded from here")) return "refund_not_possible";
   if (message.includes("no longer pending")) return "refund_not_pending";

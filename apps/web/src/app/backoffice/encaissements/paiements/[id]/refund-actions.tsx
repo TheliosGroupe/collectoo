@@ -36,6 +36,8 @@ export function RequestRefund({
   idempotencyKey: string;
 }) {
   const [payee, setPayee] = useState(payerIbanValid ? "payer" : "other");
+  // the bank may send the payer's IBAN without a name: request_refund needs one (its own, or the payer's)
+  const payerNamed = (payerName ?? "").trim() !== "";
   return (
     <ConfirmSheet label="Rembourser" title="Rembourser le payeur" buttonClassName={secondaryClass} testId="request-refund">
       {(close) => (
@@ -65,7 +67,7 @@ export function RequestRefund({
                     checked={payee === "payer"}
                     onChange={() => setPayee("payer")}
                   />
-                  Le payeur ({payerName ?? "nom non transmis"}, IBAN …{payerIbanEnd})
+                  Le payeur ({payerNamed ? payerName : "nom non transmis"}, IBAN …{payerIbanEnd})
                 </label>
               ) : (
                 <p className="text-amber-900 dark:text-amber-200">La banque n&apos;a pas transmis d&apos;IBAN utilisable du payeur.</p>
@@ -82,9 +84,14 @@ export function RequestRefund({
                   </label>
                   <label className="flex flex-col gap-1">
                     Nom du bénéficiaire
-                    <input name="payee_name" required={!payerName} maxLength={140} defaultValue={payerName ?? ""} className={inputClass} />
+                    <input name="payee_name" required={!payerNamed} maxLength={140} defaultValue={payerName ?? ""} className={inputClass} />
                   </label>
                 </>
+              ) : !payerNamed ? (
+                <label className="flex flex-col gap-1">
+                  Nom du bénéficiaire (la banque ne l&apos;a pas transmis)
+                  <input name="payee_name" required maxLength={140} autoComplete="off" className={inputClass} />
+                </label>
               ) : null}
             </fieldset>
             <label className="flex flex-col gap-1 text-sm">

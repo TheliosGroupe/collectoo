@@ -215,6 +215,8 @@ describe("errors of the M2b-6 commands", () => {
       ["refund: the reason does not match the payment's state", "refund_reason_mismatch"],
       ["refund: more than what is left of the payment", "refund_too_much"],
       ["refund: the payee's IBAN is required (the bank gave none)", "refund_iban_required"],
+      // the payer's IBAN without a name from the bank (review M2b-6): a clear error, not « L'action a échoué »
+      ["refund: the payee's name is required", "refund_name_required"],
       ["refund: invalid IBAN", "iban_invalid"],
       ["the payment changed: reload the page", "payment_changed"],
       ["debit link refused: payment_changed", "payment_changed"],
