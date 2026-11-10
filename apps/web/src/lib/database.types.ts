@@ -923,6 +923,44 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"commission_invoice_document": {
+                  Row: {
+                    "client_organization_id": string,"created_at": string,"document_id": string,"electronic": boolean,"invoice_id": string,"organization_id": string,"pdf_sha256": string,"renderer_version": string,"template_version": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "client_organization_id": string,"created_at"?: string,"document_id": string,"electronic": boolean,"invoice_id": string,"organization_id": string,"pdf_sha256": string,"renderer_version": string,"template_version": string
+                  }
+                  Update: {
+                    "client_organization_id"?: string,"created_at"?: string,"document_id"?: string,"electronic"?: boolean,"invoice_id"?: string,"organization_id"?: string,"pdf_sha256"?: string,"renderer_version"?: string,"template_version"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "commission_invoice_document_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_invoice_document_document_id_fkey"
+      columns: ["document_id"]
+isOneToOne: true
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_invoice_document_invoice_id_fkey"
+      columns: ["invoice_id"]
+isOneToOne: true
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_invoice_document_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"commission_invoice_line": {
                   Row: {
                     "claim_type_code": string | null,"designation_fr": string,"families": (string)[],"ht_minor": number,"invoice_id": string,"kind": string,"line_no": number,"original_invoice_id": string | null,"quantity": number,"rule_id": string | null,"tiers": NonNullable<Json>,"vat_rate": number
@@ -2125,6 +2163,56 @@ isOneToOne: true
       referencedColumns: ["id"]
     }
                   ]
+                },"remittance_statement": {
+                  Row: {
+                    "client_organization_id": string,"created_at": string,"csv_document_id": string,"csv_sha256": string,"currency": string,"file_count": number,"issue_date": string,"known_at": string,"line_count": number,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"pdf_document_id": string,"pdf_sha256": string,"renderer_version": string,"run_id": string,"template_version": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "client_organization_id": string,"created_at"?: string,"csv_document_id": string,"csv_sha256": string,"currency": string,"file_count": number,"issue_date": string,"known_at": string,"line_count": number,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"pdf_document_id": string,"pdf_sha256": string,"renderer_version": string,"run_id": string,"template_version": string
+                  }
+                  Update: {
+                    "client_organization_id"?: string,"created_at"?: string,"csv_document_id"?: string,"csv_sha256"?: string,"currency"?: string,"file_count"?: number,"issue_date"?: string,"known_at"?: string,"line_count"?: number,"number"?: string,"organization_id"?: string,"payload"?: NonNullable<Json>,"payload_sha256"?: string,"pdf_document_id"?: string,"pdf_sha256"?: string,"renderer_version"?: string,"run_id"?: string,"template_version"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "remittance_statement_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_statement_csv_document_id_fkey"
+      columns: ["csv_document_id"]
+isOneToOne: true
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_statement_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "remittance_statement_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_statement_pdf_document_id_fkey"
+      columns: ["pdf_document_id"]
+isOneToOne: true
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_statement_run_id_fkey"
+      columns: ["run_id"]
+isOneToOne: true
+      referencedRelation: "remittance_run"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"servicer_billing_settings": {
                   Row: {
                     "bank_cutoff": NonNullable<Json>,"created_at": string,"invoice_prefix": string,"organization_id": string,"own_bank_account_id": string | null,"penalty_text": string,"updated_at": string,"updated_by": string | null,"vat_on_debits": boolean,"version": number
@@ -2217,6 +2305,16 @@ isOneToOne: false
 "account_detail":
 { Args: { "p_account_id": string }; Returns: Json
                            },
+"accounting_export_documents":
+{ Args: { "p_from": string,"p_to": string }; Returns: {
+              "client_name": string,"client_siren": string,"corrects": string,"due_date": string,"ht_minor": number,"issue_date": string,"kind": string,"mandate": string,"number": string,"open_minor": number,"run_number": string,"service_from": string,"service_to": string,"settled_minor": number,"settlement": string,"settlements": string,"ttc_minor": number,"vat_book": string,"vat_minor": number,"vat_rate": number
+            }[]
+                           },
+"accounting_export_entries":
+{ Args: { "p_from": string,"p_to": string }; Returns: {
+              "account_number": string,"book": string,"client_name": string,"credit_minor": number,"currency": string,"debit_minor": number,"effective_date": string,"entry_id": string,"entry_type": string,"posted_at": string,"source_ref": string,"source_type": string
+            }[]
+                           },
 "add_boarding_file":
 { Args: { "p_batch_id": string,"p_file_name": string,"p_sha256": string,"p_size_bytes": number }; Returns: Json
                            },
@@ -2264,6 +2362,9 @@ isOneToOne: false
 { Args: { "p_client_organization_id": string }; Returns: {
               "blockers": (string)[],"portfolio_id": string,"portfolio_name": string
             }[]
+                           },
+"client_remittance_summary":
+{ Args: { "p_client_organization_id": string }; Returns: Json
                            },
 "close_bank_account":
 { Args: { "p_bank_account_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: undefined

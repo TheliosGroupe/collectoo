@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { adminClient, createConfirmedPayoutAccount, createMandate, createMember, createTenant, type Tenant } from "./support/admin";
 import { camt053, ibanFr, type Credit } from "./support/camt";
-import { loginAsStaff } from "./support/session";
+import { loginAsStaff, loginWithEmailCode } from "./support/session";
 import { reviewShot } from "./screenshot";
 
 /**
@@ -12,7 +12,10 @@ import { reviewShot } from "./screenshot";
  * (« Préparer maintenant »), reads it — the net in large type, the commission netted, the deadline chip, the lines
  * and « Pourquoi cette commission ? », the invoice to issue — approves it from the sticky bar (the sheet states every
  * effect), and finds it approved: the invoice numbered in the servicer's series, the payout ordered (nothing leaves
- * the dedicated account before the bank's debit, M2c-6). Phone-first. Synthetic data.
+ * the dedicated account before the bank's debit, M2c-6). M2c-5: the documents job draws the statement (PDF, CSV) and the
+ * invoice's PDF; ops download them and the accountant's export; the client's administrator reads « Reversements » (what
+ * is owed, the payout ordered, the statement) and « Factures » (the invoice, accepted electronically) in the client
+ * space and downloads them. Phone-first. Synthetic data.
  */
 const BANK_IBAN = ibanFr(434343);
 const FIXTURE = {
@@ -66,6 +69,12 @@ test.beforeAll(async () => {
   });
   if (error) throw error;
   await createConfirmedPayoutAccount(tenant, ibanFr(434344), "BOULANGERIE DURAND");
+  // the client accepted electronic invoices in its mandate (CGI 289 VI): its invoices are served in the client space
+  const { error: e2 } = await adminClient()
+    .from("billing_identity")
+    .update({ invoice_acceptance_ref: "art. 11 — Factures électroniques" })
+    .eq("organization_id", tenant.clientId);
+  if (e2) throw e2;
 });
 
 async function boardAndConfirm(page: Page) {
@@ -98,7 +107,7 @@ async function rfOf(externalRef: string): Promise<string> {
   return ref!.rf as string;
 }
 
-test("ops prepare, read and approve a client's remittance run", async ({ page }, testInfo) => {
+test("ops prepare, read and approve a client's remittance run", async ({ page, browser }, testInfo) => {
   test.setTimeout(300_000);
   await loginAsStaff(page, await createMember(tenant.servicerId, "ops_manager"));
   await boardAndConfirm(page);
@@ -162,9 +171,78 @@ test("ops prepare, read and approve a client's remittance run", async ({ page },
   await expect(page.getByTestId("run-documents")).toContainText(/Facture FC-\d{4}-000001/);
   await expect(page.getByTestId("run-transfer")).toContainText("656,01");
   await expect(page.getByTestId("run-transfer")).toContainText("Ordonné");
+
+  // M2c-5: the documents job draws the statement and the invoice's PDF (the page refreshes itself until then)
+  const statementPdf = page.getByTestId("run-statement-pdf");
+  await expect(statementPdf).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByTestId("run-document-pdf")).toBeVisible();
+  await expect(page.getByTestId("run-document-post")).toHaveCount(0);
   await reviewShot(page, testInfo, "m2c-reversement-valide");
+  const pdf = await page.request.get((await statementPdf.getAttribute("href"))!);
+  expect(pdf.status()).toBe(200);
+  expect((await pdf.body()).subarray(0, 5).toString()).toBe("%PDF-");
+  const csv = await page.request.get((await page.getByTestId("run-statement-csv").getAttribute("href"))!);
+  expect(csv.status()).toBe(200);
+  const csvText = (await csv.body()).toString("utf-8");
+  expect(csvText.startsWith("\ufeffreleve;date_releve;mandat;")).toBe(true);
+  expect(csvText).toContain(";500,00;50000;");
+  expect(csvText).toContain(";300,01;30001;");
+  const invoicePdf = await page.request.get((await page.getByTestId("run-document-pdf").getAttribute("href"))!);
+  expect(invoicePdf.status()).toBe(200);
+  expect((await invoicePdf.body()).subarray(0, 5).toString()).toBe("%PDF-");
 
   // « En cours »
   await page.goto("/backoffice/reversements?onglet=en-cours");
   await expect(page.getByTestId("run-row").filter({ hasText: tenant.clientName })).toContainText("Validé — virement ordonné");
+
+  // the accountant's export: the invoice of the period and its entries
+  await page.getByTestId("accounting-export-link").click();
+  await expect(page).toHaveURL(/\/backoffice\/reversements\/comptabilite/);
+  await reviewShot(page, testInfo, "m2c-export-comptable");
+  const exported = await page.request.get((await page.getByTestId("export-documents").getAttribute("href"))!);
+  expect(exported.status()).toBe(200);
+  const exportText = (await exported.body()).toString("utf-8");
+  expect(exportText.startsWith("\ufeffnumero;type;date_emission;")).toBe(true);
+  expect(exportText).toMatch(/FC-\d{4}-000001;facture;/);
+  const entries = await page.request.get((await page.getByTestId("export-entries").getAttribute("href"))!);
+  expect(entries.status()).toBe(200);
+  expect((await entries.body()).toString("utf-8")).toContain(";7060;Commissions de recouvrement;");
+
+  // the client space: « Reversements » and « Factures » (its administrator, its own browser)
+  const use = testInfo.project.use;
+  const context = await browser.newContext({
+    baseURL: use.baseURL,
+    viewport: use.viewport,
+    userAgent: use.userAgent,
+    deviceScaleFactor: use.deviceScaleFactor,
+    isMobile: use.isMobile,
+    hasTouch: use.hasTouch,
+  });
+  const client = await context.newPage();
+  await loginWithEmailCode(client, await createMember(tenant.clientId, "client_admin"));
+  await expect(client).toHaveURL(/\/client$/);
+  await client.getByTestId("client-remittances-link").click();
+  await expect(client).toHaveURL(/\/client\/reversements$/);
+  await expect(client.getByTestId("owed-today")).toContainText("800,01");
+  await expect(client.getByTestId("next-run")).toContainText(/le \d{2}\/\d{2}\/\d{4}/);
+  const row = client.getByTestId("statement-row");
+  await expect(row).toHaveCount(1);
+  await expect(row).toContainText("656,01");
+  await expect(row).toContainText("Virement ordonné");
+  await expect(row).not.toContainText("payé");
+  await reviewShot(client, testInfo, "m2c-client-reversements");
+  const clientPdf = await client.request.get((await row.getByTestId("statement-pdf").getAttribute("href"))!);
+  expect(clientPdf.status()).toBe(200);
+  expect((await clientPdf.body()).subarray(0, 5).toString()).toBe("%PDF-");
+  await client.getByTestId("client-invoices-link").click();
+  await expect(client).toHaveURL(/\/client\/factures$/);
+  const invoice = client.getByTestId("invoice-row");
+  await expect(invoice).toHaveCount(1);
+  await expect(invoice).toContainText(/Facture FC-\d{4}-000001/);
+  await expect(invoice).toContainText("144,00");
+  await expect(invoice).toContainText("à régler par compensation");
+  await reviewShot(client, testInfo, "m2c-client-factures");
+  const clientInvoice = await client.request.get((await invoice.getByTestId("invoice-pdf").getAttribute("href"))!);
+  expect(clientInvoice.status()).toBe(200);
+  await context.close();
 });

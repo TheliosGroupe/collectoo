@@ -49,7 +49,15 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
   // a job in flight refreshes the page; a failed preparation does not (it waits for « Actualiser »)
   const busy = o.runs.some(runBusy);
   return (
-    <WidePage title="Reversements" back={back}>
+    <WidePage
+      title="Reversements"
+      back={back}
+      actions={
+        <Link href="/backoffice/reversements/comptabilite" className="text-sm underline underline-offset-4" data-testid="accounting-export-link">
+          Export comptable
+        </Link>
+      }
+    >
       <AutoRefresh active={busy} abandonable={false} everyMs={2000} maxMs={120_000} />
       <nav className="flex flex-wrap gap-2" aria-label="Onglets">
         {Object.entries(RUN_TABS).map(([key, t]) => (

@@ -38,6 +38,20 @@ export default async function ClientPage() {
         </Link>
       </section>
       <section className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+        <h2 className="font-medium">Reversements et factures</h2>
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+          Ce qui vous revient, vos relevés de reversement et les factures de notre commission.
+        </p>
+        <div className="mt-2 flex flex-wrap gap-4">
+          <Link href="/client/reversements" className="text-sm font-medium underline underline-offset-4" data-testid="client-remittances-link">
+            Reversements
+          </Link>
+          <Link href="/client/factures" className="text-sm font-medium underline underline-offset-4" data-testid="client-invoices-home-link">
+            Factures et avoirs
+          </Link>
+        </div>
+      </section>
+      <section className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
         <h2 className="font-medium">Mandat et reversements</h2>
         <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
           Les conditions de votre mandat et le compte sur lequel le cabinet vous reverse vos encaissements.
