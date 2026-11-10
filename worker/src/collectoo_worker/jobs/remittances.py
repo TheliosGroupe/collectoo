@@ -17,6 +17,9 @@
   its settlement posted (N = 0). A data error (22xxx, 23xxx, LGxxx) sends the run back to draft with
   its reason at once; other errors are retried by the queue, then the dead-letter hook sends it
   back.
+- `documents {organization_id}` (M2c-5): the statements and the invoice PDFs due for one servicer
+  (`jobs.remittance_documents`); a document still due after an hour is the nightly alert
+  `document_missing`.
 
 No model, no LLM: every amount comes from the ledger and the engines (CLAUDE.md).
 """
@@ -35,6 +38,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Jsonb
 
+from collectoo_worker.jobs.remittance_documents import run_documents
 from collectoo_worker.remittance.calendar import Calendar, CalendarHorizonError, conservative
 from collectoo_worker.remittance.commission import FileFacts, KeyState, LineKind, Part
 from collectoo_worker.remittance.documents import EarlierCharge, EarlierInvoice
@@ -50,6 +54,7 @@ from collectoo_worker.remittance.run import (
 from collectoo_worker.remittance.schedule import guard_due, is_scheduled
 from collectoo_worker.remittance.settlement import SettlementInputError, SettlementPlan
 from collectoo_worker.remittance.terms import RemittanceTerms
+from collectoo_worker.runtime.storage import Storage
 
 Conn = psycopg.Connection[Any]
 log = logging.getLogger("collectoo.remittances")
@@ -89,10 +94,14 @@ def deterministic(exc: psycopg.Error) -> bool:
     return (exc.sqlstate or "").startswith(("LG", "22", "23"))
 
 
-def make_handler() -> Any:
+def make_handler(storage: Storage | None = None) -> Any:
     def handle(payload: dict[str, Any], conn: Conn) -> None:
         kind = payload.get("type")
-        if kind == "schedule":
+        if kind == "documents":
+            if storage is None:
+                raise RuntimeError("the documents job needs the storage")
+            run_documents(conn, storage, payload)
+        elif kind == "schedule":
             run_schedule(conn, payload)
         elif kind == "prepare":
             run_prepare(conn, payload)

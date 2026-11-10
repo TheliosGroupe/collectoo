@@ -81,6 +81,8 @@ def remittance_tenant(
     with psycopg.connect(DB) as conn, conn.transaction():
         tenant["mandate"] = ready_mandate(conn, tenant, f"MAND-{uuid.uuid4().hex[:6]}")
         if schedule is not None or terms is not None:
+            # the version is in force from its signature (immutable then): set before any use
+            conn.execute("alter table public.mandate_terms disable trigger mandate_terms_guard")
             conn.execute(
                 """update public.mandate_terms
                    set commission_schedule = coalesce(%s, commission_schedule),
@@ -91,6 +93,7 @@ def remittance_tenant(
                     tenant["mandate"],
                 ),
             )
+            conn.execute("alter table public.mandate_terms enable trigger mandate_terms_guard")
         tenant["payout"] = confirm_payout(conn, tenant, tenant["client"])
         admin = uuid.uuid4()
         conn.execute(
@@ -161,7 +164,7 @@ def paid_file(
 
 
 def drain() -> None:
-    consumer = QueueConsumer(DB, "remittances", make_handler(), on_dead=record_dead_job)
+    consumer = QueueConsumer(DB, "remittances", make_handler(storage()), on_dead=record_dead_job)
     while consumer.poll_once():
         pass
 

@@ -63,7 +63,10 @@ def main(argv: list[str] | None = None) -> int:
         elif queue == "remittances":
             consumers.append(
                 QueueConsumer(
-                    db, queue, remittances.make_handler(), on_dead=remittances.record_dead_job
+                    db,
+                    queue,
+                    remittances.make_handler(storage),
+                    on_dead=remittances.record_dead_job,
                 )
             )
         else:

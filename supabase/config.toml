@@ -139,7 +139,8 @@ file_size_limit = "500MiB"
 [storage.buckets.documents]
 public = false
 file_size_limit = "50MiB"
-allowed_mime_types = ["application/pdf", "image/png", "image/jpeg"]
+# text/csv: the remittance statements' CSV (M2c-5)
+allowed_mime_types = ["application/pdf", "image/png", "image/jpeg", "text/csv"]
 
 [storage.s3_protocol]
 enabled = true
