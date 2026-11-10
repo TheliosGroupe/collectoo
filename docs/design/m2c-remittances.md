@@ -434,8 +434,9 @@ bank_line_booking(bank_transaction_id, seq, kind payout|sweep|top_up|payout_retu
 
 remittance_deadline_breach(id, organization_id, client_organization_id, ledger_entry_id, payment_id, deadline,
   latest_execution_date, paid_on null, blocked_reason null, detected_at)       -- append-only
-remittance_late_approval(run_id, ledger_entry_id, latest_execution_date, requested_execution_date, late_reason,
-  approved_by, created_at, unique (run_id, ledger_entry_id))  -- append-only; M2c-4 review: every line approved after
+remittance_late_approval(run_id, ledger_entry_id, organization_id, client_organization_id, latest_execution_date,
+  requested_execution_date, late_reason not null, approved_by, created_at, primary key (run_id, ledger_entry_id),
+  check (latest_execution_date < requested_execution_date))  -- append-only; M2c-4 review: every line approved after
                                                               -- its latest execution date (the settlement date when N = 0)
 
 alter table refund_request add execution_mode text not null default 'manual' check (execution_mode in ('manual','file')),
@@ -833,7 +834,7 @@ N = Σ net_m ;  D = Σ D_m ;  N + D = gross
   Effects:
   - the transfer is cancelled and the file superseded;
   - one full credit note per invoice of the run;
-  - *M2c-4 review:* one corrective invoice per mandate re-charging, per (file, tier key), what the run's credit notes credited on earlier invoices, at each credited invoice's own VAT rate (« Annulation du reversement RV-… — rétablissement de l'avoir FC-… »), so the tier history is exactly as before the run and the next run credits each reversal once;
+  - *M2c-4 review:* one corrective invoice per mandate and VAT rate (reason `run_cancelled`) re-charging, per (file, tier key), exactly the HT and VAT the run's credit notes credited on earlier invoices, at each credited invoice's own VAT rate (« Annulation du reversement RV-… — rétablissement de l'avoir FC-… (facture FC-… du jj/mm/aaaa) »), so the tier history is exactly as before the run and the next run credits each reversal once;
   - the lines are released and the items go back to pending;
   - status `cancelled`.
 
@@ -1083,7 +1084,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 - `document_missing` (> 1 hour);
 - `vat_pack_review` (from 2026-12-01);
 - `calendar_horizon` (< 12 months seeded);
-- M2c-4 review: `remittance_payout_not_executed` (an approved or sent run not booked past its requested execution date), `remittance_deadline_not_computable` (an encaissement date outside the seeded calendar), `remittance_schedule_failed` (the hourly schedule job failed for good); an unmeetable delay's one-month dates raise `remittance_due_soon`, `remittance_due_critical` and `remittance_deadline_breached`.
+- M2c-4 review: `remittance_payout_not_executed` (an approved or sent run not booked past its requested execution date), `remittance_deadline_not_computable` (an encaissement date outside the seeded calendar), `remittance_schedule_failed` (the hourly schedule could not draft a client, or its job failed for good); an unmeetable delay's one-month dates raise `remittance_due_soon`, `remittance_due_critical` and `remittance_deadline_breached`.
 
 ---
 

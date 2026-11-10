@@ -317,12 +317,11 @@ describe("the remittances' nightly checks (M2c-4 and its review)", () => {
       "draft_waiting",
       "invoice_late",
       "unallocated_deadline",
-      // review M2c-4 (nc#0, legal#3, tests-ui#3)
+      // review M2c-4 (nc#0, legal#3; tests-ui#3 is draft_waiting widened)
       "remittance_deadline_not_computable",
       "remittance_schedule_failed",
       "remittance_payout_overdue",
       "remittance_payout_not_executed",
-      "remittance_prepare_failed",
     ]) {
       expect(CHECK_LABEL[code]?.label, code).toBeTruthy();
       expect(CHECK_LABEL[code]?.help, code).toBeTruthy();

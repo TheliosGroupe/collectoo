@@ -820,22 +820,10 @@ isOneToOne: false
       referencedRelation: "account"
       referencedColumns: ["id"]
     },{
-      foreignKeyName: "commission_credit_alloc_credit_note_id_fkey"
-      columns: ["credit_note_id"]
-isOneToOne: false
-      referencedRelation: "commission_invoice"
-      referencedColumns: ["id"]
-    },{
       foreignKeyName: "commission_credit_alloc_entry_id_fkey"
       columns: ["entry_id"]
 isOneToOne: false
       referencedRelation: "ledger_entry"
-      referencedColumns: ["id"]
-    },{
-      foreignKeyName: "commission_credit_alloc_original_invoice_id_fkey"
-      columns: ["original_invoice_id"]
-isOneToOne: false
-      referencedRelation: "commission_invoice"
       referencedColumns: ["id"]
     }
                   ]
@@ -1906,19 +1894,51 @@ isOneToOne: false
       referencedRelation: "account"
       referencedColumns: ["id"]
     },{
-      foreignKeyName: "remittance_key_state_client_organization_id_fkey"
+      foreignKeyName: "remittance_key_state_run_id_fkey"
+      columns: ["run_id"]
+isOneToOne: false
+      referencedRelation: "remittance_run"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"remittance_late_approval": {
+                  Row: {
+                    "approved_by": string | null,"client_organization_id": string,"created_at": string,"late_reason": string,"latest_execution_date": string,"ledger_entry_id": string,"organization_id": string,"requested_execution_date": string,"run_id": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "approved_by"?: string | null,"client_organization_id": string,"created_at"?: string,"late_reason": string,"latest_execution_date": string,"ledger_entry_id": string,"organization_id": string,"requested_execution_date": string,"run_id": string
+                  }
+                  Update: {
+                    "approved_by"?: string | null,"client_organization_id"?: string,"created_at"?: string,"late_reason"?: string,"latest_execution_date"?: string,"ledger_entry_id"?: string,"organization_id"?: string,"requested_execution_date"?: string,"run_id"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "remittance_late_approval_approved_by_fkey"
+      columns: ["approved_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_late_approval_client_organization_id_fkey"
       columns: ["client_organization_id"]
 isOneToOne: false
       referencedRelation: "organization"
       referencedColumns: ["id"]
     },{
-      foreignKeyName: "remittance_key_state_organization_id_fkey"
+      foreignKeyName: "remittance_late_approval_ledger_entry_id_fkey"
+      columns: ["ledger_entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_late_approval_organization_id_fkey"
       columns: ["organization_id"]
 isOneToOne: false
       referencedRelation: "organization"
       referencedColumns: ["id"]
     },{
-      foreignKeyName: "remittance_key_state_run_id_fkey"
+      foreignKeyName: "remittance_late_approval_run_id_fkey"
       columns: ["run_id"]
 isOneToOne: false
       referencedRelation: "remittance_run"
@@ -1944,12 +1964,6 @@ isOneToOne: false
       referencedRelation: "account"
       referencedColumns: ["id"]
     },{
-      foreignKeyName: "remittance_line_client_organization_id_fkey"
-      columns: ["client_organization_id"]
-isOneToOne: false
-      referencedRelation: "organization"
-      referencedColumns: ["id"]
-    },{
       foreignKeyName: "remittance_line_invoice_fk"
       columns: ["invoice_id"]
 isOneToOne: false
@@ -1972,12 +1986,6 @@ isOneToOne: false
       columns: ["mandate_terms_id"]
 isOneToOne: false
       referencedRelation: "mandate_terms"
-      referencedColumns: ["id"]
-    },{
-      foreignKeyName: "remittance_line_organization_id_fkey"
-      columns: ["organization_id"]
-isOneToOne: false
-      referencedRelation: "organization"
       referencedColumns: ["id"]
     },{
       foreignKeyName: "remittance_line_original_entry_id_fkey"

@@ -143,6 +143,13 @@ describe("runs (M2c-4 « Reversements »)", () => {
     expect(errorText("run_busy")).not.toContain("rapprochement");
   });
 
+  it("names the commands' allocation-lock refusal and the midnight retry (review M2c-4 perf#4, nc#1)", () => {
+    expect(runErrorCode("remittance run refused: allocation_busy")).toBe("run_busy");
+    expect(runErrorCode("commission documents: the day turned during the transaction, retry")).toBe("run_retry");
+    expect(errorText("run_retry")).toContain("Réessayez");
+    expect(errorText("run_retry")).not.toMatch(/[a-z]+_[a-z]+/);
+  });
+
   it("shows a failed preparation as such, not as a preparation running for ever (review M2c-4 tests-ui#3, C4)", () => {
     const failed = {
       status: "draft",

@@ -174,6 +174,7 @@ export type ErrorCode =
   | "run_already_sent"
   | "run_none_selected"
   | "run_busy"
+  | "run_retry"
   | "execution_date_invalid"
   | "unknown";
 
@@ -339,6 +340,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   run_none_selected: "Cochez au moins un reversement à valider.",
   run_busy:
     "Un traitement est en cours sur ce reversement ou pour ce cabinet (préparation, validation ou imputation) : réessayez dans un instant.",
+  run_retry: "La date a changé (minuit) pendant l'opération : rien n'a été enregistré. Réessayez.",
   execution_date_invalid: "La date d'exécution demandée doit être un jour ouvré, à partir d'aujourd'hui.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };

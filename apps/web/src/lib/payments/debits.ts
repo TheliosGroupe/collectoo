@@ -351,7 +351,8 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   remittance_delay_unmeetable: {
     label: "Délai de reversement intenable",
-    help: "Le délai du mandat (moins de 6 jours) ne laisse aucun jour ouvré pour exécuter le virement à temps : à revoir avec le client.",
+    // review M2c-4 (legal#1): the J-5, J-1 alerts and the breach then count one month from the encaissement
+    help: "Le délai du mandat (moins de 6 jours) ne laisse aucun jour ouvré pour exécuter le virement à temps : à revoir avec le client. Les alertes à 5 et 1 jours ouvrés, puis le dépassement, sont alors comptés sur un mois après l'encaissement.",
   },
   remittance_due_critical: {
     label: "Reversement à exécuter demain au plus tard",
@@ -367,12 +368,8 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   draft_waiting: {
     label: "Brouillon de reversement en attente",
-    help: "Un brouillon de reversement attend depuis plus d'un jour ouvré : sa validation, ou « Actualiser » si sa préparation a échoué.",
-  },
-  // review M2c-4 (tests-ui#3): a draft whose preparation failed, which nothing retries
-  remittance_prepare_failed: {
-    label: "Préparation d'un reversement échouée",
-    help: "La préparation d'un brouillon de reversement a échoué et rien ne la relance : ouvrez-le et cliquez « Actualiser » (ou « Abandonner »).",
+    // review M2c-4 (tests-ui#3, C4): also, at once, a draft whose preparation failed (details.prepare_failed)
+    help: "Un brouillon de reversement attend sa validation depuis plus d'un jour ouvré, ou sa préparation a échoué et rien ne la relance : validez-le, ou ouvrez-le et cliquez « Actualiser » (ou « Abandonner »).",
   },
   // review M2c-4 (legal#3): an approved run is not paid until the bank's debit
   remittance_payout_overdue: {

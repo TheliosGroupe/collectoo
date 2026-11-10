@@ -223,6 +223,10 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
   // a run, or the servicer's allocation work, locked by a job or another command (review M2c-4 tests-ui#5)
   ["could not obtain lock", "run_busy"],
   ["lock timeout", "run_busy"],
+  // the commands' allocation lock waited too long (cancel, refresh, discard; review M2c-4 perf#4)
+  ["allocation_busy", "run_busy"],
+  // the documents' day turned at Paris midnight during the command (review M2c-4 nc#1): a new try works
+  ["the day turned", "run_retry"],
 ];
 
 /** Code for an error raised by a run command (never the database's text on the page). */
