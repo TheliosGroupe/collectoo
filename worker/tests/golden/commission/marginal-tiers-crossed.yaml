@@ -1,7 +1,8 @@
 # Marginal tiers on what the file brought in (founder #5): a collection that crosses the tier inside one run, a
-# reversal that goes back across it, credited LIFO on two invoices (the later one first), and the credit-note VAT by
-# cumulative difference — the full credit of an invoice gives back exactly its VAT. TO VALIDATE: synthetic grid;
-# credit notes on undone collections are founder #6 / OQ-39.
+# reversal that goes back across it, credited first on the invoice that charged the collection it undoes (founder #6:
+# « a credit note on the original invoice »), the rest LIFO, and the credit-note VAT by cumulative difference — the
+# full credit of an invoice gives back exactly its VAT. TO VALIDATE: synthetic grid; credit notes on undone
+# collections are founder #6 / OQ-39.
 case: marginal-tiers-crossed
 status: TO VALIDATE
 vat_rate: "0.2000"
@@ -53,7 +54,7 @@ runs:
               - {claim_type: b2b_invoice, rule: paliers, families: [principal], ht: "16000", tiers: [["0.10", "100000"], ["0.06", "100000"]]}
   - name: run 3 — A undone (back across the tier), a new file collects
     lines:
-      - {entry: R-A, kind: allocation_reversal, file: F-1, e: "2026-10-20", eff: "2026-11-25", amount: "-400000", basis: {principal: "-400000"}}
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-1, e: "2026-10-20", eff: "2026-11-25", amount: "-400000", basis: {principal: "-400000"}}
       - {entry: C, kind: allocation, file: F-2, e: "2026-11-20", eff: "2026-11-20", amount: "50000", basis: {principal: "50000"}}
     expect:
       lines:
@@ -74,11 +75,10 @@ runs:
             vat: "-7200"
             ttc: "-43200"
             corrected:
-              FC-2026-000001: {ht: "-20000", vat: "-4000"}          # LIFO: FC-2 first (all of its 160,00), then 200,00 of FC-1
-              FC-2026-000002: {ht: "-16000", vat: "-3200"}          # fully credited: its whole VAT
+              FC-2026-000001: {ht: "-36000", vat: "-7200"}          # A's own invoice (400,00 charged): 40,00 stays open
   - name: run 4 — B undone, the file back to 0
     lines:
-      - {entry: R-B, kind: allocation_reversal, file: F-1, e: "2026-11-05", eff: "2026-12-02", amount: "-200000", basis: {principal: "-200000"}}
+      - {entry: R-B, kind: allocation_reversal, original: B, file: F-1, e: "2026-11-05", eff: "2026-12-02", amount: "-200000", basis: {principal: "-200000"}}
     expect:
       lines:
         R-B: {commission: "-20000", parts: {paliers: "-20000"}}
@@ -87,7 +87,8 @@ runs:
           credit_note:
             number: FC-2026-000005
             ht: "-20000"
-            vat: "-4000"          # R(400,00 × 20 %) − R(200,00 × 20 %): FC-1 credited in full, 80,00 of VAT in all
+            vat: "-4000"
             ttc: "-24000"
             corrected:
-              FC-2026-000001: {ht: "-20000", vat: "-4000"}
+              FC-2026-000002: {ht: "-16000", vat: "-3200"}          # B's own invoice first, in full: its whole VAT
+              FC-2026-000001: {ht: "-4000", vat: "-800"}            # then LIFO: FC-1's last 40,00 (72,00 + 8,00 = its VAT)

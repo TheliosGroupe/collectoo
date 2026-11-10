@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from collectoo_worker.remittance.packs import VatPack, VatRateRow, vat_pack
+from collectoo_worker.remittance.packs import LegalRef, VatPack, VatRateRow, vat_pack
 
 RATE_SCALE = 10_000  # rates have at most 4 decimals (numeric(6,4))
 
@@ -78,8 +78,20 @@ def vat_moved(vat: int, ttc: int, settled_before: int, settled_after: int) -> in
     return div_half_up(vat * settled_after, ttc) - div_half_up(vat * settled_before, ttc)
 
 
+def texts_due(today: date, pack: VatPack | None = None) -> list[LegalRef]:
+    """Every text whose review is due and not recorded — the rate rows' and the exigibility,
+    invoicing and credit-note texts of the 2027 recodification (the CI tripwire)."""
+    pack = pack or vat_pack()
+    return [
+        text
+        for text, _, review in pack.texts()
+        if review is not None and review.reviewed_on is None and review.due_from <= today
+    ]
+
+
 def reviews_due(today: date, pack: VatPack | None = None) -> list[VatRateRow]:
-    """Rows whose review is due and not recorded (the CI tripwire, the `vat_pack_review` alert)."""
+    """Rows whose review is due and not recorded (the `vat_pack_review` alert of
+    private.reference_data_alerts: the row stands for every text reviewed with it)."""
     pack = pack or vat_pack()
     return [
         r

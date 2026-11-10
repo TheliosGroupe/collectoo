@@ -7,6 +7,13 @@
     latest_exec    = business day before last_bd               CMF L133-13 I: credited by D+1
     alert_soon     = latest_exec - 5 business days
     alert_critical = latest_exec - 1 business day
+    unmeetable     = latest_exec ≤ E                           the money cannot be paid out in time
+
+A mandate's delay of 1 to 5 days can leave no business day after the encaissement on which to
+execute (E 13/11/2026 under 2 days: the deadline is Sun 15/11, the latest execution Thu 12/11). Both
+twins flag it (`unmeetable`, review fix): M2c-4 records such a line as « délai intenable », not as
+an operational breach. From 6 days on it never happens on the seeded calendar (2026 to 2031, a
+property test); whether the terms should refuse such a delay is the founder's call (OQ-71).
 
 Pure. The SQL twin `private.remittance_deadline(E, days)` gives the same dates (CI parity on 10,000
 dates). Both refuse a date whose computation leaves the calendar's seeded horizon.
@@ -31,6 +38,7 @@ class RemittanceDeadline:
     latest_execution: date
     alert_soon: date
     alert_critical: date
+    unmeetable: bool  # latest execution on or before E: no business day left to pay out
 
 
 def encaissement_date(booking_date: date, value_date: date | None) -> date:
@@ -63,4 +71,5 @@ def remittance_deadline(
         latest_execution=latest,
         alert_soon=cal.before(latest, pack.alert_soon_business_days),
         alert_critical=cal.before(latest, pack.alert_critical_business_days),
+        unmeetable=latest <= encaissement,
     )

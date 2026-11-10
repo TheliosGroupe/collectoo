@@ -1,0 +1,71 @@
+# The clause keeps the fee of an undone collection (`on_reversal: keep`, OQ-39) on a marginal grid and with a minimum
+# per file (review fix math #1). The undone basis leaves the tier position — tiers are on what the file brought in net
+# of reversals (design §8.1) — so the money collected again is priced in the first tier again, not pushed into a
+# lower one; the fee it would have given back stays due, and the minimum per file is charged once (the kept fee
+# counts towards it). TO VALIDATE: only with such a clause.
+case: reversal-keep-marginal
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  paliers:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: keep}
+    rules:
+      - id: tout
+        tier_key: tout
+        label_fr: "Toutes créances"
+        match: {}
+        rate: {kind: marginal, tiers: [{up_to_minor: "500000", rate: "0.10"}, {up_to_minor: null, rate: "0.06"}]}
+  minimum:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: keep}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.01"}, min_per_file_minor: "30000"}
+mandates:
+  MAND-K: [{id: k1, from: "2026-01-01", to: null, schedule: paliers}]
+  MAND-L: [{id: l1, from: "2026-01-01", to: null, schedule: minimum}]
+files:
+  F-K: {mandate: MAND-K, claim_type: b2b_invoice, portfolio: P1}
+  F-L: {mandate: MAND-L, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — 5 000,00 € on F-K, 1 000,00 € on F-L
+    lines:
+      - {entry: A, kind: allocation, file: F-K, e: "2026-10-01", eff: "2026-10-01", amount: "500000", basis: {principal: "500000"}}
+      - {entry: L, kind: allocation, file: F-L, e: "2026-10-01", eff: "2026-10-01", amount: "100000", basis: {principal: "100000"}}
+    expect:
+      lines:
+        A: {commission: "50000", parts: {tout: "50000"}}     # 10 % × 5 000,00
+        L: {commission: "30000", parts: {tout: "30000"}}     # the minimum, 300,00 (1 % would be 10,00)
+      documents:
+        MAND-K:
+          invoice: {number: FC-2026-000001, ht: "50000", vat: "10000", ttc: "60000"}
+        MAND-L:
+          invoice: {number: FC-2026-000002, ht: "30000", vat: "6000", ttc: "36000"}
+  - name: run 2 — both undone, the fees stay due, no credit note
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-K, e: "2026-10-01", eff: "2026-10-20", amount: "-500000", basis: {principal: "-500000"}}
+      - {entry: R-L, kind: allocation_reversal, original: L, file: F-L, e: "2026-10-01", eff: "2026-10-20", amount: "-100000", basis: {principal: "-100000"}}
+    expect:
+      lines:
+        R-A: {commission: "0", parts: {tout: "0"}}
+        R-L: {commission: "0", parts: {tout: "0"}}
+      documents: {}
+  - name: run 3 — collected again
+    lines:
+      - {entry: A2, kind: allocation, file: F-K, e: "2026-11-02", eff: "2026-11-02", amount: "500000", basis: {principal: "500000"}}
+      - {entry: L2, kind: allocation, file: F-L, e: "2026-11-02", eff: "2026-11-02", amount: "100000", basis: {principal: "100000"}}
+    expect:
+      lines:
+        A2: {commission: "50000", parts: {tout: "50000"}}    # the first tier again (10 %), not 6 %: 1 000,00 in all
+        L2: {commission: "1000", parts: {tout: "1000"}}      # the minimum is already charged: 1 % only, 310,00 in all
+      documents:
+        MAND-K:
+          invoice:
+            number: FC-2026-000003
+            ht: "50000"
+            vat: "10000"
+            ttc: "60000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "50000", tiers: [["0.10", "500000"]]}
+        MAND-L:
+          invoice: {number: FC-2026-000004, ht: "1000", vat: "200", ttc: "1200"}

@@ -65,7 +65,7 @@ runs:
       # E10: P6 300 000 booked Tue 10/11 on M-0077
       - {entry: E10, kind: allocation, file: M-0077, e: "2026-11-10", eff: "2026-11-10", amount: "300000", basis: {principal: "300000"}}
       # R(E2): the bank took P1 back on Thu 12/11 (encaissement date: P1's, 12/10)
-      - {entry: R-E2, kind: allocation_reversal, file: M-0042, e: "2026-10-12", eff: "2026-11-12", amount: "-200000", basis: {principal: "-200000"}}
+      - {entry: R-E2, kind: allocation_reversal, original: E2, file: M-0042, e: "2026-10-12", eff: "2026-11-12", amount: "-200000", basis: {principal: "-200000"}}
       # A1: the servicer's advance of the reversed amount (basis 0)
       - {entry: A1, kind: client_advance, file: M-0042, e: "2026-11-12", eff: "2026-11-12", amount: "200000"}
     expect:

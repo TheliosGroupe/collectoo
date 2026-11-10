@@ -18,9 +18,10 @@
 --     are generated from the pack (`python -m collectoo_worker.remittance.calendar`); a CI test checks the table equals
 --     the calendar the Python engine computes. Append-only: a later migration adds years;
 --   * the SQL twin of the R124-6 deadline (§9.2): private.encaissement_date, private.add_month_cpc641,
---     private.remittance_deadline (deadline, last business day, latest execution date, alert dates) — the same dates
---     as collectoo_worker.remittance.deadline on 10,000 generated encaissements (CI parity); both refuse a date
---     whose computation leaves the seeded horizon (22023);
+--     private.remittance_deadline (deadline, last business day, latest execution date, alert dates, and whether the
+--     delay leaves no business day to pay out after the encaissement) — the same as collectoo_worker.remittance.deadline
+--     on 10,000 generated encaissements (CI parity); both refuse a date whose computation leaves the seeded horizon
+--     (22023);
 --   * private.vat_rate_on(day) and private.reference_data_alerts(today): `vat_pack_review` (a row's review is due and
 --     not recorded) and `calendar_horizon` (less than 12 months seeded). M2c-4 adds them to the nightly checks when it
 --     redefines private.run_payment_checks; CI fails on both already (worker/tests/test_vat.py, test_deadline.py).
@@ -264,17 +265,23 @@ as $$ select (p_day + interval '1 month')::date $$;
 --   last business day ≤ deadline;
 --   latest execution date = the business day before it          — the payee's bank is credited by D+1 (L133-13 I);
 --   alert dates = latest execution − 5 and − 1 business days     — the pack's margins (the parity test checks these
---                                                                   defaults against the YAML).
+--                                                                   defaults against the YAML);
+--   unmeetable = latest execution ≤ E                            — a delay of 1–5 days can leave no business day
+--                                                                   after the money arrives (E Fri 13/11/2026, 2 days:
+--                                                                   latest execution Thu 12/11); M2c-4 records such a
+--                                                                   line as « délai intenable », not as a breach; from
+--                                                                   6 days on it never happens on 2026–2031 (OQ-71).
 -- One keyed range scan of the calendar (at most 41 days back from the deadline); a deadline beyond the horizon, or
 -- a computation that walks back before it, raises 22023 « business calendar: … horizon » (the Python twin raises
--- CalendarHorizonError in the same cases).
+-- CalendarHorizonError in the same cases). Exactly one row (`rows 1`: a lateral join is estimated as such).
 create or replace function private.remittance_deadline(p_encaissement date, p_max_days integer,
                                                        p_soon_days integer default 5,
                                                        p_critical_days integer default 1)
 returns table (encaissement_date date, deadline date, last_business_day date, latest_execution_date date,
-               alert_soon_date date, alert_critical_date date)
+               alert_soon_date date, alert_critical_date date, unmeetable boolean)
 language plpgsql
 stable
+rows 1
 set search_path = ''
 set enable_seqscan = off
 as $$
@@ -305,7 +312,7 @@ begin
       using errcode = '22023';
   end if;
   return query select p_encaissement, v_deadline, v_open[1], v_open[2], v_open[2 + p_soon_days],
-                      v_open[2 + p_critical_days];
+                      v_open[2 + p_critical_days], v_open[2] <= p_encaissement;
 end;
 $$;
 

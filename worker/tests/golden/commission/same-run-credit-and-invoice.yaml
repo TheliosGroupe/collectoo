@@ -1,0 +1,85 @@
+# A collection undone in the same run as a new collection on the same file (a rejected direct debit, then a
+# transfer): the run issues a credit note on the original invoice for the undone collection and an invoice for the
+# new one, never one netted amount (review fix legal-vat #1; founder #6; CGI 289 I 5: a document that modifies the
+# initial invoice « fait référence à la facture initiale de façon spécifique et non équivoque »; CGI 272 1: the VAT
+# is given back on « la rectification préalable de la facture initiale »). With and without a change of terms
+# between the two collections. TO VALIDATE: synthetic terms.
+case: same-run-credit-and-invoice
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  quinze:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances (15 %)", match: {}, rate: {kind: flat, rate: "0.15"}}
+  douze:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances (12 %)", match: {}, rate: {kind: flat, rate: "0.12"}}
+mandates:
+  MAND-A: [{id: a1, from: "2026-01-01", to: null, schedule: quinze}]
+  MAND-B:
+    - {id: b1, from: "2026-01-01", to: "2026-11-16", schedule: quinze}
+    - {id: b2, from: "2026-11-16", to: null, schedule: douze}
+files:
+  F-A: {mandate: MAND-A, claim_type: b2b_invoice, portfolio: P1}
+  F-B: {mandate: MAND-B, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — 1 000,00 € on each file
+    lines:
+      - {entry: A, kind: allocation, file: F-A, e: "2026-11-10", eff: "2026-11-10", amount: "100000", basis: {principal: "100000"}}
+      - {entry: B, kind: allocation, file: F-B, e: "2026-11-10", eff: "2026-11-10", amount: "100000", basis: {principal: "100000"}}
+    expect:
+      lines:
+        A: {commission: "15000", parts: {tout: "15000"}}
+        B: {commission: "15000", parts: {tout: "15000"}, terms: b1}
+      documents:
+        MAND-A:
+          invoice: {number: FC-2026-000001, ht: "15000", vat: "3000", ttc: "18000"}
+        MAND-B:
+          invoice: {number: FC-2026-000002, ht: "15000", vat: "3000", ttc: "18000"}
+  - name: run 2 — each collection undone, 2 000,00 € collected again on the same file
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-A, e: "2026-11-10", eff: "2026-11-25", amount: "-100000", basis: {principal: "-100000"}}
+      - {entry: C, kind: allocation, file: F-A, e: "2026-11-24", eff: "2026-11-24", amount: "200000", basis: {principal: "200000"}}
+      - {entry: R-B, kind: allocation_reversal, original: B, file: F-B, e: "2026-11-10", eff: "2026-11-25", amount: "-100000", basis: {principal: "-100000"}}
+      - {entry: D, kind: allocation, file: F-B, e: "2026-11-24", eff: "2026-11-24", amount: "200000", basis: {principal: "200000"}}
+    expect:
+      lines:
+        R-A: {commission: "-15000", parts: {tout: "-15000"}}
+        C: {commission: "30000", parts: {tout: "30000"}}
+        R-B: {commission: "-15000", parts: {tout: "-15000"}, terms: b1}
+        D: {commission: "24000", parts: {tout: "24000"}, terms: b2}
+      documents:
+        MAND-A:
+          invoice:
+            number: FC-2026-000003
+            ht: "30000"            # the new collection, in full: not 15 000 netted
+            vat: "6000"
+            ttc: "36000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "30000", tiers: [["0.15", "200000"]]}
+          credit_note:
+            number: FC-2026-000004
+            ht: "-15000"
+            vat: "-3000"
+            ttc: "-18000"
+            corrected:
+              FC-2026-000001: {ht: "-15000", vat: "-3000"}
+        MAND-B:
+          invoice:
+            number: FC-2026-000005
+            ht: "24000"            # 12 % under the new terms
+            vat: "4800"
+            ttc: "28800"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "24000", tiers: [["0.12", "200000"]]}
+          credit_note:
+            number: FC-2026-000006
+            ht: "-15000"           # 15 %, the old terms, on the original invoice
+            vat: "-3000"
+            ttc: "-18000"
+            corrected:
+              FC-2026-000002: {ht: "-15000", vat: "-3000"}

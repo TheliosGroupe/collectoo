@@ -41,7 +41,7 @@ runs:
               - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "27000", tiers: [["0.15", "100000"], ["0.12", "100000"]]}
   - name: run of 16/12 — A undone, credited at the old rate
     lines:
-      - {entry: R-A, kind: allocation_reversal, file: F-V, e: "2026-11-10", eff: "2026-12-10", amount: "-100000", basis: {principal: "-100000"}}
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-V, e: "2026-11-10", eff: "2026-12-10", amount: "-100000", basis: {principal: "-100000"}}
     expect:
       lines:
         R-A: {commission: "-15000", parts: {tout: "-15000"}, terms: v1}

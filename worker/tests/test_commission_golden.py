@@ -1,11 +1,12 @@
 """Golden cases of the commission engine `commission-1` (design §8, §18 M2-13; founder #4, #5, #6):
 worked examples to the cent in worker/tests/golden/commission/*.yaml — flat; claim-type and family
 rates; marginal tiers crossed inside one collection and back; brackets by boarded amount and by age;
-the minimum per file, capped; a version change; the bounds across versions; the fee kept by clause;
-forwards; items that earn nothing; and the §7.2 worked example (RV-2026-000001 … 000003). Each run's
-lines, then its invoice and credit note per mandate (§8.4), with the history carried to the next
-run. Every case is marked TO VALIDATE until the founder's anonymised clauses replace the synthetic
-ones."""
+the minimum per file, capped, across several runs; a version change; a collection made before a
+change undone after it; the cap across versions; a reversal and a new collection in one run (a
+credit note and an invoice); the fee kept by clause, flat and marginal; forwards; items that earn
+nothing; and the §7.2 worked example (RV-2026-000001 … 000003). Each run's lines, then its invoice
+and credit note per mandate (§8.4), with the history carried to the next run. Every case is
+marked TO VALIDATE until the founder's anonymised clauses replace the synthetic ones."""
 
 from decimal import Decimal
 from pathlib import Path
@@ -26,8 +27,11 @@ def test_the_golden_set() -> None:
         "brackets",
         "minimum-capped",
         "version-change",
-        "cross-version-bounds",
+        "version-change-partial-reversal",
+        "cross-version-cap",
+        "same-run-credit-and-invoice",
         "reversal-keep",
+        "reversal-keep-marginal",
         "forwards",
         "none-states",
     } <= names
@@ -52,8 +56,8 @@ def _check_lines(result: Any, expect: dict[str, Any], where: str) -> None:
             assert parts == {k: int(v) for k, v in want["parts"].items()}, f"{where} {entry}"
         if "terms" in want:
             assert r.terms_id == want["terms"], f"{where} {entry}"
-        if "clamped" in want:
-            assert any(p.clamped for p in r.parts) == want["clamped"], f"{where} {entry}"
+        if "capped" in want:
+            assert any(p.capped for p in r.parts) == want["capped"], f"{where} {entry}"
 
 
 def _check_documents(docs: Any, expect: dict[str, Any], where: str) -> None:

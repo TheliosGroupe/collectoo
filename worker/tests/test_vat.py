@@ -1,10 +1,12 @@
 """VAT on the commission (design §3, §8.4, §8.5, §9.6; rule pack `vat/fr`): the rate rows and their
 references, the rounding bounds (Hypothesis), and the tripwire of the 2027 recodification.
 
-The tripwire: from the row's `review.due_from` (2026-12-01 for the CIBS L213-151 row) CI fails
-until a human re-reads the text, records `reviewed_on` / `reviewed_by` in
-worker/rule_packs/vat/fr.yaml and a migration copies them into public.vat_rate (the integration test
-checks the table equals the file)."""
+The tripwire: from `review.due_from` (2026-12-01 for the 2027 recodification) CI fails until a human
+re-reads every text due — the CIBS L213-151 rate row and the exigibility, invoicing and credit-note
+texts (CIBS L211-4, L214-6, L214-9, L216-25, L216-30, the maintained CGI 269 2 c …) —, records
+`reviewed_on` / `reviewed_by` on all of them in worker/rule_packs/vat/fr.yaml (the loader refuses
+them recorded apart) and a migration copies the rate row's into public.vat_rate (the integration
+test checks the table equals the file)."""
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -25,6 +27,7 @@ from collectoo_worker.remittance.vat import (
     rate_row,
     reviews_due,
     scaled,
+    texts_due,
     vat_moved,
     vat_of,
 )
@@ -49,22 +52,38 @@ def test_the_standard_rate_and_its_texts() -> None:
 
 
 def test_the_review_tripwire_logic() -> None:
-    row = next(r for r in vat_pack().rates if r.review is not None)
+    pack = vat_pack()
+    row = next(r for r in pack.rates if r.review is not None)
     assert row.review is not None
     if row.review.reviewed_on is None:
-        assert reviews_due(date(2026, 11, 30)) == []
+        assert reviews_due(date(2026, 11, 30)) == [] and texts_due(date(2026, 11, 30)) == []
         assert reviews_due(row.review.due_from) == [row]
+        due = {t.title for t in texts_due(row.review.due_from)}
+        # the texts the engine and the documents rely on from 2027, not only the rate
+        assert {
+            "CIBS art. L213-151",
+            "CIBS art. L211-4",
+            "CIBS art. L214-6",
+            "CIBS art. L214-9",
+            "CIBS art. L216-30 1°",
+            "CIBS art. L216-25 al. 2",
+            "CGI art. 269 2 c",
+        } <= due
     assert row.review.due_from < row.valid_from, "reviewed before it applies"
+    for text, applies, review in pack.texts():
+        if applies is not None and applies > pack.read_on:
+            assert review is not None and review.due_from < applies, text.title
 
 
 def test_vat_pack_review_tripwire() -> None:
-    """Fails CI from the review date until the 2027 row is re-read and marked reviewed."""
-    due = reviews_due(paris_date(datetime.now(UTC)))
+    """Fails CI from the review date until every 2027 text is re-read and marked reviewed."""
+    due = texts_due(paris_date(datetime.now(UTC)))
     assert not due, (
         "VAT rule pack review due: re-read "
-        + ", ".join(f"{r.legal_ref.title} ({r.legal_ref.url})" for r in due)
-        + " on LibreJustice, record reviewed_on / reviewed_by in worker/rule_packs/vat/fr.yaml and"
-        " copy them into public.vat_rate by a new migration"
+        + ", ".join(f"{t.title} ({t.url or t.note})" for t in due)
+        + " on LibreJustice, record reviewed_on / reviewed_by on each in"
+        " worker/rule_packs/vat/fr.yaml and copy the rate row's into public.vat_rate by a new"
+        " migration"
     )
 
 

@@ -4,9 +4,10 @@ engine.
 * `public.vat_rate` equals worker/rule_packs/vat/fr.yaml, row for row (the CI equality);
 * `public.business_calendar` equals the calendar the Python engine computes from
   worker/rule_packs/remittance/fr.yaml, day for day, over the whole seeded horizon;
-* `private.remittance_deadline` gives the dates of collectoo_worker.remittance.deadline on 10,000
-  generated (encaissement, delay) pairs, its default margins are the pack's, and both refuse the
-  same out-of-horizon dates; the 10,000 calls read the calendar by index only (ARCHITECTURE §4);
+* `private.remittance_deadline` gives the dates and the « unmeetable » flag of
+  collectoo_worker.remittance.deadline on 10,000 generated (encaissement, delay) pairs — short
+  delays of 1 to 6 days among them —, its default margins are the pack's, and both refuse the same
+  out-of-horizon dates; the 10,000 calls read the calendar by index only (ARCHITECTURE §4);
 * `private.reference_data_alerts` raises what the Python tripwires say, and the seeded horizon
   covers the next 12 months (CI fails otherwise)."""
 
@@ -101,7 +102,9 @@ def _pairs(seed: int) -> list[tuple[date, int]]:
     edges += [
         d for d, c in conservative().days() if c and c.sources != ("weekend",) and lo <= d <= hi
     ]
-    return out[: N - len(edges)] + [(d, 30) for d in edges]
+    # short mandate delays, where the latest execution can fall on or before E (the flag)
+    short = [(lo + timedelta(days=3 * k), 1 + k % 6) for k in range(700)]
+    return out[: N - len(edges) - len(short)] + [(d, 30) for d in edges] + short
 
 
 def test_deadline_parity_on_10k_dates() -> None:
@@ -110,7 +113,8 @@ def test_deadline_parity_on_10k_dates() -> None:
     with psycopg.connect(DB) as conn, conn.transaction():
         rows = conn.execute(
             """select t.n, d.encaissement_date, d.deadline, d.last_business_day,
-                      d.latest_execution_date, d.alert_soon_date, d.alert_critical_date
+                      d.latest_execution_date, d.alert_soon_date, d.alert_critical_date,
+                      d.unmeetable
                from unnest(%s::date[], %s::int[]) with ordinality t (e, days, n)
                cross join lateral private.remittance_deadline(t.e, t.days) d
                order by t.n""",
@@ -132,10 +136,13 @@ def test_deadline_parity_on_10k_dates() -> None:
             d.latest_execution,
             d.alert_soon,
             d.alert_critical,
+            d.unmeetable,
         )
         if tuple(row[1:]) != py:
             differ.append((e, days, row[1:], py))
     assert not differ, differ[:5]
+    flagged = [(e, days) for (e, days), row in zip(pairs, rows, strict=True) if row[7]]
+    assert flagged and all(days <= 5 for _, days in flagged), flagged[:5]
 
 
 def test_both_refuse_the_same_dates() -> None:

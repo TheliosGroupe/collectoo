@@ -26,10 +26,10 @@ runs:
           invoice: {number: FC-2026-000001, ht: "10000", vat: "2000", ttc: "12000"}
   - name: run 2 — A undone, the fee stays due, no credit note
     lines:
-      - {entry: R-A, kind: allocation_reversal, file: F-K, e: "2026-10-01", eff: "2026-10-20", amount: "-100000", basis: {principal: "-100000"}}
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-K, e: "2026-10-01", eff: "2026-10-20", amount: "-100000", basis: {principal: "-100000"}}
     expect:
       lines:
-        R-A: {commission: "0", parts: {}}
+        R-A: {commission: "0", parts: {tout: "0"}}     # its basis leaves the tier position, its 100,00 are kept
       documents: {}
   - name: run 3 — collected again
     lines:

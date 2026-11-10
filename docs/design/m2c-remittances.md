@@ -670,6 +670,7 @@ f(c)  = 0 if c = 0, else min( max(m, g(c)), floor(c / (1 + τ)) )      m = min p
 line commission = R(f_v(c_after)) − R(f_v(c_before))                  R = round half-up to the cent; v = the line's version
 ```
 
+- **Amended by the M2c-3 review (ADR-0014):** across versions the commission of a (file, tier key) is a function of its live lines, taken in encaissement-date order (K = min(Σ_v [f_v(C_≤v) − f_v(C_<v)], ⌊C / (1 + τ)⌋)), not of the order runs arrive in; a rounding reserve keeps the TTC billed within the basis across runs; `keep` reversals leave the tier position (CALCULATION_RULES §7).
 - **Telescoping:** within one version, a file's total commission is R(f(Σ basis)) whatever the split into lines and runs. A reversal gives back exactly what f says, including across marginal tiers, and a full reversal returns the file to 0.
 - **The cap** keeps the commission TTC within what the file brought in (ops critique #7).
 - **The basis** of an allocation comes from the entry's own 1100 credits per component family. A forward's basis is 0 unless the schedule lists its reason. A reversal's basis is minus its original's; an advance, a returned payout and an unplanned payout have basis 0.
@@ -677,7 +678,7 @@ line commission = R(f_v(c_after)) − R(f_v(c_before))                  R = roun
 
 ### 8.4 From lines to documents
 
-1. **Per (mandate, file, tier key)**, the run's net Δ = Σ line commissions. A positive Δ goes to the mandate's invoice; a negative Δ goes to its credit note.
+1. **Per (mandate, file, tier key)**, the run's net Δ = Σ line commissions. A positive Δ goes to the mandate's invoice; a negative Δ goes to its credit note. *Amended by the M2c-3 review (founder #6, ADR-0014):* the raising parts go to the invoice and the lowering parts to the credit note, never netted across documents; only what was never invoiced nets inside the run (a reversal of a same-run collection, a credit beyond what earlier invoices charge the key); a credit goes first to the invoice that charged the collection it undoes.
 2. **Invoice lines** are grouped per (claim type, rule, families). Each line has quantity 1, a unit price HT equal to Σ Δ, and the VAT rate. The designation states the base collected in each tier and the tier rates, for example « Commission de recouvrement amiable — Factures entre professionnels — 15 % — sur 2 000,00 € encaissés du 21/10 au 02/11/2026 (mandat MAND-MARTIN-2026, relevé RV-2026-000001) ». This meets 242 nonies A 8° (quantity, precise designation, unit price HT, rate).
 3. **Invoice VAT** = R(HT × rate), per invoice and rate (11°), at the rate valid on the issue date.
 4. **Credit-note allocation.** A negative Δ is assigned LIFO to the earlier invoices that charged that (file, tier key), each up to what that invoice charged net of earlier credits (`commission_credit_alloc`). Every line names its original invoice (289 I 5).
@@ -1156,7 +1157,7 @@ Amounts come from the database as text, never JS numbers. No copy says « payé 
 |---|---|---|
 | Pending trigger + running balance | 50k allocations in one job | + < 0.5 s on the job |
 | Reserve items (under the allocation lock) | 50k items | < 1 s |
-| Load facts + commission (Python) + COPY draft | 50k lines | ≈ 1 s + 0.5 s + 0.5 s |
+| Load facts + commission (Python) + COPY draft | 50k lines | ≈ 1 s + 0.5 s + 0.5 s (commission measured 1.5–2.6 s in M2c-3, `docs/benchmarks/remittances.md`) |
 | Approval of one run | 50k lines frozen, 2–4 entries | 2–4 s, counter held only for the numbering (ms) |
 | Bulk approval | 200 runs | < 60 s in the job (one transaction each); the command < 1 s |
 | Statement CSV / PDF | 50k rows / ≤ 2,000 file rows | < 2 s / < 15 s |

@@ -1,11 +1,12 @@
 """Helpers for the commission tests: golden-case loading (worker/tests/golden/commission/*.yaml) and
-a small run simulator that carries the history from run to run, as M2c-4's runs will (live charged
-lines per (file, tier key), invoices and what they charged)."""
+a small run simulator that carries the history from run to run, as M2c-4's runs will (the state per
+(file, tier key) with its open invoices, the invoices and what they charged, which invoice charged
+each line)."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -25,6 +26,7 @@ from collectoo_worker.remittance.documents import (
     EarlierInvoice,
     MandateDocuments,
     after_issue,
+    open_invoices,
     run_documents,
 )
 from collectoo_worker.remittance.packs import load_yaml
@@ -98,6 +100,7 @@ def lines_of(run: Mapping[str, Any]) -> list[Line]:
                 amount_minor=_int(raw["amount"]),
                 basis={k: _int(v) for k, v in (raw.get("basis") or {}).items()},
                 forward_reason=raw.get("forward_reason"),
+                original_entry_id=raw.get("original"),
             )
         )
     return out
@@ -115,13 +118,21 @@ class Simulator:
     charges: dict[Key, list[EarlierCharge]] = field(default_factory=dict)
     invoices: dict[str, EarlierInvoice] = field(default_factory=dict)
     invoice_vat: dict[str, int] = field(default_factory=dict)  # number → VAT of the invoice
+    line_invoices: dict[str, str] = field(default_factory=dict)  # entry → invoice that charged it
     seq: int = 0
 
     def run(
         self, lines: Sequence[Line], numbers: Mapping[str, str] | None = None
     ) -> tuple[RunCommission, dict[str, MandateDocuments]]:
         result = compute(lines, self.files, self.versions, self.history, self.vat_rate)
-        docs = run_documents(result.lines, self.files, self.charges, self.invoices, self.vat_rate)
+        docs = run_documents(
+            result.lines,
+            self.files,
+            self.charges,
+            self.invoices,
+            self.vat_rate,
+            self.line_invoices,
+        )
         issued: dict[str, tuple[str, tuple[int, int]]] = {}
         for mandate in sorted(docs):
             if docs[mandate].invoice:
@@ -129,9 +140,15 @@ class Simulator:
                 number = (numbers or {}).get(mandate) or f"FC-2026-{self.seq:06d}"
                 _, year, seq = number.split("-")  # FC-AAAA-NNNNNN: the series order LIFO follows
                 issued[mandate] = (number, (int(year), int(seq)))
-                self.invoice_vat[number] = docs[mandate].invoice.vat_minor  # type: ignore[union-attr]
+                invoice = docs[mandate].invoice
+                assert invoice is not None
+                self.invoice_vat[number] = invoice.vat_minor
+                self.line_invoices.update(dict.fromkeys(invoice.entries, number))
             if docs[mandate].credit_note:
                 self.seq += 1
         self.charges, self.invoices = after_issue(self.charges, self.invoices, docs, issued)
-        self.history = result.history
+        counts = open_invoices(self.charges)
+        self.history = {
+            k: replace(s, open_invoices=counts.get(k, 0)) for k, s in result.history.items()
+        }
         return result, docs

@@ -58,3 +58,26 @@ the jobs; N entries posted in one `ledger_post_set` call inside a rolled-back tr
   run-to-run spread seen before (8.2–9.4 s in M2b-6) on a database not reset since the other runs. The statement and
   matching runs classify every line against the servicer's own and client IBANs (none registered here) and our ids:
   within the same spread.
+
+## Commission engine (M2c-3 review, `remittance.commission`, pure Python)
+
+Scratch harness of the review (not committed): 50,000 lines, 200 mandates; case 1 one marginal part a line under one
+terms version; case 2 two parts a line (principal marginal with a minimum, interest by bracket) under two versions
+of each mandate; case 2 + history: every (file, tier key) with a prior state. `compute` timed with its inputs hash;
+`run_documents` apart. Cloud session VM, 2026-11-10, CPython 3.12 (calibration `sum(range(10**7))` ≈ 0.15 s).
+
+| Case | Before the review fixes | After | Of which the inputs hash (before → after) | Documents |
+|---|---|---|---|---|
+| 1: one part, one version | 1.77 s | **1.51 s** | 0.48 → 0.25 s | 0.2 s |
+| 2: two parts, two versions | 2.85 s | **2.63 s** | 0.37 → 0.26 s | 0.6 s |
+| 2 + history | 4.12 s | **4.00 s** | 0.77 → 0.52 s | 0.5–0.8 s |
+
+- After the fixes the engine does more (the state per terms version, the rounding reserve, `keep`) and is still
+  faster: rate bands scaled once, the version per (mandate, day) and the rule per (version, claim type, portfolio,
+  family) cached, one pass over the versions per part, slotted dataclasses, the hash streamed record by record.
+- **Design §19's « commission (Python) ≈ 0.5 s » is not reachable in pure Python** for two-part lines: the rest is
+  per-line interpreter work (sorting, building the parts and results). The measured budget is ≈ 1.5–2.6 s for 50k
+  lines in the prepare job, outside the allocation lock (§9.4); approval never reruns the engine (§9.5). The unit
+  guard `worker/tests/test_commission_scale.py` (case 2, < 15 s each for the engine and the documents; 2.6 s and
+  0.9 s here) catches a regression before the M2c-7 scale run.
+

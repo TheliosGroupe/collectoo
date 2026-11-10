@@ -1,0 +1,75 @@
+# The review's scenario (math #0): a marginal grid replaced by a flat rate, then a collection made before the change
+# is undone. The undoing gives back what that collection earned under its own version, so the file is charged what
+# its live line earns, 8 % of B, whether the lines fell into three runs (F-1) or one (F-2). TO VALIDATE: synthetic terms.
+case: version-change-partial-reversal
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  paliers:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - id: tout
+        tier_key: tout
+        label_fr: "Toutes créances"
+        match: {}
+        rate: {kind: marginal, tiers: [{up_to_minor: "500000", rate: "0.10"}, {up_to_minor: null, rate: "0.06"}]}
+  forfait:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances (8 %)", match: {}, rate: {kind: flat, rate: "0.08"}}
+mandates:
+  MAND-V:
+    - {id: v1, from: "2026-01-01", to: "2026-11-16", schedule: paliers}
+    - {id: v2, from: "2026-11-16", to: null, schedule: forfait}
+files:
+  F-1: {mandate: MAND-V, claim_type: b2b_invoice, portfolio: P1}
+  F-2: {mandate: MAND-V, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — A, 5 000,00 € under v1
+    lines:
+      - {entry: A, kind: allocation, file: F-1, e: "2026-11-10", eff: "2026-11-10", amount: "500000", basis: {principal: "500000"}}
+    expect:
+      lines:
+        A: {commission: "50000", parts: {tout: "50000"}, terms: v1}
+      documents:
+        MAND-V:
+          invoice: {number: FC-2026-000001, ht: "50000", vat: "10000", ttc: "60000"}
+  - name: run 2 — B, 5 000,00 € under v2
+    lines:
+      - {entry: B, kind: allocation, file: F-1, e: "2026-11-20", eff: "2026-11-20", amount: "500000", basis: {principal: "500000"}}
+    expect:
+      lines:
+        B: {commission: "40000", parts: {tout: "40000"}, terms: v2}
+      documents:
+        MAND-V:
+          invoice: {number: FC-2026-000002, ht: "40000", vat: "8000", ttc: "48000"}
+  - name: run 3 — A undone (F-1); the same three lines in one run on F-2
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-1, e: "2026-11-10", eff: "2026-12-01", amount: "-500000", basis: {principal: "-500000"}}
+      - {entry: A2, kind: allocation, file: F-2, e: "2026-11-10", eff: "2026-11-10", amount: "500000", basis: {principal: "500000"}}
+      - {entry: B2, kind: allocation, file: F-2, e: "2026-11-20", eff: "2026-11-20", amount: "500000", basis: {principal: "500000"}}
+      - {entry: R-A2, kind: allocation_reversal, original: A2, file: F-2, e: "2026-11-10", eff: "2026-12-01", amount: "-500000", basis: {principal: "-500000"}}
+    expect:
+      lines:
+        R-A: {commission: "-50000", parts: {tout: "-50000"}, terms: v1}     # A's own 500,00: F-1 keeps B's 400,00
+        A2: {commission: "50000", parts: {tout: "50000"}, terms: v1}
+        R-A2: {commission: "-50000", parts: {tout: "-50000"}, terms: v1}
+        B2: {commission: "40000", parts: {tout: "40000"}, terms: v2}
+      documents:
+        MAND-V:
+          invoice:
+            number: FC-2026-000003
+            ht: "40000"              # F-2: A2 and its reversal in the same run net; B2 at 8 %
+            vat: "8000"
+            ttc: "48000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "40000", tiers: [["0.08", "500000"]]}
+          credit_note:
+            number: FC-2026-000004
+            ht: "-50000"
+            vat: "-10000"
+            ttc: "-60000"
+            corrected:
+              FC-2026-000001: {ht: "-50000", vat: "-10000"}       # on A's own invoice, never on B's

@@ -2,11 +2,13 @@
 -- references and the 2027 review tripwire (rule pack vat/fr); the conservative business calendar, every day of
 -- 2026–2031 (rule pack remittance/fr: weekends, French public holidays, TARGET closing days); the deadline (founder
 -- #2: the shorter of the mandate's delay and one calendar month, no weekend or holiday extension; latest execution
--- the business day before the last business day); the reference-data alerts; read access, writes and plans.
+-- the business day before the last business day; flagged when no business day is left after the encaissement); the
+-- reference-data alerts and the review procedure (on a synthetic row, so the real row may be reviewed); read access,
+-- writes and plans.
 -- Design docs/design/m2c-remittances.md §3, §8.5, §9.2, §15, §18; ADR-0014 (M2c-3). The equality with the YAML packs
 -- and the parity with the Python engine on 10,000 dates: worker/tests/test_engines_integration.py.
 begin;
-select plan(48);
+select plan(55);
 
 create or replace function pg_temp.as_user(p_user uuid, p_aal text default 'aal1') returns void language sql as $$
   select set_config('request.jwt.claims',
@@ -45,18 +47,29 @@ select throws_ok($$ update public.vat_rate set valid_to = '2026-12-01' where val
 select throws_ok($$ delete from public.vat_rate where valid_from = '2014-01-01' $$, '23514', null,
   'a rate is never deleted');
 select throws_ok($$ truncate public.vat_rate $$, '23514', null, 'nor truncated');
+-- The review procedure (a migration records reviewed_on / reviewed_by, once), tried on a synthetic next row: these
+-- tests hold before and after the migration that records the real 2027 row's review (vat/fr.yaml).
 savepoint review;
-select lives_ok($$ update public.vat_rate set reviewed_on = '2026-11-20', reviewed_by = 'Le fondateur'
-                   where valid_from = '2027-01-01' $$, 'the 2027 row''s review is recorded (by a migration)');
-select throws_ok($$ update public.vat_rate set reviewed_on = '2026-11-21' where valid_from = '2027-01-01' $$,
-  '23514', null, 'once');
-select is((select count(*)::int from private.reference_data_alerts('2026-12-01') a where a.code = 'vat_pack_review'),
-  0, 'reviewed: no vat_pack_review alert');
-select lives_ok($$ update public.vat_rate set valid_to = '2028-01-01' where valid_from = '2027-01-01' $$,
-  'an open row may be closed (the next rate follows in a new row)');
-rollback to savepoint review;
-select throws_ok($$ update public.vat_rate set reviewed_on = '2026-11-20' where valid_from = '2027-01-01' $$,
+select lives_ok($$ update public.vat_rate set valid_to = '2030-01-01' where valid_from = '2027-01-01' $$,
+  'an open row may be closed, reviewed or not (the next rate follows in a new row)');
+select lives_ok($$ insert into public.vat_rate (code, territory, rate, valid_from, valid_to, legal_ref, legal_url,
+                                                review_due_on)
+                   values ('standard', 'FR-metro', 0.2000, '2030-01-01', null, 'Texte de 2030',
+                           'https://librejustice.fr/norm/fr/x/1', '2029-12-01') $$,
+  'the next row, its review due a month before it applies');
+select is((select array_agg(a.details ->> 'legal_ref') from private.reference_data_alerts('2029-12-01') a
+           where a.code = 'vat_pack_review' and a.details ->> 'valid_from' = '2030-01-01'),
+  array['Texte de 2030'], 'from its due date the row awaits its review (vat_pack_review)');
+select throws_ok($$ update public.vat_rate set reviewed_on = '2029-11-20' where valid_from = '2030-01-01' $$,
   '23514', null, 'a review names who reviewed');
+select lives_ok($$ update public.vat_rate set reviewed_on = '2029-11-20', reviewed_by = 'Le fondateur'
+                   where valid_from = '2030-01-01' $$, 'the review is recorded (by a migration)');
+select throws_ok($$ update public.vat_rate set reviewed_on = '2029-11-21' where valid_from = '2030-01-01' $$,
+  '23514', null, 'once');
+select is((select count(*)::int from private.reference_data_alerts('2029-12-01') a
+           where a.code = 'vat_pack_review' and a.details ->> 'valid_from' = '2030-01-01'),
+  0, 'reviewed: no vat_pack_review alert');
+rollback to savepoint review;
 
 -- Business calendar ------------------------------------------------------------------------------------------
 select is((select array[count(*), count(*) filter (where c.closed), count(*) filter (where 'weekend' = any (c.sources)),
@@ -119,6 +132,18 @@ select is((select array[d.deadline, d.last_business_day, d.latest_execution_date
   array['2027-03-26', '2027-03-25', '2027-03-24']::date[], 'Good Friday 2027 (TARGET closed)');
 select is((select array[d.alert_soon_date, d.alert_critical_date] from private.remittance_deadline('2026-10-12', 30, 3, 2) d),
   array['2026-11-04', '2026-11-05']::date[], 'other alert margins (business days before the latest execution)');
+select is((select array[d.deadline::text, d.last_business_day::text, d.latest_execution_date::text, d.unmeetable::text]
+           from private.remittance_deadline('2026-11-13', 2) d),
+  array['2026-11-15', '2026-11-13', '2026-11-12', 'true'],
+  'a 2-day delay from Fri 13/11: latest execution Thu 12/11, before the money arrived — flagged unmeetable');
+select is((select array_agg(d.unmeetable) from private.remittance_deadline('2026-10-12', 30) d), array[false],
+  'one month from Mon 12/10: meetable');
+select is((select count(*)::int from generate_series(0, 2128) k
+           cross join lateral private.remittance_deadline('2026-02-01'::date + k, 6) d where d.unmeetable), 0,
+  'a delay of 6 days or more is never unmeetable on the seeded calendar (every E of 2026-02 … 2031-11)');
+select ok(exists(select from generate_series(0, 2128) k
+                 cross join lateral private.remittance_deadline('2026-02-01'::date + k, 5) d where d.unmeetable),
+  'a delay of 5 days sometimes is (around holidays)');
 select throws_ok($$ select * from private.remittance_deadline('2031-12-15', 30) $$, '22023', null,
   'a deadline beyond the seeded horizon is refused, never guessed');
 select throws_ok($$ select * from private.remittance_deadline('2025-12-31', 1) $$, '22023', null,
@@ -141,13 +166,20 @@ select ok((select s.idx_scan - (select idx_scan from scans) from pg_stat_xact_us
            where s.schemaname = 'public' and s.relname = 'business_calendar') between 200 and 400,
   'one or two index scans per deadline (the horizon, the window)');
 
+select is((select p.prorows from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+           where n.nspname = 'private' and p.proname = 'remittance_deadline'), 1::real,
+  'remittance_deadline is declared one row (a lateral join is estimated so)');
+
 -- Reference-data alerts (§15) --------------------------------------------------------------------------------
 select is((select count(*)::int from private.reference_data_alerts('2026-11-30')), 0,
   '2026-11-30: no alert');
-select is((select array_agg(a.code || ' ' || (a.details ->> 'legal_ref')) from private.reference_data_alerts('2026-12-01') a),
-  array['vat_pack_review CIBS art. L213-151'], 'from 2026-12-01 the 2027 VAT row awaits its review');
-select is((select array_agg(a.code order by a.code) from private.reference_data_alerts('2031-01-01') a),
-  array['calendar_horizon', 'vat_pack_review'], 'from 2031-01-01 less than 12 months are seeded');
+select is((select array_agg(a.details ->> 'legal_ref' order by a.details ->> 'legal_ref')
+           from private.reference_data_alerts('2026-12-01') a where a.code = 'vat_pack_review'),
+  (select array_agg(r.legal_ref order by r.legal_ref) from public.vat_rate r
+   where r.review_due_on <= '2026-12-01' and r.reviewed_on is null),
+  'from 2026-12-01 every row due and not reviewed awaits its review (the 2027 row until a migration records it)');
+select is((select array_agg(a.code) from private.reference_data_alerts('2031-01-01') a where a.code = 'calendar_horizon'),
+  array['calendar_horizon'], 'from 2031-01-01 less than 12 months are seeded');
 select is((select count(*)::int from private.reference_data_alerts('2030-12-31') a where a.code = 'calendar_horizon'), 0,
   '2030-12-31: 12 months still seeded');
 

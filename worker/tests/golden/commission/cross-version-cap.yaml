@@ -1,0 +1,73 @@
+# Across versions the commission of a (file, tier key) is still a function of its live lines (review fix of
+# 2026-11-10): each version prices the collections of its own dates, its tiers continuing where the earlier versions'
+# net basis ends, and the total is capped so the file's TTC never exceeds what it brought in. The grids are
+# deliberately extreme (80 % flat, then 0 % to 5 000,00 € and 100 % beyond) to make the cap bite; undoing the
+# pre-change collection moves the later one down into the new grid's free tier. TO VALIDATE: our reading of « new rates
+# only for the future » (founder #5) and of « never above what the file brought in » for a file straddling two versions.
+case: cross-version-cap
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  ancien:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.80"}}
+  nouveau:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - id: tout
+        tier_key: tout
+        label_fr: "Toutes créances"
+        match: {}
+        rate: {kind: marginal, tiers: [{up_to_minor: "500000", rate: "0"}, {up_to_minor: null, rate: "1"}]}
+mandates:
+  MAND-X:
+    - {id: x1, from: "2026-01-01", to: "2026-11-16", schedule: ancien}
+    - {id: x2, from: "2026-11-16", to: null, schedule: nouveau}
+files:
+  F-X: {mandate: MAND-X, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — 5 000,00 € under x1
+    lines:
+      - {entry: A, kind: allocation, file: F-X, e: "2026-11-10", eff: "2026-11-10", amount: "500000", basis: {principal: "500000"}}
+    expect:
+      lines:
+        A: {commission: "400000", parts: {tout: "400000"}, terms: x1}     # 80 % × 5 000,00 (under ⌊4 999,99 / 1,2⌋)
+      documents:
+        MAND-X:
+          invoice: {number: FC-2026-000001, ht: "400000", vat: "80000", ttc: "480000"}
+  - name: run 2 — 5 000,00 € under x2, its tiers continuing from 5 000,00 €
+    lines:
+      - {entry: B, kind: allocation, file: F-X, e: "2026-11-20", eff: "2026-11-20", amount: "500000", basis: {principal: "500000"}}
+    expect:
+      lines:
+        # x1's segment 4 000,00 + x2's F(10 000,00) − F(5 000,00) = 5 000,00: 9 000,00 > ⌊10 000,00 / 1,2⌋ = 8 333,33;
+        # held at ⌊(10 000,00 − 0,02) / 1,2⌋ = 8 333,31 (two invoices open)
+        B: {commission: "433331", parts: {tout: "433331"}, terms: x2, capped: true}
+      documents:
+        MAND-X:
+          invoice:
+            number: FC-2026-000002
+            ht: "433331"
+            vat: "86666"
+            ttc: "519997"          # 4 800,00 + 5 199,97 = 9 999,97 € TTC for 10 000,00 € brought in
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "433331", tiers: [["1", "500000"]]}
+  - name: run 3 — A undone; B alone is now x2's first 5 000,00 €, at 0 %
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-X, e: "2026-11-10", eff: "2026-12-01", amount: "-500000", basis: {principal: "-500000"}}
+    expect:
+      lines:
+        R-A: {commission: "-833331", parts: {tout: "-833331"}, terms: x1}
+      documents:
+        MAND-X:
+          credit_note:
+            number: FC-2026-000003
+            ht: "-833331"
+            vat: "-166666"
+            ttc: "-999997"
+            corrected:
+              FC-2026-000001: {ht: "-400000", vat: "-80000"}      # A's own invoice first, in full
+              FC-2026-000002: {ht: "-433331", vat: "-86666"}      # then the rest: B's position moved to the free tier

@@ -1,14 +1,18 @@
-"""From a run's line commissions to its documents (design §8.4; ADR-0014 M2c-3). Pure: M2c-4
-numbers, posts and stores them; M2c-5 renders them.
+"""From a run's line commissions to its documents (design §8.4; founder #6; ADR-0014 M2c-3). Pure:
+M2c-4 numbers, posts and stores them; M2c-5 renders them.
 
-1. Per (mandate, file, tier key) the run's net Δ = Σ line commissions. A positive Δ goes to the
-   mandate's invoice, a negative Δ to its credit note; a mandate whose Δ are all 0 issues nothing
-   (and draws no number).
-2. Invoice lines group the keys per (claim type, rule, families): quantity 1, unit price HT = Σ Δ,
-   the base that moved in each rate band (for the designation: 242 nonies A 8°).
+1. Per (mandate, file, tier key), the parts that raise the commission go to the mandate's invoice
+   and the parts that lower it to its credit note — never netted across documents (review fix,
+   founder #6: « a credit note on the original invoice »; CGI 289 I 5, 272 1). What the run nets
+   was never invoiced: a reversal whose original is in the same run, and a credit beyond what the
+   earlier invoices charge the key (the run's own collections moved the tiers it takes back). A
+   mandate whose amounts are all 0 issues nothing (and draws no number).
+2. Invoice lines group the keys per (claim type, rule, families): quantity 1, unit price HT, the
+   base that moved in each rate band (for the designation: 242 nonies A 8°).
 3. Invoice VAT = R(HT x rate) at the rate of the issue date (11°).
-4. A negative Δ is credited LIFO to the earlier invoices that charged that (file, tier key), each up
-   to what it charged net of earlier credits; every allocation names its invoice (CGI 289 I 5).
+4. A credit is allocated first to the invoice that charged the line the reversal undoes (its
+   original), up to what that invoice still charges the (file, tier key), then LIFO to the other
+   invoices that charged the key; every allocation names its invoice (289 I 5) and its line.
 5. Credit-note VAT per corrected invoice by cumulative difference at that invoice's rate: never
    above its VAT, exactly it on a full credit.
 
@@ -19,10 +23,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
-from collectoo_worker.remittance.commission import CommissionInputError, FileFacts, LineCommission
+from collectoo_worker.remittance.commission import (
+    REVERSALS,
+    CommissionInputError,
+    FileFacts,
+    LineCommission,
+    Part,
+)
 from collectoo_worker.remittance.vat import credit_note_vat, vat_of
 
 Key = tuple[str, str]  # (file, tier key)
@@ -73,6 +83,7 @@ class DraftInvoice:
     charges: tuple[
         tuple[Key, int], ...
     ]  # what it charges per (file, tier key): the LIFO history of later credits
+    entries: tuple[str, ...]  # the lines it charges (a later reversal credits this invoice first)
 
 
 @dataclass(frozen=True)
@@ -81,6 +92,7 @@ class CreditAllocation:
     account_id: str
     tier_key: str
     ht_minor: int  # negative
+    entry_id: str  # the line whose part it credits (a reversal: the line that undoes a collection)
 
 
 @dataclass(frozen=True)
@@ -108,101 +120,183 @@ class MandateDocuments:
     credit_note: DraftCreditNote | None
 
 
-def _deltas(results: Sequence[LineCommission]) -> dict[str, dict[Key, list[LineCommission]]]:
-    by: dict[str, dict[Key, list[LineCommission]]] = defaultdict(lambda: defaultdict(list))
-    for r in results:
-        if r.state != "charged" or r.mandate_id is None:
-            continue
-        for p in r.parts:
-            by[r.mandate_id][(p.account_id, p.tier_key)].append(r)
-    return by
+@dataclass
+class _Charge:
+    """One key's invoice side in the run."""
+
+    amount: int = 0
+    tiers: dict[str, int] = field(default_factory=dict)
+    families: set[str] = field(default_factory=set)
+    rule_id: str = ""
+    label_fr: str = ""
+    entries: list[str] = field(default_factory=list)  # the lines whose parts raise it
+    last_entry: str = ""
 
 
-def run_documents(
+@dataclass(frozen=True)
+class _Credit:
+    key: Key
+    amount: int  # positive magnitude
+    preferred: str | None  # the invoice that charged the line the reversal undoes
+    entry_id: str
+
+
+def run_documents(  # noqa: PLR0913, PLR0917 - the run's lines and the history
     results: Sequence[LineCommission],
     files: Mapping[str, FileFacts],
     charges: Mapping[Key, Sequence[EarlierCharge]],
     invoices: Mapping[str, EarlierInvoice],
     vat_rate: Decimal,
+    line_invoices: Mapping[str, str] | None = None,
 ) -> dict[str, MandateDocuments]:
-    """The invoice and credit note of each mandate of the run (absent: nothing to issue)."""
+    """The invoice and credit note of each mandate of the run (absent: nothing to issue).
+    `line_invoices`: an earlier line → the invoice that charged it (M2c-4: the remittance line's
+    invoice), so that its reversal is credited on that invoice first."""
+    by_mandate = _split(results, line_invoices or {})
     out: dict[str, MandateDocuments] = {}
-    for mandate, keyed in sorted(_deltas(results).items()):
-        positive: dict[
-            tuple[str, str, tuple[str, ...]], list[tuple[Key, int, dict[str, int], str]]
-        ] = defaultdict(list)
-        negative: list[tuple[Key, int]] = []
-        for key in sorted(keyed):
-            parts = [p for r in keyed[key] for p in r.parts if (p.account_id, p.tier_key) == key]
-            delta = sum(p.commission_minor for p in parts)
-            if delta > 0:
-                last = parts[-1]
-                families = tuple(sorted({f for p in parts for f in p.families}))
-                tiers: dict[str, int] = defaultdict(int)
-                for p in parts:
-                    for rate, base in p.tiers:
-                        tiers[rate] += base
-                claim_type = files[key[0]].claim_type
-                positive[(claim_type, last.rule_id, families)].append(
-                    (key, delta, tiers, last.label_fr)
-                )
-            elif delta < 0:
-                negative.append((key, delta))
-        invoice = _invoice(mandate, positive, vat_rate) if positive else None
-        credit = _credit_note(mandate, negative, charges, invoices) if negative else None
+    for mandate in sorted(by_mandate):
+        side, credits = by_mandate[mandate]
+        invoice, credit = _documents(mandate, side, credits, files, charges, invoices, vat_rate)
         if invoice or credit:
             out[mandate] = MandateDocuments(mandate, invoice, credit)
     return out
 
 
+def _split(
+    results: Sequence[LineCommission], line_invoices: Mapping[str, str]
+) -> dict[str, tuple[dict[Key, _Charge], list[_Credit]]]:
+    """Per mandate: each key's invoice side (raising parts, and same-run reversals), and the
+    credits (the other lowering parts, each with the invoice of the line it undoes)."""
+    in_run = {r.entry_id for r in results}
+    by_mandate: dict[str, tuple[dict[Key, _Charge], list[_Credit]]] = {}
+    for r in results:  # the engine's order
+        if r.state != "charged" or r.mandate_id is None or not r.parts:
+            continue
+        side, credits = by_mandate.setdefault(r.mandate_id, ({}, []))
+        reversal = r.kind in REVERSALS
+        same_run = reversal and r.original_entry_id in in_run
+        for p in r.parts:
+            key = (p.account_id, p.tier_key)
+            if p.commission_minor > 0 or (same_run and p.commission_minor < 0):
+                _charge(side.setdefault(key, _Charge()), p, r.entry_id)
+            elif p.commission_minor < 0:
+                preferred = (
+                    line_invoices.get(r.original_entry_id)
+                    if reversal and r.original_entry_id
+                    else None
+                )
+                credits.append(_Credit(key, -p.commission_minor, preferred, r.entry_id))
+    return by_mandate
+
+
+def _documents(  # noqa: PLR0913, PLR0917 - a mandate's amounts and the history they credit
+    mandate: str,
+    side: dict[Key, _Charge],
+    credits: list[_Credit],
+    files: Mapping[str, FileFacts],
+    charges: Mapping[Key, Sequence[EarlierCharge]],
+    invoices: Mapping[str, EarlierInvoice],
+    vat_rate: Decimal,
+) -> tuple[DraftInvoice | None, DraftCreditNote | None]:
+    """A mandate's credit note, allocated first, then its invoice of what remains to charge."""
+    for key in sorted(side):
+        ch = side[key]
+        if ch.amount < 0:  # a same-run reversal beyond what its run charged the key
+            credits.append(_Credit(key, -ch.amount, None, ch.last_entry))
+            ch.amount = 0
+    credit, unallocated = (
+        _credit_note(mandate, credits, charges, invoices) if credits else (None, {})
+    )
+    for key, rest in unallocated.items():
+        # what the run itself added to the key and takes back (a back-dated collection moved
+        # the tiers, a reversal moves them back): never invoiced, so netted here
+        found = side.get(key)
+        if found is None or found.amount < rest:
+            raise CommissionInputError(
+                f"credit on {key}: earlier invoices and this run charge {rest} too little"
+            )
+        found.amount -= rest
+    groups: dict[tuple[str, str, tuple[str, ...]], list[tuple[Key, _Charge]]] = defaultdict(list)
+    for key in sorted(side):
+        ch = side[key]
+        if ch.amount > 0:
+            families = tuple(sorted(ch.families))
+            groups[(files[key[0]].claim_type, ch.rule_id, families)].append((key, ch))
+    invoice = _invoice(mandate, groups, vat_rate) if groups else None
+    return invoice, credit
+
+
+def _charge(ch: _Charge, p: Part, entry_id: str) -> None:
+    ch.amount += p.commission_minor
+    ch.last_entry = entry_id
+    for rate, base in p.tiers:
+        ch.tiers[rate] = ch.tiers.get(rate, 0) + base
+    if p.commission_minor > 0:  # the rule and label of the key's last raising part
+        ch.families.update(p.families)
+        ch.rule_id, ch.label_fr = p.rule_id, p.label_fr
+        ch.entries.append(entry_id)
+
+
 def _invoice(
     mandate: str,
-    groups: Mapping[tuple[str, str, tuple[str, ...]], list[tuple[Key, int, dict[str, int], str]]],
+    groups: Mapping[tuple[str, str, tuple[str, ...]], list[tuple[Key, _Charge]]],
     vat_rate: Decimal,
 ) -> DraftInvoice:
     lines = []
     for (claim_type, rule_id, families), items in sorted(groups.items()):
         tiers: dict[str, int] = defaultdict(int)
-        for _, _, t, _ in items:
-            for rate, base in t.items():
+        for _, ch in items:
+            for rate, base in ch.tiers.items():
                 tiers[rate] += base
         lines.append(
             InvoiceLine(
                 claim_type=claim_type,
                 rule_id=rule_id,
-                label_fr=items[-1][3],
+                label_fr=items[-1][1].label_fr,
                 families=families,
-                keys=tuple(k for k, _, _, _ in items),
+                keys=tuple(k for k, _ in items),
                 tiers=tuple((r, b) for r, b in tiers.items() if b),  # band order
-                ht_minor=sum(d for _, d, _, _ in items),
+                ht_minor=sum(ch.amount for _, ch in items),
             )
         )
     ht = sum(line.ht_minor for line in lines)
     vat = vat_of(ht, vat_rate)
-    charged = tuple((k, d) for _, items in sorted(groups.items()) for k, d, _, _ in items)
-    return DraftInvoice(mandate, tuple(lines), ht, vat_rate, vat, ht + vat, tuple(sorted(charged)))
+    charged = tuple(sorted((k, ch.amount) for items in groups.values() for k, ch in items))
+    entries = tuple(sorted({e for items in groups.values() for _, ch in items for e in ch.entries}))
+    return DraftInvoice(mandate, tuple(lines), ht, vat_rate, vat, ht + vat, charged, entries)
 
 
 def _credit_note(
     mandate: str,
-    negative: Sequence[tuple[Key, int]],
+    credits: Sequence[_Credit],
     charges: Mapping[Key, Sequence[EarlierCharge]],
     invoices: Mapping[str, EarlierInvoice],
-) -> DraftCreditNote:
+) -> tuple[DraftCreditNote | None, dict[Key, int]]:
+    """The credit note, and per key what earlier invoices do not charge (for the run to net)."""
+    open_: dict[tuple[str, Key], int] = {}
     allocations: list[CreditAllocation] = []
-    for key, delta in negative:
-        left = -delta
-        for ch in sorted(charges.get(key, ()), key=lambda c: c.order, reverse=True):
-            take = min(left, ch.open_minor)
+    unallocated: dict[Key, int] = defaultdict(int)
+    for cr in credits:
+        left = cr.amount
+        earlier = sorted(charges.get(cr.key, ()), key=lambda c: c.order, reverse=True)
+        if cr.preferred is not None:  # its original's invoice first (founder #6)
+            earlier.sort(key=lambda c: c.invoice_id != cr.preferred)
+        for ch in earlier:
+            k = (ch.invoice_id, cr.key)
+            available = open_.setdefault(k, ch.open_minor)
+            take = min(left, available)
             if take > 0:
-                allocations.append(CreditAllocation(ch.invoice_id, key[0], key[1], -take))
+                allocations.append(
+                    CreditAllocation(ch.invoice_id, cr.key[0], cr.key[1], -take, cr.entry_id)
+                )
+                open_[k] = available - take
                 left -= take
             if left == 0:
                 break
         if left:
-            raise CommissionInputError(
-                f"credit of {-delta} on {key}: earlier invoices charged {-delta - left} only"
-            )
+            unallocated[cr.key] += left
+    if not allocations:
+        return None, dict(unallocated)
     per_invoice: dict[str, int] = defaultdict(int)
     for a in allocations:
         per_invoice[a.original_invoice_id] -= a.ht_minor
@@ -215,7 +309,8 @@ def _credit_note(
         corrected.append(CorrectedInvoice(inv_id, inv.vat_rate, -per_invoice[inv_id], -vat))
     ht = sum(c.ht_minor for c in corrected)
     vat = sum(c.vat_minor for c in corrected)
-    return DraftCreditNote(mandate, tuple(allocations), tuple(corrected), ht, vat, ht + vat)
+    note = DraftCreditNote(mandate, tuple(allocations), tuple(corrected), ht, vat, ht + vat)
+    return note, dict(unallocated)
 
 
 def after_issue(
@@ -250,3 +345,9 @@ def after_issue(
             for key, amount in d.invoice.charges:
                 new_charges.setdefault(key, []).append(EarlierCharge(inv_id, order, amount))
     return new_charges, new_invoices
+
+
+def open_invoices(charges: Mapping[Key, Sequence[EarlierCharge]]) -> dict[Key, int]:
+    """Per (file, tier key), how many invoices still charge it something: the engine's rounding
+    reserve (`KeyState.open_invoices`)."""
+    return {k: sum(1 for c in v if c.open_minor > 0) for k, v in charges.items()}

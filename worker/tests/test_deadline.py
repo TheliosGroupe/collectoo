@@ -71,6 +71,28 @@ def test_the_design_examples() -> None:
         D("2026-12-24"),
         D("2026-12-23"),
     )
+    assert not d.unmeetable
+
+
+def test_a_short_delay_can_be_unmeetable() -> None:
+    """A mandate's delay of 1 to 5 days can leave no business day after the money arrives: both
+    twins flag it (M2c-4: « délai intenable », not an operational breach; OQ-71)."""
+    # Fri 13/11/2026 under 2 days: deadline Sun 15/11 → Fri 13/11 → latest execution Thu 12/11
+    d = remittance_deadline(D("2026-11-13"), 2)
+    assert (d.deadline, d.last_business_day, d.latest_execution, d.unmeetable) == (
+        D("2026-11-15"),
+        D("2026-11-13"),
+        D("2026-11-12"),
+        True,
+    )
+    assert remittance_deadline(D("2026-12-24"), 1).latest_execution == D("2026-12-23")
+    assert remittance_deadline(D("2026-12-24"), 1).unmeetable
+    assert not remittance_deadline(D("2026-11-16"), 2).unmeetable  # Mon → Wed 18/11, exec Tue 17/11
+    # from 6 days on it never happens on the seeded calendar
+    cal = conservative()
+    for k in range((D("2031-11-30") - D("2026-02-01")).days + 1):
+        e = D("2026-02-01") + timedelta(days=k)
+        assert not remittance_deadline(e, 6, cal).unmeetable, e
 
 
 def test_encaissement_and_one_month() -> None:
@@ -198,6 +220,10 @@ def test_deadline_properties(e: date, days: int) -> None:
     assert d.alert_soon < d.alert_critical < d.latest_execution
     assert cal.after(d.alert_critical) == d.latest_execution
     assert cal.after(d.alert_soon, 5) == d.latest_execution
+    # unmeetable: no business day after E is left to execute on
+    assert d.unmeetable == (d.latest_execution < cal.after(e)) == (d.latest_execution <= e)
+    if days >= 6:
+        assert not d.unmeetable
 
 
 @given(e=st.dates(min_value=D("2000-01-01"), max_value=D("2099-12-31")))

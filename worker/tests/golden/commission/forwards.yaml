@@ -38,8 +38,8 @@ runs:
               - {claim_type: b2b_invoice, rule: interets, families: [interest], ht: "200", tiers: [["0.20", "1000"]]}
   - name: run 2 — both forwards undone
     lines:
-      - {entry: R-FW1, kind: forward_reversal, file: F-F, e: "2026-10-05", eff: "2026-11-03", amount: "-50000", forward_reason: client_ratification}
-      - {entry: R-FW2, kind: forward_reversal, file: F-F, e: "2026-10-06", eff: "2026-11-03", amount: "-30000", forward_reason: file_recalled}
+      - {entry: R-FW1, kind: forward_reversal, original: FW1, file: F-F, e: "2026-10-05", eff: "2026-11-03", amount: "-50000", forward_reason: client_ratification}
+      - {entry: R-FW2, kind: forward_reversal, original: FW2, file: F-F, e: "2026-10-06", eff: "2026-11-03", amount: "-30000", forward_reason: file_recalled}
     expect:
       lines:
         R-FW1: {commission: "-5000", parts: {autres: "-5000"}}

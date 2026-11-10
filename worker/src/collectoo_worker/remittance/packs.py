@@ -37,6 +37,21 @@ class _Pack(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class Review(_Pack):
+    """A dated re-reading: from `due_from` CI fails (and `vat_pack_review` alerts) until a human
+    records who re-read the text and when."""
+
+    due_from: date
+    reviewed_on: date | None
+    reviewed_by: str | None
+
+    @model_validator(mode="after")
+    def _both(self) -> Review:
+        if (self.reviewed_on is None) != (self.reviewed_by is None):
+            raise ValueError("a review records its date and who reviewed")
+        return self
+
+
 class LegalRef(_Pack):
     """A text the pack relies on: read (url + version + verbatim quote) or a convention (note, no
     quote)."""
@@ -48,6 +63,7 @@ class LegalRef(_Pack):
     note: str | None = None
     valid_from: date | None = None
     valid_to: date | None = None  # exclusive
+    review: Review | None = None  # a text not yet in force when read: re-read before it applies
 
     @model_validator(mode="after")
     def _read_or_noted(self) -> LegalRef:
@@ -68,18 +84,6 @@ class LegalRef(_Pack):
 
 
 # -- vat/fr ---------------------------------------------------------------------------------------
-
-
-class Review(_Pack):
-    due_from: date
-    reviewed_on: date | None
-    reviewed_by: str | None
-
-    @model_validator(mode="after")
-    def _both(self) -> Review:
-        if (self.reviewed_on is None) != (self.reviewed_by is None):
-            raise ValueError("a review records its date and who reviewed")
-        return self
 
 
 class VatRateRow(_Pack):
@@ -112,6 +116,33 @@ class VatPack(_Pack):
     read_on: date
     rates: list[VatRateRow] = Field(min_length=1)
     references: list[VatReference]
+
+    def texts(self) -> list[tuple[LegalRef, date | None, Review | None]]:
+        """Every text the pack relies on, with the day it applies from and its review: the rate
+        rows' (their review is the row's) and the references'."""
+        out: list[tuple[LegalRef, date | None, Review | None]] = [
+            (r.legal_ref, r.valid_from, r.review) for r in self.rates
+        ]
+        out += [(t, t.valid_from, t.review) for ref in self.references for t in ref.texts]
+        return out
+
+    @model_validator(mode="after")
+    def _reviews(self) -> VatPack:
+        """A text not yet in force on the day the pack was read (the 2027 recodification) carries a
+        review due before it applies; the reviews due the same day are recorded together, so the
+        rate row's review (seeded into public.vat_rate, the SQL alert) attests all of them."""
+        recorded: dict[date, tuple[date | None, str | None]] = {}
+        for text, applies, review in self.texts():
+            late = applies is not None and applies > self.read_on
+            if late and (review is None or applies is None or review.due_from >= applies):
+                raise ValueError(f"{text.title}: applies from {applies}, needs a review before")
+            if review is not None:
+                state = (review.reviewed_on, review.reviewed_by)
+                if recorded.setdefault(review.due_from, state) != state:
+                    raise ValueError(
+                        f"{text.title}: the reviews due {review.due_from} are recorded together"
+                    )
+        return self
 
     @model_validator(mode="after")
     def _no_overlap(self) -> VatPack:

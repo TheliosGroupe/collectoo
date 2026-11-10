@@ -87,3 +87,23 @@ def test_a_text_is_quoted_or_noted() -> None:
         LegalRef(title="X", url="https://example.com/x", version="v", quote="q")
     with pytest.raises(ValidationError, match="note"):
         LegalRef(title="TARGET")
+
+
+def test_a_text_not_yet_in_force_awaits_its_review() -> None:
+    """Every text applying after the day the pack was read carries a review due before it applies,
+    and the reviews due the same day are recorded together (the rate row's, in public.vat_rate,
+    then attests all of them)."""
+    raw = _raw("vat/fr.yaml")
+    refs = raw["references"]
+    text = next(t for r in refs for t in r["texts"] if t["title"] == "CIBS art. L214-6")
+    for bad in (
+        {k: v for k, v in text.items() if k != "review"},
+        {**text, "review": {**text["review"], "due_from": "2027-01-01"}},
+    ):
+        changed = [{**r, "texts": [bad if t is text else t for t in r["texts"]]} for r in refs]
+        with pytest.raises(ValidationError, match="needs a review before"):
+            VatPack.model_validate({**raw, "references": changed})
+    apart = {**text, "review": {**text["review"], "reviewed_on": "2026-11-20", "reviewed_by": "X"}}
+    changed = [{**r, "texts": [apart if t is text else t for t in r["texts"]]} for r in refs]
+    with pytest.raises(ValidationError, match="recorded together"):
+        VatPack.model_validate({**raw, "references": changed})

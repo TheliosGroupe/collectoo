@@ -1,6 +1,9 @@
 # A minimum per file, never above what the file brought in (founder #5; design §2.2 #9, ops critique #7): the
-# commission's TTC stays within the file's basis, HT ≤ ⌊basis / 1,20⌋. Undone in full, the file is back to 0.
-# TO VALIDATE: synthetic grid; « never above what the file brought in » read as the TTC (founder #5).
+# commission's HT stays within ⌊basis / 1,20⌋, and within ⌊(basis − n) / 1,20⌋ with n the file's invoices still open
+# after the run (one cent each: the most the rounding of an invoice's VAT adds to the file's share), so that the TTC
+# billed across several runs never exceeds the basis either. The hold is released as soon as the basis leaves room.
+# Undone in full, the file is back to 0. TO VALIDATE: synthetic grid; « never above what the file brought in » read as
+# the TTC billed in all (founder #5).
 case: minimum-capped
 status: TO VALIDATE
 vat_rate: "0.2000"
@@ -12,27 +15,29 @@ schedules:
       - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.05"}, min_per_file_minor: "3000"}
 mandates:
   MAND-M: [{id: m-v1, from: "2026-01-01", to: null, schedule: minimum}]
+  MAND-S: [{id: s-v1, from: "2026-01-01", to: null, schedule: minimum}]
 files:
   F-MIN: {mandate: MAND-M, claim_type: b2b_invoice, portfolio: P1}
+  F-SMALL: {mandate: MAND-S, claim_type: b2b_invoice, portfolio: P1}
 runs:
   - name: run 1 — 20,00 € collected
     lines:
       - {entry: A, kind: allocation, file: F-MIN, e: "2026-10-01", eff: "2026-10-01", amount: "2000", basis: {principal: "2000"}}
     expect:
       lines:
-        A: {commission: "1666", parts: {tout: "1666"}}     # min 30,00 € capped at ⌊20,00 / 1,2⌋ = 16,66 €
+        A: {commission: "1665", parts: {tout: "1665"}}     # min 30,00 € capped at ⌊(20,00 − 0,01) / 1,2⌋ = 16,65 €
       documents:
         MAND-M:
-          invoice: {number: FC-2026-000001, ht: "1666", vat: "333", ttc: "1999"}     # TTC ≤ 20,00 €
+          invoice: {number: FC-2026-000001, ht: "1665", vat: "333", ttc: "1998"}     # TTC ≤ 20,00 €
   - name: run 2 — 100,00 € in all
     lines:
       - {entry: B, kind: allocation, file: F-MIN, e: "2026-10-15", eff: "2026-10-15", amount: "8000", basis: {principal: "8000"}}
     expect:
       lines:
-        B: {commission: "1334", parts: {tout: "1334"}}     # the minimum, 30,00 €, now fits: 30,00 − 16,66
+        B: {commission: "1335", parts: {tout: "1335"}}     # the minimum, 30,00 €, now fits: 30,00 − 16,65
       documents:
         MAND-M:
-          invoice: {number: FC-2026-000002, ht: "1334", vat: "267", ttc: "1601"}
+          invoice: {number: FC-2026-000002, ht: "1335", vat: "267", ttc: "1602"}
   - name: run 3 — 1 100,00 € in all, above the minimum
     lines:
       - {entry: C, kind: allocation, file: F-MIN, e: "2026-11-02", eff: "2026-11-02", amount: "100000", basis: {principal: "100000"}}
@@ -44,7 +49,7 @@ runs:
           invoice: {number: FC-2026-000003, ht: "2500", vat: "500", ttc: "3000"}
   - name: run 4 — C undone
     lines:
-      - {entry: R-C, kind: allocation_reversal, file: F-MIN, e: "2026-11-02", eff: "2026-11-20", amount: "-100000", basis: {principal: "-100000"}}
+      - {entry: R-C, kind: allocation_reversal, original: C, file: F-MIN, e: "2026-11-02", eff: "2026-11-20", amount: "-100000", basis: {principal: "-100000"}}
     expect:
       lines:
         R-C: {commission: "-2500", parts: {tout: "-2500"}}
@@ -60,8 +65,8 @@ runs:
   - name: run 5 — A and B undone, the file back to 0
     lines:
       # sorted by encaissement date: R-A first (100,00 → 80,00: the minimum still applies, nothing back), then R-B
-      - {entry: R-B, kind: allocation_reversal, file: F-MIN, e: "2026-10-15", eff: "2026-12-01", amount: "-8000", basis: {principal: "-8000"}}
-      - {entry: R-A, kind: allocation_reversal, file: F-MIN, e: "2026-10-01", eff: "2026-12-01", amount: "-2000", basis: {principal: "-2000"}}
+      - {entry: R-B, kind: allocation_reversal, original: B, file: F-MIN, e: "2026-10-15", eff: "2026-12-01", amount: "-8000", basis: {principal: "-8000"}}
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-MIN, e: "2026-10-01", eff: "2026-12-01", amount: "-2000", basis: {principal: "-2000"}}
     expect:
       lines:
         R-A: {commission: "0", parts: {tout: "0"}}
@@ -74,5 +79,34 @@ runs:
             vat: "-600"
             ttc: "-3600"
             corrected:
-              FC-2026-000001: {ht: "-1666", vat: "-333"}
-              FC-2026-000002: {ht: "-1334", vat: "-267"}
+              FC-2026-000001: {ht: "-1665", vat: "-333"}
+              FC-2026-000002: {ht: "-1335", vat: "-267"}     # B's own invoice first, then FC-1
+  # A small file collected over several runs (the review's case): without the reserve the third invoice would charge
+  # 0,84 + 0,17 = 1,01 € TTC, 3,01 € billed for 3,00 € collected; with it every TTC billed stays within the basis.
+  - name: run 6 — 1,00 € on a small file
+    lines:
+      - {entry: S1, kind: allocation, file: F-SMALL, e: "2026-12-01", eff: "2026-12-01", amount: "100", basis: {principal: "100"}}
+    expect:
+      lines:
+        S1: {commission: "82", parts: {tout: "82"}}         # ⌊(1,00 − 0,01) / 1,2⌋
+      documents:
+        MAND-S:
+          invoice: {number: FC-2026-000006, ht: "82", vat: "16", ttc: "98"}
+  - name: run 7 — 2,00 € in all
+    lines:
+      - {entry: S2, kind: allocation, file: F-SMALL, e: "2026-12-10", eff: "2026-12-10", amount: "100", basis: {principal: "100"}}
+    expect:
+      lines:
+        S2: {commission: "83", parts: {tout: "83"}}         # ⌊(2,00 − 0,02) / 1,2⌋ − 0,82
+      documents:
+        MAND-S:
+          invoice: {number: FC-2026-000007, ht: "83", vat: "17", ttc: "100"}       # 1,98 € billed for 2,00 €
+  - name: run 8 — 3,00 € in all
+    lines:
+      - {entry: S3, kind: allocation, file: F-SMALL, e: "2026-12-20", eff: "2026-12-20", amount: "100", basis: {principal: "100"}}
+    expect:
+      lines:
+        S3: {commission: "82", parts: {tout: "82"}}         # ⌊(3,00 − 0,03) / 1,2⌋ − 1,65
+      documents:
+        MAND-S:
+          invoice: {number: FC-2026-000008, ht: "82", vat: "16", ttc: "98"}        # 2,96 € billed for 3,00 €
