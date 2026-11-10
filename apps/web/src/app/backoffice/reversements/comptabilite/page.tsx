@@ -1,6 +1,6 @@
 import { InfoNote, Section, WidePage, inlineButtonClass, inputClass } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
-import { exportPeriod } from "@/lib/remittance/documents";
+import { exportPeriod, frenchDay } from "@/lib/remittance/documents";
 
 function isoDay(d: Date): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(d);
@@ -53,6 +53,10 @@ export default async function AccountingExportPage({
               <a href={link("factures")} className="font-medium underline underline-offset-4" data-testid="export-documents">
                 Factures et avoirs (CSV)
               </a>
+              {/* review M2c-5 figures#7: the settlements and what is left are counted up to the period's last day */}
+              <span className="block text-xs text-zinc-600 dark:text-zinc-400" data-testid="export-documents-as-of">
+                Règlements et restes dus arrêtés au {frenchDay(period.to)}.
+              </span>
             </li>
             <li>
               <a href={link("ecritures")} className="font-medium underline underline-offset-4" data-testid="export-entries">

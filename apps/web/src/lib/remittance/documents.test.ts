@@ -64,6 +64,68 @@ describe("M2c-5 documents", () => {
     expect(frenchDay("2026-11-02")).toBe("02/11/2026");
   });
 
+  it("states what the run sets off and the remainder's date, as the invoice's PDF does (review M2c-5 legal#4, legal#5)", () => {
+    const netted = { kind: "invoice", settlement: "netted" } as const;
+    // the plan sets off part of it: the remainder carries the invoice's due_date (its latest date)
+    expect(
+      settlementText({
+        ...netted,
+        due_date: "2026-12-10",
+        payment_reference: {
+          mode: "run",
+          run_number: "RV-2026-000002",
+          execution_date: "2026-11-12",
+          transfer: true,
+          amount_minor: "2000",
+          remainder_minor: "4000",
+          latest_date: "2026-12-10",
+        },
+      }),
+    ).toBe(
+      `à régler par compensation sur le reversement RV-2026-000002 : ${money("2000", "EUR")} ; le solde de ${money("4000", "EUR")} sur le prochain reversement, au plus tard le 10/12/2026`,
+    );
+    // the plan sets off none of it
+    expect(
+      settlementText({
+        ...netted,
+        due_date: "2026-12-10",
+        payment_reference: { mode: "next_run", latest_date: "2026-12-10", amount_minor: "6000" },
+      }),
+    ).toBe("à régler par compensation sur le prochain reversement, au plus tard le 10/12/2026");
+    // all of it on the run
+    expect(
+      settlementText({
+        ...netted,
+        due_date: null,
+        payment_reference: {
+          mode: "run",
+          run_number: "RV-2026-000002",
+          execution_date: "2026-11-12",
+          transfer: true,
+          amount_minor: "6000",
+        },
+      }),
+    ).toBe("à régler par compensation sur le reversement RV-2026-000002");
+    // N = 0: set off at approval, no transfer — never « réglé » or « payé »
+    const none = settlementText({
+      ...netted,
+      due_date: null,
+      payment_reference: {
+        mode: "run",
+        run_number: "RV-2026-000003",
+        execution_date: "2026-11-10",
+        transfer: false,
+        amount_minor: "6000",
+      },
+    });
+    expect(none).toBe("compensée le 10/11/2026 avec vos encaissements (relevé RV-2026-000003, aucun virement)");
+    expect(none).not.toMatch(/payé|réglé/i);
+    // a payload without the reference but a date: the date is still stated
+    expect(settlementText({ ...netted, due_date: "2026-12-10" })).toBe(
+      "à régler par compensation sur un reversement, au plus tard le 10/12/2026 pour ce que le reversement ne compense pas",
+    );
+  });
+
   it("formats CSV amounts in French, from text minor units (no float)", () => {
     expect(csvAmount("123456789")).toBe("1 234 567,89");
     expect(csvAmount("-1")).toBe("-0,01");
@@ -204,6 +266,52 @@ describe("what is owed today and the payout in flight (review M2c-5 tests-ui#5, 
       in_flight: [],
     });
     expect(odd).toEqual({ sentences: [], covered: new Set() });
+  });
+
+  it("words the advances and the refunded credit note the database names, even in the same run (integration)", () => {
+    // client_remittance_summary returns advance_minor and refund_minor: gross = net + commission + advances − refund.
+    // An advance of 100,00 € and a refund of 30,00 € must both be named, never netted into « 70,00 € d'autres sommes ».
+    const { sentences } = inFlightNotes({
+      owed: [
+        {
+          currency: "EUR",
+          owed_minor: "50000",
+          in_flight_gross_minor: "50000",
+          in_flight_runs: [
+            {
+              number: "RV-2026-000004",
+              status: "approved",
+              gross_minor: "50000",
+              net_minor: "39000",
+              commission_minor: "4000",
+              advance_minor: "10000",
+              refund_minor: "3000",
+              requested_execution_date: "2026-11-20",
+            },
+          ],
+        },
+      ],
+      in_flight: [],
+    });
+    expect(sentences).toEqual([
+      `À reverser à ce jour : ${eur("50000")}, dont ${eur("50000")} compris dans le reversement RV-2026-000004 ordonné, exécution demandée le 20/11/2026 (${eur("39000")} à virer dont ${eur("3000")} de remboursement d'avoir ; ${eur("4000")} de commission et ${eur("10000")} d'avances du cabinet à compenser au débit du virement).`,
+    ]);
+    // amounts that do not add up are never worded
+    expect(
+      inFlightNotes({
+        owed: [
+          {
+            currency: "EUR",
+            owed_minor: "50000",
+            in_flight_gross_minor: "50000",
+            in_flight_runs: [
+              { number: "RV-5", gross_minor: "50000", net_minor: "39000", commission_minor: "4000", advance_minor: "1", refund_minor: "0" },
+            ],
+          },
+        ],
+        in_flight: [],
+      }).sentences,
+    ).toEqual([]);
   });
 });
 

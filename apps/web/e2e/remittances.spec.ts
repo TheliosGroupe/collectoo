@@ -198,6 +198,8 @@ test("ops prepare, read and approve a client's remittance run", async ({ page, b
   // the accountant's export: the invoice of the period and its entries
   await page.getByTestId("accounting-export-link").click();
   await expect(page).toHaveURL(/\/backoffice\/reversements\/comptabilite/);
+  // review M2c-5 figures#7: the export counts settlements up to the period's last day, and says so
+  await expect(page.getByTestId("export-documents-as-of")).toHaveText(/^Règlements et restes dus arrêtés au \d{2}\/\d{2}\/\d{4}\.$/);
   await reviewShot(page, testInfo, "m2c-export-comptable");
   const exported = await page.request.get((await page.getByTestId("export-documents").getAttribute("href"))!);
   expect(exported.status()).toBe(200);

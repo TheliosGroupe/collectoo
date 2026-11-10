@@ -6,6 +6,7 @@ import { money } from "@/lib/payments/statements";
 import { clientOfUser } from "@/lib/remittance/client-space";
 import {
   NOT_ONLINE_TEXT,
+  type PaymentReference,
   frenchDay,
   invoiceDelivery,
   invoiceKind,
@@ -51,7 +52,7 @@ export default async function ClientInvoicesPage({ searchParams }: PageProps<"/c
   const { data: invoiceRows } = await supabase
     .from("commission_invoice")
     .select(
-      "id, kind, number, issue_date, settlement, due_date, run_id, totals:payload->totals, mandate:payload->mandate->>reference, acceptance:payload->buyer->>invoice_acceptance_ref",
+      "id, kind, number, issue_date, settlement, due_date, run_id, totals:payload->totals, mandate:payload->mandate->>reference, acceptance:payload->buyer->>invoice_acceptance_ref, payment_reference:payload->payment_reference",
     )
     .eq("client_organization_id", client.id)
     .order("issue_date", { ascending: false })
@@ -94,7 +95,7 @@ export default async function ClientInvoicesPage({ searchParams }: PageProps<"/c
                   <span className="text-sm text-zinc-600 dark:text-zinc-400">
                     {t ? `HT ${money(t.ht_minor, "EUR")} · TVA ${money(t.vat_minor, "EUR")} · ` : ""}
                     {inv.mandate ? `mandat ${String(inv.mandate)} · ` : ""}
-                    {settlementText(inv)}
+                    {settlementText({ ...inv, payment_reference: (inv.payment_reference ?? null) as PaymentReference | null })}
                   </span>
                   {delivery.mode === "pdf" ? (
                     <a

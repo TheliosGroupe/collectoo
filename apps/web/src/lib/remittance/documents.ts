@@ -53,10 +53,50 @@ export function invoiceKind(kind: string): string {
   return kind === "credit_note" ? "Avoir" : "Facture";
 }
 
-/** How a document is settled, in the client's words — never « payée » or « réglée » before the bank's debit (M2c-6). */
-export function settlementText(inv: Pick<InvoiceRow, "kind" | "settlement" | "due_date">): string {
+/**
+ * A netted document's payment reference, frozen at issue in its payload (review M2c-5 legal#4, legal#5): what the run
+ * sets off (`mode` 'run', `amount_minor`; `transfer` false when N = 0) and the remainder with its latest date, or all
+ * of it on the next run by a date (`mode` 'next_run'). Amounts are text in minor units.
+ */
+export type PaymentReference = {
+  mode?: string;
+  run_number?: string | null;
+  execution_date?: string | null;
+  transfer?: boolean | null;
+  amount_minor?: string | null;
+  remainder_minor?: string | null;
+  latest_date?: string | null;
+};
+
+/**
+ * How a document is settled, in the client's words, as its PDF states it (invoice.py `_payment_line`) — never
+ * « payée » or « réglée » before the bank's debit (M2c-6). A netted invoice the run's plan sets off only in part, or
+ * not at all, states the latest date of what is left (its `due_date`, legal#4); an N = 0 run's set-off is made at
+ * the approval, with no transfer (legal#5).
+ */
+export function settlementText(
+  inv: Pick<InvoiceRow, "kind" | "settlement" | "due_date"> & { payment_reference?: PaymentReference | null },
+): string {
   if (inv.kind === "credit_note") return "déduit des factures qu'il rectifie";
   if (inv.settlement === "due") return inv.due_date ? `à régler au plus tard le ${frenchDay(inv.due_date)}` : "à régler";
+  const ref = inv.payment_reference ?? null;
+  const latest = ref?.latest_date ?? inv.due_date;
+  if (ref?.mode === "next_run" && latest) {
+    return `à régler par compensation sur le prochain reversement, au plus tard le ${frenchDay(latest)}`;
+  }
+  if (ref?.mode === "run" && ref.run_number) {
+    if (ref.transfer === false && ref.execution_date) {
+      return `compensée le ${frenchDay(ref.execution_date)} avec vos encaissements (relevé ${ref.run_number}, aucun virement)`;
+    }
+    const remainder = ref.remainder_minor && /^\d+$/.test(ref.remainder_minor) && BigInt(ref.remainder_minor) > BigInt(0);
+    if (remainder && ref.amount_minor && /^\d+$/.test(ref.amount_minor) && latest) {
+      return `à régler par compensation sur le reversement ${ref.run_number} : ${money(ref.amount_minor, "EUR")} ; le solde de ${money(ref.remainder_minor as string, "EUR")} sur le prochain reversement, au plus tard le ${frenchDay(latest)}`;
+    }
+    return `à régler par compensation sur le reversement ${ref.run_number}`;
+  }
+  if (inv.due_date) {
+    return `à régler par compensation sur un reversement, au plus tard le ${frenchDay(inv.due_date)} pour ce que le reversement ne compense pas`;
+  }
   return "à régler par compensation sur un reversement";
 }
 
@@ -84,7 +124,22 @@ export function statementRunView(run: { status: string; net_minor: string | numb
   return { label, tone: run.status === "booked" ? "ok" : "neutral", net };
 }
 
-export type InFlightRun = { number: string; gross_minor: string; net_minor: string; commission_minor: string };
+/**
+ * A run in flight, as `client_remittance_summary` returns it in `owed[].in_flight_runs` (amounts text in minor units):
+ * gross = net + commission + advances − refund. `advance_minor`, `refund_minor` and `requested_execution_date` are
+ * named by the database (integration of the M2c-5 review); without them the difference gross − net − commission is
+ * worded as a whole.
+ */
+export type InFlightRun = {
+  number: string;
+  status?: string;
+  gross_minor: string;
+  net_minor: string;
+  commission_minor: string;
+  advance_minor?: string | null;
+  refund_minor?: string | null;
+  requested_execution_date?: string | null;
+};
 export type OwedEntry = {
   currency: string;
   owed_minor: string;
@@ -98,19 +153,38 @@ export type RemittanceSummary = {
   next_run_day?: string | null;
 };
 
-/** One in-flight run in words: what is transferred, what is set off at the debit, a credit note refunded in it. */
-function inFlightDetail(r: InFlightRun, currency: string): string {
+const isMinor = (v: unknown): v is string => typeof v === "string" && /^-?\d+$/.test(v);
+
+/**
+ * One in-flight run in words: what is transferred (a credit note refunded in it) and what is set off at the debit
+ * (commission, the servicer's advances). `null` when the amounts the database names do not add up — never a guess.
+ */
+function inFlightDetail(r: InFlightRun, currency: string): string | null {
+  const zero = BigInt(0);
   const gross = BigInt(r.gross_minor);
   const net = BigInt(r.net_minor);
   const commission = BigInt(r.commission_minor);
-  const other = gross - net - commission; // > 0: other sums owed to us set off; < 0: a credit note refunded
-  const zero = BigInt(0);
+  let advances: bigint;
+  let refund: bigint;
+  let advancesLabel = "d'avances du cabinet";
+  if (r.advance_minor != null || r.refund_minor != null) {
+    if (!isMinor(r.advance_minor) || !isMinor(r.refund_minor)) return null;
+    advances = BigInt(r.advance_minor);
+    refund = BigInt(r.refund_minor);
+    if (gross !== net + commission + advances - refund) return null;
+  } else {
+    // without the database's split, the difference as a whole (> 0: other sums owed to us; < 0: a refunded credit note)
+    const other = gross - net - commission;
+    advances = other > zero ? other : zero;
+    refund = other < zero ? -other : zero;
+    advancesLabel = "d'autres sommes dues au cabinet";
+  }
   const transfer = `${money(r.net_minor, currency)} à virer${
-    other < zero ? ` dont ${money((-other).toString(), currency)} de remboursement d'avoir` : ""
+    refund > zero ? ` dont ${money(refund.toString(), currency)} de remboursement d'avoir` : ""
   }`;
   const setOffs = [
     commission !== zero ? `${money(r.commission_minor, currency)} de commission` : null,
-    other > zero ? `${money(other.toString(), currency)} d'autres sommes dues au cabinet` : null,
+    advances !== zero ? `${money(advances.toString(), currency)} ${advancesLabel}` : null,
   ].filter((x): x is string => x !== null);
   return setOffs.length > 0 ? `${transfer} ; ${setOffs.join(" et ")} à compenser au débit du virement` : transfer;
 }
@@ -128,22 +202,24 @@ export function inFlightNotes(summary: Pick<RemittanceSummary, "owed" | "in_flig
 } {
   const sentences: string[] = [];
   const covered = new Set<string>();
-  const minor = (v: unknown) => typeof v === "string" && /^-?\d+$/.test(v);
   for (const o of summary?.owed ?? []) {
     const runs = o.in_flight_runs ?? [];
     // amounts are text in minor units; anything else is left to the page's own in-flight note (never a guess)
-    const wellFormed = runs.every((r) => [r.gross_minor, r.net_minor, r.commission_minor].every(minor));
-    if (!minor(o.in_flight_gross_minor) || !minor(o.owed_minor) || !wellFormed || runs.length === 0) continue;
-    if (BigInt(o.in_flight_gross_minor as string) === BigInt(0)) continue;
+    const wellFormed = runs.every((r) => [r.gross_minor, r.net_minor, r.commission_minor].every(isMinor));
+    if (!isMinor(o.in_flight_gross_minor) || !isMinor(o.owed_minor) || !wellFormed || runs.length === 0) continue;
+    if (BigInt(o.in_flight_gross_minor) === BigInt(0)) continue;
+    const details = runs.map((r) => inFlightDetail(r, o.currency));
+    if (details.some((d) => d === null)) continue;
     const head = `À reverser à ce jour : ${money(o.owed_minor, o.currency)}, dont ${money(o.in_flight_gross_minor, o.currency)}`;
     if (runs.length === 1) {
       const r = runs[0];
-      const date = summary?.in_flight.find((f) => f.number === r.number)?.requested_execution_date;
+      const date =
+        r.requested_execution_date ?? summary?.in_flight.find((f) => f.number === r.number)?.requested_execution_date;
       sentences.push(
-        `${head} compris dans le reversement ${r.number} ordonné${date ? `, exécution demandée le ${frenchDay(date)}` : ""} (${inFlightDetail(r, o.currency)}).`,
+        `${head} compris dans le reversement ${r.number} ordonné${date ? `, exécution demandée le ${frenchDay(date)}` : ""} (${details[0]}).`,
       );
     } else {
-      const each = runs.map((r) => `${r.number} (${money(r.gross_minor, o.currency)} : ${inFlightDetail(r, o.currency)})`);
+      const each = runs.map((r, i) => `${r.number} (${money(r.gross_minor, o.currency)} : ${details[i]})`);
       sentences.push(`${head} compris dans les reversements ordonnés ${each.slice(0, -1).join(", ")} et ${each[each.length - 1]}.`);
     }
     for (const r of runs) covered.add(r.number);

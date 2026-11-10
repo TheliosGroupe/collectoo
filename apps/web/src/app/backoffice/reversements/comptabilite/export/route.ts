@@ -24,8 +24,8 @@ export async function GET(request: Request) {
     return text(400, "Période invalide : deux dates, un an au plus.");
   }
   const { supabase } = await staffSession();
-  // the generated types learn `p_after`, `p_limit` and `page_key` with the regenerated database.types.ts (K1)
-  const rpc: ExportRpc = (fn, args) => supabase.rpc(fn, args as never) as unknown as ReturnType<ExportRpc>;
+  // `p_after` omitted on the first page: the SQL default (null) starts the period
+  const rpc: ExportRpc = (fn, args) => supabase.rpc(fn, { ...args, p_after: args.p_after ?? undefined });
   const out = await accountingExportCsv(rpc, kind, period);
   if (out.error) {
     if (out.error.code !== "42501") console.error("accounting export failed", kind, out.error.code, out.error.message);

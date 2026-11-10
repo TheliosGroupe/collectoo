@@ -18,9 +18,9 @@ export const EXPORT_PAGE_SIZE = 1000;
 
 type Functions = Database["public"]["Functions"];
 /** A row of `accounting_export_documents`, with its keyset position (K1). */
-export type ExportDocumentRow = Functions["accounting_export_documents"]["Returns"][number] & { page_key: string };
+export type ExportDocumentRow = Functions["accounting_export_documents"]["Returns"][number];
 /** A row of `accounting_export_entries`, with its keyset position (K1). */
-export type ExportEntryRow = Functions["accounting_export_entries"]["Returns"][number] & { page_key: string };
+export type ExportEntryRow = Functions["accounting_export_entries"]["Returns"][number];
 
 export type ExportKind = "factures" | "ecritures";
 export type ExportError = { code?: string; message?: string };

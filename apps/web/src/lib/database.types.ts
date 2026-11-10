@@ -2165,14 +2165,14 @@ isOneToOne: true
                   ]
                 },"remittance_statement": {
                   Row: {
-                    "client_organization_id": string,"created_at": string,"csv_document_id": string,"csv_sha256": string,"currency": string,"file_count": number,"issue_date": string,"known_at": string,"line_count": number,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"pdf_document_id": string,"pdf_sha256": string,"renderer_version": string,"run_id": string,"template_version": string
+                    "client_organization_id": string,"created_at": string,"csv_document_id": string,"csv_sha256": string,"currency": string,"drawn_status": string,"file_count": number,"gross_minor": number,"issue_date": string,"known_at": string,"line_count": number,"net_minor": number,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"pdf_document_id": string,"pdf_sha256": string,"renderer_version": string,"run_id": string,"template_version": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "client_organization_id": string,"created_at"?: string,"csv_document_id": string,"csv_sha256": string,"currency": string,"file_count": number,"issue_date": string,"known_at": string,"line_count": number,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"pdf_document_id": string,"pdf_sha256": string,"renderer_version": string,"run_id": string,"template_version": string
+                    "client_organization_id": string,"created_at"?: string,"csv_document_id": string,"csv_sha256": string,"currency": string,"drawn_status": string,"file_count": number,"gross_minor": number,"issue_date": string,"known_at": string,"line_count": number,"net_minor": number,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"pdf_document_id": string,"pdf_sha256": string,"renderer_version": string,"run_id": string,"template_version": string
                   }
                   Update: {
-                    "client_organization_id"?: string,"created_at"?: string,"csv_document_id"?: string,"csv_sha256"?: string,"currency"?: string,"file_count"?: number,"issue_date"?: string,"known_at"?: string,"line_count"?: number,"number"?: string,"organization_id"?: string,"payload"?: NonNullable<Json>,"payload_sha256"?: string,"pdf_document_id"?: string,"pdf_sha256"?: string,"renderer_version"?: string,"run_id"?: string,"template_version"?: string
+                    "client_organization_id"?: string,"created_at"?: string,"csv_document_id"?: string,"csv_sha256"?: string,"currency"?: string,"drawn_status"?: string,"file_count"?: number,"gross_minor"?: number,"issue_date"?: string,"known_at"?: string,"line_count"?: number,"net_minor"?: number,"number"?: string,"organization_id"?: string,"payload"?: NonNullable<Json>,"payload_sha256"?: string,"pdf_document_id"?: string,"pdf_sha256"?: string,"renderer_version"?: string,"run_id"?: string,"template_version"?: string
                   }
                   Relationships: [
                     {
@@ -2306,13 +2306,13 @@ isOneToOne: false
 { Args: { "p_account_id": string }; Returns: Json
                            },
 "accounting_export_documents":
-{ Args: { "p_from": string,"p_to": string }; Returns: {
-              "client_name": string,"client_siren": string,"corrects": string,"due_date": string,"ht_minor": number,"issue_date": string,"kind": string,"mandate": string,"number": string,"open_minor": number,"run_number": string,"service_from": string,"service_to": string,"settled_minor": number,"settlement": string,"settlements": string,"ttc_minor": number,"vat_book": string,"vat_minor": number,"vat_rate": number
+{ Args: { "p_after"?: string,"p_from": string,"p_limit"?: number,"p_to": string }; Returns: {
+              "client_name": string,"client_siren": string,"corrects": string,"due_date": string,"ht_minor": number,"issue_date": string,"kind": string,"mandate": string,"number": string,"open_minor": number,"page_key": string,"run_number": string,"service_from": string,"service_to": string,"settled_minor": number,"settlement": string,"settlements": string,"ttc_minor": number,"vat_book": string,"vat_minor": number,"vat_rate": number
             }[]
                            },
 "accounting_export_entries":
-{ Args: { "p_from": string,"p_to": string }; Returns: {
-              "account_number": string,"book": string,"client_name": string,"credit_minor": number,"currency": string,"debit_minor": number,"effective_date": string,"entry_id": string,"entry_type": string,"posted_at": string,"source_ref": string,"source_type": string
+{ Args: { "p_after"?: string,"p_from": string,"p_limit"?: number,"p_to": string }; Returns: {
+              "account_number": string,"book": string,"client_name": string,"credit_minor": number,"currency": string,"debit_minor": number,"effective_date": string,"entry_id": string,"entry_type": string,"page_key": string,"posted_at": string,"source_ref": string,"source_type": string
             }[]
                            },
 "add_boarding_file":

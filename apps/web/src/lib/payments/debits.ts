@@ -401,7 +401,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   // review M2c-5 (perf#2 = tests-ui#2, K4): a statement or an invoice's PDF the documents job could not draw
   remittance_document_failed: {
     label: "Document de reversement en échec",
-    help: "Le relevé d'un reversement, ou le PDF d'une facture ou d'un avoir, n'a pas pu être établi (dernière erreur dans les détails) ; les autres documents continuent d'être établis et celui-ci est retenté à chaque passage. Le client ne le voit pas encore : prévenez le support.",
+    help: "Le relevé d'un reversement, ou le PDF d'une facture ou d'un avoir, n'a pas pu être établi ; les autres documents continuent d'être établis et celui-ci est retenté automatiquement, à intervalles croissants (6 heures au plus). Sa dernière erreur est enregistrée pour le support. Le client ne le voit pas encore : prévenez le support.",
   },
   remittance_document_missing: {
     label: "Document de reversement en attente depuis plus de 24 h",
