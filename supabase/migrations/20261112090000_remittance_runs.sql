@@ -233,11 +233,13 @@ create table private.remittance_draft (
 -- Frozen lines (§6.1 remittance_line): one per item, each item in exactly one live line (I15)
 ------------------------------------------------------------------------------------------
 
+-- (organization, client and currency are the run's: checked once per run by the insert guard, not by a foreign key
+-- per line — performance review #4)
 create table public.remittance_line (
   run_id uuid not null references public.remittance_run (id),
   line_no integer not null check (line_no >= 1),
-  organization_id uuid not null references public.organization (id),
-  client_organization_id uuid not null references public.organization (id),
+  organization_id uuid not null,
+  client_organization_id uuid not null,
   currency char(3) not null,
   ledger_entry_id uuid not null references public.ledger_entry (id),
   kind text not null check (kind in ('allocation', 'allocation_reversal', 'forward', 'forward_reversal', 'client_advance',
@@ -370,8 +372,10 @@ create table public.commission_invoice_line (
 );
 
 -- What each invoice charges each (file, tier key): what the next runs' credit notes allocate against (LIFO, §8.4).
+-- (the invoice checked at commit: the approval writes a run's charges before it numbers the invoice, outside the
+-- allocation lock — performance review #4)
 create table public.commission_invoice_charge (
-  invoice_id uuid not null references public.commission_invoice (id),
+  invoice_id uuid not null references public.commission_invoice (id) deferrable initially deferred,
   account_id uuid not null references public.account (id),
   tier_key text not null,
   charged_minor bigint not null check (charged_minor > 0),
@@ -380,10 +384,13 @@ create table public.commission_invoice_charge (
 create index commission_invoice_charge_key_idx on public.commission_invoice_charge (account_id, tier_key);
 
 -- What a credit note takes back from an earlier invoice, per (file, tier key) and line it credits (289 I 5).
+-- (the credit note and the invoice: a credit note and an invoice of one client, checked once per pair by the insert
+-- guard below rather than by two foreign keys per allocation — a cancellation allocates once per file, performance
+-- review #1)
 create table public.commission_credit_alloc (
-  credit_note_id uuid not null references public.commission_invoice (id),
+  credit_note_id uuid not null,
   line_no integer not null check (line_no >= 1),
-  original_invoice_id uuid not null references public.commission_invoice (id),
+  original_invoice_id uuid not null,
   account_id uuid not null references public.account (id),
   tier_key text not null,
   ht_minor bigint not null check (ht_minor < 0),
@@ -442,10 +449,11 @@ create index commission_settlement_client_idx on public.commission_settlement (c
 -- per terms version, the basis and fee kept by `keep` reversals, the commission charged (= Σ the open charges of its
 -- invoices). Append-only: the latest row is the state; an approval writes the keys it priced, a cancellation the keys
 -- back as before the run (with what its invoices still charge).
+-- (servicer and client: the run's, checked once per run by the insert guard below, not by two foreign keys per key)
 create table public.remittance_key_state (
   seq bigint generated always as identity primary key,
-  organization_id uuid not null references public.organization (id),
-  client_organization_id uuid not null references public.organization (id),
+  organization_id uuid not null,
+  client_organization_id uuid not null,
   account_id uuid not null references public.account (id),
   tier_key text not null,
   run_id uuid not null references public.remittance_run (id),
@@ -550,8 +558,9 @@ begin
 end;
 $$;
 
--- A line equals its entry's 4670 posting (§6.1 guard) for the run's client and currency: one pass over the
--- statement's new lines, each entry's postings by key.
+-- A line is its run's (servicer, client, currency: one keyed lookup per run of the statement) and equals its entry's
+-- 4670 posting (§6.1 guard) for that client and currency: one pass over the statement's new lines, each entry's
+-- postings by key.
 create or replace function private.remittance_line_insert_guard()
 returns trigger
 language plpgsql
@@ -561,6 +570,14 @@ as $$
 declare
   v_bad text;
 begin
+  if exists (select 1 from (select distinct n.run_id, n.organization_id, n.client_organization_id, n.currency
+                            from new_rows n) n
+             left join lateral (select r.organization_id, r.client_organization_id, r.currency
+                                from public.remittance_run r where r.id = n.run_id offset 0) r on true
+             where (r.organization_id, r.client_organization_id, r.currency)
+                   is distinct from (n.organization_id, n.client_organization_id, n.currency)) then
+    raise exception 'remittance line: its run''s servicer, client and currency' using errcode = 'check_violation';
+  end if;
   select min(n.run_id || '/' || n.line_no) into v_bad
   from new_rows n
   cross join lateral (
@@ -580,6 +597,54 @@ $$;
 create trigger remittance_line_insert_guard after insert on public.remittance_line
   referencing new table as new_rows for each statement execute function private.remittance_line_insert_guard();
 alter table public.remittance_line enable always trigger remittance_line_insert_guard;
+
+-- A credit allocation names a credit note and an invoice of one client (once per pair of the statement, keyed).
+create or replace function private.commission_credit_alloc_insert_guard()
+returns trigger
+language plpgsql
+set search_path = ''
+set enable_seqscan = off
+as $$
+begin
+  if exists (select 1 from (select distinct n.credit_note_id, n.original_invoice_id from new_rows n) n
+             left join lateral (select c.kind, c.organization_id, c.client_organization_id
+                                from public.commission_invoice c where c.id = n.credit_note_id offset 0) c on true
+             left join lateral (select o.kind, o.organization_id, o.client_organization_id
+                                from public.commission_invoice o where o.id = n.original_invoice_id offset 0) o on true
+             where c.kind is distinct from 'credit_note' or o.kind is distinct from 'invoice'
+                or (c.organization_id, c.client_organization_id)
+                   is distinct from (o.organization_id, o.client_organization_id)) then
+    raise exception 'commission credit allocation: a credit note on an invoice of its client'
+      using errcode = 'check_violation';
+  end if;
+  return null;
+end;
+$$;
+create trigger commission_credit_alloc_insert_guard after insert on public.commission_credit_alloc
+  referencing new table as new_rows for each statement execute function private.commission_credit_alloc_insert_guard();
+alter table public.commission_credit_alloc enable always trigger commission_credit_alloc_insert_guard;
+
+-- A key state is its run's servicer's and client's (once per run of the statement, keyed).
+create or replace function private.remittance_key_state_insert_guard()
+returns trigger
+language plpgsql
+set search_path = ''
+set enable_seqscan = off
+as $$
+begin
+  if exists (select 1 from (select distinct n.run_id, n.organization_id, n.client_organization_id from new_rows n) n
+             left join lateral (select r.organization_id, r.client_organization_id
+                                from public.remittance_run r where r.id = n.run_id offset 0) r on true
+             where (r.organization_id, r.client_organization_id)
+                   is distinct from (n.organization_id, n.client_organization_id)) then
+    raise exception 'remittance key state: its run''s servicer and client' using errcode = 'check_violation';
+  end if;
+  return null;
+end;
+$$;
+create trigger remittance_key_state_insert_guard after insert on public.remittance_key_state
+  referencing new table as new_rows for each statement execute function private.remittance_key_state_insert_guard();
+alter table public.remittance_key_state enable always trigger remittance_key_state_insert_guard;
 
 -- The series (§14.1, I17): each document takes the next number of its series and year, never a date before the
 -- previous one's, and only a number the counter gave (the counter row is updated first, in the same transaction);
@@ -1686,9 +1751,12 @@ begin
 
   begin
     -- The frozen facts, written under the run's row lock only, before the allocation lock (performance review #4):
-    -- the lines, their repricings and the tier history depend only on the draft and on immutable entries; the
-    -- refusal below rolls them back with this block. Holding the allocation lock is then the checks, the queue, the
-    -- documents and the payout (each item in exactly one live line, I15).
+    -- the lines, their repricings, the tier history and the invoices' charges depend only on the draft and on
+    -- immutable entries; the refusal below rolls them back with this block. Holding the allocation lock is then the
+    -- checks, the queue, the numbering and posting of the documents and the payout (each item in exactly one live
+    -- line, I15), then the deferred checks at commit: 5k lines, 0.09 s + 0.07 s of a 0.83 s job (all of it before).
+    -- The row locks these inserts take on what the lines name are key-share locks, taken (as every command takes its
+    -- row locks) before the advisory lock: no lock cycle with an allocation.
     insert into public.remittance_line (run_id, line_no, organization_id, client_organization_id, currency,
                                         ledger_entry_id, kind, account_id, portfolio_id, mandate_id, mandate_terms_id,
                                         payment_id, encaissement_date, effective_date, posted_at, deadline,
@@ -1715,6 +1783,12 @@ begin
            coalesce(k -> 'basis', '[]'), (k ->> 'kept_basis')::bigint, (k ->> 'kept')::bigint,
            (k ->> 'commission')::bigint
     from jsonb_array_elements(coalesce(d.key_states, '[]')) k;
+    -- what the run's invoices charge each (file, tier key) (one row per file at 50k; the invoices numbered below)
+    insert into public.commission_invoice_charge (invoice_id, account_id, tier_key, charged_minor)
+    select (x.doc ->> 'id')::uuid, (c ->> 'account_id')::uuid, c ->> 'tier_key', (c ->> 'amount')::bigint
+    from jsonb_array_elements(v_docs) x (doc)
+    cross join lateral jsonb_array_elements(coalesce(x.doc -> 'charges', '[]')) c
+    where x.doc ->> 'kind' = 'invoice';
 
     -- lock order (ADR-0014): the run row → allocation lock → remit lock → invoice counter (last, in
     -- issue_commission_documents)
@@ -1734,7 +1808,9 @@ begin
 
     -- invoices and credit notes, numbered (the counter locked last), their entries posted, in the VAT book the plan
     -- assumed (money review #1)
-    v_issued := private.issue_commission_documents(r.organization_id, r.client_organization_id, r.id, v_docs,
+    v_issued := private.issue_commission_documents(r.organization_id, r.client_organization_id, r.id,
+                                                   (select coalesce(jsonb_agg(x.doc - 'charges' order by x.ord), '[]')
+                                                    from jsonb_array_elements(v_docs) with ordinality x (doc, ord)),
                                                    'commission', d.vat_on_debits);
 
     -- the plan with the run's documents named (M2c-6 posts it at the debit)
@@ -3063,6 +3139,7 @@ create policy remittance_late_approval_read on public.remittance_late_approval f
 -- Functions: the commands and reads are the API's; the rest the worker's (service role) or internal.
 revoke execute on function
   private.remittance_run_guard(), private.remittance_line_guard(), private.remittance_line_insert_guard(),
+  private.commission_credit_alloc_insert_guard(), private.remittance_key_state_insert_guard(),
   private.commission_invoice_guard(), private.is_business_day(date), private.next_business_day(date),
   private.business_days_between(date, date), private.paying_account(uuid, char),
   private.remittance_payout_blockers(uuid, char, date), private.remittance_commission_blockers(uuid),

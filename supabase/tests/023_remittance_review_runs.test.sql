@@ -8,7 +8,7 @@
 -- (clients A/B, a restricted viewer, a collector, another servicer). Design docs/design/m2c-remittances.md §9.5–§9.7,
 -- §14; ADR-0014 M2c-4.
 begin;
-select plan(53);
+select plan(56);
 
 -- Fixtures (as 021, with a third client) ----------------------------------------------------------------
 insert into public.organization (id, kind, legal_name, siren) values
@@ -539,6 +539,24 @@ select throws_ok($$ update public.remittance_line set released = true, released_
   '23514', null, 'nor with it');
 select throws_ok($$ delete from public.remittance_line where run_id = (select v from t where k = 'r3') $$,
   '23514', null, 'nor is deleted');
+-- what the per-row foreign keys checked, now once per run or pair of the statement (stronger: the run's own)
+select throws_ok($$ insert into public.remittance_line (run_id, line_no, organization_id, client_organization_id, currency,
+                      ledger_entry_id, kind, effective_date, posted_at, amount_minor, commission_state)
+                    values ((select v from t where k = 'r4'), 99, '00000000-0000-0000-0000-0000000000bb',
+                            '00000000-0000-0000-0000-0000000000a3', 'EUR', (select v from t where k = 'e5'), 'allocation',
+                            current_date, now(), 100000, 'none') $$,
+  '23514', 'remittance line: its run''s servicer, client and currency', 'a line is its run''s servicer''s');
+select throws_ok($$ insert into public.remittance_key_state (organization_id, client_organization_id, account_id,
+                      tier_key, run_id, cause)
+                    values ('00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a2',
+                            pg_temp.f('01'), 'tout', (select v from t where k = 'r1'), 'approved') $$,
+  '23514', 'remittance key state: its run''s servicer and client', 'a key state is its run''s client''s');
+select throws_ok($$ insert into public.commission_credit_alloc (credit_note_id, line_no, original_invoice_id, account_id,
+                      tier_key, ht_minor)
+                    values ((select v from t where k = 'i1'), 1, (select v from t where k = 'i1'), pg_temp.f('01'), 'tout',
+                            -1) $$,
+  '23514', 'commission credit allocation: a credit note on an invoice of its client',
+  'a credit allocation is a credit note''s, on an invoice');
 select is((select count(*)::int from information_schema.columns
            where table_schema = 'public' and table_name = 'remittance_line'), 28,
   'remittance_line has the 28 columns its guard compares (26) or releases (2)');
