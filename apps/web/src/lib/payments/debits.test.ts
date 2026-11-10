@@ -327,6 +327,8 @@ describe("the remittances' nightly checks (M2c-4 and its review)", () => {
       // review M2c-5 (perf#2 = tests-ui#2, K4): documents the job could not draw, or still not drawn after 24 h
       "remittance_document_failed",
       "remittance_document_missing",
+      // M2c-5b (I22): a file's key state and its invoices' open charges and waivers disagree
+      "commission_key_state",
     ]) {
       expect(CHECK_LABEL[code]?.label, code).toBeTruthy();
       expect(CHECK_LABEL[code]?.help, code).toBeTruthy();

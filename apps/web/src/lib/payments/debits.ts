@@ -327,7 +327,11 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   remittance_run_totals: {
     label: "Totaux d'un reversement incohérents",
-    help: "Brut ≠ somme des lignes, net + compensation ≠ brut, virement ≠ net, ou commission des factures ≠ commission des lignes (I16).",
+    help: "Brut ≠ somme des lignes, net + compensation ≠ brut, virement ≠ net, ou commission des factures (et de ce qu'ont absorbé les avoirs manuels) ≠ commission des lignes (I16).",
+  },
+  commission_key_state: {
+    label: "Historique de commission ≠ factures d'un dossier",
+    help: "Pour un dossier, ce que ses factures facturent encore plus ce que des avoirs manuels ont rectifié ne vaut pas la commission facturée de son historique (I22) : le prochain reversement de ce client laissera sa commission en attente.",
   },
   invoice_numbering: {
     label: "Numérotation des factures discontinue",

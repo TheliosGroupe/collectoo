@@ -167,6 +167,8 @@ def test_rv1_the_first_run_of_the_worked_example() -> None:
             "kept_basis": "0",
             "kept": "0",
             "commission": "30000",
+            "waived": "0",  # M2c-5b: no manual credit note's waiver on the key, none absorbed
+            "absorbed": [],
         },
     )
 
