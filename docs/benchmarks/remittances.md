@@ -169,3 +169,32 @@ before the remittance checks: `run_remittance_checks` 2.3 s of 4.5 s, `unallocat
 11,715 partly allocated payments). In the CI-order run, the database already holding the allocation and matching
 tests' 50,000-file tenants and the receipts test's 5,000, the remittance test measured: reserve 1.33 s, prepare 12.1 s (4.07 / 5.44 / 2.37), approval job 6.7 s, nightly checks
 5.7 s (6.5 s with the draft waiting; over the 5 s target in that crowded state), overview 0.05 s, cancellation 4.00 s.
+
+### Review fixes, round 2 (2026-11-10, same VM: 4 vCPU, 16 GB RAM, local stack)
+
+The deadline CTEs of the three readers are now `materialized` (perf#0, round 2: one deadline per distinct (E, delay)
+whatever the statistics), the approval holds unmeetable lines to one month, the cancellation's corrective invoice
+bears its own VAT, and the nightly checks add `invoice_overdue`. Each scale test run alone right after
+`supabase db reset`:
+
+| Step | Volume | Round 1 | Round 2 | Design §19 target |
+|---|---|---|---|---|
+| « Préparer maintenant » (the command) | 50,000 items | 1.28 s | 1.47 s | < 1 s |
+| Prepare job: load / price / write | 50,000 lines | 3.26 / 4.62 / 2.35 s (10.4 s) | 3.39 / 4.64 / 2.36 s (**10.6 s**) | ≈ 1 + 0.5 + 0.5 s |
+| Overview (« À valider ») with the draft waiting | 50,000 reserved items | 0.05 s | 0.05 s | — |
+| Nightly checks with the draft waiting | 50,000 lines | 4.4 s | **3.7 s** | < 5 s |
+| Approval command / job | 50,000 lines | 0.04 / 6.3 s | 0.03 / **6.1 s** | < 1 s / 2–4 s |
+| Nightly checks after the approval | 50,000 lines in flight | 4.0 s | **2.7 s** | < 5 s |
+| Cancellation (the command) | 50,000 lines | 3.97 s | **4.12 s** | the API's 8 s statement timeout |
+| `test_remittance_scale_integration.py` | | | 1 passed in 245 s | |
+| `test_allocate_50k_payments`: allocation (5 jobs of 10,000) | 50,000 payments | 80.8 s | **78.0 s** (post 11.9–12.6 s a job) | — |
+| … 1,000 returns imported + linked | | 29.4 s | 29.8 s | — |
+| … nightly checks over 50,000 payments | 11,956 partly allocated | 4.7 s | **3.5 s**, no code | < 5 s |
+| `test_allocate_50k_payments` | | 259 s | 1 passed in 245 s | |
+
+- The nightly checks are 0.7–1.3 s faster: `unallocated_payment_deadlines` and `pending_item_deadlines` no longer
+  compute a deadline per payment or item when their tables have no statistics (the scale harness's state), so the
+  estimate the previous section flagged as « under 5 s but close » now has room.
+- The reservation (1.28 → 1.47 s) and the cancellation (3.97 → 4.12 s) moved within the run-to-run spread seen before
+  (1.28–1.34 s, 3.97–4.00 s); neither path changed but the corrective invoice's VAT and period (one row per mandate
+  and rate) and the late lines' month (computed once per distinct E, for unmeetable lines only).
