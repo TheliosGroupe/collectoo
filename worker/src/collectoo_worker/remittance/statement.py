@@ -373,6 +373,13 @@ def _collected(p: Mapping[str, Any], money: Callable[[int | str], str], csv_sha2
         f"{t['line_count']} encaissement(s) sur {t['file_count']} dossier(s). Commission HT de la "
         f"période : {money(t['commission_ht_minor'])}."
     ]
+    if int(t.get("waived_absorbed_minor", 0)):  # M2c-5b: absent from payloads drawn before
+        invoices = ", ".join(str(n) for n in t.get("waived_absorbed_invoices") or ())
+        texts.append(
+            f"Dont {money(-int(t['waived_absorbed_minor']))} de commission sur des encaissements "
+            f"annulés, déjà rendus par avoir manuel sur la facture {invoices} : aucun nouvel avoir "
+            "pour ce montant."
+        )
     if int(t.get("repriced_count", 0)):
         texts.append(
             f"Dont la commission de {t['repriced_count']} encaissement(s) de relevés précédents, "

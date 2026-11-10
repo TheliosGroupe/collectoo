@@ -25,7 +25,8 @@
 -- private.remittance_approval_refusal (the credit notes' key states count in the history the draft assumed),
 -- private.approve_remittance_run (the key states' waiver and what the run's credits absorb),
 -- public.cancel_remittance_run (waivers cleared and restored, the key states' waiver), private.run_remittance_checks
--- (I16 with what waivers absorbed; I22 the key states). Constraints relaxed: commission_invoice's reason ('manual'),
+-- (I16 with what waivers absorbed; I22 the key states), private.remittance_statement_build (its totals name what the
+-- run's credits absorbed). Constraints relaxed: commission_invoice's reason ('manual'),
 -- remittance_key_state's run (a credit note's key state has none) and cause ('credit_note').
 
 ------------------------------------------------------------------------------------------
@@ -1385,6 +1386,425 @@ begin
 end;
 $$;
 
+
+-- Redefined from 20261113090000 (M2c-5b): the statement's totals name what the run's credits absorbed of manual
+-- credit notes' waivers, so its commission (the lines') and its documents' agree in words (CSV = PDF = run).
+create or replace function private.remittance_statement_build(p_run_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+set enable_hashjoin = off
+set enable_mergejoin = off
+as $$
+declare
+  r public.remittance_run;
+  v_cancelled boolean;
+  v_exp integer;
+  v_lines jsonb;
+  v_files jsonb;
+  v_natures jsonb;
+  v_totals jsonb;
+  v_docs jsonb;
+  v_earlier jsonb;
+  v_mandates jsonb;
+  v_payout jsonb;
+  v_follow jsonb;
+  v_held jsonb;
+  v_refunded jsonb;
+  v_position jsonb;
+  v_prev public.remittance_run;
+  v_k_day date;
+  v_issue date;
+  v_payload jsonb;
+  v_receivable bigint;
+  v_advances bigint;
+  v_docs_ttc bigint;
+  v_issuer jsonb;
+  v_client jsonb;
+begin
+  select * into r from public.remittance_run where id = p_run_id for share;
+  if not found or r.approved_at is null then
+    raise exception 'statement of %: not an approved run', p_run_id using errcode = 'check_violation';
+  end if;
+  v_cancelled := r.status = 'cancelled';
+  select c.minor_exponent into v_exp from public.currency c where c.code = r.currency;
+  v_k_day := (r.known_at at time zone 'Europe/Paris')::date;
+  v_issue := (r.approved_at at time zone 'Europe/Paris')::date;
+
+  -- the run's lines, then the earlier lines whose commission this run priced (amount 0: remitted then)
+  drop table if exists pg_temp._rd_line;
+  create temp table _rd_line on commit drop as
+  select 0 as section, l.line_no, l.line_no as source_line_no, null::text as from_run, l.kind, l.ledger_entry_id,
+         l.account_id, l.portfolio_id, l.mandate_id, l.payment_id, l.encaissement_date, l.effective_date, l.deadline,
+         l.amount_minor, l.commission_minor, l.commission_state, l.parts, l.invoice_id, l.posted_at,
+         l.latest_execution_date, l.unmeetable
+  from public.remittance_line l where l.run_id = r.id
+  union all
+  select 1, 0, l.line_no, (select x.number from public.remittance_run x where x.id = l.run_id), l.kind,
+         l.ledger_entry_id, l.account_id, l.portfolio_id, l.mandate_id, l.payment_id, l.encaissement_date,
+         l.effective_date, l.deadline, 0, rp.commission_minor, rp.commission_state, rp.parts, rp.invoice_id,
+         l.posted_at, l.latest_execution_date, l.unmeetable
+  from public.remittance_line_repricing rp
+  cross join lateral (select y.* from public.remittance_line y where y.run_id = rp.run_id and y.line_no = rp.line_no
+                      offset 0) l
+  where rp.pricing_run_id = r.id;
+
+  drop table if exists pg_temp._rd_fact;
+  create temp table _rd_fact on commit drop as
+  select x.section, x.line_no, x.source_line_no, x.from_run, x.kind, x.account_id, x.amount_minor, x.commission_minor,
+         a.external_ref as file, d.name as debtor, m.reference as mandate, pf.name as portfolio,
+         coalesce(it.items, '[]'::jsonb) as items, coalesce(it.components, '[]'::jsonb) as components,
+         n.reason as nature_reason, x.encaissement_date, x.effective_date, x.deadline, x.commission_state,
+         coalesce(pt.rules, '[]'::jsonb) as rules, coalesce(pt.rates, '[]'::jsonb) as rates,
+         coalesce(pt.basis, 0) as basis, coalesce(inv.number, cn.number) as invoice, rc.number as receipt,
+         la.ledger_entry_id is not null as late, lc.cause as late_cause
+  from pg_temp._rd_line x
+  left join lateral (select q.external_ref from public.account q where q.id = x.account_id offset 0) a on true
+  left join lateral (
+    select (array_agg(pa.display_name order by pa.display_name, pa.id))[1] as name
+    from public.account_party ap
+    cross join lateral (select q.id, q.display_name from public.party q where q.id = ap.party_id offset 0) pa
+    where ap.account_id = x.account_id and ap.role = 'borrower') d on true
+  left join lateral (select q.reference from public.mandate q where q.id = x.mandate_id offset 0) m on true
+  left join lateral (select q.name from public.portfolio q where q.id = x.portfolio_id offset 0) pf on true
+  -- the items and components the entry moved (its 1100 postings), each item once, in a total order
+  left join lateral (
+    with y as (
+      select q.claim_item_id, q.component
+      from public.ledger_posting lp
+      cross join lateral (select v.claim_item_id, v.component from public.ledger_account v
+                          where v.id = lp.ledger_account_id and v.book = 'debtor_receivable' offset 0) q
+      where lp.entry_id = x.ledger_entry_id)
+    select (select jsonb_agg(jsonb_build_array(z.kind, z.ref) order by z.due_date nulls last, z.ref, z.kind, z.id)
+            from (select distinct ci.id, ci.kind, ci.ref, ci.due_date
+                  from y cross join lateral (select c.id, c.kind, c.ref, c.due_date from public.claim_item c
+                                             where c.id = y.claim_item_id offset 0) ci) z) as items,
+           (select jsonb_agg(z.component order by z.sort_order)
+            from (select distinct y.component, lc.sort_order
+                  from y cross join lateral (select c.sort_order from public.ledger_component c
+                                             where c.code = y.component offset 0) lc) z) as components) it on true
+  left join lateral (select q.reason from public.client_notification q where q.ledger_entry_id = x.ledger_entry_id
+                     offset 0) n on true
+  -- the rules and band rates of the line's parts, and the basis they priced
+  left join lateral (
+    select (select jsonb_agg(distinct p ->> 'label_fr') from jsonb_array_elements(x.parts) p
+            where p ->> 'label_fr' is not null) as rules,
+           (select jsonb_agg(distinct t ->> 0) from jsonb_array_elements(x.parts) p
+            cross join lateral jsonb_array_elements(coalesce(p -> 'tiers', '[]')) t) as rates,
+           (select sum((p ->> 'basis')::bigint) from jsonb_array_elements(x.parts) p) as basis) pt on true
+  left join lateral (select q.number from public.commission_invoice q where q.id = x.invoice_id offset 0) inv on true
+  -- a reversal's negative commission is on the run's credit note, which names its entry (review figures#5)
+  left join lateral (select q.number
+                     from public.commission_credit_alloc ca
+                     cross join lateral (select y.number, y.seq from public.commission_invoice y
+                                         where y.id = ca.credit_note_id and y.run_id = r.id
+                                           and y.kind = 'credit_note' and y.reason = 'commission' offset 0) q
+                     where x.invoice_id is null and ca.entry_id = x.ledger_entry_id
+                     order by q.seq limit 1) cn on true
+  left join lateral (select q.number from public.receipt q where q.payment_id = x.payment_id
+                     order by q.version limit 1) rc on true
+  left join lateral (select q.ledger_entry_id from public.remittance_late_approval q
+                     where q.run_id = r.id and q.ledger_entry_id = x.ledger_entry_id and x.section = 0
+                     offset 0) la on true
+  -- why a line was paid after its latest execution date, from the data (review legal#6; the approver's reason stays
+  -- in the back office): the mandate's delay could not be met (held to one month, R124-6), the collection reached the
+  -- queue after its J-5 date (the deadline guard's margin, 5 business days before its latest execution date), or the
+  -- approval came late
+  left join lateral (select case when x.unmeetable then 'unmeetable'
+                                 when private.business_days_between((x.posted_at at time zone 'Europe/Paris')::date,
+                                                                    x.latest_execution_date) < 5
+                                 then 'identified_late'
+                                 else 'approved_late' end as cause
+                     where la.ledger_entry_id is not null offset 0) lc on true;
+
+  select coalesce(jsonb_agg(jsonb_build_array(
+           f.source_line_no, f.mandate, f.portfolio, f.file, f.debtor, f.items, f.components, f.kind, f.nature_reason,
+           f.from_run, f.encaissement_date, f.effective_date, f.deadline, f.amount_minor::text, f.rules, f.rates,
+           f.basis::text, f.commission_minor::text, f.commission_state, f.invoice, f.receipt, f.late, f.late_cause)
+           order by f.section, f.from_run, f.source_line_no), '[]')
+  into v_lines from pg_temp._rd_fact f;
+
+  -- per file (the PDF's table): the run's lines and the commission priced on the file in this run (a file with only
+  -- earlier lines priced now has 0 lines: counted apart in the totals, review tests-ui#4)
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'file', g.file, 'debtor', g.debtor, 'lines', g.n::text, 'amount_minor', g.amount::text,
+           'commission_minor', g.commission::text, 'late', g.late::text)
+           order by g.file nulls last, g.account_id), '[]')
+  into v_files
+  from (select f.account_id, min(f.file) as file, min(f.debtor) as debtor,
+               count(*) filter (where f.section = 0) as n, sum(f.amount_minor) as amount,
+               sum(f.commission_minor) as commission, count(*) filter (where f.late) as late
+        from pg_temp._rd_fact f group by f.account_id) g;
+
+  -- per nature (the run's lines by kind and reason; the earlier lines priced now as one row)
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'kind', n.kind, 'reason', n.reason, 'count', n.c::text, 'amount_minor', n.amount::text,
+           'commission_minor', n.commission::text) order by n.section, n.kind, n.reason nulls first), '[]')
+  into v_natures
+  from (select f.section, case when f.section = 1 then 'repricing' else f.kind end as kind,
+               case when f.section = 0 and f.kind in ('forward', 'allocation_reversal', 'forward_reversal')
+                    then f.nature_reason end as reason,
+               count(*) as c, sum(f.amount_minor) as amount, sum(f.commission_minor) as commission
+        from pg_temp._rd_fact f group by 1, 2, 3) n;
+
+  select jsonb_build_object(
+           'line_count', count(*) filter (where f.section = 0),
+           'repriced_count', count(*) filter (where f.section = 1),
+           'file_count', count(distinct f.account_id) filter (where f.section = 0),
+           'repriced_only_file_count',
+             (select count(*) from (select g.account_id from pg_temp._rd_fact g group by g.account_id
+                                    having bool_and(g.section = 1)) o),
+           'collected_minor', coalesce(sum(f.amount_minor) filter (where f.amount_minor > 0), 0)::text,
+           'reversed_minor', coalesce(sum(f.amount_minor) filter (where f.amount_minor < 0), 0)::text,
+           'commission_ht_minor', coalesce(sum(f.commission_minor), 0)::text,
+           'late_count', count(*) filter (where f.late))
+         || jsonb_build_object(
+           'gross_minor', r.gross_minor::text,
+           'invoice_ht_minor', coalesce(r.invoice_ht_minor, 0)::text,
+           'invoice_vat_minor', coalesce(r.invoice_vat_minor, 0)::text,
+           'invoice_ttc_minor', coalesce(r.invoice_ttc_minor, 0)::text,
+           'credit_ht_minor', coalesce(r.credit_ht_minor, 0)::text,
+           'credit_vat_minor', coalesce(r.credit_vat_minor, 0)::text,
+           'credit_ttc_minor', coalesce(r.credit_ttc_minor, 0)::text,
+           'commission_taken_minor', coalesce(r.commission_taken_minor, 0)::text,
+           'advance_recovered_minor', coalesce(r.advance_recovered_minor, 0)::text,
+           'refund_minor', coalesce(r.refund_minor, 0)::text,
+           'settlement_minor', r.settlement_minor::text,
+           'net_minor', r.net_minor::text)
+         -- M2c-5b: what the run's credits absorbed of manual credit notes' waivers (lines with no document: the
+         -- client had it back already), named with the invoices it was on; absent when nothing was (payloads drawn
+         -- before keep their bytes)
+         || coalesce((select jsonb_build_object('waived_absorbed_minor', (-sum(w.amount_minor))::text,
+                                                'waived_absorbed_invoices',
+                                                jsonb_agg(distinct i.number order by i.number))
+                      from public.commission_waiver w
+                      cross join lateral (select q.number from public.commission_invoice q
+                                          where q.id = w.invoice_id offset 0) i
+                      where w.run_id = r.id and w.cause = 'absorbed'
+                      having count(*) > 0), '{}'::jsonb)
+  into v_totals from pg_temp._rd_fact f;
+
+  -- the run's documents (its approval's; a cancellation's too when the run was cancelled before this was drawn), each
+  -- with the invoices it corrects, the credit notes of the cancellation that annul it, and what this payout sets off
+  -- (nothing once cancelled)
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'id', i.id, 'kind', i.kind, 'number', i.number, 'issue_date', i.issue_date, 'reason', i.reason,
+           'mandate', (select m.reference from public.mandate m where m.id = i.mandate_id),
+           'ht_minor', i.ht_minor::text, 'vat_minor', i.vat_minor::text, 'ttc_minor', i.ttc_minor::text,
+           'vat_rate', i.vat_rate::text, 'settlement', i.settlement, 'due_date', i.due_date,
+           'clause_ref', i.payload #>> '{settlement,clause_ref}',
+           'payment_reference', i.payload -> 'payment_reference',
+           'own_account', case when i.payload -> 'own_account' is not null
+                               and jsonb_typeof(i.payload -> 'own_account') = 'object'
+                               then jsonb_build_object('iban', private.iban_masked(i.payload #>> '{own_account,iban}'),
+                                                       'holder', i.payload #>> '{own_account,holder}') end,
+           'corrects', (select coalesce(jsonb_agg(jsonb_build_object('number', o.number, 'issue_date', o.issue_date,
+                                                                     'ht_minor', c.ht_minor::text,
+                                                                     'vat_minor', c.vat_minor::text)
+                                                  order by o.seq), '[]')
+                        from public.commission_credit_correction c
+                        cross join lateral (select q.number, q.issue_date, q.seq from public.commission_invoice q
+                                            where q.id = c.original_invoice_id offset 0) o
+                        where c.credit_note_id = i.id),
+           'cancelled_by', (select coalesce(jsonb_agg(jsonb_build_object('number', o.number,
+                                                                         'issue_date', o.issue_date)
+                                                      order by o.seq), '[]')
+                            from public.commission_credit_correction c
+                            cross join lateral (select q.number, q.issue_date, q.seq from public.commission_invoice q
+                                                where q.id = c.credit_note_id and q.run_id = r.id
+                                                  and q.reason = 'run_cancelled' offset 0) o
+                            where c.original_invoice_id = i.id),
+           'settles_minor', case when v_cancelled then '0'
+                                 else (select coalesce(sum((s ->> 'amount')::bigint), 0)::text
+                                       from jsonb_array_elements(coalesce(r.settlement_plan -> 'settles', '[]')) s
+                                       where s ->> 'document_id' = i.id::text) end)
+           order by i.seq), '[]')
+  into v_docs
+  from public.commission_invoice i where i.run_id = r.id;
+
+  -- what this payout sets off from documents of earlier runs (compensation, a refund owed, an advance); nothing once
+  -- the run is cancelled
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'kind', s ->> 'kind', 'document_kind', i.kind, 'number', i.number, 'issue_date', i.issue_date,
+           'amount_minor', s ->> 'amount') order by i.seq nulls last, s ->> 'document_id'), '[]')
+  into v_earlier
+  from jsonb_array_elements(case when v_cancelled then '[]'::jsonb
+                                 else coalesce(r.settlement_plan -> 'settles', '[]') end) s
+  left join lateral (select q.kind, q.number, q.issue_date, q.seq, q.run_id from public.commission_invoice q
+                     where q.id = (s ->> 'document_id')::uuid offset 0) i on true
+  where i.run_id is distinct from r.id and (s ->> 'amount')::bigint <> 0;
+
+  -- the mandates the statement covers, with the clause references of their terms on K's day (R124-3 3°, 4°)
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'reference', m.reference, 'signed_on', m.signed_on,
+           'commission_clause_ref', t.commission_clause_ref, 'remittance_clause_ref', t.remittance_clause_ref,
+           'netting_clause_ref', t.remittance_terms #>> '{netting,clause_ref}',
+           'clawback_clause_ref', t.remittance_terms #>> '{clawback,clause_ref}')
+           order by m.reference, m.id), '[]')
+  into v_mandates
+  from (select distinct x.mandate_id from pg_temp._rd_line x where x.mandate_id is not null
+        union select i.mandate_id from public.commission_invoice i where i.run_id = r.id) mm
+  cross join lateral (select q.* from public.mandate q where q.id = mm.mandate_id offset 0) m
+  left join lateral (select q.commission_clause_ref, q.remittance_clause_ref, q.remittance_terms
+                     from public.mandate_terms q
+                     where q.mandate_id = m.id and q.valid_from <= v_k_day
+                     order by q.valid_from desc limit 1) t on true;
+
+  -- the payout as ordered (never « payé » before the bank's debit: M2c-6 books it)
+  select jsonb_build_object('amount_minor', t.amount_minor::text, 'ordered_on', v_issue,
+                            'requested_execution_date', t.requested_execution_date,
+                            'iban', private.iban_masked(t.payee_iban), 'holder', t.payee_name,
+                            'end_to_end_id', t.end_to_end_id, 'status', t.status)
+  into v_payout from public.bank_transfer t where t.id = r.transfer_id;
+
+  -- the previous run's payout: what became of it (« Suivi »)
+  select * into v_prev from public.remittance_run x where x.id = r.previous_run_id;
+  if v_prev.id is not null then
+    select jsonb_agg(jsonb_build_object(
+             'number', v_prev.number, 'status', v_prev.status, 'net_minor', v_prev.net_minor::text,
+             'transfer_status', t.status, 'requested_execution_date', t.requested_execution_date,
+             'amount_minor', t.amount_minor::text,
+             'debited_on', (select e.effective_date from public.ledger_entry e where e.id = t.entry_id),
+             'returned_on', (select e.effective_date from public.ledger_entry e where e.id = t.return_entry_id),
+             'booked_on', v_prev.booked_on))
+    into v_follow
+    from (select 1) one left join public.bank_transfer t on t.id = v_prev.transfer_id;
+  end if;
+
+  -- money received on the client's files and not remitted, as of K (C. civ. 1993, OQ-40; review figures#2): per file
+  -- and reason, what each payment matched to one of them by K still held on 4710 at K — its amount less what its
+  -- other entries posted by K moved (allocations, forwards, refunds, returns, and their reversals: a refund that came
+  -- back by K is held again, review legal#3). The payments that can have held money at K: those holding some now,
+  -- those refunded or returned since K, and those allocated or forwarded since K (their entries are the client's
+  -- pending items posted after K). No payer data.
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'file', h.file, 'reason', h.reason, 'currency', h.currency, 'amount_minor', h.amount::text,
+           'first_date', h.first_date, 'last_date', h.last_date, 'count', h.n::text)
+           order by h.file, h.reason, h.currency), '[]')
+  into v_held
+  from (select a.external_ref as file,
+               coalesce(p.review_reason, case when p.status in ('refund_pending', 'refunded') then 'refund_pending'
+                                              else 'pending' end) as reason,
+               p.currency, sum(u.unallocated) as amount, min(p.booking_date) as first_date,
+               max(p.booking_date) as last_date, count(*) as n
+        from (select distinct c.id
+              from (select y.id from public.payment y
+                    where y.organization_id = r.organization_id
+                      and y.status in ('matched', 'partially_allocated', 'refund_pending')
+                      and y.client_organization_id = r.client_organization_id
+                    union all
+                    select y.id from public.payment y
+                    where y.organization_id = r.organization_id and y.status in ('refunded', 'returned')
+                      and y.client_organization_id = r.client_organization_id and y.updated_at > r.known_at
+                    union all
+                    select e.payment_id from private.remittance_pending q
+                    cross join lateral (select y.payment_id from public.ledger_entry y where y.id = q.ledger_entry_id
+                                        offset 0) e
+                    where q.organization_id = r.organization_id
+                      and q.client_organization_id = r.client_organization_id
+                      and q.posted_at > r.known_at and e.payment_id is not null) c) c
+        cross join lateral (select y.* from public.payment y where y.id = c.id offset 0) p
+        cross join lateral (
+          select (p.amount_minor - coalesce(sum(lp.amount_minor), 0))::bigint as unallocated
+          from (select e.id from public.ledger_entry e
+                where e.payment_id = p.id and e.entry_type <> 'cash_in' and e.posted_at <= r.known_at offset 0) e
+          cross join lateral (select y.amount_minor from public.ledger_posting y
+                              where y.entry_id = e.id
+                                and (select la.book from public.ledger_account la where la.id = y.ledger_account_id)
+                                    = 'unallocated_payment'
+                              offset 0) lp) u
+        cross join lateral (select q.external_ref from public.account q where q.id = p.account_id offset 0) a
+        where p.client_organization_id = r.client_organization_id and p.created_at <= r.known_at
+          and p.matched_at <= r.known_at and u.unallocated > 0
+        group by 1, 2, 3) h;
+
+  -- refunded to payers between the previous K and this K, and not back by K (a refund that bounced by K is money held
+  -- again, above: review legal#3, figures#3)
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'file', h.file, 'reason', h.reason, 'currency', h.currency, 'amount_minor', h.amount::text,
+           'first_date', h.first_date, 'last_date', h.last_date, 'count', h.n::text)
+           order by h.file, h.reason, h.currency), '[]')
+  into v_refunded
+  from (select a.external_ref as file, q.reason_code as reason, q.currency, sum(q.amount_minor) as amount,
+               min(q.executed_on) as first_date, max(q.executed_on) as last_date, count(*) as n
+        from public.refund_request q
+        cross join lateral (select y.account_id, y.client_organization_id from public.payment y
+                            where y.id = q.payment_id offset 0) p
+        cross join lateral (select y.external_ref from public.account y where y.id = p.account_id offset 0) a
+        cross join lateral (select y.posted_at from public.ledger_entry y where y.id = q.cash_out_entry_id offset 0) e
+        left join lateral (select y.posted_at from public.ledger_entry y where y.id = q.bounce_entry_id offset 0) b
+          on true
+        where q.organization_id = r.organization_id and q.status in ('executed', 'bounced')
+          and p.client_organization_id = r.client_organization_id
+          and e.posted_at <= r.known_at and (v_prev.known_at is null or e.posted_at > v_prev.known_at)
+          and (q.status = 'executed' or b.posted_at > r.known_at)
+        group by a.external_ref, q.reason_code, q.currency) h;
+
+  -- the position (§10.7): owed to the client at K — every item pending then is this run's (one live run per client
+  -- and currency, I14) — and after this payout (still owed once the run is cancelled); what the client owes the
+  -- servicer (4111 + 4112) as known at K and after this statement's documents and the settlement at the payout's debit
+  -- (none once cancelled: every document of the run counts, the approval's and the cancellation's)
+  select coalesce(sum(private.ledger_balance(la.id, '9999-12-31'::date, r.known_at)), 0)
+  into v_receivable
+  from public.ledger_account la
+  where la.organization_id = r.organization_id and la.book = 'commission_receivable'
+    and la.client_organization_id = r.client_organization_id and la.currency = r.currency;
+  select coalesce(sum(private.ledger_balance(la.id, '9999-12-31'::date, r.known_at)), 0)
+  into v_advances
+  from public.ledger_account la
+  where la.organization_id = r.organization_id and la.book = 'client_advance_receivable'
+    and la.client_organization_id = r.client_organization_id and la.currency = r.currency;
+  select coalesce(sum(i.ttc_minor), 0) into v_docs_ttc
+  from public.commission_invoice i where i.run_id = r.id and (v_cancelled or i.reason <> 'run_cancelled');
+  v_position := jsonb_build_object(
+    'owed_before_minor', r.gross_minor::text,
+    'owed_after_minor', case when v_cancelled then r.gross_minor else 0 end::text,
+    'receivable_before_minor', v_receivable::text,
+    'receivable_after_minor',
+      (v_receivable + v_docs_ttc
+       - case when v_cancelled then 0 else coalesce((r.settlement_plan ->> 'dc')::bigint, 0) end)::text,
+    'advances_before_minor', v_advances::text,
+    'advances_after_minor',
+      (v_advances - case when v_cancelled then 0 else coalesce((r.settlement_plan ->> 'da')::bigint, 0) end)::text);
+
+  -- the parties as the run's invoices froze them at approval (review figures#2), else as they stand
+  select i.payload -> 'seller', i.payload -> 'buyer' into v_issuer, v_client
+  from public.commission_invoice i where i.run_id = r.id and i.reason = 'commission'
+  order by i.seq limit 1;
+
+  v_payload := jsonb_build_object(
+    'schema', 1,
+    'number', r.number,
+    'issue_date', v_issue,
+    'known_at', to_char(r.known_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+    'currency', r.currency,
+    'exponent', v_exp,
+    'status', r.status,
+    'cancelled_on', case when v_cancelled then (r.cancelled_at at time zone 'Europe/Paris')::date end,
+    -- N = 0: the settlement was posted at approval, nothing is transferred (review legal#5)
+    'settled_on', case when r.status = 'booked' and r.transfer_id is null then r.booked_on end,
+    'issuer', coalesce(v_issuer, private.invoice_party(r.organization_id)),
+    'client', coalesce(v_client, private.invoice_party(r.client_organization_id)),
+    'mandates', v_mandates,
+    'service_period', jsonb_build_object('from', r.service_from, 'to', r.service_to),
+    'totals', v_totals,
+    'files', v_files,
+    'natures', v_natures,
+    'line_columns', private.remittance_statement_line_columns(),
+    'lines', v_lines,
+    'documents', v_docs,
+    'earlier_settled', v_earlier,
+    'payout', v_payout,
+    'requested_execution_date', r.requested_execution_date,
+    'follow_up', coalesce(v_follow, '[]'),
+    'not_remitted', jsonb_build_object('held', v_held, 'refunded', v_refunded),
+    'position', v_position);
+
+  return v_payload;
+end;
+$$;
+
 ------------------------------------------------------------------------------------------
 -- Read access and privileges (§6.2): the waivers and the manual credit notes' reasons are money staff's; the credit
 -- note itself is a commission_invoice row the client reads as any (its reason category is in its line, never the
@@ -1405,11 +1825,14 @@ revoke execute on function private.remittance_key_state_insert_guard(), private.
   private.manual_credit_plan(uuid, bigint, uuid), private.euros_to_minor(text), private.commission_key_open(uuid, text),
   private.remittance_key_states(uuid[], text[]),
   private.remittance_approval_refusal(public.remittance_run, private.remittance_draft, date),
-  private.approve_remittance_run(uuid, uuid), private.run_remittance_checks(uuid, uuid, date)
+  private.approve_remittance_run(uuid, uuid), private.run_remittance_checks(uuid, uuid, date),
+  private.remittance_statement_build(uuid)
   from public, anon, authenticated;
--- the worker (service role): the prepare's history, the approval job; the plan and the key check for its tests
+-- the worker (service role): the prepare's history, the approval job, the statement; the plan and the key check for
+-- its tests
 grant execute on function private.remittance_key_states(uuid[], text[]), private.approve_remittance_run(uuid, uuid),
-  private.manual_credit_plan(uuid, bigint, uuid), private.commission_key_open(uuid, text)
+  private.manual_credit_plan(uuid, bigint, uuid), private.commission_key_open(uuid, text),
+  private.remittance_statement_build(uuid)
   to service_role;
 revoke execute on function public.issue_credit_note(text, uuid, text, text, text, text, uuid),
   public.credit_note_preview(uuid, text, uuid), public.commission_invoice_detail(uuid),

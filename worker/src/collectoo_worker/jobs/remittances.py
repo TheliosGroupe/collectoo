@@ -468,8 +468,9 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
             waived_minor=int(waived),
         )
     seq_row = conn.execute("select private.remittance_history_seq(%s)", (client,)).fetchone()
-    # what each earlier invoice still charges each key (every credit note's allocations off, a manual one's
-    # included) and what manual credit notes left waived on it (M2c-5b): the engine's capacity is their sum
+    # what each earlier invoice still charges each key (every credit note's allocations off, a
+    # manual one's included) and what manual credit notes left waived on it (M2c-5b): the engine's
+    # capacity is their sum
     charges: dict[tuple[str, str], list[EarlierCharge]] = defaultdict(list)
     for a, tier, inv, year, seq, charged, credited, rate, waived in conn.execute(
         """select ch.account_id, ch.tier_key, ch.invoice_id, i.year, i.seq, ch.charged_minor,
@@ -508,8 +509,9 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         invoices[str(inv)] = EarlierInvoice(str(inv), int(ht), Decimal(rate), int(credited))
         numbers[str(inv)] = (num, issued)
     # each reversal's original: the invoices that charge it now — its line's (or its live
-    # repricing's) invoice and, when a cancelled run had credited this reversal, first the corrective
-    # invoice that cancellation issued to charge it again (money review #0: credited there, once;
+    # repricing's) invoice and, when a cancelled run had credited this reversal, first the
+    # corrective invoice that cancellation issued to charge it again (money review #0: credited
+    # there, once;
     # M2c-5b: then on the line's own invoice, where the cancellation restored what the run's credit
     # had absorbed of a manual credit note's waiver)
     undone = sorted(

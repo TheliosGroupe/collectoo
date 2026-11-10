@@ -634,6 +634,21 @@ def test_files_with_earlier_lines_only_are_named_apart() -> None:
     ) in statement_text(p, "0" * 64)
 
 
+def test_what_a_manual_credit_notes_waiver_absorbed_is_named() -> None:
+    """M2c-5b: a reversal whose credit a manual credit note's waiver absorbed has a commission line
+    with no credit note for that part; the statement says so, naming the invoice, so the period's
+    commission and the documents agree in words. Absent from a payload without it (the bytes of
+    statements drawn before are unchanged: the golden hashes)."""
+    p = statement_payload()
+    assert "avoir manuel" not in statement_text(p, "0" * 64)
+    p["totals"]["waived_absorbed_minor"] = "9000"
+    p["totals"]["waived_absorbed_invoices"] = ["FC-2026-000001"]
+    assert (
+        "Dont -90,00\u00a0€ de commission sur des encaissements annulés, déjà rendus par avoir "
+        "manuel sur la facture FC-2026-000001 : aucun nouvel avoir pour ce montant."
+    ) in statement_text(p, "0" * 64)
+
+
 def test_the_money_not_remitted_is_stated_at_k() -> None:
     """figures#2: section 6 is the state at K, which it names."""
     st = statement_text(statement_payload(), "0" * 64)

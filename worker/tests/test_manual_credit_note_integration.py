@@ -205,6 +205,14 @@ def test_a_waiver_is_never_charged_again_and_a_reversal_meets_it_first() -> None
         == reversal
     )
     assert _state(f.id) == (45_000, 0, "approved")
+    # its statement names what FC-1's waiver absorbed (the lines' commission -150,00 vs the documents)
+    totals = _value(
+        "select payload -> 'totals' from public.remittance_statement where run_id = %s", rv2
+    )
+    assert (totals["waived_absorbed_minor"], totals["waived_absorbed_invoices"]) == (
+        "9000",
+        [fc1["number"]],
+    )
     with psycopg.connect(DB) as conn:
         closed = conn.execute(
             """select i.ht_minor + (select sum(c.ht_minor)
@@ -265,7 +273,9 @@ def test_the_spread_in_sql_is_the_workers() -> None:
     tenant = remittance_tenant()
     files = [paid_file(tenant, 100_001 * (n + 1), recent_business_day(4))[0] for n in range(5)]
     run = _approved(tenant)
-    book_payout(run)  # (its plan set off the invoice: no manual credit while the payout is in flight)
+    book_payout(
+        run
+    )  # (its plan set off the invoice: no manual credit while the payout is in flight)
     (inv,) = documents(run)
     inv_id = str(_value("select id from public.commission_invoice where run_id = %s", run))
     with psycopg.connect(DB) as conn:
