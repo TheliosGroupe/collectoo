@@ -3,7 +3,14 @@
 import { revalidatePath } from "next/cache";
 import { staffSession } from "@/lib/auth/staff";
 import type { ErrorCode } from "@/lib/boarding/forms";
-import { type CreditNotePreview, REASON_CATEGORIES, creditNoteErrorCode } from "@/lib/remittance/credit-notes";
+import {
+  type CreditNotePreview,
+  type FileChoice,
+  REASON_CATEGORIES,
+  creditNoteErrorCode,
+  invoiceFilesPage,
+  invoiceFilesRpc,
+} from "@/lib/remittance/credit-notes";
 
 /**
  * M2c-5b « Émettre un avoir » (design §14.1, risk R2). The effect sheet comes from `public.credit_note_preview` (the
@@ -32,6 +39,23 @@ function fields(formData: FormData): Fields | { error: ErrorCode } {
   if (!REASON_CATEGORIES.some((c) => c.code === category)) return { error: "credit_note_category" };
   if (!reason) return { error: "reason_required" };
   return { invoice, amount, account: account || null, category, reason };
+}
+
+export type FilesResult = { ok: true; files: FileChoice[]; next: string | null } | { error: ErrorCode };
+
+/**
+ * « Charger les dossiers suivants » (review M2c-5b tests-ui#2, F4): the next page of the files the invoice still charges,
+ * after the opaque key the previous page ended on (`public.commission_invoice_files`, money staff at aal2).
+ */
+export async function loadInvoiceFiles(invoiceId: string, after: string): Promise<FilesResult> {
+  if (!UUID.test(invoiceId) || !after || after.length > 512) return { error: "unknown" };
+  const { supabase } = await staffSession();
+  const page = await invoiceFilesPage(invoiceFilesRpc(supabase), invoiceId, after);
+  if ("error" in page) {
+    console.error("invoice files failed", { error: page.error });
+    return { error: creditNoteErrorCode(page.error) };
+  }
+  return { ok: true, ...page };
 }
 
 export type PreviewResult = { ok: true; preview: CreditNotePreview } | { error: ErrorCode };

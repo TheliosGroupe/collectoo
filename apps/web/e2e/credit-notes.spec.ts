@@ -9,7 +9,9 @@ import { reviewShot } from "./screenshot";
 /**
  * M2c-5b « Émettre un avoir » (design §14.1, risk R2): a client whose mandate has no netting clause (its invoices are
  * due, no payout sets them off); an admin of the servicer boards its files, imports the statement where two of them
- * paid, prepares and approves its run (FC-…-000001, 120,00 € HT). On the invoice's page the admin types 30,00 € HT, a
+ * paid, prepares and approves its run (FC-…-000001, 120,00 € HT). While the run can still be cancelled the invoice
+ * takes no credit note (review M2c-5b F1, `run_in_flight`); its payout's debit is then booked (the service role stands
+ * in for M2c-6). On the invoice's page the admin types 30,00 € HT, a
  * reason category and a reason, reads the effect sheet (HT, VAT, TTC, what it takes off what the invoice owes, what is
  * left) and issues the credit note: FC-…-000002, in the servicer's series, the invoice's remaining HT 90,00 €. The
  * client's administrator reads it in « Factures »: « rectifie la facture FC-…-000001 » with its reason category, never
@@ -136,6 +138,7 @@ test("an admin issues a manual credit note on an invoice and the client reads it
   if (await lateReason.isVisible()) await lateReason.fill("Encaissement identifié tardivement (E2E)");
   await sheet.getByTestId("approve-confirm").click();
   await expect(page.getByTestId("run-status")).toHaveText("Validé — virement ordonné", { timeout: 60_000 });
+  const runId = new URL(page.url()).pathname.split("/").pop() ?? "";
 
   // the invoice's page: what it still charges and owes
   const invoiceLink = page.getByTestId("run-document-link").filter({ hasText: /Facture FC-\d{4}-000001/ });
@@ -146,6 +149,19 @@ test("an admin issues a manual credit note on an invoice and the client reads it
   await expect(page.getByTestId("invoice-remaining")).toContainText("120,00");
   await expect(page.getByTestId("invoice-open")).toContainText("144,00");
   await expect(page.getByTestId("invoice-files")).toContainText("Dossiers facturés (2)");
+
+  // review M2c-5b (ledger-vat#0, F1): while its own run can still be cancelled (validated, not debited), the invoice
+  // takes no manual credit note — a cancellation would credit it in full and the re-run bill the rectified amount again
+  await expect(page.getByTestId("credit-note")).toContainText("Le reversement qui a émis cette facture est validé mais pas encore débité");
+  await expect(page.getByTestId("credit-note-form")).toHaveCount(0);
+  // the payout's debit is booked by M2c-6 (not built yet): the service role stands in for it, the run « Comptabilisé »
+  const { error: bookError } = await adminClient()
+    .from("remittance_run")
+    .update({ status: "booked", booked_on: parisToday() })
+    .eq("id", runId);
+  if (bookError) throw bookError;
+  await page.reload();
+  await expect(page.getByTestId("credit-note-form")).toBeVisible();
   await reviewShot(page, testInfo, "m2c5b-facture");
 
   // « Émettre un avoir »: the amount, the reason category, the reason; the effect sheet; then the credit note
@@ -172,6 +188,18 @@ test("an admin issues a manual credit note on an invoice and the client reads it
   await expect(note).toContainText(/Avoir FC-\d{4}-000002/);
   await expect(note).toContainText("Avoir manuel : erreur de conditions de rémunération (taux, paliers ou minimum)");
   await reviewShot(page, testInfo, "m2c5b-avoir-emis");
+
+  // review M2c-5b (tests-ui#3): the credit note's own page names the invoice it rectifies and goes back to it
+  const invoiceUrl = page.url();
+  await note.getByRole("link", { name: /Avoir FC-\d{4}-000002/ }).click();
+  await expect(page).toHaveURL(/\/backoffice\/reversements\/factures\/[0-9a-f-]{36}$/);
+  await expect(page.getByTestId("credit-note-corrected")).toContainText(`facture ${invoiceNumber} du`);
+  await expect(page.getByTestId("credit-note-corrected")).toContainText("-30,00");
+  await expect(page.getByTestId("credit-note-reason")).toContainText("Erreur de conditions de rémunération");
+  await expect(page.getByTestId("invoice-credit-notes")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: `← Facture ${invoiceNumber}` })).toBeVisible();
+  await reviewShot(page, testInfo, "m2c5b-avoir-page");
+  await page.goto(invoiceUrl);
 
   // the client's administrator: « Factures » shows the credit note and the invoice it rectifies, not the admin's text
   const use = testInfo.project.use;
