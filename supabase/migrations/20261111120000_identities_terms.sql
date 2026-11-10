@@ -85,7 +85,8 @@ $$;
 
 -- The legal forms whose mention we know how to print (C. com. R123-238 1°–4°, R123-237 9° for EI), and whether the
 -- capital must follow the name (R123-238 3° SARL, 4° b sociétés par actions). OTHER: a form we do not print (a
--- client's, never printed on our documents; a servicer with another form is OQ-71).
+-- client's, never printed on our documents; a servicer of another form cannot save its identity: its mentions are
+-- not built).
 create or replace function private.legal_form_mention(p_form text)
 returns text
 language sql
@@ -361,7 +362,7 @@ create table public.servicer_billing_settings (
   own_bank_account_id uuid references public.bank_account (id),       -- where due invoices are paid (M2c-4)
   vat_on_debits boolean not null default false,                        -- 242 nonies A 11° bis
   -- L441-10 II: absent a rate agreed, the ECB rate + 10 points; an agreed rate is at least three times the legal rate
-  -- (checked by ops; OQ-72: no legal-rate table yet)
+  -- (free text for now: the floor is checked when invoices print it, M2c-5, with M3's legal-rate table)
   penalty_text text not null default 'Pénalités de retard : taux d''intérêt appliqué par la Banque centrale européenne '
     'à son opération de refinancement la plus récente, majoré de 10 points de pourcentage.'
     check (length(btrim(penalty_text)) between 1 and 500),
