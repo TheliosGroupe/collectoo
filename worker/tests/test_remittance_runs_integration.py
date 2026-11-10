@@ -30,6 +30,7 @@ import psycopg
 import pytest
 from debit_helpers import checks
 from integration_helpers import DB, one
+from psycopg.types.json import Jsonb
 from remittance_helpers import (
     add_client,
     approve,
@@ -362,3 +363,127 @@ def test_a_collection_past_its_latest_execution_date_is_a_breach() -> None:
     approve(tenant, run, day=next_business_day(), late_reason="Encaissement identifié tardivement")
     drain()
     assert run_row(run)["status"] == "approved"
+
+
+def _book_payout(run: str) -> None:
+    """What M2c-6 does at the payout's debit, emulated: the remittance (+4670 N / -5120 N) and the
+    settlement of the run's plan, the transfer and the run booked."""
+    r = run_row(run)
+    with psycopg.connect(DB) as conn, conn.transaction():
+        transfer = conn.execute(
+            "select id, debtor_bank_account_id, amount_minor from public.bank_transfer"
+            " where run_id = %s",
+            (run,),
+        ).fetchone()
+        assert transfer is not None
+        conn.execute("select private.ledger_post_set_begin()")
+        conn.execute(
+            """insert into pg_temp._lps_entry (entry_no, organization_id, entry_type,
+                 effective_date,
+                 idempotency_key, client_organization_id, source_type, source_id)
+               values (1, %s, 'remittance', private.paris_today(), %s, %s, 'bank_transfer', %s)""",
+            (
+                r["organization_id"],
+                f"remit:{transfer[0]}",
+                r["client_organization_id"],
+                transfer[0],
+            ),
+        )
+        conn.execute(
+            """insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency,
+                 bank_account_id) values (1, 1, 'client_payable', %s, 'EUR', null),
+                 (1, 2, 'client_money_cash', %s, 'EUR', %s)""",
+            (transfer[2], -transfer[2], transfer[1]),
+        )
+        entry = one(conn, "select entry_id from private.ledger_post_set()")
+        conn.execute(
+            "select private.post_run_settlement(%s, %s, private.paris_today())",
+            (run, Jsonb(r["settlement_plan"])),
+        )
+        conn.execute(
+            "update public.bank_transfer set status = 'booked', entry_id = %s where id = %s",
+            (entry, transfer[0]),
+        )
+        conn.execute(
+            "update public.remittance_run set status = 'booked', booked_on = private.paris_today()"
+            " where id = %s",
+            (run,),
+        )
+
+
+def test_the_worked_example_continues_a_credit_note_on_a_settled_invoice() -> None:
+    """§7.2 RV-3 (without the advance, M2c-7): RV-1 debited (emulated M2c-6: FC-1 settled, its VAT
+    due); then E10 +300 000 on another file and P1's allocation undone: FC-3 54 000 TTC and a credit
+    note on FC-1 of 36 000 TTC, its VAT off the VAT already due (44571); FC-1 settled, the 36 000 is
+    a refund owed paid with the payout: N 82 000, D 18 000; 4111 = the open documents."""
+    tenant = remittance_tenant()
+    f42, p1 = paid_file(tenant, 200_000)
+    rv1 = request_run(tenant)
+    approve(tenant, rv1)
+    drain()
+    _book_payout(rv1)
+    (fc1,) = documents(rv1)
+    paid_file(tenant, 300_000)
+    e2 = one_value(
+        "select id from public.ledger_entry where payment_id = %s and entry_type = 'allocation'", p1
+    )
+    staff(
+        tenant,
+        "select public.reverse_allocation(%s, %s, %s, %s::uuid[], %s)",
+        str(uuid.uuid4()),
+        p1,
+        f42.id,
+        [str(e2)],
+        "paiement repris par la banque",
+    )
+    rv3 = request_run(tenant)
+    draft = run_row(rv3)
+    assert (draft["gross_minor"], draft["refund_minor"], draft["net_minor"]) == (
+        100_000,
+        36_000,
+        82_000,
+    ), draft["last_failure"]
+    approve(tenant, rv3)
+    drain()
+    done = run_row(rv3)
+    assert done["status"] == "approved", done["last_failure"]
+    fc3, fc4 = documents(rv3)
+    assert (fc3["kind"], fc3["ttc_minor"], fc3["seq"]) == ("invoice", 54_000, fc1["seq"] + 1)
+    assert (fc4["kind"], fc4["ht_minor"], fc4["vat_minor"], fc4["seq"]) == (
+        "credit_note",
+        -30_000,
+        -6_000,
+        fc1["seq"] + 2,
+    )
+    with psycopg.connect(DB) as conn:
+        corr = conn.execute(
+            """select c.vat_pending_minor, c.vat_collected_minor, c.applied_minor, c.excess_minor,
+                      o.number
+               from public.commission_credit_correction c
+               join public.commission_invoice o on o.id = c.original_invoice_id
+               join public.commission_invoice n on n.id = c.credit_note_id
+               where n.run_id = %s""",
+            (rv3,),
+        ).fetchone()
+    entry = one_value(
+        "select ledger_entry_id from public.commission_invoice where run_id = %s"
+        " and kind = 'credit_note'",
+        rv3,
+    )
+    receivable = one_value(
+        """select sum(p.amount_minor) from public.ledger_account la
+           join public.ledger_posting p on p.ledger_account_id = la.id
+           where la.book = 'commission_receivable' and la.client_organization_id = %s""",
+        tenant["client"],
+    )
+    assert corr == (0, 6_000, 0, 36_000, fc1["number"])
+    assert entry_books(str(entry)) == {
+        "commission_receivable": -36_000,
+        "servicer_revenue": 30_000,
+        "vat_collected": 6_000,
+    }
+    assert receivable == 54_000 - 36_000
+    run_checks = checks(tenant)
+    # (the emulated debit has no bank line: I19 flags it; M2c-6 books from the statement)
+    found = _remittance_violations(str(run_checks["run_id"]))
+    assert [code for code, _ in found if code != "bank_cash_identity"] == []
