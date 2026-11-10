@@ -68,6 +68,15 @@ def test_a_run_of_50k_lines(tmp_path: Path, caplog: pytest.LogCaptureFixture) ->
     draft = run_row(run)
     assert draft["prepared_at"] is not None, draft["last_failure"]
     assert draft["line_count"] == items
+    # « Reversements » and the nightly checks with the draft waiting (its items reserved: the
+    # overview and the schedule read only the unreserved ones, review perf#6)
+    shown = time.monotonic()
+    overview = staff(tenant, "select public.remittance_overview('a-valider')")
+    overview_s = time.monotonic() - shown
+    assert [r["id"] for r in overview["runs"]] == [run]
+    shown = time.monotonic()
+    checks(tenant)
+    draft_checks_s = time.monotonic() - shown
     item = [
         {"run_id": run, "inputs_hash": draft["inputs_hash"], "net_text": str(draft["net_minor"])}
     ]
@@ -91,7 +100,8 @@ def test_a_run_of_50k_lines(tmp_path: Path, caplog: pytest.LogCaptureFixture) ->
         f"\n{items} items: reserved (command) in {requested - started:.2f}s; prepared in"
         f" {prepared - requested:.1f}s ({'; '.join(logs)}); approval command"
         f" {commanded - approving:.2f}s, job {approved - commanded:.1f}s; nightly checks"
-        f" {checked - approved:.1f}s"
+        f" {checked - approved:.1f}s (with the draft waiting {draft_checks_s:.1f}s); overview"
+        f" with the draft {overview_s:.2f}s"
     )
     with psycopg.connect(DB) as conn:
         lines, commission, live = conn.execute(
