@@ -1,7 +1,7 @@
 # Remittances benchmarks (M2c)
 
-Targets: design `docs/design/m2c-remittances.md` §19. Each slice adds its section; documents and
-transfer files come with M2c-5 … M2c-7.
+Targets: design `docs/design/m2c-remittances.md` §19. Each slice adds its section; transfer files
+come with M2c-6 and M2c-7.
 
 ## Funds ledger (M2c-1, migration `20261111090000`)
 
@@ -198,3 +198,79 @@ bears its own VAT, and the nightly checks add `invoice_overdue`. Each scale test
 - The reservation (1.28 → 1.47 s) and the cancellation (3.97 → 4.12 s) moved within the run-to-run spread seen before
   (1.28–1.34 s, 3.97–4.00 s); neither path changed but the corrective invoice's VAT and period (one row per mandate
   and rate) and the late lines' month (computed once per distinct E, for unmeetable lines only).
+
+## Documents (M2c-5, migration `20261113090000`)
+
+What M2c-5 adds after an approval: the `documents` job builds the statement's payload in SQL from the run's frozen
+lines (keyed lookups per line: file, borrower, mandate, portfolio, the entry's 1100 postings, the notification, the
+invoice, the receipt, the late approval), renders its CSV (one row per line) and its PDF (summary, natures, one row
+per file up to 2,000), renders each invoice's PDF from its frozen payload, uploads the files and records them.
+Same VM (4 vCPU, 16 GB RAM, local stack), 2026-11-10.
+
+| Step | Volume | Time | Design §19 target |
+|---|---|---|---|
+| Statement payload built in SQL (`remittance_statement_prepare`) | 50,000 lines, 50,000 files | **6.42 s** | — |
+| Statement CSV (Python) | 50,000 rows (14.6 MB) | **1.60 s** in the job, 1.33 s in the unit guard | < 2 s |
+| Statement PDF, 50,000 files (no per-file table: the CSV's SHA-256 names the detail) | 50,000 files | 1.50 s | — |
+| Statement PDF with the per-file table (`test_statement_scale.py`, pure Python) | 2,000 file rows | **1.55 s** (1.4 MB) | < 15 s |
+| Invoice PDF | 1–2 pages | ≈ 10 ms (the receipts' renderer: 14.3 ms a receipt with its upload) | ≈ 10 ms |
+| The documents job (build, render, upload, record) | one 50,000-line run | 9.67 s render + store, record 0.03 s | — |
+| Approval job then documents job (`drain()` of the scale test) | 50,000 lines | 15.9 s (approval ≈ 6.2 s, as M2c-4) | approval 2–4 s |
+
+`test_remittance_scale_integration.py` now asserts the statement is drawn with its 50,000 lines and the run's gross,
+and the invoice's PDF recorded; the other figures of the run are M2c-4's: « Préparer maintenant » 1.34 s, prepare
+11.6 s (load 3.80, price 5.35, write 2.29), approval command 0.02 s, nightly checks 4.1 s (4.7 s with the draft
+waiting), overview 0.04 s, cancellation 3.74 s.
+
+- The payload's SQL build is the documents job's largest step (≈ 0.13 ms a line): one pass over the run's lines with
+  keyed laterals, then the per-file and per-nature aggregates over a temporary table. It runs after the approval
+  committed, outside every lock but the servicer's documents lock, so it never holds up allocations or approvals.
+- The payload of a 50,000-line run is ≈ 10 MB of jsonb (lines as arrays in `line_columns` order), stored once.
+
+### Scale tests after the migration (`RECEIPT_FILES=5000`, the CI scale job's command, right after `supabase db reset`)
+
+6 passed in **938.6 s**.
+
+| Run | M2c-5 |
+|---|---|
+| Allocation 50k (boarded 96 s, imported + matched 33.0 s) | allocated in 80.2 s; 1,000 returns imported + linked 30.7 s; nightly checks over 50,000 payments 3.5 s, no code |
+| Statement 50k | 43.3 s imported + matched (ingest 9.3 s); history 13,500 credits 11.3 s |
+| Receipts 5k | 25 jobs in 71.6 s (14.3 ms a receipt) |
+| Remittance run 50k (with its documents) | above |
+| Boarding 50k | 115 s (commit 31.4 s, confirm job 34.4 s) |
+
+### After the review fixes (M2c-5 review, integrated; 2026-11-10, same VM: 4 vCPU, 16 GB RAM, local stack)
+
+The review isolates each document under its own savepoint (K4: the invoice PDFs in chunks of 50, each statement
+alone, a failed upload's objects removed), builds section 6 as of K (figures#2: payments created and matched by K,
+their 4710 postings by K), names the credit note of a reversal line by a keyed lateral (figures#5), reads the run
+`for share` (figures#6), and records the statement's gross, net and drawn status on its row (perf#4). The CI `scale`
+job's command (`RECEIPT_FILES=5000`, every `*scale_integration.py` in one pytest run, right after `supabase db reset`):
+**6 passed in 933.9 s** (15 min 34 s; the CI job's budget is 30 min).
+
+| Step (the 50,000-line run's documents job) | Volume | Build | Review fixes | Design §19 target |
+|---|---|---|---|---|
+| Statement payload built in SQL (`remittance_statement_prepare`) | 50,000 lines, 50,000 files | 6.42 s | **6.51 s** | — |
+| Statement CSV (Python, text cells neutralised) | 50,000 rows | 1.60 s | **1.30 s** | < 2 s |
+| Statement PDF (no per-file table above 2,000 files) | 50,000 files | 1.50 s | **1.81 s** | — |
+| The documents job (statement + invoice PDF, uploads, records; 0 failed) | one 50,000-line run | 9.67 s + record 0.03 s | **10.04 s** | — |
+| Approval job then documents job (`drain()`) | 50,000 lines | 15.9 s | **16.2 s** | approval 2–4 s |
+
+The rest of the remittance run in the same pytest session: « Préparer maintenant » 1.25 s, prepare 13.8 s (50,000
+lines: load 3.62, price 5.33, write 2.34 s; then the 5,000-line run), approval command 0.02 s, nightly checks 4.1 s
+(5.1 s with the draft waiting, now with `remittance_document_failed` and `remittance_document_missing`), overview
+0.05 s, cancellation 3.67 s.
+
+| Run (same pytest session) | Review fixes | Build |
+|---|---|---|
+| Allocation 50k (boarded 96 s, imported + matched 31.3 s) | allocated in 75.4 s (post 11.5–12.7 s a job); 1,000 returns 27.5 s; nightly checks over 50,000 payments 3.3 s, no code | 80.2 s; 30.7 s; 3.5 s |
+| Statement 50k | 43.1 s imported + matched (ingest 8.8 s); history 13,500 credits 11.1 s | 43.3 s (ingest 9.3 s); 11.3 s |
+| Receipts 5k | 25 jobs in 71.7 s (14.3 ms a receipt) | 71.6 s |
+| Boarding 50k | 116 s (commit 31.6 s, confirm job 34.9 s) | 115 s |
+
+- The savepoints cost nothing measurable: the job is 0.4 s slower on one run, within the spread of its three steps
+  (the PDF +0.3 s, the CSV −0.3 s, the SQL build +0.1 s). The section-6 rewrite starts from the client's candidate
+  payments (those holding money now, refunded or returned since K, or with entries pending since K) and the build
+  stayed at ≈ 0.13 ms a line (6.51 s for 50,000).
+- The 5 s nightly-check target is exceeded once, with the 50,000-line draft waiting in this crowded database
+  (5.1 s; 6.5 s in the M2c-4 round-1 CI-order run); 4.1 s after the approval.

@@ -6,7 +6,9 @@ reference is imported, matched and allocated; then « Préparer maintenant » (t
 the allocation lock), the prepare job (facts, deadlines, commission, documents, settlement plan,
 COPY), the approval command and its job (the lines frozen, the invoice numbered with one charge per
 file, its entry, the payout ordered), the nightly checks (I14 to I18, R124-6), then the
-cancellation by an admin (a synchronous command under the API's 8 s: the transfer cancelled, one
+documents job the approval queues (M2c-5: the statement's payload built in SQL from the 50,000
+lines, its CSV and PDF, the invoice's PDF, uploaded and recorded), the cancellation by an admin (a
+synchronous command under the API's 8 s: the transfer cancelled, one
 full credit note with one allocation per file, the lines released, the items back in the queue, the
 tier history restored) and the checks again. The remittance tables are never analysed (the state CI
 meets): the plans must not rest on statistics. Prints the timings (docs/benchmarks/remittances.md).
@@ -102,7 +104,7 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
     )
     commanded = time.monotonic()
     assert queued["results"][0]["status"] == "queued", queued
-    drain()  # the approval job
+    drain()  # the approval job, then the documents job it queues (M2c-5)
     approved = time.monotonic()
     done = run_row(run)
     assert done["status"] == "approved", done["last_failure"]
@@ -133,6 +135,17 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
     assert invoice is not None and invoice[0] == commission
     assert invoice[2] == len(files)
     assert transfer == done["net_minor"] == done["gross_minor"] - invoice[1]
+    with psycopg.connect(DB) as conn:
+        drawn = conn.execute(
+            """select s.line_count, s.file_count, s.payload #>> '{totals,gross_minor}',
+                      (select count(*) from public.commission_invoice_document d
+                       join public.commission_invoice i on i.id = d.invoice_id
+                       where i.run_id = s.run_id)
+               from public.remittance_statement s where s.run_id = %s""",
+            (run,),
+        ).fetchone()
+    assert drawn is not None and drawn[0] == items and drawn[2] == str(done["gross_minor"])
+    assert drawn[3] == 1
     with psycopg.connect(DB) as conn:
         found = conn.execute(
             """select code from public.payment_check_result where run_id = %s
@@ -173,10 +186,12 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
         ).fetchall()
     assert found == [], found
     logs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("prepare ")]
+    docs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("documents ")]
     print(
         f"\n{items} items: reserved (command) in {requested - started:.2f}s; prepared in"
         f" {prepared - requested:.1f}s ({'; '.join(logs)}); approval command"
-        f" {commanded - approving:.2f}s, job {approved - commanded:.1f}s; nightly checks"
+        f" {commanded - approving:.2f}s, job and documents {approved - commanded:.1f}s"
+        f" ({'; '.join(docs)}); nightly checks"
         f" {checked - approved:.1f}s (with the draft waiting {draft_checks_s:.1f}s); overview"
         f" with the draft {overview_s:.2f}s; cancellation (command) {cancel_s:.2f}s"
     )
