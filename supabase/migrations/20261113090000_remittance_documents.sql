@@ -1279,10 +1279,12 @@ begin
          jsonb_build_object('number', i.number, 'receivable_minor', e.receivable::text, 'revenue_minor', e.revenue::text)
   from public.commission_invoice i
   cross join lateral (
+    -- the entry's postings by key first, then each one's account by key (plan robustness, ARCHITECTURE §4)
     select coalesce(sum(p.amount_minor) filter (where la.book = 'commission_receivable'), 0) as receivable,
            coalesce(sum(p.amount_minor) filter (where la.book = 'servicer_revenue'), 0) as revenue
-    from public.ledger_posting p join public.ledger_account la on la.id = p.ledger_account_id
-    where p.entry_id = i.ledger_entry_id) e
+    from (select q.amount_minor, q.ledger_account_id from public.ledger_posting q
+          where q.entry_id = i.ledger_entry_id offset 0) p
+    cross join lateral (select a.book from public.ledger_account a where a.id = p.ledger_account_id offset 0) la) e
   where i.organization_id = p_organization_id and (e.receivable <> i.ttc_minor or e.revenue <> -i.ht_minor)
   union all
   -- I18: per client, Σ open invoices − Σ refunds owed = 4111[c]; 44574 = Σ pending VAT of the documents (the client's
@@ -1849,3 +1851,44 @@ grant select (id, organization_id, client_organization_id, currency, number, sta
               approved_by, approved_at, invoice_late, booked_on, cancelled_by, cancelled_at, created_by, created_at,
               updated_at)
   on public.remittance_run to authenticated;
+
+-- CI scale run of PR #26: the remittance line insert guard (M2c-4) took 149 s for a 50k-line approval. Its lateral joined
+-- ledger_posting to ledger_account with a filter on the account's book; with the statistics of a crowded database the
+-- planner started from the client's single 4670 account and BitmapAnd-ed its postings with the entry's, once per line:
+-- quadratic in the account's postings. The lateral now reads the entry's postings by key (2 to 6 rows, offset 0 keeps
+-- it a separate plan) and each posting's account by its key, so no estimate can turn it around (ARCHITECTURE §4).
+create or replace function private.remittance_line_insert_guard()
+returns trigger
+language plpgsql
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  v_bad text;
+begin
+  if exists (select 1 from (select distinct n.run_id, n.organization_id, n.client_organization_id, n.currency
+                            from new_rows n) n
+             left join lateral (select r.organization_id, r.client_organization_id, r.currency
+                                from public.remittance_run r where r.id = n.run_id offset 0) r on true
+             where (r.organization_id, r.client_organization_id, r.currency)
+                   is distinct from (n.organization_id, n.client_organization_id, n.currency)) then
+    raise exception 'remittance line: its run''s servicer, client and currency' using errcode = 'check_violation';
+  end if;
+  select min(n.run_id || '/' || n.line_no) into v_bad
+  from new_rows n
+  cross join lateral (
+    select coalesce(-sum(p.amount_minor), 0) as owed, min(la.client_organization_id::text) as client,
+           min(la.currency) as currency, count(*) as n
+    from (select q.amount_minor, q.ledger_account_id from public.ledger_posting q
+          where q.entry_id = n.ledger_entry_id offset 0) p
+    cross join lateral (select a.client_organization_id, a.currency from public.ledger_account a
+                        where a.id = p.ledger_account_id and a.book = 'client_payable' offset 0) la) x
+  where x.n = 0 or x.owed <> n.amount_minor or x.client <> n.client_organization_id::text or x.currency <> n.currency;
+  if v_bad is not null then
+    raise exception 'remittance line %: not the 4670 posting of its entry for the run''s client and currency', v_bad
+      using errcode = 'check_violation';
+  end if;
+  return null;
+end;
+$$;
+revoke execute on function private.remittance_line_insert_guard() from public, anon, authenticated;

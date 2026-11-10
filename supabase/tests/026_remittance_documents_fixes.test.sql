@@ -11,7 +11,7 @@
 --   * legal#0 — the 40 € flat indemnity frozen as applying to a professional buyer, a proceeding kept beside it.
 -- Design docs/design/m2c-remittances.md §9.6, §10, §14, §15; ADR-0014 M2c-5 (review fixes).
 begin;
-select plan(43);
+select plan(45);
 
 -- Fixtures (as 021: Martin (a1) and Lilas (a2) of the servicer aa, each with a file paid; Martin accepted electronic
 -- invoices in its mandate, Lilas did not) ----------------------------------------------------------------
@@ -658,6 +658,16 @@ select lives_ok($$ select id, number, status, gross_minor, net_minor from public
   'but reads its runs'' status and amounts (the client space''s embed)');
 select is((select count(*)::int from public.remittance_late_approval), 0, 'and no late approval');
 reset role;
+
+-- CI scale run of PR #26: the remittance line insert guard reads each line's entry by key (plan robustness) ---------
+select is((select p.proconfig from pg_proc p where p.oid = 'private.remittance_line_insert_guard()'::regprocedure),
+  array['search_path=""', 'enable_seqscan=off'], 'the line insert guard keeps its settings');
+select ok((select pg_get_functiondef('private.remittance_line_insert_guard()'::regprocedure)
+                  ~ 'where q\.entry_id = n\.ledger_entry_id offset 0'
+             and pg_get_functiondef('private.remittance_line_insert_guard()'::regprocedure)
+                  ~ 'where a\.id = p\.ledger_account_id and a\.book = ''client_payable'' offset 0'),
+  'and reads each line''s postings by its entry, then each posting''s account by key, whatever the statistics '
+  '(the 4670 account first was quadratic: 149 s for 50k lines in CI)');
 
 select * from finish();
 rollback;
