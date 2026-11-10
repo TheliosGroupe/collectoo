@@ -119,6 +119,7 @@ export type ErrorCode =
   | "already_booked"
   | "not_a_fee"
   | "not_an_own_credit"
+  | "not_own_credit"
   | "own_account_unknown"
   | "top_up_differs"
   | "not_a_loss"
@@ -149,7 +150,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   iban_invalid: "IBAN invalide : vérifiez la saisie (27 caractères pour un compte en France).",
   close_confirmation: "Pour confirmer la clôture, saisissez les 4 derniers caractères de l'IBAN de ce compte.",
   bic_invalid: "BIC invalide : 8 ou 11 caractères (lettres et chiffres).",
-  iban_taken: "Cet IBAN est déjà enregistré dans cette devise.",
+  iban_taken:
+    "Cet IBAN est déjà enregistré : dans cette devise, ou pour un autre usage (un IBAN est soit un compte de fonds de tiers, soit le compte propre du cabinet).",
   label_required: "Indiquez un libellé (100 caractères au plus).",
   opened_future: "La date d'ouverture ne peut pas être dans le futur.",
   account_holds_money:
@@ -207,7 +209,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   file_not_open: "Le dossier n'est pas ouvert.",
   amount_invalid: "Montant invalide : saisissez un montant positif en euros (ex. 120,50).",
   client_funds_exists:
-    "Un compte de fonds de tiers est déjà actif dans cette devise : un seul compte dédié par devise reçoit et reverse les fonds des clients.",
+    "Un compte de fonds de tiers est déjà actif dans cette devise : le cabinet a choisi un seul compte dédié par devise pour recevoir et reverser les fonds des clients.",
   transfers_in_flight:
     "Un virement depuis ou vers ce compte est en cours (approvisionnement non encore crédité) : annulez-le ou attendez son crédit.",
   top_up_accounts:
@@ -215,8 +217,11 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   top_up_not_pending: "Cet approvisionnement n'est plus en attente : rechargez la page.",
   date_past: "La date d'exécution demandée ne peut pas être passée.",
   already_booked: "Cette ligne est déjà comptabilisée : rechargez la page.",
-  not_a_fee: "Seul un débit (autre débit ou virement émis) se comptabilise en frais bancaires.",
+  not_a_fee:
+    "Seul un débit classé « Frais ou autre débit » se comptabilise en frais bancaires : un virement émis par le cabinet n'en est pas un.",
   not_an_own_credit: "Seul un crédit reçu du compte propre du cabinet se comptabilise en approvisionnement.",
+  not_own_credit:
+    "Seul un crédit reçu du compte propre du cabinet, ni comptabilisé ni classé, peut devenir le paiement d'un débiteur : rechargez la page.",
   own_account_unknown:
     "Ce crédit ne vient d'aucun compte propre enregistré : enregistrez le compte propre, ou classez la ligne avec une explication.",
   top_up_differs:

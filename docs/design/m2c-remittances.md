@@ -245,7 +245,7 @@ The numbers are our labels; the accountant maps them. 5122 is not the own accoun
 | `client_refund_own` | Remboursement au mandant depuis le compte propre | +4111[c] R / −5122[own] R | proof date | ops, with evidence | ops reversal |
 | `advance_write_off` | Abandon d'avance | +6780 W / −4112[c] W | decision date | admin, with a motif | never |
 
-- **No M2c type touches 1100, 3100 or 4710** (L111-8; unallocated money is never remitted, M2b founder #8).
+- **No M2c type touches 1100, 3100 or 4710** (1100/3100: L111-8; 4710: unallocated money is never remitted, M2b founder #8).
 - **7060 is reached only through the two commission types**, against 4111 of the same client.
 - **No M2b type reaches a servicer-fund book or 4679** (I10′).
 - `ledger_post` refuses all M2c types; they go through `ledger_post_set`.
@@ -947,7 +947,7 @@ The statement is built in SQL from the frozen lines, the entries and the identit
 
 **Classification at import** (Python `payments.statement.classify` and SQL ingest, kept in parity):
 - a debit whose end-to-end id starts with `RMT` or `SWP`, or a debit to a registered own IBAN → `transfer_out`;
-- a credit from a registered own IBAN, or carrying our `TOP` id → `own_transfer_in`, **never a debtor payment**;
+- a credit from a registered own IBAN, or carrying our `TOP` id → `own_transfer_in`, **never automatically a debtor payment** (ops may release one as a debtor payment the servicer relays, below);
 - a credit from a client's registered payout IBAN → `client_transfer_in`, to ops;
 - camt.053 `NtryDtls/Btch/PmtInfId` is kept in `payment_info_id`.
 
@@ -960,7 +960,7 @@ The M2b-6 debit job (`payments.process_debits`, same chunking and lock order) ga
 | `transfer_out` with the SWP id | auto | `servicer_sweep` |
 | a credit undoing RMT (original end-to-end id) | auto | reversal of the `remittance` at the return date; pending item `payout_returned`; payout account `returned`; P0; any difference → `bank_fee` |
 | `own_transfer_in` matching a `TOP` transfer | auto | `servicer_top_up` |
-| `own_transfer_in` matching nothing | ops | top-up, or a debtor payment relayed by the servicer (it becomes a `payment`) (ledger critique #8) |
+| `own_transfer_in` matching nothing | ops | top-up, or a debtor payment relayed by the servicer (it becomes a `payment`: `release_own_credit`, M2c-1 review; ledger critique #8, OQ-69) |
 | `client_transfer_in` | ops | `client_payment_dedicated` (a misdirected invoice payment), or ops explain it |
 | RMT of a cancelled or already-booked transfer, other amount, unknown id | ops | `unplanned_payout` (§9.7), or explained; never automatic |
 | `other_debit` with BkTxCd charges (`CHRG`, `FEES`) | auto, suggested | `bank_fee`; other debits are classified by ops (« Frais bancaires ») |
@@ -1201,7 +1201,7 @@ The plans rest on no statistics (M2b lessons): keyed lookups, `NOT EXISTS`, part
 | **M2c-4** Runs and invoices (M2-14 core, M2-15 numbering) | `remittance_run`, draft lines, lines; schedule + guard; prepare and approve jobs; counter and guard; invoices, credit notes, credit allocations and entries; settlement plan; N = 0 settlement; cancellation before download; « Reversements » pages; checks I14–I17, deadline alerts, breach rows | pgTAP `018`, `019` (except files); gapless under rollback and concurrency; one stale run never blocks the others |
 | **M2c-5** Documents (M2-14 statement, M2-15 PDF) | Statement payload, PDF and CSV; invoice and credit-note payload and PDF; storage policies; client space; accounting export; `issue_credit_note` | CSV = PDF = run; golden hashes; mentions snapshot; RLS A/B and restricted viewers |
 | **M2c-6** Bank (M2-14 cash-out) | `bank_transfer`, `transfer_file`, pain.001 (.09/.03, XSD, golden, charset), cash check and per-client cap, download and sent, refunds in files; debit rules: payout + settlement + booking-time cover, batch, sweep, top-up, returned payout, charges on return, unplanned payouts; sweep after payouts; statement « Suivi » | the §7 example end to end with synthetic camt.053; I9, I19, I20; double debit never auto-booked |
-| **M2c-7** Returns after remittance and close-out | `cover_remitted_reversals` wired into every reversal path + nightly backstop; automatic top-ups (own-account file); claw-back recovery; repayment request; client payments and refunds; write-off; client status effects (proceedings, liquidation, mandate end); full property machine; 50k scale run; docs (COMPLIANCE CPCE-02/03/07/08 + new rows TVA-01, FAC-01…04, MAND-01/02, SEPA-01 + OQ-35…50 + OQ-34 update + Ops row for 289 VII; DOMAIN; ARCHITECTURE §8–9 postings fixed; CALCULATION_RULES; ADR-0014 final; PROGRESS) | pgTAP `021`; property machine; scale timings; **no real remittance before M2c-7 is merged** (until then a return of a remitted entry fails closed with `LG008` and goes to ops) |
+| **M2c-7** Returns after remittance and close-out | `cover_remitted_reversals` wired into every reversal path + nightly backstop; automatic top-ups (own-account file); claw-back recovery; repayment request; client payments and refunds; write-off; client status effects (proceedings, liquidation, mandate end); full property machine; 50k scale run; docs (COMPLIANCE CPCE-02/03/07/08 + new rows TVA-01, FAC-01…04, MAND-01/02, SEPA-01 + OQ-35…50 + OQ-34 update + Ops row for 289 VII; DOMAIN; ARCHITECTURE §8–9 postings fixed; CALCULATION_RULES; ADR-0014 final; PROGRESS) | pgTAP `021`; property machine; scale timings; **no real remittance before M2c-7 is merged** (until then a return of a remitted entry fails closed with `LG008`, and goes to ops, only when it would leave the client's whole 4670 in debit; otherwise it nets against the client's other pending collections, which §13 #1 excludes) |
 
 ---
 

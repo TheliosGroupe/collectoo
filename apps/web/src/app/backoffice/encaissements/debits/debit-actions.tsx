@@ -3,7 +3,7 @@
 import { ActionForm } from "@/components/action-form";
 import { buttonClass, dangerButtonClass, inputClass } from "@/components/ui";
 import { ConfirmSheet, secondaryClass } from "../a-traiter/queue-actions";
-import { linkDebit, resolveDuplicate } from "./actions";
+import { linkDebit, releaseOwnCredit, resolveDuplicate } from "./actions";
 
 function Reason({ label = "Motif (interne)" }: { label?: string }) {
   return (
@@ -119,6 +119,31 @@ export function BookLine({
           <ActionForm onDone={close} action={linkDebit} submitLabel="Comptabiliser" buttonClassName={buttonClass}>
             <input type="hidden" name="bank_transaction_id" value={lineId} />
             <input type="hidden" name="kind" value={kind} />
+            <input type="hidden" name="idempotency_key" value={idempotencyKey} />
+            <Reason />
+          </ActionForm>
+        </>
+      )}
+    </ConfirmSheet>
+  );
+}
+
+/**
+ * M2c-1 review: « Paiement d'un débiteur relayé par le cabinet » — a credit from the own account that relays a debtor's
+ * payment the servicer received on its own account. It becomes a payment on no file (« Paiements à traiter »); the
+ * motif (who paid the servicer, when) is required and kept.
+ */
+export function ReleaseOwnCredit({ lineId, effect, idempotencyKey }: { lineId: string; effect: string; idempotencyKey: string }) {
+  const label = "Paiement d'un débiteur relayé par le cabinet";
+  return (
+    <ConfirmSheet label={label} title={label} buttonClassName={secondaryClass} testId="release-own-credit">
+      {(close) => (
+        <>
+          <p className="text-sm" data-testid="sheet-effect">
+            {effect}
+          </p>
+          <ActionForm onDone={close} action={releaseOwnCredit} submitLabel="Créer le paiement" buttonClassName={buttonClass}>
+            <input type="hidden" name="bank_transaction_id" value={lineId} />
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />
             <Reason />
           </ActionForm>

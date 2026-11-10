@@ -9,14 +9,17 @@ import {
   feeEffect,
   LINK_KIND,
   lossEffect,
+  offersPaymentLinks,
   ownCreditEffect,
   lineKindLabel,
   linkRefundEffect,
+  relayable,
+  relayedPaymentEffect,
   releaseEffect,
   returnEffect,
 } from "@/lib/payments/debits";
 import { money, signedMoney } from "@/lib/payments/statements";
-import { BookLine, Explain, LinkLoss, LinkRefund, LinkReturn, ResolveDuplicate } from "./debit-actions";
+import { BookLine, Explain, LinkLoss, LinkRefund, LinkReturn, ReleaseOwnCredit, ResolveDuplicate } from "./debit-actions";
 
 const PAGE_SIZE = 20;
 const TABS: Record<string, string> = {
@@ -105,11 +108,16 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
   const { data } = await supabase.rpc("debit_queue", { p_tab: tab, p_offset: (page - 1) * PAGE_SIZE, p_limit: PAGE_SIZE });
   const rows = (data ?? []) as unknown as Row[];
   const total = rows[0]?.total ?? 0;
-  // what ops may link a line to when the job found nothing it could link (bounded: one keyed read per line shown)
+  // what ops may link a line to when the job found nothing it could link (bounded: one keyed read per line shown that
+  // offers links; never our own transfers and credits)
   const options = new Map<string, Options>();
   if (tab === "a-classer") {
     const reads = await Promise.all(
-      rows.map((r) => supabase.rpc("debit_link_options", { p_bank_transaction_id: r.bank_transaction_id })),
+      rows.map((r) =>
+        offersPaymentLinks(r)
+          ? supabase.rpc("debit_link_options", { p_bank_transaction_id: r.bank_transaction_id })
+          : Promise.resolve({ data: null }),
+      ),
     );
     rows.forEach((r, i) => options.set(r.bank_transaction_id, (reads[i].data ?? { payments: [], refunds: [] }) as unknown as Options));
   }
@@ -122,7 +130,9 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
         enregistrée pour le client de son dossier) ; un remboursement n&apos;est comptabilisé qu&apos;une fois son débit
         sur le relevé. Les frais bancaires du compte de fonds de tiers sont à la charge du cabinet : ceux que la banque code
         comme tels sont comptabilisés automatiquement, les autres avec « Frais bancaires ». Un crédit venant du compte propre
-        n&apos;est jamais le paiement d&apos;un débiteur.
+        n&apos;est jamais pris automatiquement pour le paiement d&apos;un débiteur : c&apos;est un approvisionnement du
+        cabinet, ou le paiement d&apos;un débiteur reçu par le cabinet et relayé sur le compte dédié, qui devient alors un
+        paiement à affecter (« Paiement d&apos;un débiteur relayé par le cabinet »).
       </InfoNote>
       <nav className="flex flex-wrap gap-2 text-sm" aria-label="Onglets">
         {Object.entries(TABS).map(([key, label]) => (
@@ -274,7 +284,9 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
       file_reference: c.file_reference ?? null,
     });
   for (const p of options?.payments ?? []) if (!payments.has(p.payment_id)) payments.set(p.payment_id, p);
-  const refunds = options?.refunds ?? [];
+  // review M2c-1: no return or refund link on our own transfers and credits (the database refuses them)
+  const linkable = offersPaymentLinks(row);
+  const refunds = linkable ? (options?.refunds ?? []) : [];
   const isReturn = row.direction === "debit" && row.kind !== "refund_out";
   // M2c-1 (OQ-34): a return naming a payment of which less is left than it takes back
   const beyond = row.direction === "debit" && row.kind === "return"
@@ -283,13 +295,22 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
   return (
     <div className="flex flex-col gap-2">
       {row.direction === "credit" && row.kind === "own_transfer_in" ? (
-        <BookLine
-          lineId={row.bank_transaction_id}
-          kind="own_credit"
-          label="Approvisionnement par le compte propre"
-          effect={ownCreditEffect(money(row.amount_minor, cur))}
-          idempotencyKey={randomUUID()}
-        />
+        <>
+          <BookLine
+            lineId={row.bank_transaction_id}
+            kind="own_credit"
+            label="Approvisionnement par le compte propre"
+            effect={ownCreditEffect(money(row.amount_minor, cur))}
+            idempotencyKey={randomUUID()}
+          />
+          {relayable(row) ? (
+            <ReleaseOwnCredit
+              lineId={row.bank_transaction_id}
+              effect={relayedPaymentEffect({ amount: money(row.amount_minor, cur), dateFr: frenchDate(row.booking_date) })}
+              idempotencyKey={randomUUID()}
+            />
+          ) : null}
+        </>
       ) : null}
       {beyond.map((p) => (
         <LinkLoss
@@ -308,7 +329,7 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
           idempotencyKey={randomUUID()}
         />
       ))}
-      {row.direction === "debit"
+      {row.direction === "debit" && linkable
         ? [...payments.values()]
             .filter((p) => BigInt(p.left_minor) >= BigInt(row.amount_minor))
             .slice(0, isReturn ? 5 : 2)

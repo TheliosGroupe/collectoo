@@ -63,6 +63,8 @@ export const LINK_KIND: Record<string, string> = {
   fee: "Frais bancaires (à la charge du cabinet)",
   top_up: "Approvisionnement par le compte propre",
   loss: "Retour au-delà du paiement : perte du cabinet",
+  // M2c-1 review: a credit from the own account released as a debtor's payment (public.release_own_credit)
+  relayed_payment: "Paiement d'un débiteur relayé par le cabinet",
   duplicate: "Doublon confirmé (non comptabilisé)",
   released: "Libéré",
 };
@@ -98,13 +100,33 @@ export const DEBIT_REVIEW: Record<string, string> = {
   refund_amount_match: "Débit du montant d'un remboursement demandé sur ce compte : s'il s'agit de ce remboursement, liez-le.",
   // M2c-1: our own transfers and credits
   top_up_not_found:
-    "Crédit venant du compte propre sans approvisionnement demandé : s'il s'agit d'un approvisionnement, comptabilisez-le ; sinon classez-le avec une explication.",
+    "Crédit venant du compte propre sans approvisionnement demandé : approvisionnement du cabinet, ou paiement d'un débiteur reçu par le cabinet et relayé sur ce compte (il devient alors un paiement à affecter). Ne le classez avec une explication que s'il n'est ni l'un ni l'autre.",
   top_up_differs:
     "Crédit portant la référence d'un approvisionnement, mais d'un autre montant ou sur un autre compte : vérifiez dans la banque.",
   client_credit: "Virement reçu d'un client du cabinet : à classer (règlement d'une facture de commission à venir).",
   own_transfer_out:
     "Virement émis par le cabinet (reversement ou balayage) : comptabilisé avec les reversements ; à classer avec une explication d'ici là.",
 };
+
+/**
+ * Whether « À classer » offers the M2b links on a line — a payment's return (« Retour du paiement … ») and our refunds
+ * (« Remboursement … »): only on the lines M2b reads as such, a debit read as a return, our refund or another debit, and
+ * a credit undoing a debit. Our own transfers out and the credits from our own account or from a client (M2c-1 kinds)
+ * never: the database refuses those links (« debit link refused: not_a_return »; review M2c-1).
+ */
+export function offersPaymentLinks(o: { direction: string; kind: string }): boolean {
+  if (o.direction === "debit") return o.kind === "return" || o.kind === "refund_out" || o.kind === "other_debit";
+  return o.direction === "credit" && o.kind === "return";
+}
+
+/**
+ * Whether « Paiement d'un débiteur relayé par le cabinet » is offered (review M2c-1): a credit from the own account
+ * (`own_transfer_in`) that does not carry our `TOP…` reference — a credit carrying it is our top-up, never a debtor's
+ * payment. The database checks the rest (unbooked, unlinked, on a dedicated account).
+ */
+export function relayable(o: { direction: string; kind: string; end_to_end_id: string | null }): boolean {
+  return o.direction === "credit" && o.kind === "own_transfer_in" && !/^TOP[0-9A-F]{12}$/.test(o.end_to_end_id ?? "");
+}
 
 /**
  * Whether a line may be classified without booking (« Classer sans comptabiliser »): never our refund leaving the
@@ -179,9 +201,19 @@ export function feeEffect(amount: string): string {
   return `Le débit de ${amount} sera comptabilisé en frais bancaires du compte dédié, à la charge du cabinet : la part du cabinet sur ce compte diminue d'autant, à compenser par un approvisionnement depuis le compte propre. Aucun client n'en supporte le coût.`;
 }
 
-/** M2c-1: what booking a credit from the own account does (a top-up, never a debtor's payment). */
+/** M2c-1: what booking a credit from the own account as a top-up does (the servicer's own money). */
 export function ownCreditEffect(amount: string): string {
-  return `Le crédit de ${amount} venant du compte propre sera comptabilisé comme un approvisionnement du compte dédié par le cabinet : ce n'est le paiement d'aucun débiteur.`;
+  return `Le crédit de ${amount} venant du compte propre sera comptabilisé comme un approvisionnement du compte dédié par le cabinet, avec son propre argent. S'il s'agit du paiement d'un débiteur reçu par le cabinet et relayé sur ce compte, choisissez plutôt « Paiement d'un débiteur relayé par le cabinet ».`;
+}
+
+/**
+ * M2c-1 review: what releasing a credit from the own account as a debtor's payment does (public.release_own_credit).
+ * A debtor paid the servicer's own account and the servicer relays the money to the dedicated account: the line
+ * becomes a payment, booked on the dedicated account at the line's date as a released duplicate credit is, on no file
+ * yet, so it waits in « Paiements à traiter » for ops to assign it. The motif is required and kept.
+ */
+export function relayedPaymentEffect(o: { amount: string; dateFr: string }): string {
+  return `Le crédit de ${o.amount} deviendra un paiement reçu, comptabilisé sur le compte de fonds de tiers au ${o.dateFr} (date de la ligne), payeur « Versement relayé par le cabinet ». Il attendra dans « Paiements à traiter » d'être affecté au dossier du débiteur, puis sera imputé comme tout paiement. Le motif est conservé : indiquez qui a payé le cabinet, et quand. À ne pas utiliser pour un approvisionnement par le cabinet.`;
 }
 
 /**
@@ -245,6 +277,11 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   client_payable_debit: {
     label: "Somme due à un client en débit",
     help: "Ce qui est dû à un client serait négatif : l'argent d'un autre client ou du cabinet l'aurait couvert (I13).",
+  },
+  // M2c-1 review: the servicer owes the dedicated account (fees, losses) beyond the top-ups ordered (design §15)
+  servicer_shortfall: {
+    label: "Approvisionnement du compte dédié à demander",
+    help: "Le cabinet doit de l'argent au compte dédié (frais bancaires, pertes) au-delà des approvisionnements demandés : approvisionnez-le depuis le compte propre (« Comptes bancaires »).",
   },
   remittance_completeness: {
     label: "Encaissements à reverser incomplets",
@@ -358,7 +395,7 @@ export function normaliseIban(text: string): string | null {
 /** Errors of the M2b-6 commands, as codes (order matters: most specific first). */
 export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
-  if (message.includes("reason is required")) return "reason_required";
+  if (message.includes("reason is required") || message.includes("refused: reason_required")) return "reason_required";
   if (message.includes("the payment changed") || message.includes("payment_changed")) return "payment_changed";
   if (message.includes("reason does not match")) return "refund_reason_mismatch";
   if (message.includes("more than what is left")) return "refund_too_much";
@@ -373,6 +410,7 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("already_booked")) return "already_booked";
   if (message.includes("not_a_fee")) return "not_a_fee";
   if (message.includes("not_an_own_credit")) return "not_an_own_credit";
+  if (message.includes("own credit release refused: not_own_credit")) return "not_own_credit";
   if (message.includes("own_account_unknown")) return "own_account_unknown";
   if (message.includes("transfer_not_pending") || message.includes("bank booking refused: amount_differs"))
     return "top_up_differs";
@@ -383,7 +421,7 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("posting_failed")) return "link_posting_failed";
   if (message.includes("amount_exceeds") || message.includes("amount_differs")) return "link_amount";
   if (message.includes("debit link refused")) return "link_refused";
-  if (message.includes("bank booking refused")) return "booking_refused";
+  if (message.includes("bank booking refused") || message.includes("own credit release refused")) return "booking_refused";
   if (message.includes("already decided")) return "already_decided";
   if (message.includes("client's statement is required")) return "direct_evidence";
   if (message.includes("before the servicing started")) return "direct_date";
