@@ -224,11 +224,17 @@ test("ops prepare, read and approve a client's remittance run", async ({ page, b
   await client.getByTestId("client-remittances-link").click();
   await expect(client).toHaveURL(/\/client\/reversements$/);
   await expect(client.getByTestId("owed-today")).toContainText("800,01");
+  // review M2c-5 (tests-ui#5, K2): the gross still owed is the ordered payout's, worded so, not an extra amount
+  const inFlight = client.getByTestId("owed-in-flight");
+  await expect(inFlight).toHaveCount(1);
+  await expect(inFlight).toContainText(/dont 800,01\s€ compris dans le reversement RV-\d{4}-\d{6} ordonné/);
+  await expect(inFlight).toContainText(/656,01\s€ à virer ; 144,00\s€ de commission à compenser au débit du virement/);
   await expect(client.getByTestId("next-run")).toContainText(/le \d{2}\/\d{2}\/\d{4}/);
   const row = client.getByTestId("statement-row");
   await expect(row).toHaveCount(1);
   await expect(row).toContainText("656,01");
-  await expect(row).toContainText("Virement ordonné");
+  // review M2c-5 (figures#1 = tests-ui#1, K7): the run's live status, not the one frozen in the statement
+  await expect(row.getByTestId("statement-status")).toHaveText("Virement ordonné");
   await expect(row).not.toContainText("payé");
   await reviewShot(client, testInfo, "m2c-client-reversements");
   const clientPdf = await client.request.get((await row.getByTestId("statement-pdf").getAttribute("href"))!);

@@ -324,6 +324,9 @@ describe("the remittances' nightly checks (M2c-4 and its review)", () => {
       "remittance_payout_not_executed",
       // review M2c-4, round 2 (legal#4): an invoice open after the date it is paid by
       "invoice_overdue",
+      // review M2c-5 (perf#2 = tests-ui#2, K4): documents the job could not draw, or still not drawn after 24 h
+      "remittance_document_failed",
+      "remittance_document_missing",
     ]) {
       expect(CHECK_LABEL[code]?.label, code).toBeTruthy();
       expect(CHECK_LABEL[code]?.help, code).toBeTruthy();

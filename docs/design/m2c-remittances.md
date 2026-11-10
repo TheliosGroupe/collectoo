@@ -902,7 +902,7 @@ The statement is built in SQL from the frozen lines, the entries and the identit
    - the nature: « Paiement imputé », « Imputation annulée », « Paiement repris par la banque du payeur le … », « Reversement sans imputation (dossier rappelé / antérieur à la reprise / ratification) », « Avance du cabinet », « Virement revenu impayé — reversé à nouveau », « Virement exécuté hors reversement »;
    - amount, commission basis, rule and rate, commission HT;
    - receipt number;
-   - « hors délai » with its cause when a deadline was missed.
+   - « hors délai » with its cause when a deadline was missed (a cause category, never the approver's free-text reason: M2c-5 review).
 
    The payer is named only when certainly a party (`private.payer_is_party`). No payer IBAN, no bank line.
 3. **Retenues et compensations:**
@@ -1017,13 +1017,13 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
   - Nightly check: count = max seq per year, and dates monotonic.
 - **Rendering** happens after the commit, from the frozen payload. A failed render is retried and never changes the number or the data.
 
-### 14.2 Mentions (payload → locked template `facture-commission-fr-1`, no LLM)
+### 14.2 Mentions (payload → locked template `facture-commission-fr-1`, `fr-2` since the M2c-5 review; no LLM)
 
 | Mention | Basis |
 |---|---|
 | « Facture » / « Avoir », number, issue date | 242 nonies A 6°, 7° |
 | Seller: legal name, legal form and capital, SIREN, RCS city, registered office, VAT number, « en liquidation » / « EI » when applicable | 242 nonies A 1°, 2°; R123-237; R123-238 |
-| Buyer: legal name, SIREN, billing address | 242 nonies A 1°; L441-9 |
+| Buyer: legal name, SIREN, address (« Siège social ») and its billing address when different (« Adresse de facturation », M2c-5 review) | 242 nonies A 1°; L441-9 (« leur adresse et leur adresse de facturation si elle est différente ») |
 | « Prestations de services » | 242 nonies A 8° bis |
 | « Recouvrement amiable de créances pour votre compte — encaissements du 21/10/2026 au 02/11/2026 » | 242 nonies A 10° |
 | Lines: designation (mandate, claim type, rule, tier bases and rates), quantity 1, unit price HT, VAT rate 20 % | 242 nonies A 8°; L441-9 |
@@ -1032,15 +1032,16 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 | « Option pour le paiement de la taxe d'après les débits » only if opted | 242 nonies A 11° bis |
 | Payment date: « À régler par compensation sur le reversement RV-… (exécution demandée le 03/11/2026 ; convention …, art. 7.2) » — or « À régler au plus tard le … par virement sur FR76 … (compte propre) » | L441-9 (« la date à laquelle le règlement doit intervenir ») |
 | « Pas d'escompte pour paiement anticipé » | L441-9 |
-| Penalty rate (servicer setting) and « Indemnité forfaitaire pour frais de recouvrement : 40 € » — professional clients only; not claimed while a client proceeding forbids payment | L441-9, L441-10 II, D441-5 |
-| Optional « Votre bon de commande n° … » | L441-9 |
+| Penalty rate (servicer setting) and « Indemnité forfaitaire pour frais de recouvrement en cas de retard de paiement : 40,00 € » — professional clients; **printed** whatever proceeding is recorded, **not claimed** while the opening forbids payment of that claim at its due date (M2c-5 review: the creditor « ne peut invoquer » it then; printing is still due) | L441-9, L441-10 II, D441-5 |
+| Optional « Votre bon de commande n° … » — not yet supported: nothing captures a purchase order (a recovery mandate is not one); printed once a client gives one (OQ-77) | L441-9 |
 | Credit note: « Avoir n° FC-2026-000004 rectifiant la facture FC-2026-000001 du 02/11/2026 » per line, with its reason (« encaissement annulé : paiement repris le 12/11/2026 ») | 289 I 5; 272 |
 
 - Amounts are integer minor units as text in the payload and French in the PDF.
 - The payload holds the structured seller, buyer, lines, totals and settlement, ready for a later Factur-X / UBL mapping and for 290 A.
 - *M2c-4 review (for M2c-5):* the mentions above that settings can change are frozen in the payload at issue, before hashing — `penalty_text`, `flat_indemnity` (whether the 40 € applies, `amount_minor` 4000 for a professional buyer), `due_date`, `payment_reference` (the run's number and requested execution date, or the approval date when N = 0) and, for an invoice with an amount due, the own account {`iban`, `bic`, `holder`} read in the issuing transaction. M2c-5 renders from them, never from the current settings.
 - The PDF is stored with its SHA-256, kept 10 years, and checked before serving.
-- **Delivery:** the client space, when `invoice_acceptance_ref` is recorded (289 VI). Otherwise the invoice is flagged « envoi postal » for ops.
+- *M2c-5 review:* the payment date names what the run's plan sets off — « À régler par compensation sur le reversement RV-… : X € (exécution demandée le …) ; le solde de Y € sur le prochain reversement, au plus tard le … » when the plan leaves part open (latest date as OQ-72, checked by `invoice_overdue`); a run that transfers nothing (N = 0) prints « Réglée par compensation sur le relevé RV-… du … (aucun virement) ». Template `facture-commission-fr-2`.
+- **Delivery:** the client space, when `invoice_acceptance_ref` is recorded (289 VI). Otherwise the invoice is flagged « À envoyer par courrier » for ops, and the client space says the PDF is not available online (never that it was posted while no dispatch is recorded; OQ-74).
 - **Accounting export** (money staff, CSV):
   - invoices and credit notes: number, date, client, SIREN, HT, VAT, TTC, settlement dates and kinds;
   - entries of 7060, 44571, 44574, 6270, 6780, 4111, 4112, 5122.
@@ -1138,8 +1139,8 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 5. **`/backoffice/parametres/facturation`**: servicer identity, own account, penalty text, bank cut-offs.
 6. **« Débits et retours »** (M2b-6) gains the new kinds and « Frais bancaires ». **« Contrôles »** gains §15 and « Couvrir », « Réapprovisionner ».
 7. **`/client/reversements`, `/client/factures`, `/client/mandat`**:
-   - « À reverser à ce jour », « Prochain reversement prévu le 16/11 »;
-   - statements (PDF, CSV), invoices and credit notes, terms in words;
+   - « À reverser à ce jour », « Prochain reversement prévu le 16/11 »; the gross of a run ordered and not debited is still owed (it leaves 4670 at the debit), so the page says « dont X € compris dans le reversement RV-… ordonné (Y € à virer ; Z € de commission à compenser au débit du virement) » (M2c-5 review);
+   - statements (PDF, CSV) with their run's live status, invoices and credit notes, terms in words, both lists paged;
    - « Confirmer le nouvel IBAN » (client admin, aal2);
    - restricted users read « Vos accès ne couvrent pas les relevés de reversement ».
 

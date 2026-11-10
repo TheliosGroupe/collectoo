@@ -1,14 +1,21 @@
 import { describe, expect, it } from "vitest";
+import { money } from "@/lib/payments/statements";
 import {
-  EXPORT_DOCUMENT_HEADER,
+  NOT_ONLINE_TEXT,
   csvAmount,
   csvFile,
   exportPeriod,
   frenchDay,
+  inFlightNotes,
   invoiceDelivery,
   invoiceKind,
+  listPage,
+  neutraliseText,
+  pageOf,
+  runStatementState,
   runStatusText,
   settlementText,
+  statementRunView,
 } from "./documents";
 
 describe("M2c-5 documents", () => {
@@ -19,10 +26,17 @@ describe("M2c-5 documents", () => {
     });
     expect(invoiceDelivery({ payload: { buyer: { invoice_acceptance_ref: "art. 11" } } }, null)).toEqual({ mode: "pending" });
     expect(invoiceDelivery({ payload: { buyer: { invoice_acceptance_ref: null } } }, { document_id: "d1" })).toEqual({
-      mode: "post",
+      mode: "not_online",
     });
-    expect(invoiceDelivery({ payload: { buyer: { invoice_acceptance_ref: "  " } } }, null)).toEqual({ mode: "post" });
-    expect(invoiceDelivery({ payload: null }, null)).toEqual({ mode: "post" });
+    expect(invoiceDelivery({ payload: { buyer: { invoice_acceptance_ref: "  " } } }, null)).toEqual({ mode: "not_online" });
+    expect(invoiceDelivery({ payload: null }, null)).toEqual({ mode: "not_online" });
+  });
+
+  it("never claims a postal dispatch nothing records (review M2c-5 legal#7, K6)", () => {
+    expect(NOT_ONLINE_TEXT).toBe(
+      "PDF non disponible en ligne : vous n'aviez pas accepté la facture électronique à son émission. Demandez-la au cabinet.",
+    );
+    expect(NOT_ONLINE_TEXT).not.toMatch(/courrier|adress|envoy|transmis/i);
   });
 
   it("never says paid before the bank's debit", () => {
@@ -58,9 +72,8 @@ describe("M2c-5 documents", () => {
   });
 
   it("writes a CSV with a BOM, ';' and CRLF, quoting what needs it", () => {
-    const out = csvFile(["a", "b"], [["x;y", 'he said "hi"'], [null, "z"]]);
+    const out = csvFile(["a", "b"], [["x;y", 'he said "hi"'], [null, "z"]], new Set(["a", "b"]));
     expect(out).toBe('﻿a;b\r\n"x;y";"he said ""hi"""\r\n;z\r\n');
-    expect(EXPORT_DOCUMENT_HEADER[0]).toBe("numero");
   });
 
   it("accepts a period of at most a year", () => {
@@ -69,5 +82,157 @@ describe("M2c-5 documents", () => {
     expect(exportPeriod("2025-01-01", "2026-12-31")).toBeNull();
     expect(exportPeriod("2026-1-1", "2026-12-31")).toBeNull();
     expect(exportPeriod(null, "2026-12-31")).toBeNull();
+  });
+});
+
+describe("CSV text cells are never formulas (review M2c-5 security#0 = tests-ui#6, K3)", () => {
+  it("puts an apostrophe before a leading = + - @ TAB or CR, and only then", () => {
+    expect(["=1+1", "+33", "-x", "@SUM(A1)", "\tx", "\rx"].map(neutraliseText)).toEqual([
+      "'=1+1",
+      "'+33",
+      "'-x",
+      "'@SUM(A1)",
+      "'\tx",
+      "'\rx",
+    ]);
+    expect(["Durand", " =1", "a=b", "", "'=déjà"].map(neutraliseText)).toEqual(["Durand", " =1", "a=b", "", "'=déjà"]);
+  });
+
+  it("neutralises the text columns it is given, then quotes; amounts and dates stay as they are", () => {
+    const out = csvFile(
+      ["client", "montant", "montant_centimes", "date", "piece"],
+      [["=HYPERLINK(\"x\";\"y\")", "-12,34", "-1234", "2026-11-02", "\rRV"]],
+      new Set(["client", "piece"]),
+    );
+    expect(out).toBe('﻿client;montant;montant_centimes;date;piece\r\n"\'=HYPERLINK(""x"";""y"")";-12,34;-1234;2026-11-02;"\'\rRV"\r\n');
+  });
+
+  it("refuses a text column that is not in the header (the list is explicit)", () => {
+    expect(() => csvFile(["a"], [["x"]], new Set(["b"]))).toThrow(/not in the header/);
+  });
+});
+
+describe("the client's statements read the run as it stands (review M2c-5 figures#1 = tests-ui#1, K7)", () => {
+  it("words the live status, not the one frozen in the statement", () => {
+    expect(statementRunView({ status: "approved", net_minor: 65601 })).toEqual({
+      label: "Virement ordonné",
+      tone: "neutral",
+      net: "65601",
+    });
+    expect(statementRunView({ status: "sent", net_minor: "65601" }).label).toBe("Virement ordonné");
+    expect(statementRunView({ status: "booked", net_minor: "65601" })).toEqual({
+      label: "Virement débité de notre compte",
+      tone: "ok",
+      net: "65601",
+    });
+    expect(statementRunView({ status: "booked", net_minor: 0 }).label).toBe("Réglé par compensation, sans virement");
+  });
+
+  it("shows no amount to transfer for a cancelled run", () => {
+    expect(statementRunView({ status: "cancelled", net_minor: "65601" })).toEqual({
+      label: "Annulé avant son exécution",
+      tone: "error",
+      net: null,
+    });
+    expect(statementRunView(null)).toEqual({ label: "Statut indisponible", tone: "neutral", net: null });
+  });
+});
+
+describe("what is owed today and the payout in flight (review M2c-5 tests-ui#5, K2)", () => {
+  const eur = (m: string) => money(m, "EUR");
+
+  it("says the in-flight gross is part of what is owed, and what it is made of", () => {
+    const notes = inFlightNotes({
+      owed: [
+        {
+          currency: "EUR",
+          owed_minor: "80001",
+          in_flight_gross_minor: "80001",
+          in_flight_runs: [{ number: "RV-2026-000001", gross_minor: "80001", net_minor: "65601", commission_minor: "14400" }],
+        },
+      ],
+      in_flight: [
+        { number: "RV-2026-000001", status: "approved", currency: "EUR", net_minor: "65601", requested_execution_date: "2026-11-12" },
+      ],
+    });
+    expect(notes.sentences).toEqual([
+      `À reverser à ce jour : ${eur("80001")}, dont ${eur("80001")} compris dans le reversement RV-2026-000001 ordonné, exécution demandée le 12/11/2026 (${eur("65601")} à virer ; ${eur("14400")} de commission à compenser au débit du virement).`,
+    ]);
+    expect(notes.covered).toEqual(new Set(["RV-2026-000001"]));
+    expect(notes.sentences.join(" ")).not.toMatch(/payé|réglé/i);
+  });
+
+  it("names a part owed beyond the payout, other set-offs and a refunded credit note", () => {
+    const { sentences } = inFlightNotes({
+      owed: [
+        {
+          currency: "EUR",
+          owed_minor: "100000",
+          in_flight_gross_minor: "90000",
+          in_flight_runs: [
+            { number: "RV-2026-000002", gross_minor: "50000", net_minor: "40000", commission_minor: "6000" },
+            { number: "RV-2026-000003", gross_minor: "40000", net_minor: "42000", commission_minor: "0" },
+          ],
+        },
+      ],
+      in_flight: [],
+    });
+    expect(sentences).toEqual([
+      `À reverser à ce jour : ${eur("100000")}, dont ${eur("90000")} compris dans les reversements ordonnés RV-2026-000002 (${eur("50000")} : ${eur("40000")} à virer ; ${eur("6000")} de commission et ${eur("4000")} d'autres sommes dues au cabinet à compenser au débit du virement) et RV-2026-000003 (${eur("40000")} : ${eur("42000")} à virer dont ${eur("2000")} de remboursement d'avoir).`,
+    ]);
+  });
+
+  it("adds nothing without a payout in flight, or when the database does not say it", () => {
+    expect(inFlightNotes({ owed: [{ currency: "EUR", owed_minor: "500" }], in_flight: [] }).sentences).toEqual([]);
+    expect(
+      inFlightNotes({
+        owed: [{ currency: "EUR", owed_minor: "500", in_flight_gross_minor: "0", in_flight_runs: [] }],
+        in_flight: [],
+      }).sentences,
+    ).toEqual([]);
+    expect(inFlightNotes(null)).toEqual({ sentences: [], covered: new Set() });
+    // amounts that are not text in minor units are never worded (the page's own in-flight note stays)
+    const odd = inFlightNotes({
+      owed: [
+        {
+          currency: "EUR",
+          owed_minor: "80001",
+          in_flight_gross_minor: "80001",
+          in_flight_runs: [{ number: "RV-1", gross_minor: "80001", net_minor: "65601", commission_minor: null as unknown as string }],
+        },
+      ],
+      in_flight: [],
+    });
+    expect(odd).toEqual({ sentences: [], covered: new Set() });
+  });
+});
+
+describe("the client's lists page instead of stopping (review M2c-5 tests-ui#7)", () => {
+  it("reads a page number and asks one row more to know whether older ones exist", () => {
+    expect(listPage(undefined, 100)).toEqual({ page: 0, from: 0, to: 100 });
+    expect(listPage("2", 100)).toEqual({ page: 2, from: 200, to: 300 });
+    expect(listPage(["1", "5"], 200)).toEqual({ page: 1, from: 200, to: 400 });
+    expect(listPage("-3", 100).page).toBe(0);
+    expect(listPage("abc", 100).page).toBe(0);
+    expect(listPage("1e9", 100).page).toBe(0);
+  });
+
+  it("keeps a page's rows and says when more follow", () => {
+    expect(pageOf([1, 2, 3], 2)).toEqual({ rows: [1, 2], more: true });
+    expect(pageOf([1, 2], 2)).toEqual({ rows: [1, 2], more: false });
+    expect(pageOf(null, 2)).toEqual({ rows: [], more: false });
+  });
+});
+
+describe("the run page waits only for a statement that will come (review M2c-5 perf#6 = tests-ui#3)", () => {
+  it("polls while an approved run's statement is being drawn, a cancelled one's included", () => {
+    expect(runStatementState({ status: "approved", approved_at: "2026-11-10T10:00:00Z" }, null)).toBe("pending");
+    expect(runStatementState({ status: "cancelled", approved_at: "2026-11-10T10:00:00Z" }, null)).toBe("pending");
+    expect(runStatementState({ status: "booked", approved_at: "2026-11-10T10:00:00Z" }, { number: "RV-1" })).toBe("drawn");
+  });
+
+  it("never waits for a draft, or for one discarded or cancelled before its approval", () => {
+    expect(runStatementState({ status: "draft", approved_at: null }, null)).toBe("draft");
+    expect(runStatementState({ status: "cancelled", approved_at: null }, null)).toBe("none");
   });
 });
