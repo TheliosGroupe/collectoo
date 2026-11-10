@@ -75,7 +75,7 @@ export async function createServicerIdentity(tenant: Tenant): Promise<void> {
   const { error: e2 } = await admin.from("billing_identity").upsert({
     organization_id: tenant.servicerId,
     legal_form: "SAS",
-    share_capital_minor: 1_000_000,
+    share_capital_minor: "1000000", // bigint minor units as text, never a JS number
     rcs_city: "Paris",
     registered_office: OFFICE,
     vat_number: SERVICER_VAT,
@@ -163,6 +163,64 @@ export async function createMandate(tenant: Tenant, { complete = true }: { compl
     if (e5) throw e5;
   }
   return mandate.id as string;
+}
+
+/** The app user id of a member created by createMember (its email). */
+export async function userId(email: string): Promise<string> {
+  const { data, error } = await adminClient().from("app_user").select("id").eq("email", email).single();
+  if (error) throw error;
+  return data.id as string;
+}
+
+/**
+ * An event recorded for the tenant's client (review M2c-2: a mandate end, a death or a liquidation keeps its portfolios
+ * from being confirmed), with its evidence, as « Enregistrer un événement » records it.
+ */
+export async function recordClientEvent(
+  tenant: Tenant,
+  kind: "proceeding_opened" | "liquidation" | "death" | "guardianship" | "mandate_ended",
+  effectiveDate: string,
+  recordedBy: string,
+): Promise<void> {
+  const evidence = await createClientDocument(tenant, "client_status_evidence", `Justificatif ${kind}.pdf`);
+  const { error } = await adminClient().from("client_status_event").insert({
+    organization_id: tenant.servicerId,
+    client_organization_id: tenant.clientId,
+    kind,
+    effective_date: effectiveDate,
+    evidence_document_id: evidence,
+    recorded_by: await userId(recordedBy),
+  });
+  if (error) throw error;
+}
+
+/**
+ * The client's payout IBAN, proposed by one admin of the servicer with the client's RIB and confirmed by another
+ * (founder #10), as the pages do it: a credit from it is then read as the client's at import (`client_transfer_in`).
+ */
+export async function createConfirmedPayoutAccount(tenant: Tenant, iban: string, holder: string): Promise<void> {
+  const admin = adminClient();
+  const proposer = await userId(await createMember(tenant.servicerId, "admin"));
+  const confirmer = await userId(await createMember(tenant.servicerId, "admin"));
+  const { data, error } = await admin
+    .from("client_payout_account")
+    .insert({
+      organization_id: tenant.servicerId,
+      client_organization_id: tenant.clientId,
+      currency: "EUR",
+      iban,
+      holder_name: holder,
+      evidence_document_id: await createClientDocument(tenant, "payout_rib", "RIB client.pdf"),
+      proposed_by: proposer,
+    })
+    .select("id")
+    .single();
+  if (error) throw error;
+  const { error: e2 } = await admin
+    .from("client_payout_account")
+    .update({ status: "active", confirmed_by: confirmer, confirmed_at: new Date().toISOString(), confirmed_via: "second_admin" })
+    .eq("id", data.id);
+  if (e2) throw e2;
 }
 
 /**

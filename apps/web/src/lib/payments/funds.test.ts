@@ -5,7 +5,11 @@ import {
   CHECK_LABEL,
   DEBIT_REVIEW,
   LINK_KIND,
+  RELAY_LABEL,
+  clientRelayable,
+  clientRelayedPaymentEffect,
   debitErrorCode,
+  decisionLabel,
   explainable,
   feeEffect,
   lineKindLabel,
@@ -138,6 +142,38 @@ describe("our own transfers and credits to classify", () => {
       expect(errorText(debitErrorCode(message))).not.toBe(errorText("unknown"));
     }
     expect(errorText("not_own_credit")).toContain("compte propre du cabinet");
+    expect(errorText("not_own_credit")).toContain("compte de reversement d'un client");
+  });
+});
+
+describe("a debtor's payment relayed by a client (review M2c-2)", () => {
+  it("is offered on a credit from a client's payout IBAN only", () => {
+    expect(clientRelayable({ direction: "credit", kind: "client_transfer_in" })).toBe(true);
+    expect(clientRelayable({ direction: "credit", kind: "own_transfer_in" })).toBe(false);
+    expect(clientRelayable({ direction: "credit", kind: "debtor_credit" })).toBe(false);
+    expect(clientRelayable({ direction: "debit", kind: "client_transfer_in" })).toBe(false);
+    // the own-credit action stays the servicer's
+    expect(relayable({ direction: "credit", kind: "client_transfer_in", end_to_end_id: null })).toBe(false);
+  });
+  it("says what it does, and when not to use it, before it is sent", () => {
+    const effect = clientRelayedPaymentEffect({ amount: "120,00 €", dateFr: "06/11/2026" });
+    expect(effect).toContain("Le crédit de 120,00 € venant du compte de reversement d'un client deviendra un paiement reçu");
+    expect(effect).toContain("au 06/11/2026 (date de la ligne), payeur « Versement relayé par le client »");
+    expect(effect).toContain("« Paiements à traiter »");
+    expect(effect).toContain("indiquez quel débiteur a payé le client");
+    expect(effect).toContain("À ne pas utiliser pour le règlement d'une facture du cabinet par le client");
+    expect(effect).toContain("reçu directement par le client");
+    expect(RELAY_LABEL.client).toBe("Paiement d'un débiteur relayé par le client");
+    expect(RELAY_LABEL.servicer).toBe(LINK_KIND.relayed_payment);
+  });
+  it("names who relayed a decided line", () => {
+    expect(decisionLabel("relayed_payment", "client_transfer_in")).toBe("Paiement d'un débiteur relayé par le client");
+    expect(decisionLabel("relayed_payment", "own_transfer_in")).toBe("Paiement d'un débiteur relayé par le cabinet");
+    expect(decisionLabel("fee", "other_debit")).toBe(LINK_KIND.fee);
+    expect(decisionLabel("something_new", "x")).toBe("something_new");
+  });
+  it("tells ops a client's credit may be either an invoice paid or a relayed payment", () => {
+    expect(DEBIT_REVIEW.client_credit).toContain("paiement d'un débiteur que le client relaie");
   });
 });
 

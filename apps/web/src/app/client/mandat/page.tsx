@@ -5,7 +5,15 @@ import { ActionForm } from "@/components/action-form";
 import { Badge, InfoNote, Page, buttonClass, dangerButtonClass, inputClass } from "@/components/ui";
 import type { SessionClaims } from "@/lib/auth/access";
 import { frenchDate } from "@/lib/payments/bank-accounts";
-import { CONFIRMED_VIA, PAYOUT_STATUS, addressText, scheduleInWords, termsInWords, type Address } from "@/lib/remittance/terms";
+import {
+  CONFIRMED_VIA,
+  PAYOUT_STATUS,
+  addressText,
+  parisToday,
+  scheduleInWords,
+  termsInWords,
+  type Address,
+} from "@/lib/remittance/terms";
 import { createClient } from "@/lib/supabase/server";
 import { confirmOwnPayoutAccount, rejectOwnPayoutAccount } from "./actions";
 
@@ -19,18 +27,20 @@ type Payout = {
   proposed_at: string;
   confirmed_at: string | null;
   confirmed_via: string | null;
-  evidence_document_id: string;
+  /** the RIB: never linked while the account waits for the client's confirmation (review M2c-2, security #1) */
+  evidence_document_id: string | null;
 };
 
-function parisToday(): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(new Date());
-}
+/** The accounts the card lists: the one waiting for confirmation and the current one (retired and rejected ones not). */
+const SHOWN = new Set(["proposed", "active", "returned"]);
 
 /**
  * M2c-2 (design §17.7): the client's mandate and payout account. The money terms in force (R124-3 3°, 4°) in words,
  * the payout IBAN masked, and — for the client's administrator with access to the whole client, at aal2 — « Confirmer
- * le nouvel IBAN » proposed by the servicer (founder #10: the client confirms, typing the IBAN read on its RIB). Users
- * restricted to some portfolios read no client-level data (OQ-48 default).
+ * le nouvel IBAN » proposed by the servicer (founder #10: the client confirms, typing the IBAN from its own records —
+ * the RIB sent to the servicer is not shown while the proposal waits, review M2c-2). A court-appointed account (the
+ * liquidator's) is the servicer's to confirm, never the client's (L641-9 I; the database refuses it). Users restricted
+ * to some portfolios read no client-level data (OQ-48 default).
  */
 export default async function ClientMandatePage() {
   const supabase = await createClient();
@@ -63,7 +73,7 @@ export default async function ClientMandatePage() {
   }
   const org = member.organization_id;
   const isAdmin = member.role === "client_admin";
-  const [{ data: identityRow }, { data: mandates }, payoutRes] = await Promise.all([
+  const [{ data: identityRow }, { data: mandates }, payoutRes, { data: claimTypes }] = await Promise.all([
     supabase.from("billing_identity").select("registered_office, billing_address").eq("organization_id", org).maybeSingle(),
     supabase
       .from("mandate")
@@ -71,8 +81,11 @@ export default async function ClientMandatePage() {
       .eq("client_organization_id", org)
       .order("signed_on"),
     isAdmin ? supabase.rpc("payout_accounts", { p_client_organization_id: org }) : Promise.resolve({ data: [] }),
+    supabase.from("claim_type").select("code, label_fr"),
   ]);
-  const payouts = (payoutRes.data ?? []) as Payout[];
+  const payouts = ((payoutRes.data ?? []) as Payout[]).filter((p) => SHOWN.has(p.status));
+  // the claim types the schedule names, in words (review M2c-2, tests-ui #4)
+  const claimLabels = Object.fromEntries((claimTypes ?? []).map((c) => [c.code, c.label_fr]));
   const today = parisToday();
   const aal2 = claims.aal === "aal2";
 
@@ -88,75 +101,89 @@ export default async function ClientMandatePage() {
         <section className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800" data-testid="client-payout">
           <h2 className="font-medium">Compte de reversement</h2>
           {payouts.length === 0 ? (
-            <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucun IBAN de reversement enregistré par le cabinet.</p>
+            <p className="text-sm text-zinc-600 dark:text-zinc-400" data-testid="client-payout-none">
+              Aucun IBAN de reversement en cours. Le cabinet vous en proposera un, à confirmer ici.
+            </p>
           ) : (
-            payouts
-              .filter((p) => p.status === "proposed" || p.status === "active" || p.status === "returned")
-              .map((p) => (
-                <div key={p.id} className="flex flex-col gap-2" data-testid="client-payout-account">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-mono">{p.iban_masked}</span>
-                    <Badge tone={p.status === "active" ? "ok" : "action"}>{PAYOUT_STATUS[p.status] ?? p.status}</Badge>
-                  </div>
-                  <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                    Titulaire : {p.holder_name}
-                    {p.confirmed_at ? ` · confirmé ${CONFIRMED_VIA[p.confirmed_via ?? ""] ?? ""}` : ""} ·{" "}
-                    <a href={`/client/documents/${p.evidence_document_id}`} className="underline underline-offset-4">
-                      RIB transmis
-                    </a>
+            payouts.map((p) => (
+              <div key={p.id} className="flex flex-col gap-2" data-testid="client-payout-account">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-mono">{p.iban_masked}</span>
+                  <Badge tone={p.status === "active" ? "ok" : "action"}>{PAYOUT_STATUS[p.status] ?? p.status}</Badge>
+                </div>
+                <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                  Titulaire : {p.holder_name}
+                  {p.kind === "court_appointed" ? " · compte du mandataire de justice" : ""}
+                  {p.confirmed_at ? ` · confirmé ${CONFIRMED_VIA[p.confirmed_via ?? ""] ?? ""}` : ""}
+                  {p.status !== "proposed" && p.evidence_document_id ? (
+                    <>
+                      {" · "}
+                      <a href={`/client/documents/${p.evidence_document_id}`} className="underline underline-offset-4">
+                        RIB transmis
+                      </a>
+                    </>
+                  ) : null}
+                </p>
+                {p.kind === "court_appointed" ? (
+                  <p className="text-sm text-zinc-600 dark:text-zinc-400" data-testid="client-payout-court">
+                    Compte d&apos;un mandataire de justice : c&apos;est un second administrateur du cabinet qui le confirme, le
+                    refuse ou le retire, et non votre espace (règle du cabinet ; en liquidation judiciaire, les droits de la
+                    société sont exercés par le liquidateur, art. L641-9 C. com.).
                   </p>
-                  {p.status === "proposed" && p.kind === "client" ? (
-                    aal2 ? (
-                      <>
+                ) : null}
+                {p.status === "proposed" && p.kind === "client" ? (
+                  aal2 ? (
+                    <>
+                      <ActionForm
+                        action={confirmOwnPayoutAccount}
+                        submitLabel="Confirmer le nouvel IBAN"
+                        pendingLabel="Confirmation…"
+                        buttonClassName={buttonClass}
+                        className="flex flex-col gap-2"
+                        testId="client-confirm-payout"
+                      >
+                        <input type="hidden" name="payout_account_id" value={p.id} readOnly />
+                        <input type="hidden" name="idempotency_key" value={randomUUID()} readOnly />
+                        <p className="text-sm">
+                          Le cabinet propose de vous reverser vos encaissements sur ce compte. Saisissez en entier l&apos;IBAN de
+                          votre compte d&apos;après vos propres documents (votre banque, votre RIB) : il doit être identique à
+                          celui proposé. S&apos;il ne l&apos;est pas, refusez la proposition.
+                        </p>
+                        <label className="flex flex-col gap-1 text-sm">
+                          IBAN de votre compte
+                          <input name="iban_typed" required autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} />
+                        </label>
+                      </ActionForm>
+                      <details className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+                        <summary className="cursor-pointer text-sm font-medium">Ce n&apos;est pas notre compte</summary>
                         <ActionForm
-                          action={confirmOwnPayoutAccount}
-                          submitLabel="Confirmer le nouvel IBAN"
-                          pendingLabel="Confirmation…"
-                          buttonClassName={buttonClass}
-                          className="flex flex-col gap-2"
-                          testId="client-confirm-payout"
+                          action={rejectOwnPayoutAccount}
+                          submitLabel="Refuser cet IBAN"
+                          pendingLabel="Enregistrement…"
+                          buttonClassName={dangerButtonClass}
+                          className="mt-3 flex flex-col gap-2"
                         >
                           <input type="hidden" name="payout_account_id" value={p.id} readOnly />
                           <input type="hidden" name="idempotency_key" value={randomUUID()} readOnly />
-                          <p className="text-sm">
-                            Le cabinet propose de vous reverser vos encaissements sur ce compte. Saisissez l&apos;IBAN tel qu&apos;il
-                            figure sur votre RIB : il doit être identique.
-                          </p>
                           <label className="flex flex-col gap-1 text-sm">
-                            IBAN de votre RIB
-                            <input name="iban_typed" required autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} />
+                            Motif
+                            <input name="reason" required maxLength={2000} className={inputClass} />
                           </label>
                         </ActionForm>
-                        <details className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
-                          <summary className="cursor-pointer text-sm font-medium">Ce n&apos;est pas notre compte</summary>
-                          <ActionForm
-                            action={rejectOwnPayoutAccount}
-                            submitLabel="Refuser cet IBAN"
-                            pendingLabel="Enregistrement…"
-                            buttonClassName={dangerButtonClass}
-                            className="mt-3 flex flex-col gap-2"
-                          >
-                            <input type="hidden" name="payout_account_id" value={p.id} readOnly />
-                            <input type="hidden" name="idempotency_key" value={randomUUID()} readOnly />
-                            <label className="flex flex-col gap-1 text-sm">
-                              Motif
-                              <input name="reason" required maxLength={2000} className={inputClass} />
-                            </label>
-                          </ActionForm>
-                        </details>
-                      </>
-                    ) : (
-                      <InfoNote>
-                        Un nouvel IBAN attend votre confirmation. Pour le confirmer,{" "}
-                        <Link href="/mfa?next=/client/mandat" className="underline underline-offset-4" data-testid="client-mfa-link">
-                          activez la double authentification
-                        </Link>
-                        .
-                      </InfoNote>
-                    )
-                  ) : null}
-                </div>
-              ))
+                      </details>
+                    </>
+                  ) : (
+                    <InfoNote>
+                      Un nouvel IBAN attend votre confirmation. Pour le confirmer,{" "}
+                      <Link href="/mfa?next=/client/mandat" className="underline underline-offset-4" data-testid="client-mfa-link">
+                        activez la double authentification
+                      </Link>
+                      .
+                    </InfoNote>
+                  )
+                ) : null}
+              </div>
+            ))
           )}
         </section>
       ) : null}
@@ -182,7 +209,7 @@ export default async function ClientMandatePage() {
                       reversements : {current.remittance_clause_ref ?? "—"}
                     </p>
                     <ul className="list-disc pl-5">
-                      {scheduleInWords(current.commission_schedule).map((l) => (
+                      {scheduleInWords(current.commission_schedule, claimLabels).map((l) => (
                         <li key={l}>{l}</li>
                       ))}
                       {termsInWords(current.remittance_terms, current.remittance_max_days).map((l) => (

@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { Badge, ErrorNote, InfoNote, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { isProcessing, statusLabel, statusTone } from "@/lib/boarding/status";
-import { READINESS_LABEL } from "@/lib/remittance/terms";
+import { readinessText } from "@/lib/remittance/terms";
 import { AutoRefresh } from "@/components/auto-refresh";
 import {
   AbandonSection,
@@ -138,7 +138,7 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
           {b.failed_job.error === "not_ready" ? (
             <>
               La confirmation n&apos;a pas été faite : le portefeuille n&apos;était plus prêt quand elle a été traitée (
-              {(b.failed_job.blockers ?? []).map((r) => READINESS_LABEL[r] ?? r).join(" ; ")}). Aucun solde n&apos;a été
+              {(b.failed_job.blockers ?? []).map(readinessText).join(" ; ")}). Aucun solde n&apos;a été
               comptabilisé. Complétez ces éléments, puis confirmez à nouveau.
             </>
           ) : b.failed_job.error === "mandate_inactive" ? (

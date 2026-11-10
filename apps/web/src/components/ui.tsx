@@ -38,9 +38,9 @@ export function WidePage({
   );
 }
 
-export function Section({ title, children, testId }: { title: string; children: ReactNode; testId?: string }) {
+export function Section({ title, children, testId, id }: { title: string; children: ReactNode; testId?: string; id?: string }) {
   return (
-    <section className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800" data-testid={testId}>
+    <section id={id} className="scroll-mt-4 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800" data-testid={testId}>
       <h2 className="mb-3 font-medium">{title}</h2>
       {children}
     </section>

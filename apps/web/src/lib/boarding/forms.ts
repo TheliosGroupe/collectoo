@@ -151,7 +151,9 @@ export type ErrorCode =
   | "event_future"
   | "evidence_required"
   | "court_account_only"
+  | "payout_court_appointed"
   | "terms_past"
+  | "terms_too_early"
   | "terms_start_taken"
   | "schedule_json"
   | "schedule_invalid"
@@ -260,7 +262,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Seul un débit classé « Frais ou autre débit » se comptabilise en frais bancaires : un virement émis par le cabinet n'en est pas un.",
   not_an_own_credit: "Seul un crédit reçu du compte propre du cabinet se comptabilise en approvisionnement.",
   not_own_credit:
-    "Seul un crédit reçu du compte propre du cabinet, ni comptabilisé ni classé, peut devenir le paiement d'un débiteur : rechargez la page.",
+    "Seul un crédit reçu du compte propre du cabinet ou d'un compte de reversement d'un client, ni comptabilisé ni classé, peut devenir le paiement d'un débiteur : rechargez la page.",
   own_account_unknown:
     "Ce crédit ne vient d'aucun compte propre enregistré : enregistrez le compte propre, ou classez la ligne avec une explication.",
   top_up_differs:
@@ -295,7 +297,11 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   event_future: "La date de l'événement ne peut pas être dans le futur.",
   evidence_required: "Le justificatif (document « Justificatif » de ce client) est obligatoire.",
   court_account_only: "Seul le compte d'un mandataire de justice (liquidateur) peut être indiqué ici.",
-  terms_past: "Une nouvelle version commence au plus tôt aujourd'hui : les conditions ne sont jamais rétroactives.",
+  payout_court_appointed:
+    "Un mandataire de justice est enregistré pour ce client (liquidation judiciaire, ou compte d'un mandataire désigné) : ses comptes de reversement sont confirmés, refusés ou retirés par un second administrateur du cabinet, et non depuis l'espace du client (règle du cabinet ; en liquidation, les droits du client sont exercés par le liquidateur, art. L641-9 C. com.).",
+  terms_past: "Une nouvelle version commence au plus tôt demain : les conditions ne sont jamais rétroactives.",
+  terms_too_early:
+    "Une nouvelle version commence au plus tôt demain (heure de Paris) : les encaissements d'aujourd'hui restent aux conditions en vigueur.",
   terms_start_taken: "Une version en vigueur commence déjà ce jour-là : choisissez une date à venir.",
   schedule_json: "Le barème n'est pas un JSON lisible : vérifiez les guillemets, virgules et accolades.",
   schedule_invalid:
@@ -306,7 +312,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   terms_document_required: "Le mandat signé (document « Mandat » de ce client) est obligatoire.",
   claim_type_unknown: "Le barème nomme un type de créance inconnu.",
   portfolio_other_mandate: "Le barème nomme un portefeuille d'un autre mandat.",
-  max_days_invalid: "Le délai de reversement est de 1 à 30 jours (art. R124-6 CPCE).",
+  max_days_invalid:
+    "Le délai de reversement est de 1 à 30 jours : jamais plus d'un mois, engagement du cabinet (l'art. R124-6 CPCE prévoit un mois, sauf convention contraire).",
   clause_required: "La référence de la clause est obligatoire (200 caractères au plus).",
   not_ready:
     "Le portefeuille n'est pas prêt pour la confirmation : complétez d'abord les éléments listés (identités, conditions du mandat).",

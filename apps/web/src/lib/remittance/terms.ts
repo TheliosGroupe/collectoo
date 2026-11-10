@@ -1,4 +1,5 @@
 import type { ErrorCode } from "@/lib/boarding/forms";
+import { frenchDate } from "@/lib/payments/bank-accounts";
 import { money } from "@/lib/payments/statements";
 
 /**
@@ -38,7 +39,42 @@ export const READINESS_LABEL: Readonly<Record<string, string>> = {
   client_not_professional: "Le client n'est pas un professionnel : seuls les professionnels sont servis",
   client_not_mainland_france: "Le client n'est pas établi en France métropolitaine",
   currency_not_eur: "Le lot contient des dossiers hors euro : seul l'euro est servi",
+  // review M2c-2: events recorded for the client (« Événements du client »), each with its effective date
+  // a mandate end or a guardianship (C. civ. 2003: the mandate ends by revocation, renunciation, « la tutelle des
+  // majeurs »), a death (2003), a liquidation (our rule, not the law: OQ-41)
+  client_mandate_ended: "Mandat terminé : fin du mandat ou tutelle enregistrée pour ce client (art. 2003 C. civ.)",
+  client_deceased: "Décès du client enregistré : le mandat prend fin (art. 2003 C. civ.)",
+  client_in_liquidation:
+    "Client en liquidation judiciaire : pas de nouveau portefeuille pour ce client (règle du cabinet ; ses droits sont exercés par le liquidateur, art. L641-9 C. com.)",
 };
+
+/** The same three reasons, with the event's effective date (« le 05/11/2026 »). */
+const DATED_READINESS: Readonly<Record<string, (on: string) => string>> = {
+  client_mandate_ended: (on) =>
+    `Mandat terminé le ${on} : fin du mandat ou tutelle enregistrée pour ce client (art. 2003 C. civ.)`,
+  client_deceased: (on) => `Décès du client le ${on} : le mandat prend fin (art. 2003 C. civ.)`,
+  client_in_liquidation: (on) =>
+    `Client en liquidation judiciaire depuis le ${on} : pas de nouveau portefeuille pour ce client (règle du cabinet ; ses droits sont exercés par le liquidateur, art. L641-9 C. com.)`,
+};
+
+/** The reasons that come from an event recorded for the client (« Événements du client »). */
+export const EVENT_BLOCKERS: readonly string[] = Object.keys(DATED_READINESS);
+
+/**
+ * A reason of the confirmation gate as the database returns it — a code, or a code with the date of the event it comes
+ * from (« client_in_liquidation:2026-11-05 »; any separator) — split into its code and its date.
+ */
+export function readinessReason(blocker: string): { code: string; on: string | null } {
+  const m = /^([a-z_]+)(?:\W+(\d{4}-\d{2}-\d{2}))?/.exec(blocker);
+  return m ? { code: m[1], on: m[2] ?? null } : { code: blocker, on: null };
+}
+
+/** A reason of the confirmation gate in French, with its event's date when it has one. */
+export function readinessText(blocker: string): string {
+  const { code, on } = readinessReason(blocker);
+  if (on && DATED_READINESS[code]) return DATED_READINESS[code](frenchDate(on));
+  return READINESS_LABEL[code] ?? blocker;
+}
 
 /** What an identity still lacks (private.billing_identity_gaps). */
 export const GAP_LABEL: Readonly<Record<string, string>> = {
@@ -202,7 +238,8 @@ export function termsInWords(terms: unknown, maxDays: number): string[] {
     t.frequency === "weekly"
       ? `Reversements chaque semaine, le ${WEEKDAY[Number(t.weekday)] ?? "?"} (ou le jour ouvré suivant)`
       : "Reversements deux fois par mois, le 1er et le 16 (ou le jour ouvré suivant)",
-    `Délai : au plus ${maxDays} jour${maxDays > 1 ? "s" : ""} après l'encaissement, et jamais plus d'un mois (art. R124-6 CPCE)`,
+    // review M2c-2 (legal #6): R124-6 sets one month « sauf convention contraire »; never more is our commitment (founder #2)
+    `Délai : au plus ${maxDays} jour${maxDays > 1 ? "s" : ""} après l'encaissement, jamais plus d'un mois (engagement du cabinet ; l'art. R124-6 CPCE prévoit un mois, sauf convention contraire)`,
     netting
       ? `Commission compensée sur chaque reversement (${netting})`
       : `Pas de compensation : reversement brut, facture payable sous ${days ?? "?"} jours sur le compte propre du cabinet`,
@@ -234,9 +271,13 @@ export function addressFromForm(formData: FormData, prefix: string): Address | n
   return address.line1 || address.postcode || address.city ? address : null;
 }
 
+/**
+ * A billing identity as the pages read it. The capital is integer minor units (bigint): it is selected as text
+ * (`share_capital_minor:share_capital_minor::text`, BILLING_IDENTITY_COLUMNS) and never passes through a JS number.
+ */
 export type BillingIdentity = {
   legal_form: string | null;
-  share_capital_minor: number | string | null;
+  share_capital_minor: string | null;
   rcs_city: string | null;
   registered_office: Address;
   billing_address: Address | null;
@@ -246,6 +287,38 @@ export type BillingIdentity = {
   invoice_acceptance_ref: string | null;
   version: number;
 };
+
+/** The columns of `billing_identity` the pages read, the capital as text (review M2c-2, tests-ui #6). */
+export const BILLING_IDENTITY_COLUMNS =
+  "legal_form, share_capital_minor:share_capital_minor::text, rcs_city, registered_office, billing_address, vat_number," +
+  " is_professional, in_liquidation, invoice_acceptance_ref, version";
+
+/** A capital in minor units (a string) as the form shows it: « 10000 », « 10000,50 » (no float). */
+export function capitalFieldValue(minor: string | null | undefined): string {
+  if (minor === null || minor === undefined || !/^\d+$/.test(minor)) return "";
+  const v = BigInt(minor);
+  const cents = v % BigInt(100);
+  return (v / BigInt(100)).toString() + (cents === BigInt(0) ? "" : `,${cents.toString().padStart(2, "0")}`);
+}
+
+/** A day (YYYY-MM-DD) plus some days, on the calendar (no time zone involved). */
+export function addDays(isoDate: string, days: number): string {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+/** Today in Europe/Paris (the business calendar), as YYYY-MM-DD. */
+export function parisToday(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(now);
+}
+
+/**
+ * The first day a new version of the money terms may start (review M2c-2): tomorrow in Paris at the earliest, never
+ * today — a version applies by the day of the encaissement, so today's collections stay under the version in force.
+ */
+export function earliestTermsStart(now: Date = new Date()): string {
+  return addDays(parisToday(now), 1);
+}
 
 const FORM_MENTION: Readonly<Record<string, string>> = {
   SA_DIRECTOIRE: "société anonyme à directoire et conseil de surveillance",
@@ -308,6 +381,8 @@ export function identityErrorCode(message: string): ErrorCode {
     ["cannot be in the future", "event_future"],
     ["the evidence is required", "evidence_required"],
     ["only a court-appointed", "court_account_only"],
+    ["payout account refused: court_appointed", "payout_court_appointed"],
+    ["mandate terms refused: starts_too_early", "terms_too_early"],
     ["never starts before today", "terms_past"],
     ["already starts that day", "terms_start_taken"],
     ["invalid commission schedule", "schedule_invalid"],

@@ -6,7 +6,7 @@ import { columnIssuesLabel, readProfile, typeLabel, type FileProfile } from "@/l
 import { issueLabel, statusLabel } from "@/lib/boarding/status";
 import { targetGroups, targetLabel } from "@/lib/boarding/targets";
 import { formatMoneyFr } from "@/lib/money";
-import { READINESS_LABEL } from "@/lib/remittance/terms";
+import { readinessText } from "@/lib/remittance/terms";
 import { abandonBatch, approveMapping, commitBatch, confirmBatch, rollbackBatch } from "./actions";
 
 // --- Types of the JSON written by the worker (worker/src/collectoo_worker/boarding) ---------------
@@ -668,15 +668,19 @@ export function IntegrationSection({
         )}
         {openingPlan && readiness.length > 0 ? (
           <div className="mt-4 flex flex-col gap-2" data-testid="batch-readiness">
-            <p className="text-sm font-medium">Avant de confirmer, complétez :</p>
+            <p className="text-sm font-medium">Le lot ne peut pas encore être confirmé :</p>
             <ul className="list-disc pl-5 text-sm">
               {readiness.map((r) => (
-                <li key={r}>{READINESS_LABEL[r] ?? r}</li>
+                <li key={r}>{readinessText(r)}</li>
               ))}
             </ul>
             {clientId ? (
-              <Link href={`/backoffice/clients/${clientId}/reversement`} className="text-sm underline underline-offset-4">
-                Identité et conditions du client
+              <Link
+                href={`/backoffice/clients/${clientId}/reversement`}
+                className="text-sm underline underline-offset-4"
+                data-testid="batch-readiness-client"
+              >
+                Identité, conditions et événements du client
               </Link>
             ) : null}
           </div>

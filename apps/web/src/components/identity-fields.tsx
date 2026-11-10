@@ -1,5 +1,5 @@
 import { inputClass } from "@/components/ui";
-import { type Address, type BillingIdentity, LEGAL_FORMS } from "@/lib/remittance/terms";
+import { type Address, type BillingIdentity, LEGAL_FORMS, capitalFieldValue } from "@/lib/remittance/terms";
 
 function AddressFields({ prefix, legend, value, required }: { prefix: string; legend: string; value: Address | null; required: boolean }) {
   return (
@@ -48,6 +48,9 @@ function AddressFields({ prefix, legend, value, required }: { prefix: string; le
  * M2c-2: the fields of a billing identity (design §6.1; what invoices, statements and receipts print: C. com. R123-237,
  * R123-238, CGI ann. II 242 nonies A 1°–2°). The servicer prints every mention, so its form asks for all of them; a
  * client's asks what invoicing it needs (SIREN, registered office, billing address, professional, PDF acceptance).
+ * Review M2c-2: « professionnel » is an explicit choice for a new client (never pre-ticked: it is what the founder #13
+ * gate tests); « en liquidation » is the servicer's mention only (R123-237 4° on its own documents) — a client's
+ * liquidation is an event, recorded with its evidence in « Événements du client ».
  */
 export function IdentityFields({
   kind,
@@ -60,13 +63,8 @@ export function IdentityFields({
   siren: string | null;
   identity: BillingIdentity | null;
 }) {
-  const capital =
-    identity?.share_capital_minor !== null && identity?.share_capital_minor !== undefined
-      ? (BigInt(identity.share_capital_minor) / BigInt(100)).toString() +
-        (BigInt(identity.share_capital_minor) % BigInt(100) === BigInt(0)
-          ? ""
-          : `,${(BigInt(identity.share_capital_minor) % BigInt(100)).toString().padStart(2, "0")}`)
-      : "";
+  // integer minor units read as text (BILLING_IDENTITY_COLUMNS), shown in euros without a float
+  const capital = capitalFieldValue(identity?.share_capital_minor);
   return (
     <>
       <input type="hidden" name="expected_version" value={identity?.version ?? ""} readOnly />
@@ -131,10 +129,33 @@ export function IdentityFields({
             value={identity?.billing_address ?? null}
             required={false}
           />
-          <label className="flex items-start gap-2 text-sm">
-            <input type="checkbox" name="is_professional" defaultChecked={identity?.is_professional ?? true} className="mt-1" />
-            <span>Client professionnel (seuls les professionnels établis en France métropolitaine sont servis)</span>
-          </label>
+          <fieldset className="flex flex-col gap-2 rounded-md border border-zinc-200 p-3 dark:border-zinc-800" data-testid="professional">
+            <legend className="px-1 text-sm font-medium">
+              Client professionnel ? (seuls les professionnels établis en France métropolitaine sont servis)
+            </legend>
+            <div className="flex flex-wrap gap-4 text-sm">
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="is_professional"
+                  value="on"
+                  required
+                  defaultChecked={identity ? identity.is_professional : undefined}
+                />
+                Oui, un professionnel
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="is_professional"
+                  value="off"
+                  required
+                  defaultChecked={identity ? !identity.is_professional : undefined}
+                />
+                Non
+              </label>
+            </div>
+          </fieldset>
           <label className="flex flex-col gap-1 text-sm">
             Acceptation des factures PDF (clause ou accord écrit ; vide : envoi postal)
             <input
@@ -145,14 +166,27 @@ export function IdentityFields({
               className={inputClass}
             />
           </label>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400" data-testid="client-liquidation-note">
+            Une procédure collective, une liquidation judiciaire, un décès ou la fin du mandat s&apos;enregistrent avec leur
+            justificatif dans{" "}
+            <a href="#evenements" className="underline underline-offset-4">
+              « Événements du client »
+            </a>
+            .
+          </p>
         </>
       ) : (
-        <input type="hidden" name="is_professional" value="on" readOnly />
+        <>
+          <input type="hidden" name="is_professional" value="on" readOnly />
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" name="in_liquidation" defaultChecked={identity?.in_liquidation ?? false} className="mt-1" />
+            <span>
+              Le cabinet est en liquidation : ses quittances, relevés et factures portent la mention « en liquidation »
+              (obligatoire, art. R123-237 4° C. com.)
+            </span>
+          </label>
+        </>
       )}
-      <label className="flex items-start gap-2 text-sm">
-        <input type="checkbox" name="in_liquidation" defaultChecked={identity?.in_liquidation ?? false} className="mt-1" />
-        <span>En liquidation (mention obligatoire, art. R123-237 4° C. com.)</span>
-      </label>
     </>
   );
 }
