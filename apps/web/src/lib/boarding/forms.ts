@@ -173,6 +173,7 @@ export type ErrorCode =
   | "run_not_cancellable"
   | "run_already_sent"
   | "run_none_selected"
+  | "run_busy"
   | "execution_date_invalid"
   | "unknown";
 
@@ -336,6 +337,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   run_already_sent:
     "Le fichier de virements a déjà été transmis à la banque : l'annulation suit la procédure d'attestation (à venir).",
   run_none_selected: "Cochez au moins un reversement à valider.",
+  run_busy:
+    "Un traitement est en cours sur ce reversement ou pour ce cabinet (préparation, validation ou imputation) : réessayez dans un instant.",
   execution_date_invalid: "La date d'exécution demandée doit être un jour ouvré, à partir d'aujourd'hui.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };

@@ -434,6 +434,9 @@ bank_line_booking(bank_transaction_id, seq, kind payout|sweep|top_up|payout_retu
 
 remittance_deadline_breach(id, organization_id, client_organization_id, ledger_entry_id, payment_id, deadline,
   latest_execution_date, paid_on null, blocked_reason null, detected_at)       -- append-only
+remittance_late_approval(run_id, ledger_entry_id, latest_execution_date, requested_execution_date, late_reason,
+  approved_by, created_at, unique (run_id, ledger_entry_id))  -- append-only; M2c-4 review: every line approved after
+                                                              -- its latest execution date (the settlement date when N = 0)
 
 alter table refund_request add execution_mode text not null default 'manual' check (execution_mode in ('manual','file')),
   add transfer_id uuid unique null;                         -- in a file: no manual execution; booked by the M2b RFD link only
@@ -451,6 +454,7 @@ Amounts in every jsonb payload are text (M1e rule).
 |---|---|
 | `remittance_run`, `remittance_line`, `commission_invoice` (+ lines, credit allocations), `commission_settlement`, `client_advance`, statement and invoice documents | money staff; client members with whole-client access, for runs at status ≥ approved (OQ-48) |
 | `bank_transfer`, `transfer_file`, `bank_line_booking`, bucket `transfer-files`, `remittance_deadline_breach`, `client_status_event`, `servicer_billing_settings`, private tables | money staff |
+| `remittance_late_approval` (M2c-4 review) | money staff; the client's members read their own rows |
 | `client_payout_account` | money staff; client admins of that client (IBAN masked in the UI) |
 | `billing_identity` | staff; client members read their own and their servicer's |
 | `mandate_terms` (new columns), `vat_rate`, `business_calendar` | as today / authenticated |
@@ -786,7 +790,7 @@ The command checks and enqueues. The job approves **each run in its own transact
    - status `draft`, and the same `inputs_hash` and net as the page showed;
    - no payout blocker;
    - **cap:** gross ≤ −4670[c] − Σ in-flight (N + D) of c, read from the running balance. Otherwise the run goes back to draft with `balance_changed` (ledger critique #1).
-   - **Requested execution date:** at least today, or today only before the paying account's cut-off (L133-9 « jour convenu »). It must not be later than the earliest `latest_exec` of the positive lines; a later date is allowed only with a recorded `late_reason` and writes a breach. Paying late beats not paying.
+   - **Requested execution date:** at least today, or today only before the paying account's cut-off (L133-9 « jour convenu »). It must not be later than the earliest `latest_exec` of the positive lines; a later date is allowed only with a recorded `late_reason` and writes a breach. Paying late beats not paying. *M2c-4 review:* when nothing is transferred (N = 0, settled at approval) the same holds for the approval day; every late line is recorded in `remittance_late_approval` with the reason; the command locks each run `FOR UPDATE NOWAIT` and refuses a locked one alone (`busy`); the job also refuses a draft prepared under another VAT option (`vat_option_changed`) or another proceeding date (`client_status_changed`).
 3. The draft lines are inserted into `remittance_line`, and their pending rows are deleted (PK: exactly once).
 4. **Invoices and credit notes per mandate:**
    - counter row `FOR UPDATE`;
@@ -829,6 +833,7 @@ N = Σ net_m ;  D = Σ D_m ;  N + D = gross
   Effects:
   - the transfer is cancelled and the file superseded;
   - one full credit note per invoice of the run;
+  - *M2c-4 review:* one corrective invoice per mandate re-charging, per (file, tier key), what the run's credit notes credited on earlier invoices, at each credited invoice's own VAT rate (« Annulation du reversement RV-… — rétablissement de l'avoir FC-… »), so the tier history is exactly as before the run and the next run credits each reversal once;
   - the lines are released and the items go back to pending;
   - status `cancelled`.
 
@@ -851,7 +856,7 @@ stateDiagram-v2
   draft --> approved : job: lines frozen, invoices numbered, transfer ordered
   draft --> booked : job: N = 0 (settlement posted at approval)
   approved --> sent : file downloaded or « Marquer comme transmis »
-  approved --> cancelled : before download (credit notes, lines released)
+  approved --> cancelled : before download (credit notes, corrective invoice, lines released)
   sent --> cancelled : attestation + statement without the debit
   sent --> booked : payout debit booked (+ settlement, + cover if needed)
   approved --> booked : payout debit booked (file uploaded without the stamp)
@@ -1032,6 +1037,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 
 - Amounts are integer minor units as text in the payload and French in the PDF.
 - The payload holds the structured seller, buyer, lines, totals and settlement, ready for a later Factur-X / UBL mapping and for 290 A.
+- *M2c-4 review (for M2c-5):* the mentions above that settings can change are frozen in the payload at issue, before hashing — `penalty_text`, `flat_indemnity` (whether the 40 € applies, `amount_minor` 4000 for a professional buyer), `due_date`, `payment_reference` (the run's number and requested execution date, or the approval date when N = 0) and, for an invoice with an amount due, the own account {`iban`, `bic`, `holder`} read in the issuing transaction. M2c-5 renders from them, never from the current settings.
 - The PDF is stored with its SHA-256, kept 10 years, and checked before serving.
 - **Delivery:** the client space, when `invoice_acceptance_ref` is recorded (289 VI). Otherwise the invoice is flagged « envoi postal » for ops.
 - **Accounting export** (money staff, CSV):
@@ -1054,6 +1060,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 - `settlement_ledger` (I18);
 - `transfer_booked_once` (I20);
 - `remittance_deadline_breached` (I21; breach rows);
+- `remittance_payout_overdue` (M2c-4 review: a live line of an approved or sent run not booked, past its latest execution date; breach row);
 - `remitted_reversal_uncovered`.
 
 **Alerts:**
@@ -1075,7 +1082,8 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 - `payee_changed` (information, 30 days);
 - `document_missing` (> 1 hour);
 - `vat_pack_review` (from 2026-12-01);
-- `calendar_horizon` (< 12 months seeded).
+- `calendar_horizon` (< 12 months seeded);
+- M2c-4 review: `remittance_payout_not_executed` (an approved or sent run not booked past its requested execution date), `remittance_deadline_not_computable` (an encaissement date outside the seeded calendar), `remittance_schedule_failed` (the hourly schedule job failed for good); an unmeetable delay's one-month dates raise `remittance_due_soon`, `remittance_due_critical` and `remittance_deadline_breached`.
 
 ---
 

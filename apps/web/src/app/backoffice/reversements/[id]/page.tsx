@@ -10,9 +10,11 @@ import {
   TRIGGER_LABEL,
   blockerLabel,
   deadlineChip,
-  failureLabel,
+  failureNote,
   frenchDate,
   percentText,
+  refundNote,
+  runBusy,
   runStatus,
 } from "@/lib/remittance/runs";
 import { cancelRun, discardRun, refreshRun } from "../actions";
@@ -75,6 +77,7 @@ type Detail = {
   } | null;
   service_from: string | null;
   service_to: string | null;
+  today: string;
   next_business_day: string;
   can_approve: boolean;
   can_cancel: boolean;
@@ -140,8 +143,10 @@ export default async function RemittanceRunPage({
   const r = d.run;
   const status = runStatus(r);
   const chip = deadlineChip(r.earliest_latest_execution_date, r.deadline_state);
-  const busy = r.job !== null || (r.status === "draft" && r.prepared_at === null);
+  // a job in flight refreshes the page; a failed preparation does not (it waits for « Actualiser »)
+  const busy = runBusy(r);
   const draft = r.status === "draft";
+  const refund = refundNote(r);
   return (
     <WidePage title={`${r.client_name} · ${r.number}`} back={{ href: "/backoffice/reversements", label: "Reversements" }}>
       <AutoRefresh active={busy} abandonable={false} everyMs={2000} maxMs={120_000} />
@@ -152,7 +157,7 @@ export default async function RemittanceRunPage({
         {chip ? <Badge tone={chip.tone}>{chip.label}</Badge> : null}
         <Badge tone="neutral">{TRIGGER_LABEL[r.trigger] ?? r.trigger}</Badge>
       </div>
-      {r.last_failure ? <InfoNote>Renvoyé en brouillon : {failureLabel(r.last_failure.code)}.</InfoNote> : null}
+      {r.last_failure ? <InfoNote>{failureNote(r.last_failure)}.</InfoNote> : null}
       {r.blockers.map((b) => (
         <InfoNote key={b}>Virement bloqué : {blockerLabel(b)}.</InfoNote>
       ))}
@@ -172,12 +177,12 @@ export default async function RemittanceRunPage({
       />
       <p className="text-sm text-zinc-600 dark:text-zinc-400">
         Période : {d.service_from ? frenchDate(d.service_from) : "—"} → {d.service_to ? frenchDate(d.service_to) : "—"}
-        {r.refund_minor && r.refund_minor !== "0" ? ` · avoir remboursé ${money(r.refund_minor, r.currency)}` : ""}
+        {refund ? ` · ${refund}` : ""}
         {r.requested_execution_date ? ` · exécution demandée le ${frenchDate(r.requested_execution_date)}` : ""}
       </p>
 
       {draft && r.prepared_at && d.can_approve ? (
-        <ApprovePanel runs={[r]} nextBusinessDay={d.next_business_day} canApprove />
+        <ApprovePanel runs={[r]} today={d.today} nextBusinessDay={d.next_business_day} canApprove />
       ) : null}
       {draft && r.job === null && d.can_approve ? (
         <div className="flex flex-wrap gap-2">

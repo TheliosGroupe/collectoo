@@ -4,7 +4,7 @@ import { AutoRefresh } from "@/components/auto-refresh";
 import { Badge, InfoNote, Section, WidePage, inlineButtonClass } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { money } from "@/lib/payments/statements";
-import { RUN_TABS, type RunCard, deadlineChip, frenchDate, runStatus, runTab } from "@/lib/remittance/runs";
+import { RUN_TABS, type RunCard, deadlineChip, frenchDate, runBusy, runStatus, runTab } from "@/lib/remittance/runs";
 import { requestRun } from "./actions";
 import { ApprovePanel } from "./approve-panel";
 
@@ -46,7 +46,8 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
     );
   }
   const o = data as unknown as Overview;
-  const busy = o.runs.some((r) => r.job !== null || (r.status === "draft" && r.prepared_at === null));
+  // a job in flight refreshes the page; a failed preparation does not (it waits for « Actualiser »)
+  const busy = o.runs.some(runBusy);
   return (
     <WidePage title="Reversements" back={back}>
       <AutoRefresh active={busy} abandonable={false} everyMs={2000} maxMs={120_000} />
@@ -73,7 +74,7 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
             le débit de la banque. Délai : un mois au plus après l&apos;encaissement (art. R124-6 CPCE), plus court si le
             mandat le prévoit.
           </InfoNote>
-          <ApprovePanel runs={o.runs} nextBusinessDay={o.next_business_day} canApprove={o.can_approve} />
+          <ApprovePanel runs={o.runs} today={o.today} nextBusinessDay={o.next_business_day} canApprove={o.can_approve} />
           <Section title="Encaissements en attente sans reversement" testId="to-prepare">
             {o.to_prepare.length === 0 ? (
               <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucun encaissement n&apos;attend hors reversement.</p>

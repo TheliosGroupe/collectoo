@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { staffSession } from "@/lib/auth/staff";
 import type { ActionResult, ErrorCode } from "@/lib/boarding/forms";
 import type { Json } from "@/lib/database.types";
-import { approvalSummary, runErrorCode } from "@/lib/remittance/runs";
+import { type ApprovalOutcome, approvalSummary, runErrorCode } from "@/lib/remittance/runs";
 
 /**
  * M2c-4 « Reversements » commands. Authorization (admins and ops managers at aal2; cancellation: admins), compare and
@@ -101,12 +101,13 @@ export async function cancelRun(formData: FormData): Promise<ActionResult> {
   return done(error, run);
 }
 
-export type ApproveResult = { ok: true; summary: string } | { error: ErrorCode };
+export type ApproveResult = ({ ok: true } & ApprovalOutcome) | { error: ErrorCode };
 
 /**
  * « Valider » one or many drafts (≤ 200): each checked box carries the run, its inputs hash and its net as the page
  * showed them (`run`: "id|hash|net"); the execution date requested (default: the next business day) and, past a
- * latest execution date, the reason. The jobs then approve each run in its own transaction.
+ * latest execution date, the reason. The jobs then approve each run in its own transaction. The command refuses a run
+ * on its own (a run locked by a job: « busy ») and goes on with the others; the result counts the refused.
  */
 export async function approveRuns(formData: FormData): Promise<ApproveResult> {
   const key = field(formData, "idempotency_key");
@@ -138,5 +139,5 @@ export async function approveRuns(formData: FormData): Promise<ApproveResult> {
     status: string;
     reason: string | null;
   }[];
-  return { ok: true, summary: approvalSummary(results) };
+  return { ok: true, ...approvalSummary(results) };
 }

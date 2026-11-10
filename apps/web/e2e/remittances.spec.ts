@@ -15,7 +15,6 @@ import { reviewShot } from "./screenshot";
  * the dedicated account before the bank's debit, M2c-6). Phone-first. Synthetic data.
  */
 const BANK_IBAN = ibanFr(434343);
-const DAY = "2026-11-02";
 const FIXTURE = {
   name: "Créances à reverser.csv",
   mimeType: "text/csv",
@@ -23,6 +22,36 @@ const FIXTURE = {
 };
 
 let tenant: Tenant;
+
+/** Today in Europe/Paris (YYYY-MM-DD), the day `private.paris_today()` reads on the same machine. */
+function parisToday(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(new Date());
+}
+
+function addDays(isoDate: string, days: number): string {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+/**
+ * The statement's day (review M2c-4 tests-ui#0): the latest business day of `public.business_calendar` on or before
+ * yesterday (Paris), never a fixed date. The collections' latest execution date (one month on, R124-6) is then about
+ * four weeks ahead: the chip reads « Exécution au plus tard le », the default execution date (the next business day) is
+ * never late, and the deadline guard (5 business days before it) is never due.
+ */
+async function statementDay(): Promise<string> {
+  const { data, error } = await adminClient()
+    .from("business_calendar")
+    .select("day")
+    .eq("scope", "FR-conservative")
+    .eq("closed", false)
+    .lte("day", addDays(parisToday(), -1))
+    .order("day", { ascending: false })
+    .limit(1)
+    .single();
+  if (error) throw error;
+  return data.day as string;
+}
 
 test.beforeAll(async () => {
   tenant = await createTenant();
@@ -82,20 +111,28 @@ test("ops prepare, read and approve a client's remittance run", async ({ page },
   await form.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({
     name: "releve-reversement.xml",
     mimeType: "application/xml",
-    buffer: Buffer.from(camt053(BANK_IBAN, DAY, credits), "utf-8"),
+    buffer: Buffer.from(camt053(BANK_IBAN, await statementDay(), credits), "utf-8"),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
   await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
 
-  // « Reversements »: the client's collections wait; prepare its run now
+  // « Reversements »: the client's collections wait; prepare its run now. The hourly schedule (xx:07) may have
+  // prepared it first on a run day of the mandate (the 1st, the 16th): its draft is then the one read and approved.
   await page.goto("/backoffice");
   await page.getByTestId("remittances-link").click();
   await expect(page).toHaveURL(/\/backoffice\/reversements$/);
   const waiting = page.getByTestId("prepare-row").filter({ hasText: tenant.clientName });
-  await expect(waiting).toContainText("800,01", { timeout: 60_000 });
-  await waiting.getByRole("button", { name: "Préparer maintenant" }).click();
   const card = page.getByTestId("run-card").filter({ hasText: tenant.clientName });
-  await expect(card.getByText("Brouillon")).toBeVisible({ timeout: 60_000 });
+  await expect(waiting.or(card)).toBeVisible({ timeout: 60_000 });
+  if (await waiting.isVisible()) {
+    await expect(waiting).toContainText("800,01");
+    await waiting.getByRole("button", { name: "Préparer maintenant" }).click();
+    // a click that lost the race to the schedule is refused (one run at a time) and the list stays: reload it
+    await card.waitFor({ timeout: 15_000 }).catch(() => page.reload());
+  }
+  // the draft, prepared by the click or by the schedule (the page refreshes itself while it is prepared)
+  await expect(card.getByText("Brouillon", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(card).toContainText("brut 800,01");
   await expect(card.getByTestId("run-net")).toContainText("656,01");
   await expect(card).toContainText("commission 144,00 € TTC");
   await expect(card).toContainText("Exécution au plus tard le");
@@ -117,6 +154,9 @@ test("ops prepare, read and approve a client's remittance run", async ({ page },
   await expect(sheet.getByTestId("approve-effects")).toContainText("1 virement depuis le compte dédié");
   await expect(sheet.getByTestId("approve-effects")).toContainText("1 facture sera numérotée");
   await reviewShot(page, testInfo, "m2c-reversement-validation");
+  // never shown with a statement of yesterday; filled if a calendar ever makes the default date late
+  const lateReason = sheet.getByLabel(/Motif du retard/);
+  if (await lateReason.isVisible()) await lateReason.fill("Encaissement identifié tardivement (E2E)");
   await sheet.getByTestId("approve-confirm").click();
   await expect(page.getByTestId("run-status")).toHaveText("Validé — virement ordonné", { timeout: 60_000 });
   await expect(page.getByTestId("run-documents")).toContainText(/Facture FC-\d{4}-000001/);
