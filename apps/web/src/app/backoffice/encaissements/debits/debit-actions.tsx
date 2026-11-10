@@ -3,7 +3,7 @@
 import { ActionForm } from "@/components/action-form";
 import { buttonClass, dangerButtonClass, inputClass } from "@/components/ui";
 import { ConfirmSheet, secondaryClass } from "../a-traiter/queue-actions";
-import { linkDebit, resolveDuplicate } from "./actions";
+import { linkDebit, releaseOwnCredit, resolveDuplicate } from "./actions";
 
 function Reason({ label = "Motif (interne)" }: { label?: string }) {
   return (
@@ -95,15 +95,110 @@ export function LinkRefund({
   );
 }
 
-/** « Classer sans comptabiliser » (founder #20: fees and the like are not booked in M2b): the motif is kept. */
+/** M2c-1 « Frais bancaires » (a debit, the servicer's cost) or « Approvisionnement » (a credit from the own account). */
+export function BookLine({
+  lineId,
+  kind,
+  label,
+  effect,
+  idempotencyKey,
+}: {
+  lineId: string;
+  kind: "fee" | "own_credit";
+  label: string;
+  effect: string;
+  idempotencyKey: string;
+}) {
+  return (
+    <ConfirmSheet label={label} title={label} buttonClassName={buttonClass} testId={kind === "fee" ? "book-fee" : "book-top-up"}>
+      {(close) => (
+        <>
+          <p className="text-sm" data-testid="sheet-effect">
+            {effect}
+          </p>
+          <ActionForm onDone={close} action={linkDebit} submitLabel="Comptabiliser" buttonClassName={buttonClass}>
+            <input type="hidden" name="bank_transaction_id" value={lineId} />
+            <input type="hidden" name="kind" value={kind} />
+            <input type="hidden" name="idempotency_key" value={idempotencyKey} />
+            <Reason />
+          </ActionForm>
+        </>
+      )}
+    </ConfirmSheet>
+  );
+}
+
+/**
+ * M2c-1 review: « Paiement d'un débiteur relayé par le cabinet » — a credit from the own account that relays a debtor's
+ * payment the servicer received on its own account. It becomes a payment on no file (« Paiements à traiter »); the
+ * motif (who paid the servicer, when) is required and kept.
+ */
+export function ReleaseOwnCredit({ lineId, effect, idempotencyKey }: { lineId: string; effect: string; idempotencyKey: string }) {
+  const label = "Paiement d'un débiteur relayé par le cabinet";
+  return (
+    <ConfirmSheet label={label} title={label} buttonClassName={secondaryClass} testId="release-own-credit">
+      {(close) => (
+        <>
+          <p className="text-sm" data-testid="sheet-effect">
+            {effect}
+          </p>
+          <ActionForm onDone={close} action={releaseOwnCredit} submitLabel="Créer le paiement" buttonClassName={buttonClass}>
+            <input type="hidden" name="bank_transaction_id" value={lineId} />
+            <input type="hidden" name="idempotency_key" value={idempotencyKey} />
+            <Reason />
+          </ActionForm>
+        </>
+      )}
+    </ConfirmSheet>
+  );
+}
+
+/** M2c-1 (OQ-34): a return larger than what is left of the payment it names — its return, and the servicer's loss. */
+export function LinkLoss({
+  lineId,
+  paymentId,
+  leftMinor,
+  label,
+  effect,
+  idempotencyKey,
+}: {
+  lineId: string;
+  paymentId: string;
+  leftMinor: string;
+  label: string;
+  effect: string;
+  idempotencyKey: string;
+}) {
+  return (
+    <ConfirmSheet label={label} title="Retour au-delà du paiement" buttonClassName={secondaryClass} testId="link-loss">
+      {(close) => (
+        <>
+          <p className="text-sm" data-testid="sheet-effect">
+            {effect}
+          </p>
+          <ActionForm onDone={close} action={linkDebit} submitLabel="Comptabiliser le retour et la perte" buttonClassName={buttonClass}>
+            <input type="hidden" name="bank_transaction_id" value={lineId} />
+            <input type="hidden" name="kind" value="loss" />
+            <input type="hidden" name="payment_id" value={paymentId} />
+            <input type="hidden" name="expected_left_minor" value={leftMinor} />
+            <input type="hidden" name="idempotency_key" value={idempotencyKey} />
+            <Reason />
+          </ActionForm>
+        </>
+      )}
+    </ConfirmSheet>
+  );
+}
+
+/** « Classer sans comptabiliser »: the motif is kept (since M2c-1 fees are booked: « Frais bancaires »). */
 export function Explain({ lineId, idempotencyKey }: { lineId: string; idempotencyKey: string }) {
   return (
     <ConfirmSheet label="Classer sans comptabiliser" title="Classer sans comptabiliser" buttonClassName={secondaryClass} testId="explain">
       {(close) => (
         <>
           <p className="text-sm">
-            La ligne restera hors comptabilité (écart expliqué avec le solde bancaire) : à réserver aux frais repris, aux
-            corrections de la banque, aux mouvements qui ne concernent aucun paiement reçu.
+            La ligne restera hors comptabilité (écart expliqué avec le solde bancaire) : à réserver aux corrections de la
+            banque et aux mouvements qui ne concernent aucun paiement reçu ni le cabinet.
           </p>
           <ActionForm onDone={close} action={linkDebit} submitLabel="Classer" buttonClassName={buttonClass}>
             <input type="hidden" name="bank_transaction_id" value={lineId} />

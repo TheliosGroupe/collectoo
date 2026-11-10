@@ -29,14 +29,15 @@ export default async function StatementsPage({ searchParams }: PageProps<"/backo
       .from("membership")
       .select("role, organization:organization_id(kind)")
       .eq("user_id", claims.sub ?? ""),
-    supabase.from("bank_account").select("id, label, iban, feed, currency, status").order("label"),
+    supabase.from("bank_account").select("id, label, iban, feed, currency, status, purpose").order("label"),
     list.order("created_at", { ascending: false }).range(from, from + STATEMENT_PAGE_SIZE - 1),
   ]);
   const staff = (memberships ?? []).find((m) => m.organization?.kind === "servicer");
   const canImport = staff?.role === "admin" || staff?.role === "ops_manager";
   const options: BankAccountOption[] = (accounts ?? [])
-    .filter((a) => a.status === "active")
-    .map((a) => ({ id: a.id, label: a.label, feed: a.feed, currency: a.currency, ibanEnd: a.iban.slice(-4) }));
+    // statements of the client-funds accounts only (an own account's are not imported, M2c-1)
+    .filter((a) => a.status === "active" && a.purpose === "client_funds" && a.feed !== null)
+    .map((a) => ({ id: a.id, label: a.label, feed: a.feed ?? "", currency: a.currency, ibanEnd: a.iban.slice(-4) }));
   const rows = (statements ?? []) as unknown as StatementRow[];
   const total = count ?? 0;
   const { data: matchRows } = rows.length

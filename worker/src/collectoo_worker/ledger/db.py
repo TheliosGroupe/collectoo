@@ -128,10 +128,14 @@ def client_money_balances(
 
 
 def verify_pending(conn: Conn) -> None:
-    """Run the deferred balance checks now (they otherwise run at commit)."""
+    """Run the deferred ledger checks now (they otherwise run at commit): each entry's balance,
+    funds, mirrors and shape (LG001 ...), and each client's 4670 never in debit (LG008)."""
     try:
-        conn.execute("set constraints public.ledger_entry_balanced immediate")
-        conn.execute("set constraints public.ledger_entry_balanced deferred")
+        for mode in ("immediate", "deferred"):
+            conn.execute(
+                "set constraints public.ledger_entry_balanced, private.client_payable_in_credit "
+                + mode
+            )
     except psycopg.Error as exc:
         mapped = from_db_error(exc)
         if mapped is not None:

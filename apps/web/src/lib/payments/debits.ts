@@ -59,6 +59,12 @@ export const LINK_KIND: Record<string, string> = {
   refund: "Remboursement exécuté",
   refund_returned: "Remboursement revenu impayé",
   explained: "Expliqué (non comptabilisé)",
+  // M2c: lines booked in the funds (bank_line_booking.kind)
+  fee: "Frais bancaires (à la charge du cabinet)",
+  top_up: "Approvisionnement par le compte propre",
+  loss: "Retour au-delà du paiement : perte du cabinet",
+  // M2c-1 review: a credit from the own account released as a debtor's payment (public.release_own_credit)
+  relayed_payment: "Paiement d'un débiteur relayé par le cabinet",
   duplicate: "Doublon confirmé (non comptabilisé)",
   released: "Libéré",
 };
@@ -68,6 +74,9 @@ export function lineKindLabel(kind: string, direction: string): string {
   if (kind === "return") return direction === "debit" ? "Retour d'un paiement reçu" : "Crédit annulant un débit";
   if (kind === "refund_out") return "Remboursement émis (référence RFD)";
   if (kind === "other_debit") return "Frais ou autre débit";
+  if (kind === "transfer_out") return "Virement émis par le cabinet";
+  if (kind === "own_transfer_in") return "Virement reçu du compte propre";
+  if (kind === "client_transfer_in") return "Virement reçu d'un client";
   if (kind === "suspected_duplicate") return "Doublon possible";
   return kind;
 }
@@ -89,7 +98,35 @@ export const DEBIT_REVIEW: Record<string, string> = {
     "Ligne antérieure à un retour déjà comptabilisé sur ce paiement, à une date plus récente : elle ne peut pas être liée à sa date.",
   posting_failed: "La comptabilisation a été refusée pour cette ligne : liez-la à un autre paiement ou signalez-la au support.",
   refund_amount_match: "Débit du montant d'un remboursement demandé sur ce compte : s'il s'agit de ce remboursement, liez-le.",
+  // M2c-1: our own transfers and credits
+  top_up_not_found:
+    "Crédit venant du compte propre sans approvisionnement demandé : approvisionnement du cabinet, ou paiement d'un débiteur reçu par le cabinet et relayé sur ce compte (il devient alors un paiement à affecter). Ne le classez avec une explication que s'il n'est ni l'un ni l'autre.",
+  top_up_differs:
+    "Crédit portant la référence d'un approvisionnement, mais d'un autre montant ou sur un autre compte : vérifiez dans la banque.",
+  client_credit: "Virement reçu d'un client du cabinet : à classer (règlement d'une facture de commission à venir).",
+  own_transfer_out:
+    "Virement émis par le cabinet (reversement ou balayage) : comptabilisé avec les reversements ; à classer avec une explication d'ici là.",
 };
+
+/**
+ * Whether « À classer » offers the M2b links on a line — a payment's return (« Retour du paiement … ») and our refunds
+ * (« Remboursement … »): only on the lines M2b reads as such, a debit read as a return, our refund or another debit, and
+ * a credit undoing a debit. Our own transfers out and the credits from our own account or from a client (M2c-1 kinds)
+ * never: the database refuses those links (« debit link refused: not_a_return »; review M2c-1).
+ */
+export function offersPaymentLinks(o: { direction: string; kind: string }): boolean {
+  if (o.direction === "debit") return o.kind === "return" || o.kind === "refund_out" || o.kind === "other_debit";
+  return o.direction === "credit" && o.kind === "return";
+}
+
+/**
+ * Whether « Paiement d'un débiteur relayé par le cabinet » is offered (review M2c-1): a credit from the own account
+ * (`own_transfer_in`) that does not carry our `TOP…` reference — a credit carrying it is our top-up, never a debtor's
+ * payment. The database checks the rest (unbooked, unlinked, on a dedicated account).
+ */
+export function relayable(o: { direction: string; kind: string; end_to_end_id: string | null }): boolean {
+  return o.direction === "credit" && o.kind === "own_transfer_in" && !/^TOP[0-9A-F]{12}$/.test(o.end_to_end_id ?? "");
+}
 
 /**
  * Whether a line may be classified without booking (« Classer sans comptabiliser »): never our refund leaving the
@@ -159,6 +196,37 @@ export function linkRefundEffect(o: { direction: string; lineRef: string | null;
   return `Le débit ne porte pas la référence ${o.refundRef} : vérifiez dans la banque qu'il s'agit bien du virement à ${o.payee}. Le remboursement sera comptabilisé à la date du débit.`;
 }
 
+/** M2c-1: what booking a debit as a bank fee does (the servicer's cost, founder #9). */
+export function feeEffect(amount: string): string {
+  return `Le débit de ${amount} sera comptabilisé en frais bancaires du compte dédié, à la charge du cabinet : la part du cabinet sur ce compte diminue d'autant, à compenser par un approvisionnement depuis le compte propre. Aucun client n'en supporte le coût.`;
+}
+
+/** M2c-1: what booking a credit from the own account as a top-up does (the servicer's own money). */
+export function ownCreditEffect(amount: string): string {
+  return `Le crédit de ${amount} venant du compte propre sera comptabilisé comme un approvisionnement du compte dédié par le cabinet, avec son propre argent. S'il s'agit du paiement d'un débiteur reçu par le cabinet et relayé sur ce compte, choisissez plutôt « Paiement d'un débiteur relayé par le cabinet ».`;
+}
+
+/**
+ * M2c-1 review: what releasing a credit from the own account as a debtor's payment does (public.release_own_credit).
+ * A debtor paid the servicer's own account and the servicer relays the money to the dedicated account: the line
+ * becomes a payment, booked on the dedicated account at the line's date as a released duplicate credit is, on no file
+ * yet, so it waits in « Paiements à traiter » for ops to assign it. The motif is required and kept.
+ */
+export function relayedPaymentEffect(o: { amount: string; dateFr: string }): string {
+  return `Le crédit de ${o.amount} deviendra un paiement reçu, comptabilisé sur le compte de fonds de tiers au ${o.dateFr} (date de la ligne), payeur « Versement relayé par le cabinet ». Il attendra dans « Paiements à traiter » d'être affecté au dossier du débiteur, puis sera imputé comme tout paiement. Le motif est conservé : indiquez qui a payé le cabinet, et quand. À ne pas utiliser pour un approvisionnement par le cabinet.`;
+}
+
+/**
+ * M2c-1 (OQ-34, founder #8): a return larger than what is left of its payment. The payment's return of what is left
+ * (its imputations undone at the return date, as any return) and the excess, the servicer's loss — never the client's
+ * nor another client's.
+ */
+export function lossEffect(o: { amount: string; left: string; excess: string; dateFr: string; noneLeft: boolean }): string {
+  const loss = `l'excédent de ${o.excess} sera une perte à la charge du cabinet, jamais du client ni d'un autre client (question ouverte OQ-34 : recours contre le payeur).`;
+  if (o.noneLeft) return `La banque reprend ${o.amount} alors que rien ne reste du paiement : ${loss}`;
+  return `La banque reprend ${o.amount}, plus que ce qui reste du paiement (${o.left}). Le retour de ${o.left} sera comptabilisé sur le paiement au ${o.dateFr} (ses imputations et reversements annulés à cette date) ; ${loss}`;
+}
+
 /**
  * What « Libérer » does to a CSV line held as a suspected duplicate (review M2b-6): the line becomes what the import
  * read it as (`private.held_line_kind`), and only a debtor's credit (or an unsplit batch) becomes a payment. A credit
@@ -177,7 +245,11 @@ export function releaseEffect(o: { direction: string; heldKind: string | null; a
     case "refund_out":
       return debits;
     case "other_debit":
-      return "La ligne sera classée avec les frais et autres débits : non comptabilisée (écart expliqué avec le solde bancaire).";
+      return "La ligne sera classée avec les frais et autres débits, à comptabiliser en frais bancaires ou à expliquer.";
+    case "own_transfer_in":
+    case "client_transfer_in":
+    case "transfer_out":
+      return "La ligne sera classée dans « À classer » avec les virements du cabinet : aucun paiement n'est créé.";
   }
   return o.direction === "credit"
     ? `La ligne reprendra la lecture faite à l'import. Lue comme un paiement du débiteur, elle deviendra un paiement reçu de ${o.amount}, comptabilisé sur le compte de fonds de tiers à la date du relevé puis rapproché d'un dossier ; lue comme un retour (libellé « RETOUR … »), elle sera traitée avec les débits et retours, sans paiement.`
@@ -188,11 +260,32 @@ export function releaseEffect(o: { direction: string; heldKind: string | null; a
 export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   client_money_identity: {
     label: "Fonds de tiers déséquilibrés",
-    help: "Le solde du compte dédié ne vaut pas les fonds à affecter plus les sommes dues aux clients (I8).",
+    help: "Le solde du compte dédié ne vaut pas les fonds à affecter, plus les sommes dues aux clients, plus la part du cabinet (I8).",
   },
   bank_cash_identity: {
     label: "Compte bancaire : trésorerie ≠ paiements",
-    help: "La trésorerie comptable du compte ne vaut pas ce que ses paiements ont apporté moins ce qui est ressorti.",
+    help: "La trésorerie comptable du compte ne vaut pas ce que ses paiements ont apporté, moins ce qui est ressorti, plus ce que ses autres lignes comptabilisées ont fait entrer ou sortir (frais, approvisionnements).",
+  },
+  own_fund_identity: {
+    label: "Fonds du cabinet déséquilibrés",
+    help: "Les comptes du cabinet (compte propre, commissions, avances, TVA, frais, pertes) ne s'équilibrent pas.",
+  },
+  fund_mirror: {
+    label: "Part du cabinet ≠ créance du cabinet",
+    help: "La part du cabinet sur le compte dédié (4679) ne reflète plus sa créance sur ce compte (4689).",
+  },
+  client_payable_debit: {
+    label: "Somme due à un client en débit",
+    help: "Ce qui est dû à un client serait négatif : l'argent d'un autre client ou du cabinet l'aurait couvert (I13).",
+  },
+  // M2c-1 review: the servicer owes the dedicated account (fees, losses) beyond the top-ups ordered (design §15)
+  servicer_shortfall: {
+    label: "Approvisionnement du compte dédié à demander",
+    help: "Le cabinet doit de l'argent au compte dédié (frais bancaires, pertes) au-delà des approvisionnements demandés : approvisionnez-le depuis le compte propre (« Comptes bancaires »).",
+  },
+  remittance_completeness: {
+    label: "Encaissements à reverser incomplets",
+    help: "Ce qui est dû à un client ne vaut pas la somme de ses encaissements en attente de reversement.",
   },
   cash_in_statement: {
     label: "Encaissement d'un jour ≠ ses paiements",
@@ -302,7 +395,7 @@ export function normaliseIban(text: string): string | null {
 /** Errors of the M2b-6 commands, as codes (order matters: most specific first). */
 export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
-  if (message.includes("reason is required")) return "reason_required";
+  if (message.includes("reason is required") || message.includes("refused: reason_required")) return "reason_required";
   if (message.includes("the payment changed") || message.includes("payment_changed")) return "payment_changed";
   if (message.includes("reason does not match")) return "refund_reason_mismatch";
   if (message.includes("more than what is left")) return "refund_too_much";
@@ -314,12 +407,21 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("a refund is pending") || message.includes("debit link refused: refund_pending"))
     return "refund_pending";
   if (message.includes("already_linked")) return "already_linked";
+  if (message.includes("already_booked")) return "already_booked";
+  if (message.includes("not_a_fee")) return "not_a_fee";
+  if (message.includes("not_an_own_credit")) return "not_an_own_credit";
+  if (message.includes("own credit release refused: not_own_credit")) return "not_own_credit";
+  if (message.includes("own_account_unknown")) return "own_account_unknown";
+  if (message.includes("transfer_not_pending") || message.includes("bank booking refused: amount_differs"))
+    return "top_up_differs";
+  if (message.includes("not_a_loss")) return "not_a_loss";
   if (message.includes("not_explainable")) return "not_explainable";
   if (message.includes("before_previous_return")) return "link_before_return";
   if (message.includes("payment_returned")) return "link_payment_returned";
   if (message.includes("posting_failed")) return "link_posting_failed";
   if (message.includes("amount_exceeds") || message.includes("amount_differs")) return "link_amount";
   if (message.includes("debit link refused")) return "link_refused";
+  if (message.includes("bank booking refused") || message.includes("own credit release refused")) return "booking_refused";
   if (message.includes("already decided")) return "already_decided";
   if (message.includes("client's statement is required")) return "direct_evidence";
   if (message.includes("before the servicing started")) return "direct_date";

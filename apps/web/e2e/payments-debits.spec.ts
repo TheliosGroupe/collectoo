@@ -135,6 +135,7 @@ test("refund, bank return, lines to classify, direct payment and the checks", as
     { ref: "DB-4", amountMinor: BigInt(100000), kind: "return", e2e: "E2E-RIV-0001", name: "RIVIERE ET FILS" },
     { ref: "DB-5", amountMinor: BigInt(290), kind: "fee" },
     { ref: "DB-6", amountMinor: BigInt(5000), kind: "return", e2e: "E2E-INCONNU-01" },
+    { ref: "DB-7", amountMinor: BigInt(1200), kind: "other" },
   ];
   await importStatement(page, "releve-debits-2.xml", camt053Lines(BANK_IBAN, "2026-11-05", [], debits, BigInt(220000)));
   const riviere = await paymentOf("DB-2");
@@ -159,7 +160,7 @@ test("refund, bank return, lines to classify, direct payment and the checks", as
   await expect(page.getByTestId("payment-allocation")).toContainText("Rien n'est imputé");
   await reviewShot(page, testInfo, "m2-payment-returned");
 
-  // « Débits et retours »: the return nobody can name; the fee is an explained gap
+  // « Débits et retours »: the return nobody can name; the bank's coded charge booked by the job (M2c-1)
   await page.goto("/backoffice/encaissements");
   await expect(page.getByTestId("debits-link")).toContainText("1 à classer");
   await page.getByTestId("debits-link").click();
@@ -174,10 +175,22 @@ test("refund, bank return, lines to classify, direct payment and the checks", as
   await explain.getByLabel("Explication (interne)").fill("Rejet d'un prélèvement de frais, hors fonds de tiers");
   await explain.getByRole("button", { name: "Classer" }).click();
   await expect(page.getByTestId("debit-list")).toContainText("Aucune ligne.");
+  // M2c-1: a debit the bank did not code as a charge, booked by ops as a bank fee (the servicer's cost)
   await page.getByRole("link", { name: "Frais et autres débits" }).click();
-  await expect(page.getByTestId("debit-row")).toContainText(n("− 2,90 €"));
+  const fee = page.getByTestId("debit-row");
+  await expect(fee).toHaveCount(1);
+  await expect(fee).toContainText(n("− 12,00 €"));
+  await reviewShot(page, testInfo, "m2c-debits-fees");
+  await fee.getByTestId("book-fee").getByRole("button", { name: "Frais bancaires" }).click();
+  const feeSheet = page.getByRole("dialog", { name: "Frais bancaires" });
+  await expect(feeSheet.getByTestId("sheet-effect")).toContainText("à la charge du cabinet");
+  await feeSheet.getByLabel("Motif (interne)").fill("Abonnement de banque en ligne");
+  await feeSheet.getByRole("button", { name: "Comptabiliser" }).click();
+  await expect(page.getByTestId("debit-list")).toContainText("Aucune ligne.");
   await page.getByRole("link", { name: "Traités" }).click();
-  await expect(page.getByTestId("debit-row")).toHaveCount(3);
+  await expect(page.getByTestId("debit-row")).toHaveCount(5);
+  await expect(page.getByTestId("debit-list")).toContainText("Frais bancaires (à la charge du cabinet)");
+  await expect(page.getByTestId("debit-row").filter({ hasText: n("− 2,90 €") })).toContainText("Frais bancaires");
 
   // A payment the debtor made to the client directly: Verdier paid 300,00 € on F2026-00103, says the client's statement
   const verdier = f["C9313"].id;
@@ -218,7 +231,9 @@ test("refund, bank return, lines to classify, direct payment and the checks", as
     )
     .toBe(1);
   await expect(page.getByTestId("check-violations")).toContainText("0");
-  await expect(page.getByTestId("check-clean")).toBeVisible();
+  // M2c-1: the bank fees booked on the dedicated account are the servicer's cost: the checks ask for a top-up from the
+  // own account (an alert, not a violation)
+  await expect(page.getByTestId("check-results")).toContainText("Approvisionnement du compte dédié à demander");
   await reviewShot(page, testInfo, "m2-payment-checks");
 
   // the client was told of the return (R124-5; founder #13)

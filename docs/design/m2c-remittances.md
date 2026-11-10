@@ -245,7 +245,7 @@ The numbers are our labels; the accountant maps them. 5122 is not the own accoun
 | `client_refund_own` | Remboursement au mandant depuis le compte propre | +4111[c] R / −5122[own] R | proof date | ops, with evidence | ops reversal |
 | `advance_write_off` | Abandon d'avance | +6780 W / −4112[c] W | decision date | admin, with a motif | never |
 
-- **No M2c type touches 1100, 3100 or 4710** (L111-8; unallocated money is never remitted, M2b founder #8).
+- **No M2c type touches 1100, 3100 or 4710** (1100/3100: L111-8; 4710: unallocated money is never remitted, M2b founder #8).
 - **7060 is reached only through the two commission types**, against 4111 of the same client.
 - **No M2b type reaches a servicer-fund book or 4679** (I10′).
 - `ledger_post` refuses all M2c types; they go through `ledger_post_set`.
@@ -947,7 +947,7 @@ The statement is built in SQL from the frozen lines, the entries and the identit
 
 **Classification at import** (Python `payments.statement.classify` and SQL ingest, kept in parity):
 - a debit whose end-to-end id starts with `RMT` or `SWP`, or a debit to a registered own IBAN → `transfer_out`;
-- a credit from a registered own IBAN, or carrying our `TOP` id → `own_transfer_in`, **never a debtor payment**;
+- a credit from a registered own IBAN, or carrying our `TOP` id → `own_transfer_in`, **never automatically a debtor payment** (ops may release one as a debtor payment the servicer relays, below);
 - a credit from a client's registered payout IBAN → `client_transfer_in`, to ops;
 - camt.053 `NtryDtls/Btch/PmtInfId` is kept in `payment_info_id`.
 
@@ -960,7 +960,7 @@ The M2b-6 debit job (`payments.process_debits`, same chunking and lock order) ga
 | `transfer_out` with the SWP id | auto | `servicer_sweep` |
 | a credit undoing RMT (original end-to-end id) | auto | reversal of the `remittance` at the return date; pending item `payout_returned`; payout account `returned`; P0; any difference → `bank_fee` |
 | `own_transfer_in` matching a `TOP` transfer | auto | `servicer_top_up` |
-| `own_transfer_in` matching nothing | ops | top-up, or a debtor payment relayed by the servicer (it becomes a `payment`) (ledger critique #8) |
+| `own_transfer_in` matching nothing | ops | top-up, or a debtor payment relayed by the servicer (it becomes a `payment`: `release_own_credit`, M2c-1 review; ledger critique #8, OQ-69) |
 | `client_transfer_in` | ops | `client_payment_dedicated` (a misdirected invoice payment), or ops explain it |
 | RMT of a cancelled or already-booked transfer, other amount, unknown id | ops | `unplanned_payout` (§9.7), or explained; never automatic |
 | `other_debit` with BkTxCd charges (`CHRG`, `FEES`) | auto, suggested | `bank_fee`; other debits are classified by ops (« Frais bancaires ») |
@@ -1201,7 +1201,7 @@ The plans rest on no statistics (M2b lessons): keyed lookups, `NOT EXISTS`, part
 | **M2c-4** Runs and invoices (M2-14 core, M2-15 numbering) | `remittance_run`, draft lines, lines; schedule + guard; prepare and approve jobs; counter and guard; invoices, credit notes, credit allocations and entries; settlement plan; N = 0 settlement; cancellation before download; « Reversements » pages; checks I14–I17, deadline alerts, breach rows | pgTAP `018`, `019` (except files); gapless under rollback and concurrency; one stale run never blocks the others |
 | **M2c-5** Documents (M2-14 statement, M2-15 PDF) | Statement payload, PDF and CSV; invoice and credit-note payload and PDF; storage policies; client space; accounting export; `issue_credit_note` | CSV = PDF = run; golden hashes; mentions snapshot; RLS A/B and restricted viewers |
 | **M2c-6** Bank (M2-14 cash-out) | `bank_transfer`, `transfer_file`, pain.001 (.09/.03, XSD, golden, charset), cash check and per-client cap, download and sent, refunds in files; debit rules: payout + settlement + booking-time cover, batch, sweep, top-up, returned payout, charges on return, unplanned payouts; sweep after payouts; statement « Suivi » | the §7 example end to end with synthetic camt.053; I9, I19, I20; double debit never auto-booked |
-| **M2c-7** Returns after remittance and close-out | `cover_remitted_reversals` wired into every reversal path + nightly backstop; automatic top-ups (own-account file); claw-back recovery; repayment request; client payments and refunds; write-off; client status effects (proceedings, liquidation, mandate end); full property machine; 50k scale run; docs (COMPLIANCE CPCE-02/03/07/08 + new rows TVA-01, FAC-01…04, MAND-01/02, SEPA-01 + OQ-35…50 + OQ-34 update + Ops row for 289 VII; DOMAIN; ARCHITECTURE §8–9 postings fixed; CALCULATION_RULES; ADR-0014 final; PROGRESS) | pgTAP `021`; property machine; scale timings; **no real remittance before M2c-7 is merged** (until then a return of a remitted entry fails closed with `LG008` and goes to ops) |
+| **M2c-7** Returns after remittance and close-out | `cover_remitted_reversals` wired into every reversal path + nightly backstop; automatic top-ups (own-account file); claw-back recovery; repayment request; client payments and refunds; write-off; client status effects (proceedings, liquidation, mandate end); full property machine; 50k scale run; docs (COMPLIANCE CPCE-02/03/07/08 + new rows TVA-01, FAC-01…04, MAND-01/02, SEPA-01 + OQ-35…50 + OQ-34 update + Ops row for 289 VII; DOMAIN; ARCHITECTURE §8–9 postings fixed; CALCULATION_RULES; ADR-0014 final; PROGRESS) | pgTAP `021`; property machine; scale timings; **no real remittance before M2c-7 is merged** (until then a return of a remitted entry fails closed with `LG008`, and goes to ops, only when it would leave the client's whole 4670 in debit; otherwise it nets against the client's other pending collections, which §13 #1 excludes) |
 
 ---
 
@@ -1331,4 +1331,50 @@ The plans rest on no statistics (M2b lessons): keyed lookups, `NOT EXISTS`, part
 
 ## 24. Founder decisions
 
-See the numbered list returned with this document (to be copied here with the answers, as in `m2b-payments.md` §17).
+**Answered 2026-11-09: all defaults accepted (« All ok »).** These decisions bind the M2c PRs; the open questions of §23 keep their conservative defaults until counsel or the accountant answers.
+
+1. How often do we pay clients? Twice a month (1st and 16th), weekly if the mandate asks, plus an automatic extra run before any one-month deadline.
+Default: yes.
+Why: a single monthly run misses the one-month limit for money collected just after it.
+2. When must the money reach the client? By the shorter of the mandate's delay and one calendar month from the day it hit our account (booking or value date, whichever is earlier), with no weekend or holiday extension.
+Default: yes.
+Why: safest reading of R124-6 until counsel answers.
+3. Do we deduct our commission from what we pay the client? Only when the mandate has a netting clause; otherwise we pay the gross amount and invoice the commission, payable within 30 days to our own account. Our standard mandate includes the clause.
+Default: yes.
+Why: the law lets the parties agree a set-off; without a clause we do not impose one.
+4. What earns commission? What we allocate to the client's claims (principal, interest, fees alike); nothing on money passed on without allocation (recalled file, cut-off, ratification) or paid to the client directly, unless the mandate says so.
+Default: yes.
+Why: the fee is what the agreement says (R124-3 3°), nothing implied.
+5. Which fee grids do we support now? A rate per claim type or component, tiers on what a file has brought in, a rate set by claim size or age at boarding, and a minimum per file (never above what the file brought in); new rates only for the future.
+Default: yes.
+Why: covers the usual French grids with one engine; fixed fees and success fees come later.
+6. A collection is undone after we invoiced it (bank return, mistake): do we issue a credit note on the original invoice?
+Default: yes, unless the mandate says the fee stays due.
+Why: no fee on money that did not stay collected.
+7. Money already paid to the client comes back (unpaid cheque, recall): we advance it from our own account the same day, so no other client's money covers it; we take it back from the client's next payments only if the mandate has a claw-back clause, otherwise we send a repayment request. No hold-back.
+Default: yes.
+Why: one creditor's money must never cover another's; holding funds needs a clause.
+8. A bank takes back more than what is left of a payment (OQ-34): who pays?
+Default: we bear it as a loss and pursue the payer.
+Why: never charged to another client.
+9. Our commission leaves the dedicated account by a separate transfer to our own account the day the clients' payments are debited, and bank fees on the dedicated account are our cost.
+Default: yes.
+Why: our money should not sit on the client account, and clients are always paid first.
+10. How is a client's payout IBAN changed? Only with its RIB, confirmed by a second person (the client's administrator in the portal, or a second admin of ours); the first payment to a new IBAN is flagged.
+Default: yes.
+Why: a changed IBAN is the classic fraud.
+11. Who approves payments to clients? One admin or ops manager, with no second approver per run.
+Default: yes.
+Why: the IBAN control covers the fraud path; speed keeps us within deadlines.
+12. Invoices: one numbering series for invoices and credit notes (FC-2026-000001, restarting each 1 January), one invoice per payment run and mandate, PDF until the e-invoicing platform.
+Default: yes; your accountant confirms, and tell us if the company is not a micro or SME.
+Why: tax doctrine allows a yearly series; e-invoicing is compulsory for micro/SMEs from 1 September 2027.
+13. Which clients can we serve in M2c? Only businesses established in mainland France, in euros; others are refused when their portfolio is confirmed.
+Default: yes; please confirm you have no other.
+Why: overseas departments, foreign and consumer clients need other VAT and invoice rules.
+14. One dedicated client-money account per currency pays all clients; a second one is refused.
+Default: yes.
+Why: keeps the cash checks and our commission transfers exact.
+15. Payments to clients go in a bank file (pain.001) that ops download and upload to the bank; pending refunds go in the same file; we keep the bank's name check on.
+Default: yes; please send your bank's file specifications.
+Why: no bank connection needed, one upload, and the name check catches wrong IBANs.

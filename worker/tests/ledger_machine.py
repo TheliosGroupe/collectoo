@@ -3,13 +3,17 @@
 `InMemoryLedger` is an oracle with the database's rules: entries, reversals and idempotency (M2a),
 and since M2b the payment entries with their checks at commit: client money closed in every entry
 (I2), the shape of each type (I3), what is left of a payment never negative at any date (I4), and
-a receivable credited by an allocation or a netting never overdrawn afterwards (I6).
+a receivable credited by an allocation or a netting never overdrawn afterwards (I6); since M2c
+the two funds closed in every entry (I2'), the 4679 / 4689 mirror (I12), the shapes of the fund
+entries (I3') and each client's 4670 never in debit at commit (I13, LG008).
 
 `LedgerMachine` drives random corrections, receipts (a payment and its cash_in), allocations,
-forwards, refunds, nettings and reversals (with forced idempotency-key collisions) against a
-backend and checks the invariants after every step. The pure test runs it against the oracle; the
-integration test runs it against Postgres (payment entries through private.ledger_post_set) and
-compares outcomes and balances with the oracle.
+forwards, refunds, nettings, reversals (with forced idempotency-key collisions) and, since M2c,
+the funds' entries (commission invoices, settlements, remittances, sweeps, top-ups, fees, losses,
+advances, entries of the wrong shape) against a backend and checks the invariants after every
+step. The pure test runs it against the oracle; the integration test runs it against Postgres
+(payment and fund entries through private.ledger_post_set) and compares outcomes and balances
+with the oracle.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from hypothesis.stateful import Bundle, RuleBasedStateMachine, invariant, precon
 from collectoo_worker.ledger import (
     AlreadyReversedError,
     Book,
+    ClientMoneyShortError,
     Component,
     EntryDraft,
     EntryType,
@@ -41,13 +46,19 @@ from collectoo_worker.ledger import (
     balance_by_currency,
     mirror,
 )
-from collectoo_worker.ledger.model import CLIENT_MONEY_BOOKS
+from collectoo_worker.ledger.model import (
+    CLIENT_MONEY_BOOKS,
+    MIRROR_BOOKS,
+    NEVER_REVERSED,
+    SERVICER_FUND_BOOKS,
+)
 
 ORG = UUID("00000000-0000-0000-0000-0000000000f0")
 CLIENT = UUID("00000000-0000-0000-0000-0000000000f1")
 ACCOUNT = UUID("30000000-0000-0000-0000-0000000000f1")
 ITEMS = (UUID("40000000-0000-0000-0000-0000000000f1"), UUID("40000000-0000-0000-0000-0000000000f2"))
 BANK = UUID("80000000-0000-0000-0000-0000000000f1")
+OWN = UUID("80000000-0000-0000-0000-0000000000f2")  # the servicer's own account (5122)
 DATES = (date(2026, 2, 1), date(2026, 3, 1), date(2026, 4, 1))
 CHECK_DATES = (date(2026, 1, 31), *DATES)
 KEYS = tuple(f"prop-key-{i:04d}" for i in range(8))
@@ -140,6 +151,7 @@ class InMemoryLedger:
 
     def _commit(self, entry: Entry, key: str, h: str) -> PostResult:
         self.check(entry)
+        self.check_client_payable(entry)
         self.entries[entry.id] = entry
         self.by_key[key] = (entry.id, h)
         return PostResult(entry.id, True)
@@ -191,8 +203,8 @@ class InMemoryLedger:
             return replay
         if target.reverses is not None:
             raise ReversalError("a reversal is not reversed")
-        if target.entry_type is EntryType.CASH_IN:
-            raise ReversalError("a cash_in is not reversed")
+        if target.entry_type in NEVER_REVERSED:
+            raise ReversalError(f"a {target.entry_type} is not reversed")
         if effective < target.effective_date:
             raise ReversalError("reversal dated before the entry")
         if entry_id in self.reversed_by:
@@ -227,6 +239,19 @@ class InMemoryLedger:
                 credited = any(x.amount_minor < 0 for x in lines)
                 debited = any(x.amount_minor > 0 for x in lines)
                 self.check_receivable(d, entries, credited=credited, debited=debited)
+
+    def check_client_payable(self, new: Entry) -> None:
+        """I13 at commit: Σ4670 of each client, all dates, never in debit (LG008)."""
+        clients = {x.client_organization_id for x in new.lines if x.book is Book.CLIENT_PAYABLE}
+        for client in clients:
+            total = sum(
+                x.amount_minor
+                for e in [*self.entries.values(), new]
+                for x in e.lines
+                if x.book is Book.CLIENT_PAYABLE and x.client_organization_id == client
+            )
+            if total > 0:
+                raise ClientMoneyShortError(f"client {client} would be in debit by {total}")
 
     def left_over(self, payment_id: UUID, entries: list[Entry] | None = None) -> list[int]:
         """U_p at each date where an entry of the payment moves it (I4)."""
@@ -650,6 +675,140 @@ class LedgerMachine(RuleBasedStateMachine):
         self.ids[got.entry_id] = want.entry_id
         return got.entry_id
 
+    # --- M2c: the funds -----------------------------------------------------------------------
+
+    def _fund(
+        self, entry_type: EntryType, lines: tuple[Line, ...], when: date, *, client: bool = False
+    ) -> UUID | None:
+        source = {
+            EntryType.COMMISSION_INVOICE: "commission_invoice",
+            EntryType.CLIENT_SETTLEMENT: "remittance_run",
+            EntryType.CLIENT_ADVANCE: "client_advance",
+        }.get(entry_type, "bank_transaction")
+        draft = EntryDraft(
+            organization_id=ORG,
+            entry_type=entry_type,
+            effective_date=when,
+            idempotency_key=f"fund-{uuid4()}",
+            lines=lines,
+            client_organization_id=CLIENT if client else None,
+            source_type=source,
+            source_id=f"doc-{uuid4()}",
+            reason="property test",
+        )
+        return self._post(draft, payment_entry=True)
+
+    @rule(
+        target=entries,
+        kind=st.sampled_from(["sweep", "top_up", "fee", "loss"]),
+        amount=st.integers(min_value=1, max_value=100_000),
+        when=st.sampled_from(DATES),
+    )
+    def move_servicer_money(self, kind: str, amount: int, when: date) -> Any:
+        """The servicer's money on the dedicated account: swept out, topped up, fees, losses."""
+        cash = Line(Book.CLIENT_MONEY_CASH, -amount, "EUR", bank_account_id=BANK)
+        dts = Line(Book.DUE_TO_SERVICER, amount, "EUR")
+        dfc = Line(Book.DUE_FROM_CLIENT_FUNDS, -amount, "EUR")
+        if kind == "sweep":
+            lines = (dts, cash, Line(Book.OWN_CASH, amount, "EUR", bank_account_id=OWN), dfc)
+            return self._fund(EntryType.SERVICER_SWEEP, lines, when)
+        if kind == "top_up":
+            lines = (
+                cash.negated(),
+                dts.negated(),
+                dfc.negated(),
+                Line(Book.OWN_CASH, -amount, "EUR", bank_account_id=OWN),
+            )
+            return self._fund(EntryType.SERVICER_TOP_UP, lines, when)
+        book = Book.BANK_FEES if kind == "fee" else Book.SERVICER_LOSSES
+        entry_type = EntryType.BANK_FEE if kind == "fee" else EntryType.SERVICER_LOSS
+        return self._fund(entry_type, (dts, cash, Line(book, amount, "EUR"), dfc), when)
+
+    @rule(
+        target=entries,
+        ht=st.integers(min_value=1, max_value=50_000),
+        when=st.sampled_from(DATES),
+    )
+    def invoice(self, ht: int, when: date) -> Any:
+        """A commission invoice (VAT 20 %, pending until settled)."""
+        vat = ht // 5
+        lines = [
+            Line(Book.COMMISSION_RECEIVABLE, ht + vat, "EUR", client_organization_id=CLIENT),
+            Line(Book.SERVICER_REVENUE, -ht, "EUR", client_organization_id=CLIENT),
+        ]
+        if vat:
+            lines.append(Line(Book.VAT_PENDING, -vat, "EUR"))
+        return self._fund(EntryType.COMMISSION_INVOICE, tuple(lines), when, client=True)
+
+    @rule(
+        target=entries,
+        kind=st.sampled_from(["remittance", "settlement", "advance"]),
+        amount=st.integers(min_value=1, max_value=200_000),
+        when=st.sampled_from(DATES),
+    )
+    def pay_the_client(self, kind: str, amount: int, when: date) -> Any:
+        """What the client is owed moves: a remittance, a settlement of its invoice from it, an
+        advance (more owed). A payout beyond what the client is owed fails at commit (LG008)."""
+        pay = Line(Book.CLIENT_PAYABLE, amount, "EUR", client_organization_id=CLIENT)
+        if kind == "remittance":
+            lines: tuple[Line, ...] = (
+                pay,
+                Line(Book.CLIENT_MONEY_CASH, -amount, "EUR", bank_account_id=BANK),
+            )
+            return self._fund(EntryType.REMITTANCE, lines, when, client=True)
+        dts = Line(Book.DUE_TO_SERVICER, -amount, "EUR")
+        dfc = Line(Book.DUE_FROM_CLIENT_FUNDS, amount, "EUR")
+        if kind == "settlement":
+            com = Line(Book.COMMISSION_RECEIVABLE, -amount, "EUR", client_organization_id=CLIENT)
+            return self._fund(EntryType.CLIENT_SETTLEMENT, (pay, dts, dfc, com), when, client=True)
+        adv = Line(Book.CLIENT_ADVANCE_RECEIVABLE, amount, "EUR", client_organization_id=CLIENT)
+        lines = (dts.negated(), pay.negated(), adv, dfc.negated())
+        return self._fund(EntryType.CLIENT_ADVANCE, lines, when, client=True)
+
+    @rule(
+        kind=st.sampled_from(["sweep", "fee", "advance", "remittance"]),
+        amount=st.integers(min_value=1, max_value=100_000),
+        when=st.sampled_from(DATES),
+    )
+    def wrong_shape(self, kind: str, amount: int, when: date) -> None:
+        """A balanced entry, each fund closed and the mirror kept, but of the wrong shape (signs
+        flipped): refused by both (I3', LG001)."""
+        cash = Line(Book.CLIENT_MONEY_CASH, amount, "EUR", bank_account_id=BANK)
+        dts = Line(Book.DUE_TO_SERVICER, -amount, "EUR")
+        dfc = Line(Book.DUE_FROM_CLIENT_FUNDS, amount, "EUR")
+        pay = Line(Book.CLIENT_PAYABLE, -amount, "EUR", client_organization_id=CLIENT)
+        entry_type, lines, client = {
+            "sweep": (
+                EntryType.SERVICER_SWEEP,
+                (dts, cash, Line(Book.OWN_CASH, -amount, "EUR", bank_account_id=OWN), dfc),
+                False,
+            ),
+            "fee": (
+                EntryType.BANK_FEE,
+                (dts, cash, Line(Book.BANK_FEES, -amount, "EUR"), dfc),
+                False,
+            ),
+            "advance": (
+                EntryType.CLIENT_ADVANCE,
+                (
+                    dts,
+                    pay.negated(),
+                    Line(
+                        Book.CLIENT_ADVANCE_RECEIVABLE,
+                        -amount,
+                        "EUR",
+                        client_organization_id=CLIENT,
+                    ),
+                    dfc,
+                ),
+                True,
+            ),
+            "remittance": (EntryType.REMITTANCE, (pay, cash), True),
+        }[kind]
+        before = len(self.oracle.entries)
+        assert self._fund(entry_type, lines, when, client=client) is None
+        assert len(self.oracle.entries) == before
+
     @precondition(lambda self: bool(self.cash_ins))
     @rule(data=st.data())
     def reverse_a_cash_in(self, data: st.DataObject) -> None:
@@ -704,6 +863,34 @@ class LedgerMachine(RuleBasedStateMachine):
                 if Book(k[0]) in CLIENT_MONEY_BOOKS:
                     per_currency[k[1]] += v
             assert all(v == 0 for v in per_currency.values()), (d, per_currency)
+
+    @invariant()
+    def the_servicers_fund_and_the_mirror_net_to_zero(self) -> None:
+        """I2' summed over entries, and I12: the servicer's fund and Σ4679 + Σ4689 at every date."""
+        for d in CHECK_DATES:
+            fund: dict[str, int] = defaultdict(int)
+            crossing: dict[str, int] = defaultdict(int)
+            for k, v in self.backend.balances(d).items():
+                if Book(k[0]) in SERVICER_FUND_BOOKS:
+                    fund[k[1]] += v
+                if Book(k[0]) in MIRROR_BOOKS:
+                    crossing[k[1]] += v
+            assert all(v == 0 for v in fund.values()), (d, fund)
+            assert all(v == 0 for v in crossing.values()), (d, crossing)
+
+    @invariant()
+    def every_entry_closes_both_funds(self) -> None:
+        """I2' and I12 per entry (the oracle's entries are the backend's: balances match)."""
+        for e in self.oracle.entries.values():
+            for books in (CLIENT_MONEY_BOOKS, SERVICER_FUND_BOOKS, MIRROR_BOOKS):
+                assert sum(x.amount_minor for x in e.lines if x.book in books) == 0, e
+
+    @invariant()
+    def no_client_is_owed_less_than_nothing(self) -> None:
+        """I13: Σ4670 of the client (all postings) is never in debit after a commit."""
+        last = max(CHECK_DATES)
+        owed = sum(v for k, v in self.backend.balances(last).items() if k[0] == Book.CLIENT_PAYABLE)
+        assert owed <= 0, owed
 
     @invariant()
     def what_is_left_of_each_payment_is_in_the_pool(self) -> None:
