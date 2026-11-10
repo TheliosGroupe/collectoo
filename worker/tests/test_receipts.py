@@ -26,21 +26,42 @@ from collectoo_worker.payments.receipts import (
     NBSP,
     NNBSP,
     TEMPLATE_VERSION,
+    TEMPLATE_VERSIONS,
     THIRD_PARTY,
     ReceiptDocument,
     format_date,
     format_money,
+    issuer_block,
     paris_date,
     payer_text,
     receipt_text,
     receipt_view,
 )
 
-# Pinned to TEMPLATE_VERSION and RENDERER_VERSION: a change of either (or of reportlab, the font,
-# the layout) changes the bytes; stored receipts keep their PDF, new ones carry the new versions.
+# Pinned to the template version and RENDERER_VERSION: a change of either (or of reportlab, the
+# font, the layout) changes the bytes; stored receipts keep their PDF, new ones carry the new
+# versions. quittance-fr-2's golden is M2b-5's, unchanged by M2c-2 (the receipts issued before it
+# regenerate to the same bytes); quittance-fr-3 adds the issuer block (R123-237/238).
 GOLDEN_TEMPLATE = "quittance-fr-2"
 GOLDEN_RENDERER = "reportlab-4.4.10/dejavu-2.37/r2"
 GOLDEN_PDF_SHA256 = "8e1f450ce3f1062e50243b5937850491bffad8a4f95e26add4d04a913833dfcb"
+GOLDEN_FR3_PDF_SHA256 = "6c3d4439a3770a9b188afe77a9736384d8836ce29d0f6daa11b5f47868619b21"
+ISSUER = {  # as private.receipt_issuer builds it from billing_identity (synthetic)
+    "name": "Collectoo",
+    "siren": "424392447",
+    "legal_form": "SAS",
+    "share_capital_minor": "1000000",
+    "currency": "EUR",
+    "rcs_city": "Paris",
+    "registered_office": {
+        "line1": "10 rue de la Bourse",
+        "postcode": "75002",
+        "city": "Paris",
+        "country": "FR",
+    },
+    "in_liquidation": False,
+    "entrepreneur_individuel": False,
+}
 KNOWN_AT = datetime(2026, 11, 9, 10, 15, 30, tzinfo=UTC)
 
 
@@ -96,6 +117,15 @@ def _line(ref: str, due: str | None, amount: str, file: str = "M-0042") -> dict[
 
 
 def doc(version: int = 1, kind: str = "original", **over: Any) -> ReceiptDocument:
+    """A quittance-fr-2 receipt (M2b-5's tests, golden and snapshots unchanged)."""
+    return ReceiptDocument(
+        "Q-2026-000001", version, kind, KNOWN_AT, payload(**over), GOLDEN_TEMPLATE
+    )
+
+
+def doc3(version: int = 1, kind: str = "original", **over: Any) -> ReceiptDocument:
+    """A quittance-fr-3 receipt (M2c-2): the payload's issuer is the full block."""
+    over.setdefault("issuer", ISSUER)
     return ReceiptDocument("Q-2026-000001", version, kind, KNOWN_AT, payload(**over))
 
 
@@ -352,8 +382,10 @@ def test_the_pdf_is_deterministic_and_pinned_by_a_golden_hash() -> None:
     assert render_receipt(copy.deepcopy(doc())) == first  # same input, same bytes
     assert first.startswith(b"%PDF-1.4") and b"/CreationDate (D:20261109101530+00'00')" in first
     assert b"/Title (Quittance Q-2026-000001 version 1)" in first
-    assert (TEMPLATE_VERSION, RENDERER_VERSION) == (GOLDEN_TEMPLATE, GOLDEN_RENDERER)
+    assert RENDERER_VERSION == GOLDEN_RENDERER and GOLDEN_TEMPLATE in TEMPLATE_VERSIONS
     assert hashlib.sha256(first).hexdigest() == GOLDEN_PDF_SHA256
+    # the issuer block in its payload changes nothing in a quittance-fr-2 receipt
+    assert render_receipt(doc(issuer=ISSUER | {"name": "Collectoo SAS"})) == first
 
 
 def test_the_pdf_depends_on_the_receipt_only() -> None:
@@ -410,7 +442,8 @@ from collectoo_worker.payments.receipt_pdf import render_receipt
 from collectoo_worker.payments.receipts import ReceiptDocument
 row = json.load(sys.stdin)
 doc = ReceiptDocument(row["number"], row["version"], row["kind"],
-                      datetime.fromisoformat(row["known_at"]), row["payload"])
+                      datetime.fromisoformat(row["known_at"]), row["payload"],
+                      row["template_version"])
 print(hashlib.sha256(render_receipt(doc)).hexdigest())
 """
 RL_ENV = {
@@ -472,3 +505,73 @@ def test_the_renderer_refuses_a_reportlab_configured_before_it(tmp_path: Path) -
     assert out.returncode != 0
     assert "reportlab was configured outside the receipt renderer" in out.stderr
     assert "pdfComments" in out.stderr
+
+
+# -- quittance-fr-3: the issuer block (M2c-2; C. com. R123-237, R123-238) ------------------------
+
+
+def test_new_receipts_carry_the_issuer_block() -> None:
+    assert TEMPLATE_VERSION == "quittance-fr-3" and TEMPLATE_VERSIONS[-1] == TEMPLATE_VERSION
+    text = plain(receipt_text(doc3()))
+    lines = text.splitlines()
+    assert lines[:9] == [
+        "Quittance",
+        "N° Q-2026-000001",
+        "Version 1",
+        "Établie le 09/11/2026",
+        "",
+        "Collectoo SAS au capital de 10 000 €",
+        "SIREN 424 392 447 · RCS Paris",
+        "Siège social : 10 rue de la Bourse, 75002 Paris",
+        "",
+    ]
+    assert "Émetteur : Collectoo, agissant pour le compte de Martin SAS" in lines
+    # the rest of the receipt is quittance-fr-2's
+    assert (
+        text.split("Siège social : 10 rue de la Bourse, 75002 Paris\n\n")[1]
+        == plain(receipt_text(doc(issuer={"name": "Collectoo"}))).split(
+            "Établie le 09/11/2026\n\n"
+        )[1]
+    )
+
+
+def test_the_issuer_block_states_liquidation_ei_capital_and_a_foreign_office() -> None:
+    assert issuer_block({"name": "Collectoo"}) == ()  # no identity: the name only, as before
+    liquidation = ISSUER | {"in_liquidation": True, "share_capital_minor": "1000050"}
+    assert plain(issuer_block(liquidation)[0]) == (
+        "Collectoo SAS au capital de 10 000,50 € \u2013 en liquidation"
+    )
+    ei = ISSUER | {"name": "Jean Durand", "legal_form": "EI", "share_capital_minor": None,
+                   "entrepreneur_individuel": True}  # fmt: skip
+    assert issuer_block(ei)[0] == "Jean Durand EI"
+    no_rcs = ISSUER | {"rcs_city": None}
+    assert plain(issuer_block(no_rcs)[1]) == "SIREN 424 392 447"
+    office = {"line1": "1 rue X", "line2": "Bât. B", "postcode": "98000", "city": "Monaco",
+              "country": "MC"}  # fmt: skip
+    assert issuer_block(ISSUER | {"registered_office": office})[2] == (
+        "Siège social : 1 rue X, Bât. B, 98000 Monaco, Monaco"
+    )
+
+
+def test_a_void_version_carries_the_block_too() -> None:
+    void = ReceiptDocument(
+        "Q-2026-000001", 2, "void", KNOWN_AT,
+        {"schema": 1, "state": "void", "issuer": ISSUER, "creditor": {"name": "Martin SAS"},
+         "file": {"reference": "M-0042"}, "debtor": {"name": "Martin-Durand SARL"},
+         "payment": payload()["payment"], "first_letter": None},
+    )  # fmt: skip
+    assert "SIREN 424 392 447 · RCS Paris" in plain(receipt_text(void))
+
+
+def test_an_unknown_template_is_refused() -> None:
+    bad = ReceiptDocument("Q-2026-000001", 1, "original", KNOWN_AT, payload(), "quittance-fr-9")
+    with pytest.raises(ValueError, match="unknown receipt template"):
+        receipt_view(bad)
+
+
+def test_the_fr3_pdf_is_deterministic_and_pinned_by_its_golden_hash() -> None:
+    first = render_receipt(doc3())
+    assert render_receipt(copy.deepcopy(doc3())) == first
+    assert b"/Creator (quittance-fr-3)" in first
+    assert hashlib.sha256(first).hexdigest() == GOLDEN_FR3_PDF_SHA256
+    assert render_receipt(doc3(issuer=ISSUER | {"in_liquidation": True})) != first

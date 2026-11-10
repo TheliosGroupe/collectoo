@@ -15,7 +15,7 @@ from typing import Any
 
 import psycopg
 import pytest
-from integration_helpers import DB, as_user, board, drain, one, storage
+from integration_helpers import DB, as_user, board, drain, one, ready_mandate, storage
 from psycopg.types.json import Jsonb
 from reconciliation_helpers import outcomes, pay, world_into_db
 from statement_helpers import bank_tenant, upload
@@ -97,22 +97,7 @@ def _credit_for(file: str, ref: str, name: str, amount: int) -> Credit:
 
 def _mandate(tenant: dict[str, Any]) -> None:
     with psycopg.connect(DB) as conn, conn.transaction():
-        mandate = one(
-            conn,
-            "insert into public.mandate (organization_id, client_organization_id, reference,"
-            " mandate_type, signed_on) values (%s, %s, %s, 'mandate_amicable', '2026-01-01')"
-            " returning id",
-            (tenant["servicer"], tenant["client"], f"M-{uuid.uuid4().hex[:6]}"),
-        )
-        conn.execute(
-            "insert into public.mandate_terms (mandate_id, valid_from, commission_rate)"
-            " values (%s, '2026-01-01', 0.15)",
-            (mandate,),
-        )
-        conn.execute(
-            "update public.portfolio set mandate_id = %s where id = %s",
-            (mandate, tenant["portfolio"]),
-        )
+        ready_mandate(conn, tenant, f"M-{uuid.uuid4().hex[:6]}")
 
 
 def test_a_payment_waits_for_its_file_and_is_matched_at_confirmation(tmp_path: Path) -> None:

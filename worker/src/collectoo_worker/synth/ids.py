@@ -28,6 +28,11 @@ def siren(rng: random.Random) -> str:
     return _luhn_complete(str(rng.randint(10_000_000, 99_999_999)))
 
 
+def fr_vat_number(siren_: str) -> str:
+    """French VAT number of a SIREN: FR + key + SIREN, key = (12 + 3 * (SIREN mod 97)) mod 97."""
+    return f"FR{(12 + 3 * (int(siren_) % 97)) % 97:02d}{siren_}"
+
+
 def siret(rng: random.Random, siren_: str | None = None) -> str:
     """14-digit SIRET (SIREN + NIC) valid under Luhn."""
     base = (siren_ or siren(rng)) + f"{rng.randint(0, 9999):04d}"

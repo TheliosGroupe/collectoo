@@ -21,7 +21,8 @@ export function decideAccess(pathname: string, claims: SessionClaims | null): Ac
   if (!claims?.sub) return { kind: "redirect", to: "/connexion" };
 
   const internal = claims.is_internal === true;
-  if (isMfa) return internal ? { kind: "allow" } : { kind: "redirect", to: "/client" };
+  // Staff need aal2 everywhere; a client user steps up to aal2 for what requires it (M2c-2: confirming a payout IBAN).
+  if (isMfa) return { kind: "allow" };
   if (isBackoffice) {
     if (!internal) return { kind: "redirect", to: "/client" };
     if (claims.aal !== "aal2") return { kind: "redirect", to: "/mfa" };
@@ -34,4 +35,11 @@ export function decideAccess(pathname: string, claims: SessionClaims | null): Ac
 /** Where to land after a successful login. */
 export function homeFor(claims: SessionClaims): "/backoffice" | "/client" {
   return claims.is_internal === true ? "/backoffice" : "/client";
+}
+
+/** Where to go once MFA is verified: the page asked for (`next`), if it is in the user's own space; else home. */
+export function afterMfa(next: string | undefined, claims: SessionClaims): string {
+  const home = homeFor(claims);
+  if (!next || !/^\/[a-z0-9/_-]*$/i.test(next) || next.startsWith("//")) return home;
+  return next === home || next.startsWith(`${home}/`) ? next : home;
 }

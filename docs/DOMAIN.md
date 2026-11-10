@@ -33,6 +33,12 @@ Contents: [1. Glossary](#1-glossary-fr--en) · [2. Conventions](#2-modelling-con
 | Dépositaire | Depositary | `organization(kind = depositary)` | Holds the FCT's assets |
 | Fonds de dette / de crédit | Credit fund | `organization(kind = fund)` | |
 | Co-investissement | Co-investment | `fund_share` | Our share in each FCT |
+| Identité de facturation | Billing identity | `billing_identity` (one per organization: the servicer and each client; name and SIREN on `organization`) | What invoices, statements and receipts print: legal form and capital, RCS city, registered office, VAT number, liquidation, EI (C. com. R123-237/238; CGI ann. II 242 nonies A 1°–2°). M2c-2 |
+| Paramètres de facturation | Billing settings | `servicer_billing_settings` | Invoice prefix, own account for due invoices, VAT on debits, penalty text, bank cut-offs. M2c-2 |
+| Client professionnel établi en France métropolitaine | Professional client in mainland France | `billing_identity.is_professional`, `established_in.mainland_france` (from the registered office's postcode; not 97x/98x) | The only clients served until other VAT and invoice rules are built (founder #13, OQ-42). M2c-2 |
+| Compte de reversement du mandant | Client payout account | `client_payout_account` (IBAN and holder as on the client's RIB; `proposed → active → retired`, `returned`, `rejected`) | Confirmed by a second person: the client's administrator at aal2 or another servicer admin (founder #10). A court-appointed account (liquidator) only by a second admin. Its IBAN reads credits as `client_transfer_in`. M2c-2 |
+| Document du client | Client document | `document(kind = payout_rib \| mandate_document \| client_status_evidence)`, bucket `documents` at `client/<servicer>/<client>/…` | The RIB, the signed mandate or an amendment, the evidence of an event. M2c-2 |
+| Événement du client | Client status event | `client_status_event` (proceeding opened, liquidation, death, guardianship, mandate ended) | Append-only, with evidence; effects on payouts come with the runs (OQ-41). M2c-2 |
 
 ### 1.2 Claims and contracts
 
@@ -86,7 +92,7 @@ Contents: [1. Glossary](#1-glossary-fr--en) · [2. Conventions](#2-modelling-con
 | Anatocisme / capitalisation | Capitalisation of interest | rule-pack `capitalisation` | INT-04, INT-06 |
 | Décompte | Itemised statement of account | `statement` (engine output) | Used in letters, portal, bailiff files |
 | Imputation des paiements | Payment allocation | `allocation_order` (rule pack), `ledger_entry(entry_type = allocation)`, one entry per (payment, account) | INT-09; ADR-0013 |
-| Quittance | Receipt | `receipt` | CPCE-07 |
+| Quittance | Receipt | `receipt` | CPCE-07; template `quittance-fr-3` (M2c-2) adds the issuer block (SIREN, RCS, registered office, legal form and capital; C. com. R123-237/238); a stored receipt keeps its template and bytes |
 | Reversement | Remittance to the client | `remittance_run` | CPCE-08 |
 | Compte dédié aux fonds de tiers | Client money account | `bank_account(purpose = client_funds)`, book `client_money_cash` (5120) | CPCE-02; ADR-0013; one active per currency (founder #14, not the law; M2c-1); an IBAN has one purpose only |
 | Compte propre du cabinet | Servicer's own bank account | `bank_account(purpose = own)`, book `own_cash` (5122: the movements the dedicated account shows, not the own account's balance) | M2c-1, ADR-0014; statements not imported |
@@ -252,18 +258,67 @@ erDiagram
         text mandate_type "mandate_amicable|servicing_agreement"
         uuid signed_document_id FK
         date signed_on
-        text insurance_terms "R124-3"
+        text insurance_clause_ref "R124-3 2° (M2c-2)"
     }
     mandate_terms {
-        uuid mandate_id FK
-        date valid_from
+        uuid mandate_id FK "ON DELETE RESTRICT (M2c-2)"
+        date valid_from "never before today for a new version"
         date valid_to
-        numeric commission_rate
+        numeric commission_rate "superseded by commission_schedule"
         int remittance_max_days "R124-6 default 30"
         jsonb plan_envelope "max duration, min instalment"
         jsonb settlement_authority "max discount"
+        jsonb commission_schedule "commission-1 (R124-3 3°)"
+        text commission_clause_ref
+        jsonb remittance_terms "remittance-1 (R124-3 4°)"
+        text remittance_clause_ref
+        uuid document_id FK "signed mandate or amendment"
+        text schedule_sha256
+    }
+    organization ||--o| billing_identity : "is billed as"
+    organization ||--o| servicer_billing_settings : "bills with (servicer)"
+    organization ||--o{ client_payout_account : "is paid on (client)"
+    organization ||--o{ client_status_event : "goes through (client)"
+    billing_identity {
+        uuid organization_id PK
+        text legal_form "SNC|SCS|SARL|SA|SA_DIRECTOIRE|SAS|SCA|SE|EI|OTHER"
+        bigint share_capital_minor
+        text rcs_city
+        jsonb registered_office "line1, line2, postcode, city, country"
+        jsonb billing_address
+        text vat_number "FR key = (12 + 3 x (SIREN mod 97)) mod 97"
+        bool is_professional
+        jsonb established_in "derived: country, mainland_france"
+        bool in_liquidation
+        bool entrepreneur_individuel "derived from legal_form"
+        text invoice_acceptance_ref "CGI 289 VI"
+        int version "compare and set"
+    }
+    client_payout_account {
+        uuid id PK
+        uuid client_organization_id FK
+        char currency
+        text iban
+        text holder_name "as on the RIB"
+        uuid evidence_document_id FK "the RIB"
+        text kind "client|court_appointed"
+        text status "proposed|active|returned|retired|rejected"
+        uuid proposed_by
+        uuid confirmed_by "never the proposer"
+        text confirmed_via "client_portal|second_admin"
     }
 ```
+
+Mandate terms (M2c-2, design §6.1, §8.1–§8.2): each version holds the commission schedule (`commission-1`: basis, rules
+flat / marginal / bracket, minimum per file) and the remittance terms (`remittance-1`: frequency, netting and claw-back
+clauses, payment term of a due invoice ≤ 45 days, hold-back reserved), each with its clause reference, and the signed
+document. A version in force never changes (only its end may move, never into the past) and is never deleted; a new one
+starts today at the earliest and ends the one in force that day (`set_mandate_terms`, compare and set on the latest
+version). Validators in SQL (`private.commission_schedule_error`, `private.remittance_terms_error`) and Python
+(`collectoo_worker.remittance.terms`, pydantic) agree on 5,000 generated cases each. Versions written before M2c-2 were
+back-filled with one flat rule at their rate and no clause references: they read « incomplete » until new terms are set.
+A boarding batch is confirmed only when the version in force is complete, both billing identities are complete, the
+client is a professional established in mainland France and its accounts are in EUR (`private.batch_confirmation_blockers`).
 
 ### 3.2 Parties and contacts
 

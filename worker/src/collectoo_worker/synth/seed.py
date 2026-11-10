@@ -7,6 +7,8 @@ Users log in with an email code (Mailpit locally). Emails use the reserved `.tes
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import random
 import uuid
 from collections.abc import Iterable, Sequence
@@ -15,7 +17,7 @@ from decimal import Decimal
 
 from faker import Faker
 
-from collectoo_worker.synth.ids import siren, siret
+from collectoo_worker.synth.ids import fr_vat_number, siren, siret
 
 NS = uuid.UUID("6f1c5a52-6f1e-4c39-9a3c-0c0ffee0c011")
 SERVICER = "Collectoo"
@@ -23,6 +25,89 @@ CLIENTS = (
     ("martin", "Fournitures Martin SARL", "b2b_invoice", "commercial_b2b", "Factures 2026"),
     ("lilas", "Foncière des Lilas", "rent", "civil", "Loyers impayés"),
 )
+# M2c-2: billing identities (synthetic addresses) and the money terms of each mandate (design
+# §7.2's synthetic terms: Martin 15 % flat, netting and claw-back clauses; Lilas 10 % up to
+# 5 000,00 € collected per file then 6 %, 30,00 € minimum per file, a netting clause only). The
+# clause references are the synthetic mandates'.
+SERVICER_OFFICE = {
+    "line1": "10 rue de la Bourse",
+    "postcode": "75002",
+    "city": "Paris",
+    "country": "FR",
+}
+CLIENT_OFFICE = {
+    "martin": {
+        "line1": "12 rue des Artisans",
+        "postcode": "69003",
+        "city": "Lyon",
+        "country": "FR",
+    },
+    "lilas": {"line1": "8 avenue des Lilas", "postcode": "75019", "city": "Paris", "country": "FR"},
+}
+_BASIS = {
+    "families": "all",
+    "forwards": {
+        "file_recalled": False,
+        "before_servicing_start": False,
+        "client_ratification": False,
+    },
+    "on_reversal": "credit",
+}
+SCHEDULES: dict[str, dict[str, object]] = {
+    "martin": {
+        "schema": "commission-1",
+        "basis": _BASIS,
+        "rules": [
+            {
+                "id": "tout",
+                "tier_key": "tout",
+                "label_fr": "Toutes créances",
+                "match": {},
+                "rate": {"kind": "flat", "rate": "0.15"},
+            }
+        ],
+    },
+    "lilas": {
+        "schema": "commission-1",
+        "basis": _BASIS,
+        "rules": [
+            {
+                "id": "loyers",
+                "tier_key": "loyers",
+                "label_fr": "Loyers et charges",
+                "match": {},
+                "rate": {
+                    "kind": "marginal",
+                    "tiers": [
+                        {"up_to_minor": "500000", "rate": "0.10"},
+                        {"up_to_minor": None, "rate": "0.06"},
+                    ],
+                },
+                "min_per_file_minor": "3000",
+            }
+        ],
+    },
+}
+REMITTANCE: dict[str, dict[str, object]] = {
+    "martin": {
+        "schema": "remittance-1",
+        "frequency": "twice_monthly",
+        "netting": {"clause_ref": "art. 7.2"},
+        "clawback": {"clause_ref": "art. 7.4"},
+        "invoice_payment_days": 30,
+    },
+    "lilas": {
+        "schema": "remittance-1",
+        "frequency": "twice_monthly",
+        "netting": {"clause_ref": "art. 6.3"},
+        "clawback": None,
+        "invoice_payment_days": 30,
+    },
+}
+CLAUSES = {  # (R124-3 2°, 3°, 4°)
+    "martin": ("art. 9 — Garantie", "art. 6 — Rémunération", "art. 7 — Reversements"),
+    "lilas": ("art. 8 — Garantie", "art. 5 — Rémunération", "art. 6 — Reversements"),
+}
 USERS = (
     ("admin@collectoo.test", None, "admin"),
     ("ops@collectoo.test", None, "ops_manager"),
@@ -76,8 +161,12 @@ def seed_sql(seed: int = 1, accounts_per_client: int = 125) -> str:
         "",
     ]
     servicer = uid("org", "servicer")
+    # its own generator: the clients' and files' draws stay what they were before M2c-2
+    servicer_siren = siren(random.Random(f"servicer-{seed}"))
     out += insert(
-        "public.organization", ["id", "kind", "legal_name"], [[servicer, "servicer", SERVICER]]
+        "public.organization",
+        ["id", "kind", "legal_name", "siren"],
+        [[servicer, "servicer", SERVICER, servicer_siren]],
     )
     out += insert(
         "public.organization",
@@ -87,6 +176,7 @@ def seed_sql(seed: int = 1, accounts_per_client: int = 125) -> str:
             for key, name, *_ in CLIENTS
         ],
     )
+    out += _billing(servicer, servicer_siren)
 
     users = []
     identities = []
@@ -136,6 +226,7 @@ def seed_sql(seed: int = 1, accounts_per_client: int = 125) -> str:
         client = uid("org", key)
         mandate = uid("mandate", key)
         portfolio = uid("portfolio", key)
+        insurance, commission, remittance = CLAUSES[key]
         out += insert(
             "public.mandate",
             [
@@ -145,6 +236,7 @@ def seed_sql(seed: int = 1, accounts_per_client: int = 125) -> str:
                 "reference",
                 "mandate_type",
                 "signed_on",
+                "insurance_clause_ref",
             ],
             [
                 [
@@ -154,19 +246,36 @@ def seed_sql(seed: int = 1, accounts_per_client: int = 125) -> str:
                     f"MAND-{key.upper()}-2026",
                     "mandate_amicable",
                     "2026-01-15",
+                    insurance,
                 ]
             ],
         )
         out += insert(
             "public.mandate_terms",
-            ["mandate_id", "valid_from", "commission_rate", "remittance_max_days", "plan_envelope"],
+            [
+                "mandate_id",
+                "valid_from",
+                "commission_rate",
+                "remittance_max_days",
+                "plan_envelope",
+                "commission_schedule",
+                "commission_clause_ref",
+                "remittance_terms",
+                "remittance_clause_ref",
+                "document_id",
+            ],
             [
                 [
                     mandate,
                     "2026-01-15",
-                    Decimal("0.1500"),
+                    Decimal("0.1500") if key == "martin" else None,
                     30,
                     '{"max_months": 12, "min_instalment_minor": 3000}',
+                    json.dumps(SCHEDULES[key], ensure_ascii=False),
+                    commission,
+                    json.dumps(REMITTANCE[key], ensure_ascii=False),
+                    remittance,
+                    uid("document", "mandate", key),
                 ]
             ],
         )
@@ -190,6 +299,62 @@ def seed_sql(seed: int = 1, accounts_per_client: int = 125) -> str:
         "",
     ]
     return "\n".join(out)
+
+
+def _billing(servicer: str, servicer_siren: str) -> list[str]:
+    """M2c-2: the billing identities (servicer and clients) and each client's signed mandate (a
+    synthetic document row: no file is stored for it)."""
+    office = json.dumps(SERVICER_OFFICE, ensure_ascii=False)
+    rows: list[list[object]] = [
+        [servicer, "SAS", 1_000_000, "Paris", office, fr_vat_number(servicer_siren), True]
+    ]
+    docs: list[list[object]] = []
+    for key, *_ in CLIENTS:
+        client = uid("org", key)
+        address = json.dumps(CLIENT_OFFICE[key], ensure_ascii=False)
+        rows.append([client, None, None, None, address, None, True])
+        doc = uid("document", "mandate", key)
+        docs.append(
+            [
+                doc,
+                servicer,
+                client,
+                "mandate_document",
+                "documents",
+                f"client/{servicer}/{client}/{doc}.pdf",
+                hashlib.sha256(f"synthetic mandate {key}".encode()).hexdigest(),
+                "application/pdf",
+                f"MAND-{key.upper()}-2026.pdf",
+            ]
+        )
+    out = insert(
+        "public.billing_identity",
+        [
+            "organization_id",
+            "legal_form",
+            "share_capital_minor",
+            "rcs_city",
+            "registered_office",
+            "vat_number",
+            "is_professional",
+        ],
+        rows,
+    )
+    return out + insert(
+        "public.document",
+        [
+            "id",
+            "organization_id",
+            "client_organization_id",
+            "kind",
+            "storage_bucket",
+            "storage_path",
+            "sha256",
+            "mime_type",
+            "file_name",
+        ],
+        docs,
+    )
 
 
 def _accounts(fake: Faker, rng: random.Random, ctx: ClientCtx, n: int) -> list[str]:

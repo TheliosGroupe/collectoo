@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { ActionForm } from "@/components/action-form";
 import { Badge, InfoNote, Section, Stats, dangerButtonClass, inlineButtonClass, inputClass } from "@/components/ui";
 import { formatPct, mappingField } from "@/lib/boarding/forms";
@@ -5,6 +6,7 @@ import { columnIssuesLabel, readProfile, typeLabel, type FileProfile } from "@/l
 import { issueLabel, statusLabel } from "@/lib/boarding/status";
 import { targetGroups, targetLabel } from "@/lib/boarding/targets";
 import { formatMoneyFr } from "@/lib/money";
+import { READINESS_LABEL } from "@/lib/remittance/terms";
 import { abandonBatch, approveMapping, commitBatch, confirmBatch, rollbackBatch } from "./actions";
 
 // --- Types of the JSON written by the worker (worker/src/collectoo_worker/boarding) ---------------
@@ -584,12 +586,17 @@ export function IntegrationSection({
   report,
   openingPlan,
   openingSummary,
+  readiness = [],
+  clientId = null,
 }: {
   batchId: string;
   status: string;
   report: DqReport | null;
   openingPlan: OpeningTotals | null;
   openingSummary: { entries: number; totals: OpeningTotals } | null;
+  /** M2c-2: why the portfolio cannot be confirmed yet (design §9.1; empty: ready). */
+  readiness?: string[];
+  clientId?: string | null;
 }) {
   const hidden = <input type="hidden" name="batch_id" value={batchId} />;
   const staged = report?.staging?.entities ?? {};
@@ -659,8 +666,23 @@ export function IntegrationSection({
             Annulez l&apos;intégration, puis déposez à nouveau le fichier dans un nouveau lot.
           </InfoNote>
         )}
+        {openingPlan && readiness.length > 0 ? (
+          <div className="mt-4 flex flex-col gap-2" data-testid="batch-readiness">
+            <p className="text-sm font-medium">Avant de confirmer, complétez :</p>
+            <ul className="list-disc pl-5 text-sm">
+              {readiness.map((r) => (
+                <li key={r}>{READINESS_LABEL[r] ?? r}</li>
+              ))}
+            </ul>
+            {clientId ? (
+              <Link href={`/backoffice/clients/${clientId}/reversement`} className="text-sm underline underline-offset-4">
+                Identité et conditions du client
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
         <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-end">
-          {openingPlan ? (
+          {openingPlan && readiness.length === 0 ? (
             <ActionForm action={confirmBatch} submitLabel="Confirmer le lot" pendingLabel="Confirmation…" buttonClassName={inlineButtonClass}>
               {hidden}
             </ActionForm>

@@ -4,7 +4,9 @@ current version; the payload's amounts are the ledger's postings; the stored PDF
 receipt row names, and regenerating it in another process gives the same bytes; a reversal issues a
 new version, taking the payment off its file a void one; running the job again issues nothing; the
 migration's backfill covers allocations made before receipts existed. The client feed shows what
-was allocated or held, amounts from the postings, and records its delivery."""
+was allocated or held, amounts from the postings, and records its delivery. M2c-2: new versions
+carry the servicer's issuer block (template quittance-fr-3, C. com. R123-237/238); a new or changed
+identity alone issues no version, so stored receipts keep their bytes."""
 
 import hashlib
 import json
@@ -38,7 +40,8 @@ from collectoo_worker.payments.receipt_pdf import render_receipt
 from collectoo_worker.payments.receipts import ReceiptDocument
 row = json.load(sys.stdin)
 doc = ReceiptDocument(row["number"], row["version"], row["kind"],
-                      datetime.fromisoformat(row["known_at"]), row["payload"])
+                      datetime.fromisoformat(row["known_at"]), row["payload"],
+                      row["template_version"])
 print(hashlib.sha256(render_receipt(doc)).hexdigest())
 """
 
@@ -106,6 +109,7 @@ def _regenerate(receipt: dict[str, Any]) -> str:
         "kind": receipt["kind"],
         "known_at": receipt["known_at"].isoformat(),
         "payload": receipt["payload"],
+        "template_version": receipt["template_version"],  # a stored receipt keeps its template
     }
     out = subprocess.run(  # noqa: S603 - our interpreter, our code
         [sys.executable, "-c", REGENERATE],
@@ -517,3 +521,68 @@ def test_a_held_payment_gets_its_receipt_and_the_client_reads_the_feed() -> None
     stranger = make_tenant()
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         feed(stranger["user"], tenant["client"])
+
+
+def _set_servicer_identity(tenant: dict[str, Any], city: str) -> None:
+    """The servicer's billing identity (synthetic SIREN 849 678 297), its registered office in
+    `city`: what receipts print from M2c-2 on."""
+    office = {"line1": "10 rue de la Bourse", "postcode": "75002", "city": city, "country": "FR"}
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            "update public.organization set siren = '849678297' where id = %s",
+            (tenant["servicer"],),
+        )
+        conn.execute(
+            """insert into public.billing_identity (organization_id, legal_form,
+                 share_capital_minor, rcs_city, registered_office, vat_number, is_professional)
+               values (%s, 'SAS', 1000000, 'Paris', %s, 'FR33849678297', true)
+               on conflict (organization_id) do update
+               set registered_office = excluded.registered_office""",
+            (tenant["servicer"], Jsonb(office)),
+        )
+
+
+def test_new_versions_carry_the_issuer_block_and_an_identity_alone_issues_none() -> None:
+    tenant = bank_tenant()
+    a, _ = _files(tenant)
+    store = storage()
+    # a receipt issued before the servicer had a billing identity: its name only
+    p = statement(tenant, store, [credit(30_000, "REGLT", rf=a.rf)], "IS", DAY, receipts=True)[
+        line_ref("IS", 1)
+    ]
+    (v1,) = _receipts(p)
+    assert set(v1["payload"]["issuer"]) == {"name"}
+
+    # the identity alone (as at the M2c-2 migration): the job issues nothing, the PDF stays
+    _set_servicer_identity(tenant, "Paris")
+    _queue_receipts(tenant, p)
+    drain_payments(store, receipts=True)
+    assert _receipts(p) == [v1]
+    assert _regenerate(v1) == v1["pdf_sha256"]
+
+    # what the receipt says about the payment changes: the new version carries the block
+    with psycopg.connect(DB) as conn:
+        entries = [
+            r[0]
+            for r in conn.execute(
+                "select id::text from public.ledger_entry where payment_id = %s", (p,)
+            ).fetchall()
+        ]
+    ops(tenant, "select public.reverse_allocation(%s, %s, %s, %s::uuid[], %s)",
+        str(uuid.uuid4()), p, a.id, entries, "erreur")  # fmt: skip
+    drain_payments(store, receipts=True)
+    _, v2 = _receipts(p)
+    assert (v2["version"], v2["template_version"]) == (2, "quittance-fr-3")
+    issuer = v2["payload"]["issuer"]
+    assert (issuer["siren"], issuer["rcs_city"], issuer["legal_form"]) == (
+        "849678297",
+        "Paris",
+        "SAS",
+    )
+    assert issuer["registered_office"]["city"] == "Paris"
+    assert _regenerate(v2) == v2["pdf_sha256"]
+    # a later change of the registered office alone issues nothing either
+    _set_servicer_identity(tenant, "Lyon")
+    _queue_receipts(tenant, p)
+    drain_payments(store, receipts=True)
+    assert len(_receipts(p)) == 2

@@ -1,0 +1,90 @@
+{
+  "$defs": {
+    "Clause": {
+      "additionalProperties": false,
+      "properties": {
+        "clause_ref": {
+          "title": "Clause Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "clause_ref"
+      ],
+      "title": "Clause",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "`remittance-1` (design §8.2): R124-3 4°; the delay itself is\nmandate_terms.remittance_max_days (1..30, the one source).",
+  "properties": {
+    "clawback": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Clause"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "frequency": {
+      "enum": [
+        "twice_monthly",
+        "weekly"
+      ],
+      "title": "Frequency",
+      "type": "string"
+    },
+    "holdback": {
+      "items": {},
+      "maxItems": 0,
+      "title": "Holdback",
+      "type": "array"
+    },
+    "invoice_payment_days": {
+      "maximum": 45,
+      "minimum": 0,
+      "title": "Invoice Payment Days",
+      "type": "integer"
+    },
+    "netting": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Clause"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema": {
+      "const": "remittance-1",
+      "title": "Schema",
+      "type": "string"
+    },
+    "weekday": {
+      "anyOf": [
+        {
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Weekday"
+    }
+  },
+  "required": [
+    "schema",
+    "frequency",
+    "netting",
+    "clawback",
+    "invoice_payment_days"
+  ],
+  "title": "Conditions de reversement (remittance-1)",
+  "type": "object"
+}

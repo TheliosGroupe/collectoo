@@ -1,14 +1,19 @@
 """M2-07 scale: a synthetic camt.053 statement of 50,000 lines (STATEMENT_LINES to change it;
 100,000 measured locally, docs/benchmarks/payments.md) imported by the payments job in one
 transaction: set-based SQL, one cash_in per statement day (a few entries instead of 50k), then the
-same file's lines again in another file (nothing new, ledger unchanged)."""
+same file's lines again in another file (nothing new, ledger unchanged). The servicer has 5,000
+clients with a confirmed payout IBAN (CLIENT_IBANS): every credit is checked against them, in one
+join (M2c-2 review: a list scan per line took 8 s for 50k lines by 5k IBANs)."""
 
 import logging
 import os
+import random
 import time
+import uuid
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
@@ -22,9 +27,11 @@ from collectoo_worker.synth.camt053 import (
     make_doc,
     render_camt053,
 )
+from collectoo_worker.synth.ids import iban_fr
 
 pytestmark = pytest.mark.integration
 LINES = int(os.environ.get("STATEMENT_LINES", "50000"))
+CLIENT_IBANS = int(os.environ.get("CLIENT_IBANS", "5000"))
 DAYS = 5
 
 
@@ -55,6 +62,45 @@ def _empty_stage_statistics(conn: psycopg.Connection) -> None:
     assert stats is not None and stats[0] == 0 and stats[1] > 0, stats
 
 
+def _confirmed_client_ibans(tenant: dict[str, Any], n: int) -> None:
+    """`n` clients of the servicer, each with a confirmed payout IBAN (proposed by the ops manager,
+    confirmed by another person), written set-based as the commands leave them."""
+    rng = random.Random(f"clients-{tenant['servicer']}")
+    ibans = sorted({iban_fr(rng) for _ in range(n)})
+    clients = [uuid.uuid4() for _ in ibans]
+    docs = [uuid.uuid4() for _ in ibans]
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            """insert into public.organization (id, kind, servicer_organization_id, legal_name)
+               select c, 'creditor_client', %s, 'Client ' || n
+               from unnest(%s::uuid[]) with ordinality x (c, n)""",
+            (tenant["servicer"], clients),
+        )
+        conn.execute(
+            """insert into public.document (id, organization_id, client_organization_id, kind,
+                 storage_bucket, storage_path, sha256, mime_type, file_name)
+               select d, %s, c, 'payout_rib', 'documents',
+                      'client/' || %s || '/' || c || '/' || d || '.pdf', repeat('a', 64),
+                      'application/pdf', 'RIB.pdf'
+               from unnest(%s::uuid[], %s::uuid[]) x (c, d)""",
+            (tenant["servicer"], tenant["servicer"], clients, docs),
+        )
+        conn.execute(
+            """insert into public.client_payout_account (organization_id, client_organization_id,
+                 currency, iban, holder_name, evidence_document_id, proposed_by)
+               select %s, c, 'EUR', i, 'CLIENT', d, %s
+               from unnest(%s::uuid[], %s::uuid[], %s::text[]) x (c, d, i)""",
+            (tenant["servicer"], tenant["staff"], clients, docs, ibans),
+        )
+        conn.execute(
+            """update public.client_payout_account
+               set status = 'active', confirmed_by = %s, confirmed_at = now(),
+                   confirmed_via = 'second_admin'
+               where organization_id = %s and status = 'proposed'""",
+            (tenant["user"], tenant["servicer"]),
+        )
+
+
 def test_import_a_large_statement(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="collectoo.payments")
     with psycopg.connect(DB, autocommit=True) as conn:
@@ -69,6 +115,7 @@ def test_import_a_large_statement(tmp_path: Path, caplog: pytest.LogCaptureFixtu
 
 def _import_a_large_statement(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     tenant = bank_tenant()
+    _confirmed_client_ibans(tenant, CLIENT_IBANS)
     store = storage()
     entries = generate_entries(LINES, seed=21, start=START, days=DAYS)
     doc = make_doc(
@@ -88,11 +135,13 @@ def _import_a_large_statement(tmp_path: Path, caplog: pytest.LogCaptureFixture) 
     s = statement(target["statement_id"])
     state = money_state(tenant["bank"])
     print(
-        f"\n{len(expected)}-line camt.053 ({len(data) / 1e6:.0f} MB): parse alone {parse_s:.1f}s;"
+        f"\n{len(expected)}-line camt.053 ({len(data) / 1e6:.0f} MB), {CLIENT_IBANS} client IBANs:"
+        f" parse alone {parse_s:.1f}s;"
         f" import job {job_s:.1f}s ({_timings(caplog)}); payments={state['payments']},"
         f" cash_in entries={state['cash_entries']}"
     )
     assert s["status"] == "imported", s
+    assert s["counts"]["client_transfers_in"] == 0  # none of the synthetic payers is a client
     assert len(parsed.lines) == len(expected) == s["counts"]["new_lines"] >= LINES
     by_day = paid_by_day(expected)
     assert state["payments_minor"] == sum(by_day.values())

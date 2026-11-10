@@ -5,8 +5,20 @@ select plan(47);
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
   ('00000000-0000-0000-0000-00000000000a', 'servicer', 'Collectoo');
-insert into public.organization (id, kind, servicer_organization_id, legal_name) values
-  ('00000000-0000-0000-0000-0000000000a1', 'creditor_client', '00000000-0000-0000-0000-00000000000a', 'Client A');
+insert into public.organization (id, kind, servicer_organization_id, legal_name, siren) values
+  ('00000000-0000-0000-0000-0000000000a1', 'creditor_client', '00000000-0000-0000-0000-00000000000a', 'Client A',
+   '552100554');
+update public.organization set siren = '732829320' where id = '00000000-0000-0000-0000-00000000000a';
+-- M2c-2: confirmation needs both billing identities and complete money terms (design §9.1).
+insert into public.billing_identity (organization_id, legal_form, share_capital_minor, rcs_city, registered_office,
+                                     vat_number, is_professional) values
+  ('00000000-0000-0000-0000-00000000000a', 'SAS', 1000000, 'Paris',
+   '{"line1": "1 rue de la Paix", "postcode": "75002", "city": "Paris", "country": "FR"}', 'FR44732829320', true),
+  ('00000000-0000-0000-0000-0000000000a1', null, null, null,
+   '{"line1": "2 rue Neuve", "postcode": "69001", "city": "Lyon", "country": "FR"}', null, true);
+insert into public.document (id, organization_id, client_organization_id, kind, storage_path, sha256, mime_type) values
+  ('7d000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-0000000000a1',
+   'mandate_document', 'client/test/mandate.pdf', repeat('a', 64), 'application/pdf');
 insert into auth.users (id, email, aud, role) values
   ('10000000-0000-0000-0000-000000000001', 'ops@s.test', 'authenticated', 'authenticated'),
   ('10000000-0000-0000-0000-000000000003', 'admin@a.test', 'authenticated', 'authenticated');
@@ -18,9 +30,13 @@ insert into public.mandate (id, organization_id, client_organization_id, referen
    'M-1', 'mandate_amicable', '2026-01-01'),
   ('70000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-0000000000a1',
    'M-2', 'mandate_amicable', '2026-01-01');
-insert into public.mandate_terms (mandate_id, valid_from, commission_rate) values
-  ('70000000-0000-0000-0000-000000000001', '2026-01-01', 0.15),
-  ('70000000-0000-0000-0000-000000000002', '2026-01-01', 0.15);
+update public.mandate set insurance_clause_ref = 'art. 9' where organization_id = '00000000-0000-0000-0000-00000000000a';
+insert into public.mandate_terms (mandate_id, valid_from, commission_rate, commission_schedule, commission_clause_ref,
+                                  remittance_terms, remittance_clause_ref, document_id)
+select m, '2026-01-01', null, private.legacy_commission_schedule(0.15), 'art. 6',
+       '{"schema": "remittance-1", "frequency": "twice_monthly", "netting": {"clause_ref": "art. 7.2"},
+         "clawback": null, "invoice_payment_days": 30}', 'art. 7', '7d000000-0000-0000-0000-000000000001'
+from unnest(array['70000000-0000-0000-0000-000000000001', '70000000-0000-0000-0000-000000000002']::uuid[]) m;
 insert into public.portfolio (id, organization_id, client_organization_id, name, mandate_id) values
   ('20000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-0000000000a1',
    'A', '70000000-0000-0000-0000-000000000001'),

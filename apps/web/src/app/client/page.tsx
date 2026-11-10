@@ -37,6 +37,15 @@ export default async function ClientPage() {
           Paiements reçus
         </Link>
       </section>
+      <section className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+        <h2 className="font-medium">Mandat et reversements</h2>
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+          Les conditions de votre mandat et le compte sur lequel le cabinet vous reverse vos encaissements.
+        </p>
+        <Link href="/client/mandat" className="mt-2 inline-block text-sm font-medium underline underline-offset-4" data-testid="client-mandate-link">
+          Mandat et reversements
+        </Link>
+      </section>
       <LogoutButton />
     </Page>
   );

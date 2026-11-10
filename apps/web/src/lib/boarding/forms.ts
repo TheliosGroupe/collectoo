@@ -124,6 +124,45 @@ export type ErrorCode =
   | "top_up_differs"
   | "not_a_loss"
   | "booking_refused"
+  // M2c-2: identities, payout accounts, client documents and events, money terms, the confirmation gate
+  | "changed_since_read"
+  | "legal_name_required"
+  | "siren_invalid"
+  | "address_invalid"
+  | "capital_invalid"
+  | "vat_mismatch"
+  | "servicer_identity_incomplete"
+  | "text_too_long"
+  | "settings_own_account"
+  | "cutoff_invalid"
+  | "prefix_invalid"
+  | "own_account_in_settings"
+  | "document_invalid"
+  | "document_not_uploaded"
+  | "rib_required"
+  | "holder_required"
+  | "payout_pending"
+  | "payout_own_iban"
+  | "payout_other_client"
+  | "payout_not_pending"
+  | "payout_same_person"
+  | "payout_iban_mismatch"
+  | "payout_not_current"
+  | "event_future"
+  | "evidence_required"
+  | "court_account_only"
+  | "terms_past"
+  | "terms_start_taken"
+  | "schedule_json"
+  | "schedule_invalid"
+  | "terms_invalid"
+  | "clauses_required"
+  | "terms_document_required"
+  | "claim_type_unknown"
+  | "portfolio_other_mandate"
+  | "max_days_invalid"
+  | "clause_required"
+  | "not_ready"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -228,6 +267,49 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Ce crédit porte la référence d'un approvisionnement d'un autre montant ou d'un autre compte : annulez l'approvisionnement demandé, puis comptabilisez le crédit.",
   not_a_loss: "Ce retour ne dépasse pas ce qui reste du paiement : liez-le au paiement (retour total ou partiel).",
   booking_refused: "Cette comptabilisation n'est pas possible pour cette ligne : vérifiez-la et rechargez la page.",
+  changed_since_read: "Les données ont changé depuis leur affichage : rechargez la page et recommencez.",
+  legal_name_required: "La raison sociale est obligatoire (200 caractères au plus).",
+  siren_invalid: "SIREN invalide : 9 chiffres.",
+  address_invalid: "Adresse invalide : ligne d'adresse, code postal (5 chiffres en France), ville et pays.",
+  capital_invalid: "Capital social invalide : un montant positif en euros.",
+  vat_mismatch: "Le numéro de TVA intracommunautaire ne correspond pas au SIREN.",
+  servicer_identity_incomplete:
+    "L'identité du cabinet s'enregistre complète : SIREN, forme juridique, capital (SARL, SA, SAS…), ville du RCS, numéro de TVA, professionnel.",
+  text_too_long: "Un texte est trop long.",
+  settings_own_account: "Les factures se règlent sur un compte propre actif du cabinet, jamais sur le compte dédié.",
+  cutoff_invalid: "Heure limite invalide : HH:MM, pour un compte de fonds de tiers.",
+  prefix_invalid: "Le préfixe des factures compte 2 à 6 lettres majuscules.",
+  own_account_in_settings:
+    "Ce compte propre reçoit le paiement des factures (paramètres de facturation) : choisissez-en un autre d'abord.",
+  document_invalid: "Fichier refusé : PDF, PNG ou JPEG, avec un nom de fichier simple.",
+  document_not_uploaded: "Le fichier n'a pas été envoyé. Réessayez.",
+  rib_required: "Le RIB du client (document « RIB » de ce client) est obligatoire.",
+  holder_required: "Le titulaire, tel qu'il figure sur le RIB, est obligatoire (70 caractères au plus).",
+  payout_pending: "Un IBAN attend déjà sa confirmation pour ce client et cette devise : confirmez-le ou refusez-le d'abord.",
+  payout_own_iban: "Cet IBAN est l'un des comptes bancaires du cabinet.",
+  payout_other_client: "Cet IBAN est déjà le compte de reversement d'un autre client.",
+  payout_not_pending: "Cet IBAN n'attend plus de confirmation. Rechargez la page.",
+  payout_same_person: "Vous avez proposé cet IBAN : une autre personne doit le confirmer.",
+  payout_iban_mismatch: "L'IBAN saisi n'est pas celui proposé : vérifiez le RIB et refusez la proposition si elle est fausse.",
+  payout_not_current: "Ce compte n'est plus le compte de reversement en cours. Rechargez la page.",
+  event_future: "La date de l'événement ne peut pas être dans le futur.",
+  evidence_required: "Le justificatif (document « Justificatif » de ce client) est obligatoire.",
+  court_account_only: "Seul le compte d'un mandataire de justice (liquidateur) peut être indiqué ici.",
+  terms_past: "Une nouvelle version commence au plus tôt aujourd'hui : les conditions ne sont jamais rétroactives.",
+  terms_start_taken: "Une version en vigueur commence déjà ce jour-là : choisissez une date à venir.",
+  schedule_json: "Le barème n'est pas un JSON lisible : vérifiez les guillemets, virgules et accolades.",
+  schedule_invalid:
+    "Barème invalide (commission-1) : taux en texte (« 0.15 », 4 décimales au plus, entre 0 et 1), paliers croissants dont seul le dernier est ouvert, identifiants distincts, la dernière règle s'applique à tout.",
+  terms_invalid:
+    "Conditions de reversement invalides (remittance-1) : fréquence bimensuelle ou hebdomadaire (jour 1 à 5), clauses de compensation et de reprise (ou aucune), délai de paiement des factures de 0 à 45 jours.",
+  clauses_required: "Les références des clauses de rémunération et de reversement sont obligatoires (art. R124-3 3° et 4° CPCE).",
+  terms_document_required: "Le mandat signé (document « Mandat » de ce client) est obligatoire.",
+  claim_type_unknown: "Le barème nomme un type de créance inconnu.",
+  portfolio_other_mandate: "Le barème nomme un portefeuille d'un autre mandat.",
+  max_days_invalid: "Le délai de reversement est de 1 à 30 jours (art. R124-6 CPCE).",
+  clause_required: "La référence de la clause est obligatoire (200 caractères au plus).",
+  not_ready:
+    "Le portefeuille n'est pas prêt pour la confirmation : complétez d'abord les éléments listés (identités, conditions du mandat).",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 
@@ -242,6 +324,7 @@ export function commandErrorCode(message: string): ErrorCode {
   if (message.includes("do not reconcile")) return "totals_mismatch";
   if (message.includes("reason is required")) return "reason_required";
   if (message.includes("CPCE R124-3")) return "mandate_missing";
+  if (message.includes("not ready for confirmation")) return "not_ready";
   if (message.includes("same target")) return "duplicate_target";
   if (message.includes("another file with this name")) return "name_taken";
   if (message.includes("only be added to a draft batch") || message.includes("control totals can only change"))

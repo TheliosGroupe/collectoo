@@ -10,8 +10,9 @@ type Step =
   | { kind: "enroll"; factorId: string; qrCode: string; secret: string }
   | { kind: "verify"; factorId: string };
 
-/** TOTP enrolment (first time) or verification (next logins). Staff need aal2 (GDPR art. 32). */
-export function MfaForm() {
+/** TOTP enrolment (first time) or verification (next logins). Staff need aal2 (GDPR art. 32); a client user steps up
+ * to aal2 to confirm a payout IBAN (M2c-2, founder #10). Then back to `target` (a page of the user's own space). */
+export function MfaForm({ target }: { target: string }) {
   const router = useRouter();
   const [step, setStep] = useState<Step>({ kind: "loading" });
   const [error, setError] = useState<string | null>(null);
@@ -54,7 +55,7 @@ export function MfaForm() {
     });
     setBusy(false);
     if (verifyError) return setError("Code incorrect. Vérifiez l'heure de votre téléphone.");
-    router.replace("/backoffice");
+    router.replace(target);
     router.refresh();
   }
 
