@@ -1,7 +1,7 @@
 # Remittances benchmarks (M2c)
 
-Targets: design `docs/design/m2c-remittances.md` §19. Each slice adds its section; runs, approvals, documents and
-transfer files come with M2c-2 … M2c-7.
+Targets: design `docs/design/m2c-remittances.md` §19. Each slice adds its section; documents and
+transfer files come with M2c-5 … M2c-7.
 
 ## Funds ledger (M2c-1, migration `20261111090000`)
 
@@ -89,3 +89,112 @@ of each mandate; case 2 + history: every (file, tier key) with a prior state. `c
   change of VAT rate): case 2 on the same VM, three runs each, interleaved: the second-review engine 2.75–3.18 s and
   documents 1.05–1.22 s, now 2.86–3.16 s and 1.11–1.38 s — no measurable change (one more O(n) pass over the run).
 
+
+## Runs and invoices (M2c-4, migration `20261112090000`)
+
+`worker/tests/test_remittance_scale_integration.py` (CI `scale` job): 50,000 files boarded from the synthetic EU loan
+tape, a statement paying each by its RF reference imported, matched and allocated (the payments queue), then one run
+of the client: « Préparer maintenant » (the command: the draft created and its 50,000 items reserved under the
+allocation lock), the prepare job, the approval command and its job, the nightly checks. The remittance tables are
+never analysed (their statistics forgotten before the run). Cloud session VM, 2026-11-10, local stack.
+
+| Step | Volume | Measured | Design §19 target |
+|---|---|---|---|
+| « Préparer maintenant » (reserve under the allocation lock, the command) | 50,000 items | **1.34 s** | < 1 s |
+| Prepare job: load the facts | 50,000 lines | 3.06 s | ≈ 1 s |
+| Prepare job: deadlines, commission, documents, settlement plan (pure Python) | 50,000 lines | 4.61 s | ≈ 0.5 s (1.5–2.6 s measured in M2c-3) |
+| Prepare job: COPY of the draft lines + header (its checks) | 50,000 lines | 2.28 s | ≈ 0.5 s |
+| Approval command (compare and set, queue) | 1 run | **0.02 s** | < 1 s |
+| Approval job (lines frozen, invoice with 50,000 charges, key states, entry, payout) | 50,000 lines | **7.9 s** | 2–4 s, counter held for the numbering only |
+| Nightly checks of the servicer (payments + runs: I14–I18, R124-6) | 50,000 lines | **3.4 s** | < 5 s |
+
+The same at 5,000 items: reserve 0.16 s, prepare 1.0 s (load 0.34, price 0.33, write 0.25), approval job 1.0 s.
+
+- **Above target, accepted for now:** the reservation (1.3 s for 50,000 items: one UPDATE of the pending rows, the
+  allocation lock held for its duration — allocations wait that long, once per run); the prepare job (10 s, outside
+  every lock: the engine's pure-Python cost dominates, as M2c-3 measured; the loading is set-based by keys); the
+  approval job (7.9 s in its own transaction: inserting the 50,000 frozen lines with their per-line guard against the
+  entry's 4670 posting, 50,000 invoice charges and 50,000 key states from the draft's JSON). The invoice counter is
+  locked only from the numbering to the commit (the documents' inserts): other servicers never wait, and a servicer's
+  other runs wait at most that long. A client with 50,000 collections in one fortnight is far above the expected
+  volumes; if needed, the charges and key states can be copied from typed draft tables instead of JSON.
+- The plans rest on keys, not statistics: the draft lines are checked against the items by one keyed probe per item
+  (`remittance_draft_line (run_id, ledger_entry_id)`), the line guard reads each entry's postings by key.
+
+### After the review fixes (2026-11-10, same VM: 4 vCPU, 16 GB RAM, local stack)
+
+The scale test now also cancels the approved run (an admin, the API's 8 s statement timeout; the review's perf#1)
+and times the overview and the nightly checks with the 50,000-line draft waiting. Run alone right after
+`supabase db reset`, as the figures above were:
+
+| Step | Volume | Build | After the fixes | Design §19 target |
+|---|---|---|---|---|
+| « Préparer maintenant » (the command) | 50,000 items | 1.34 s | **1.28 s** | < 1 s |
+| Prepare job: load / price / write | 50,000 lines | 3.06 / 4.61 / 2.28 s | 3.26 / 4.62 / 2.35 s (**10.4 s**) | ≈ 1 + 0.5 + 0.5 s |
+| Overview (« À valider ») with the draft waiting | 50,000 reserved items | — | **0.05 s** | — |
+| Nightly checks with the draft waiting | 50,000 lines | — | 4.4 s | < 5 s |
+| Approval command | 1 run | 0.02 s | 0.04 s | < 1 s |
+| Approval job | 50,000 lines | 7.9 s | **6.3 s** | 2–4 s, counter held for the numbering only |
+| Nightly checks after the approval (payments + runs) | 50,000 lines in flight | 3.4 s | **4.0 s** | < 5 s |
+| Cancellation (the command: credit note with 50,000 allocations, lines released, items back, tier history) | 50,000 lines | — | **3.97 s** | the API's 8 s statement timeout |
+
+- **Cancellation:** 3.97 s at 50,000 lines, half the 8 s timeout. At 5,000 lines it went from 0.95 s on the build to
+  0.40–0.43 s: the line guard became a `WHEN` clause, and the per-row foreign keys that only repeated the run's or the
+  invoice's values became statement-level guards (one keyed lookup per run or pair). No queued job is needed.
+- **The approval job's hold of the allocation lock** (perf#4): the lines, repricings, tier history and charges are now
+  written before the lock. Instrumented at 5,000 lines it holds the lock for 0.09 s in the function plus 0.07 s of
+  checks deferred to the commit, against ≈ 0.80 s before. By linear extrapolation that is ≈ 1.6 s at 50,000 lines
+  (not instrumented at 50k), under the 2 s `lock_timeout` of the M2b commands but close to it. A remittance command
+  that waits longer is refused `allocation_busy` (« réessayez »). The JSON is not the cost (the FK checks and the
+  index work are), so no typed draft tables were added.
+- **Nightly checks:** 3.4 → 4.0 s after the approval. The checks now do more: I21 over the in-flight lines of
+  approved runs (legal#3), files with no terms version on E (legal#2), the unmeetable escalation, and the money
+  waiting on files on the mandate's delay. With the 50,000 items back in the queue after the cancellation (12,018
+  partly allocated payments): `run_payment_checks` 4.6 s, of which `run_remittance_checks` 2.4 s;
+  `private.unallocated_payment_deadlines` takes 1.7 s (0.14 ms a partly allocated payment, keyed whatever the
+  statistics) and `private.pending_item_deadlines` 0.78 s for the 50,000 items. That is under 5 s but close. If it
+  grows, the next step is a set-based `unallocated_payment_deadlines` (one `group by` over the servicer's 4710
+  postings) with fallbacks for missing statistics.
+- **Approval job:** 7.9 → 6.3 s, the same work in a different order (above). Still above the 2–4 s target, in its own
+  transaction; the counter is still locked only from the numbering to the commit.
+
+**The CI `scale` job's command** (`RECEIPT_FILES=5000`, every `*scale_integration.py` in one pytest run after
+`supabase db reset`, the remittance test at 50,000), on the merged review fixes: 5 passed and 1 failed in 987 s
+(16 min 27 s; the CI job's budget is 30 min). The failure was the M2b allocation test. It paid its files on fixed
+dates from 2026-10-05 under a mandate that has terms, and nothing remits them. Since legal#2 those collections are
+held to one month, so on 2026-11-10 they were a real `remittance_deadline_breached`. The test now dates its
+payments and returns a few business days back and keeps `violations == 0`. Run again alone: passed in 259 s
+(allocation 80.8 s, 1,000 returns 29.4 s, nightly checks over 50,000 payments 4.7 s with no code; 1.8 s in M2c-1,
+before the remittance checks: `run_remittance_checks` 2.3 s of 4.5 s, `unallocated_payment_deadlines` 1.6 s over
+11,715 partly allocated payments). In the CI-order run, the database already holding the allocation and matching
+tests' 50,000-file tenants and the receipts test's 5,000, the remittance test measured: reserve 1.33 s, prepare 12.1 s (4.07 / 5.44 / 2.37), approval job 6.7 s, nightly checks
+5.7 s (6.5 s with the draft waiting; over the 5 s target in that crowded state), overview 0.05 s, cancellation 4.00 s.
+
+### Review fixes, round 2 (2026-11-10, same VM: 4 vCPU, 16 GB RAM, local stack)
+
+The deadline CTEs of the three readers are now `materialized` (perf#0, round 2: one deadline per distinct (E, delay)
+whatever the statistics), the approval holds unmeetable lines to one month, the cancellation's corrective invoice
+bears its own VAT, and the nightly checks add `invoice_overdue`. Each scale test run alone right after
+`supabase db reset`:
+
+| Step | Volume | Round 1 | Round 2 | Design §19 target |
+|---|---|---|---|---|
+| « Préparer maintenant » (the command) | 50,000 items | 1.28 s | 1.47 s | < 1 s |
+| Prepare job: load / price / write | 50,000 lines | 3.26 / 4.62 / 2.35 s (10.4 s) | 3.39 / 4.64 / 2.36 s (**10.6 s**) | ≈ 1 + 0.5 + 0.5 s |
+| Overview (« À valider ») with the draft waiting | 50,000 reserved items | 0.05 s | 0.05 s | — |
+| Nightly checks with the draft waiting | 50,000 lines | 4.4 s | **3.7 s** | < 5 s |
+| Approval command / job | 50,000 lines | 0.04 / 6.3 s | 0.03 / **6.1 s** | < 1 s / 2–4 s |
+| Nightly checks after the approval | 50,000 lines in flight | 4.0 s | **2.7 s** | < 5 s |
+| Cancellation (the command) | 50,000 lines | 3.97 s | **4.12 s** | the API's 8 s statement timeout |
+| `test_remittance_scale_integration.py` | | | 1 passed in 245 s | |
+| `test_allocate_50k_payments`: allocation (5 jobs of 10,000) | 50,000 payments | 80.8 s | **78.0 s** (post 11.9–12.6 s a job) | — |
+| … 1,000 returns imported + linked | | 29.4 s | 29.8 s | — |
+| … nightly checks over 50,000 payments | 11,956 partly allocated | 4.7 s | **3.5 s**, no code | < 5 s |
+| `test_allocate_50k_payments` | | 259 s | 1 passed in 245 s | |
+
+- The nightly checks are 0.7–1.3 s faster: `unallocated_payment_deadlines` and `pending_item_deadlines` no longer
+  compute a deadline per payment or item when their tables have no statistics (the scale harness's state), so the
+  estimate the previous section flagged as « under 5 s but close » now has room.
+- The reservation (1.28 → 1.47 s) and the cancellation (3.97 → 4.12 s) moved within the run-to-run spread seen before
+  (1.28–1.34 s, 3.97–4.00 s); neither path changed but the corrective invoice's VAT and period (one row per mandate
+  and rate) and the late lines' month (computed once per distinct E, for unmeetable lines only).

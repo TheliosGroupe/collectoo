@@ -64,7 +64,9 @@ and a file undone in full is back to 0.
   reversals); a release goes to its last positive collection.
 * **A change of the VAT rate**: a run with no reversal on a key never takes back what its earlier
   invoices charged at their own rate (V ≥ what was charged before, less only its own collections'
-  re-tiering); a run with a reversal re-applies the cap and the reserve at the new rate.
+  re-tiering); a run with a reversal re-applies the cap and the reserve at the new rate. Each
+  earlier invoice carries its own rate (`OpenCharge.vat_rate`, M2c-4): the reserve weighs what it
+  still charges at that rate, so after a fall of the rate the TTC billed stays within the basis.
 
 Basis (founder #4): an allocation's 1100 credits per component family, filtered by the schedule's
 families; a forward's amount only when the schedule lists its reason; a reversal minus its
@@ -110,6 +112,7 @@ class LineKind(StrEnum):
     FORWARD = "forward"
     FORWARD_REVERSAL = "forward_reversal"
     CLIENT_ADVANCE = "client_advance"
+    CLIENT_ADVANCE_REVERSAL = "client_advance_reversal"  # an advance undone with its cause (M2c-7)
     PAYOUT_RETURNED = "payout_returned"
     UNPLANNED_PAYOUT = "unplanned_payout"
 
@@ -117,7 +120,12 @@ class LineKind(StrEnum):
 # the reasons a schedule may list in `basis.forwards`; any other forward never earns commission
 FORWARD_REASONS = frozenset({"file_recalled", "before_servicing_start", "client_ratification"})
 NEVER_COMMISSIONED = frozenset(
-    {LineKind.CLIENT_ADVANCE, LineKind.PAYOUT_RETURNED, LineKind.UNPLANNED_PAYOUT}
+    {
+        LineKind.CLIENT_ADVANCE,
+        LineKind.CLIENT_ADVANCE_REVERSAL,
+        LineKind.PAYOUT_RETURNED,
+        LineKind.UNPLANNED_PAYOUT,
+    }
 )
 REVERSALS = frozenset({LineKind.ALLOCATION_REVERSAL, LineKind.FORWARD_REVERSAL})
 
@@ -205,6 +213,9 @@ class OpenCharge(Protocol):
 
     @property
     def open_minor(self) -> int: ...
+
+    @property
+    def vat_rate(self) -> Decimal | None: ...  # the invoice's own rate (None: the run's)
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,8 +627,9 @@ class _Pricer:
 
     def __init__(self, versions: Mapping[str, Sequence[TermsVersion]], vat_rate: Decimal) -> None:
         self.versions = versions
-        self.cap_den = RATE_SCALE + scaled(vat_rate)
-        self.reserve = scaled(vat_rate) > 0  # no VAT, no rounding to reserve for
+        self.tau = scaled(vat_rate)
+        self.cap_den = RATE_SCALE + self.tau
+        self.reserve = self.tau > 0  # no VAT, no rounding to reserve for
         self._on: dict[tuple[str, date], TermsVersion | None] = {}
         self._rule: dict[tuple[str, str, str, str], Rule] = {}
         self._seq: dict[tuple[str, str], tuple[tuple[str, Rule], ...]] = {}
@@ -1000,40 +1012,12 @@ def _finish(
     floor = cb + min(0, drift) if all(w[2] for w in where) else None
     if floor is not None and hi < floor:
         hi = floor
-    charged = hi
-    c = sum(key.net.values()) + key.kept_basis
-    open_before = sum(1 for ch in key.earlier if ch.open_minor > 0)
-
-    def reserve(n: int) -> int:
-        return (c - n) * RATE_SCALE // pricer.cap_den if c > n else 0
-
-    base: list[int] = []
-    collection: list[bool] = []
-    if pricer.reserve and hi > reserve(open_before + 1):
-        base = [parts[i][j].commission_minor for i, j, *_ in where]
-        collection = [w[2] for w in where]
-        low = reserve(open_before + 1)  # always holds: at most one more invoice
-        if floor is not None and low < floor:
-            low = floor
-        charged = low
-        for v in range(hi, low, -1):  # the largest V that its own documents' n holds
-            commissions = _spread(base, collection, (v - cb) - drift)
-            side = key_side(
-                [
-                    SidePart(heads[i][0].entry_id, parts[i][j], m, same, pref)
-                    for (i, j, _, same, pref), m in zip(where, commissions, strict=True)
-                ],
-                key.earlier,
-            )
-            if v <= reserve(open_after(side, key.earlier)):
-                charged = v
-                break
+    base = [parts[i][j].commission_minor for i, j, *_ in where]
+    collection = [w[2] for w in where]
+    charged = _reserved(key, pricer, parts, heads, (hi, floor, drift), (base, collection))
     held = sched - charged
     if charged - cb == drift and not held:
         return charged  # the parts are the schedule's
-    if not base:
-        base = [parts[i][j].commission_minor for i, j, *_ in where]
-        collection = [w[2] for w in where]
     commissions = _spread(base, collection, (charged - cb) - drift)
     for n, ((i, j, *_), m) in enumerate(zip(where, commissions, strict=True)):
         p = parts[i][j]
@@ -1041,6 +1025,77 @@ def _finish(
         if m != p.commission_minor or (last and held):
             parts[i][j] = replace(p, commission_minor=m, held_minor=max(0, held) if last else 0)
     return charged
+
+
+def _reserved(  # noqa: PLR0913, PLR0917 - the key, its run, its bounds, its parts
+    key: _Key,
+    pricer: _Pricer,
+    parts: list[list[Part]],
+    heads: Sequence[Head],
+    bounds: tuple[int, int | None, int],
+    spread: tuple[list[int], list[bool]],
+) -> int:
+    """The largest V ≤ hi that the rounding reserve holds for the n its own documents leave open
+    (at least the floor). Each earlier invoice keeps its own VAT rate (M2c-4): after a fall of the
+    rate, an invoice still open at a higher one weighs at its own rate, never at the run's, so the
+    TTC billed stays within the basis; `top` is the highest rate the key's open documents bear."""
+    hi, floor, drift = bounds
+    base, collection = spread
+    cb, where = key.charged_before, key.where
+    c = sum(key.net.values()) + key.kept_basis
+    open_before = sum(1 for ch in key.earlier if ch.open_minor > 0)
+    rates = {ch.invoice_id: _rate_scaled(ch, pricer.tau) for ch in key.earlier if ch.open_minor}
+    top = max(pricer.tau, *rates.values()) if rates else pricer.tau
+    mixed = top > pricer.tau
+    # V within it holds whatever the rates of the key's invoices: at most one more invoice
+    low = (c - open_before - 1) * RATE_SCALE // (RATE_SCALE + top) if c > open_before + 1 else 0
+    if not (pricer.reserve or mixed) or hi <= low:
+        return hi
+    if floor is not None and low < floor:
+        low = floor
+
+    def fits(v: int) -> bool:
+        commissions = _spread(base, collection, (v - cb) - drift)
+        side = key_side(
+            [
+                SidePart(heads[i][0].entry_id, parts[i][j], m, same, pref)
+                for (i, j, _, same, pref), m in zip(where, commissions, strict=True)
+            ],
+            key.earlier,
+        )
+        n = open_after(side, key.earlier)
+        if not mixed:
+            return v <= (c - n) * RATE_SCALE // pricer.cap_den if c > n else v <= 0
+        credited: dict[str, int] = {}
+        for inv, take, _ in side.allocations:
+            credited[inv] = credited.get(inv, 0) + take
+        ttc = side.invoiced_minor * pricer.cap_den + sum(
+            (ch.open_minor - credited.get(ch.invoice_id, 0)) * (RATE_SCALE + rates[ch.invoice_id])
+            for ch in key.earlier
+            if ch.open_minor
+        )
+        return ttc + n * RATE_SCALE <= c * RATE_SCALE
+
+    if not mixed:
+        for v in range(hi, low, -1):  # the largest V that its own documents' n holds
+            if fits(v):
+                return v
+        return low
+    if fits(hi):
+        return hi
+    while hi - low > 1:  # rates differ: the range can be wide, bisect (n moves by one at most)
+        mid = (low + hi) // 2
+        if fits(mid):
+            low = mid
+        else:
+            hi = mid
+    return low
+
+
+def _rate_scaled(charge: OpenCharge, tau: int) -> int:
+    """The VAT rate an earlier invoice bears, x RATE_SCALE (None: the run's)."""
+    rate = charge.vat_rate
+    return tau if rate is None else scaled(rate)
 
 
 def _line(  # noqa: PLR0913, PLR0917 - a line and the run it is priced in
@@ -1320,7 +1375,8 @@ def inputs_hash(  # noqa: PLR0913, PLR0917 - every input of `compute`
         )
     for (account, tier), earlier in sorted((charges or {}).items()):
         for ch in sorted(earlier, key=lambda c: c.invoice_id):
-            _put(h, "charge", account, tier, ch.invoice_id, *ch.order, ch.open_minor)
+            rate = None if ch.vat_rate is None else scaled(ch.vat_rate)
+            _put(h, "charge", account, tier, ch.invoice_id, *ch.order, ch.open_minor, rate)
     invoices = line_invoices or {}
     for original in sorted({ln.original_entry_id for ln in lines if ln.original_entry_id}):
         _put(h, "line invoice", original, invoices.get(original))

@@ -57,7 +57,7 @@ make reset        # supabase db reset: migrations + seed
 make lint         # ruff, ruff format --check, mypy --strict, eslint, tsc
 make test         # pytest (+hypothesis), vitest, pgTAP (needs make up)
 make test-integration  # worker tests against the local stack (queue, storage)
-make worker       # run the boarding queue consumer locally (LLM_PROVIDER=mock)
+make worker       # run the boarding, payments and remittances queue consumers locally (LLM_PROVIDER=mock)
 make eval         # eval suites: AI mapping top-1 accuracy (CI fails below worker/evals/mapping/threshold) and payment reconciliation on a synthetic statement (CI fails below 95 % automatic or on any wrong match)
 make e2e          # needs make up; boarding worker + next build + Playwright vs local stack (desktop + mobile); screenshots -> docs/screenshots/
 make catalogue    # regenerate the EU NPL template catalogue (CI checks it is unchanged)

@@ -26,6 +26,11 @@ M2c-4 numbers, posts and stores them; M2c-5 renders them.
    `commission.key_side`, which the engine's rounding reserve simulates too.
 5. Credit-note VAT per corrected invoice by cumulative difference at that invoice's rate: never
    above its VAT, exactly it on a full credit.
+6. Each credit says why (289 I 5, 272 1: the rectification is justified): a credit for a line that
+   undoes a collection (a reversal) is « encaissements annulés »; a credit for a collection that
+   re-tiers the others down (a change of terms, a collection dated before the change booked after
+   them, no collection undone) is a « Régularisation de paliers (changement de conditions) »
+   (legal review M2c-4). A corrected invoice carries its HT per cause, one credit line each.
 
 Signs: invoice amounts are positive; credit-note amounts negative, as printed (« -30 000 HT »).
 """
@@ -52,6 +57,9 @@ from collectoo_worker.remittance.vat import credit_note_vat, vat_of
 
 Key = tuple[str, str]  # (file, tier key)
 LineKindFr = Literal["commission", "regularisation"]
+CreditCause = Literal["reversal", "retiering"]
+REVERSAL: CreditCause = "reversal"
+RETIERING: CreditCause = "retiering"
 COMMISSION: LineKindFr = "commission"
 REGULARISATION: LineKindFr = "regularisation"
 _Group = tuple[str, str, tuple[str, ...], LineKindFr]  # (claim type, rule, families, kind)
@@ -66,6 +74,7 @@ class EarlierCharge:
     order: tuple[int, int]  # (year, seq) in the invoice series: LIFO takes the highest first
     charged_minor: int
     credited_minor: int = 0
+    vat_rate: Decimal | None = None  # the invoice's own rate (M2c-4 stores it; None: the run's)
 
     @property
     def open_minor(self) -> int:
@@ -114,6 +123,7 @@ class CreditAllocation:
     tier_key: str
     ht_minor: int  # negative
     entry_id: str  # the line whose part it credits (a reversal: the line that undoes a collection)
+    cause: CreditCause = REVERSAL  # a collection undone, or the tiers moved by a change of terms
 
 
 @dataclass(frozen=True)
@@ -122,6 +132,7 @@ class CorrectedInvoice:
     vat_rate: Decimal
     ht_minor: int  # negative
     vat_minor: int  # negative
+    causes: tuple[tuple[CreditCause, int], ...] = ()  # HT per cause (negative), reversal first
 
 
 @dataclass(frozen=True)
@@ -155,10 +166,11 @@ def run_documents(  # noqa: PLR0913, PLR0917 - the run's lines and the history
     same documents (`commission.compute(…, charges=, line_invoices=)`)."""
     by_mandate = _split(results, line_invoices or {})
     order = {r.entry_id: i for i, r in enumerate(results)}
+    undoes = {r.entry_id for r in results if r.kind in REVERSALS}
     out: dict[str, MandateDocuments] = {}
     for mandate in sorted(by_mandate):
         sides = {key: key_side(ps, charges.get(key, ())) for key, ps in by_mandate[mandate].items()}
-        credit = _credit_note(mandate, sides, invoices, order)
+        credit = _credit_note(mandate, sides, invoices, order, undoes)
         invoice = _invoice(mandate, sides, files, vat_rate)
         if invoice or credit:
             out[mandate] = MandateDocuments(mandate, invoice, credit)
@@ -258,12 +270,16 @@ def _credit_note(
     sides: Mapping[Key, KeySide],
     invoices: Mapping[str, EarlierInvoice],
     order: Mapping[str, int],
+    undoes: frozenset[str] | set[str] = frozenset(),
 ) -> DraftCreditNote | None:
-    """The allocations of every key, in the engine's order of the lines they credit; VAT per
-    corrected invoice by cumulative difference at that invoice's rate."""
+    """The allocations of every key, in the engine's order of the lines they credit, each with its
+    cause (`undoes`: the run's lines that undo a collection); VAT per corrected invoice by
+    cumulative difference at that invoice's rate."""
     allocations = sorted(
         (
-            CreditAllocation(inv, key[0], key[1], -take, entry)
+            CreditAllocation(
+                inv, key[0], key[1], -take, entry, REVERSAL if entry in undoes else RETIERING
+            )
             for key in sorted(sides)
             for inv, take, entry in sides[key].allocations
         ),
@@ -272,15 +288,20 @@ def _credit_note(
     if not allocations:
         return None
     per_invoice: dict[str, int] = defaultdict(int)
+    per_cause: dict[str, dict[CreditCause, int]] = defaultdict(lambda: defaultdict(int))
     for a in allocations:
         per_invoice[a.original_invoice_id] -= a.ht_minor
+        per_cause[a.original_invoice_id][a.cause] += a.ht_minor
     corrected = []
     for inv_id in sorted(per_invoice):
         inv = invoices[inv_id]
         before = inv.credited_ht_minor
         after = before + per_invoice[inv_id]
         vat = credit_note_vat(inv.ht_minor, inv.vat_rate, before, after)
-        corrected.append(CorrectedInvoice(inv_id, inv.vat_rate, -per_invoice[inv_id], -vat))
+        causes = tuple(
+            (c, per_cause[inv_id][c]) for c in (REVERSAL, RETIERING) if per_cause[inv_id][c]
+        )
+        corrected.append(CorrectedInvoice(inv_id, inv.vat_rate, -per_invoice[inv_id], -vat, causes))
     ht = sum(c.ht_minor for c in corrected)
     vat = sum(c.vat_minor for c in corrected)
     return DraftCreditNote(mandate, tuple(allocations), tuple(corrected), ht, vat, ht + vat)
@@ -316,5 +337,7 @@ def after_issue(
             inv_id, order = numbers[mandate]
             new_invoices[inv_id] = EarlierInvoice(inv_id, d.invoice.ht_minor, d.invoice.vat_rate)
             for key, amount in d.invoice.charges:
-                new_charges.setdefault(key, []).append(EarlierCharge(inv_id, order, amount))
+                new_charges.setdefault(key, []).append(
+                    EarlierCharge(inv_id, order, amount, vat_rate=d.invoice.vat_rate)
+                )
     return new_charges, new_invoices

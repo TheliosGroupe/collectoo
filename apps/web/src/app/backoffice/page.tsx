@@ -52,6 +52,13 @@ export default async function BackofficePage() {
         Paiements à traiter
       </Link>
       <Link
+        href="/backoffice/reversements"
+        className="w-full rounded-md border border-zinc-300 px-4 py-2 text-center font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+        data-testid="remittances-link"
+      >
+        Reversements
+      </Link>
+      <Link
         href="/backoffice/parametres/comptes-bancaires"
         className="w-full rounded-md border border-zinc-300 px-4 py-2 text-center font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
         data-testid="bank-accounts-link"

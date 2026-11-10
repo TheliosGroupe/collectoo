@@ -6,14 +6,15 @@ checks the money set-based: every allocation within the payment and the receivab
 unallocated = Σ received, client money closed (I8), one client notification per allocation entry.
 The allocation runs with the ledger's statistics as CI met them (ledger_entry not analysed yet, the
 4710 pool estimated at a few postings): its lookups must not rest on fresh statistics. ALLOC_FILES
-changes the size."""
+changes the size. The payments and returns are dated a few business days back, never on fixed dates:
+since M2c-4 the nightly checks hold every collection of a mandate with terms to its R124-6 deadline
+(one month when no terms version covers its date), and nothing here remits it."""
 
 import logging
 import os
 import random
 import time
 import uuid
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ import pytest
 from debit_helpers import import_entries, return_entry
 from integration_helpers import DB, one, storage
 from reconciliation_helpers import pay
+from remittance_helpers import recent_business_day
 from statement_helpers import bank_tenant
 from statement_helpers import drain as drain_payments
 from stats_helpers import analyse, estimated_rows, forget_statistics, frozen_statistics
@@ -76,7 +78,8 @@ def test_allocate_50k_payments(tmp_path: Path, caplog: pytest.LogCaptureFixture)
     boarded = time.monotonic()
     files = [f for f in _files(tenant) if f[2] > 0][:FILES]
     credits = _credits(files)
-    pay(tenant, store, credits, prefix="A", days=5, allocate=False)  # imported and matched only
+    # imported and matched only; collected two weeks ago at most, so no R124-6 deadline has passed
+    pay(tenant, store, credits, prefix="A", start=recent_business_day(10), days=5, allocate=False)
     # CI (M2b-6): ledger_account and ledger_posting analysed (the pool: one 4710 account, a few
     # cash_in postings), ledger_entry not analysed yet, none of them again while the jobs run
     # (payment_positions then read every posting of the pool for each payment: 439 s a chunk)
@@ -192,13 +195,14 @@ def _returns(tenant: dict[str, Any], store: Any, credits: list[Credit]) -> None:
                order by p.id limit %s""",
             (org, max(1, len(credits) // 50)),
         ).fetchall()
+    day = recent_business_day(1)  # after the payments (at most today - 5)
     entries = [
-        return_entry(int(amount), str(e2e), f"RT{n:010d}", date(2026, 10, 20))
+        return_entry(int(amount), str(e2e), f"RT{n:010d}", day)
         for n, (_pid, amount, e2e) in enumerate(chosen)
     ]
     opening = sum(c.amount_minor for c in credits)
     started = time.monotonic()
-    import_entries(tenant, store, entries, day=date(2026, 10, 20), opening=opening)
+    import_entries(tenant, store, entries, day=day, opening=opening)
     returned = time.monotonic()
     with psycopg.connect(DB) as conn:
         run = one(conn, "select private.run_payment_checks(%s)", (org,))
