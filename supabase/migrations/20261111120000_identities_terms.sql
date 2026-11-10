@@ -824,7 +824,10 @@ begin
   if a.id is null then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
   end if;
-  if a.client_organization_id = any (private.client_admin_whole_org_ids()) and private.is_aal2() then
+  -- A court-appointed account (the liquidator's, L641-9 I: the client's rights are exercised by the liquidator) is never
+  -- confirmed by the client's own users: a second admin of the servicer confirms it (OQ-41 default).
+  if a.client_organization_id = any (private.client_admin_whole_org_ids()) and private.is_aal2()
+     and a.kind = 'client' then
     v_via := 'client_portal';
   elsif private.has_role(a.organization_id, array['admin']) then
     v_via := 'second_admin';
@@ -1433,13 +1436,8 @@ begin
     return null;
   end if;
   if old.valid_from <= v_today then
-    if (new.id, new.mandate_id, new.valid_from, new.commission_rate, new.remittance_max_days, new.plan_envelope,
-        new.settlement_authority, new.terms, new.created_at, new.commission_schedule, new.commission_clause_ref,
-        new.remittance_terms, new.remittance_clause_ref, new.document_id, new.created_by)
-       is distinct from
-       (old.id, old.mandate_id, old.valid_from, old.commission_rate, old.remittance_max_days, old.plan_envelope,
-        old.settlement_authority, old.terms, old.created_at, old.commission_schedule, old.commission_clause_ref,
-        old.remittance_terms, old.remittance_clause_ref, old.document_id, old.created_by)
+    -- every column but the end, including any column added later
+    if (to_jsonb(new) - 'valid_to') is distinct from (to_jsonb(old) - 'valid_to')
        or (new.valid_to is distinct from old.valid_to
            and ((old.valid_to is not null and old.valid_to < v_today)
                 or (new.valid_to is not null and new.valid_to < v_today))) then
@@ -1466,11 +1464,13 @@ alter table public.mandate_terms enable always trigger mandate_terms_no_truncate
 -- applied); the new one keeps the mandate's end (the last version's, when later than its start) and the covering
 -- version's other settings
 -- (payment plans, settlement authority). Claim types named by the schedule must exist; portfolios it names must be
--- the mandate's.
+-- the mandate's. Compare and set: p_expected_latest_id is the mandate's latest version (by start) as the page showed
+-- it (null: none), so two admins never supersede each other's terms unseen.
 create or replace function public.set_mandate_terms(p_idempotency_key text, p_mandate_id uuid, p_valid_from date,
                                                     p_commission_schedule jsonb, p_commission_clause_ref text,
                                                     p_remittance_terms jsonb, p_remittance_clause_ref text,
-                                                    p_document_id uuid, p_remittance_max_days integer default 30)
+                                                    p_document_id uuid, p_remittance_max_days integer,
+                                                    p_expected_latest_id uuid)
 returns jsonb
 language plpgsql
 security definer
@@ -1488,9 +1488,11 @@ declare
                                         'commission_clause_ref', btrim(coalesce(p_commission_clause_ref, '')),
                                         'remittance_terms', p_remittance_terms,
                                         'remittance_clause_ref', btrim(coalesce(p_remittance_clause_ref, '')),
-                                        'document_id', p_document_id, 'remittance_max_days', p_remittance_max_days);
+                                        'document_id', p_document_id, 'remittance_max_days', p_remittance_max_days,
+                                        'expected_latest_id', p_expected_latest_id);
   v_result jsonb;
   v_error text;
+  v_latest uuid;
   v_superseded integer;
   v_end date;
   v_id uuid;
@@ -1502,6 +1504,11 @@ begin
   v_result := private.command_replay('set_mandate_terms', p_idempotency_key, v_request);
   if v_result is not null then
     return v_result;
+  end if;
+  select t.id into v_latest from public.mandate_terms t where t.mandate_id = m.id
+  order by t.valid_from desc limit 1;
+  if v_latest is distinct from p_expected_latest_id then
+    raise exception 'mandate terms changed since they were read' using errcode = 'serialization_failure';
   end if;
   if p_valid_from is null or p_valid_from < v_today then
     raise exception 'mandate terms: a new version never starts before today (%)', v_today
@@ -2042,7 +2049,7 @@ revoke execute on function
   public.confirm_payout_account(text, uuid, text), public.reject_payout_account(text, uuid, text),
   public.retire_payout_account(text, uuid, text),
   public.record_client_status_event(text, uuid, text, date, uuid, text, uuid),
-  public.set_mandate_terms(text, uuid, date, jsonb, text, jsonb, text, uuid, integer),
+  public.set_mandate_terms(text, uuid, date, jsonb, text, jsonb, text, uuid, integer, uuid),
   public.set_mandate_insurance_clause(text, uuid, text, text), public.boarding_batch_readiness(uuid),
   public.client_readiness(uuid), public.payout_accounts(uuid), public.confirm_boarding_batch(uuid),
   public.close_bank_account(text, uuid, text)
@@ -2055,7 +2062,7 @@ grant execute on function
   public.confirm_payout_account(text, uuid, text), public.reject_payout_account(text, uuid, text),
   public.retire_payout_account(text, uuid, text),
   public.record_client_status_event(text, uuid, text, date, uuid, text, uuid),
-  public.set_mandate_terms(text, uuid, date, jsonb, text, jsonb, text, uuid, integer),
+  public.set_mandate_terms(text, uuid, date, jsonb, text, jsonb, text, uuid, integer, uuid),
   public.set_mandate_insurance_clause(text, uuid, text, text), public.boarding_batch_readiness(uuid),
   public.client_readiness(uuid), public.payout_accounts(uuid), public.confirm_boarding_batch(uuid),
   public.close_bank_account(text, uuid, text)
