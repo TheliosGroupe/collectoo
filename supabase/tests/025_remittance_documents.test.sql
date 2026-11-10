@@ -8,7 +8,7 @@
 -- viewer, a collector, aal1); the client space's summary and the accountant's export. Design
 -- docs/design/m2c-remittances.md §10, §14, §17, §18; ADR-0014 M2c-5.
 begin;
-select plan(41);
+select plan(42);
 
 -- Fixtures (as 021: Martin (a1) and Lilas (a2) of the servicer aa, each with a file paid; Martin accepted electronic
 -- invoices in its mandate, Lilas did not) ----------------------------------------------------------------
@@ -340,6 +340,10 @@ select results_eq($$ select kind, number, pdf_path ~ ('^(statements|invoices)/00
      where r.id in ((select v from t where k = 'r1'), (select v from t where k = 'r2'))
      order by 1, 2 $$,
   'what is due, each at its key');
+select results_eq($$ select kind, count(*)::int from private.remittance_documents_missing(
+                       '00000000-0000-0000-0000-0000000000aa', '0 seconds') group by kind order by kind $$,
+  $$ values ('invoice'::text, 2), ('statement', 2) $$,
+  'documents still due are listed with their age (the input of the future document_missing alert)');
 select private.remittance_statement_prepare(d.ref_id) from due d where d.kind = 'statement';
 insert into pg_temp._rd_statement_files select d.ref_id, repeat('b', 64), repeat('c', 64) from due d
 where d.kind = 'statement';

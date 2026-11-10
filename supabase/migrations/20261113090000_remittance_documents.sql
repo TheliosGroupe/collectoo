@@ -16,8 +16,10 @@
 --   * read access: money staff; the client's members with access to the whole client (OQ-48); the storage policy of the
 --     private bucket follows the same rule; collectors and portfolio-restricted users read none of it;
 --   * the client space's summary (`public.client_remittance_summary`) and the accountant's export
---     (`public.accounting_export_documents`, `public.accounting_export_entries`);
---   * the manual credit note (`public.issue_credit_note`, design §14.1, risk R2).
+--     (`public.accounting_export_documents`, `public.accounting_export_entries`).
+--
+-- The manual credit note (`issue_credit_note`, design §14.1, risk R2) is not here: it needs a waived amount in the
+-- commission engine's key state (ADR-0014 M2c-5, « Left for later slices »).
 --
 -- Nothing earlier is redefined.
 

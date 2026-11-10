@@ -1,6 +1,6 @@
 # ADR-0014: Remittances, commission, invoices and own cash (extends ADR-0012, ADR-0013)
 
-- Status: Accepted (the funds ledger implemented in M2c-1, identities and terms in M2c-2, the engines in M2c-3, runs and invoices in M2c-4; documents and transfers follow in M2c-5 … M2c-7, each adding its section)
+- Status: Accepted (the funds ledger implemented in M2c-1, identities and terms in M2c-2, the engines in M2c-3, runs and invoices in M2c-4, documents in M2c-5; transfers and returns follow in M2c-6 … M2c-7, each adding its section)
 - Date: 2026-11-09
 - Design: `docs/design/m2c-remittances.md` (three-design panel, critiques and a judge; legal texts re-read on LibreJustice on 2026-11-09). Founder answers on 2026-11-09: all 15 defaults accepted (« All ok », design §24).
 - Supersedes ADR-0013's sentence « Only M2c `commission` will be exempt » (from I2): **no entry is exempt** from fund closure.
@@ -199,6 +199,121 @@ Confirmed findings of the five-lens review (money, numbering and concurrency, te
   - **The scheduler property CPCE-08 promised** (legal#8), written: `test_schedule.py` simulates days over the pure schedule functions (`is_scheduled`, `guard_due`, `remittance_deadline`, the calendar) with random collections, run days, frequencies and delays (1–5-day unmeetable ones included); a run cut on every scheduled day and whenever the guard is due, paying out the next business day, pays every collection that reached the queue on its E or by its J-5 date by its latest execution date, an unmeetable one by the month (no miss in 290,000 collections checked offline). Modelling one live run per client, as `private.create_remittance_run` holds, the property found a gap that is not the guard's: a collection that arrives while a payout is in flight waits for its debit, and under a 2- to 5-day delay misses its date (1,493 of 294,622 collections with the debit booked on its execution day, all with E on a closed day; 2,558 of 143,071 on business days when it is booked the next business day; 23 of 189,392 at 6–8 days). Not fixed here: it needs a second live run per client whose plan leaves aside what the run in flight sets off, or same-day execution — M2c-6's, with the debit booking (OQ-73); the property holds with one live run from 6 days or for business-day encaissements, and the gap is pinned by a strict xfail.
   - **Round 3 (verification of round 2).** The skeptic showed the property could not see the J-5 margin: it approved each run the day it was cut, so any margin of one business day passed. `test_the_guard_leaves_room_for_ops_to_approve` approves each run 0 to 4 business days after it is cut (the J-5 … J-1 window) and pays the next business day; it fails with the guard at 4 or 3 business days (mutation check), passes at 5. The other three round-2 fixes were confirmed (money#0 across 20 scenarios and three VAT rates, legal#4, legal#1, perf#0 under five statistics states).
 - **Schema changes beyond the contract** (perf#1, perf#4): the foreign keys `remittance_line.organization_id`/`client_organization_id`, `remittance_key_state.organization_id`/`client_organization_id` and `commission_credit_alloc.credit_note_id`/`original_invoice_id` are replaced by statement-level `AFTER INSERT` guards with one keyed lookup per run or pair, which check more (a line's currency = its run's; a credit note on an invoice of its own client); `commission_invoice_charge.invoice_id` is `DEFERRABLE INITIALLY DEFERRED`; new index `commission_credit_alloc (entry_id)`; `private.issue_commission_documents` takes `p_vat_on_debits`; `private.pending_item_deadlines(uuid, boolean)` reports `monitored`, `max_days`, the `check_*` dates and `out_of_horizon`; `private.run_remittance_checks(uuid, uuid, date)` takes an optional day for tests.
+
+## M2c-5: documents (M2-14 statement, M2-15 PDF; design §10, §14, §16, §17, §19, §21)
+Migration `20261113090000_remittance_documents.sql` (forward-only; nothing earlier is redefined); worker
+`remittance.statement`, `statement_csv`, `statement_pdf`, `invoice`, `invoice_pdf`, `pdf`, job `remittances.documents`
+(`jobs.remittance_documents`, on the existing `remittances` queue: no new queue).
+- **What is due** (`private.remittance_document_todo`): a statement for every run whose approval is recorded (trigger on
+  `remittance_run.approved_at` null → set: approved, or booked at approval when N = 0), a PDF for every invoice or
+  credit note (statement trigger on `commission_invoice`: the approval's, a cancellation's credit notes and corrective
+  invoice, and any later issuer). Each trigger also queues `documents {organization_id}`; the job draws what is due for
+  that servicer, oldest first (200 invoice PDFs and 1 statement a job, the rest queued again), under the servicer's
+  documents lock. Runs and invoices issued before the migration were queued by it (none in production).
+- **The statement payload** (`private.remittance_statement_build`, §10): built once, in SQL, by the job right after
+  the approval commits, from the run's frozen facts — its lines and the earlier lines it priced (`remittance_line_
+  repricing`), each line's file, borrower, mandate, portfolio, the items and components its entry's 1100 postings
+  moved, the notification's reason code (bank return, recalled file…), its invoice, its payment's receipt number and its
+  late approval (`remittance_late_approval`) —, the run's documents and settlement plan, its payout as ordered (IBAN
+  masked), the previous run's payout, and the identities (`private.invoice_party`). Every lookup is keyed from the
+  run's lines (ARCHITECTURE §4). Amounts are text in minor units, dates ISO, lines as arrays in the order
+  `line_columns` names (a 50,000-line payload stays ≈ 10 MB). It is stored with its SHA-256 (`remittance_statement`,
+  append-only) and never rebuilt: the files are rendered from the stored payload. Sections: header (issuer block
+  R123-237/238 « agissant en qualité de mandataire de recouvrement amiable », client, mandates with their R124-3 3°/4°,
+  netting and claw-back clause references, period, K), « Récapitulatif », « Sommes encaissées pour votre compte »
+  (natures, per-file table), « Retenues et compensations », « Reversement », « Suivi de vos reversements précédents »,
+  « Sommes reçues sur vos dossiers et non reversées », « Position ».
+- **Decisions where the design was open:**
+  - **The PDF shows the per-file table, the CSV every line.** §10 asks both « one row per line » and « a per-file table
+    up to 2,000 files »; the PDF carries the summary, the natures and one row per file (≤ 2,000, else the CSV's
+    SHA-256 for the detail), the CSV one row per line — so a 50,000-line statement's PDF stays short. The PDF always
+    names the CSV's SHA-256 (CSV = PDF), and its footer the first 16 characters.
+  - **CSV columns**: the design's list plus `hors_delai` (« oui – motif » for a line approved after its latest execution
+    date, §10.2 « hors délai with its cause »); several items or components of one line joined with « ; » in
+    `piece` / `composante`; `regle` / `taux` the rules and band rates of the line's parts (« Commission en attente »
+    when pending); `base_commission_centimes` the basis its parts priced. **Dates ISO** (AAAA-MM-JJ) in the CSV
+    (§10's « ISO and French dates » read as ISO dates and French amounts), French in the PDF. Amounts « 1 234,56 »
+    with a no-break space (U+00A0, what French spreadsheets read) and in integer cents.
+  - **Earlier lines priced by this run** (commission left pending by an earlier run, §9.1) are CSV rows of amount 0
+    (« Commission sur un encaissement du relevé RV-… ») so the CSV's commission adds up to the documents' HT.
+  - **Position**: owed to the client at K = the run's gross (every item pending at K is the run's: one live run per
+    client and currency, I14; the integration test checks it equals −4670 known at K), 0 after the payout; what the
+    client owes the servicer (4111, 4112) known at K, and after this statement's documents and the settlement the plan
+    posts at the payout's debit. Worded « Les compensations sont réalisées au débit du virement … jusque-là elles
+    restent à régler ».
+  - **Section 5 before M2c-6**: the previous run's payout as its transfer stands (ordered → « son débit n'est pas encore
+    constaté », booked → « débité de notre compte dédié le … », returned, cancelled; N = 0 → « aucun virement »).
+  - **Section 6**: per (file, reason, currency), the money still waiting on 4710 when the statement is drawn
+    (`payment.review_reason` worded: paiement bloqué, trop-perçu, avoir à imputer…) and the refunds whose cash-out
+    was posted between the previous run's K and this K, with their dates; no payer data (OQ-40).
+  - **A run cancelled before its statement is drawn** still gets it, saying so (« Reversement annulé le … »); one
+    drawn before the cancellation keeps its bytes (append-only); the cancellation's documents get their PDFs.
+- **Files**: reportlab pinned with its own defaults (the receipts' `reportlab_defaults`, imported first by every PDF
+  module — a finding of the environment test: a module importing reportlab before it made the renderer refuse under
+  `RL_*` variables), invariant mode, no compression, DejaVu Sans; the statement dated K, an invoice its issue date at
+  00:00 UTC; templates `releve-reversement-fr-1` and `facture-commission-fr-1`, `RENDERER_VERSION`
+  `reportlab-4.4.10/dejavu-2.37/d1`, stored on each row. Keys in the private bucket `documents`:
+  `statements/<servicer>/<client>/<year>/<RV>.pdf|.csv`, `invoices/<servicer>/<client>/<year>/<FC>.pdf`; the bucket
+  accepts `text/csv` (config). A failed attempt removes what it uploaded; a retry renders the same bytes at the same
+  keys. Golden SHA-256 for fixed payloads (`tests/test_statement_docs.py`), the same bytes in another process
+  whatever `RL_*`, `reportlab_settings.py`, `TZ` or `SOURCE_DATE_EPOCH`.
+- **Invoices** render the payload M2c-4 froze at issue, never the current settings (C5): seller and buyer blocks, «
+  Prestations de services », the service period, lines (quantity 1, unit price HT, rate), « Aucun rabais, remise ni
+  ristourne », HT, VAT per rate (a credit note: per rate of the invoices it rectifies), TTC, « Option pour le paiement
+  de la taxe d'après les débits » when opted, the payment line from `payment_reference` (`run`: « À régler par
+  compensation sur le reversement RV-… (exécution demandée le … ; mandat …, art. …) »; `next_run`: « … sur le prochain
+  reversement, au plus tard le … »; a due invoice: « À régler au plus tard le … par virement sur le compte … (BIC …),
+  titulaire … » from `own_account`), « Pas d'escompte pour paiement anticipé », `penalty_text`, the 40 € flat
+  indemnity when `flat_indemnity.applies`, `po_number` when present; a credit note names each invoice it rectifies
+  (number and date read from the append-only invoice rows, 289 I 5) and carries no payment mentions. No CGI article
+  number is printed (§3.1).
+- **Electronic delivery (CGI 289 VI)**: `commission_invoice_document.electronic` = the buyer's
+  `invoice_acceptance_ref` frozen in the payload at issue. Without it, the client space lists the invoice « Adressée par
+  courrier » and neither the document row nor the object is readable by the client; the back office flags « Envoi
+  postal » (OQ-74).
+- **Read access** (OQ-48): `remittance_statement` and the statement documents — money staff (aal2) and the client's
+  members with access to the whole client; `commission_invoice_document` and the invoice PDF — money staff, and the
+  client's whole-client members when electronic. A restrictive policy on `document` narrows `document_read` for the
+  three kinds; the storage policy on `statements/%` and `invoices/%` asks the same of the object's document (keyed by
+  bucket and path). Collectors, portfolio-restricted users, other servicers and aal1 staff read none (pgTAP `025`).
+  Downloads are served after the bytes are checked against the recorded SHA-256 (CGI 289 V).
+- **Client space** (§17.7): `/client/reversements` (`public.client_remittance_summary`: owed today from the running
+  4670 balance, the payout in flight « ordonné », the next run day `private.next_scheduled_run_day` — the 1st and 16th
+  or the mandate's weekday moved to the next business day, checked against `remittance.schedule` over 60 days in
+  integration; the statements with PDF and CSV), `/client/factures`. Restricted users read « Vos accès ne couvrent
+  pas … ». Nothing says « payé » or « réglé » before the bank's debit.
+- **Accounting export** (§14.2): `public.accounting_export_documents(from, to)` (invoices and credit notes of the
+  period: client, SIREN, mandate, run, HT/VAT/TTC, VAT book, settlement mode and due date, invoices rectified, settled
+  amount and its rows, open amount) and `public.accounting_export_entries(from, to)` (postings of 7060, 44571, 44574,
+  6270, 6780, 4111, 4112, 5122 with their entry, type, document reference and client), money staff at aal2, one year at
+  most; `/backoffice/reversements/comptabilite` writes them as CSV (BOM, `;`, CRLF, French headers, amounts twice,
+  deterministic order). Not a FEC: the servicer's general ledger is out of scope (§1, OQ-76).
+- **Left for later slices:**
+  - **`issue_credit_note` (the manual credit note, §14.1, risk R2) is not built.** It needs a change of the commission
+    engine's contract, not a document: the engine requires each (file, tier key)'s invoices' open charges to add up to
+    the commission it charged (`commission._key`, `CommissionInputError` otherwise). A manual credit either lowers the
+    key's state (then the next collection on that file re-charges what was given back: telescoping) or does not (then a
+    later reversal credits the invoice LIFO beyond what is left of it, and `issue_commission_documents` refuses the
+    approval with 23514). It needs a waived amount per key (`KeyState.waived_minor`: open charges + waived = K; LIFO
+    credits capped by each invoice's remaining HT and absorbed by the waiver first), with its Hypothesis properties —
+    the engine's slice, before go-live. Meanwhile R2's mitigations stay the draft's lines, the golden cases and the
+    approval sheet; a wrong invoice is corrected by cancelling the run before its file (M2c-4).
+  - **The nightly `document_missing` alert** (§15): `private.remittance_documents_missing(org, age)` lists what has
+    been due longer than an age; wiring it into `private.run_remittance_checks` is left to M2c-6, which redefines that
+    function for its transfer alerts. The pages say « Relevé en préparation » / « PDF en préparation » meanwhile.
+  - Postal dispatch of invoices without electronic acceptance (ops' record of the sending), the orphan-object sweep for
+    statements and invoices (`private.remittance_document_orphans` is ready; the job removes its own uploads on
+    failure), the Factur-X / UBL mapping of the payload (OQ-44), the statement's « Suivi » once M2c-6 books debits.
+- **Tests:** pgTAP `025_remittance_documents` (42: the queue, the payload = the run, CSV = PDF = run in SQL, the
+  position = −4670 at K, idempotent record, append-only, RLS on rows, documents and objects for staff, clients A/B,
+  a restricted viewer, a collector, another servicer and aal1, the summary and the export); pytest
+  `test_statement_docs` (18: CSV format and amounts, CSV = payload totals, natures, text snapshots, the invoice
+  mentions with their bases, frozen mentions, credit notes, golden hashes, environment-proof bytes),
+  `test_statement_scale` (50,000 lines over 2,000 files: CSV 1.3 s, PDF 1.6 s); integration
+  `test_remittance_documents_integration` (6: the worked example's statement and invoice stored = recorded =
+  re-rendered, CSV = PDF = run, another process, a due invoice's own account frozen at issue, a cancelled run's credit
+  note, a failed upload leaves nothing, the next run day = the schedule); the 50k scale run draws its statement; vitest
+  `documents.test.ts`; E2E `remittances` (documents downloaded by ops and the client, the export).
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
