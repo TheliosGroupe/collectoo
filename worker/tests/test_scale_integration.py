@@ -13,7 +13,16 @@ from typing import Any
 
 import psycopg
 import pytest
-from integration_helpers import DB, as_user, board, drain, make_tenant, one, storage
+from integration_helpers import (
+    DB,
+    as_user,
+    board,
+    drain,
+    make_tenant,
+    one,
+    ready_mandate,
+    storage,
+)
 
 from collectoo_worker.bench import generate
 
@@ -78,22 +87,7 @@ def test_board_a_50k_loan_tape(tmp_path: Path) -> None:
 def _add_mandate(tenant: dict[str, Any], batch: str) -> None:
     """Confirmation needs an active client mandate on the portfolio (R124-3)."""
     with psycopg.connect(DB) as conn, conn.transaction():
-        mandate = one(
-            conn,
-            "insert into public.mandate (organization_id, client_organization_id, reference,"
-            " mandate_type, signed_on)"
-            " values (%s, %s, %s, 'mandate_amicable', '2026-01-01') returning id",
-            (tenant["servicer"], tenant["client"], f"M-{batch}"),
-        )
-        conn.execute(
-            "insert into public.mandate_terms (mandate_id, valid_from, commission_rate)"
-            " values (%s, '2026-01-01', 0.15)",
-            (mandate,),
-        )
-        conn.execute(
-            "update public.portfolio set mandate_id = %s where id = %s",
-            (mandate, tenant["portfolio"]),
-        )
+        ready_mandate(conn, tenant, f"M-{batch}")
 
 
 def _results(batch: str) -> tuple[Any, ...]:

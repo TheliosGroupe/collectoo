@@ -10,6 +10,14 @@ he is certainly a party to the file, otherwise « Versement d'un tiers » (found
 decides, and leaves a third party's name out of the payload altogether). Each allocated component
 is worded here for the debtor (`COMPONENT_LABEL`), never with the ledger's back-office labels
 (« … déclarés par le cédant », « Écart au solde légal déclaré »: review #2).
+
+Template versions (each stored receipt names its own; regenerating it uses that version, so its
+bytes never change):
+* `quittance-fr-2` (M2b-5 review): the issuer by its name only;
+* `quittance-fr-3` (M2c-2, founder 2026-11-09): the issuer block a receipt (« récépissé »)
+  must carry (C. com. R123-237: SIREN, « RCS » and the city of its registry, the registered
+  office, « en liquidation » when it applies, « EI »; R123-238: the legal form and the capital
+  next to the name), from the payload's `issuer` (built in SQL from `billing_identity`).
 """
 
 from __future__ import annotations
@@ -20,7 +28,9 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-TEMPLATE_VERSION = "quittance-fr-2"  # 2: debtor-facing component words (review #2)
+TEMPLATE_VERSION = "quittance-fr-3"  # 3: the issuer block (R123-237/238; M2c-2)
+# every version a stored receipt may name (2: debtor-facing component words, review #2)
+TEMPLATE_VERSIONS = ("quittance-fr-2", "quittance-fr-3")
 PARIS = ZoneInfo("Europe/Paris")
 NNBSP = "\u202f"  # thousands separator, as Intl fr-FR prints it (the web pages)
 NBSP = "\u00a0"  # between the amount and the currency sign
@@ -51,6 +61,7 @@ COMPONENT_LABEL = {
     "balancing_line": "Autres sommes",
 }
 CURRENCY_SIGN = {"EUR": "€"}
+COUNTRY_FR = {"FR": "France", "BE": "Belgique", "LU": "Luxembourg", "MC": "Monaco", "CH": "Suisse"}
 
 
 def format_money(minor: int | str, exponent: int, currency: str) -> str:
@@ -92,6 +103,7 @@ class ReceiptDocument:
     kind: str  # original | update | void
     known_at: datetime
     payload: Mapping[str, Any]
+    template_version: str = TEMPLATE_VERSION  # a stored receipt: the version it was issued with
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +127,7 @@ class ReceiptView:
     number_line: str
     version_line: str
     issued_line: str
+    issuer_lines: tuple[str, ...]  # quittance-fr-3: the issuer block (R123-237/238)
     parties: tuple[Row, ...]
     payment: tuple[Row, ...]
     allocation: tuple[AllocationLine, ...]
@@ -125,7 +138,9 @@ class ReceiptView:
 
 
 def receipt_view(doc: ReceiptDocument) -> ReceiptView:
-    """The locked French template (TEMPLATE_VERSION) filled from the payload."""
+    """The locked French template (the receipt's template version) filled from the payload."""
+    if doc.template_version not in TEMPLATE_VERSIONS:
+        raise ValueError(f"unknown receipt template {doc.template_version!r}")
     p = doc.payload
     pay = p["payment"]
     money = _money(pay)
@@ -163,6 +178,7 @@ def receipt_view(doc: ReceiptDocument) -> ReceiptView:
         number_line=f"N° {doc.number}",
         version_line=version_line,
         issued_line=f"Établie le {format_date(paris_date(doc.known_at))}",
+        issuer_lines=issuer_block(p["issuer"]) if doc.template_version != "quittance-fr-2" else (),
         parties=parties,
         payment=_payment_rows(pay, None if void else p.get("payer") or {}, money),
         allocation=lines,
@@ -171,6 +187,44 @@ def receipt_view(doc: ReceiptDocument) -> ReceiptView:
         notes=tuple(notes),
         footer=f"Quittance n° {doc.number} · version {doc.version}",
     )
+
+
+def issuer_block(issuer: Mapping[str, Any]) -> tuple[str, ...]:
+    """The issuer's mentions on a receipt (« récépissé », C. com. R123-237; R123-238):
+    « Collectoo SAS au capital de 10 000 € », « SIREN 424 392 447 · RCS Paris », « Siège social :
+    10 rue de la Bourse, 75002 Paris »; « en liquidation » (4°) and « EI » (9°, the form) when they
+    apply. Nothing when the servicer has no billing identity (its name stays in « Émetteur »)."""
+    if not issuer.get("siren"):
+        return ()
+    head = str(issuer["name"])
+    if issuer.get("legal_form"):
+        head += f" {issuer['legal_form']}"
+    if issuer.get("share_capital_minor"):
+        head += f" au capital de {_capital(str(issuer['share_capital_minor']))}"
+    if issuer.get("in_liquidation"):
+        head += f" {DASH} en liquidation"
+    siren = str(issuer["siren"])
+    ids = f"SIREN {siren[0:3]}{NNBSP}{siren[3:6]}{NNBSP}{siren[6:9]}"
+    if issuer.get("rcs_city"):
+        ids += f" · RCS {issuer['rcs_city']}"
+    lines = [head, ids]
+    office = issuer.get("registered_office") or {}
+    if office:
+        parts = [str(office["line1"])]
+        if office.get("line2"):
+            parts.append(str(office["line2"]))
+        parts.append(f"{office['postcode']} {office['city']}")
+        if office.get("country") and office["country"] != "FR":
+            parts.append(COUNTRY_FR.get(str(office["country"]), str(office["country"])))
+        lines.append("Siège social : " + ", ".join(parts))
+    return tuple(lines)
+
+
+def _capital(minor: str) -> str:
+    """The capital in euros (R123-238 4° b: « peut être arrondi à la valeur entière inférieure »):
+    whole euros without cents, otherwise to the cent."""
+    text = format_money(minor, 2, "EUR")
+    return text.replace(",00" + NBSP, NBSP)
 
 
 def _money(pay: Mapping[str, Any]) -> Callable[[int | str], str]:
@@ -240,6 +294,8 @@ def receipt_text(doc: ReceiptDocument) -> str:
     """The receipt as plain text, line by line in the order the PDF draws it (snapshot tests)."""
     v = receipt_view(doc)
     out = [v.title, v.number_line, v.version_line, v.issued_line, ""]
+    if v.issuer_lines:
+        out += [*v.issuer_lines, ""]
     out += [f"{r.label} : {r.value}" for r in v.parties]
     out += ["", "Paiement reçu"]
     out += [f"{r.label} : {r.value}" for r in v.payment]

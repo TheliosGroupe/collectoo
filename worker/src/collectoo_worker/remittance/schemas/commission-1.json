@@ -1,0 +1,353 @@
+{
+  "$defs": {
+    "Basis": {
+      "additionalProperties": false,
+      "properties": {
+        "families": {
+          "anyOf": [
+            {
+              "const": "all",
+              "type": "string"
+            },
+            {
+              "items": {
+                "enum": [
+                  "principal",
+                  "interest",
+                  "indemnity",
+                  "charge",
+                  "cost",
+                  "unclassified"
+                ],
+                "type": "string"
+              },
+              "maxItems": 6,
+              "minItems": 1,
+              "type": "array"
+            }
+          ],
+          "title": "Families"
+        },
+        "forwards": {
+          "$ref": "#/$defs/Forwards"
+        },
+        "on_reversal": {
+          "enum": [
+            "credit",
+            "keep"
+          ],
+          "title": "On Reversal",
+          "type": "string"
+        }
+      },
+      "required": [
+        "families",
+        "forwards",
+        "on_reversal"
+      ],
+      "title": "Basis",
+      "type": "object"
+    },
+    "Bracket": {
+      "additionalProperties": false,
+      "properties": {
+        "rate": {
+          "pattern": "^(0(\\.[0-9]{1,4})?|1(\\.0{1,4})?)$",
+          "title": "Rate",
+          "type": "string"
+        },
+        "up_to": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]{0,14})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Up To"
+        }
+      },
+      "required": [
+        "up_to",
+        "rate"
+      ],
+      "title": "Bracket",
+      "type": "object"
+    },
+    "BracketRate": {
+      "additionalProperties": false,
+      "description": "One rate for the whole file, chosen by an attribute fixed at boarding.",
+      "properties": {
+        "attribute": {
+          "enum": [
+            "boarded_amount",
+            "age_days_at_boarding"
+          ],
+          "title": "Attribute",
+          "type": "string"
+        },
+        "brackets": {
+          "items": {
+            "$ref": "#/$defs/Bracket"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Brackets",
+          "type": "array"
+        },
+        "kind": {
+          "const": "bracket",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "attribute",
+        "brackets"
+      ],
+      "title": "BracketRate",
+      "type": "object"
+    },
+    "FlatRate": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "flat",
+          "title": "Kind",
+          "type": "string"
+        },
+        "rate": {
+          "pattern": "^(0(\\.[0-9]{1,4})?|1(\\.0{1,4})?)$",
+          "title": "Rate",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "rate"
+      ],
+      "title": "FlatRate",
+      "type": "object"
+    },
+    "Forwards": {
+      "additionalProperties": false,
+      "description": "Which forwards (money passed on without allocation) earn commission (founder #4: none unless\nthe mandate says so).",
+      "properties": {
+        "before_servicing_start": {
+          "title": "Before Servicing Start",
+          "type": "boolean"
+        },
+        "client_ratification": {
+          "title": "Client Ratification",
+          "type": "boolean"
+        },
+        "file_recalled": {
+          "title": "File Recalled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "file_recalled",
+        "before_servicing_start",
+        "client_ratification"
+      ],
+      "title": "Forwards",
+      "type": "object"
+    },
+    "MarginalRate": {
+      "additionalProperties": false,
+      "description": "Tiers on what the file brought in under the rule's tier key, net of reversals. (Whole-rate\ntiers on cumulative collections are not offered: the rate would fall as collections rise.)",
+      "properties": {
+        "kind": {
+          "const": "marginal",
+          "title": "Kind",
+          "type": "string"
+        },
+        "tiers": {
+          "items": {
+            "$ref": "#/$defs/Tier"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Tiers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "tiers"
+      ],
+      "title": "MarginalRate",
+      "type": "object"
+    },
+    "Match": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_types": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,39}$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Claim Types",
+          "type": "array"
+        },
+        "families": {
+          "items": {
+            "enum": [
+              "principal",
+              "interest",
+              "indemnity",
+              "charge",
+              "cost",
+              "unclassified"
+            ],
+            "type": "string"
+          },
+          "maxItems": 6,
+          "minItems": 1,
+          "title": "Families",
+          "type": "array"
+        },
+        "portfolio_ids": {
+          "items": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "title": "Portfolio Ids",
+          "type": "array"
+        }
+      },
+      "title": "Match",
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "label_fr": {
+          "title": "Label Fr",
+          "type": "string"
+        },
+        "match": {
+          "$ref": "#/$defs/Match"
+        },
+        "min_per_file_minor": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]{0,14})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Per File Minor"
+        },
+        "rate": {
+          "discriminator": {
+            "mapping": {
+              "bracket": "#/$defs/BracketRate",
+              "flat": "#/$defs/FlatRate",
+              "marginal": "#/$defs/MarginalRate"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/FlatRate"
+            },
+            {
+              "$ref": "#/$defs/MarginalRate"
+            },
+            {
+              "$ref": "#/$defs/BracketRate"
+            }
+          ],
+          "title": "Rate"
+        },
+        "tier_key": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$",
+          "title": "Tier Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "tier_key",
+        "label_fr",
+        "match",
+        "rate"
+      ],
+      "title": "Rule",
+      "type": "object"
+    },
+    "Tier": {
+      "additionalProperties": false,
+      "properties": {
+        "rate": {
+          "pattern": "^(0(\\.[0-9]{1,4})?|1(\\.0{1,4})?)$",
+          "title": "Rate",
+          "type": "string"
+        },
+        "up_to_minor": {
+          "anyOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]{0,14})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Up To Minor"
+        }
+      },
+      "required": [
+        "up_to_minor",
+        "rate"
+      ],
+      "title": "Tier",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "`commission-1` (design §8.1).",
+  "properties": {
+    "basis": {
+      "$ref": "#/$defs/Basis"
+    },
+    "rules": {
+      "items": {
+        "$ref": "#/$defs/Rule"
+      },
+      "maxItems": 50,
+      "minItems": 1,
+      "title": "Rules",
+      "type": "array"
+    },
+    "schema": {
+      "const": "commission-1",
+      "title": "Schema",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "basis",
+    "rules"
+  ],
+  "title": "Barème de commission (commission-1)",
+  "type": "object"
+}

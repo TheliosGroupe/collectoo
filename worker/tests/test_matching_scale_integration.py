@@ -17,7 +17,7 @@ from typing import Any
 
 import psycopg
 import pytest
-from integration_helpers import DB, as_user, board, drain, one, storage
+from integration_helpers import DB, as_user, board, drain, one, ready_mandate, storage
 from reconciliation_helpers import pay, score, world_from_db
 from statement_helpers import bank_tenant
 from stats_helpers import analyse, estimated_rows, frozen_statistics, lines_of_another_account
@@ -46,22 +46,7 @@ def _board(tenant: dict[str, Any], tmp_path: Path, count: int = FILES) -> None:
         conn.execute("select public.commit_boarding_batch(%s)", (batch,))
     drain(store)
     with psycopg.connect(DB) as conn, conn.transaction():
-        mandate = one(
-            conn,
-            "insert into public.mandate (organization_id, client_organization_id, reference,"
-            " mandate_type, signed_on) values (%s, %s, %s, 'mandate_amicable', '2026-01-01')"
-            " returning id",
-            (tenant["servicer"], tenant["client"], f"M-{uuid.uuid4().hex[:6]}"),
-        )
-        conn.execute(
-            "insert into public.mandate_terms (mandate_id, valid_from, commission_rate)"
-            " values (%s, '2026-01-01', 0.15)",
-            (mandate,),
-        )
-        conn.execute(
-            "update public.portfolio set mandate_id = %s where id = %s",
-            (mandate, tenant["portfolio"]),
-        )
+        ready_mandate(conn, tenant, f"M-{uuid.uuid4().hex[:6]}")
     with psycopg.connect(DB) as conn, conn.transaction():
         as_user(conn, tenant["staff"], aal="aal2")
         conn.execute("select public.confirm_boarding_batch(%s)", (batch,))
