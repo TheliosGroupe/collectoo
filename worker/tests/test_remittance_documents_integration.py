@@ -180,7 +180,7 @@ def test_an_approved_run_has_its_statement_and_its_invoice() -> None:  # noqa: P
     assert int(payload["position"]["owed_before_minor"]) == int(owed) == r["gross_minor"]
     # the invoice's PDF, from its frozen payload
     (inv,) = _invoice_docs(run)
-    assert inv["pdf_sha256"] is not None and inv["template_version"] == "facture-commission-fr-2"
+    assert inv["pdf_sha256"] is not None and inv["template_version"] == "facture-commission-fr-3"
     stored = _download(inv["storage_path"])
     assert pdf_sha256(stored) == inv["pdf_sha256"] == inv["sha256"]
     doc = InvoiceDocument(

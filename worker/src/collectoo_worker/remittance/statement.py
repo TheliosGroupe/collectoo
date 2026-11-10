@@ -367,6 +367,23 @@ def _summary(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Section
     return Section("Récapitulatif", rows=tuple(rows))
 
 
+def _absorbed_text(t: Mapping[str, Any], money: Callable[[int | str], str]) -> str:
+    """What the run's credits absorbed of manual credit notes' waivers (M2c-5b; review legal#4): a
+    credit already issued by the manual credit note named — never « rendu », which would read as
+    money returned while a refund it leaves is only ordered with the payout."""
+    notes = t.get("waived_absorbed_credit_notes") or ()
+    if notes:
+        named = ", ".join(f"n° {n['number']} rectifiant la facture {n['invoice']}" for n in notes)
+        which = f"(avoir{'s' if len(notes) > 1 else ''} {named})"
+    else:  # a payload frozen without the credit notes: the invoices it was absorbed on
+        invoices = [str(n) for n in t.get("waived_absorbed_invoices") or ()]
+        which = f"sur {'les factures' if len(invoices) > 1 else 'la facture'} {', '.join(invoices)}"
+    return (
+        f"Dont {money(-int(t['waived_absorbed_minor']))} de commission sur des encaissements "
+        f"annulés, déjà crédités par avoir manuel {which} : aucun nouvel avoir pour ce montant."
+    )
+
+
 def _collected(p: Mapping[str, Any], money: Callable[[int | str], str], csv_sha256: str) -> Section:
     t = p["totals"]
     texts = [
@@ -374,12 +391,7 @@ def _collected(p: Mapping[str, Any], money: Callable[[int | str], str], csv_sha2
         f"période : {money(t['commission_ht_minor'])}."
     ]
     if int(t.get("waived_absorbed_minor", 0)):  # M2c-5b: absent from payloads drawn before
-        invoices = ", ".join(str(n) for n in t.get("waived_absorbed_invoices") or ())
-        texts.append(
-            f"Dont {money(-int(t['waived_absorbed_minor']))} de commission sur des encaissements "
-            f"annulés, déjà rendus par avoir manuel sur la facture {invoices} : aucun nouvel avoir "
-            "pour ce montant."
-        )
+        texts.append(_absorbed_text(t, money))
     if int(t.get("repriced_count", 0)):
         texts.append(
             f"Dont la commission de {t['repriced_count']} encaissement(s) de relevés précédents, "

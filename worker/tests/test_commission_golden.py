@@ -48,6 +48,10 @@ def test_the_golden_set() -> None:
         "manual-credit-per-invoice",
         "manual-credit-two-files",
         "manual-credit-cancelled-run",
+        "manual-credit-cancel-two-reversals",
+        "manual-credit-cancel-all-absorbed",
+        "cancel-credit-across-rates",
+        "manual-credit-rate-fall",
     } <= names
     for p in CASES:
         case = load_case(p)
@@ -150,6 +154,12 @@ def _check_state(sim: Simulator, want: dict[str, Any], where: str) -> None:
         charges = sim.charges.get(key, [])
         assert sum(c.open_minor + c.waived_minor for c in charges) == state.commission_minor
         assert sum(c.waived_minor for c in charges) == state.waived_minor
+        if "invoices" in expect:  # per invoice: what it still charges the key, and its waiver
+            assert {
+                c.invoice_id: [str(c.open_minor), str(c.waived_minor)]
+                for c in charges
+                if c.open_minor or c.waived_minor
+            } == expect["invoices"], f"{where} {text}"
 
 
 def _check_cancel(sim: Simulator, want: dict[str, Any], where: str) -> None:

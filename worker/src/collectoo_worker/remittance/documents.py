@@ -22,7 +22,9 @@ M2c-4 numbers, posts and stores them; M2c-5 renders them.
 4. A reversal's credit is allocated first to the invoice that charged the line it undoes (its
    original), up to what that invoice still charges the (file, tier key) — every reversal of the
    run there before any credit goes LIFO — then LIFO to the other invoices that charged the key;
-   every allocation names its invoice (289 I 5) and its line. The per-key logic is
+   every allocation names its invoice (289 I 5) and its line. After a cancelled run, a reversal
+   it took something for is credited first on the invoices that cancellation put it back on, up
+   to its own share on each (`commission.Retake`, M2c-5b review math#0). The per-key logic is
    `commission.key_side`, which the engine's rounding reserve simulates too.
 5. Credit-note VAT per corrected invoice by cumulative difference at that invoice's rate: never
    above its VAT, exactly it on a full credit.
@@ -53,8 +55,8 @@ from collectoo_worker.remittance.commission import (
     LineCommission,
     LineInvoices,
     SidePart,
-    chain,
     key_side,
+    preferred_for,
 )
 from collectoo_worker.remittance.vat import credit_note_vat, vat_of
 
@@ -220,14 +222,15 @@ def _split(
         keys = by_mandate.setdefault(r.mandate_id, {})
         reversal = r.kind in REVERSALS
         same_run = reversal and r.original_entry_id in in_run
-        preferred = (
-            chain(line_invoices.get(r.original_entry_id))
+        found = (
+            line_invoices.get(r.original_entry_id)
             if reversal and r.original_entry_id and not same_run
-            else ()
+            else None
         )
         for p in r.parts:
-            keys.setdefault((p.account_id, p.tier_key), []).append(
-                SidePart(r.entry_id, p, p.commission_minor, same_run, preferred)
+            key = (p.account_id, p.tier_key)
+            keys.setdefault(key, []).append(
+                SidePart(r.entry_id, p, p.commission_minor, same_run, preferred_for(found, key))
             )
     return by_mandate
 

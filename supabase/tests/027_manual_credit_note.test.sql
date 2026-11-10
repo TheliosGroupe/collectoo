@@ -2,8 +2,9 @@
 --   * who: an admin of the servicer at aal2 — not an ops manager, a collector, a client, an admin at aal1, another
 --     servicer's admin (another tenant's invoice);
 --   * refusals: a credit note on a credit note, more than the invoice's remaining HT, a file the invoice does not charge,
---     an invoice a run in flight sets off, a missing amount / reason / category, an invoice changed since the page read
---     it (compare and set);
+--     an invoice whose own run is in flight (`run_in_flight`: still cancellable; review ledger-vat#0), an invoice a run
+--     in flight sets off (`in_flight`), a missing amount / reason / category, an invoice changed since the page read it
+--     (compare and set);
 --   * idempotency key and request hash (the same request replays, another is refused);
 --   * the document: the next number of the gapless series (approvals interleaved), dated today, its entry −4111 TTC /
 --     +7060 HT / +44574 v₁ / +44571 v₂ (the invoice's pending VAT first) balanced, VAT by cumulative difference at the
@@ -11,12 +12,15 @@
 --     line, the staff's free text in a table clients cannot read; its PDF queued;
 --   * the spread over the invoice's (file, tier key) in proportion (largest remainder), or one file's;
 --   * the waiver: commission_waiver and the key states (V unchanged, waived grown), Σ open + Σ waived = V, the guard;
---   * the run's cancellation with a manual credit note on its invoice: the open part credited, the waiver cleared, the
---     key states back with nothing waived;
---   * RLS (staff, client A/B, a restricted viewer, a collector, another servicer), the nightly checks (I16–I18, I22).
+--   * RLS (staff, client A/B, a restricted viewer, a collector, another servicer), the nightly checks (I16–I18, I22);
+--   * review fixes: every credit note's payload names each rectified invoice's HT and VAT after it (legal#1); a refund
+--     owed still unpaid 30 days on is alerted (`credit_refund_owed`, legal#0); the invoice page's files a page at a
+--     time (`commission_invoice_files`, tests-ui#2) and a credit note's own page names what it rectifies (tests-ui#3);
+--     a manual credit note issued between a draft's prepare and its approval sends it back (`history_changed`,
+--     tests-ui#0); a draft the engine could not price is never approved (`engine_error`, security-concurrency#0).
 -- Design docs/design/m2c-remittances.md §4, §14.1, §16, §20 R2; ADR-0014 M2c-5b.
 begin;
-select plan(70);
+select plan(77);
 
 -- Fixtures (as 026: Martin (a1), Lilas (a2) and Cyprès (a3) of the servicer aa; Bleu (b1) of another servicer bb) ----
 insert into public.organization (id, kind, legal_name, siren) values
@@ -303,8 +307,8 @@ select pg_temp.collect('09', 100000, private.paris_today() - 3);
 select pg_temp.collect('02', 360000, private.paris_today() - 3);
 select pg_temp.collect('03', 300000, private.paris_today() - 3);
 
--- Martin: two files, nothing set off on its payout (the plan defers its invoice: creditable); Cyprès: its invoice set
--- off on its payout (in flight until the debit)
+-- Martin: two files, nothing set off on its payout (the plan defers its invoice); Cyprès: its invoice set off on its
+-- payout (in flight until the debit)
 insert into t select 'r1', pg_temp.run('a1', '{"01": "200000", "09": "100000"}', 0, 0);
 insert into t select 'r3', pg_temp.run('a3', '{"03": "300000"}', 20000, 3333);
 insert into t select 'i1', id from public.commission_invoice where run_id = (select v from t where k = 'r1');
@@ -315,6 +319,20 @@ select results_eq($$ select i.number, i.ht_minor, i.vat_minor, private.document_
   $$ values ('FC-' || extract(year from private.paris_today()) || '-000001', 45000::bigint, 9000::bigint, 54000::bigint,
              9000::bigint) $$,
   'fixture: Martin''s invoice FC-…-000001, 450,00 € HT on two files, all open');
+
+-- A run still in flight (approved, its payout not debited: cancellable): its own invoice takes no manual credit note
+-- (review ledger-vat#0: the cancellation would credit the invoice in full and the run again bill its lines anew, the
+-- rectification billed again)
+select throws_ok($$ select pg_temp.credit('04', 'mcn-flight-1', (select v from t where k = 'i1'), '10', '45000') $$,
+  '23514', 'credit note refused: run_in_flight', 'the invoice of a run in flight: refused (run_in_flight)');
+select pg_temp.as_user('04');
+set local role authenticated;
+select is(public.credit_note_preview((select v from t where k = 'i1'), '10') ->> 'refusal', 'run_in_flight',
+  '… the effect sheet says so');
+reset role;
+-- … creditable once the run is debited (emulating M2c-6's booking of the payout, as 024 does)
+update public.remittance_run set status = 'booked', booked_on = private.paris_today()
+where id = (select v from t where k = 'r1');
 
 -- Schema -----------------------------------------------------------------------------------------------------------
 select has_column('public', 'remittance_key_state', 'waived_minor', 'a key state carries its waiver');
@@ -357,9 +375,20 @@ select throws_ok($$ select pg_temp.credit('04', 'mcn-no-7', (select v from t whe
                                           pg_temp.f('02')) $$,
   '23514', 'credit note refused: file_not_on_invoice', 'a file the invoice does not charge');
 select throws_ok($$ select pg_temp.credit('04', 'mcn-no-8', (select v from t where k = 'i3'), '10', '45000') $$,
-  '23514', 'credit note refused: in_flight', 'an invoice a run in flight sets off (its payout not debited)');
+  '23514', 'credit note refused: run_in_flight', 'an invoice its own run in flight sets off (its payout not debited)');
 select is((select refusal from (select public.credit_note_preview((select v from t where k = 'i3'), '10') ->> 'refusal'
-                                         as refusal) x), 'in_flight', '… the effect sheet says so');
+                                         as refusal) x), 'run_in_flight', '… the effect sheet says so');
+-- an invoice of a debited run that a later run in flight sets off (its plan's `settles`): `in_flight` — the refusal
+-- read for Cyprès's invoice as if its own run were not in flight (its run cleared on the row read)
+create or replace function pg_temp.refusal_as_debited(p_invoice uuid) returns text language plpgsql as $$
+declare v public.commission_invoice;
+begin
+  select * into v from public.commission_invoice where id = p_invoice;
+  v.run_id := null;
+  return private.manual_credit_refusal(v, 1);
+end $$;
+select is(pg_temp.refusal_as_debited((select v from t where k = 'i3')), 'in_flight',
+  'an invoice a run in flight sets off (in_flight)');
 
 -- The effect sheet, then the credit note: 100,00 € on Martin's invoice --------------------------------------------
 select pg_temp.as_user('04');
@@ -586,14 +615,14 @@ select throws_ok($$ insert into public.commission_waiver (organization_id, clien
                            (select v from t where k = 'i1'), pg_temp.f('01'), 'tout', -6668, 'absorbed',
                            (select v from t where k = 'r1'), (select ledger_entry_id from public.commission_invoice
                                                               where id = (select v from t where k = 'i1')) $$,
-  '23514', 'commission waiver: an invoice of its client, between 0 and what manual credit notes took back',
+  '23514', 'commission waiver: an invoice of its client charging the key, between 0 and what manual credit notes took back',
   'a waiver never below 0');
 select throws_ok($$ insert into public.commission_waiver (organization_id, client_organization_id, invoice_id,
                       account_id, tier_key, amount_minor, cause, credit_note_id)
                     values ('00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a2',
                             (select v from t where k = 'i1'), pg_temp.f('01'), 'tout', 1, 'credit_note',
                             (select v from t where k = 'cn1')) $$,
-  '23514', 'commission waiver: an invoice of its client, between 0 and what manual credit notes took back',
+  '23514', 'commission waiver: an invoice of its client charging the key, between 0 and what manual credit notes took back',
   'nor above what was waived, nor another client''s');
 select throws_ok($$ update public.commission_waiver set amount_minor = 1 $$, '23514', null, 'append-only');
 select throws_ok($$ insert into public.remittance_key_state (organization_id, client_organization_id, account_id,
@@ -634,40 +663,113 @@ select results_eq($$ select c.subject_id, c.amount_minor from public.payment_che
   $$ values (pg_temp.f('03'), -1::bigint) $$,
   'I22: a key whose open charges and waivers are not its commission is flagged');
 
--- Cancelling Martin's run with manual credit notes on its invoice --------------------------------------------------
-select pg_temp.as_user('04');
+-- Review legal#1: every credit note freezes each rectified invoice's HT and VAT after it ----------------------------
+select results_eq($$ select (select v from t where k = x.k), c ->> 'ht_after', c ->> 'vat_after'
+                     from (values ('cn1', 1), ('cn2', 2), ('cn3', 3)) x (k, o)
+                     cross join lateral jsonb_array_elements((select i.payload -> 'corrections' from public.commission_invoice i
+                                                              where i.id = (select v from t where k = x.k))) c
+                     order by x.o $$,
+  $$ values ((select v from t where k = 'cn1'), '35000', '7000'), ((select v from t where k = 'cn2'), '30000', '6000'),
+            ((select v from t where k = 'cn3'), '0', '0') $$,
+  'each credit note: the invoice it rectifies after it, all its credit notes included (BOI-TVA-DECLA-30-20-20-20 §260)');
+
+-- Review tests-ui#2/#3: the invoice page's files a page at a time; a credit note's page names what it rectifies ----
+select pg_temp.as_user('01');
 set local role authenticated;
-insert into j select 'cx', public.cancel_remittance_run('cn-mcn-martin', (select v from t where k = 'r1'),
-                                    (select version from public.remittance_run where id = (select v from t where k = 'r1')),
-                                    'mandat mal paramétré');
+insert into j select 'p1', jsonb_agg(to_jsonb(f)) from public.commission_invoice_files((select v from t where k = 'i1'),
+                                                                                        null, 1) f;
+insert into j select 'p2', jsonb_agg(to_jsonb(f))
+from public.commission_invoice_files((select v from t where k = 'i1'), (select v #>> '{0,page_key}' from j where k = 'p1'),
+                                     1) f;
+insert into j select 'p3', coalesce(jsonb_agg(to_jsonb(f)), '[]')
+from public.commission_invoice_files((select v from t where k = 'i1'), (select v #>> '{0,page_key}' from j where k = 'p2'),
+                                     1) f;
+insert into j select 'dn', public.commission_invoice_detail((select v from t where k = 'cn1'));
 reset role;
-select results_eq($$ select i.ht_minor, i.vat_minor, private.document_open((select v from t where k = 'i1'))
-                     from public.commission_invoice i
-                     where i.run_id = (select v from t where k = 'r1') and i.reason = 'run_cancelled' $$,
-  $$ values (-30000::bigint, -6000::bigint, 0::bigint) $$,
-  'the cancellation credits what the invoice still charges (300,00 € HT), its VAT the rest of the invoice''s: closed');
-select results_eq($$ select w.account_id, sum(w.amount_minor) from public.commission_waiver w
-                     where w.invoice_id = (select v from t where k = 'i1') group by w.account_id order by w.account_id $$,
-  $$ values (pg_temp.f('01'), 0::numeric), (pg_temp.f('09'), 0::numeric) $$,
-  'its waivers cleared');
-select results_eq($$ select s.cause, s.commission_minor, s.waived_minor, s.basis
-                     from private.remittance_key_states(array[pg_temp.f('01'), pg_temp.f('09')], array['tout', 'tout']) x
-                     join lateral (select k.* from public.remittance_key_state k
-                                   where k.account_id = x.account_id and k.tier_key = x.tier_key
-                                   order by k.seq desc limit 1) s on true $$,
-  $$ values ('cancelled'::text, 0::bigint, 0::bigint, '[]'::jsonb), ('cancelled', 0, 0, '[]') $$,
-  'each key back to before the run: nothing charged, nothing waived');
+select results_eq($$ select (x.v -> 0 ->> 'file_id')::uuid, x.v -> 0 ->> 'file_ref', (x.v -> 0 ->> 'open_minor')::bigint,
+                            jsonb_array_length(x.v)
+                     from j x where x.k in ('p1', 'p2') order by x.k $$,
+  $$ values (least(pg_temp.f('01'), pg_temp.f('09')), case when pg_temp.f('01') < pg_temp.f('09') then 'D-01' else 'D-09' end,
+             case when pg_temp.f('01') < pg_temp.f('09') then 23333::bigint else 6667 end, 1),
+            (greatest(pg_temp.f('01'), pg_temp.f('09')), case when pg_temp.f('01') < pg_temp.f('09') then 'D-09' else 'D-01' end,
+             case when pg_temp.f('01') < pg_temp.f('09') then 6667::bigint else 23333 end, 1) $$,
+  'the files a page at a time, in key order, with what the invoice still charges each');
+select is((select jsonb_array_length(v) from j where k = 'p3'), 0, '… and after the last page, none');
+select results_eq($$ select v #>> '{corrects,0,number}', v #>> '{corrects,0,ht}', v ->> 'reason_code',
+                            jsonb_array_length(v -> 'credit_notes')
+                     from j where k = 'dn' $$,
+  $$ values ('FC-' || extract(year from private.paris_today()) || '-000001', '-10000', 'terms_error', 0) $$,
+  'a credit note''s page: the invoice it rectifies, its reason category; no credit notes of its own');
+select pg_temp.as_user('05');
+set local role authenticated;
+select throws_ok($$ select * from public.commission_invoice_files((select v from t where k = 'i1')) $$, '42501',
+  'not allowed', 'another servicer cannot read the invoice''s files');
+reset role;
+
+-- Review legal#0: a refund owed still unpaid 30 days on is an alert -------------------------------------------------
 with x as (insert into public.payment_check_run (organization_id) values ('00000000-0000-0000-0000-0000000000aa')
            returning id)
-insert into t select 'cr3', x.id from x;
-select private.run_remittance_checks((select v from t where k = 'cr3'), '00000000-0000-0000-0000-0000000000aa');
-select is((select string_agg(c.code || ':' || coalesce(c.subject_id::text, ''), ',') from public.payment_check_result c
-           where c.run_id = (select v from t where k = 'cr3') and c.severity = 'violation'
-             and c.code not in ('remittance_payout_overdue')
-             and not (c.code = 'commission_key_state' and c.subject_id = pg_temp.f('03'))), null,
-  'after the cancellation: no violation (but the key the test broke)');
-select throws_ok($$ select pg_temp.credit('04', 'mcn-no-12', (select v from t where k = 'i1'), '1', '0') $$,
-  '23514', 'credit note refused: nothing_left', 'a cancelled run''s invoice has nothing left to credit');
+insert into t select 'cr4', x.id from x;
+select private.run_remittance_checks((select v from t where k = 'cr4'), '00000000-0000-0000-0000-0000000000aa',
+                                     private.paris_today() + 31);
+with x as (insert into public.payment_check_run (organization_id) values ('00000000-0000-0000-0000-0000000000aa')
+           returning id)
+insert into t select 'cr5', x.id from x;
+select private.run_remittance_checks((select v from t where k = 'cr5'), '00000000-0000-0000-0000-0000000000aa');
+select results_eq($$ select c.run_id = (select v from t where k = 'cr4'), c.subject_id, c.amount_minor, c.severity,
+                            c.details ->> 'reason', c.details ->> 'planned_run'
+                     from public.payment_check_result c
+                     where c.run_id in ((select v from t where k = 'cr4'), (select v from t where k = 'cr5'))
+                       and c.code = 'credit_refund_owed' $$,
+  $$ values (true, (select v from t where k = 'cn3'), 360000::bigint, 'alert'::text, 'manual'::text, null::text) $$,
+  'credit_refund_owed: Lilas''s 3 600,00 € owed, 31 days on (not today); none for the notes applied in full');
+
+-- Review tests-ui#0 / security-concurrency#0: a draft prepared before a manual credit note goes back to draft ------
+select pg_temp.file('10', '20000000-0000-0000-0000-0000000000a1', 100000);
+select pg_temp.collect('10', 100000, private.paris_today() - 2);
+create or replace function pg_temp.prepared(p_c text, p_files jsonb, p_key text) returns uuid
+language plpgsql as $$
+declare v_run uuid; v_gross bigint; v_ht bigint;
+begin
+  select sum((x.value)::bigint), sum((x.value)::bigint * 15 / 100) into v_gross, v_ht from jsonb_each_text(p_files) x;
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v_run := (public.request_remittance_run('rq-' || p_key, ('00000000-0000-0000-0000-0000000000' || p_c)::uuid)
+            ->> 'run_id')::uuid;
+  reset role;
+  perform pg_temp.prepare(v_run, pg_temp.doc(p_c, p_files, 15, 100), pg_temp.keys(p_c, p_files, 15, 100),
+                          pg_temp.plan(p_c, v_gross, v_ht, 0, 0));
+  return v_run;
+end $$;
+insert into t select 'r5', pg_temp.prepared('a1', '{"10": "100000"}', 'mcn-hc');
+select lives_ok($$ insert into j select 'c5', pg_temp.credit('04', 'mcn-hc-1', (select v from t where k = 'i1'), '10',
+                                                          '30000') $$,
+  'a manual credit note on Martin''s invoice while its next draft waits for approval');
+select pg_temp.as_user('01');
+set local role authenticated;
+select public.approve_remittance_runs('ap-mcn-hc', pg_temp.item((select v from t where k = 'r5')));
+reset role;
+insert into j select 'a5', private.approve_remittance_run((select v from t where k = 'r5'),
+                                                          (select job_token from public.remittance_run
+                                                           where id = (select v from t where k = 'r5')));
+select results_eq($$ select (select v ->> 'status' from j where k = 'a5'), (select v ->> 'reason' from j where k = 'a5'),
+                            r.status, r.last_failure ->> 'code',
+                            (select count(*)::int from public.remittance_key_state k where k.run_id = r.id),
+                            (select count(*)::int from public.commission_invoice i where i.run_id = r.id)
+                     from public.remittance_run r where r.id = (select v from t where k = 'r5') $$,
+  $$ values ('back_to_draft'::text, 'history_changed'::text, 'draft'::text, 'history_changed'::text, 0, 0) $$,
+  'the approval sends it back (history_changed): no key state, no document — « Actualiser » prices it again');
+-- a draft whose commission the engine refused (`commission_input_error`) is never approved as is (engine_error)
+create or replace function pg_temp.refusal_with_input_error(p_run uuid) returns text language plpgsql as $$
+declare r public.remittance_run; d private.remittance_draft;
+begin
+  select * into r from public.remittance_run where id = p_run;
+  select * into d from private.remittance_draft where run_id = p_run;
+  r.commission_blockers := array['commission_input_error: file F, tout: its invoices'' waivers do not add up'];
+  return private.remittance_approval_refusal(r, d, private.paris_today());
+end $$;
+select is(pg_temp.refusal_with_input_error((select v from t where k = 'r5')), 'engine_error',
+  'a draft the engine could not price: refused (engine_error)');
 
 select * from finish();
 rollback;

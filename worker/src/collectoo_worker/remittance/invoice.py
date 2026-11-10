@@ -1,5 +1,6 @@
 """Commission invoices and credit notes (M2-15; design §14.2; locked template
-`facture-commission-fr-2`): the French wording of a document, from the payload M2c-4 froze at
+`facture-commission-fr-3`, `facture-commission-fr-2` kept for the payloads frozen before it): the
+French wording of a document, from the payload M2c-4 froze at
 issue (`private.issue_commission_documents`) — never from the current settings. Amounts are text
 in minor units, dates ISO; nothing is computed here, no model or LLM is involved.
 
@@ -29,7 +30,14 @@ Mentions and their basis (design §14.2):
   paiement »; L441-10 II; D441-5: 40 euros). A proceeding of the client does not remove the
   mention: L441-10 II only bars invoking the indemnity while the opening forbids paying the claim
   at its date — the dunning step's concern (review legal#0);
-* a credit note: each line names the invoice it rectifies and why — CGI 289 I 5, 272 1.
+* a credit note: each line names the invoice it rectifies and why — CGI 289 I 5, 272 1; and, from
+  `facture-commission-fr-3` (M2c-5b review legal#1), per invoice it rectifies, that invoice's HT
+  and VAT once the note is applied, « Après cet avoir, la facture FC-… du … s'élève à X € HT, TVA
+  Y € (taux) » — the note states « le montant du total hors taxes et de la TVA due après
+  application de la réduction de prix » (BOI-TVA-DECLA-30-20-20-20 §260, BOI-TVA-DED-40-10-20
+  §80), frozen in the payload (`ht_after`, `vat_after`); what it gives back beyond what the
+  invoices still owe is owed to the client, paid with a later payout or, with none, by transfer
+  (never « remboursé » before the money moves).
 No CGI article number is printed (the VAT articles move to the CIBS on 2027-01-01: design §3.1).
 Nothing says « payé » or « réglé » before the bank's debit.
 """
@@ -47,8 +55,9 @@ from collectoo_worker.payments.receipts import NNBSP, format_date, format_money,
 from collectoo_worker.remittance.run import percent
 from collectoo_worker.remittance.statement import address
 
-TEMPLATE_VERSION = "facture-commission-fr-2"  # M2c-5 review (fr-1 never left the slice)
-TEMPLATE_VERSIONS = (TEMPLATE_VERSION,)
+TEMPLATE_V2 = "facture-commission-fr-2"  # M2c-5 review (fr-1 never left the slice)
+TEMPLATE_VERSION = "facture-commission-fr-3"  # M2c-5b review legal#1: the invoice after the credit
+TEMPLATE_VERSIONS = (TEMPLATE_V2, TEMPLATE_VERSION)  # fr-2 renders what it rendered, to the byte
 FLAT_INDEMNITY_MINOR = (
     4000  # C. com. D441-5: « fixé à 40 euros » (when the payload names no amount)
 )
@@ -260,16 +269,26 @@ def _mentions(doc: InvoiceDocument, credit: bool) -> tuple[str, ...]:
     p = doc.payload
     out: list[str] = []
     if credit:
+        v2 = doc.template_version == TEMPLATE_V2
         for c in p.get("corrections") or ():
             ref = doc.refs.get(str(c["original_invoice_id"])) or {}
+            name = f"la facture {ref.get('number', '?')} du {format_date(ref.get('issue_date'))}"
             out.append(
-                f"Avoir n° {doc.number} rectifiant la facture {ref.get('number', '?')} du "
-                f"{format_date(ref.get('issue_date'))} : HT {_money(c['ht'])}, "
+                f"Avoir n° {doc.number} rectifiant {name} : HT {_money(c['ht'])}, "
                 f"TVA {_money(c['vat'])}."
             )
+            if not v2 and c.get("ht_after") is not None and c.get("vat_after") is not None:
+                out.append(  # BOI-TVA-DECLA-30-20-20-20 §260: the totals after the reduction
+                    f"Après cet avoir, {name} s'élève à {_money(c['ht_after'])} HT, "
+                    f"TVA {_money(c['vat_after'])} ({percent(str(c['vat_rate']))})."
+                )
         out.append(
             "Le montant de cet avoir est déduit des factures qu'il rectifie ; l'excédent éventuel "
             "vous est remboursé avec un prochain reversement."
+            if v2
+            else "Le montant de cet avoir est déduit des factures qu'il rectifie ; l'excédent "
+            "éventuel vous est dû : il vous sera versé avec un prochain reversement, ou par "
+            "virement s'il n'y en a pas."
         )
     else:
         out.append("Aucun rabais, remise ni ristourne.")

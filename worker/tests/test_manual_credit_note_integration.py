@@ -6,10 +6,19 @@
   again); undoing the collection the invoice charged is absorbed by its waiver first (recorded, no
   document), the rest credited on it — the invoice credited in full by the two credit notes, its VAT
   exactly; the nightly checks clean (I16 with what the waiver absorbed, I18, I22);
-* that run cancelled: its credit note restored by a corrective invoice of what it credited, what it
-  absorbed restored as the invoice's waiver, the key back to its state before the run; the run
-  again credits the reversal on the corrective invoice first, then absorbs the waiver on the
-  original invoice — the same net effect;
+* while that run is in flight its own invoice takes no manual credit note (`run_in_flight`, review
+  ledger-vat#0); its credit note names FC-1 after it (`ht_after`, `vat_after`: review legal#1);
+* that run cancelled: a corrective invoice charges again what it credited and holds, as its
+  waiver, what it absorbed (review math#0), the key back to its state before the run; the run
+  again takes back on the corrective invoice what the cancelled run took for the reversal there —
+  the same net effect; its statement names the manual credit note (review legal#4);
+* two reversals, the one the waiver absorbs first, and a later invoice still live on the file: the
+  run cancelled and run again gives each reversal its own share of the pooled corrective invoice,
+  the live invoice is never credited and no waiver is left behind (review math#0);
+* a manual credit note issued between a draft's prepare and its approval sends the draft back
+  (`history_changed`, review tests-ui#0), and one committing while the prepare reads the history
+  never yields an approvable draft (review security-concurrency#0: `history_changed` or
+  `engine_error`);
 * parity: the spread `private.manual_credit_plan` computes over an invoice's files is the worker's
   `documents.manual_credit`, to the cent, for random amounts, on the whole invoice or one file.
 """
@@ -205,7 +214,22 @@ def test_a_waiver_is_never_charged_again_and_a_reversal_meets_it_first() -> None
         == reversal
     )
     assert _state(f.id) == (45_000, 0, "approved")
-    # its statement names what FC-1's waiver absorbed (the lines' commission -150,00 vs the documents)
+    # RV-2 in flight (approved, its payout not debited): its own invoice takes no manual credit note
+    rv2_invoice = str(
+        _value(
+            "select id from public.commission_invoice where run_id = %s and kind = 'invoice'", rv2
+        )
+    )
+    with pytest.raises(psycopg.errors.CheckViolation, match="run_in_flight"):
+        _credit_note(tenant, rv2_invoice, "10")
+    # its credit note states FC-1 after it: nothing left (legal#1)
+    assert _value(
+        """select jsonb_agg(jsonb_build_array(c ->> 'ht_after', c ->> 'vat_after'))
+           from public.commission_invoice n, jsonb_array_elements(n.payload -> 'corrections') c
+           where n.run_id = %s and n.kind = 'credit_note'""",
+        rv2,
+    ) == [["0", "0"]]
+    # its statement names what FC-1's waiver absorbed (the lines' commission -150,00, the documents)
     totals = _value(
         "select payload -> 'totals' from public.remittance_statement where run_id = %s", rv2
     )
@@ -213,6 +237,12 @@ def test_a_waiver_is_never_charged_again_and_a_reversal_meets_it_first() -> None
         "9000",
         [fc1["number"]],
     )
+    issued_number = _value(
+        "select number from public.commission_invoice where id = %s", issued["credit_note_id"]
+    )
+    assert totals["waived_absorbed_credit_notes"] == [
+        {"number": issued_number, "invoice": fc1["number"]}
+    ]
     with psycopg.connect(DB) as conn:
         closed = conn.execute(
             """select i.ht_minor + (select sum(c.ht_minor)
@@ -240,10 +270,6 @@ def test_a_waiver_is_never_charged_again_and_a_reversal_meets_it_first() -> None
         user=tenant["admin"],
     )
     assert cancelled["status"] == "cancelled"
-    assert _absorbed(rv2) == [
-        (fc1["number"], -9_000, "absorbed"),
-        (fc1["number"], 9_000, "restored"),
-    ]
     with psycopg.connect(DB) as conn:
         corrective = conn.execute(
             """select number, ht_minor, vat_minor from public.commission_invoice
@@ -251,6 +277,20 @@ def test_a_waiver_is_never_charged_again_and_a_reversal_meets_it_first() -> None
             (rv2,),
         ).fetchone()
     assert corrective is not None and corrective[1:] == (21_000, 4_200)
+    # what RV-2 absorbed is restored as the corrective invoice's waiver (math#0): it holds again
+    # all RV-2 took at FC-1's rate, 210,00 € charged and 90,00 € waived, with the reversal's line
+    assert _absorbed(rv2) == [
+        (fc1["number"], -9_000, "absorbed"),
+        (corrective[0], 9_000, "restored"),
+    ]
+    assert (
+        _value(
+            "select entry_id::text from public.commission_waiver where run_id = %s"
+            " and cause = 'restored'",
+            rv2,
+        )
+        == reversal
+    )
     assert _state(f.id) == (30_000, 9_000, "cancelled")  # as before RV-2
     assert _violations(tenant) == []
 
@@ -259,10 +299,268 @@ def test_a_waiver_is_never_charged_again_and_a_reversal_meets_it_first() -> None
         ("invoice", 45_000, 9_000),
         ("credit_note", -21_000, -4_200),
     ]
-    assert _credits(rv3) == [(corrective[0], -21_000, -4_200)]  # the corrective invoice first
-    assert _absorbed(rv3) == [(fc1["number"], -9_000, "absorbed")]  # then FC-1's waiver
+    # the reversal takes back on the corrective invoice what RV-2 took for it: 90,00 € absorbed by
+    # its waiver, 210,00 € credited — it is credited in full, FC-1 untouched
+    assert _credits(rv3) == [(corrective[0], -21_000, -4_200)]
+    assert _absorbed(rv3) == [(corrective[0], -9_000, "absorbed")]
     assert _state(f.id) == (45_000, 0, "approved")
+    totals = _value(
+        "select payload -> 'totals' from public.remittance_statement where run_id = %s", rv3
+    )
+    assert totals["waived_absorbed_credit_notes"] == [
+        {"number": issued_number, "invoice": fc1["number"]}
+    ]  # followed back from the corrective invoice to the manual credit note (legal#4)
     assert _violations(tenant) == []
+
+
+def _file_paid(tenant: dict[str, Any], store: Any, amount: int, back: int) -> tuple[File, str]:
+    f = create_file(
+        tenant,
+        File(
+            f"F-{uuid.uuid4().hex[:8]}",
+            "b2b",
+            "Débiteur SARL",
+            [Item("INV-1", {"principal": 900_000}, date(2026, 9, 1))],
+        ),
+    )
+    (pay,) = statement(
+        tenant,
+        store,
+        [credit(amount, rf=f.rf)],
+        f"M{uuid.uuid4().hex[:5]}",
+        recent_business_day(back),
+    ).values()
+    return f, pay
+
+
+def _pay_again(tenant: dict[str, Any], store: Any, f: File, amount: int, back: int) -> str:
+    (pay,) = statement(
+        tenant,
+        store,
+        [credit(amount, rf=f.rf)],
+        f"M{uuid.uuid4().hex[:5]}",
+        recent_business_day(back),
+    ).values()
+    return str(pay)
+
+
+def _invoice_of(run: str) -> tuple[str, str]:
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            "select id::text, number from public.commission_invoice"
+            " where run_id = %s and kind = 'invoice' and reason = 'commission'",
+            (run,),
+        ).fetchone()
+    assert row is not None
+    return str(row[0]), str(row[1])
+
+
+def _open_and_waived(invoice: str, file_id: str) -> tuple[int, int]:
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            """select ch.charged_minor + coalesce((select sum(a.ht_minor)
+                 from public.commission_credit_alloc a where a.original_invoice_id = ch.invoice_id
+                   and a.account_id = ch.account_id and a.tier_key = ch.tier_key), 0),
+                      coalesce((select sum(w.amount_minor) from public.commission_waiver w
+                 where w.invoice_id = ch.invoice_id and w.account_id = ch.account_id
+                   and w.tier_key = ch.tier_key), 0)
+               from public.commission_invoice_charge ch
+               where ch.invoice_id = %s and ch.account_id = %s""",
+            (invoice, file_id),
+        ).fetchone()
+    return (0, 0) if row is None else (int(row[0]), int(row[1]))
+
+
+def test_a_cancelled_run_again_gives_each_reversal_its_own_share() -> None:
+    """Review math#0 (p1_cancel.py through the database and the jobs). 15 % flat: A, B and D,
+    1 000 € each on file F, in three debited runs (FC-1, FC-2, FC-3, 150,00 € each); a manual
+    credit note of 40,00 € on FC-1. A then B undone in one run, with 5 000 € on file G: A's 150,00 €
+    — 40,00 € absorbed by FC-1's waiver, 110,00 € credited on FC-1 —, B's 150,00 € on FC-2.
+    Cancelled: the corrective invoice charges F again 260,00 € and holds the 40,00 € as its waiver.
+    The run again: A takes its 150,00 € there (40,00 € absorbed), B its 150,00 €; FC-3, whose D was
+    never undone, keeps its 150,00 € and FC-1 holds no waiver — before the fix A took B's share of
+    the pooled invoice and B's credit fell on FC-3, 40,00 € under-billed for good."""
+    tenant = remittance_tenant()
+    store = storage()
+    f, pa = _file_paid(tenant, store, 100_000, 9)
+    fcs = []
+    for n, pay in enumerate((None, 100_000, 100_000)):
+        if pay is not None:
+            _pay_again(tenant, store, f, pay, 8 - n)
+        run = _approved(tenant)
+        book_payout(run)
+        fcs.append(_invoice_of(run))
+    (fc1_id, fc1), (fc2_id, _), (fc3_id, _) = fcs
+    pb = str(
+        _value(
+            """select e.payment_id from public.ledger_entry e
+               where e.account_id = %s and e.entry_type = 'allocation' and e.payment_id <> %s
+               order by e.posted_at limit 1""",
+            f.id,
+            pa,
+        )
+    )
+    issued = _credit_note(tenant, fc1_id, "40")
+    assert _state(f.id) == (45_000, 4_000, "credit_note")
+    g, _ = _file_paid(tenant, store, 500_000, 5)
+    ra = _undo(tenant, pa, f.id)
+    rb = _undo(tenant, pb, f.id)
+    rv4 = _approved(tenant)
+    assert _credits(rv4) == [(fc1, -11_000, -2_200), (fcs[1][1], -15_000, -3_000)]
+    assert _absorbed(rv4) == [(fc1, -4_000, "absorbed")]
+    assert (
+        _value("select entry_id::text from public.commission_waiver where run_id = %s", rv4) == ra
+    )
+    after_rv4 = {i: _open_and_waived(i, f.id) for i in (fc1_id, fc2_id, fc3_id)}
+    assert after_rv4 == {fc1_id: (0, 0), fc2_id: (0, 0), fc3_id: (15_000, 0)}
+
+    staff(
+        tenant,
+        "select public.cancel_remittance_run(%s, %s, %s, %s)",
+        str(uuid.uuid4()),
+        rv4,
+        run_row(rv4)["version"],
+        "à vérifier",
+        user=tenant["admin"],
+    )
+    with psycopg.connect(DB) as conn:
+        corrective = conn.execute(
+            """select id::text, number, ht_minor from public.commission_invoice
+               where run_id = %s and reason = 'run_cancelled' and kind = 'invoice'""",
+            (rv4,),
+        ).fetchone()
+    assert corrective is not None and corrective[2] == 26_000
+    assert _open_and_waived(corrective[0], f.id) == (26_000, 4_000)  # all RV-4 took at 20 %
+    assert _state(f.id) == (45_000, 4_000, "cancelled")
+    assert _violations(tenant) == []
+
+    rv5 = _approved(tenant)
+    assert _credits(rv5) == [(corrective[1], -26_000, -5_200)]  # the corrective only
+    assert _absorbed(rv5) == [(corrective[1], -4_000, "absorbed")]
+    with psycopg.connect(DB) as conn:
+        takes = conn.execute(
+            """select a.entry_id::text, -sum(a.ht_minor) from public.commission_credit_alloc a
+               join public.commission_invoice n on n.id = a.credit_note_id
+               where n.run_id = %s group by a.entry_id order by 1""",
+            (rv5,),
+        ).fetchall()
+    absorbed_by = _value(
+        "select entry_id::text from public.commission_waiver where run_id = %s", rv5
+    )
+    assert absorbed_by == ra  # A's 40,00 € on the corrective's waiver, its 110,00 € credited
+    assert dict(takes) == {ra: 11_000, rb: 15_000}
+    assert {i: _open_and_waived(i, f.id) for i in (fc1_id, fc2_id, fc3_id)} == after_rv4
+    assert _open_and_waived(corrective[0], f.id) == (0, 0)
+    assert _state(f.id) == (15_000, 0, "approved")
+    assert g.id != f.id and _state(g.id)[0] == 75_000
+    totals = _value(
+        "select payload -> 'totals' from public.remittance_statement where run_id = %s", rv5
+    )
+    issued_number = _value(
+        "select number from public.commission_invoice where id = %s", issued["credit_note_id"]
+    )
+    assert totals["waived_absorbed_credit_notes"] == [{"number": issued_number, "invoice": fc1}]
+    assert _violations(tenant) == []
+
+
+def test_a_credit_note_between_prepare_and_approval_sends_the_draft_back() -> None:
+    """Review tests-ui#0: a draft is prepared on a history; a manual credit note issued before its
+    approval changes that history (its key state, no run): the approval job sends the draft back
+    (`history_changed`) and writes nothing; « Actualiser » prices it again — the waiver now in its
+    inputs — and the approval then writes a key state whose waiver is the waivers' sum."""
+    tenant = remittance_tenant()
+    store = storage()
+    f, _ = _file_paid(tenant, store, 200_000, 6)
+    rv1 = _approved(tenant)
+    book_payout(rv1)
+    fc1_id, _ = _invoice_of(rv1)
+    _pay_again(tenant, store, f, 100_000, 4)
+    rv2 = request_run(tenant)  # prepared on the history before the credit note
+    assert run_row(rv2)["prepared_at"] is not None
+    _credit_note(tenant, fc1_id, "50")
+    approve(tenant, rv2)
+    drain()
+    row = run_row(rv2)
+    assert (row["status"], row["last_failure"]["code"]) == ("draft", "history_changed")
+    assert _value("select count(*) from public.remittance_key_state where run_id = %s", rv2) == 0
+    staff(
+        tenant,
+        "select public.refresh_remittance_run(%s, %s, %s)",
+        str(uuid.uuid4()),
+        rv2,
+        row["version"],
+    )
+    drain()
+    approve(tenant, rv2)
+    drain()
+    assert run_row(rv2)["status"] == "approved"
+    assert _state(f.id) == (45_000, 5_000, "approved")
+    assert (
+        _value("select sum(amount_minor) from public.commission_waiver where account_id = %s", f.id)
+        == 5_000
+    )
+    assert _violations(tenant) == []
+
+
+class _CommitsMidway:
+    """The prepare's connection, with another session committing right after the statement that
+    names `marker` (READ COMMITTED: every later statement of the prepare sees it)."""
+
+    def __init__(self, conn: psycopg.Connection[Any], marker: str, action: Any) -> None:
+        self._conn, self._marker, self._action, self.done = conn, marker, action, False
+
+    def execute(self, query: Any, params: Any = None, **kw: Any) -> Any:
+        cur = self._conn.execute(query, params, **kw)
+        if not self.done and self._marker in str(query):
+            self.done = True
+            self._action()
+        return cur
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+@pytest.mark.parametrize(
+    ("marker", "refusal"),
+    [("remittance_history_seq", "history_changed"), ("remittance_key_states", "engine_error")],
+)
+def test_a_credit_note_committing_mid_prepare_never_gives_an_approvable_draft(
+    marker: str, refusal: str
+) -> None:
+    """Review security-concurrency#0: a manual credit note commits while the prepare reads its
+    facts, each statement in its own snapshot. Right after the history's position is read (now
+    first): the later reads see the waiver, the inputs agree, but the draft's history is stale —
+    the approval sends it back (`history_changed`). Right after the key states: the charges read
+    later carry the waiver the states lack, the engine refuses the inputs (`commission_input_error`)
+    and the approval never takes such a draft (`engine_error`). Before the fix both drafts were
+    approved with every line's commission left pending."""
+    from collectoo_worker.jobs.remittances import run_prepare  # noqa: PLC0415
+
+    tenant = remittance_tenant()
+    store = storage()
+    f, _ = _file_paid(tenant, store, 200_000, 6)
+    rv1 = _approved(tenant)
+    book_payout(rv1)
+    fc1_id, _ = _invoice_of(rv1)
+    _pay_again(tenant, store, f, 100_000, 4)
+    created = staff(
+        tenant,
+        "select public.request_remittance_run(%s, %s, 'EUR')",
+        str(uuid.uuid4()),
+        tenant["client"],
+    )
+    run = str(created["run_id"])
+    token = str(run_row(run)["job_token"])
+    with psycopg.connect(DB) as conn:
+        proxy = _CommitsMidway(conn, marker, lambda: _credit_note(tenant, fc1_id, "50"))
+        assert run_prepare(proxy, {"run_id": run, "token": token}) == "prepared"  # type: ignore[arg-type]
+        assert proxy.done
+    drain()  # the queued prepare finds its run prepared: a no-op
+    approve(tenant, run)
+    drain()
+    row = run_row(run)
+    assert (row["status"], row["last_failure"]["code"]) == ("draft", refusal)
+    assert _value("select count(*) from public.remittance_key_state where run_id = %s", run) == 0
 
 
 def test_the_spread_in_sql_is_the_workers() -> None:

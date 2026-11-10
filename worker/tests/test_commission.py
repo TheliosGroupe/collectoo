@@ -30,15 +30,18 @@ Hypothesis properties and the input errors.
 * manual credit notes (M2c-5b): Σ open charges + Σ waivers = V for every key at every step; the
   waiver is invisible to what the engine charges (V, tiers, kept fees and invoices are those of a
   twin without manual credit notes), so no later collection re-charges a waived amount, whatever
-  the partition into runs and the order of a run's lines; a later credit is absorbed by the
-  credited invoice's waiver first, then credited, never beyond that invoice's remaining HT; a full
-  reversal leaves every invoice credited in full, its VAT exactly; a cancelled run restores the
-  state before it; a manual credit is spread over the invoice's keys in proportion to what each
+  the partition into runs, the order of a run's lines and the VAT rates; a later credit is absorbed
+  by the credited invoice's waiver first, then credited, never beyond that invoice's remaining HT;
+  a full reversal leaves every invoice credited in full, its VAT exactly; a cancelled run restores
+  the state before it, and running it again is the run never cancelled — every key's state with
+  its waiver, every earlier invoice's charge and waiver, each corrective invoice credited in full
+  (review math#0); a manual credit is spread over the invoice's keys in proportion to what each
   still charges.
 """
 
 from __future__ import annotations
 
+import copy
 import random
 from collections import defaultdict
 from dataclasses import replace
@@ -60,6 +63,7 @@ from collectoo_worker.remittance.commission import (
     LineCommission,
     LineKind,
     Part,
+    Retake,
     TermsVersion,
     cap_of,
     chain,
@@ -589,7 +593,7 @@ def test_documents_never_show_a_negative_band_and_credit_the_originals_invoice_f
     clause = {v.id: v.schedule.basis.on_reversal for v in versions["M"]}
     sim = Simulator(files, versions, tau)
     for run in _runs(lines, cuts):
-        originals = {k: chain(v)[0] for k, v in sim.line_invoices.items()}
+        originals = {k: str(chain(v)[0]) for k, v in sim.line_invoices.items()}  # no cancellation
         result, docs = sim.run(run)
         by_entry = {r.entry_id: r for r in result.lines}
         invoiced = {e for d in docs.values() if d.invoice for e in d.invoice.entries}
@@ -1191,6 +1195,57 @@ def test_the_inputs_hash_names_every_input() -> None:
     assert inputs_hash(lines, files, versions, {}, TAU) == inputs_hash(
         lines, files, versions, {}, TAU, line_invoices={first: "FC-1"}
     )  # only the invoices of the lines the run undoes
+    # M2c-5b (review tests-ui#5): the waivers, the chain of invoices and what a cancellation put
+    # back on each for the reversal are inputs; a history without them hashes as before
+    key = ("F", "k")
+    charge = EarlierCharge("FC-1", (2026, 1), 1)
+    hashed = {
+        "state": inputs_hash(lines, files, versions, {key: state}, TAU),
+        "state waived": inputs_hash(
+            lines, files, versions, {key: replace(state, waived_minor=1)}, TAU
+        ),
+        "charge": inputs_hash(lines, files, versions, {}, TAU, {key: [charge]}),
+        "charge waived": inputs_hash(
+            lines, files, versions, {}, TAU, {key: [replace(charge, waived_minor=1)]}
+        ),
+        "own": inputs_hash(undo, files, versions, {}, TAU, line_invoices={first: "FC-6"}),
+        "chain": inputs_hash(
+            undo, files, versions, {}, TAU, line_invoices={first: ("FC-6", "FC-1")}
+        ),
+        "retake": inputs_hash(
+            undo,
+            files,
+            versions,
+            {},
+            TAU,
+            line_invoices={first: (Retake("FC-6", ((key, 100),)), "FC-1")},
+        ),
+        "retake cap": inputs_hash(
+            undo,
+            files,
+            versions,
+            {},
+            TAU,
+            line_invoices={first: (Retake("FC-6", ((key, 101),)), "FC-1")},
+        ),
+        "retake key": inputs_hash(
+            undo,
+            files,
+            versions,
+            {},
+            TAU,
+            line_invoices={first: (Retake("FC-6", ((("F", "kp"), 100),)), "FC-1")},
+        ),
+    }
+    assert len(set(hashed.values())) == len(hashed), hashed
+    assert inputs_hash(
+        undo, files, versions, {}, TAU, line_invoices={first: ("FC-1",)}
+    ) == inputs_hash(undo, files, versions, {}, TAU, line_invoices={first: "FC-1"})
+    # pinned: the hash of a history without manual credit notes is the one M2c-4 drew
+    assert (
+        inputs_hash(undo, files, versions, {key: state}, TAU, {key: [charge]}, {first: "FC-1"})
+        == "1578d3f485633812740070e2fd446bf4f0b8c26d7cc47262d3d527f632058b09"
+    )  # main, M2c-5
 
 
 def test_input_errors() -> None:
@@ -1392,9 +1447,12 @@ def _open_invoices(sim: Simulator) -> list[str]:
     return sorted(n for n, inv in sim.invoices.items() if inv.ht_minor - inv.credited_ht_minor > 0)
 
 
-def _credit(sim: Simulator, pick: int, share: int, one_file: bool) -> bool:
-    """One manual credit note as `credit_plans` drew it (none when no invoice is open): issued?"""
-    open_ = _open_invoices(sim)
+def _credit(
+    sim: Simulator, pick: int, share: int, one_file: bool, exclude: frozenset[str] = frozenset()
+) -> bool:
+    """One manual credit note as `credit_plans` drew it (none when no invoice is open; never on
+    `exclude`, the invoices of a run still in flight: refused as `run_in_flight`): issued?"""
+    open_ = [n for n in _open_invoices(sim) if n not in exclude]
     if not open_:
         return False
     number = open_[pick % len(open_)]
@@ -1427,12 +1485,31 @@ def _invariants(sim: Simulator) -> None:
         assert sim.vat_credited.get(inv.invoice_id, 0) <= sim.invoice_vat[inv.invoice_id]
 
 
-def _state_of(history: dict[Key, KeyState]) -> dict[Key, tuple[Any, int, int, int]]:
-    """What the engine charges from (the waiver aside)."""
+def _charged_state(history: dict[Key, KeyState]) -> dict[Key, tuple[Any, int, int, int]]:
+    """What the engine charges from (the waiver aside: a twin without manual credit notes)."""
     return {
         k: (s.basis, s.kept_basis_minor, s.kept_minor, s.commission_minor)
         for k, s in history.items()
         if s.basis or s.kept_minor or s.commission_minor
+    }
+
+
+def _state_of(history: dict[Key, KeyState]) -> dict[Key, tuple[Any, int, int, int, int]]:
+    """A key's whole state: what the engine charges from and its waiver (review math#0)."""
+    return {
+        k: (s.basis, s.kept_basis_minor, s.kept_minor, s.commission_minor, s.waived_minor)
+        for k, s in history.items()
+        if s.basis or s.kept_minor or s.commission_minor or s.waived_minor
+    }
+
+
+def _per_invoice(sim: Simulator) -> dict[tuple[str, Key], tuple[int, int]]:
+    """Per (invoice, key) with anything on it: (what it still charges, its waiver)."""
+    return {
+        (c.invoice_id, k): (c.open_minor, c.waived_minor)
+        for k, cs in sim.charges.items()
+        for c in cs
+        if c.open_minor or c.waived_minor
     }
 
 
@@ -1453,20 +1530,23 @@ def _takes(d: MandateDocuments | None) -> dict[tuple[str, Key], list[int]]:
     cuts=st.lists(st.integers(0, 60), max_size=10),
     plan=credit_plans(),
     small=st.booleans(),
+    rates=st.lists(RATES, max_size=12),
 )
-def test_a_manual_credit_note_never_changes_what_the_engine_charges(
+def test_a_manual_credit_note_never_changes_what_the_engine_charges(  # noqa: PLR0913, PLR0917
     versions: dict[str, list[TermsVersion]],
     lines: list[Line],
     cuts: list[int],
     plan: Plan,
     small: bool,
+    rates: list[Decimal],
 ) -> None:
     """Manual credit notes between runs, beside a twin without them: after every step Σ open
     charges + Σ waivers = V for every key; V, the tier positions and the kept fees stay the twin's
     (the waiver is invisible: no later collection re-charges a waived amount, whatever the
     partition); a run's invoices are the twin's to the cent, and each credit the twin issues is
     absorbed by the waiver first, then credited, on the same invoice and key, never beyond its
-    remaining HT."""
+    remaining HT. The VAT rate changes between runs (review tests-ui#1): after a fall, the cap and
+    the reserve weigh each open invoice at its own rate, its waiver included."""
     if small:
         lines = _small(lines)
     files = {"F": _file(), "G": _file(2_000_000, "G")}
@@ -1481,13 +1561,15 @@ def test_a_manual_credit_note_never_changes_what_the_engine_charges(
                 _invariants(sim)
         waived = {(c.invoice_id, k): c.waived_minor for k, cs in sim.charges.items() for c in cs}
         opened = {(c.invoice_id, k): c.open_minor for k, cs in sim.charges.items() for c in cs}
+        if n < len(rates):
+            sim.vat_rate = twin.vat_rate = rates[n]
         _, docs = sim.run(run)
         _, twin_docs = twin.run(run)
         assert sim.last is not None and twin.last is not None
         for mandate, (number, _) in sim.last[3].items():
             alias[number] = twin.last[3][mandate][0]
         _invariants(sim)
-        assert _state_of(sim.history) == _state_of(twin.history)
+        assert _charged_state(sim.history) == _charged_state(twin.history)
         assert set(docs) <= set(twin_docs)
         for mandate, t in twin_docs.items():
             d = docs.get(mandate)
@@ -1587,45 +1669,73 @@ def test_with_waivers_a_full_reversal_leaves_every_invoice_closed(
     assert all(c.open_minor == 0 and c.waived_minor == 0 for cs in sim.charges.values() for c in cs)
 
 
-@settings(max_examples=300, deadline=None)
+@settings(max_examples=400, deadline=None)
 @given(
     versions=terms(two_keys=True),
     lines=histories(max_ops=20, accounts=("F", "G"), interest=True),
-    cut=st.integers(0, 60),
-    before=credit_plans(runs=1),
+    cuts=st.lists(st.integers(0, 60), max_size=4),
+    rates=st.lists(RATES, min_size=1, max_size=5),
+    before=credit_plans(runs=4),
     after=credit_plans(runs=0),
 )
-def test_with_waivers_a_cancellation_restores_the_state_before_the_run(
+def test_with_waivers_a_cancellation_then_the_run_again_is_the_run_never_approved(  # noqa: PLR0913, PLR0917
     versions: dict[str, list[TermsVersion]],
     lines: list[Line],
-    cut: int,
+    cuts: list[int],
+    rates: list[Decimal],
     before: Plan,
     after: Plan,
 ) -> None:
-    """Manual credit notes before a run R and after it, then R cancelled (M2c-4 C7 with the
-    waivers): every key is back to its state before R — tier positions, kept fees, V — with Σ open
-    charges + Σ waivers = V; running R's lines again charges what R charged."""
+    """Runs at changing VAT rates with manual credit notes between them, then a run R, manual credit
+    notes on earlier invoices while R is in flight (never on R's own: `run_in_flight`), R cancelled
+    (M2c-4 C7 with the waivers) and run again (review math#0): after the cancellation every key is
+    back to its state before R, its waiver what its invoices hold (Σ open + Σ waived = V); after the
+    run again every key's state — V and the waiver included — and every earlier invoice's open
+    charge and waiver per key are those of R never cancelled, and every corrective invoice is
+    credited in full with nothing waived left on it: each reversal took back, on each corrective
+    invoice, exactly what the cancelled run took for it at that rate (pooled across reversals,
+    invoices at several rates, a waiver restored on the corrective invoice of its rate)."""
     files = {"F": _file(), "G": _file(2_000_000, "G")}
-    sim = Simulator(files, versions, TAU)
-    point = cut % (len(lines) + 1)
-    head, run = lines[:point], lines[point:]
-    if head:
-        sim.run(head)
-    for _, pick, share, one_file in before:
-        _credit(sim, pick, share, one_file)
-    state_before = _state_of(sim.history)
+    sim = Simulator(files, versions, rates[0])
+    runs = _runs(lines, cuts)
+    *heads, run = runs
     if not run:
         return
+    for n, head in enumerate(heads):
+        sim.vat_rate = rates[n % len(rates)]
+        if head:
+            sim.run(head)
+        for at, pick, share, one_file in before:
+            if at == n:
+                _credit(sim, pick, share, one_file)
+    sim.vat_rate = rates[-1]
+    charged_before = _charged_state(sim.history)
+    state_before, invoices_before = _state_of(sim.history), _per_invoice(sim)
     sim.run(run)
-    state_after = _state_of(sim.history)
+    assert sim.last is not None
+    own = frozenset(number for number, _ in sim.last[3].values())
     for _, pick, share, one_file in after:
-        _credit(sim, pick, share, one_file)
-    sim.cancel_last()
+        _credit(sim, pick, share, one_file, exclude=own)
+    never_cancelled = copy.deepcopy(sim)
+    corrective = sim.cancel_last()
     _invariants(sim)
-    assert _state_of(sim.history) == state_before
+    assert _charged_state(sim.history) == charged_before
+    if not corrective and not after:
+        # nothing credited (every take absorbed, or no credit at all): no corrective invoice, and
+        # the files exactly as before the run — its waivers where they were (review math#1)
+        assert _state_of(sim.history) == state_before
+        assert {x: v for x, v in _per_invoice(sim).items() if x[0] not in own} == invoices_before
     sim.run(run)
     _invariants(sim)
-    assert _state_of(sim.history) == state_after
+    assert _state_of(sim.history) == _state_of(never_cancelled.history)
+    again = _per_invoice(sim)
+    earlier = {
+        x: v for x, v in _per_invoice(never_cancelled).items() if x[0] not in own | set(corrective)
+    }
+    assert {x: v for x, v in again.items() if x[0] in {i for i, _ in earlier}} == earlier
+    assert not any(i in corrective for i, _ in again)  # each corrective invoice credited in full
+    for number in corrective:
+        assert sim.vat_credited.get(number, 0) == sim.invoice_vat[number], number
 
 
 # -- manual credit notes: the allocation over the invoice's keys ----------------------------------

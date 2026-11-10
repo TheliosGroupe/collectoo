@@ -1,8 +1,10 @@
 # A run whose credit is absorbed by a manual credit note's waiver, cancelled before its transfer (M2c-4 C7 with the
 # waivers of M2c-5b): its invoice credited in full (FC-5), one corrective invoice charging again the 70,00 € its credit
-# note credited on FC-1 (FC-6, with the VAT of its own HT), the 30,00 € its credit absorbed restored as FC-1's waiver —
-# the file is back to its state before the run (V = 100,00 €, 30,00 € waived). The run again: A's reversal credited on
-# the corrective invoice first (70,00 €), then on FC-1, where the waiver absorbs the last 30,00 €; B invoiced again.
+# note credited on FC-1 (FC-6, with the VAT of its own HT), the 30,00 € its credit absorbed restored as FC-6's waiver
+# (review math#0: the corrective invoice holds again all the run took at FC-1's rate, 70,00 € charged and 30,00 €
+# waived, as the corrective of the same history without the manual credit note charges 100,00 €) — the file is back to
+# its state before the run (V = 100,00 €, 30,00 € waived). The run again: A's reversal takes back on FC-6 what the
+# cancelled run took for it (100,00 €): the waiver absorbs 30,00 €, 70,00 € credited; FC-1 untouched; B invoiced again.
 # Same net effect as the cancelled run. TO VALIDATE (OQ-78).
 case: manual-credit-cancelled-run
 status: TO VALIDATE
@@ -53,7 +55,7 @@ runs:
           absorbed:
             FC-2026-000001: {F-1/tout: "3000"}
       state: {F-1/tout: {commission: "5000", waived: "0"}}
-  - name: run 2 cancelled — FC-3 credited (FC-5), FC-6 charges again what FC-4 credited, the waiver restored
+  - name: run 2 cancelled — FC-3 credited (FC-5), FC-6 charges again what FC-4 credited and holds the waiver
     cancel_previous:
       FC-2026-000006: {ht: "7000", vat: "1400"}
     expect:
@@ -77,5 +79,5 @@ runs:
             corrected:
               FC-2026-000006: {ht: "-7000", vat: "-1400"}
           absorbed:
-            FC-2026-000001: {F-1/tout: "3000"}
+            FC-2026-000006: {F-1/tout: "3000"}
       state: {F-1/tout: {commission: "5000", waived: "0"}}

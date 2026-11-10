@@ -80,6 +80,17 @@ and a file undone in full is back to 0.
   allocates to an invoice (its original's first, then LIFO) is absorbed by that invoice's waiver
   for the key first (no credit note for that part: the client already has it), and only the rest
   is credited, so no invoice is credited beyond its remaining HT.
+* **After a cancelled run** (M2c-4 C7; M2c-5b review math#0): its corrective invoice of each
+  (mandate, VAT rate) charges again what the run credited at that rate and holds, as its waiver,
+  what the run's credits absorbed there (where no corrective invoice was issued at a rate, the
+  waiver goes back on the invoice it was absorbed from: the file is then exactly as before the
+  run). Running a reversal again takes first, on each of those invoices, exactly what the
+  cancelled run took for it there per (file, tier key) (`Retake`, a capped link of its chain),
+  then its original's own invoice — so a corrective invoice pooling several reversals, or a credit
+  that fell on invoices at two rates, gives each reversal its own share in any order: the run
+  again gives the documents of the run never approved. (With no corrective invoice at a rate,
+  the same history without manual credit notes has one more open invoice than this one: its
+  reserve, and under mixed VAT rates its LIFO order, can then differ — review math#1.)
 
 Basis (founder #4): an allocation's 1100 credits per component family, filtered by the schedule's
 families; a forward's amount only when the schedule lists its reason; a reversal minus its
@@ -242,15 +253,51 @@ def capacity(charge: OpenCharge) -> int:
     return charge.open_minor + charge.waived_minor
 
 
-LineInvoices = Mapping[str, "str | tuple[str, ...]"]  # an earlier line → the invoices charging it
+@dataclass(frozen=True, slots=True)
+class Retake:
+    """After a cancelled run (M2c-4 C7; M2c-5b review math#0): an invoice that holds again what the
+    cancelled run took for one reversal — its corrective invoice at the VAT rate of the invoices
+    the run credited, the credited part as its charge and the absorbed part as its waiver (or,
+    where the cancellation issued no corrective invoice at that rate, the invoice whose waiver it
+    restored) — and how much per (file, tier key). Running the reversal again takes exactly that
+    from it, whatever the other reversals of the run take there: the pooled corrective invoice
+    gives each its own share."""
+
+    invoice_id: str
+    caps: tuple[tuple[Key, int], ...]  # per (file, tier key), > 0
 
 
-def chain(found: str | tuple[str, ...] | None) -> tuple[str, ...]:
+ChainLink = str | Retake
+# an earlier line → the invoices its reversal is credited on first: its own invoice, or (after a
+# cancellation) the invoices holding again what the cancelled run took, then the line's own
+LineInvoices = Mapping[str, "str | tuple[ChainLink, ...]"]
+Preferred = tuple[tuple[str, int | None], ...]  # (invoice, at most that much: None, what it holds)
+
+
+def chain(found: str | tuple[ChainLink, ...] | None) -> tuple[ChainLink, ...]:
     """The invoices a reversal is credited on first, in order (`line_invoices`' value: one invoice,
-    or the cancellation's corrective invoice then the original line's own)."""
+    or the invoices a cancellation restored what the run took on, then the original line's own)."""
     if found is None:
         return ()
     return (found,) if isinstance(found, str) else tuple(found)
+
+
+def preferred_for(found: str | tuple[ChainLink, ...] | None, key: Key) -> Preferred:
+    """The chain for one (file, tier key): each invoice with the most the reversal takes there
+    first (a `Retake`'s amount for the key; None: what the invoice still holds)."""
+    if found is None:
+        return ()
+    if isinstance(found, str):
+        return ((found, None),)
+    out: list[tuple[str, int | None]] = []
+    for link in found:
+        if isinstance(link, str):
+            out.append((link, None))
+            continue
+        for k, cap in link.caps:
+            if k == key and cap > 0:
+                out.append((link.invoice_id, cap))
+    return tuple(out)
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,9 +551,9 @@ class SidePart:
     part: Part
     commission_minor: int
     same_run: bool = False
-    # the invoices credited first, in order (a cancellation's corrective invoice, then the original
-    # line's own invoice)
-    preferred: tuple[str, ...] = ()
+    # the invoices credited first, in order, each up to what it holds or to its cap (what a
+    # cancellation restored there for this reversal; then the original line's own invoice)
+    preferred: Preferred = ()
 
 
 @dataclass(slots=True)
@@ -592,7 +639,7 @@ def key_side(parts: Sequence[SidePart], earlier: Sequence[OpenCharge]) -> KeySid
     return side
 
 
-Credit = tuple[int, tuple[str, ...], str]  # (HT > 0, the invoices to credit first, the line)
+Credit = tuple[int, Preferred, str]  # (HT > 0, the invoices to credit first, the line)
 
 
 def _place(parts: Sequence[SidePart]) -> tuple[KeySide, list[Credit]]:
@@ -634,20 +681,29 @@ def _allocate(side: KeySide, credits: Sequence[Credit], earlier: Sequence[OpenCh
     capacity: a manual credit note's waiver included): first every reversal on the invoices that
     charge its original (the one that charges it now first), then what is left of each credit
     LIFO, in the engine's order (so a credit with no original's invoice never takes the one
-    another reversal's original was charged on). Returns what the invoices cannot take."""
+    another reversal's original was charged on). A capped invoice of the chain (what a cancellation
+    restored there for that reversal) gives the line at most its cap, over all its credits on the
+    key, so a pooled corrective invoice gives each reversal its own share in any order. Returns
+    what the invoices cannot take."""
     lifo = sorted(earlier, key=lambda c: c.order, reverse=True)
     open_ = {c.invoice_id: capacity(c) for c in earlier}
     left = [amount for amount, _, _ in credits]
+    caps: dict[tuple[str, str], int] = {}  # (line, invoice) → what its cap still allows
     for n, (_, preferred, entry) in enumerate(credits):
-        for inv in preferred:
+        for inv, cap in preferred:
             if not left[n]:
                 break
             available = open_.get(inv, 0)
+            if cap is not None:
+                allowed = caps.setdefault((entry, inv), cap)
+                available = allowed if allowed < available else available
             take = left[n] if left[n] < available else available
             if take > 0:
                 side.allocations.append((inv, take, entry))
-                open_[inv] = available - take
+                open_[inv] -= take
                 left[n] -= take
+                if cap is not None:
+                    caps[(entry, inv)] -= take
     for n, (_, _, entry) in enumerate(credits):
         for ch in lifo:
             if not left[n]:
@@ -758,8 +814,8 @@ class _Key:
     sched_before: int = 0  # the schedule's K of the history's state, at this run's τ
     sched: int = 0  # the schedule's K of the current state
     # its parts in the run: (line index, part index, a collection's, undoes a same-run line,
-    # the invoice that charged the line a reversal undoes)
-    where: list[tuple[int, int, bool, bool, tuple[str, ...]]] = field(default_factory=list)
+    # the invoices charging the line a reversal undoes, for this key)
+    where: list[tuple[int, int, bool, bool, Preferred]] = field(default_factory=list)
     # the collections of this run undone in it under `credit` (never priced): (event index of the
     # collection, of its reversal, terms version, basis) — live between the two for `keep`
     transient: list[tuple[int, int, str, int]] = field(default_factory=list)
@@ -920,12 +976,12 @@ def compute(  # noqa: PLR0913 - the run's lines, its world and its documents' hi
             continue
         reversal = ln.kind in REVERSALS
         same_run = reversal and ln.original_entry_id in in_run
-        preferred = (
-            chain(line_invoices.get(ln.original_entry_id))
+        found = (
+            line_invoices.get(ln.original_entry_id)
             if reversal and ln.original_entry_id and not same_run
-            else ()
+            else None
         )
-        mark = (len(heads), not reversal, same_run, preferred)
+        mark = (len(heads), not reversal, same_run, found)
         head, line_parts = _line(ln, files, history, keys, pricer, charges, mark, transient)
         heads.append(head)
         parts.append(line_parts)
@@ -1200,12 +1256,12 @@ def _line(  # noqa: PLR0913, PLR0917 - a line and the run it is priced in
     keys: dict[tuple[str, str], _Key],
     pricer: _Pricer,
     charges: Mapping[Key, Sequence[OpenCharge]],
-    mark: tuple[int, bool, bool, tuple[str, ...]],
+    mark: tuple[int, bool, bool, str | tuple[ChainLink, ...] | None],
     transient: Transient,
 ) -> tuple[Head, list[Part]]:
     """(the line, its mandate, its terms version, why it earns nothing), and its parts; each key
     it reaches records where its part is (`mark`: the line's event index, a collection's, undoes a
-    same-run line, the invoice of the line it undoes)."""
+    same-run line, the invoices charging the line it undoes — resolved per key)."""
     if line.kind in NEVER_COMMISSIONED:
         known = files.get(line.account_id) if line.account_id is not None else None
         return (line, known.mandate_id if known else None, None, "not_commissionable"), []
@@ -1234,7 +1290,7 @@ def _line(  # noqa: PLR0913, PLR0917 - a line and the run it is priced in
                 history.get(k, KeyState()), file, rule.tier_key, pricer, charges.get(k, ())
             )
             key.transient = transient.get(k, [])
-        key.where.append((mark[0], len(parts), mark[1], mark[2], mark[3]))
+        key.where.append((mark[0], len(parts), mark[1], mark[2], preferred_for(mark[3], k)))
         parts.append(_part(key, version.id, rule, fams, amount, keep, pricer, mark[0]))
     return (line, file.mandate_id, version.id, None), parts
 
@@ -1479,5 +1535,15 @@ def inputs_hash(  # noqa: PLR0913, PLR0917 - every input of `compute`
     invoices = line_invoices or {}
     for original in sorted({ln.original_entry_id for ln in lines if ln.original_entry_id}):
         found = invoices.get(original)
-        _put(h, "line invoice", original, found if found is None else ",".join(chain(found)))
+        _put(h, "line invoice", original, None if found is None else _chain_text(found))
     return h.hexdigest()
+
+
+def _chain_text(found: str | tuple[ChainLink, ...]) -> str:
+    """A chain as text: invoice ids, a `Retake` with its caps per key (« inv[file/tier=cap;…] »)."""
+    return ",".join(
+        link
+        if isinstance(link, str)
+        else link.invoice_id + "[" + ";".join(f"{a}/{t}={c}" for (a, t), c in link.caps) + "]"
+        for link in chain(found)
+    )

@@ -1,0 +1,74 @@
+# A run whose only credit a manual credit note's waiver absorbs in full, cancelled (M2c-5b review math#0/#1). 10 % flat:
+# A 1 000,00 € and B 200,00 € (FC-1, 120,00 €); a manual credit note of 30,00 € HT on FC-1 (FC-2). B undone and C
+# 500,00 € in one run: B's 20,00 € absorbed by FC-1's waiver (no credit note), C invoiced (FC-3). Cancelled: FC-3
+# credited in full (FC-4); nothing was credited, so no corrective invoice — the 20,00 € absorbed go back to FC-1's
+# waiver, where they were: the file is exactly as before the run, waiver 30,00 € on FC-1. (The same history without the
+# manual credit note credits 20,00 € on FC-1 and its cancellation issues a corrective invoice of 20,00 €: one more open
+# invoice for its rounding reserve — at most one cent per such invoice, documented in CALCULATION_RULES §7.) The run
+# again: the same documents. TO VALIDATE (OQ-78).
+case: manual-credit-cancel-all-absorbed
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  flat:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.10"}}
+mandates:
+  MAND-W: [{id: w-v1, from: "2026-01-01", to: null, schedule: flat}]
+files:
+  F-1: {mandate: MAND-W, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — A and B
+    lines:
+      - {entry: A, kind: allocation, file: F-1, e: "2026-10-05", eff: "2026-10-05", amount: "100000", basis: {principal: "100000"}}
+      - {entry: B, kind: allocation, file: F-1, e: "2026-10-06", eff: "2026-10-06", amount: "20000", basis: {principal: "20000"}}
+    expect:
+      lines: {A: {commission: "10000"}, B: {commission: "2000"}}
+      documents:
+        MAND-W: {invoice: {number: FC-2026-000001, ht: "12000", vat: "2400", ttc: "14400"}}
+  - name: a manual credit note of 30,00 € HT on FC-1 (FC-2026-000002)
+    manual_credit_notes:
+      - invoice: FC-2026-000001
+        amount: "3000"
+        expect: {ht: "3000", vat: "600", allocations: {F-1/tout: "3000"}}
+    expect:
+      state: {F-1/tout: {commission: "12000", waived: "3000", invoices: {FC-2026-000001: ["9000", "3000"]}}}
+  - name: run 2 — B undone, C (to be cancelled)
+    lines:
+      - {entry: R-B, kind: allocation_reversal, original: B, file: F-1, e: "2026-10-06", eff: "2026-11-02", amount: "-20000", basis: {principal: "-20000"}}
+      - {entry: C, kind: allocation, file: F-1, e: "2026-11-03", eff: "2026-11-03", amount: "50000", basis: {principal: "50000"}}
+    expect:
+      lines: {R-B: {commission: "-2000"}, C: {commission: "5000"}}
+      documents:
+        MAND-W:
+          invoice: {number: FC-2026-000003, ht: "5000", vat: "1000", ttc: "6000"}
+          absorbed:
+            FC-2026-000001: {F-1/tout: "2000"}
+      state:
+        F-1/tout:
+          commission: "15000"
+          waived: "1000"
+          invoices: {FC-2026-000001: ["9000", "1000"], FC-2026-000003: ["5000", "0"]}
+  - name: run 2 cancelled — FC-3 credited (FC-4), no corrective invoice, the waiver back on FC-1
+    cancel_previous: {}
+    expect:
+      state:
+        F-1/tout: {commission: "12000", waived: "3000", invoices: {FC-2026-000001: ["9000", "3000"]}}
+  - name: run 3 — the same lines again
+    lines:
+      - {entry: R-B, kind: allocation_reversal, original: B, file: F-1, e: "2026-10-06", eff: "2026-11-02", amount: "-20000", basis: {principal: "-20000"}}
+      - {entry: C, kind: allocation, file: F-1, e: "2026-11-03", eff: "2026-11-03", amount: "50000", basis: {principal: "50000"}}
+    expect:
+      lines: {R-B: {commission: "-2000"}, C: {commission: "5000"}}
+      documents:
+        MAND-W:
+          invoice: {number: FC-2026-000005, ht: "5000", vat: "1000", ttc: "6000"}
+          absorbed:
+            FC-2026-000001: {F-1/tout: "2000"}
+      state:
+        F-1/tout:
+          commission: "15000"
+          waived: "1000"
+          invoices: {FC-2026-000001: ["9000", "1000"], FC-2026-000005: ["5000", "0"]}
