@@ -28,6 +28,7 @@ test.beforeAll(async () => {
       iban: BANK_IBAN,
       currency: "EUR",
       label: "Fonds de tiers – Banque F",
+      purpose: "client_funds", // a bulk insert sends every column: unset ones would be null, not their default
       feed: "camt053",
       opened_on: "2026-01-01",
     },

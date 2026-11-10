@@ -231,7 +231,9 @@ test("refund, bank return, lines to classify, direct payment and the checks", as
     )
     .toBe(1);
   await expect(page.getByTestId("check-violations")).toContainText("0");
-  await expect(page.getByTestId("check-clean")).toBeVisible();
+  // M2c-1: the bank fees booked on the dedicated account are the servicer's cost: the checks ask for a top-up from the
+  // own account (an alert, not a violation)
+  await expect(page.getByTestId("check-results")).toContainText("Approvisionnement du compte dédié à demander");
   await reviewShot(page, testInfo, "m2-payment-checks");
 
   // the client was told of the return (R124-5; founder #13)
