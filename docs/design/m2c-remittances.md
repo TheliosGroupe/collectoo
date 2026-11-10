@@ -1009,7 +1009,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 - **One credit note per (run, mandate) with Δ < 0**, naming every invoice it corrects.
 - **Service period** = previous K → this K (269 1 a bis; 242 nonies A 10°).
 - **A cancelled run** is credited in full; numbers are never reused.
-- **A manual credit note** (`issue_credit_note`, admin, reason) corrects an error (risk R2).
+- **A manual credit note** (`issue_credit_note`, admin, reason) corrects an error (risk R2). *Built in M2c-5b (ADR-0014):* on one invoice, spread over what it still charges each file in proportion (or on one file), a reason category on the document and the reason kept by staff; what it takes back is a waiver on (invoice, file, tier key) the commission engine never charges again and a later credit on that invoice absorbs first; refused on a credit note, beyond what is left, or while a run in flight sets the invoice off.
 - **Number:** `{prefix}-{YYYY}-{NNNNNN}`, from `private.invoice_counter` (servicer, series, year of the issue date), locked `FOR UPDATE` in the issuing transaction, never from a sequence.
   - One series for invoices and credit notes per servicer: BOFiP §90 and §110, founder #12, OQ-43.
   - ALWAYS guard: seq = previous + 1 in its series and year, and issue date ≥ the previous one.
