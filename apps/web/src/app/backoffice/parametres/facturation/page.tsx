@@ -3,7 +3,7 @@ import { ActionForm } from "@/components/action-form";
 import { IdentityFields } from "@/components/identity-fields";
 import { Badge, InfoNote, Section, WidePage, buttonClass, inputClass } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
-import { GAP_LABEL, type BillingIdentity, issuerLines } from "@/lib/remittance/terms";
+import { BILLING_IDENTITY_COLUMNS, GAP_LABEL, type BillingIdentity, issuerLines } from "@/lib/remittance/terms";
 import { saveBillingIdentity, saveBillingSettings } from "../../clients/actions";
 
 type Settings = {
@@ -39,7 +39,8 @@ export default async function BillingSettingsPage() {
   const org = staff.organization_id;
   const isAdmin = staff.role === "admin";
   const [{ data: identityRow }, { data: settingsRow }, { data: gaps }, { data: accounts }] = await Promise.all([
-    supabase.from("billing_identity").select("*").eq("organization_id", org).maybeSingle(),
+    // the capital as text: integer minor units never pass through a JS number (review M2c-2)
+    supabase.from("billing_identity").select(BILLING_IDENTITY_COLUMNS).eq("organization_id", org).maybeSingle(),
     supabase.from("servicer_billing_settings").select("*").eq("organization_id", org).maybeSingle(),
     supabase.rpc("billing_identity_gaps", { p_organization_id: org }),
     supabase.from("bank_account").select("id, label, iban, purpose, status, currency").eq("status", "active").order("label"),
@@ -157,8 +158,8 @@ export default async function BillingSettingsPage() {
                   <span>Option pour le paiement de la TVA d&apos;après les débits</span>
                 </label>
                 <label className="flex flex-col gap-1 text-sm">
-                  Mention des pénalités de retard (vide : taux légal par défaut ; un taux convenu vaut au moins trois fois le
-                  taux d&apos;intérêt légal, art. L441-10 II C. com.)
+                  Mention des pénalités de retard (vide : taux de la BCE majoré de 10 points, art. L441-10 II C. com. ; un taux
+                  convenu ne peut être inférieur à trois fois le taux d&apos;intérêt légal)
                   <textarea name="penalty_text" rows={3} maxLength={500} defaultValue={settings?.penalty_text ?? ""} className={inputClass} />
                 </label>
                 {dedicated.map((a) => (

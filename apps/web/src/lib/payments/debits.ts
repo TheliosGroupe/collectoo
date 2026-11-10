@@ -63,7 +63,8 @@ export const LINK_KIND: Record<string, string> = {
   fee: "Frais bancaires (à la charge du cabinet)",
   top_up: "Approvisionnement par le compte propre",
   loss: "Retour au-delà du paiement : perte du cabinet",
-  // M2c-1 review: a credit from the own account released as a debtor's payment (public.release_own_credit)
+  // M2c-1 review: a credit from the own account released as a debtor's payment (public.release_own_credit); a
+  // client's credit released the same way reads « … relayé par le client » (decisionLabel)
   relayed_payment: "Paiement d'un débiteur relayé par le cabinet",
   duplicate: "Doublon confirmé (non comptabilisé)",
   released: "Libéré",
@@ -103,7 +104,8 @@ export const DEBIT_REVIEW: Record<string, string> = {
     "Crédit venant du compte propre sans approvisionnement demandé : approvisionnement du cabinet, ou paiement d'un débiteur reçu par le cabinet et relayé sur ce compte (il devient alors un paiement à affecter). Ne le classez avec une explication que s'il n'est ni l'un ni l'autre.",
   top_up_differs:
     "Crédit portant la référence d'un approvisionnement, mais d'un autre montant ou sur un autre compte : vérifiez dans la banque.",
-  client_credit: "Virement reçu d'un client du cabinet : à classer (règlement d'une facture de commission à venir).",
+  client_credit:
+    "Virement reçu du compte de reversement d'un client : règlement d'une facture du cabinet (à classer, comptabilisé avec les factures à venir), ou paiement d'un débiteur que le client relaie (il devient alors un paiement à affecter).",
   own_transfer_out:
     "Virement émis par le cabinet (reversement ou balayage) : comptabilisé avec les reversements ; à classer avec une explication d'ici là.",
 };
@@ -126,6 +128,28 @@ export function offersPaymentLinks(o: { direction: string; kind: string }): bool
  */
 export function relayable(o: { direction: string; kind: string; end_to_end_id: string | null }): boolean {
   return o.direction === "credit" && o.kind === "own_transfer_in" && !/^TOP[0-9A-F]{12}$/.test(o.end_to_end_id ?? "");
+}
+
+/**
+ * Review M2c-2: whether « Paiement d'un débiteur relayé par le client » is offered — a credit from a client's confirmed
+ * payout IBAN (`client_transfer_in`), e.g. the client forwarding a debtor's payment it received. It is released by
+ * public.release_own_credit as an own credit is; the database checks the rest (unbooked, unlinked, on a dedicated
+ * account).
+ */
+export function clientRelayable(o: { direction: string; kind: string }): boolean {
+  return o.direction === "credit" && o.kind === "client_transfer_in";
+}
+
+/** The button and sheet title of a relayed debtor payment, by who relays it. */
+export const RELAY_LABEL = {
+  servicer: "Paiement d'un débiteur relayé par le cabinet",
+  client: "Paiement d'un débiteur relayé par le client",
+} as const;
+
+/** What a decided line became, in French: a relayed payment says who relayed it (review M2c-2). */
+export function decisionLabel(decision: string, kind: string): string {
+  if (decision === "relayed_payment" && kind === "client_transfer_in") return RELAY_LABEL.client;
+  return LINK_KIND[decision] ?? decision;
 }
 
 /**
@@ -214,6 +238,16 @@ export function ownCreditEffect(amount: string): string {
  */
 export function relayedPaymentEffect(o: { amount: string; dateFr: string }): string {
   return `Le crédit de ${o.amount} deviendra un paiement reçu, comptabilisé sur le compte de fonds de tiers au ${o.dateFr} (date de la ligne), payeur « Versement relayé par le cabinet ». Il attendra dans « Paiements à traiter » d'être affecté au dossier du débiteur, puis sera imputé comme tout paiement. Le motif est conservé : indiquez qui a payé le cabinet, et quand. À ne pas utiliser pour un approvisionnement par le cabinet.`;
+}
+
+/**
+ * Review M2c-2: what releasing a client's credit as a debtor's payment does (public.release_own_credit on a
+ * `client_transfer_in` line): the same as for an own credit — a payment on no file yet, booked at the line's date, that
+ * waits in « Paiements à traiter ». Not for the client paying one of our invoices, nor for a payment already declared on
+ * the file as made to the client directly (it would be counted twice).
+ */
+export function clientRelayedPaymentEffect(o: { amount: string; dateFr: string }): string {
+  return `Le crédit de ${o.amount} venant du compte de reversement d'un client deviendra un paiement reçu, comptabilisé sur le compte de fonds de tiers au ${o.dateFr} (date de la ligne), payeur « Versement relayé par le client ». Il attendra dans « Paiements à traiter » d'être affecté au dossier du débiteur, puis sera imputé comme tout paiement. Le motif est conservé : indiquez quel débiteur a payé le client, et quand. À ne pas utiliser pour le règlement d'une facture du cabinet par le client, ni pour un paiement déjà déclaré sur la fiche du dossier comme reçu directement par le client.`;
 }
 
 /**

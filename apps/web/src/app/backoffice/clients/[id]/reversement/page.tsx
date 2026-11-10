@@ -7,14 +7,19 @@ import { Badge, InfoNote, Section, WidePage, buttonClass, dangerButtonClass, inp
 import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import {
+  BILLING_IDENTITY_COLUMNS,
   type BillingIdentity,
   CONFIRMED_VIA,
   DOCUMENT_KIND,
+  EVENT_BLOCKERS,
   EVENT_KIND,
   GAP_LABEL,
   PAYOUT_STATUS,
-  READINESS_LABEL,
   addressText,
+  earliestTermsStart,
+  parisToday,
+  readinessReason,
+  readinessText,
   scheduleInWords,
   termsInWords,
 } from "@/lib/remittance/terms";
@@ -74,10 +79,6 @@ const SCHEDULE_TEMPLATE = {
   rules: [{ id: "tout", tier_key: "tout", label_fr: "Toutes créances", match: {}, rate: { kind: "flat", rate: "0.15" } }],
 };
 
-function parisToday(): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(new Date());
-}
-
 function frenchDateTime(iso: string | null): string {
   if (!iso) return "";
   return new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", dateStyle: "short", timeStyle: "short" }).format(new Date(iso));
@@ -109,7 +110,8 @@ export default async function ClientRemittancePage({ params }: { params: Promise
   const isMoney = isAdmin || role === "ops_manager";
 
   const [identityRes, gapsRes, readinessRes, payoutRes, docsRes, eventsRes, mandatesRes, claimTypesRes] = await Promise.all([
-    supabase.from("billing_identity").select("*").eq("organization_id", id).maybeSingle(),
+    // the capital as text: integer minor units never pass through a JS number (review M2c-2)
+    supabase.from("billing_identity").select(BILLING_IDENTITY_COLUMNS).eq("organization_id", id).maybeSingle(),
     supabase.rpc("billing_identity_gaps", { p_organization_id: id }),
     supabase.rpc("client_readiness", { p_client_organization_id: id }),
     isMoney ? supabase.rpc("payout_accounts", { p_client_organization_id: id }) : Promise.resolve({ data: [] }),
@@ -146,6 +148,7 @@ export default async function ClientRemittancePage({ params }: { params: Promise
   }[];
   const claimLabels = Object.fromEntries((claimTypesRes.data ?? []).map((c) => [c.code, c.label_fr]));
   const today = parisToday();
+  const firstStart = earliestTermsStart(); // review M2c-2: a new version starts tomorrow at the earliest, never today
   const ribs = docs.filter((d) => d.kind === "payout_rib");
   const mandateDocs = docs.filter((d) => d.kind === "mandate_document");
   const evidence = docs.filter((d) => d.kind === "client_status_evidence");
@@ -168,7 +171,17 @@ export default async function ClientRemittancePage({ params }: { params: Promise
                 {r.blockers.length > 0 ? (
                   <ul className="list-disc pl-5 text-sm text-zinc-700 dark:text-zinc-300">
                     {r.blockers.map((b) => (
-                      <li key={b}>{READINESS_LABEL[b] ?? b}</li>
+                      <li key={b}>
+                        {readinessText(b)}
+                        {isMoney && EVENT_BLOCKERS.includes(readinessReason(b).code) ? (
+                          <>
+                            {" · "}
+                            <a href="#evenements" className="underline underline-offset-4">
+                              voir les événements
+                            </a>
+                          </>
+                        ) : null}
+                      </li>
                     ))}
                   </ul>
                 ) : null}
@@ -502,15 +515,23 @@ export default async function ClientRemittancePage({ params }: { params: Promise
                         <input type="hidden" name="expected_latest_id" value={latest?.id ?? ""} readOnly />
                         <p className="text-sm text-zinc-600 dark:text-zinc-400">
                           Une version s&apos;applique aux encaissements à partir de sa date, jamais avant : la version en vigueur
-                          prend fin ce jour-là.
+                          prend fin ce jour-là. Elle commence au plus tôt demain, le {frenchDate(firstStart)} : les encaissements
+                          d&apos;aujourd&apos;hui restent aux conditions en vigueur.
                         </p>
                         <div className="grid gap-3 sm:grid-cols-2">
                           <label className="flex flex-col gap-1 text-sm">
                             En vigueur à partir du
-                            <input type="date" name="valid_from" required min={today} defaultValue={today} className={inputClass} />
+                            <input
+                              type="date"
+                              name="valid_from"
+                              required
+                              min={firstStart}
+                              defaultValue={firstStart}
+                              className={inputClass}
+                            />
                           </label>
                           <label className="flex flex-col gap-1 text-sm">
-                            Délai de reversement (jours, 30 au plus)
+                            Délai de reversement (jours, 30 au plus : engagement du cabinet)
                             <input
                               name="remittance_max_days"
                               inputMode="numeric"
@@ -631,7 +652,7 @@ export default async function ClientRemittancePage({ params }: { params: Promise
       </Section>
 
       {isMoney ? (
-        <Section title="Événements du client" testId="client-events">
+        <Section title="Événements du client" testId="client-events" id="evenements">
           {events.length === 0 ? (
             <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucun événement enregistré.</p>
           ) : (
@@ -705,8 +726,13 @@ export default async function ClientRemittancePage({ params }: { params: Promise
                     <input name="note" maxLength={2000} className={inputClass} />
                   </label>
                   <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                    Leurs effets sur les reversements viendront avec les reversements (payeur, compensation : question ouverte
-                    OQ-41).
+                    Dès leur date d&apos;effet, une fin de mandat, une tutelle, un décès (art. 2003 C. civ.) ou une liquidation
+                    judiciaire (règle du cabinet) empêchent de confirmer un portefeuille de ce client. Une fois une liquidation,
+                    ou le compte d&apos;un mandataire de justice, enregistré, les comptes de reversement ne se confirment, ne se
+                    refusent et ne se retirent plus que par un second administrateur du cabinet, jamais depuis l&apos;espace du
+                    client (règle du cabinet ; en liquidation, les droits du client sont exercés par le liquidateur, art. L641-9
+                    C. com.). Les effets des événements sur les reversements viendront avec les reversements (payeur,
+                    compensation : question ouverte OQ-41).
                   </p>
                 </ActionForm>
               )}
