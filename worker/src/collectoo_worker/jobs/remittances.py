@@ -35,7 +35,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Jsonb
 
-from collectoo_worker.remittance.calendar import CalendarHorizonError, conservative
+from collectoo_worker.remittance.calendar import Calendar, CalendarHorizonError, conservative
 from collectoo_worker.remittance.commission import FileFacts, KeyState, LineKind, Part
 from collectoo_worker.remittance.documents import EarlierCharge, EarlierInvoice
 from collectoo_worker.remittance.run import (
@@ -105,7 +105,13 @@ def make_handler() -> Any:
 
 
 def record_dead_job(payload: dict[str, Any], error: str, conn: Conn) -> None:
-    """A job failed for good: its run says so (back to draft, or not prepared) and waits for ops."""
+    """A job failed for good: its run says so (back to draft, or not prepared) and waits for ops; a
+    servicer's schedule is recorded for the nightly checks (`remittance_schedule_failed`)."""
+    if payload.get("type") == "schedule":
+        org = payload.get("organization_id")
+        if org:
+            _schedule_failed(conn, str(org), None, "dead", error)
+        return
     run, token = payload.get("run_id"), payload.get("token")
     if not run or not token:
         return
@@ -125,40 +131,88 @@ def record_dead_job(payload: dict[str, Any], error: str, conn: Conn) -> None:
 
 
 def run_schedule(conn: Conn, payload: dict[str, Any], now: datetime | None = None) -> list[str]:
-    """The drafts the schedule creates for one servicer now (Paris time); `now` for tests."""
+    """The drafts the schedule creates for one servicer now (Paris time); `now` for tests.
+
+    One client's data error never stops the others (review nc#0): the recovery of stuck jobs, the
+    candidates' read and each client's draft run in their own savepoint; a data error is logged and
+    recorded for the nightly checks (`remittance_schedule_failed`), and the job goes on, so what was
+    done is committed with it. Any other error (a lock timeout) fails the job, which the queue
+    retries."""
     org = str(payload["organization_id"])
     conn.execute("set local lock_timeout = '5s'")
-    conn.execute("select private.remittance_stuck_jobs(%s)", (org,))
+    with conn.transaction():
+        conn.execute("select private.remittance_stuck_jobs(%s)", (org,))
     at = (now or datetime.now(PARIS)).astimezone(PARIS)
     today = at.date()
     if at.hour < SCHEDULE_FROM_HOUR:
         return []
     cal = conservative()
     business = cal.is_business_day(today)
-    rows = conn.execute(
-        "select * from private.remittance_schedule_candidates(%s, %s)", (org, today)
-    ).fetchall()
+    try:
+        with conn.transaction():
+            rows = conn.execute(
+                "select * from private.remittance_schedule_candidates(%s, %s)", (org, today)
+            ).fetchall()
+    except psycopg.Error as exc:
+        if not deterministic(exc):
+            raise
+        log.warning("schedule %s: candidates not read (%s %s)", org, exc.sqlstate, exc)
+        _schedule_failed(conn, org, None, "candidates", f"{exc.sqlstate}: {exc}")
+        return []
     created = []
     for client, currency, terms_docs, payout_returned, latest in rows:
-        terms = [RemittanceTerms.model_validate(t) for t in terms_docs or ()]
-        trigger = None
-        if payout_returned:
-            trigger = "payout_returned"
-        elif business and any(is_scheduled(t, today, cal) for t in terms):
-            trigger = "schedule"
-        elif guard_due(today, latest or (), cal):
-            trigger = "deadline"
-        if trigger is None:
+        key = f"sched:{client}:{currency}:{today.isoformat()}"
+        try:
+            trigger = _schedule_trigger(terms_docs, payout_returned, latest, today, business, cal)
+            if trigger is None:
+                continue
+            with conn.transaction():
+                row = conn.execute(
+                    "select private.create_remittance_run(%s, %s, %s, %s, %s, null)",
+                    (org, client, currency, trigger, key),
+                ).fetchone()
+        except psycopg.Error as exc:
+            if not deterministic(exc):
+                raise
+            log.warning("schedule %s: no draft for %s (%s %s)", org, client, exc.sqlstate, exc)
+            _schedule_failed(conn, org, str(client), "client", f"{exc.sqlstate}: {exc}")
             continue
-        row = conn.execute(
-            "select private.create_remittance_run(%s, %s, %s, %s, %s, null)",
-            (org, client, currency, trigger, f"sched:{client}:{currency}:{today.isoformat()}"),
-        ).fetchone()
+        except ValueError as exc:  # its terms do not validate (pydantic), a calendar horizon
+            log.warning("schedule %s: no draft for %s (%s)", org, client, exc)
+            _schedule_failed(conn, org, str(client), "client", str(exc))
+            continue
         if row and row[0]:
             created.append(str(row[0]))
     if created:
         log.info("schedule %s: %d drafts", org, len(created))
     return created
+
+
+def _schedule_trigger(  # noqa: PLR0913, PLR0917 - one candidate row, the day, the calendar
+    terms_docs: list[dict[str, Any]] | None,
+    payout_returned: bool,
+    latest: list[date] | None,
+    today: date,
+    business: bool,
+    cal: Calendar,
+) -> str | None:
+    """Why a client's draft is due today, if it is (§9.3: a payout come back, a scheduled day of
+    one of its mandates, the deadline guard)."""
+    terms = [RemittanceTerms.model_validate(t) for t in terms_docs or ()]
+    if payout_returned:
+        return "payout_returned"
+    if business and any(is_scheduled(t, today, cal) for t in terms):
+        return "schedule"
+    if guard_due(today, latest or (), cal):
+        return "deadline"
+    return None
+
+
+def _schedule_failed(conn: Conn, org: str, client: str | None, code: str, error: str) -> None:
+    conn.execute(
+        "select private.record_remittance_schedule_failure(%s, %s, %s, %s)",
+        (org, client, code, (error or "unknown error")[:2000]),
+    )
 
 
 # -- prepare --------------------------------------------------------------------------------------
@@ -380,13 +434,21 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
             "select id::text, reference from public.mandate where id = any(%s::uuid[])", (mandates,)
         ).fetchall()
     )
+    # the latest state of each (file, tier key) its mandate's terms can price — one keyed read per
+    # key, however many runs wrote the key before (append-only history; review perf#7)
+    keys = sorted(
+        {
+            (account, str(rule["tier_key"]))
+            for account, f in files.items()
+            for t in terms.get(f.mandate_id, ())
+            for rule in (t.schedule or {}).get("rules", [])
+            if rule.get("tier_key")
+        }
+    )
     history: dict[tuple[str, str], KeyState] = {}
     for a, tier, b, kept_basis, kept, commission in conn.execute(
-        """select distinct on (k.account_id, k.tier_key) k.account_id, k.tier_key, k.basis,
-                  k.kept_basis_minor, k.kept_minor, k.commission_minor
-           from public.remittance_key_state k where k.account_id = any(%s::uuid[])
-           order by k.account_id, k.tier_key, k.seq desc""",
-        (accounts,),
+        "select * from private.remittance_key_states(%s::uuid[], %s::text[])",
+        ([a for a, _ in keys], [t for _, t in keys]),
     ).fetchall():
         history[(str(a), tier)] = KeyState(
             basis=tuple(sorted((str(v), int(x)) for v, x in b if int(x))),
@@ -394,11 +456,7 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
             kept_minor=int(kept),
             commission_minor=int(commission),
         )
-    seq_row = conn.execute(
-        "select coalesce(max(seq), 0) from public.remittance_key_state"
-        " where client_organization_id = %s",
-        (client,),
-    ).fetchone()
+    seq_row = conn.execute("select private.remittance_history_seq(%s)", (client,)).fetchone()
     charges: dict[tuple[str, str], list[EarlierCharge]] = defaultdict(list)
     for a, tier, inv, year, seq, charged, credited, rate in conn.execute(
         """select ch.account_id, ch.tier_key, ch.invoice_id, i.year, i.seq, ch.charged_minor,

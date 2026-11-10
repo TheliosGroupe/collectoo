@@ -816,20 +816,26 @@ begin
                                                 where r.schedule_key = p_schedule_key)) then
     return null;
   end if;
-  -- the service period of a first run starts at its earliest encaissement (a payment's E, else the posting day)
-  select min(least((q.posted_at at time zone 'Europe/Paris')::date,
-                   coalesce((select private.encaissement_date(p.booking_date, p.value_date)
-                             from public.ledger_entry e join public.payment p on p.id = e.payment_id
-                             where e.id = q.ledger_entry_id), 'infinity'::date)))
-  into v_from from private.remittance_pending q
-  where q.organization_id = p_organization_id and q.client_organization_id = p_client_organization_id
-    and q.currency = p_currency and q.draft_run_id is null;
-  if v_from is null then
+  -- nothing waiting: no run (one probe; review perf#3: the reservation holds the allocation lock)
+  if not exists (select 1 from private.remittance_pending q
+                 where q.organization_id = p_organization_id and q.client_organization_id = p_client_organization_id
+                   and q.currency = p_currency and q.draft_run_id is null) then
     return null;
   end if;
   select * into v_prev from public.remittance_run r
   where r.client_organization_id = p_client_organization_id and r.currency = p_currency and r.status <> 'cancelled'
   order by r.created_at desc limit 1;
+  if v_prev.id is null then
+    -- the service period of a first run starts at its earliest encaissement (a payment's E, else the posting day);
+    -- a later run's starts at the previous run's K
+    select min(least((q.posted_at at time zone 'Europe/Paris')::date,
+                     coalesce((select private.encaissement_date(p.booking_date, p.value_date)
+                               from public.ledger_entry e join public.payment p on p.id = e.payment_id
+                               where e.id = q.ledger_entry_id), 'infinity'::date)))
+    into v_from from private.remittance_pending q
+    where q.organization_id = p_organization_id and q.client_organization_id = p_client_organization_id
+      and q.currency = p_currency and q.draft_run_id is null;
+  end if;
   v_k := clock_timestamp();
   insert into public.remittance_run (organization_id, client_organization_id, currency, number, trigger, schedule_key,
                                      job, job_token, job_queued_at, known_at, previous_run_id, service_from, service_to,
@@ -904,9 +910,9 @@ as $$
   delete from private.remittance_draft where run_id = p_run_id;
 $$;
 
--- A draft, by a command: the row locked, then the allocation lock (the order of the approval job).
-create or replace function private.remittance_draft_for_command(p_run_id uuid, p_expected_version integer,
-                                                                p_roles text[])
+-- A draft, by a command, with its row locked (the status, the job and the version checked under it).
+create or replace function private.remittance_draft_row_for_command(p_run_id uuid, p_expected_version integer,
+                                                                    p_roles text[])
 returns public.remittance_run
 language plpgsql
 security definer
@@ -920,7 +926,6 @@ begin
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
   end if;
   select * into r from public.remittance_run where id = p_run_id for update;
-  perform private.remittance_command_locks(r.organization_id);
   if r.status <> 'draft' then
     raise exception 'remittance run refused: not_draft' using errcode = 'check_violation';
   end if;
@@ -934,8 +939,29 @@ begin
 end;
 $$;
 
--- « Actualiser » (§9.4 step 3): releases the reservation and reserves the client's pending items again (a new K),
--- then prepares again. A draft with nothing left is abandoned.
+-- A draft, by a command: the row locked, then the allocation lock (the order of the approval job).
+create or replace function private.remittance_draft_for_command(p_run_id uuid, p_expected_version integer,
+                                                                p_roles text[])
+returns public.remittance_run
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  r public.remittance_run;
+begin
+  r := private.remittance_draft_row_for_command(p_run_id, p_expected_version, p_roles);
+  perform private.remittance_command_locks(r.organization_id);
+  return r;
+end;
+$$;
+revoke execute on function private.remittance_draft_row_for_command(uuid, integer, text[])
+  from public, anon, authenticated;
+
+-- « Actualiser » (§9.4 step 3): the client's pending items reserved again (a new K) — the draft keeps what it had
+-- reserved and takes what came since — then prepared again. A draft with nothing left is abandoned. The prepared
+-- draft (keyed by the run, whose row is locked) is cleared before the allocation lock, which is held only to reserve
+-- the new items (review perf#3).
 create or replace function public.refresh_remittance_run(p_idempotency_key text, p_run_id uuid,
                                                          p_expected_version integer)
 returns jsonb
@@ -959,13 +985,13 @@ begin
   if v_result is not null then
     return v_result;
   end if;
-  r := private.remittance_draft_for_command(p_run_id, p_expected_version, array['admin', 'ops_manager']);
-  update private.remittance_pending set draft_run_id = null where draft_run_id = r.id;
+  r := private.remittance_draft_row_for_command(p_run_id, p_expected_version, array['admin', 'ops_manager']);
+  perform private.remittance_clear_draft(r.id);
+  perform private.remittance_command_locks(r.organization_id);
   update private.remittance_pending q set draft_run_id = r.id
   where q.organization_id = r.organization_id and q.client_organization_id = r.client_organization_id
     and q.currency = r.currency and q.draft_run_id is null;
-  get diagnostics v_n = row_count;
-  perform private.remittance_clear_draft(r.id);
+  select count(*)::integer into v_n from private.remittance_pending q where q.draft_run_id = r.id;
   if v_n = 0 then
     update public.remittance_run set status = 'cancelled', job = null, job_token = null, job_queued_at = null,
       cancelled_by = auth.uid(), cancelled_at = clock_timestamp(), cancel_reason = 'Plus rien à reverser',
@@ -2102,15 +2128,55 @@ end;
 $$;
 
 ------------------------------------------------------------------------------------------
--- Deadlines of the items not yet in an approved run (§9.2: one deadline per distinct (E, delay), not per line)
+-- Deadlines of the collections not yet paid (§9.2: one deadline per distinct (E, delay), not per line)
 ------------------------------------------------------------------------------------------
 
--- The positive collections waiting in the queue (reserved by a draft or not) with their R124-6 dates: E from their
--- payment, the delay of their file's mandate version on E (one month when none: R124-6 « un mois »).
-create or replace function private.pending_item_deadlines(p_organization_id uuid)
+-- The deadline of an encaissement, or none when the business calendar cannot place it (review nc#0): a date before
+-- the seeded horizon (or a deadline after it) makes private.remittance_deadline raise 22023 « business calendar: … »;
+-- the set-based readers (the queue's deadlines, the nightly checks, the overview, the schedule) flag such a date
+-- `out_of_horizon` instead of failing for every client of the servicer. Any other error is raised.
+create or replace function private.remittance_deadline_or_null(p_encaissement date, p_max_days integer)
+returns table (encaissement_date date, deadline date, last_business_day date, latest_execution_date date,
+               alert_soon_date date, alert_critical_date date, unmeetable boolean, out_of_horizon boolean)
+language plpgsql
+stable
+rows 1
+set search_path = ''
+as $$
+declare
+  d record;
+begin
+  begin
+    select * into d from private.remittance_deadline(p_encaissement, p_max_days);
+  exception when sqlstate '22023' then
+    if sqlerrm not like 'business calendar:%' then
+      raise;
+    end if;
+    return query select p_encaissement, null::date, null::date, null::date, null::date, null::date, null::boolean,
+                        true;
+    return;
+  end;
+  return query select d.encaissement_date, d.deadline, d.last_business_day, d.latest_execution_date,
+                      d.alert_soon_date, d.alert_critical_date, d.unmeetable, false;
+end;
+$$;
+
+-- The positive collections waiting in the queue (reserved by a draft or not; only the unreserved ones with
+-- `p_unreserved_only`, review perf#6) with their R124-6 dates: E from their payment, the delay of their file's
+-- mandate version on E — one month when no version covers E (R124-6 « un mois »: a collection before the first
+-- version, or after the last one ended; review legal#2).
+--   monitored: the file's portfolio is under a mandate that has terms — the only portfolios the M2c-2 gate confirms;
+--              the nightly checks look at these (not at the M2b fixtures, nor at files under no mandate);
+--   check_*:   the dates the checks hold the collection to — its own, or one month when its mandate's delay leaves no
+--              business day after E (`unmeetable`, OQ-71): R124-6's month is always meetable (review legal#1);
+--   out_of_horizon: an E the business calendar cannot place (no dates; review nc#0).
+create or replace function private.pending_item_deadlines(p_organization_id uuid,
+                                                          p_unreserved_only boolean default false)
 returns table (ledger_entry_id uuid, client_organization_id uuid, currency char(3), amount_minor bigint,
-               draft_run_id uuid, payment_id uuid, has_terms boolean, encaissement_date date, deadline date,
-               latest_execution_date date, alert_soon_date date, alert_critical_date date, unmeetable boolean)
+               draft_run_id uuid, payment_id uuid, monitored boolean, encaissement_date date, max_days integer,
+               deadline date, latest_execution_date date, alert_soon_date date, alert_critical_date date,
+               unmeetable boolean, check_deadline date, check_latest_execution_date date, check_alert_soon_date date,
+               check_alert_critical_date date, out_of_horizon boolean)
 language sql
 stable
 security definer
@@ -2119,30 +2185,173 @@ set enable_seqscan = off
 as $$
   with items as materialized (
     select q.ledger_entry_id, q.client_organization_id, q.currency, q.amount_minor, q.draft_run_id, e.payment_id,
-           x.e_date, t.days
+           x.e_date, coalesce(t.days, 30) as days, f.mandate_id
     from private.remittance_pending q
     join lateral (select le.payment_id, le.account_id from public.ledger_entry le
                   where le.id = q.ledger_entry_id offset 0) e on true
     left join lateral (select private.encaissement_date(p.booking_date, p.value_date) as e_date,
                               coalesce(e.account_id, p.account_id) as account_id
                        from public.payment p where p.id = e.payment_id offset 0) x on true
+    left join lateral (select pf.mandate_id
+                       from public.account a join public.portfolio pf on pf.id = a.portfolio_id
+                       where a.id = coalesce(x.account_id, e.account_id) offset 0) f on true
+    left join lateral (select mt.remittance_max_days as days from public.mandate_terms mt
+                       where mt.mandate_id = f.mandate_id and mt.valid_from <= x.e_date
+                         and (mt.valid_to is null or x.e_date < mt.valid_to)
+                       limit 1) t on true
+    where q.organization_id = p_organization_id and q.amount_minor > 0 and q.kind in ('allocation', 'forward')
+      and (not p_unreserved_only or q.draft_run_id is null)),
+  mon as (
+    select k.mandate_id, exists (select 1 from public.mandate_terms v where v.mandate_id = k.mandate_id) as monitored
+    from (select distinct i.mandate_id from items i where i.mandate_id is not null) k),
+  dl as (
+    select k.e_date, k.days, d.*
+    from (select distinct i.e_date, i.days from items i where i.e_date is not null) k
+    cross join lateral private.remittance_deadline_or_null(k.e_date, k.days) d),
+  m as (   -- one month, for the delays that cannot be met
+    select k.e_date, d.*
+    from (select distinct dl.e_date from dl where dl.unmeetable) k
+    cross join lateral private.remittance_deadline_or_null(k.e_date, 30) d)
+  select i.ledger_entry_id, i.client_organization_id, i.currency, i.amount_minor, i.draft_run_id, i.payment_id,
+         coalesce(mon.monitored, false), i.e_date, i.days, dl.deadline, dl.latest_execution_date, dl.alert_soon_date,
+         dl.alert_critical_date, coalesce(dl.unmeetable, false),
+         case when dl.unmeetable then m.deadline else dl.deadline end,
+         case when dl.unmeetable then m.latest_execution_date else dl.latest_execution_date end,
+         case when dl.unmeetable then m.alert_soon_date else dl.alert_soon_date end,
+         case when dl.unmeetable then m.alert_critical_date else dl.alert_critical_date end,
+         coalesce(dl.out_of_horizon, false) or coalesce(m.out_of_horizon, false)
+  from items i
+  left join mon on mon.mandate_id = i.mandate_id
+  left join dl on dl.e_date = i.e_date and dl.days = i.days
+  left join m on m.e_date = i.e_date and dl.unmeetable;
+$$;
+
+-- Money matched to a client's file but not allocated yet (still in 4710: nothing due, a credit note to apply, before
+-- the servicing start, ops pending) gets the clock of an allocation (§9.2, OQ-26, compliance B7): E from its booking
+-- and value dates, the delay of its file's mandate version on E, one month when none (review legal#7). Each payment
+-- read by key whatever the statistics (review perf#0): its tagged entries by the payment's index, their postings by
+-- entry, each posting's book by its account's key, the amount once; one deadline per distinct (E, delay).
+create or replace function private.unallocated_payment_deadlines(p_organization_id uuid)
+returns table (payment_id uuid, currency char(3), held boolean, unallocated_minor bigint, encaissement_date date,
+               max_days integer, deadline date, latest_execution_date date, alert_soon_date date,
+               alert_critical_date date, out_of_horizon boolean)
+language sql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+  with u as materialized (
+    select p.id, p.currency, coalesce(p.review_reason = 'hold_blocks_allocation', false) as held,
+           (p.amount_minor - coalesce(s.taken, 0))::bigint as unallocated, x.e_date, coalesce(t.days, 30) as days
+    from public.payment p
+    cross join lateral (select private.encaissement_date(p.booking_date, p.value_date) as e_date) x
+    left join lateral (
+      select sum(lp.amount_minor) as taken
+      from (select e.id from public.ledger_entry e
+            where e.payment_id = p.id and e.entry_type <> 'cash_in' offset 0) e
+      cross join lateral (select y.amount_minor from public.ledger_posting y
+                          where y.entry_id = e.id
+                            and (select la.book from public.ledger_account la where la.id = y.ledger_account_id)
+                                = 'unallocated_payment'
+                          offset 0) lp) s on true
     left join lateral (select mt.remittance_max_days as days
                        from public.account a
                        join public.portfolio pf on pf.id = a.portfolio_id
                        join public.mandate_terms mt on mt.mandate_id = pf.mandate_id and mt.valid_from <= x.e_date
                          and (mt.valid_to is null or x.e_date < mt.valid_to)
-                       where a.id = x.account_id
+                       where a.id = p.account_id
                        limit 1) t on true
-    where q.organization_id = p_organization_id and q.amount_minor > 0 and q.kind in ('allocation', 'forward')),
+    where p.organization_id = p_organization_id and p.account_id is not null
+      and p.status in ('matched', 'partially_allocated')),
   dl as (
     select k.e_date, k.days, d.*
-    from (select distinct i.e_date, coalesce(i.days, 30) as days from items i where i.e_date is not null) k
-    cross join lateral private.remittance_deadline(k.e_date, k.days) d)
-  select i.ledger_entry_id, i.client_organization_id, i.currency, i.amount_minor, i.draft_run_id, i.payment_id,
-         i.days is not null, i.e_date, dl.deadline, dl.latest_execution_date, dl.alert_soon_date, dl.alert_critical_date,
-         dl.unmeetable
-  from items i left join dl on dl.e_date = i.e_date and dl.days = coalesce(i.days, 30);
+    from (select distinct u.e_date, u.days from u where u.unallocated > 0) k
+    cross join lateral private.remittance_deadline_or_null(k.e_date, k.days) d)
+  select u.id, u.currency, u.held, u.unallocated, u.e_date, u.days, dl.deadline, dl.latest_execution_date,
+         dl.alert_soon_date, dl.alert_critical_date, dl.out_of_horizon
+  from u join dl on dl.e_date = u.e_date and dl.days = u.days
+  where u.unallocated > 0;
 $$;
+
+-- The collections of the servicer's runs approved or sent whose payout is not debited yet (M2c-6 books it): still
+-- owed to the client (§9.2 « still not paid at latest_exec »; review legal#3). Those whose date has passed by
+-- `p_today` — the line's latest execution date, or one month for a delay that could not be met (review legal#1) —
+-- and those the calendar cannot place. Each run's live lines read by the run's key, whatever the statistics.
+create or replace function private.inflight_overdue_lines(p_organization_id uuid, p_today date)
+returns table (run_id uuid, number text, client_organization_id uuid, currency char(3),
+               requested_execution_date date, late_reason text, ledger_entry_id uuid, payment_id uuid,
+               amount_minor bigint, deadline date, latest_execution_date date, out_of_horizon boolean)
+language sql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+  with l as materialized (
+    select r.id as run_id, r.number, r.client_organization_id, r.currency, r.requested_execution_date, r.late_reason,
+           y.ledger_entry_id, y.payment_id, y.amount_minor, y.encaissement_date, y.deadline, y.latest_execution_date,
+           y.unmeetable
+    from public.remittance_run r
+    cross join lateral (select x.ledger_entry_id, x.payment_id, x.amount_minor, x.encaissement_date, x.deadline,
+                               x.latest_execution_date, x.unmeetable
+                        from public.remittance_line x
+                        where x.run_id = r.id and not x.released and x.amount_minor > 0
+                          and x.latest_execution_date is not null
+                          and (x.unmeetable or x.latest_execution_date < p_today)
+                        offset 0) y
+    where r.organization_id = p_organization_id and r.status in ('approved', 'sent')
+      and not exists (select 1 from public.bank_transfer t where t.id = r.transfer_id and t.status = 'booked')),
+  m as (
+    select k.e_date, d.*
+    from (select distinct l.encaissement_date as e_date from l where l.unmeetable and l.encaissement_date is not null) k
+    cross join lateral private.remittance_deadline_or_null(k.e_date, 30) d),
+  c as (
+    select l.*, case when l.unmeetable then m.deadline else l.deadline end as c_deadline,
+           case when l.unmeetable then m.latest_execution_date else l.latest_execution_date end as c_latest,
+           coalesce(l.unmeetable and (m.out_of_horizon or m.e_date is null), false) as c_out
+    from l left join m on l.unmeetable and m.e_date = l.encaissement_date)
+  select c.run_id, c.number, c.client_organization_id, c.currency, c.requested_execution_date, c.late_reason,
+         c.ledger_entry_id, c.payment_id, c.amount_minor, c.c_deadline, c.c_latest, c.c_out
+  from c where c.c_out or c.c_latest < p_today;
+$$;
+
+-- The tier history the prepare continues from (review perf#7): the latest state of each (file, tier key) asked for,
+-- one keyed read per key however many runs wrote it before (append-only), and the client's last history number.
+create or replace function private.remittance_key_states(p_account_ids uuid[], p_tier_keys text[])
+returns table (account_id uuid, tier_key text, basis jsonb, kept_basis_minor bigint, kept_minor bigint,
+               commission_minor bigint)
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select k.account_id, k.tier_key, s.basis, s.kept_basis_minor, s.kept_minor, s.commission_minor
+  from unnest(p_account_ids, p_tier_keys) k (account_id, tier_key)
+  cross join lateral (select x.basis, x.kept_basis_minor, x.kept_minor, x.commission_minor
+                      from public.remittance_key_state x
+                      where x.account_id = k.account_id and x.tier_key = k.tier_key
+                      order by x.seq desc limit 1) s;
+$$;
+
+create or replace function private.remittance_history_seq(p_client_organization_id uuid)
+returns bigint
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select coalesce((select k.seq from public.remittance_key_state k
+                   where k.client_organization_id = p_client_organization_id
+                   order by k.seq desc limit 1), 0);
+$$;
+
+revoke execute on function private.remittance_deadline_or_null(date, integer),
+  private.unallocated_payment_deadlines(uuid), private.inflight_overdue_lines(uuid, date),
+  private.remittance_key_states(uuid[], text[]), private.remittance_history_seq(uuid)
+  from public, anon, authenticated;
+grant execute on function private.remittance_key_states(uuid[], text[]), private.remittance_history_seq(uuid)
+  to service_role;
 
 ------------------------------------------------------------------------------------------
 -- The schedule (§9.3; founder #1): pg_cron hourly → one worker job per servicer, which decides once per Paris business
@@ -2183,7 +2392,7 @@ as $$
     from private.remittance_pending q
     where q.organization_id = p_organization_id and q.draft_run_id is null
     group by q.client_organization_id, q.currency),
-  d as (select * from private.pending_item_deadlines(p_organization_id) where draft_run_id is null)
+  d as (select * from private.pending_item_deadlines(p_organization_id, true))
   select c.client_organization_id, c.currency,
          coalesce((select array_agg(mt.remittance_terms order by mt.id) from public.mandate m
                    join public.mandate_terms mt on mt.mandate_id = m.id and mt.valid_from <= p_today
@@ -2198,6 +2407,38 @@ as $$
   where not exists (select 1 from public.remittance_run r where r.client_organization_id = c.client_organization_id
                       and r.currency = c.currency and r.status in ('draft', 'approved', 'sent'));
 $$;
+
+-- What the hourly schedule could not do (review nc#0), recorded by the worker for the nightly checks
+-- (`remittance_schedule_failed`): a client whose draft a data error kept from being created (the job goes on with the
+-- others), the candidates' read failing with a data error, or the job dead-lettered after its retries.
+create table private.remittance_schedule_failure (
+  id bigint generated always as identity primary key,
+  organization_id uuid not null references public.organization (id),
+  client_organization_id uuid references public.organization (id),
+  code text not null check (code in ('client', 'candidates', 'dead')),
+  error text not null check (length(error) between 1 and 2000),
+  failed_at timestamptz not null default clock_timestamp()
+);
+create index remittance_schedule_failure_org_idx on private.remittance_schedule_failure (organization_id, failed_at);
+alter table private.remittance_schedule_failure enable row level security;
+revoke all on private.remittance_schedule_failure from public, anon, authenticated;
+
+create or replace function private.record_remittance_schedule_failure(p_organization_id uuid,
+                                                                      p_client_organization_id uuid, p_code text,
+                                                                      p_error text)
+returns void
+language sql
+security definer
+set search_path = ''
+as $$
+  insert into private.remittance_schedule_failure (organization_id, client_organization_id, code, error)
+  select o.id, (select c.id from public.organization c where c.id = p_client_organization_id), p_code,
+         left(coalesce(nullif(btrim(p_error), ''), 'unknown error'), 2000)
+  from public.organization o where o.id = p_organization_id;
+$$;
+revoke execute on function private.record_remittance_schedule_failure(uuid, uuid, text, text)
+  from public, anon, authenticated;
+grant execute on function private.record_remittance_schedule_failure(uuid, uuid, text, text) to service_role;
 
 -- Jobs stuck in flight (§9.5: an approval over 10 minutes goes back to draft; a prepare is queued again).
 create or replace function private.remittance_stuck_jobs(p_organization_id uuid)
@@ -2234,31 +2475,60 @@ $$;
 -- payment_check_run: the payments checks are not copied here), each check one statement.
 ------------------------------------------------------------------------------------------
 
-create or replace function private.run_remittance_checks(p_check_run_id uuid, p_organization_id uuid)
+-- p_today: the Paris date the checks hold the books to (today; another date only for tests). Every check reads the
+-- books in ONE statement, so in one snapshot; the breach rows are written by the same statement, from the same
+-- deadlines (computed once). Plans hold whatever the statistics: the deadlines' readers drive from the rows they are
+-- about by key, and nothing here scans a table an index can serve (ARCHITECTURE §4).
+create or replace function private.run_remittance_checks(p_check_run_id uuid, p_organization_id uuid,
+                                                         p_today date default null)
 returns void
 language plpgsql
 security definer
 set search_path = ''
+set enable_seqscan = off
 as $$
 declare
-  v_today date := private.paris_today();
+  v_today date := coalesce(p_today, private.paris_today());
+  v_since timestamptz;      -- the previous check run of the servicer
+  v_full boolean;           -- I16 over every run (Sundays, or the first check run), else over the runs changed lately
+  v_failures timestamptz;   -- the schedule's failures reported from (at least the last 24 hours)
 begin
-  -- I21: a positive item not paid by its latest execution date: a breach row, once (an unmeetable delay recorded as
-  -- such, not as an operational breach: M2c-3, OQ-71)
-  insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
-                                                 run_id, deadline, latest_execution_date, blocked_reason)
-  select p_organization_id, d.client_organization_id, d.ledger_entry_id, d.payment_id, d.draft_run_id, d.deadline,
-         d.latest_execution_date, case when d.unmeetable then 'unmeetable_delay' end
-  from private.pending_item_deadlines(p_organization_id) d
-  where d.has_terms and d.latest_execution_date < v_today
-  on conflict (ledger_entry_id) do nothing;
+  select max(c.started_at) into v_since from public.payment_check_run c
+  where c.organization_id = p_organization_id and c.id <> p_check_run_id and c.finished_at is not null;
+  v_full := v_since is null or extract(isodow from v_today) = 7;
+  v_failures := least(coalesce(v_since, clock_timestamp()), clock_timestamp() - interval '24 hours');
 
+  with dl as materialized (     -- the collections waiting, of files under a mandate with terms (review legal#2)
+    select * from private.pending_item_deadlines(p_organization_id) d where d.monitored),
+  ol as materialized (          -- the collections of runs approved or sent, not debited by their date (legal#3)
+    select * from private.inflight_overdue_lines(p_organization_id, v_today)),
+  ua as materialized (          -- money matched to a file, not allocated (legal#7, perf#0)
+    select * from private.unallocated_payment_deadlines(p_organization_id)),
+  -- I21: a positive collection not paid by its latest execution date — one month after E when its mandate's delay
+  -- cannot be met (review legal#1) — writes a breach row, once; one the calendar cannot place has no date to hold it
+  -- to (its alert below)
+  waiting_breach as (
+    insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
+                                                   run_id, deadline, latest_execution_date)
+    select p_organization_id, d.client_organization_id, d.ledger_entry_id, d.payment_id, d.draft_run_id,
+           d.check_deadline, d.check_latest_execution_date
+    from dl d where not d.out_of_horizon and d.check_latest_execution_date < v_today
+    on conflict (ledger_entry_id) do nothing),
+  -- … and so does a collection whose run was approved but whose payout is not debited by then (§9.2: paid means
+  -- debited; until M2c-6 books payouts, every approved run's collections are held to it)
+  inflight_breach as (
+    insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
+                                                   run_id, deadline, latest_execution_date, requested_execution_date,
+                                                   late_reason)
+    select p_organization_id, o.client_organization_id, o.ledger_entry_id, o.payment_id, o.run_id, o.deadline,
+           o.latest_execution_date, o.requested_execution_date, o.late_reason
+    from ol o where not o.out_of_horizon
+    on conflict (ledger_entry_id) do nothing)
   insert into public.payment_check_result (run_id, organization_id, code, severity, subject_type, subject_id, currency,
                                            amount_minor, count, oldest_days, details)
   select p_check_run_id, p_organization_id, u.code, u.severity, u.subject_type, u.subject_id, u.currency,
          u.amount_minor, u.count, u.oldest_days, coalesce(u.details, '{}')
   from (
-  with dl as materialized (select * from private.pending_item_deadlines(p_organization_id) where has_terms)
   -- (I14 is in run_payment_checks)
   -- I15: an item both waiting and in a live line
   select 'remittance_item_twice'::text, 'violation'::text, 'ledger_entry'::text, q.ledger_entry_id, q.currency::char(3),
@@ -2267,25 +2537,27 @@ begin
   join public.remittance_line l on l.ledger_entry_id = q.ledger_entry_id and not l.released
   where q.organization_id = p_organization_id
   union all
-  -- I16: a run's arithmetic — gross = Σ lines, N + D = gross, N ≥ 0, the payout = N, documents' HT = Σ line commissions
+  -- I16: a run's arithmetic — gross = Σ lines, N + D = gross, N ≥ 0, the payout = N, documents' HT = Σ line
+  -- commissions. A run's lines and totals are frozen once approved: each run is read in one pass over its lines, the
+  -- runs changed since the previous check run (with a day's margin), every run on Sundays (review perf#5).
   select 'remittance_run_totals', 'violation', 'remittance_run', r.id, r.currency, r.gross_minor, null, null,
-         jsonb_build_object('number', r.number, 'lines_minor', s.gross::text, 'documents_ht_minor', s.docs::text,
-                            'commission_minor', s.commission::text)
+         jsonb_build_object('number', r.number, 'lines_minor', l.gross::text, 'documents_ht_minor', s.docs::text,
+                            'commission_minor', (l.charged + s.repriced)::text)
   from public.remittance_run r
+  cross join lateral (select coalesce(sum(x.amount_minor), 0) as gross, count(*) as n,
+                             coalesce(sum(x.commission_minor) filter (where x.commission_state = 'charged'), 0)
+                               as charged
+                      from public.remittance_line x where x.run_id = r.id) l
   cross join lateral (
-    select (select coalesce(sum(l.amount_minor), 0) from public.remittance_line l where l.run_id = r.id) as gross,
-           (select count(*) from public.remittance_line l where l.run_id = r.id) as n,
-           (select coalesce(sum(i.ht_minor), 0) from public.commission_invoice i
+    select (select coalesce(sum(i.ht_minor), 0) from public.commission_invoice i
             where i.run_id = r.id and i.reason = 'commission') as docs,
-           (select coalesce(sum(l.commission_minor), 0) from public.remittance_line l
-            where l.run_id = r.id and l.commission_state = 'charged')
-           + (select coalesce(sum(x.commission_minor), 0) from public.remittance_line_repricing x
-              where x.pricing_run_id = r.id and x.commission_state = 'charged') as commission,
+           (select coalesce(sum(x.commission_minor), 0) from public.remittance_line_repricing x
+            where x.pricing_run_id = r.id and x.commission_state = 'charged') as repriced,
            (select t.amount_minor from public.bank_transfer t where t.id = r.transfer_id) as payout) s
   where r.organization_id = p_organization_id and r.status in ('approved', 'sent', 'booked', 'cancelled')
-    and r.approved_at is not null
-    and (s.gross <> r.gross_minor or s.n <> r.line_count or r.net_minor < 0
-         or r.net_minor + r.settlement_minor <> r.gross_minor or s.docs <> s.commission
+    and r.approved_at is not null and (v_full or r.updated_at > v_since - interval '1 day')
+    and (l.gross <> r.gross_minor or l.n <> r.line_count or r.net_minor < 0
+         or r.net_minor + r.settlement_minor <> r.gross_minor or s.docs <> l.charged + s.repriced
          or (r.status <> 'cancelled' and r.net_minor > 0 and s.payout is distinct from r.net_minor)
          or (r.net_minor = 0 and r.transfer_id is not null))
   union all
@@ -2313,7 +2585,8 @@ begin
     where p.entry_id = i.ledger_entry_id) e
   where i.organization_id = p_organization_id and (e.receivable <> i.ttc_minor or e.revenue <> -i.ht_minor)
   union all
-  -- I18: per client, Σ open invoices − Σ refunds owed = 4111[c]; 44574 = Σ pending VAT of the documents
+  -- I18: per client, Σ open invoices − Σ refunds owed = 4111[c]; 44574 = Σ pending VAT of the documents (the client's
+  -- and the servicer's pooled accounts by their indexes: 4111 has no portfolio, 44574 no claim item; review perf#2)
   select 'settlement_ledger', 'violation', 'client', y.client_organization_id, 'EUR', (y.ledger - y.docs)::bigint, null,
          null, jsonb_build_object('documents_minor', y.docs::text, 'ledger_minor', y.ledger::text)
   from (select c.client_organization_id,
@@ -2322,7 +2595,8 @@ begin
                         0) as docs,
                coalesce((select sum(p.amount_minor) from public.ledger_account la
                          join public.ledger_posting p on p.ledger_account_id = la.id
-                         where la.book = 'commission_receivable' and la.client_organization_id = c.client_organization_id),
+                         where la.book = 'commission_receivable' and la.client_organization_id = c.client_organization_id
+                           and la.portfolio_id is null),
                         0) as ledger
         from (select distinct i.client_organization_id from public.commission_invoice i
               where i.organization_id = p_organization_id) c) y
@@ -2334,24 +2608,80 @@ begin
                          where i.organization_id = p_organization_id and i.kind = 'invoice'), 0) as docs,
                coalesce((select -sum(p.amount_minor) from public.ledger_account la
                          join public.ledger_posting p on p.ledger_account_id = la.id
-                         where la.organization_id = p_organization_id and la.book = 'vat_pending'), 0) as ledger) v
+                         where la.organization_id = p_organization_id and la.book = 'vat_pending'
+                           and la.claim_item_id is null), 0) as ledger) v
   where v.docs <> v.ledger
   union all
-  -- I21: items past their latest execution date, not paid (violation), or whose delay could not be met (alert)
-  select case when bool_and(d.unmeetable) then 'remittance_delay_unmeetable' else 'remittance_deadline_breached' end,
-         case when bool_and(d.unmeetable) then 'alert' else 'violation' end, 'client', d.client_organization_id,
-         d.currency, sum(d.amount_minor)::bigint, count(*)::integer, max(v_today - d.latest_execution_date),
-         jsonb_build_object('earliest_latest_execution_date', min(d.latest_execution_date),
-                            'ids', (array_agg(d.ledger_entry_id order by d.latest_execution_date))[1:50])
-  from dl d where d.latest_execution_date < v_today
-  group by d.client_organization_id, d.currency, d.unmeetable
-  union all
-  -- due soon (D-5 business days) and critical (D-1): per client, the earliest date
-  select case when min(d.alert_critical_date) <= v_today then 'remittance_due_critical' else 'remittance_due_soon' end,
-         'alert', 'client', d.client_organization_id, d.currency, sum(d.amount_minor)::bigint, count(*)::integer, null,
-         jsonb_build_object('earliest_latest_execution_date', min(d.latest_execution_date))
-  from dl d where d.latest_execution_date >= v_today and d.alert_soon_date <= v_today
+  -- I21: collections waiting past the date they are held to (violation, per client)
+  select 'remittance_deadline_breached', 'violation', 'client', d.client_organization_id, d.currency,
+         sum(d.amount_minor)::bigint, count(*)::integer, max(v_today - d.check_latest_execution_date),
+         jsonb_build_object('earliest_latest_execution_date', min(d.check_latest_execution_date),
+                            'unmeetable', count(*) filter (where d.unmeetable),
+                            'ids', (array_agg(d.ledger_entry_id order by d.check_latest_execution_date))[1:50])
+  from dl d where not d.out_of_horizon and d.check_latest_execution_date < v_today
   group by d.client_organization_id, d.currency
+  union all
+  -- … whose mandate's delay could not be met (OQ-71: « délai intenable », an alert) while the month still runs
+  select 'remittance_delay_unmeetable', 'alert', 'client', d.client_organization_id, d.currency,
+         sum(d.amount_minor)::bigint, count(*)::integer, max(v_today - d.latest_execution_date),
+         jsonb_build_object('earliest_latest_execution_date', min(d.latest_execution_date),
+                            'one_month_latest_execution_date', min(d.check_latest_execution_date),
+                            'ids', (array_agg(d.ledger_entry_id order by d.latest_execution_date))[1:50])
+  from dl d
+  where d.unmeetable and not d.out_of_horizon and d.latest_execution_date < v_today
+    and d.check_latest_execution_date >= v_today
+  group by d.client_organization_id, d.currency
+  union all
+  -- due soon (D-5 business days) and critical (D-1): per client, the earliest date (one month's for an unmeetable
+  -- delay)
+  select case when min(d.check_alert_critical_date) <= v_today then 'remittance_due_critical'
+              else 'remittance_due_soon' end,
+         'alert', 'client', d.client_organization_id, d.currency, sum(d.amount_minor)::bigint, count(*)::integer, null,
+         jsonb_build_object('earliest_latest_execution_date', min(d.check_latest_execution_date))
+  from dl d
+  where not d.out_of_horizon and d.check_latest_execution_date >= v_today and d.check_alert_soon_date <= v_today
+  group by d.client_organization_id, d.currency
+  union all
+  -- collections the business calendar cannot place (E before its horizon: long past any deadline; review nc#0)
+  select 'remittance_deadline_not_computable', 'alert', 'client', d.client_organization_id, d.currency,
+         sum(d.amount_minor)::bigint, count(*)::integer, null,
+         jsonb_build_object('of', 'items', 'earliest_encaissement_date', min(d.encaissement_date),
+                            'ids', (array_agg(d.ledger_entry_id order by d.encaissement_date))[1:50])
+  from dl d where d.out_of_horizon
+  group by d.client_organization_id, d.currency
+  union all
+  select 'remittance_deadline_not_computable', 'alert', 'remittance_run', o.run_id, o.currency,
+         sum(o.amount_minor)::bigint, count(*)::integer, null,
+         jsonb_build_object('of', 'lines', 'number', min(o.number),
+                            'ids', (array_agg(o.ledger_entry_id order by o.ledger_entry_id))[1:50])
+  from ol o where o.out_of_horizon
+  group by o.run_id, o.currency
+  union all
+  select 'remittance_deadline_not_computable', 'alert', 'servicer', null, u.currency, sum(u.unallocated_minor)::bigint,
+         count(*)::integer, null,
+         jsonb_build_object('of', 'payments', 'earliest_encaissement_date', min(u.encaissement_date),
+                            'ids', (array_agg(u.payment_id order by u.encaissement_date))[1:50])
+  from ua u where u.out_of_horizon
+  group by u.currency
+  union all
+  -- a run approved or sent whose payout is not debited by its lines' date (violation; review legal#3) …
+  select 'remittance_payout_overdue', 'violation', 'remittance_run', o.run_id, o.currency, sum(o.amount_minor)::bigint,
+         count(*)::integer, max(v_today - o.latest_execution_date),
+         jsonb_build_object('number', min(o.number), 'earliest_latest_execution_date', min(o.latest_execution_date),
+                            'requested_execution_date', min(o.requested_execution_date),
+                            'ids', (array_agg(o.ledger_entry_id order by o.latest_execution_date))[1:50])
+  from ol o where not o.out_of_horizon
+  group by o.run_id, o.currency
+  union all
+  -- … or by the date it was ordered for (alert)
+  select 'remittance_payout_not_executed', 'alert', 'remittance_run', r.id, r.currency, r.net_minor, null,
+         v_today - r.requested_execution_date,
+         jsonb_build_object('number', r.number, 'requested_execution_date', r.requested_execution_date,
+                            'transfer_status', (select t.status from public.bank_transfer t where t.id = r.transfer_id))
+  from public.remittance_run r
+  where r.organization_id = p_organization_id and r.status in ('approved', 'sent')
+    and r.requested_execution_date < v_today
+    and not exists (select 1 from public.bank_transfer t where t.id = r.transfer_id and t.status = 'booked')
   union all
   -- a draft whose payout is blocked, with its reason and its deadline
   select 'payout_blocked', 'alert', 'remittance_run', r.id, r.currency, r.net_minor, null, null,
@@ -2361,38 +2691,47 @@ begin
   where r.organization_id = p_organization_id and r.status = 'draft' and r.net_minor > 0
     and cardinality(r.blockers) > 0
   union all
-  -- a draft waiting more than one business day; an approval more than 2 business days after K (invoice_late)
+  -- a draft waiting more than one business day; one whose preparation failed at once (nothing retries it before
+  -- « Actualiser »; review tests-ui#3)
   select 'draft_waiting', 'alert', 'remittance_run', r.id, r.currency, r.net_minor, null,
-         private.business_days_between((r.prepared_at at time zone 'Europe/Paris')::date, v_today),
+         private.business_days_between((coalesce(r.prepared_at, (r.last_failure ->> 'at')::timestamptz, r.known_at)
+                                        at time zone 'Europe/Paris')::date, v_today),
          jsonb_build_object('number', r.number)
+         || case when r.prepared_at is null
+                 then jsonb_build_object('prepare_failed', true, 'failure_code', r.last_failure ->> 'code')
+                 else '{}'::jsonb end
   from public.remittance_run r
-  where r.organization_id = p_organization_id and r.status = 'draft' and r.prepared_at is not null
-    and private.business_days_between((r.prepared_at at time zone 'Europe/Paris')::date, v_today) > 1
+  where r.organization_id = p_organization_id and r.status = 'draft'
+    and ((r.prepared_at is not null
+          and private.business_days_between((r.prepared_at at time zone 'Europe/Paris')::date, v_today) > 1)
+         or (r.prepared_at is null and r.job is null and r.last_failure ->> 'step' = 'prepare'))
   union all
+  -- an approval more than 2 business days after K (invoice_late)
   select 'invoice_late', 'alert', 'remittance_run', r.id, r.currency, r.invoice_ttc_minor, null, null,
          jsonb_build_object('number', r.number, 'known_at', r.known_at, 'approved_at', r.approved_at)
   from public.remittance_run r
   where r.organization_id = p_organization_id and r.invoice_late and r.approved_at > clock_timestamp() - interval '30 days'
   union all
   -- money matched to a client's file but not allocated (still in 4710) gets the same clock (OQ-26, compliance B7)
-  select 'unallocated_deadline', 'alert', 'servicer', null, u.currency, sum(u.unallocated)::bigint, count(*)::integer,
-         null, jsonb_build_object('earliest_latest_execution_date', min(u.latest_execution_date),
-                                  'held', count(*) filter (where u.held),
-                                  'ids', (array_agg(u.id order by u.latest_execution_date))[1:50])
-  from (select p.id, p.currency, p.review_reason = 'hold_blocks_allocation' as held,
-               p.amount_minor - coalesce((select sum(lp.amount_minor) from public.ledger_entry e
-                                          join public.ledger_posting lp on lp.entry_id = e.id
-                                          join public.ledger_account la on la.id = lp.ledger_account_id
-                                            and la.book = 'unallocated_payment'
-                                          where e.payment_id = p.id and e.entry_type <> 'cash_in'), 0) as unallocated,
-               k.latest_execution_date, k.alert_soon_date
-        from public.payment p
-        cross join lateral private.remittance_deadline(private.encaissement_date(p.booking_date, p.value_date),
-                                                       30) k
-        where p.organization_id = p_organization_id and p.account_id is not null
-          and p.status in ('matched', 'partially_allocated')) u
-  where u.unallocated > 0 and u.alert_soon_date <= v_today
+  select 'unallocated_deadline', 'alert', 'servicer', null, u.currency, sum(u.unallocated_minor)::bigint,
+         count(*)::integer, null,
+         jsonb_build_object('earliest_latest_execution_date', min(u.latest_execution_date),
+                            'held', count(*) filter (where u.held),
+                            'ids', (array_agg(u.payment_id order by u.latest_execution_date))[1:50])
+  from ua u where not u.out_of_horizon and u.alert_soon_date <= v_today
   group by u.currency
+  union all
+  -- the hourly schedule could not create a client's draft, or read its candidates, or its job died (review nc#0)
+  select 'remittance_schedule_failed', 'alert', 'servicer', null, null, null, count(*)::integer, null,
+         jsonb_build_object('last_failed_at', max(f.failed_at),
+                            'last_error', (array_agg(f.error order by f.failed_at desc))[1],
+                            'codes', to_jsonb(array_agg(distinct f.code)),
+                            'client_ids', to_jsonb(coalesce(array_agg(distinct f.client_organization_id)
+                                                              filter (where f.client_organization_id is not null),
+                                                            '{}')))
+  from private.remittance_schedule_failure f
+  where f.organization_id = p_organization_id and f.failed_at >= v_failures
+  having count(*) > 0
   union all
   -- reference data (M2c-3): the VAT pack's review, the calendar's horizon
   select a.code, 'alert', 'servicer', null, null, null, null, null, a.details
@@ -2896,7 +3235,7 @@ begin
         group by q.client_organization_id, q.currency) w
   join public.organization o on o.id = w.client_organization_id
   left join (select x.client_organization_id, x.currency, min(x.latest_execution_date) as latest
-             from private.pending_item_deadlines(v_org) x where x.draft_run_id is null
+             from private.pending_item_deadlines(v_org, true) x
              group by x.client_organization_id, x.currency) d
     on d.client_organization_id = w.client_organization_id and d.currency = w.currency
   where not exists (select 1 from public.remittance_run r where r.client_organization_id = w.client_organization_id
@@ -3152,9 +3491,9 @@ revoke execute on function
   private.remittance_back_to_draft(uuid, uuid, text, text),
   private.remittance_approval_refusal(public.remittance_run, private.remittance_draft, date),
   private.document_open(uuid), private.document_pending_vat(uuid), private.approve_remittance_run(uuid, uuid),
-  private.pending_item_deadlines(uuid), private.queue_remittance_schedule(),
+  private.pending_item_deadlines(uuid, boolean), private.queue_remittance_schedule(),
   private.remittance_schedule_candidates(uuid, date), private.remittance_stuck_jobs(uuid),
-  private.run_remittance_checks(uuid, uuid),
+  private.run_remittance_checks(uuid, uuid, date),
   private.remittance_run_card(public.remittance_run), private.client_reads_run(uuid, text, timestamptz),
   private.deadline_state(date)
   from public, anon, authenticated;
@@ -3167,7 +3506,7 @@ grant execute on function private.is_business_day(date), private.next_business_d
   private.create_remittance_run(uuid, uuid, char, text, text, uuid), private.remittance_prepare_begin(uuid, uuid),
   private.remittance_record_draft(uuid, uuid, jsonb), private.remittance_prepare_failed(uuid, uuid, text, text),
   private.remittance_back_to_draft(uuid, uuid, text, text), private.approve_remittance_run(uuid, uuid),
-  private.document_open(uuid), private.document_pending_vat(uuid), private.pending_item_deadlines(uuid),
+  private.document_open(uuid), private.document_pending_vat(uuid), private.pending_item_deadlines(uuid, boolean),
   private.remittance_schedule_candidates(uuid, date), private.remittance_stuck_jobs(uuid)
   to service_role;
 revoke execute on function public.request_remittance_run(text, uuid, text),

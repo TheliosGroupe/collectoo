@@ -39,7 +39,7 @@ import psycopg
 import pytest
 from allocation_helpers import File, Item, create_file, credit, statement
 from debit_helpers import checks
-from integration_helpers import DB, one, storage
+from integration_helpers import DB, TERMS, one, storage
 from psycopg.types.json import Jsonb
 from remittance_helpers import (
     add_admin,
@@ -58,6 +58,9 @@ from remittance_helpers import (
 )
 
 from collectoo_worker.jobs.remittances import run_schedule
+from collectoo_worker.remittance.calendar import conservative
+from collectoo_worker.remittance.schedule import guard_due, is_scheduled
+from collectoo_worker.remittance.terms import RemittanceTerms
 
 pytestmark = pytest.mark.integration
 PARIS = ZoneInfo("Europe/Paris")
@@ -327,6 +330,37 @@ def test_cancellation_before_the_file_credits_the_invoices_and_frees_the_items()
     assert documents(again)[0]["seq"] == docs[1]["seq"] + 1
 
 
+def guard_day(latest: date, used: date = date(2026, 11, 16)) -> date:
+    """The latest business day before `latest` that the test's terms do not schedule (whatever the
+    calendar moved: the 1st or the 16th to the next business day) and on which the deadline guard is
+    due — the same rules run_schedule applies, so the day never depends on today's date (review
+    tests-ui#1); not `used`, whose schedule key the test already took."""
+    cal = conservative()
+    terms = RemittanceTerms.model_validate(TERMS)
+    day = latest - timedelta(days=1)
+    while not (
+        cal.is_business_day(day)
+        and not is_scheduled(terms, day, cal)
+        and guard_due(day, [latest], cal)
+        and day != used
+    ):
+        assert day > latest - timedelta(days=30), latest
+        day -= timedelta(days=1)
+    return day
+
+
+def test_the_guard_day_is_never_a_scheduled_day() -> None:
+    """Every latest execution date of the next years has a guard day the schedule leaves free."""
+    cal = conservative()
+    terms = RemittanceTerms.model_validate(TERMS)
+    latest = date(2026, 11, 20)
+    while latest < date(2028, 12, 31):
+        if cal.is_business_day(latest):
+            day = guard_day(latest)
+            assert not is_scheduled(terms, day, cal) and guard_due(day, [latest], cal), latest
+        latest += timedelta(days=1)
+
+
 def test_the_schedule_and_the_deadline_guard() -> None:
     tenant = remittance_tenant()
     paid_file(tenant, 30_000)
@@ -345,7 +379,7 @@ def test_the_schedule_and_the_deadline_guard() -> None:
     # the same day again: its key was used, nothing new
     with psycopg.connect(DB) as conn, conn.transaction():
         assert run_schedule(conn, payload, now=datetime(2026, 11, 16, 9, 0, tzinfo=PARIS)) == []
-    # a day that is not scheduled, 3 business days before the latest execution date: the guard
+    # a business day the terms do not schedule, the guard due on it: the guard
     with psycopg.connect(DB) as conn:
         latest = one(
             conn,
@@ -353,13 +387,7 @@ def test_the_schedule_and_the_deadline_guard() -> None:
                where d.client_organization_id = %s""",
             (tenant["servicer"], tenant["client"]),
         )
-        day = one(
-            conn,
-            """select c.day from public.business_calendar c where c.day < %s and not c.closed
-               order by c.day desc offset 2 limit 1""",
-            (latest,),
-        )
-    assert day.day not in (1, 16, 17, 2)
+    day = guard_day(latest)
     with psycopg.connect(DB) as conn, conn.transaction():
         guard = run_schedule(conn, payload, now=datetime.combine(day, datetime.min.time(), PARIS)
                              + timedelta(hours=7))  # fmt: skip
