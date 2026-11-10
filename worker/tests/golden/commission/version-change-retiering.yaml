@@ -1,0 +1,128 @@
+# A change of a marginal grid re-tiers the collections made under it when an earlier-dated collection arrives or is
+# undone (tiers continue across versions on the net basis, new rates only for the future: founder #5). The invoice
+# never shows a negative band (CGI ann. II 242 nonies A 8°, « la dénomination précise » of each service): a
+# collection's line shows its own band, and the re-tiering of the later collections is a separate line,
+# « Régularisation de paliers (changement de conditions) », with its net HT and no bands (second review). What lowers
+# the commission is credited, never netted across documents (founder #6, CGI 289 I 5): an undone collection's own fee on
+# its original's invoice first, and so is what its undoing takes back from the later collections.
+# MAND-R: 10 % until 15/11, then 5 % to 5 000,00 € and 20 % beyond; a collection dated 10/11 booked after one dated
+# 20/11 puts the latter in the 20 % band. MAND-S: 10 %, then 20 % to 5 000,00 € and 5 % beyond; undoing the pre-change
+# collection moves the later one down into the 20 % band, so the reversal raises the commission.
+# TO VALIDATE: the designation and the split of an undone collection into a credit note and a regularisation invoice.
+case: version-change-retiering
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  dix:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.10"}}
+  montant:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - id: tout
+        tier_key: tout
+        label_fr: "Toutes créances"
+        match: {}
+        rate: {kind: marginal, tiers: [{up_to_minor: "500000", rate: "0.05"}, {up_to_minor: null, rate: "0.20"}]}
+  descendant:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - id: tout
+        tier_key: tout
+        label_fr: "Toutes créances"
+        match: {}
+        rate: {kind: marginal, tiers: [{up_to_minor: "500000", rate: "0.20"}, {up_to_minor: null, rate: "0.05"}]}
+mandates:
+  MAND-R:
+    - {id: r1, from: "2026-01-01", to: "2026-11-16", schedule: dix}
+    - {id: r2, from: "2026-11-16", to: null, schedule: montant}
+  MAND-S:
+    - {id: s1, from: "2026-01-01", to: "2026-11-16", schedule: dix}
+    - {id: s2, from: "2026-11-16", to: null, schedule: descendant}
+files:
+  F-R: {mandate: MAND-R, claim_type: b2b_invoice, portfolio: P1}
+  F-S: {mandate: MAND-S, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — F-R 5 000,00 € on 20/11; F-S 5 000,00 € on 10/11
+    lines:
+      - {entry: B-R, kind: allocation, file: F-R, e: "2026-11-20", eff: "2026-11-20", amount: "500000", basis: {principal: "500000"}}
+      - {entry: A-S, kind: allocation, file: F-S, e: "2026-11-10", eff: "2026-11-10", amount: "500000", basis: {principal: "500000"}}
+    expect:
+      lines:
+        B-R: {commission: "25000", parts: {tout: "25000"}, terms: r2}    # r2's first band: 5 %
+        A-S: {commission: "50000", parts: {tout: "50000"}, terms: s1}    # 10 %
+      documents:
+        MAND-R:
+          invoice:
+            number: FC-2026-000001
+            ht: "25000"
+            vat: "5000"
+            ttc: "30000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "25000", tiers: [["0.05", "500000"]]}
+        MAND-S:
+          invoice: {number: FC-2026-000002, ht: "50000", vat: "10000", ttc: "60000"}
+  - name: run 2 — F-R 5 000,00 € dated 10/11 booked on 25/11; F-S 5 000,00 € on 20/11
+    lines:
+      - {entry: A-R, kind: allocation, file: F-R, e: "2026-11-10", eff: "2026-11-25", amount: "500000", basis: {principal: "500000"}}
+      - {entry: B-S, kind: allocation, file: F-S, e: "2026-11-20", eff: "2026-11-20", amount: "500000", basis: {principal: "500000"}}
+    expect:
+      lines:
+        # A-R: its own 10 % (500,00), and B-R now sits on 5 000,00 → 10 000,00: 20 % instead of 5 % (+750,00)
+        A-R: {commission: "125000", parts: {tout: "125000"}, terms: r1}
+        B-S: {commission: "25000", parts: {tout: "25000"}, terms: s2}    # s2 continues from 5 000,00: 5 %
+      documents:
+        MAND-R:
+          invoice:
+            number: FC-2026-000003
+            ht: "125000"
+            vat: "25000"
+            ttc: "150000"
+            lines:     # not « 10 % sur 5 000,00 €, 20 % sur 5 000,00 €, 5 % sur −5 000,00 € »
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "50000", tiers: [["0.10", "500000"]]}
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "75000", tiers: [], kind: regularisation}
+        MAND-S:
+          invoice:
+            number: FC-2026-000004
+            ht: "25000"
+            vat: "5000"
+            ttc: "30000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "25000", tiers: [["0.05", "500000"]]}
+  - name: run 3 — A-R and A-S undone
+    lines:
+      - {entry: R-A-R, kind: allocation_reversal, original: A-R, file: F-R, e: "2026-11-10", eff: "2026-12-01", amount: "-500000", basis: {principal: "-500000"}}
+      - {entry: R-A-S, kind: allocation_reversal, original: A-S, file: F-S, e: "2026-11-10", eff: "2026-12-01", amount: "-500000", basis: {principal: "-500000"}}
+    expect:
+      lines:
+        R-A-R: {commission: "-125000", parts: {tout: "-125000"}, terms: r1}   # B-R alone: 250,00 again
+        # F-S: B-S alone is now s2's first 5 000,00 €, at 20 % (1 000,00): +750,00 for it, −500,00 for A-S
+        R-A-S: {commission: "25000", parts: {tout: "25000"}, terms: s1}
+      documents:
+        MAND-R:
+          credit_note:      # A-R's own fee and the re-tiering it caused, on A-R's invoice
+            number: FC-2026-000005
+            ht: "-125000"
+            vat: "-25000"
+            ttc: "-150000"
+            corrected:
+              FC-2026-000003: {ht: "-125000", vat: "-25000"}
+        MAND-S:
+          invoice:          # B-S re-tiered upward: a regularisation, not a negative band
+            number: FC-2026-000006
+            ht: "75000"
+            vat: "15000"
+            ttc: "90000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "75000", tiers: [], kind: regularisation}
+          credit_note:      # A-S's own 500,00 on its invoice, not netted with the regularisation
+            number: FC-2026-000007
+            ht: "-50000"
+            vat: "-10000"
+            ttc: "-60000"
+            corrected:
+              FC-2026-000002: {ht: "-50000", vat: "-10000"}

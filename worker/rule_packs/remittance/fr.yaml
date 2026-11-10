@@ -1,0 +1,84 @@
+# Remittance deadline and business calendar (design docs/design/m2c-remittances.md §8.5, §9.2, §9.3; founder
+# decisions #1 and #2 of 2026-11-09; ADR-0014 M2c-3).
+#
+# Data, not code: the Python engine (collectoo_worker.remittance.calendar / .deadline) reads this file; the SQL twin
+# (private.remittance_deadline, public.business_calendar) holds the same rules as data seeded by migration
+# 20261111150000_engines.sql. CI checks both agree: the calendar table equals the calendar computed from this file over
+# the seeded horizon, and the deadline of 10,000 generated encaissements is the same in SQL and in Python
+# (worker/tests/test_engines_integration.py).
+#
+# Texts read on LibreJustice on 2026-11-10, in the version in force that day.
+pack: remittance/fr
+schema: remittance-pack-1
+label_fr: "Délai de reversement au mandant et calendrier des jours ouvrés"
+read_on: "2026-11-10"
+
+deadline:
+  # Founder #2 (2026-11-09): « By the shorter of the mandate's delay and one calendar month from the day it hit our
+  # account (booking or value date, whichever is earlier), with no weekend or holiday extension. » The mandate's delay
+  # is mandate_terms.remittance_max_days (1–30). OQ-36 asks counsel whether this reading is right.
+  months: 1
+  encaissement: earlier_of_booking_and_value_date
+  weekend_holiday_extension: false
+  # The money must be credited to the client by the deadline: the order is executed at the latest the business day
+  # before the last business day on or before the deadline (the payee's bank is credited by the end of the next
+  # business day, CMF L133-13 I).
+  latest_execution: business_day_before_last_business_day
+  # Product defaults (not law): the guard prepares a run when the earliest latest execution date of a client's
+  # pending items is 5 business days away or less; alerts at 5 and 1 business days.
+  alert_soon_business_days: 5
+  alert_critical_business_days: 1
+  legal_refs:
+    - title: "CPCE art. R124-6 al. 2"
+      url: "https://librejustice.fr/norm/fr/code-des-procedures-civiles-d-execution/r124-6"
+      version: "version du 2012-06-01"
+      quote: "Les fonds reçus par la personne chargée du recouvrement donnent lieu, sauf convention contraire, à un reversement dans un délai d'un mois à compter de leur encaissement effectif."
+    - title: "CPC art. 641 al. 2 (par analogie, OQ-36)"
+      url: "https://librejustice.fr/norm/fr/code-de-procedure-civile/641"
+      version: "version du 1976-01-01"
+      quote: "Lorsqu'un délai est exprimé en mois ou en années, ce délai expire le jour du dernier mois ou de la dernière année qui porte le même quantième que le jour de l'acte, de l'événement, de la décision ou de la notification qui fait courir le délai. A défaut d'un quantième identique, le délai expire le dernier jour du mois."
+    - title: "CMF art. L133-13 I"
+      url: "https://librejustice.fr/norm/fr/code-monetaire-et-financier/l133-13"
+      version: "version du 2018-01-13"
+      quote: "Le montant de l'opération de paiement est crédité sur le compte du prestataire de services de paiement du bénéficiaire au plus tard à la fin du premier jour ouvrable suivant le moment de réception de l'ordre de paiement tel que défini à l'article L. 133-9."
+    - title: "CMF art. L133-4 d"
+      url: "https://librejustice.fr/norm/fr/code-monetaire-et-financier/l133-4"
+      version: "version du 2018-01-13"
+      quote: "Un jour ouvrable est un jour au cours duquel le prestataire de services de paiement du payeur ou celui du bénéficiaire exerce une activité permettant d'exécuter des opérations de paiement ;"
+
+calendar:
+  # « FR-conservative »: a day is a business day unless it is a Saturday, a Sunday, a French public holiday or a TARGET
+  # closing day. The union is conservative: more closed days only bring the latest execution date earlier. A paying
+  # bank's own closures come on top later (M2c-6).
+  scope: FR-conservative
+  zone: Europe/Paris
+  weekend_isodays: [6, 7]
+  seeded_from: "2026-01-01"
+  seeded_to: "2031-12-31"
+  min_horizon_months: 12      # private.reference_data_alerts raises `calendar_horizon` below this; CI fails too
+  closing_days:
+    - {id: new_year, month: 1, day: 1, label_fr: "Jour de l'an", sources: [public_holiday, target]}
+    - {id: good_friday, easter_offset: -2, label_fr: "Vendredi saint", sources: [target]}
+    - {id: easter_monday, easter_offset: 1, label_fr: "Lundi de Pâques", sources: [public_holiday, target]}
+    - {id: labour_day, month: 5, day: 1, label_fr: "1er mai", sources: [public_holiday, target]}
+    - {id: victory_day, month: 5, day: 8, label_fr: "8 mai", sources: [public_holiday]}
+    - {id: ascension, easter_offset: 39, label_fr: "Ascension", sources: [public_holiday]}
+    - {id: whit_monday, easter_offset: 50, label_fr: "Lundi de Pentecôte", sources: [public_holiday]}
+    - {id: national_day, month: 7, day: 14, label_fr: "14 juillet", sources: [public_holiday]}
+    - {id: assumption, month: 8, day: 15, label_fr: "Assomption", sources: [public_holiday]}
+    - {id: all_saints, month: 11, day: 1, label_fr: "Toussaint", sources: [public_holiday]}
+    - {id: armistice, month: 11, day: 11, label_fr: "11 novembre", sources: [public_holiday]}
+    - {id: christmas, month: 12, day: 25, label_fr: "Noël", sources: [public_holiday, target]}
+    - {id: boxing_day, month: 12, day: 26, label_fr: "26 décembre", sources: [target]}
+  legal_refs:
+    - title: "C. trav. art. L3133-1"
+      url: "https://librejustice.fr/norm/fr/code-du-travail/l3133-1"
+      version: "version du 2016-08-10"
+      quote: "Les fêtes légales ci-après désignées sont des jours fériés : 1° Le 1er janvier ; 2° Le lundi de Pâques ; 3° Le 1er mai ; 4° Le 8 mai ; 5° L'Ascension ; 6° Le lundi de Pentecôte ; 7° Le 14 juillet ; 8° L'Assomption ; 9° La Toussaint ; 10° Le 11 novembre ; 11° Le jour de Noël."
+    - title: "Jours de fermeture de TARGET (BCE)"
+      note: "Convention du produit, pas une règle de droit : le calendrier publié par la BCE (1er janvier, Vendredi saint, lundi de Pâques, 1er mai, 25 et 26 décembre) n'a pas été lu sur LibreJustice et n'est pas cité. À confirmer avec le calendrier de la banque teneuse du compte dédié (M2c-6)."
+
+schedule:
+  # Founder #1: twice a month (the 1st and the 16th, the next business day when that day is not one), weekly if the
+  # mandate asks, plus the deadline guard (alert_soon_business_days above). Used by the runs (M2c-4).
+  twice_monthly_days: [1, 16]

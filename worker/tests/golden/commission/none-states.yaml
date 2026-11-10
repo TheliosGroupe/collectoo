@@ -1,0 +1,34 @@
+# Items that earn no commission (design §8.3, §9.1): an item before the mandate's first terms version, a forward on
+# no file, a returned payout and an unplanned payout. They are remitted gross; M2c-4 raises an alert for the first
+# two. TO VALIDATE: synthetic terms.
+case: none-states
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  dix:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: true, before_servicing_start: true, client_ratification: true}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.10"}}
+mandates:
+  MAND-N: [{id: n1, from: "2026-11-01", to: null, schedule: dix}]
+files:
+  F-N: {mandate: MAND-N, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: one run
+    lines:
+      - {entry: X1, kind: allocation, file: F-N, e: "2026-10-20", eff: "2026-11-02", amount: "20000", basis: {principal: "20000"}}
+      - {entry: X2, kind: forward, file: null, e: "2026-11-03", eff: "2026-11-03", amount: "15000", forward_reason: client_ratification}
+      - {entry: X3, kind: payout_returned, file: F-N, e: "2026-11-04", eff: "2026-11-04", amount: "50000"}
+      - {entry: X4, kind: unplanned_payout, file: F-N, e: "2026-11-04", eff: "2026-11-04", amount: "-20000"}
+      - {entry: X5, kind: allocation, file: F-N, e: "2026-11-05", eff: "2026-11-05", amount: "10000", basis: {principal: "10000"}}
+    expect:
+      lines:
+        X1: {commission: "0", state: none, reason: no_terms}
+        X2: {commission: "0", state: none, reason: no_file}
+        X3: {commission: "0", state: none, reason: not_commissionable}
+        X4: {commission: "0", state: none, reason: not_commissionable}
+        X5: {commission: "1000", parts: {tout: "1000"}}
+      documents:
+        MAND-N:
+          invoice: {number: FC-2026-000001, ht: "1000", vat: "200", ttc: "1200"}

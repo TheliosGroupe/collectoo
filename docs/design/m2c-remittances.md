@@ -670,6 +670,7 @@ f(c)  = 0 if c = 0, else min( max(m, g(c)), floor(c / (1 + τ)) )      m = min p
 line commission = R(f_v(c_after)) − R(f_v(c_before))                  R = round half-up to the cent; v = the line's version
 ```
 
+- **Amended by the M2c-3 review (ADR-0014):** across versions the commission of a (file, tier key) is a function of its live lines, taken in encaissement-date order (K = min(Σ_v [f_v(C_≤v) − f_v(C_<v)], ⌊C / (1 + τ)⌋)), not of the order runs arrive in; a rounding reserve keeps the TTC billed within the basis across runs; `keep` reversals leave the tier position (CALCULATION_RULES §7). *Amended again by the second review:* the minimum and the rounding are taken once on the file (K = min(R(K° + top), ⌊C / (1 + τ)⌋), K° the versions' exact rates, top the largest shortfall of a version's minimum on the collections up to it), and the reserve counts the invoices the run's documents leave open. *Amended by the third review:* a run takes its lines in event order (effective date, posted_at, entry id), the encaissement date only choosing the version; under `credit` a collection undone in its own run is never priced (both lines 0, no parts); a run with no reversal never takes back what earlier invoices charged at their own VAT rate.
 - **Telescoping:** within one version, a file's total commission is R(f(Σ basis)) whatever the split into lines and runs. A reversal gives back exactly what f says, including across marginal tiers, and a full reversal returns the file to 0.
 - **The cap** keeps the commission TTC within what the file brought in (ops critique #7).
 - **The basis** of an allocation comes from the entry's own 1100 credits per component family. A forward's basis is 0 unless the schedule lists its reason. A reversal's basis is minus its original's; an advance, a returned payout and an unplanned payout have basis 0.
@@ -677,8 +678,8 @@ line commission = R(f_v(c_after)) − R(f_v(c_before))                  R = roun
 
 ### 8.4 From lines to documents
 
-1. **Per (mandate, file, tier key)**, the run's net Δ = Σ line commissions. A positive Δ goes to the mandate's invoice; a negative Δ goes to its credit note.
-2. **Invoice lines** are grouped per (claim type, rule, families). Each line has quantity 1, a unit price HT equal to Σ Δ, and the VAT rate. The designation states the base collected in each tier and the tier rates, for example « Commission de recouvrement amiable — Factures entre professionnels — 15 % — sur 2 000,00 € encaissés du 21/10 au 02/11/2026 (mandat MAND-MARTIN-2026, relevé RV-2026-000001) ». This meets 242 nonies A 8° (quantity, precise designation, unit price HT, rate).
+1. **Per (mandate, file, tier key)**, the run's net Δ = Σ line commissions. A positive Δ goes to the mandate's invoice; a negative Δ goes to its credit note. *Amended by the M2c-3 review (founder #6, ADR-0014):* the raising parts go to the invoice and the lowering parts to the credit note, never netted across documents; only what was never invoiced nets inside the run (a reversal of a same-run collection, a credit beyond what earlier invoices charge the key); a credit goes first to the invoice that charged the collection it undoes.
+2. **Invoice lines** are grouped per (claim type, rule, families). Each line has quantity 1, a unit price HT equal to Σ Δ, and the VAT rate. The designation states the base collected in each tier and the tier rates, for example « Commission de recouvrement amiable — Factures entre professionnels — 15 % — sur 2 000,00 € encaissés du 21/10 au 02/11/2026 (mandat MAND-MARTIN-2026, relevé RV-2026-000001) ». This meets 242 nonies A 8° (quantity, precise designation, unit price HT, rate). *Amended by the M2c-3 second review (ADR-0014):* a change of terms that re-tiers later collections never shows as a negative band: the collection's own band on its line, the re-tiering on a separate « Régularisation de paliers (changement de conditions) » line (net HT, no bands), credited when it lowers the commission.
 3. **Invoice VAT** = R(HT × rate), per invoice and rate (11°), at the rate valid on the issue date.
 4. **Credit-note allocation.** A negative Δ is assigned LIFO to the earlier invoices that charged that (file, tier key), each up to what that invoice charged net of earlier credits (`commission_credit_alloc`). Every line names its original invoice (289 I 5).
 5. **Credit-note VAT** per corrected invoice i, by cumulative difference: Vcred_i(after) = R(credited_HT_i(after) × rate_i), and the credit = after − before. It never exceeds the invoice's VAT, and a full credit equals it exactly (ledger critique #13, ops critique #9).
@@ -1156,7 +1157,7 @@ Amounts come from the database as text, never JS numbers. No copy says « payé 
 |---|---|---|
 | Pending trigger + running balance | 50k allocations in one job | + < 0.5 s on the job |
 | Reserve items (under the allocation lock) | 50k items | < 1 s |
-| Load facts + commission (Python) + COPY draft | 50k lines | ≈ 1 s + 0.5 s + 0.5 s |
+| Load facts + commission (Python) + COPY draft | 50k lines | ≈ 1 s + 0.5 s + 0.5 s (commission measured 1.5–2.6 s in M2c-3, `docs/benchmarks/remittances.md`) |
 | Approval of one run | 50k lines frozen, 2–4 entries | 2–4 s, counter held only for the numbering (ms) |
 | Bulk approval | 200 runs | < 60 s in the job (one transaction each); the command < 1 s |
 | Statement CSV / PDF | 50k rows / ≤ 2,000 file rows | < 2 s / < 15 s |
@@ -1378,3 +1379,18 @@ Why: keeps the cash checks and our commission transfers exact.
 15. Payments to clients go in a bank file (pain.001) that ops download and upload to the bank; pending refunds go in the same file; we keep the bank's name check on.
 Default: yes; please send your bank's file specifications.
 Why: no bank connection needed, one upload, and the name check catches wrong IBANs.
+
+## 25. Commission edge cases to validate (M2c-3 reviews, 2026-11-10)
+
+Rare cases the three review rounds of the engine had to decide. Each default is what the engine does now (golden cases marked TO VALIDATE; CALCULATION_RULES §7). Answer « 1 ok, 2 b … ».
+
+1. Terms change with a minimum per file: each version's minimum is a floor on what the collections up to that version earn; later collections add their own rate. A 300 € minimum dropped → 300 + 100 = 400 €; a 300 € minimum added → 300 € for the whole file. Default: yes.
+2. A change of tiered grid that re-prices earlier collections: the invoice shows the collection's own rate line plus a separate « Régularisation de paliers (changement de conditions) » line (amount only). Default: yes.
+3. Undoing a collection across a grid change: its own fee is credited on its invoice and the re-pricing goes on a separate invoice or credit note, never netted (two documents for a small net amount). Default: yes.
+4. A reversal is credited first on the invoice that charged its collection, then on the newest other invoices. Default: yes.
+5. VAT rounding reserve: on small files near the cap, up to about 1 cent per open invoice is held back and released at the file's next collection; across a grid change an undo may give back 1 cent more or less than it was charged. Default: accept.
+6. « Keep the fee » clause: what a bounce keeps depends on what was posted before it, never on how payment runs are cut; across a grid change an undo can still raise the commission (regularisation invoice). Default: yes.
+7. Entries count in the order they were posted (booking time); a payment matched late counts after a bounce posted earlier. Default: yes.
+8. A collection undone within the same payment run is never invoiced (0 on both lines). Default: yes.
+
+Known gap, fixed in M2c-4: after a fall of the VAT rate, a small file at the cap can be billed slightly more (TTC) than it brought in; the fix needs each invoice's own rate in the engine (M2c-4 stores it).
