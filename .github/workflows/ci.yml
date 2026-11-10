@@ -198,11 +198,11 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
-      - name: Start the worker on the boarding and payments queues (mock LLM, mock addresses)
+      - name: Start the worker on the boarding, payments and remittances queues (mock LLM, mock addresses)
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen
-          LLM_PROVIDER=mock ADDRESS_NORMALISER=mock nohup uv run collectoo-worker consume boarding payments > ../worker.log 2>&1 &
+          LLM_PROVIDER=mock ADDRESS_NORMALISER=mock nohup uv run collectoo-worker consume boarding payments remittances > ../worker.log 2>&1 &
       - run: npm run build
         working-directory: apps/web
       - run: npm run e2e
