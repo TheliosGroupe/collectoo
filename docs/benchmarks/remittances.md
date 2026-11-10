@@ -274,3 +274,27 @@ lines: load 3.62, price 5.33, write 2.34 s; then the 5,000-line run), approval c
   stayed at ≈ 0.13 ms a line (6.51 s for 50,000).
 - The 5 s nightly-check target is exceeded once, with the 50,000-line draft waiting in this crowded database
   (5.1 s; 6.5 s in the M2c-4 round-1 CI-order run); 4.1 s after the approval.
+
+## Manual credit note (M2c-5b, migration `20261114090000`)
+
+The remittance scale run (`worker/tests/test_remittance_scale_integration.py`, CI `scale` job's command, right after
+`supabase db reset`; 2026-11-10, same VM: 4 vCPU, 16 GB RAM, local stack), with the approval job writing each key
+state's waiver and what its credits absorbed, the cancellation clearing and restoring waivers, and the nightly checks'
+new I22 over the 50,000 keys the approval wrote:
+
+| Step (50,000 lines) | M2c-5 (review) | M2c-5b |
+|---|---|---|
+| « Préparer maintenant » | 1.25 s | 1.27 s |
+| Prepare job (load, price, write) | 13.8 s (3.62, 5.33, 2.34) | 10.5 s (3.13, 4.77, 2.39) |
+| Approval job then documents job | 16.2 s | 16.3 s (statement build 6.24 s, CSV 1.37 s, PDF 1.76 s) |
+| Nightly checks after the approval (I22 over 50,000 keys) | 4.1 s | 3.7 s |
+| Cancellation (command) | 3.67 s | 4.15 s |
+
+- The engine reads one more column per earlier charge (`commission_waiver` by its (invoice, file, tier key) index:
+  empty here) and simulates a key's documents once more only when the key holds a waiver.
+- I22 reads, per key changed since the previous check run, its charges by `(account_id, tier_key)`, each charge's
+  credits and waivers by their indexes (`private.commission_key_open`); keys are listed from
+  `remittance_key_state (organization_id, created_at)`. The check stays under the 5 s target.
+- `issue_credit_note` itself is keyed by the invoice: its charges by the primary key, each key's credits and waivers
+  and latest state by their indexes; a credit note on an invoice charging 50,000 files is one plan and two inserts of
+  50,000 rows (not measured at that size: an invoice that size is a scale artefact, not a correction ops make by hand).
