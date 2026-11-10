@@ -173,7 +173,8 @@ def ready_mandate(
         '        \'{"line1": "1 rue de la Paix", "postcode": "75002", "city": "Paris",'
         ' "country": "FR"}\','
         "        case when o.kind = 'servicer' then 'FR'"
-        "          || lpad(((12 + 3 * (o.siren::bigint %% 97)) %% 97)::text, 2, '0') || o.siren end,"
+        "          || lpad(((12 + 3 * (o.siren::bigint %% 97)) %% 97)::text, 2, '0')"
+        "          || o.siren end,"
         "        true"
         " from public.organization o where o.id in (%s, %s)"
         " on conflict (organization_id) do nothing",
