@@ -143,6 +143,14 @@ describe("runs (M2c-4 « Reversements »)", () => {
     expect(errorText("run_busy")).not.toContain("rapprochement");
   });
 
+  it("says a cancellation waits for the statement being drawn, and to retry (review M2c-5 figures#6)", () => {
+    // remittance_statement_build holds the run FOR SHARE until the documents job commits: cancel_remittance_run's
+    // lock_timeout (5 s) can refuse it with 55P03 « canceling statement due to lock timeout »
+    expect(runErrorCode("canceling statement due to lock timeout")).toBe("run_busy");
+    expect(errorText("run_busy")).toContain("relevé");
+    expect(errorText("run_busy")).toMatch(/réessayez/i);
+  });
+
   it("names the commands' allocation-lock refusal and the midnight retry (review M2c-4 perf#4, nc#1)", () => {
     expect(runErrorCode("remittance run refused: allocation_busy")).toBe("run_busy");
     expect(runErrorCode("commission documents: the day turned during the transaction, retry")).toBe("run_retry");
