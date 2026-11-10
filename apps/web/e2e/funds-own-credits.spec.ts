@@ -1,5 +1,12 @@
 import { expect, test } from "@playwright/test";
-import { adminClient, createMandate, createMember, createTenant, type Tenant } from "./support/admin";
+import {
+  adminClient,
+  createConfirmedPayoutAccount,
+  createMandate,
+  createMember,
+  createTenant,
+  type Tenant,
+} from "./support/admin";
 import { camt053Lines, ibanFr, type Credit, type Debit } from "./support/camt";
 import { loginAsStaff } from "./support/session";
 import { reviewShot } from "./screenshot";
@@ -10,7 +17,9 @@ import { reviewShot } from "./screenshot";
  * ordered). « À classer » offers no « Retour du paiement » nor refund link on our transfer or our credit (the database
  * refuses them), even though a payment of a larger amount is on the account. The credit is a debtor's payment the
  * servicer received on its own account: ops release it as « Paiement d'un débiteur relayé par le cabinet », with a
- * motif, and it waits in « Paiements à traiter » to be assigned. Synthetic data.
+ * motif, and it waits in « Paiements à traiter » to be assigned. Review M2c-2: a credit from a client's confirmed payout
+ * IBAN (read as the client's at import) may be a debtor's payment the client relays: « Paiement d'un débiteur relayé par
+ * le client », the same sheet and the same command. Synthetic data.
  */
 const BANK_IBAN = ibanFr(575757);
 const OWN_IBAN = ibanFr(585858);
@@ -99,4 +108,61 @@ test("our own transfers offer no payment links; a debtor's payment relayed by th
   const relayed = page.getByTestId("queue-card").filter({ hasText: "Versement relayé par le cabinet" });
   await expect(relayed).toHaveCount(1);
   await expect(relayed.getByTestId("queue-amount")).toContainText("300,00");
+});
+
+test("a debtor's payment relayed by the client, from its confirmed payout IBAN, becomes a payment", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  // a tenant of its own: its dedicated account receives one statement here
+  const own = await createTenant();
+  await createMandate(own);
+  const seed = Number.parseInt(own.clientId.slice(0, 6), 16);
+  const bankIban = ibanFr(seed);
+  const clientIban = ibanFr(seed + 7);
+  const { error } = await adminClient().from("bank_account").insert({
+    organization_id: own.servicerId,
+    iban: bankIban,
+    currency: "EUR",
+    label: "Fonds de tiers – Banque R",
+    purpose: "client_funds",
+    feed: "camt053",
+    opened_on: "2026-01-01",
+  });
+  if (error) throw error;
+  await createConfirmedPayoutAccount(own, clientIban, own.clientName.toUpperCase());
+  await loginAsStaff(page, await createMember(own.servicerId, "ops_manager"));
+
+  const credits: Credit[] = [
+    { ref: "CR-1", amountMinor: BigInt(12000), name: own.clientName.toUpperCase(), iban: clientIban, ustrd: ["REGLEMENT CLIENT DUPONT"] },
+  ];
+  await page.goto("/backoffice/encaissements");
+  const form = page.getByTestId("statement-upload");
+  await form.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({
+    name: "releve-client.xml",
+    mimeType: "application/xml",
+    buffer: Buffer.from(camt053Lines(bankIban, "2026-11-06", credits, [], BigInt(0)), "utf-8"),
+  });
+  await form.getByRole("button", { name: "Importer le relevé" }).click();
+  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+
+  // never taken for a debtor's payment automatically: the line waits in « À classer »
+  await page.goto("/backoffice/encaissements/debits");
+  const row = page.getByTestId("debit-row").filter({ hasText: "Virement reçu d'un client" });
+  await expect(row).toHaveCount(1, { timeout: 60_000 });
+  await expect(row).toContainText("120,00");
+  await expect(row.getByTestId("link-return")).toHaveCount(0);
+  await expect(row.getByTestId("release-own-credit")).toHaveCount(0);
+  await row.getByTestId("release-client-credit").getByRole("button", { name: "Paiement d'un débiteur relayé par le client" }).click();
+  const sheet = page.getByRole("dialog", { name: "Paiement d'un débiteur relayé par le client" });
+  await expect(sheet.getByTestId("sheet-effect")).toContainText("venant du compte de reversement d'un client");
+  await expect(sheet.getByTestId("sheet-effect")).toContainText("au 06/11/2026");
+  await sheet.getByLabel("Motif (interne)").fill("Le client relaie le virement de M. Dupont reçu sur son compte le 05/11");
+  await reviewShot(page, testInfo, "m2c-client-credit-relay");
+  await sheet.getByRole("button", { name: "Créer le paiement" }).click();
+  await expect(page.getByTestId("debit-row")).toHaveCount(0);
+
+  // « Paiements à traiter »: the relayed payment waits to be assigned to the debtor's file
+  await page.goto("/backoffice/encaissements/a-traiter");
+  const relayed = page.getByTestId("queue-card").filter({ hasText: "Versement relayé par le client" });
+  await expect(relayed).toHaveCount(1);
+  await expect(relayed.getByTestId("queue-amount")).toContainText("120,00");
 });

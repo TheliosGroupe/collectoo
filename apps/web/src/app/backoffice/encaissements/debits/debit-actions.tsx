@@ -3,6 +3,7 @@
 import { ActionForm } from "@/components/action-form";
 import { buttonClass, dangerButtonClass, inputClass } from "@/components/ui";
 import { ConfirmSheet, secondaryClass } from "../a-traiter/queue-actions";
+import { RELAY_LABEL } from "@/lib/payments/debits";
 import { linkDebit, releaseOwnCredit, resolveDuplicate } from "./actions";
 
 function Reason({ label = "Motif (interne)" }: { label?: string }) {
@@ -130,13 +131,29 @@ export function BookLine({
 
 /**
  * M2c-1 review: « Paiement d'un débiteur relayé par le cabinet » — a credit from the own account that relays a debtor's
- * payment the servicer received on its own account. It becomes a payment on no file (« Paiements à traiter »); the
- * motif (who paid the servicer, when) is required and kept.
+ * payment the servicer received on its own account. Review M2c-2: « … relayé par le client » — the same for a credit
+ * from a client's payout IBAN (`by: "client"`). It becomes a payment on no file (« Paiements à traiter »); the motif
+ * (who paid, when) is required and kept.
  */
-export function ReleaseOwnCredit({ lineId, effect, idempotencyKey }: { lineId: string; effect: string; idempotencyKey: string }) {
-  const label = "Paiement d'un débiteur relayé par le cabinet";
+export function ReleaseOwnCredit({
+  lineId,
+  effect,
+  idempotencyKey,
+  by = "servicer",
+}: {
+  lineId: string;
+  effect: string;
+  idempotencyKey: string;
+  by?: keyof typeof RELAY_LABEL;
+}) {
+  const label = RELAY_LABEL[by];
   return (
-    <ConfirmSheet label={label} title={label} buttonClassName={secondaryClass} testId="release-own-credit">
+    <ConfirmSheet
+      label={label}
+      title={label}
+      buttonClassName={secondaryClass}
+      testId={by === "client" ? "release-client-credit" : "release-own-credit"}
+    >
       {(close) => (
         <>
           <p className="text-sm" data-testid="sheet-effect">

@@ -8,7 +8,16 @@ from typing import Any
 
 import psycopg
 import pytest
-from integration_helpers import DB, as_user, board, drain, make_tenant, one, storage
+from integration_helpers import (
+    DB,
+    as_user,
+    board,
+    drain,
+    make_tenant,
+    one,
+    ready_mandate,
+    storage,
+)
 
 from collectoo_worker.synth.civil import DIALECT_SPECS, generate_civil
 
@@ -64,22 +73,7 @@ def _count(sql: str, params: tuple[Any, ...]) -> int:
 def _add_mandate(tenant: dict[str, Any]) -> None:
     """An active client mandate on the tenant's portfolio (confirmation needs one, R124-3)."""
     with psycopg.connect(DB) as conn, conn.transaction():
-        mandate = one(
-            conn,
-            "insert into public.mandate"
-            " (organization_id, client_organization_id, reference, mandate_type, signed_on)"
-            " values (%s, %s, %s, 'mandate_amicable', current_date - 30) returning id",
-            (tenant["servicer"], tenant["client"], f"M-{uuid.uuid4().hex[:6]}"),
-        )
-        conn.execute(
-            "insert into public.mandate_terms (mandate_id, valid_from, commission_rate)"
-            " values (%s, current_date - 30, 0.15)",
-            (mandate,),
-        )
-        conn.execute(
-            "update public.portfolio set mandate_id = %s where id = %s",
-            (mandate, tenant["portfolio"]),
-        )
+        ready_mandate(conn, tenant, f"M-{uuid.uuid4().hex[:6]}", "2026-01-01")
 
 
 def test_commit_then_rollback_leaves_only_the_audit_trail(

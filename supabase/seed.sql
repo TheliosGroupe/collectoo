@@ -3,12 +3,21 @@
 
 select set_config('app.actor', 'seed', false);
 
-insert into public.organization (id, kind, legal_name) values
-  ('773a3a51-8279-5c90-a65d-f5639c9d31c7', 'servicer', 'Collectoo');
+insert into public.organization (id, kind, legal_name, siren) values
+  ('773a3a51-8279-5c90-a65d-f5639c9d31c7', 'servicer', 'Collectoo', '424392447');
 
 insert into public.organization (id, kind, servicer_organization_id, legal_name, siren) values
   ('0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352', 'creditor_client', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'Fournitures Martin SARL', '280340639'),
   ('b3e2a53d-9f46-5983-957e-468ff633770d', 'creditor_client', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'Foncière des Lilas', '863972501');
+
+insert into public.billing_identity (organization_id, legal_form, share_capital_minor, rcs_city, registered_office, vat_number, is_professional) values
+  ('773a3a51-8279-5c90-a65d-f5639c9d31c7', 'SAS', 1000000, 'Paris', '{"line1": "10 rue de la Bourse", "postcode": "75002", "city": "Paris", "country": "FR"}', 'FR70424392447', true),
+  ('0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352', null, null, null, '{"line1": "12 rue des Artisans", "postcode": "69003", "city": "Lyon", "country": "FR"}', null, true),
+  ('b3e2a53d-9f46-5983-957e-468ff633770d', null, null, null, '{"line1": "8 avenue des Lilas", "postcode": "75019", "city": "Paris", "country": "FR"}', null, true);
+
+insert into public.document (id, organization_id, client_organization_id, kind, storage_bucket, storage_path, sha256, mime_type, file_name) values
+  ('ad724b92-3fb4-53ec-80c4-ed94ab101e78', '773a3a51-8279-5c90-a65d-f5639c9d31c7', '0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352', 'mandate_document', 'documents', 'client/773a3a51-8279-5c90-a65d-f5639c9d31c7/0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352/ad724b92-3fb4-53ec-80c4-ed94ab101e78.pdf', 'b0a8d2e7d34cad24b36d22313aba0d3d31ed9f42aca1c38c78a4462c2afc4592', 'application/pdf', 'MAND-MARTIN-2026.pdf'),
+  ('40a5fce4-e3da-545e-aec7-00bf0b16a3a0', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'b3e2a53d-9f46-5983-957e-468ff633770d', 'mandate_document', 'documents', 'client/773a3a51-8279-5c90-a65d-f5639c9d31c7/b3e2a53d-9f46-5983-957e-468ff633770d/40a5fce4-e3da-545e-aec7-00bf0b16a3a0.pdf', '7dd2ff2c9b7eff317fd9ae7b46343fd5ad122a707787179d6509668cc3843c58', 'application/pdf', 'MAND-LILAS-2026.pdf');
 
 insert into auth.users (instance_id, id, aud, role, email, email_confirmed_at, confirmation_token, recovery_token, email_change_token_new, email_change, raw_app_meta_data, raw_user_meta_data, created_at, updated_at) values
   ('00000000-0000-0000-0000-000000000000', '419977d0-a34b-5eca-a7cb-1725c181e078', 'authenticated', 'authenticated', 'admin@collectoo.test', '2026-01-01 00:00:00+00', '', '', '', '', '{}', '{}', '2026-01-01 00:00:00+00', '2026-01-01 00:00:00+00'),
@@ -34,11 +43,11 @@ insert into public.membership (user_id, organization_id, role) values
   ('55e99d73-bab6-59e8-98c0-4092bfb61030', '0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352', 'client_viewer'),
   ('eec0a492-3813-508a-94ea-25967ea8dd9d', 'b3e2a53d-9f46-5983-957e-468ff633770d', 'client_admin');
 
-insert into public.mandate (id, organization_id, client_organization_id, reference, mandate_type, signed_on) values
-  ('3467f394-3bb2-53b8-a9b3-ea63601c9c58', '773a3a51-8279-5c90-a65d-f5639c9d31c7', '0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352', 'MAND-MARTIN-2026', 'mandate_amicable', '2026-01-15');
+insert into public.mandate (id, organization_id, client_organization_id, reference, mandate_type, signed_on, insurance_clause_ref) values
+  ('3467f394-3bb2-53b8-a9b3-ea63601c9c58', '773a3a51-8279-5c90-a65d-f5639c9d31c7', '0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352', 'MAND-MARTIN-2026', 'mandate_amicable', '2026-01-15', 'art. 9 — Garantie');
 
-insert into public.mandate_terms (mandate_id, valid_from, commission_rate, remittance_max_days, plan_envelope) values
-  ('3467f394-3bb2-53b8-a9b3-ea63601c9c58', '2026-01-15', 0.1500, 30, '{"max_months": 12, "min_instalment_minor": 3000}');
+insert into public.mandate_terms (mandate_id, valid_from, commission_rate, remittance_max_days, plan_envelope, commission_schedule, commission_clause_ref, remittance_terms, remittance_clause_ref, document_id) values
+  ('3467f394-3bb2-53b8-a9b3-ea63601c9c58', '2026-01-15', 0.1500, 30, '{"max_months": 12, "min_instalment_minor": 3000}', '{"schema": "commission-1", "basis": {"families": "all", "forwards": {"file_recalled": false, "before_servicing_start": false, "client_ratification": false}, "on_reversal": "credit"}, "rules": [{"id": "tout", "tier_key": "tout", "label_fr": "Toutes créances", "match": {}, "rate": {"kind": "flat", "rate": "0.15"}}]}', 'art. 6 — Rémunération', '{"schema": "remittance-1", "frequency": "twice_monthly", "netting": {"clause_ref": "art. 7.2"}, "clawback": {"clause_ref": "art. 7.4"}, "invoice_payment_days": 30}', 'art. 7 — Reversements', 'ad724b92-3fb4-53ec-80c4-ed94ab101e78');
 
 insert into public.portfolio (id, organization_id, client_organization_id, name, default_claim_type, mandate_id) values
   ('d065bbb6-686b-5e60-ab79-fbcc760dd791', '773a3a51-8279-5c90-a65d-f5639c9d31c7', '0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352', 'Factures 2026', 'b2b_invoice', '3467f394-3bb2-53b8-a9b3-ea63601c9c58');
@@ -1382,11 +1391,11 @@ insert into public.claim_ownership_period (account_id, owner_organization_id, se
   ('0cc0b28e-ab27-511e-951a-cf1a65adc389', '0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'mandate_amicable', '2026-01-15'),
   ('7f10e137-ffca-569f-96ab-50972c9feb4a', '0aa5ffc2-c970-5e4b-adc9-c7ebda7ab352', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'mandate_amicable', '2026-01-15');
 
-insert into public.mandate (id, organization_id, client_organization_id, reference, mandate_type, signed_on) values
-  ('e1d3e433-6b91-5539-9153-7064dc54112a', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'b3e2a53d-9f46-5983-957e-468ff633770d', 'MAND-LILAS-2026', 'mandate_amicable', '2026-01-15');
+insert into public.mandate (id, organization_id, client_organization_id, reference, mandate_type, signed_on, insurance_clause_ref) values
+  ('e1d3e433-6b91-5539-9153-7064dc54112a', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'b3e2a53d-9f46-5983-957e-468ff633770d', 'MAND-LILAS-2026', 'mandate_amicable', '2026-01-15', 'art. 8 — Garantie');
 
-insert into public.mandate_terms (mandate_id, valid_from, commission_rate, remittance_max_days, plan_envelope) values
-  ('e1d3e433-6b91-5539-9153-7064dc54112a', '2026-01-15', 0.1500, 30, '{"max_months": 12, "min_instalment_minor": 3000}');
+insert into public.mandate_terms (mandate_id, valid_from, commission_rate, remittance_max_days, plan_envelope, commission_schedule, commission_clause_ref, remittance_terms, remittance_clause_ref, document_id) values
+  ('e1d3e433-6b91-5539-9153-7064dc54112a', '2026-01-15', null, 30, '{"max_months": 12, "min_instalment_minor": 3000}', '{"schema": "commission-1", "basis": {"families": "all", "forwards": {"file_recalled": false, "before_servicing_start": false, "client_ratification": false}, "on_reversal": "credit"}, "rules": [{"id": "loyers", "tier_key": "loyers", "label_fr": "Loyers et charges", "match": {}, "rate": {"kind": "marginal", "tiers": [{"up_to_minor": "500000", "rate": "0.10"}, {"up_to_minor": null, "rate": "0.06"}]}, "min_per_file_minor": "3000"}]}', 'art. 5 — Rémunération', '{"schema": "remittance-1", "frequency": "twice_monthly", "netting": {"clause_ref": "art. 6.3"}, "clawback": null, "invoice_payment_days": 30}', 'art. 6 — Reversements', '40a5fce4-e3da-545e-aec7-00bf0b16a3a0');
 
 insert into public.portfolio (id, organization_id, client_organization_id, name, default_claim_type, mandate_id) values
   ('bda46472-8375-54cb-a2b9-392e8dea6a2d', '773a3a51-8279-5c90-a65d-f5639c9d31c7', 'b3e2a53d-9f46-5983-957e-468ff633770d', 'Loyers impayés', 'rent', 'e1d3e433-6b91-5539-9153-7064dc54112a');

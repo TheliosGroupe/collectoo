@@ -5,9 +5,11 @@ import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import {
   DEBIT_REVIEW,
+  clientRelayable,
+  clientRelayedPaymentEffect,
+  decisionLabel,
   explainable,
   feeEffect,
-  LINK_KIND,
   lossEffect,
   offersPaymentLinks,
   ownCreditEffect,
@@ -132,7 +134,9 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
         comme tels sont comptabilisés automatiquement, les autres avec « Frais bancaires ». Un crédit venant du compte propre
         n&apos;est jamais pris automatiquement pour le paiement d&apos;un débiteur : c&apos;est un approvisionnement du
         cabinet, ou le paiement d&apos;un débiteur reçu par le cabinet et relayé sur le compte dédié, qui devient alors un
-        paiement à affecter (« Paiement d&apos;un débiteur relayé par le cabinet »).
+        paiement à affecter (« Paiement d&apos;un débiteur relayé par le cabinet »). De même, un crédit venant du compte de
+        reversement d&apos;un client règle une facture du cabinet, ou relaie le paiement d&apos;un débiteur reçu par le client
+        (« Paiement d&apos;un débiteur relayé par le client »).
       </InfoNote>
       <nav className="flex flex-wrap gap-2 text-sm" aria-label="Onglets">
         {Object.entries(TABS).map(([key, label]) => (
@@ -165,7 +169,7 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
                       {tab === "doublons" ? lineKindLabel("suspected_duplicate", r.direction) : lineKindLabel(r.kind, r.direction)}
                     </Badge>
                     {tab !== "traites" ? <Badge tone={r.age_days >= 3 ? "action" : "neutral"}>J+{r.age_days}</Badge> : null}
-                    {r.decision ? <Badge tone="ok">{LINK_KIND[r.decision] ?? r.decision}</Badge> : null}
+                    {r.decision ? <Badge tone="ok">{decisionLabel(r.decision, r.kind)}</Badge> : null}
                   </span>
                   <span
                     className={`font-medium tabular-nums ${r.direction === "debit" ? "text-red-800 dark:text-red-300" : ""}`}
@@ -311,6 +315,14 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
             />
           ) : null}
         </>
+      ) : null}
+      {clientRelayable(row) ? (
+        <ReleaseOwnCredit
+          by="client"
+          lineId={row.bank_transaction_id}
+          effect={clientRelayedPaymentEffect({ amount: money(row.amount_minor, cur), dateFr: frenchDate(row.booking_date) })}
+          idempotencyKey={randomUUID()}
+        />
       ) : null}
       {beyond.map((p) => (
         <LinkLoss

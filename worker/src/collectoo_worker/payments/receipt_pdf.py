@@ -1,6 +1,6 @@
 """Deterministic PDF rendering of a receipt (M2-10, design §10, risk R7).
 
-PDF bytes = f(receipt row, payload, TEMPLATE_VERSION, RENDERER_VERSION): reportlab pinned in
+PDF bytes = f(receipt row, payload, template version, RENDERER_VERSION): reportlab pinned in
 `uv.lock` and run with its own defaults only (`reportlab_defaults`: no RL_* variable, settings file
 or mods hook of the environment reaches it, its global configuration is pinned again before each
 render, and a reportlab another module configured first is refused: review #4), in invariant mode
@@ -43,7 +43,6 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from collectoo_worker.payments.receipts import (
     NBSP,
     NNBSP,
-    TEMPLATE_VERSION,
     ReceiptDocument,
     ReceiptView,
     Row,
@@ -183,6 +182,9 @@ def render_receipt(doc: ReceiptDocument) -> bytes:
         )
     )
     story += [header, Spacer(1, 5 * mm)]
+    if v.issuer_lines:  # quittance-fr-3: the issuer's mentions (R123-237/238), above the parties
+        story += [_p(line, s["small"]) for line in v.issuer_lines]
+        story.append(Spacer(1, 4 * mm))
     story.append(_pairs(v.parties, s, width))
     story += [Spacer(1, 5 * mm), _p("Paiement reçu", s["h2"]), Spacer(1, 1.5 * mm)]
     story.append(_pairs(v.payment, s, width))
@@ -213,7 +215,7 @@ def render_receipt(doc: ReceiptDocument) -> bytes:
         title=f"Quittance {doc.number} version {doc.version}",
         author=str(doc.payload["issuer"]["name"]),
         subject=v.title,
-        creator=TEMPLATE_VERSION,
+        creator=doc.template_version,
         invariant=1,
         pageCompression=0,
     )

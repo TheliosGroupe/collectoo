@@ -61,8 +61,55 @@ export async function createMember(
   return email;
 }
 
-/** A signed amicable-collection mandate covering the tenant's portfolio (CPCE R124-3). */
-export async function createMandate(tenant: Tenant): Promise<void> {
+/** Synthetic identifiers (Luhn-valid SIRENs, their VAT key) for E2E tenants; no real company. */
+export const SERVICER_SIREN = "849678297";
+export const SERVICER_VAT = "FR33849678297";
+export const CLIENT_SIREN = "825944093";
+const OFFICE = { line1: "10 rue de la Bourse", postcode: "75002", city: "Paris", country: "FR" };
+
+/** The servicer's billing identity, complete (what receipts, statements and invoices print; M2c-2). */
+export async function createServicerIdentity(tenant: Tenant): Promise<void> {
+  const admin = adminClient();
+  const { error } = await admin.from("organization").update({ siren: SERVICER_SIREN }).eq("id", tenant.servicerId);
+  if (error) throw error;
+  const { error: e2 } = await admin.from("billing_identity").upsert({
+    organization_id: tenant.servicerId,
+    legal_form: "SAS",
+    share_capital_minor: "1000000", // bigint minor units as text, never a JS number
+    rcs_city: "Paris",
+    registered_office: OFFICE,
+    vat_number: SERVICER_VAT,
+    is_professional: true,
+  });
+  if (e2) throw e2;
+}
+
+/** A client document row (a RIB, the signed mandate, an evidence) without a stored file. */
+export async function createClientDocument(tenant: Tenant, kind: string, fileName: string): Promise<string> {
+  const admin = adminClient();
+  const id = randomUUID();
+  const { error } = await admin.from("document").insert({
+    id,
+    organization_id: tenant.servicerId,
+    client_organization_id: tenant.clientId,
+    kind,
+    storage_bucket: "documents",
+    storage_path: `client/${tenant.servicerId}/${tenant.clientId}/${id}.pdf`,
+    sha256: "a".repeat(64),
+    mime_type: "application/pdf",
+    file_name: fileName,
+  });
+  if (error) throw error;
+  return id;
+}
+
+/**
+ * A signed amicable-collection mandate covering the tenant's portfolio (CPCE R124-3), ready for confirmation (M2c-2,
+ * design §9.1): its money terms (commission-1, remittance-1) with their clause references and the signed document, the
+ * insurance clause, and both billing identities (the client a professional established in mainland France).
+ * `complete: false` writes a version as before M2c-2 (a rate only): the portfolio is then not ready.
+ */
+export async function createMandate(tenant: Tenant, { complete = true }: { complete?: boolean } = {}): Promise<string> {
   const admin = adminClient();
   const { data: mandate, error } = await admin
     .from("mandate")
@@ -72,16 +119,108 @@ export async function createMandate(tenant: Tenant): Promise<void> {
       reference: `MAND-${randomUUID().slice(0, 8)}`,
       mandate_type: "mandate_amicable",
       signed_on: "2026-01-15",
+      insurance_clause_ref: complete ? "art. 9 — Garantie" : null,
+    })
+    .select("id")
+    .single();
+  if (error) throw error;
+  const terms = complete
+    ? {
+        commission_schedule: {
+          schema: "commission-1",
+          basis: {
+            families: "all",
+            forwards: { file_recalled: false, before_servicing_start: false, client_ratification: false },
+            on_reversal: "credit",
+          },
+          rules: [{ id: "tout", tier_key: "tout", label_fr: "Toutes créances", match: {}, rate: { kind: "flat", rate: "0.15" } }],
+        },
+        commission_clause_ref: "art. 6 — Rémunération",
+        remittance_terms: {
+          schema: "remittance-1",
+          frequency: "twice_monthly",
+          netting: { clause_ref: "art. 7.2" },
+          clawback: null,
+          invoice_payment_days: 30,
+        },
+        remittance_clause_ref: "art. 7 — Reversements",
+        document_id: await createClientDocument(tenant, "mandate_document", "Mandat signé.pdf"),
+      }
+    : { commission_rate: 0.15 };
+  const { error: e2 } = await admin.from("mandate_terms").insert({ mandate_id: mandate.id, valid_from: "2026-01-15", ...terms });
+  if (e2) throw e2;
+  const { error: e3 } = await admin.from("portfolio").update({ mandate_id: mandate.id }).eq("id", tenant.portfolioId);
+  if (e3) throw e3;
+  await createServicerIdentity(tenant);
+  if (complete) {
+    const { error: e4 } = await admin.from("organization").update({ siren: CLIENT_SIREN }).eq("id", tenant.clientId);
+    if (e4) throw e4;
+    const { error: e5 } = await admin.from("billing_identity").upsert({
+      organization_id: tenant.clientId,
+      registered_office: { line1: "12 rue des Artisans", postcode: "69003", city: "Lyon", country: "FR" },
+      is_professional: true,
+    });
+    if (e5) throw e5;
+  }
+  return mandate.id as string;
+}
+
+/** The app user id of a member created by createMember (its email). */
+export async function userId(email: string): Promise<string> {
+  const { data, error } = await adminClient().from("app_user").select("id").eq("email", email).single();
+  if (error) throw error;
+  return data.id as string;
+}
+
+/**
+ * An event recorded for the tenant's client (review M2c-2: a mandate end, a death or a liquidation keeps its portfolios
+ * from being confirmed), with its evidence, as « Enregistrer un événement » records it.
+ */
+export async function recordClientEvent(
+  tenant: Tenant,
+  kind: "proceeding_opened" | "liquidation" | "death" | "guardianship" | "mandate_ended",
+  effectiveDate: string,
+  recordedBy: string,
+): Promise<void> {
+  const evidence = await createClientDocument(tenant, "client_status_evidence", `Justificatif ${kind}.pdf`);
+  const { error } = await adminClient().from("client_status_event").insert({
+    organization_id: tenant.servicerId,
+    client_organization_id: tenant.clientId,
+    kind,
+    effective_date: effectiveDate,
+    evidence_document_id: evidence,
+    recorded_by: await userId(recordedBy),
+  });
+  if (error) throw error;
+}
+
+/**
+ * The client's payout IBAN, proposed by one admin of the servicer with the client's RIB and confirmed by another
+ * (founder #10), as the pages do it: a credit from it is then read as the client's at import (`client_transfer_in`).
+ */
+export async function createConfirmedPayoutAccount(tenant: Tenant, iban: string, holder: string): Promise<void> {
+  const admin = adminClient();
+  const proposer = await userId(await createMember(tenant.servicerId, "admin"));
+  const confirmer = await userId(await createMember(tenant.servicerId, "admin"));
+  const { data, error } = await admin
+    .from("client_payout_account")
+    .insert({
+      organization_id: tenant.servicerId,
+      client_organization_id: tenant.clientId,
+      currency: "EUR",
+      iban,
+      holder_name: holder,
+      evidence_document_id: await createClientDocument(tenant, "payout_rib", "RIB client.pdf"),
+      proposed_by: proposer,
     })
     .select("id")
     .single();
   if (error) throw error;
   const { error: e2 } = await admin
-    .from("mandate_terms")
-    .insert({ mandate_id: mandate.id, valid_from: "2026-01-15", commission_rate: 0.15 });
+    .from("client_payout_account")
+    .update({ status: "active", confirmed_by: confirmer, confirmed_at: new Date().toISOString(), confirmed_via: "second_admin" })
+    .eq("id", data.id);
   if (e2) throw e2;
-  const { error: e3 } = await admin.from("portfolio").update({ mandate_id: mandate.id }).eq("id", tenant.portfolioId);
-  if (e3) throw e3;
 }
 
 /**

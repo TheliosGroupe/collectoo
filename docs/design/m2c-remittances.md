@@ -961,7 +961,7 @@ The M2b-6 debit job (`payments.process_debits`, same chunking and lock order) ga
 | a credit undoing RMT (original end-to-end id) | auto | reversal of the `remittance` at the return date; pending item `payout_returned`; payout account `returned`; P0; any difference → `bank_fee` |
 | `own_transfer_in` matching a `TOP` transfer | auto | `servicer_top_up` |
 | `own_transfer_in` matching nothing | ops | top-up, or a debtor payment relayed by the servicer (it becomes a `payment`: `release_own_credit`, M2c-1 review; ledger critique #8, OQ-69) |
-| `client_transfer_in` | ops | `client_payment_dedicated` (a misdirected invoice payment), or ops explain it |
+| `client_transfer_in` | ops | `client_payment_dedicated` (a misdirected invoice payment), a debtor payment relayed by the client (it becomes a `payment`: `release_own_credit`, « Paiement d'un débiteur relayé par le client », M2c-2 review), or ops explain it |
 | RMT of a cancelled or already-booked transfer, other amount, unknown id | ops | `unplanned_payout` (§9.7), or explained; never automatic |
 | `other_debit` with BkTxCd charges (`CHRG`, `FEES`) | auto, suggested | `bank_fee`; other debits are classified by ops (« Frais bancaires ») |
 | return larger than what is left of the payment (OQ-34, M2b `amount_exceeds`) | ops | the M2b part as today + `servicer_loss` for the excess |

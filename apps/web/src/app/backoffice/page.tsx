@@ -30,6 +30,9 @@ export default async function BackofficePage() {
           ))}
         </ul>
         <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">Portefeuilles : {count ?? 0}</p>
+        <Link href="/backoffice/clients" className="mt-2 inline-block text-sm font-medium underline underline-offset-4" data-testid="clients-link">
+          Identités, IBAN de reversement et mandats
+        </Link>
       </section>
       <Link href="/backoffice/reprises" className={buttonClass + " text-center"} data-testid="boarding-link">
         Reprises de portefeuilles
@@ -54,6 +57,13 @@ export default async function BackofficePage() {
         data-testid="bank-accounts-link"
       >
         Comptes bancaires
+      </Link>
+      <Link
+        href="/backoffice/parametres/facturation"
+        className="w-full rounded-md border border-zinc-300 px-4 py-2 text-center font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+        data-testid="billing-settings-link"
+      >
+        Facturation
       </Link>
       <LogoutButton />
     </Page>

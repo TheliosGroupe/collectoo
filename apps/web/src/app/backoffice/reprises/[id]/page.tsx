@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { Badge, ErrorNote, InfoNote, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { isProcessing, statusLabel, statusTone } from "@/lib/boarding/status";
+import { readinessText } from "@/lib/remittance/terms";
 import { AutoRefresh } from "@/components/auto-refresh";
 import {
   AbandonSection,
@@ -37,7 +38,7 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
   const { data: batch } = await supabase
     .from("boarding_batch")
     .select(
-      "id, version, status, cut_off_date, dq_report, failed_job, opening_plan, opening_summary," +
+      "id, version, status, cut_off_date, dq_report, failed_job, opening_plan, opening_summary, client_organization_id," +
         " portfolio:portfolio_id(name), client:client_organization_id(legal_name)," +
         // Amounts as text: integer minor units never pass through a JS number.
         " total_minor:dq_report->reconciliation->computed->>total_minor," +
@@ -55,7 +56,8 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
     status: string;
     cut_off_date: string | null;
     dq_report: DqReport | null;
-    failed_job: { type: string; error: string; at: string } | null;
+    failed_job: { type: string; error: string; at: string; blockers?: string[] } | null;
+    client_organization_id: string;
     opening_plan: OpeningTotals | null;
     opening_summary: { entries: number; totals: OpeningTotals } | null;
     portfolio: { name: string } | null;
@@ -83,6 +85,11 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
       .limit(50),
   ]);
 
+  // M2c-2: what still keeps the portfolio from being confirmed (identities, the mandate's money terms; design §9.1).
+  const readiness =
+    b.status === "committed"
+      ? (((await supabase.rpc("boarding_batch_readiness", { p_batch_id: id })).data ?? []) as string[])
+      : [];
   const fileRows = (files ?? []) as unknown as FileRow[];
   const fileNames = Object.fromEntries(fileRows.map((f) => [f.id, f.file_name]));
   // A job that failed for good: blocks the page while processing; after commit (documents job)
@@ -128,7 +135,13 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
         </ErrorNote>
       ) : b.failed_job?.type === "confirm" && b.status === "committed" ? (
         <ErrorNote>
-          {b.failed_job.error === "mandate_inactive" ? (
+          {b.failed_job.error === "not_ready" ? (
+            <>
+              La confirmation n&apos;a pas été faite : le portefeuille n&apos;était plus prêt quand elle a été traitée (
+              {(b.failed_job.blockers ?? []).map(readinessText).join(" ; ")}). Aucun solde n&apos;a été
+              comptabilisé. Complétez ces éléments, puis confirmez à nouveau.
+            </>
+          ) : b.failed_job.error === "mandate_inactive" ? (
             <>
               La confirmation n&apos;a pas été faite : aucun mandat actif ne couvre ce portefeuille à cette date (art. R124-3
               CPCE). Aucun solde n&apos;a été comptabilisé. Rattachez un mandat actif au portefeuille, puis confirmez à nouveau.
@@ -180,6 +193,8 @@ export default async function BatchPage({ params }: PageProps<"/backoffice/repri
         report={b.dq_report}
         openingPlan={b.opening_plan}
         openingSummary={b.opening_summary}
+        readiness={readiness}
+        clientId={b.client_organization_id}
       />
       <HistorySection events={events ?? []} />
       <AbandonSection batchId={b.id} status={b.status} />
