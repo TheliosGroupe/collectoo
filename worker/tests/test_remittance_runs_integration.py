@@ -32,6 +32,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -61,9 +62,11 @@ from collectoo_worker.jobs.remittances import run_schedule
 from collectoo_worker.remittance.calendar import conservative
 from collectoo_worker.remittance.schedule import guard_due, is_scheduled
 from collectoo_worker.remittance.terms import RemittanceTerms
+from collectoo_worker.remittance.vat import div_half_up, vat_of
 
 pytestmark = pytest.mark.integration
 PARIS = ZoneInfo("Europe/Paris")
+RATE = Decimal("0.2")
 
 
 def _lines(run: str) -> list[tuple[str, int, int, str]]:
@@ -759,6 +762,146 @@ def test_a_cancelled_runs_credit_note_is_restored_and_the_reversal_credited_once
 @contextmanager
 def _same_rate() -> Iterator[None]:
     yield
+
+
+def _undo(tenant: dict[str, Any], payment: str, file_id: str) -> str:
+    """The bank takes a payment back: its allocation reversed. Returns the reversal entry."""
+    entry = one_value(
+        "select id from public.ledger_entry where payment_id = %s and entry_type = 'allocation'",
+        payment,
+    )
+    staff(
+        tenant,
+        "select public.reverse_allocation(%s, %s, %s, %s::uuid[], %s)",
+        str(uuid.uuid4()),
+        payment,
+        file_id,
+        [str(entry)],
+        "paiement repris par la banque",
+    )
+    return str(one_value("select id from public.ledger_entry where reverses_entry_id = %s", entry))
+
+
+def _approved_run(tenant: dict[str, Any]) -> str:
+    """A run prepared by the worker, approved, its approval job run (the real prepare and job)."""
+    run = request_run(tenant)
+    approve(tenant, run)
+    drain()
+    row = run_row(run)
+    assert row["status"] == "approved", row["last_failure"]
+    return run
+
+
+@pytest.mark.parametrize(
+    ("collected", "partly_credited"),
+    [(100_013, False), (100_020, False), (100_013, True)],
+    ids=["two-invoices-150,02", "two-invoices-150,03", "credited-before-by-a-live-run"],
+)
+def test_a_corrective_invoice_bears_the_vat_of_its_own_ht(  # noqa: PLR0915
+    collected: int, partly_credited: bool
+) -> None:
+    """Money review #0, round 2: a cancelled run's credit notes credited earlier invoices of one
+    mandate at 20 %, each by cumulative difference; the corrective invoice that re-charges them
+    bears R(HT x 20 %), as every invoice (242 nonies A 11°), not the sum of the credited VATs, so
+    the re-run credits it in full with exactly that VAT (documents rule 5), leaves nothing open or
+    pending, and is approved. Two invoices of 150,02 € HT (VAT 30,00 € each, R(300,04 x 20 %) =
+    60,01 €: the sum was a cent short and the re-run was refused, data_error 23514), of 150,03 €
+    (30,01 € each, R = 60,01 €: the sum was a cent over and stayed pending), and one invoice of
+    300,04 € already credited 150,02 € by a live run (the cancelled run credited 30,01 € of VAT
+    on the other half, R(150,02 x 20 %) = 30,00 €). The corrective invoice is dated over the
+    service periods of the invoices it re-charges; it is netted, with a latest payment date."""
+    tenant = remittance_tenant()
+    admin = add_admin(tenant)
+    commission = div_half_up(collected * 15, 100)  # 15 % flat
+    if partly_credited:
+        f1, p1 = paid_file(tenant, collected, recent_business_day(8))
+        f2, p2 = paid_file(tenant, collected, recent_business_day(8))
+        rv1 = _approved_run(tenant)
+        _book_payout(rv1)
+        (fc1,) = documents(rv1)
+        assert (fc1["ht_minor"], fc1["vat_minor"]) == (2 * commission, vat_of(2 * commission, RATE))
+        paid_file(tenant, 300_000, recent_business_day(6))  # (the client's money covers the undo)
+        _undo(tenant, p1, f1.id)
+        rv2 = _approved_run(tenant)  # a live run credits FC-1 for the first collection
+        _book_payout(rv2)
+        paid_file(tenant, 300_000, recent_business_day(3))
+        _undo(tenant, p2, f2.id)
+        originals = [fc1]
+        restored = commission
+    else:
+        f1, p1 = paid_file(tenant, collected, recent_business_day(8))
+        rv1 = _approved_run(tenant)
+        _book_payout(rv1)
+        f2, p2 = paid_file(tenant, collected, recent_business_day(7))
+        rv2 = _approved_run(tenant)
+        _book_payout(rv2)
+        (fc1,), (fc2,) = documents(rv1), documents(rv2)
+        assert fc1["vat_minor"] == fc2["vat_minor"] == vat_of(commission, RATE)
+        paid_file(tenant, 300_000, recent_business_day(3))
+        _undo(tenant, p1, f1.id)
+        _undo(tenant, p2, f2.id)
+        originals = [fc1, fc2]
+        restored = 2 * commission
+    rv3 = _approved_run(tenant)  # a collection, and the reversals credited on the originals
+    credited_vat = -one_value(
+        "select sum(vat_minor) from public.commission_invoice where run_id = %s"
+        " and kind = 'credit_note'",
+        rv3,
+    )
+    assert credited_vat != vat_of(restored, RATE)  # (the case the review found)
+    cancelled = staff(
+        tenant,
+        "select public.cancel_remittance_run(%s, %s, %s, %s)",
+        str(uuid.uuid4()),
+        rv3,
+        run_row(rv3)["version"],
+        "IBAN à vérifier",
+        user=admin,
+    )
+    assert cancelled["status"] == "cancelled"
+    with psycopg.connect(DB) as conn:
+        cur = conn.execute(
+            """select j.id::text, j.ht_minor, j.vat_minor, j.settlement, j.service_from,
+                      j.service_to, j.payload -> 'service_period', j.due_date,
+                      j.payload -> 'payment_reference',
+                      (select min(o.service_from) from public.commission_invoice o
+                       where o.organization_id = j.organization_id and o.number = any(%s)),
+                      (select max(o.service_to) from public.commission_invoice o
+                       where o.organization_id = j.organization_id and o.number = any(%s))
+               from public.commission_invoice j
+               where j.run_id = %s and j.kind = 'invoice' and j.reason = 'run_cancelled'""",
+            ([o["number"] for o in originals], [o["number"] for o in originals], rv3),
+        )  # (a number is unique within its servicer's series)
+        row = cur.fetchone()
+    assert row is not None
+    corrective, ht, vat, settlement, s_from, s_to, period, due, reference, o_from, o_to = row
+    # its own HT's VAT, half up as every invoice's
+    assert (ht, vat) == (restored, vat_of(restored, RATE))
+    # the service period of the invoices it charges again, not the cancelled run's
+    assert (s_from, s_to) == (o_from, o_to) and s_from < run_row(rv3)["service_from"]
+    assert period == {"from": o_from.isoformat(), "to": o_to.isoformat()}
+    # netted (the mandate's clause), with the date by which it is paid (L441-9; OQ-72)
+    issued = one_value("select issue_date from public.commission_invoice where id = %s", corrective)
+    assert (settlement, due) == ("netted", issued + timedelta(days=30))
+    assert reference == {"mode": "next_run", "latest_date": due.isoformat()}
+
+    rv4 = _approved_run(tenant)  # the reversals credited again, once, on the corrective invoice
+    with psycopg.connect(DB) as conn:
+        state = conn.execute(
+            """select private.document_open(%s), private.document_pending_vat(%s),
+                      (select sum(c.ht_minor) from public.commission_credit_correction c
+                       join public.commission_invoice n on n.id = c.credit_note_id
+                       where c.original_invoice_id = %s and n.run_id = %s),
+                      (select sum(c.vat_minor) from public.commission_credit_correction c
+                       join public.commission_invoice n on n.id = c.credit_note_id
+                       where c.original_invoice_id = %s and n.run_id = %s)""",
+            (corrective, corrective, corrective, rv4, corrective, rv4),
+        ).fetchone()
+    assert state == (0, 0, -restored, -vat_of(restored, RATE))
+    run_checks = checks(tenant)
+    found = _remittance_violations(str(run_checks["run_id"]))
+    # (the emulated debits have no bank line: I19 flags them; M2c-6 books from the statement)
+    assert [code for code, _ in found if code != "bank_cash_identity"] == []
 
 
 def test_the_counter_row_alone_serialises_two_issuers() -> None:

@@ -8,7 +8,7 @@
 -- (clients A/B, a restricted viewer, a collector, another servicer). Design docs/design/m2c-remittances.md §9.5–§9.7,
 -- §14; ADR-0014 M2c-4.
 begin;
-select plan(56);
+select plan(72);
 
 -- Fixtures (as 021, with a third client) ----------------------------------------------------------------
 insert into public.organization (id, kind, legal_name, siren) values
@@ -20,6 +20,10 @@ insert into public.organization (id, kind, servicer_organization_id, legal_name,
   ('00000000-0000-0000-0000-0000000000a2', 'creditor_client', '00000000-0000-0000-0000-0000000000aa', 'Lilas Finance',
    '552100554'),
   ('00000000-0000-0000-0000-0000000000a3', 'creditor_client', '00000000-0000-0000-0000-0000000000aa', 'Cèdre SA',
+   '552100554'),
+  ('00000000-0000-0000-0000-0000000000a4', 'creditor_client', '00000000-0000-0000-0000-0000000000aa', 'Pin SAS',
+   '552100554'),
+  ('00000000-0000-0000-0000-0000000000a5', 'creditor_client', '00000000-0000-0000-0000-0000000000aa', 'Cyprès SAS',
    '552100554'),
   ('00000000-0000-0000-0000-0000000000b1', 'creditor_client', '00000000-0000-0000-0000-0000000000bb', 'Bleu SARL', null);
 insert into auth.users (id, email, aud, role)
@@ -36,7 +40,7 @@ insert into public.membership (user_id, organization_id, role) values
 insert into public.portfolio (id, organization_id, client_organization_id, name)
 select ('20000000-0000-0000-0000-0000000000' || c)::uuid, '00000000-0000-0000-0000-0000000000aa',
        ('00000000-0000-0000-0000-0000000000' || c)::uuid, 'P-' || c
-from unnest(array['a1', 'a2', 'a3']) c;
+from unnest(array['a1', 'a2', 'a3', 'a4', 'a5']) c;
 insert into public.portfolio_access (user_id, portfolio_id) values
   ('10000000-0000-0000-0000-000000000007', '20000000-0000-0000-0000-0000000000a1');  -- a client viewer of P-a1 only
 insert into public.bank_account (id, organization_id, purpose, iban, currency, label, feed, opened_on) values
@@ -60,14 +64,17 @@ select ('d0000000-0000-0000-0000-0000000000' || x.n)::uuid, '00000000-0000-0000-
        'application/pdf'
 from (values ('01', 'a1', 'mandate_document'), ('02', 'a2', 'mandate_document'), ('03', 'a1', 'payout_rib'),
              ('04', 'a2', 'payout_rib'), ('05', 'a3', 'mandate_document'), ('06', 'a3', 'payout_rib'),
-             ('07', 'a3', 'client_status_evidence')) x (n, c, kind);
+             ('07', 'a3', 'client_status_evidence'), ('08', 'a4', 'mandate_document'), ('09', 'a4', 'payout_rib'),
+             ('10', 'a5', 'mandate_document'), ('11', 'a5', 'payout_rib'))
+  x (n, c, kind);
 insert into public.mandate (id, organization_id, client_organization_id, reference, mandate_type, signed_on,
                             insurance_clause_ref)
 select ('70000000-0000-0000-0000-0000000000' || c)::uuid, '00000000-0000-0000-0000-0000000000aa',
        ('00000000-0000-0000-0000-0000000000' || c)::uuid, 'MAND-' || upper(c), 'mandate_amicable', '2026-01-01', 'art. 9'
-from unnest(array['a1', 'a2', 'a3']) c;
+from unnest(array['a1', 'a2', 'a3', 'a4', 'a5']) c;
+-- (Pin's and Cyprès's mandates: a 1-day delay each, which no payout can meet: OQ-71)
 insert into public.mandate_terms (id, mandate_id, valid_from, commission_schedule, commission_clause_ref, remittance_terms,
-                                  remittance_clause_ref, document_id)
+                                  remittance_clause_ref, document_id, remittance_max_days)
 select ('71000000-0000-0000-0000-0000000000' || x.c)::uuid, ('70000000-0000-0000-0000-0000000000' || x.c)::uuid,
        '2026-01-01',
        '{"schema": "commission-1", "basis": {"families": "all", "forwards": {"file_recalled": false,
@@ -76,8 +83,8 @@ select ('71000000-0000-0000-0000-0000000000' || x.c)::uuid, ('70000000-0000-0000
                     "rate": {"kind": "flat", "rate": "0.15"}}]}',
        'art. 6', '{"schema": "remittance-1", "frequency": "twice_monthly", "netting": {"clause_ref": "art. 7.2"},
                    "clawback": null, "invoice_payment_days": 30}', 'art. 7',
-       ('d0000000-0000-0000-0000-0000000000' || x.d)::uuid
-from (values ('a1', '01'), ('a2', '02'), ('a3', '05')) x (c, d);
+       ('d0000000-0000-0000-0000-0000000000' || x.d)::uuid, x.days
+from (values ('a1', '01', 30), ('a2', '02', 30), ('a3', '05', 30), ('a4', '08', 1), ('a5', '10', 1)) x (c, d, days);
 update public.portfolio set mandate_id = ('70000000-0000-0000-0000-0000000000' || right(id::text, 2))::uuid
 where id::text like '20000000-0000-0000-0000-0000000000a%';
 insert into public.client_payout_account (id, organization_id, client_organization_id, currency, iban, holder_name,
@@ -87,7 +94,9 @@ select ('90000000-0000-0000-0000-0000000000' || x.c)::uuid, '00000000-0000-0000-
        ('d0000000-0000-0000-0000-0000000000' || x.d)::uuid, '10000000-0000-0000-0000-000000000004'
 from (values ('a1', '03', 'FR7630004000031234567890143', 'MARTIN SAS'),
              ('a2', '04', 'FR1420041010050500013M02606', 'LILAS FINANCE'),
-             ('a3', '06', 'FR7610107001011234567890129', 'CEDRE SA')) x (c, d, iban, holder);
+             ('a3', '06', 'FR7610107001011234567890129', 'CEDRE SA'),
+             ('a4', '09', 'FR7643924771728897790153488', 'PIN SAS'),
+             ('a5', '11', 'FR7643174829350009526794738', 'CYPRES SAS')) x (c, d, iban, holder);
 update public.client_payout_account set status = 'active', confirmed_at = now(), confirmed_via = 'client_portal',
   confirmed_by = '10000000-0000-0000-0000-000000000003'
 where id::text like '90000000-0000-0000-0000-0000000000a%';
@@ -162,10 +171,11 @@ begin
   perform private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1');
 end $$;
 -- What the prepare job writes (emulated): one draft line per reserved item (its commission from `p_commissions` by
--- entry, else 0; charged and invoiced when not 0; its latest execution date 27 days after its date), the documents,
--- key states and plan given, then the header (`p_header` adds to it: vat_on_debits, proceeding_opened_on).
+-- entry, else 0; charged and invoiced when not 0; its latest execution date 27 days after its date, or, with
+-- `p_days`, its R124-6 dates under that delay as the prepare computes them), the documents, key states and plan given,
+-- then the header (`p_header` adds to it: vat_on_debits, proceeding_opened_on).
 create or replace function pg_temp.prepare(p_run uuid, p_commissions jsonb, p_docs jsonb, p_keys jsonb, p_plan jsonb,
-                                           p_header jsonb default '{}')
+                                           p_header jsonb default '{}', p_days integer default null)
 returns integer language plpgsql as $$
 declare r public.remittance_run;
 begin
@@ -173,13 +183,14 @@ begin
   perform private.remittance_prepare_begin(p_run, r.job_token);
   insert into private.remittance_draft_line (run_id, line_no, ledger_entry_id, kind, account_id, mandate_id,
                                              mandate_terms_id, payment_id, encaissement_date, effective_date, posted_at,
-                                             deadline, latest_execution_date, amount_minor, basis, commission_minor,
-                                             commission_state, parts, invoiced)
+                                             deadline, latest_execution_date, unmeetable, amount_minor, basis,
+                                             commission_minor, commission_state, parts, invoiced)
   select p_run, row_number() over (order by q.posted_at, q.ledger_entry_id), q.ledger_entry_id, q.kind, e.account_id,
          pf.mandate_id, ('71000000-0000-0000-0000-0000000000' || right(pf.mandate_id::text, 2))::uuid, e.payment_id,
          e.effective_date, e.effective_date, q.posted_at,
-         case when q.amount_minor > 0 then e.effective_date + 30 end,
-         case when q.amount_minor > 0 then e.effective_date + 27 end, q.amount_minor,
+         case when q.amount_minor > 0 then coalesce(dl.deadline, e.effective_date + 30) end,
+         case when q.amount_minor > 0 then coalesce(dl.latest_execution_date, e.effective_date + 27) end,
+         q.amount_minor > 0 and coalesce(dl.unmeetable, false), q.amount_minor,
          jsonb_build_object('principal', q.amount_minor::text),
          coalesce((p_commissions ->> q.ledger_entry_id::text)::bigint, 0),
          case when coalesce((p_commissions ->> q.ledger_entry_id::text)::bigint, 0) <> 0 then 'charged' else 'none' end,
@@ -188,6 +199,8 @@ begin
   join public.ledger_entry e on e.id = q.ledger_entry_id
   join public.account a on a.id = e.account_id
   join public.portfolio pf on pf.id = a.portfolio_id
+  left join lateral (select d.deadline, d.latest_execution_date, d.unmeetable
+                     from private.remittance_deadline(e.effective_date, p_days) d where p_days is not null) dl on true
   where q.draft_run_id = p_run;
   perform private.remittance_record_draft(p_run, r.job_token, jsonb_build_object(
     'line_count', (select count(*) from private.remittance_draft_line where run_id = p_run),
@@ -198,7 +211,8 @@ begin
     'earliest_deadline', (select min(deadline) from private.remittance_draft_line where run_id = p_run),
     'earliest_latest_execution_date', (select min(latest_execution_date) from private.remittance_draft_line
                                        where run_id = p_run),
-    'unmeetable', 0, 'blockers', '[]'::jsonb, 'commission_blockers', '[]'::jsonb, 'engine_version', 'commission-1',
+    'unmeetable', (select count(*) from private.remittance_draft_line where run_id = p_run and unmeetable),
+    'blockers', '[]'::jsonb, 'commission_blockers', '[]'::jsonb, 'engine_version', 'commission-1',
     'inputs_hash', encode(sha256(convert_to(p_run::text || p_plan::text || r.version, 'UTF8')), 'hex'),
     'payout_account_id', (select pa.id from public.client_payout_account pa
                           where pa.client_organization_id = r.client_organization_id and pa.status = 'active'),
@@ -237,6 +251,22 @@ returns jsonb language sql as $$
          'deferred', false, 'invoice_ht', p_ht::text, 'invoice_vat', round(p_ht * 0.2)::bigint::text,
          'invoice_ttc', (p_ht + round(p_ht * 0.2)::bigint)::text);
 $$;
+-- A plan with nothing to set off (no commission): N = the gross.
+create or replace function pg_temp.gross_plan(p_gross bigint) returns jsonb language sql as $$
+  select jsonb_build_object('settles', '[]'::jsonb, 'net', p_gross::text, 'settlement', '0', 'dc', '0', 'da', '0',
+                            'vat_moved', '0', 'deferred', false, 'invoice_ht', '0', 'invoice_vat', '0',
+                            'invoice_ttc', '0');
+$$;
+-- A check run of the servicer's remittance checks at Paris date p_today (finished, as the nightly's).
+create or replace function pg_temp.chk(p_today date) returns uuid language plpgsql as $$
+declare v uuid;
+begin
+  insert into public.payment_check_run (organization_id) values ('00000000-0000-0000-0000-0000000000aa')
+  returning id into v;
+  perform private.run_remittance_checks(v, '00000000-0000-0000-0000-0000000000aa', p_today);
+  update public.payment_check_run set finished_at = clock_timestamp() where id = v;
+  return v;
+end $$;
 create or replace function pg_temp.key(p_file text, p_basis bigint, p_commission bigint) returns jsonb language sql as $$
   select jsonb_build_object('account_id', pg_temp.f(p_file), 'tier_key', 'tout',
     'basis', case when p_basis = 0 then '[]'::jsonb
@@ -409,7 +439,8 @@ select results_eq($$ select i.payload ->> 'penalty_text' like 'Pénalités de re
                             i.payload -> 'own_account'
                      from public.commission_invoice i where i.run_id = (select v from t where k = 'r1') $$,
   $$ values (true, '{"applies": true, "amount_minor": "4000"}'::jsonb, null::text,
-             jsonb_build_object('run_number', (select number from public.remittance_run where id = (select v from t where k = 'r1')),
+             jsonb_build_object('mode', 'run',
+                                'run_number', (select number from public.remittance_run where id = (select v from t where k = 'r1')),
                                 'execution_date', private.next_business_day(private.paris_today())),
              'null'::jsonb) $$,
   'a netted invoice: the penalty rate, the 40 € indemnity (professional buyer, L441-10 II), set off on the payout''s date');
@@ -425,6 +456,15 @@ select results_eq($$ select i.due_date, (i.payload ->> 'due_date')::date, i.payl
   $$ values (private.paris_today() + 30, private.paris_today() + 30,
              '{"iban": "FR7630006000011234567890189", "bic": "AGRIFRPPXXX", "holder": "Collectoo SAS"}'::jsonb) $$,
   'a due invoice: its date and the servicer''s own account to pay, read at issue');
+insert into j select 'due-run', private.issue_commission_documents('00000000-0000-0000-0000-0000000000aa',
+  '00000000-0000-0000-0000-0000000000a2', (select v from t where k = 'r3'),
+  jsonb_build_array((pg_temp.invoice('a2', '04', 2000, 'due') - 'charges') || '{"id": "e3000000-0000-0000-0000-000000000004",
+                                                               "key": "due-invoice-0002"}'), 'commission');
+select results_eq($$ select i.settlement, (i.payload ->> 'due_date')::date, i.payload -> 'payment_reference',
+                            i.payload #>> '{own_account,iban}'
+                     from public.commission_invoice i where i.id = 'e3000000-0000-0000-0000-000000000004' $$,
+  $$ values ('due'::text, private.paris_today() + 30, 'null'::jsonb, 'FR7630006000011234567890189'::text) $$,
+  'a due invoice of a run: its date is its due date, no run''s payment reference beside it (legal #4, round 2)');
 select is((select payload_sha256 from public.commission_invoice where id = 'e3000000-0000-0000-0000-000000000002'),
   (select encode(sha256(convert_to(payload::text, 'UTF8')), 'hex') from public.commission_invoice
    where id = 'e3000000-0000-0000-0000-000000000002'), 'the hash covers them');
@@ -529,6 +569,97 @@ select results_eq($$ select released, count(*)::int from public.remittance_line
                      where run_id = (select v from t where k = 'r5') group by released $$,
   $$ values (true, 2) $$, 'the lines released (the guard''s release path)');
 
+-- The corrective invoice's payment date (legal #4, round 2) and its service period (money #0, round 2) ---------------
+select results_eq($$ select settlement, due_date, (payload ->> 'due_date')::date, payload -> 'payment_reference',
+                            payload -> 'own_account', payload #>> '{settlement,due_days}'
+                     from public.commission_invoice where id = (select v from t where k = 'j5') $$,
+  $$ values ('netted'::text, private.paris_today() + 30, private.paris_today() + 30,
+             jsonb_build_object('mode', 'next_run', 'latest_date', private.paris_today() + 30), 'null'::jsonb,
+             '30'::text) $$,
+  'the corrective invoice: set off on the next run (the netting clause), at the latest 30 days after its issue, frozen');
+select results_eq($$ select j.service_from, j.service_to, j.payload -> 'service_period'
+                     from public.commission_invoice j where j.id = (select v from t where k = 'j5') $$,
+  $$ select o.service_from, o.service_to, jsonb_build_object('from', o.service_from, 'to', o.service_to)
+     from public.commission_invoice o where o.id = (select v from t where k = 'i1') $$,
+  'dated over the service period of the invoice it charges again, not the cancelled run''s');
+
+-- An unmeetable delay's late approval is held to one month (legal #1, round 2) -------------------------------------
+-- Pin's and Cyprès's 1-day delays leave no business day after E (OQ-71). Pin's collection is approved within the month
+-- (with the reason: past the mandate's date) and its payout never debited; Cyprès's is approved, then sent back to
+-- pending by a cancellation. Neither is a breach until the month has passed; then each gets its row against the month.
+insert into j select 'd1', to_jsonb(d) from private.remittance_deadline(private.paris_today() - 3, 1) d;
+insert into j select 'm1', to_jsonb(d) from private.remittance_deadline(private.paris_today() - 3, 30) d;
+select pg_temp.file('41', 'a4', 50000);
+select pg_temp.collect('41', 50000, private.paris_today() - 3);
+insert into t select 'e41', id from public.ledger_entry where payment_id = pg_temp.pay('41') and entry_type = 'allocation';
+insert into t values ('r6', pg_temp.request('a4', 'rq-r6-review'));
+select pg_temp.prepare((select v from t where k = 'r6'), '{}', '[]', '[]', pg_temp.gross_plan(50000), '{}', 1);
+select is(pg_temp.approve('ap-r6-review', pg_temp.item((select v from t where k = 'r6')), 'Délai du mandat intenable')
+          #>> '{results,0,status}', 'queued', 'Pin''s run queued with the reason (past the mandate''s date)');
+select is(pg_temp.job((select v from t where k = 'r6')) ->> 'status', 'approved', 'approved, within the month');
+select is((select count(*)::int from public.remittance_deadline_breach
+           where ledger_entry_id = (select v from t where k = 'e41')), 0,
+  'no breach row: paid within one month (R124-6), the mandate''s own date being unmeetable');
+select results_eq($$ select latest_execution_date, requested_execution_date, late_reason from public.remittance_late_approval
+                     where ledger_entry_id = (select v from t where k = 'e41') $$,
+  $$ select (v ->> 'latest_execution_date')::date, private.next_business_day(private.paris_today()),
+            'Délai du mandat intenable'::text from j where k = 'd1' $$,
+  'the late approval recorded against the mandate''s date (« délai intenable »)');
+select pg_temp.file('51', 'a5', 60000);
+select pg_temp.collect('51', 60000, private.paris_today() - 3);
+insert into t select 'e51', id from public.ledger_entry where payment_id = pg_temp.pay('51') and entry_type = 'allocation';
+insert into t values ('r7', pg_temp.request('a5', 'rq-r7-review'));
+select pg_temp.prepare((select v from t where k = 'r7'), '{}', '[]', '[]', pg_temp.gross_plan(60000), '{}', 1);
+select is(pg_temp.approve('ap-r7-review', pg_temp.item((select v from t where k = 'r7')), 'Délai du mandat intenable')
+          #>> '{results,0,status}', 'queued', 'Cyprès''s run queued');
+select is(pg_temp.job((select v from t where k = 'r7')) ->> 'status', 'approved', 'approved');
+select pg_temp.as_user('04');
+set local role authenticated;
+insert into j select 'cn7', public.cancel_remittance_run('cn-r7-review', (select v from t where k = 'r7'),
+                     (select version from public.remittance_run where id = (select v from t where k = 'r7')),
+                     'IBAN à vérifier');
+reset role;
+select results_eq($$ select (select count(*)::int from private.remittance_pending
+                             where ledger_entry_id = (select v from t where k = 'e51') and draft_run_id is null),
+                            (select count(*)::int from public.remittance_deadline_breach
+                             where ledger_entry_id = (select v from t where k = 'e51')) $$,
+  $$ values (1, 0) $$, 'cancelled: the item back in the queue, no breach row');
+insert into t select 'k1m', pg_temp.chk((select (v ->> 'latest_execution_date')::date from j where k = 'm1'));
+select is((select count(*)::int from public.remittance_deadline_breach
+           where ledger_entry_id in ((select v from t where k = 'e41'), (select v from t where k = 'e51'))), 0,
+  'the nightly checks on the one-month latest execution date: no breach yet');
+insert into t select 'k1n', pg_temp.chk((select (v ->> 'latest_execution_date')::date + 1 from j where k = 'm1'));
+select results_eq($$ select run_id, deadline, latest_execution_date, requested_execution_date, blocked_reason
+                     from public.remittance_deadline_breach where ledger_entry_id = (select v from t where k = 'e41') $$,
+  $$ select (select v from t where k = 'r6'), (v ->> 'deadline')::date, (v ->> 'latest_execution_date')::date,
+            private.next_business_day(private.paris_today()), null::text from j where k = 'm1' $$,
+  'the day after, the payout still not debited: its breach row, against the month (no « délai intenable » reason)');
+select results_eq($$ select run_id, deadline, latest_execution_date, requested_execution_date, blocked_reason
+                     from public.remittance_deadline_breach where ledger_entry_id = (select v from t where k = 'e51') $$,
+  $$ select null::uuid, (v ->> 'deadline')::date, (v ->> 'latest_execution_date')::date, null::date, null::text
+     from j where k = 'm1' $$,
+  'and the item sent back to pending: its breach row against the month');
+
+-- A corrective invoice unpaid after its date (legal #4, round 2: design §15 invoice_overdue) --------------------------
+insert into t select 'k30', pg_temp.chk(private.paris_today() + 30);
+insert into t select 'k31', pg_temp.chk(private.paris_today() + 31);
+select is((select count(*)::int from public.payment_check_result
+           where run_id = (select v from t where k = 'k30') and code = 'invoice_overdue'), 0,
+  'on its latest date nothing is overdue');
+select results_eq($$ select amount_minor, details ->> 'settlement', (details ->> 'due_date')::date
+                     from public.payment_check_result
+                     where run_id = (select v from t where k = 'k31') and code = 'invoice_overdue'
+                       and subject_id = (select v from t where k = 'j5') $$,
+  $$ values (36000::bigint, 'netted'::text, private.paris_today() + 30) $$,
+  'the day after, still open: invoice_overdue, its open TTC and date');
+select ok((select count(*) from public.payment_check_result
+           where run_id = (select v from t where k = 'k31') and code = 'invoice_overdue'
+             and subject_id in ('e3000000-0000-0000-0000-000000000002', 'e3000000-0000-0000-0000-000000000004')) = 2
+          and not exists (select 1 from public.payment_check_result
+                          where run_id = (select v from t where k = 'k31') and code = 'invoice_overdue'
+                            and subject_id = (select v from t where k = 'i1')),
+  'so are the due invoices left open; a run''s netted invoice, paid with its run, has no date of its own');
+
 -- The line guard (performance #1) ------------------------------------------------------------------------------------
 select throws_ok($$ update public.remittance_line set released_at = now() where run_id = (select v from t where k = 'r5') $$,
   '23514', null, 'a released line never changes again');
@@ -564,7 +695,8 @@ select is((select count(*)::int from information_schema.columns
 -- Who reads the late approvals -------------------------------------------------------------------------------------
 select pg_temp.as_user('01');
 set local role authenticated;
-select is((select count(*)::int from public.remittance_late_approval), 2, 'money staff read the servicer''s');
+select is((select count(*)::int from public.remittance_late_approval), 4,
+  'money staff read the servicer''s (Martin''s, Lilas''s, Pin''s and Cyprès''s)');
 select throws_ok($$ insert into public.remittance_late_approval (run_id, ledger_entry_id, organization_id,
                       client_organization_id, latest_execution_date, requested_execution_date, late_reason)
                     values ((select v from t where k = 'r1'), (select v from t where k = 'e6'),

@@ -393,6 +393,11 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Facture émise tardivement",
     help: "Un reversement a été validé plus de 2 jours ouvrés après sa préparation : la facture de commission est datée du jour de la validation.",
   },
+  // review M2c-4, round 2 (legal#4): the date printed on the invoice has passed (L441-10 II: penalties from the next day)
+  invoice_overdue: {
+    label: "Facture de commission non réglée à sa date",
+    help: "Une facture de commission reste ouverte après la date de règlement qu'elle indique : une facture à régler au compte propre, ou une facture rétablie par l'annulation d'un reversement que le reversement suivant n'a pas compensée à temps. Préparez le reversement du client ou vérifiez son règlement.",
+  },
   unallocated_deadline: {
     label: "Fonds rattachés à un dossier non imputés",
     help: "De l'argent rattaché au dossier d'un client attend son imputation alors que son délai de reversement court (OQ-26) ; « bloqué » quand une procédure l'interdit.",

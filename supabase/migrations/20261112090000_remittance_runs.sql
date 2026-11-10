@@ -342,9 +342,15 @@ create table public.commission_invoice (
   constraint commission_invoice_totals check (ttc_minor = ht_minor + vat_minor and case kind
     when 'invoice' then ht_minor > 0 and vat_minor >= 0 and vat_rate is not null and vat_book is not null
     else ht_minor < 0 and vat_minor <= 0 and vat_rate is null and vat_book is null end),
-  constraint commission_invoice_due check ((settlement = 'due') = (due_date is not null))
+  -- the date by which it is paid (L441-9 I): a due invoice's; a netted one is paid with its run's payout — except the
+  -- corrective invoice of a cancellation, set off on the next run at the latest by its date (legal review #4, round 2;
+  -- OQ-72)
+  constraint commission_invoice_due check (case settlement when 'due' then due_date is not null
+                                           else due_date is null or (kind = 'invoice' and reason = 'run_cancelled') end)
 );
 create index commission_invoice_client_idx on public.commission_invoice (client_organization_id, issue_date desc);
+create index commission_invoice_due_idx on public.commission_invoice (organization_id, due_date)
+  where due_date is not null;
 create index commission_invoice_run_idx on public.commission_invoice (run_id) where run_id is not null;
 create index commission_invoice_mandate_idx on public.commission_invoice (mandate_id, kind);
 comment on table public.commission_invoice is
@@ -1175,12 +1181,13 @@ as $$
 $$;
 
 -- Issues the documents `p_docs` (in order; each with its `id`, `key`, kind, mandate_id, amounts as text, lines,
--- charges, allocations, corrections, settlement mode and due days) for a client: one number each, the counter row of
--- the servicer's series and year locked (after the allocation and remit locks the caller holds), dated the
--- transaction's day; their entries in one ledger_post_set, the invoices' VAT in the book `p_vat_on_debits` says (the
--- plan's; null: the servicer's setting); each credit note applied to the invoices it corrects (commission_settlement
--- kind credit_note); the payload frozen with the mentions in force (L441-9). Returns {issue_date, documents: {ref:
--- {id, number}}}.
+-- charges, allocations, corrections, settlement mode and due days; optionally its own service period `service_from`,
+-- `service_to`, and `payment` 'next_run' for a netted invoice set off on the client's next run by a date) for a
+-- client: one number each, the counter row of the servicer's series and year locked (after the allocation and remit
+-- locks the caller holds), dated the transaction's day; their entries in one ledger_post_set, the invoices' VAT in the
+-- book `p_vat_on_debits` says (the plan's; null: the servicer's setting); each credit note applied to the invoices it
+-- corrects (commission_settlement kind credit_note); the payload frozen with the mentions in force (L441-9). Returns
+-- {issue_date, documents: {ref: {id, number}}}.
 create or replace function private.issue_commission_documents(p_organization_id uuid, p_client_organization_id uuid,
                                                               p_run_id uuid, p_docs jsonb, p_reason text,
                                                               p_vat_on_debits boolean default null)
@@ -1240,10 +1247,10 @@ begin
   select jsonb_build_object('iban', b.iban, 'bic', b.bic, 'holder', o.legal_name) into v_own
   from public.bank_account b join public.organization o on o.id = b.organization_id
   where b.id = v_set.own_bank_account_id;
-  -- an approval's documents are paid with its run: set off on its payout of the requested date, or on the approval
-  -- date when nothing is transferred (N = 0)
+  -- an approval's netted documents are paid with its run: set off on its payout of the requested date, or on the
+  -- approval date when nothing is transferred (N = 0); a due document's date is its due date (legal review #4, round 2)
   v_pay := case when p_reason = 'commission' and v_run.id is not null
-                then jsonb_build_object('run_number', v_run.number,
+                then jsonb_build_object('mode', 'run', 'run_number', v_run.number,
                                         'execution_date', coalesce(v_run.requested_execution_date, v_issue)) end;
 
   drop table if exists pg_temp._docs;
@@ -1254,9 +1261,14 @@ begin
          (x.doc ->> 'vat_rate')::numeric as vat_rate,
          case when x.doc ->> 'kind' = 'invoice' and x.doc ->> 'settlement' = 'due' then 'due' else 'netted' end
            as settlement,
-         case when x.doc ->> 'kind' = 'invoice' and x.doc ->> 'settlement' = 'due'
+         -- a due invoice's date, and a corrective invoice's set off on the next run at the latest by then (OQ-72):
+         -- the mandate's term, 30 days without one, never more than 45 after issue (L441-10 I)
+         case when x.doc ->> 'kind' = 'invoice'
+                   and (x.doc ->> 'settlement' = 'due' or x.doc ->> 'payment' = 'next_run')
               then v_issue + least(coalesce((x.doc ->> 'due_days')::integer, 30), 45) end as due_date,
          (x.doc ->> 'due_days')::integer as due_days, x.doc,
+         coalesce((x.doc ->> 'service_from')::date, v_run.service_from) as service_from,
+         coalesce((x.doc ->> 'service_to')::date, v_run.service_to) as service_to,
          v_last + x.ord::integer as seq,
          coalesce((select sum((c ->> 'vat_pending')::bigint) from jsonb_array_elements(x.doc -> 'corrections') c), 0)
            as v_pending,
@@ -1304,7 +1316,8 @@ begin
     select v_doc.id, p_organization_id, p_client_organization_id, v_doc.mandate_id, p_run_id, v_doc.kind, v_series,
            extract(year from v_issue)::integer, v_doc.seq,
            v_series || '-' || extract(year from v_issue)::integer || '-' || lpad(v_doc.seq::text, 6, '0'), v_issue,
-           v_run.service_from, v_run.service_to, 'EUR', v_doc.ht, case when v_doc.kind = 'invoice' then v_doc.vat_rate end, v_doc.vat,
+           v_doc.service_from, v_doc.service_to, 'EUR', v_doc.ht, case when v_doc.kind = 'invoice' then v_doc.vat_rate end,
+           v_doc.vat,
            v_doc.ttc, case when v_doc.kind = 'invoice' then case when v_on_debits then 'vat_collected' else 'vat_pending' end end,
            v_doc.settlement, v_doc.due_date,
            p_reason, y.payload, encode(sha256(convert_to(y.payload::text, 'UTF8')), 'hex'), v_doc.entry_id
@@ -1317,7 +1330,7 @@ begin
             'mandate', (select jsonb_build_object('id', m.id, 'reference', m.reference) from public.mandate m
                         where m.id = v_doc.mandate_id),
             'run', case when v_run.id is not null then jsonb_build_object('id', v_run.id, 'number', v_run.number) end,
-            'service_period', jsonb_build_object('from', v_run.service_from, 'to', v_run.service_to),
+            'service_period', jsonb_build_object('from', v_doc.service_from, 'to', v_doc.service_to),
             'lines', coalesce(v_doc.doc -> 'lines', '[]'),
             'corrections', coalesce(v_doc.doc -> 'corrections', '[]'),
             'totals', jsonb_build_object('ht_minor', v_doc.ht::text, 'vat_minor', v_doc.vat::text, 'ttc_minor', v_doc.ttc::text,
@@ -1326,7 +1339,12 @@ begin
                                              'due_days', v_doc.due_days),
             -- the mentions that change over time, as in force at issue (L441-9 I; legal review #4)
             'due_date', v_doc.due_date,
-            'payment_reference', v_pay,
+            -- netted documents only: the run whose payout pays them, or the next run by a date; a due one is paid by
+            -- its due date to the own account below
+            'payment_reference', case when v_doc.settlement = 'netted' then
+                                   case when v_doc.doc ->> 'payment' = 'next_run'
+                                        then jsonb_build_object('mode', 'next_run', 'latest_date', v_doc.due_date)
+                                        else v_pay end end,
             'own_account', case when v_doc.settlement = 'due' then v_own end,
             'penalty_text', coalesce(v_set.penalty_text,
               'Pénalités de retard : taux d''intérêt appliqué par la Banque centrale européenne à son opération de '
@@ -1884,9 +1902,12 @@ end;
 $$;
 
 -- The lines of an approved run paid after their latest execution date (§9.5 step 2: approved late with its reason):
--- a breach row per item unless the nightly checks wrote it first (I21; one per item, append-only), and the late
--- approval itself, always (review M2c-4: tests-ui #2, legal #8). p_paid_on: the payout's requested execution date, or
--- the settlement date when N = 0.
+-- the late approval itself, always (review M2c-4: tests-ui #2, legal #8), and a breach row per item paid after the
+-- date it is held to, unless the nightly checks wrote it first (I21; one per item, append-only). An unmeetable delay
+-- (OQ-71) is held to one month, as the nightly checks hold it (R124-6; review legal #1, round 2): its late approval is
+-- recorded against the mandate's date (« délai intenable »), its breach row only when it is paid after the month,
+-- with the month's dates — so that, approved within the month and not paid by then, the nightly checks write its
+-- breach row at the month. p_paid_on: the payout's requested execution date, or the settlement date when N = 0.
 create or replace function private.remittance_late_lines(r public.remittance_run, p_paid_on date)
 returns void
 language plpgsql
@@ -1897,13 +1918,23 @@ begin
   if r.earliest_latest_execution_date is null or p_paid_on <= r.earliest_latest_execution_date then
     return;   -- no line late (the header's earliest date is the lines' minimum)
   end if;
+  with late as materialized (
+    select l.ledger_entry_id, l.payment_id, l.deadline, l.latest_execution_date, l.unmeetable, l.encaissement_date
+    from public.remittance_line l
+    where l.run_id = r.id and l.amount_minor > 0 and l.latest_execution_date < p_paid_on),
+  m as materialized (   -- one month, once per distinct E of the unmeetable lines
+    select k.e_date, d.deadline, d.latest_execution_date
+    from (select distinct x.encaissement_date as e_date from late x
+          where x.unmeetable and x.encaissement_date is not null) k
+    cross join lateral private.remittance_deadline_or_null(k.e_date, 30) d)
   insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
                                                  run_id, deadline, latest_execution_date, requested_execution_date,
-                                                 blocked_reason, late_reason)
-  select r.organization_id, r.client_organization_id, l.ledger_entry_id, l.payment_id, r.id, l.deadline,
-         l.latest_execution_date, p_paid_on, case when l.unmeetable then 'unmeetable_delay' end, r.late_reason
-  from public.remittance_line l
-  where l.run_id = r.id and l.amount_minor > 0 and l.latest_execution_date < p_paid_on
+                                                 late_reason)
+  select r.organization_id, r.client_organization_id, l.ledger_entry_id, l.payment_id, r.id,
+         case when l.unmeetable then m.deadline else l.deadline end,
+         case when l.unmeetable then m.latest_execution_date else l.latest_execution_date end, p_paid_on, r.late_reason
+  from late l left join m on l.unmeetable and m.e_date = l.encaissement_date
+  where not l.unmeetable or m.latest_execution_date < p_paid_on   -- (a month the calendar cannot place: its alert)
   on conflict (ledger_entry_id) do nothing;
   insert into public.remittance_late_approval (run_id, ledger_entry_id, organization_id, client_organization_id,
                                                latest_execution_date, requested_execution_date, late_reason,
@@ -2031,12 +2062,17 @@ begin
   into v_docs from amounts a;
 
   -- 2. the run's own credit notes on earlier invoices undone (money review #0): per mandate and VAT rate, one corrective
-  -- invoice charging again, per (file, tier key), what they took back — its HT and VAT exactly what they credited, at
-  -- each credited invoice's own rate — so that the tier history goes back exactly as before the run and the next run
-  -- credits each reversal once (on this invoice: it charges the line now). Settled as the mandate's terms say today.
+  -- invoice charging again, per (file, tier key), the HT they took back, at each credited invoice's own rate — so that
+  -- the tier history goes back exactly as before the run and the next run credits each reversal once (on this invoice:
+  -- it charges the line now). Its VAT is its own HT's, R(HT × rate) half up as every invoice's (242 nonies A 11°) and
+  -- as the engine assumes when it credits it (round 2: the sum of the VATs credited, each by cumulative difference on
+  -- its own invoice, is not, and the re-run then credited a cent more than it charged, or left one pending); it differs
+  -- from what was credited by under a cent per invoice credited, until the re-run credits it in full. Dated over the
+  -- service periods of the invoices it charges again; settled as the mandate's terms say today — netted, set off on
+  -- the next run at the latest by its due date, or due (legal review #4, round 2; OQ-72).
   with crd as (   -- per credit note of the run and invoice it corrected: what it took back
     select cn.mandate_id, cn.number as credit_number, c.original_invoice_id, o.number as original_number,
-           o.issue_date as original_date, o.vat_rate, -c.ht_minor as ht, -c.vat_minor as vat, cn.seq
+           o.issue_date as original_date, o.vat_rate, -c.ht_minor as ht, o.service_from, o.service_to, cn.seq
     from public.commission_invoice cn
     join public.commission_credit_correction c on c.credit_note_id = cn.id
     join public.commission_invoice o on o.id = c.original_invoice_id
@@ -2049,7 +2085,8 @@ begin
     where cn.run_id = r.id and cn.kind = 'credit_note' and cn.reason = 'commission'
     group by cn.mandate_id, o.vat_rate, a.account_id, a.tier_key),
   docs as (
-    select x.mandate_id, x.vat_rate, sum(x.ht) as ht, sum(x.vat) as vat, m.reference,
+    select x.mandate_id, x.vat_rate, sum(x.ht) as ht, round(sum(x.ht) * x.vat_rate)::bigint as vat, m.reference,
+           min(x.service_from) as service_from, max(x.service_to) as service_to,
            (select mt.remittance_terms from public.mandate_terms mt
             where mt.mandate_id = x.mandate_id and mt.valid_from <= v_today
               and (mt.valid_to is null or v_today < mt.valid_to)
@@ -2060,10 +2097,10 @@ begin
            'id', gen_random_uuid(), 'ref', 'restore:' || d.mandate_id || ':' || d.vat_rate,
            'key', 'inv-restore:' || r.id || ':' || d.mandate_id || ':' || d.vat_rate, 'kind', 'invoice',
            'mandate_id', d.mandate_id, 'ht', d.ht::text, 'vat', d.vat::text, 'ttc', (d.ht + d.vat)::text,
-           'vat_rate', d.vat_rate::text,
+           'vat_rate', d.vat_rate::text, 'service_from', d.service_from, 'service_to', d.service_to,
            'settlement', case when jsonb_typeof(d.terms -> 'netting') = 'object' then 'netted' else 'due' end,
-           'due_days', case when jsonb_typeof(d.terms -> 'netting') = 'object' then null
-                            else coalesce((d.terms ->> 'invoice_payment_days')::integer, 30) end,
+           'payment', case when jsonb_typeof(d.terms -> 'netting') = 'object' then 'next_run' end,
+           'due_days', coalesce((d.terms ->> 'invoice_payment_days')::integer, 30),
            'clause_ref', d.terms #>> '{netting,clause_ref}',
            'lines', (select jsonb_agg(jsonb_build_object(
                        'kind', 'commission',
@@ -2204,11 +2241,13 @@ as $$
   mon as (
     select k.mandate_id, exists (select 1 from public.mandate_terms v where v.mandate_id = k.mandate_id) as monitored
     from (select distinct i.mandate_id from items i where i.mandate_id is not null) k),
-  dl as (
+  -- one deadline per distinct (E, delay), whatever the estimates (review perf#0, round 2: an inlined CTE was joined
+  -- first and its deadline computed once per item when the queue had no statistics)
+  dl as materialized (
     select k.e_date, k.days, d.*
     from (select distinct i.e_date, i.days from items i where i.e_date is not null) k
     cross join lateral private.remittance_deadline_or_null(k.e_date, k.days) d),
-  m as (   -- one month, for the delays that cannot be met
+  m as materialized (   -- one month, for the delays that cannot be met: once per distinct E
     select k.e_date, d.*
     from (select distinct dl.e_date from dl where dl.unmeetable) k
     cross join lateral private.remittance_deadline_or_null(k.e_date, 30) d)
@@ -2264,7 +2303,7 @@ as $$
                        limit 1) t on true
     where p.organization_id = p_organization_id and p.account_id is not null
       and p.status in ('matched', 'partially_allocated')),
-  dl as (
+  dl as materialized (   -- once per distinct (E, delay), whatever the estimates (review perf#0, round 2)
     select k.e_date, k.days, d.*
     from (select distinct u.e_date, u.days from u where u.unallocated > 0) k
     cross join lateral private.remittance_deadline_or_null(k.e_date, k.days) d)
@@ -2302,7 +2341,7 @@ as $$
                         offset 0) y
     where r.organization_id = p_organization_id and r.status in ('approved', 'sent')
       and not exists (select 1 from public.bank_transfer t where t.id = r.transfer_id and t.status = 'booked')),
-  m as (
+  m as materialized (   -- one month once per distinct E, whatever the estimates (review perf#0, round 2)
     select k.e_date, d.*
     from (select distinct l.encaissement_date as e_date from l where l.unmeetable and l.encaissement_date is not null) k
     cross join lateral private.remittance_deadline_or_null(k.e_date, 30) d),
@@ -2711,6 +2750,16 @@ begin
          jsonb_build_object('number', r.number, 'known_at', r.known_at, 'approved_at', r.approved_at)
   from public.remittance_run r
   where r.organization_id = p_organization_id and r.invoice_late and r.approved_at > clock_timestamp() - interval '30 days'
+  union all
+  -- an invoice still open after the date it is paid by (§15 invoice_overdue; L441-10 II: penalties run from the next
+  -- day): a due invoice, or a cancellation's corrective invoice the next run did not set off in time (legal review #4,
+  -- round 2; OQ-72). A run's netted invoice has no date of its own: its run pays it (the payout checks above).
+  select 'invoice_overdue', 'alert', 'commission_invoice', i.id, i.currency, o.open, null, v_today - i.due_date,
+         jsonb_build_object('number', i.number, 'client_id', i.client_organization_id, 'settlement', i.settlement,
+                            'due_date', i.due_date)
+  from public.commission_invoice i
+  cross join lateral (select private.document_open(i.id) as open) o
+  where i.organization_id = p_organization_id and i.due_date is not null and i.due_date < v_today and o.open > 0
   union all
   -- money matched to a client's file but not allocated (still in 4710) gets the same clock (OQ-26, compliance B7)
   select 'unallocated_deadline', 'alert', 'servicer', null, u.currency, sum(u.unallocated_minor)::bigint,

@@ -16,7 +16,7 @@
 -- The date-dependent checks run at a given Paris date (run_remittance_checks' p_today), so they never drift with the
 -- calendar.
 begin;
-select plan(52);
+select plan(56);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name, siren) values
@@ -489,6 +489,64 @@ select pg_temp.chk('2026-11-08');       -- a Sunday
 select is((select idx_tup_fetch from pg_temp.since_mark('public.remittance_line'))
           - (select (v #>> '{}')::bigint from j where k = 'thu'), 1::bigint,
   'I16 reads a run frozen long ago only on Sundays (the booked run''s one line more than on Thursday)');
+
+-- perf#0, round 2: one deadline per distinct (E, delay) in each reader, whatever the estimates -----------------------
+-- On one E (Mon 12/10): ten payments matched to c8's files and not allocated (4710), ten collections of c1 (1-day delay:
+-- unmeetable, held to one month too) frozen in an approved run never debited (c1's earlier run booked first: one live
+-- run per client), ten more of c1 waiting. Each deadline is
+-- two probes of the business calendar (its horizon, then the days before the deadline): a reader probes it twice per
+-- distinct (E, delay) it holds, never per row.
+select pg_temp.file(n, '8', 10000, '2026-09-01') from unnest(array['d0', 'd1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7', 'd8',
+                                                                 'd9']) n;
+select pg_temp.collect(n, 10000, '2026-10-12', false) from unnest(array['d0', 'd1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7',
+                                                                         'd8', 'd9']) n;
+select pg_temp.file(n, '1', 10000, '2026-09-01') from unnest(array['e0', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8',
+                                                                 'e9', 'f0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7',
+                                                                 'f8', 'f9']) n;
+select pg_temp.collect(n, 10000, '2026-10-12') from unnest(array['e0', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8',
+                                                                 'e9']) n;
+update public.remittance_run set status = 'booked', booked_on = '2026-11-02' where id = (select v from t where k = 'r1');
+insert into t select 'r1b', private.create_remittance_run('00000000-0000-0000-0000-0000000000cc', pg_temp.c('1'), 'EUR',
+                                                          'manual', null, null);
+select pg_temp.freeze((select v from t where k = 'r1b'), '2026-10-30');
+select pg_temp.collect(n, 10000, '2026-10-12') from unnest(array['f0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8',
+                                                                 'f9']) n;
+select results_eq($$ select (select count(*)::int from private.unallocated_payment_deadlines(
+                                '00000000-0000-0000-0000-0000000000cc') where encaissement_date = '2026-10-12'),
+                            (select count(*)::int from private.pending_item_deadlines(
+                                '00000000-0000-0000-0000-0000000000cc') where encaissement_date = '2026-10-12'
+                                and unmeetable),
+                            (select count(*)::int from public.remittance_line
+                             where run_id = (select v from t where k = 'r1b') and unmeetable) $$,
+  $$ values (10, 10, 10) $$, 'ten payments, ten waiting collections and ten frozen lines share one E');
+-- what each reader holds: its distinct (E, delay), and the distinct E of its unmeetable ones (one month)
+insert into j select 'ua', to_jsonb(count(distinct (d.encaissement_date, d.max_days)))
+from private.unallocated_payment_deadlines('00000000-0000-0000-0000-0000000000cc') d;
+insert into j select 'pi', to_jsonb(count(distinct (d.encaissement_date, d.max_days))
+                                    filter (where d.encaissement_date is not null)
+                                    + count(distinct d.encaissement_date) filter (where d.unmeetable))
+from private.pending_item_deadlines('00000000-0000-0000-0000-0000000000cc') d;
+insert into j select 'ol', to_jsonb(count(distinct l.encaissement_date))
+from public.remittance_run r join public.remittance_line l on l.run_id = r.id
+where r.organization_id = '00000000-0000-0000-0000-0000000000cc' and r.status in ('approved', 'sent')
+  and not exists (select 1 from public.bank_transfer x where x.id = r.transfer_id and x.status = 'booked')
+  and not l.released and l.amount_minor > 0 and l.unmeetable and l.latest_execution_date is not null
+  and l.encaissement_date is not null;
+select pg_temp.mark();
+select count(*) from private.unallocated_payment_deadlines('00000000-0000-0000-0000-0000000000cc');
+select is((select idx_scan from pg_temp.since_mark('public.business_calendar')),
+  2 * (select (v #>> '{}')::bigint from j where k = 'ua'),
+  'the money in 4710: one deadline per distinct (E, delay), not per payment');
+select pg_temp.mark();
+select count(*) from private.pending_item_deadlines('00000000-0000-0000-0000-0000000000cc');
+select is((select idx_scan from pg_temp.since_mark('public.business_calendar')),
+  2 * (select (v #>> '{}')::bigint from j where k = 'pi'),
+  'the waiting collections: one per distinct (E, delay), and one month once per distinct E of the unmeetable ones');
+select pg_temp.mark();
+select count(*) from private.inflight_overdue_lines('00000000-0000-0000-0000-0000000000cc', private.paris_today());
+select is((select idx_scan from pg_temp.since_mark('public.business_calendar')),
+  2 * (select (v #>> '{}')::bigint from j where k = 'ol'),
+  'the lines of runs not debited: one month once per distinct E of the unmeetable ones, not per line');
 
 select * from finish();
 rollback;

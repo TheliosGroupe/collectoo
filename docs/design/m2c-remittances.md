@@ -834,7 +834,7 @@ N = Σ net_m ;  D = Σ D_m ;  N + D = gross
   Effects:
   - the transfer is cancelled and the file superseded;
   - one full credit note per invoice of the run;
-  - *M2c-4 review:* one corrective invoice per mandate and VAT rate (reason `run_cancelled`) re-charging, per (file, tier key), exactly the HT and VAT the run's credit notes credited on earlier invoices, at each credited invoice's own VAT rate (« Annulation du reversement RV-… — rétablissement de l'avoir FC-… (facture FC-… du jj/mm/aaaa) »), so the tier history is exactly as before the run and the next run credits each reversal once;
+  - *M2c-4 review:* one corrective invoice per mandate and VAT rate (reason `run_cancelled`) re-charging, per (file, tier key), exactly the HT the run's credit notes credited on earlier invoices, at each credited invoice's own VAT rate (« Annulation du reversement RV-… — rétablissement de l'avoir FC-… (facture FC-… du jj/mm/aaaa) »), so the tier history is exactly as before the run and the next run credits each reversal once; *round 2:* its VAT is R(HT × rate) as every invoice's, its service period that of the invoices it charges again, and under a netting clause it is set off on the next run at the latest by its due date (issue + the mandate's `invoice_payment_days`, 30 without, ≤ 45; OQ-72), `invoice_overdue` once that date passes;
   - the lines are released and the items go back to pending;
   - status `cancelled`.
 
