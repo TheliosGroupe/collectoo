@@ -782,6 +782,7 @@ The key is `sched:<client>:<currency>:<Paris date>`. A monthly frequency is not 
 
    It then computes deadlines, commission and the settlement plan (§9.6), writes the draft lines (COPY into `private.remittance_draft_line`), and stores `inputs_hash` (item ids, amounts, bases, terms versions and their hashes, history, engine version), the blockers and the totals.
 3. **« Actualiser »** releases the reservation and prepares again, with a new K. Drafts are not recomputed under ops' feet: the items are frozen at prepare (ledger critique #22).
+4. *M2c-5b review (security-concurrency#0):* a manual credit note can commit while a draft is prepared (nothing serialises the two). The prepare reads the history's high-water mark (`private.remittance_history_seq`) before the key states, so a credit note committed after that read raises it and the approval sends the draft back (`history_changed`); and a draft whose lines' commission the engine refused (`commission_input_error`, e.g. key states and waivers read in different snapshots) is never approved: the approval refuses it (`engine_error`, « actualisez le brouillon ») and the page leaves it unselectable.
 
 ### 9.5 Approval (`approve_remittance_runs(key, items ≤ 200 [{run_id, inputs_hash, net_text}], requested_execution_date?)`, admin or ops manager at aal2)
 
@@ -1009,7 +1010,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 - **One credit note per (run, mandate) with Δ < 0**, naming every invoice it corrects.
 - **Service period** = previous K → this K (269 1 a bis; 242 nonies A 10°).
 - **A cancelled run** is credited in full; numbers are never reused.
-- **A manual credit note** (`issue_credit_note`, admin, reason) corrects an error (risk R2). *Built in M2c-5b (ADR-0014):* on one invoice, spread over what it still charges each file in proportion (or on one file), a reason category on the document and the reason kept by staff; what it takes back is a waiver on (invoice, file, tier key) the commission engine never charges again and a later credit on that invoice absorbs first; refused on a credit note, beyond what is left, or while a run in flight sets the invoice off.
+- **A manual credit note** (`issue_credit_note`, admin, reason) corrects an error (risk R2). *Built in M2c-5b (ADR-0014):* on one invoice, spread over what it still charges each file in proportion (or on one file), a reason category on the document and the reason kept by staff; what it takes back is a waiver on (invoice, file, tier key) the commission engine never charges again and a later credit on that invoice absorbs first; refused on a credit note, beyond what is left, or while a run in flight sets the invoice off. *M2c-5b review:* also refused while the invoice's own run is approved or sent (`run_in_flight`: a cancellation would credit the invoice in full and the re-run bill the rectified amount again; OQ-78 c); a refund owed that no later run settles raises `credit_refund_owed` after 30 days and is paid by `record_client_refund` (§16, M2c-7).
 - **Number:** `{prefix}-{YYYY}-{NNNNNN}`, from `private.invoice_counter` (servicer, series, year of the issue date), locked `FOR UPDATE` in the issuing transaction, never from a sequence.
   - One series for invoices and credit notes per servicer: BOFiP §90 and §110, founder #12, OQ-43.
   - ALWAYS guard: seq = previous + 1 in its series and year, and issue date ≥ the previous one.
@@ -1017,7 +1018,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
   - Nightly check: count = max seq per year, and dates monotonic.
 - **Rendering** happens after the commit, from the frozen payload. A failed render is retried and never changes the number or the data.
 
-### 14.2 Mentions (payload → locked template `facture-commission-fr-1`, `fr-2` since the M2c-5 review; no LLM)
+### 14.2 Mentions (payload → locked template `facture-commission-fr-1`, `fr-2` since the M2c-5 review, `fr-3` since the M2c-5b review; no LLM)
 
 | Mention | Basis |
 |---|---|
@@ -1034,7 +1035,8 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 | « Pas d'escompte pour paiement anticipé » | L441-9 |
 | Penalty rate (servicer setting) and « Indemnité forfaitaire pour frais de recouvrement en cas de retard de paiement : 40,00 € » — professional clients; **printed** whatever proceeding is recorded, **not claimed** while the opening forbids payment of that claim at its due date (M2c-5 review: the creditor « ne peut invoquer » it then; printing is still due) | L441-9, L441-10 II, D441-5 |
 | Optional « Votre bon de commande n° … » — not yet supported: nothing captures a purchase order (a recovery mandate is not one); printed once a client gives one (OQ-77) | L441-9 |
-| Credit note: « Avoir n° FC-2026-000004 rectifiant la facture FC-2026-000001 du 02/11/2026 » per line, with its reason (« encaissement annulé : paiement repris le 12/11/2026 ») | 289 I 5; 272 |
+| Credit note: « Avoir n° FC-2026-000004 rectifiant la facture FC-2026-000001 du 02/11/2026 » per line, with its reason (« encaissement annulé : paiement repris le 12/11/2026 ») | 289 I 5; 272; from 2027 CIBS L216-25 al. 2, L212-9, L214-18 (M2c-5b review) |
+| Credit note, per invoice it corrects (M2c-5b review, template `fr-3`): « Après cet avoir, la facture FC-2026-000001 du 02/11/2026 s'élève à 70,00 € HT, TVA 14,00 € (20 %) » — that invoice's HT and VAT after this credit note, every credit note on it included (`corrections[].ht_after`, `vat_after`, frozen at issue) | BOI-TVA-DECLA-30-20-20-20 §260; BOI-TVA-DED-40-10-20 §80 (« La note doit, en outre, mentionner les noms et adresses des parties ainsi que le montant du total hors taxes et de la TVA due après application de la réduction de prix ») |
 
 - Amounts are integer minor units as text in the payload and French in the PDF.
 - The payload holds the structured seller, buyer, lines, totals and settlement, ready for a later Factur-X / UBL mapping and for 290 A.
@@ -1080,7 +1082,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 - `servicer_funds_unswept` (> 2 business days);
 - `advance_open` (> 30 days);
 - `invoice_overdue`;
-- `refund_owed_to_client` (a credit balance on 4111 in invoice mode);
+- `refund_owed_to_client` (a credit balance on 4111 in invoice mode); *built in the M2c-5b review as `credit_refund_owed`*: a credit note with an amount owed to the client (beyond what its invoice still owed) that no run has settled 30 days after its issue — paid by the client's next run, or by `record_client_refund` (§16, M2c-7);
 - `payee_changed` (information, 30 days);
 - `document_missing` (> 1 hour);
 - `vat_pack_review` (from 2026-12-01);
@@ -1104,7 +1106,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 | `approve_remittance_runs(key, items ≤ 200, requested_execution_date?)`, `cancel_remittance_run(key, run, reason, attestation?, evidence?)` | admin, ops_manager / admin |
 | `generate_transfer_file(key, bank_account)`, `transfer_file_download(file)`, `mark_transfer_file_sent`, `cancel_transfer_file(key, file, not_sent_attestation)` | admin, ops_manager |
 | `link_debit` (new kinds `unplanned_payout`, `fee`, `loss`, `own_credit`, `client_payment`), `classify_bank_fee`, `request_top_up` | admin, ops_manager |
-| `record_client_payment(key, client, documents?, amount_text, date, evidence)`, `record_client_refund`, `write_off_advance`, `reverse_servicer_entry(key, entry, reason)` (fee, advance, loss), `issue_credit_note` | admin (payments: ops_manager too) |
+| `record_client_payment(key, client, documents?, amount_text, date, evidence)`, `record_client_refund`, `write_off_advance`, `reverse_servicer_entry(key, entry, reason)` (fee, advance, loss), `issue_credit_note` (built in M2c-5b; `record_client_refund` pays a credit note's refund owed that no run settles, M2c-7) | admin (payments: ops_manager too) |
 
 **Reads:** `remittance_overview` (per client: owed, oldest encaissement, earliest latest-execution date, blockers), `remittance_run_detail`, `transfer_queue`, `client_remittances`, `client_invoices`, `accounting_export`.
 
