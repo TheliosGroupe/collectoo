@@ -299,3 +299,40 @@ describe("classifying without booking", () => {
       expect(DEBIT_REVIEW[code], code).toBeDefined();
   });
 });
+
+describe("the remittances' nightly checks (M2c-4 and its review)", () => {
+  it("has French words for every code the remittance checks and the worker write", () => {
+    for (const code of [
+      "remittance_item_twice",
+      "remittance_run_totals",
+      "invoice_numbering",
+      "invoice_ledger",
+      "settlement_ledger",
+      "vat_pending_ledger",
+      "remittance_deadline_breached",
+      "remittance_delay_unmeetable",
+      "remittance_due_critical",
+      "remittance_due_soon",
+      "payout_blocked",
+      "draft_waiting",
+      "invoice_late",
+      "unallocated_deadline",
+      // review M2c-4 (nc#0, legal#3, tests-ui#3)
+      "remittance_deadline_not_computable",
+      "remittance_schedule_failed",
+      "remittance_payout_overdue",
+      "remittance_payout_not_executed",
+      "remittance_prepare_failed",
+    ]) {
+      expect(CHECK_LABEL[code]?.label, code).toBeTruthy();
+      expect(CHECK_LABEL[code]?.help, code).toBeTruthy();
+    }
+  });
+
+  it("never says a payout was paid before the bank's debit", () => {
+    for (const code of ["remittance_payout_overdue", "remittance_payout_not_executed"]) {
+      expect(CHECK_LABEL[code]?.help, code).toContain("débit");
+      expect(CHECK_LABEL[code]?.label.toLowerCase(), code).not.toContain("payé");
+    }
+  });
+});

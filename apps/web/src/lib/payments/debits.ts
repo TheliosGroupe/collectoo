@@ -367,7 +367,30 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   draft_waiting: {
     label: "Brouillon de reversement en attente",
-    help: "Un brouillon préparé attend sa validation depuis plus d'un jour ouvré.",
+    help: "Un brouillon de reversement attend depuis plus d'un jour ouvré : sa validation, ou « Actualiser » si sa préparation a échoué.",
+  },
+  // review M2c-4 (tests-ui#3): a draft whose preparation failed, which nothing retries
+  remittance_prepare_failed: {
+    label: "Préparation d'un reversement échouée",
+    help: "La préparation d'un brouillon de reversement a échoué et rien ne la relance : ouvrez-le et cliquez « Actualiser » (ou « Abandonner »).",
+  },
+  // review M2c-4 (legal#3): an approved run is not paid until the bank's debit
+  remittance_payout_overdue: {
+    label: "Reversement validé non débité après la date limite",
+    help: "Le virement d'un reversement validé n'est pas débité par la banque alors que la dernière date d'exécution de certains de ses encaissements est passée (art. R124-6 CPCE) : vérifiez qu'il a été transmis et exécuté.",
+  },
+  remittance_payout_not_executed: {
+    label: "Reversement non exécuté à la date demandée",
+    help: "La date d'exécution demandée d'un reversement validé est passée et son débit n'est pas comptabilisé : vérifiez la transmission du fichier de virements à la banque.",
+  },
+  // review M2c-4 (nc#0): what the deadline engine or the hourly schedule could not do
+  remittance_deadline_not_computable: {
+    label: "Délai de reversement non calculable",
+    help: "Des encaissements ou des paiements ont une date d'encaissement hors du calendrier des jours ouvrés renseigné : leur dernière date d'exécution ne peut pas être calculée. Vérifiez-les et reversez-les sans attendre ; prévenez le support.",
+  },
+  remittance_schedule_failed: {
+    label: "Préparation automatique des reversements en échec",
+    help: "La tâche horaire qui prépare les reversements du cabinet (jours du mandat, garde du délai) a échoué : préparez les reversements dus (« Préparer maintenant ») et prévenez le support.",
   },
   invoice_late: {
     label: "Facture émise tardivement",

@@ -1,15 +1,22 @@
 import { describe, expect, it } from "vitest";
+import { errorText } from "@/lib/boarding/forms";
 import {
   approvalSummary,
   blockerLabel,
   confirmedAgo,
   deadlineChip,
   failureLabel,
+  failureNote,
+  lateReasonRequired,
   percentText,
+  prepareFailed,
+  refundNote,
+  runBusy,
   runErrorCode,
   runStatus,
   runTab,
   sumMinor,
+  summaryTone,
 } from "./runs";
 
 describe("runs (M2c-4 « Reversements »)", () => {
@@ -62,13 +69,138 @@ describe("runs (M2c-4 « Reversements »)", () => {
     expect(runErrorCode("anything else")).toBe("unknown");
   });
 
-  it("says the approval's outcome per run", () => {
+  it("says the approval's outcome per run, with the count refused", () => {
     expect(
       approvalSummary([
         { number: "RV-2026-000001", status: "queued", reason: null },
         { number: "RV-2026-000002", status: "refused", reason: "stale" },
       ]),
-    ).toBe("1 en validation ; RV-2026-000002 refusé : le brouillon a changé depuis l'affichage");
+    ).toEqual({
+      summary: "1 en validation ; RV-2026-000002 refusé : le brouillon a changé depuis l'affichage",
+      queued: 1,
+      refused: 1,
+    });
+    expect(approvalSummary([{ number: "RV-2026-000001", status: "queued", reason: null }])).toEqual({
+      summary: "1 en validation",
+      queued: 1,
+      refused: 0,
+    });
+  });
+
+  it("colours the approval's outcome: green when all are queued, orange when some are refused, red when all are", () => {
+    expect(summaryTone({ queued: 2, refused: 0 })).toBe("ok");
+    expect(summaryTone({ queued: 1, refused: 1 })).toBe("action");
+    expect(summaryTone({ queued: 0, refused: 1 })).toBe("error");
+  });
+
+  it("words every refusal of the approval in French, never the code (review M2c-4 tests-ui#4, C1)", () => {
+    const words: Record<string, string> = {
+      unknown_run: "reversement introuvable",
+      not_draft: "n'est plus un brouillon : rechargez",
+      preparing: "préparation en cours : réessayez",
+      approval_in_progress: "déjà en cours de validation",
+      payout_blocked: "virement bloqué",
+      busy: "traitement en cours sur ce reversement : réessayez",
+      vat_option_changed: "option TVA modifiée depuis la préparation : actualisez",
+      client_status_changed: "situation du client modifiée depuis la préparation : actualisez",
+      late_reason_required: "motif du retard requis",
+    };
+    for (const [code, text] of Object.entries(words)) expect(failureLabel(code), code).toBe(text);
+    for (const code of [
+      "stale",
+      "not_prepared",
+      "negative_net",
+      "execution_date_passed",
+      "execution_date_not_business_day",
+      "execution_date_after_cutoff",
+      "vat_rate_changed",
+      "commission_blocked",
+      "payout_account_changed",
+      "balance_changed",
+      "history_changed",
+      "documents_changed",
+      "items_changed",
+      "approval_timeout",
+      "approval_failed",
+      "prepare_failed",
+    ])
+      expect(failureLabel(code), code).not.toBe(code);
+    expect(failureLabel("payout_blocked:client_status:death")).toBe("virement bloqué — Décès du client enregistré");
+    const { summary } = approvalSummary([
+      { number: "RV-2026-000003", status: "refused", reason: "approval_in_progress" },
+      { number: "RV-2026-000004", status: "refused", reason: "busy" },
+    ]);
+    expect(summary).toBe(
+      "0 en validation ; RV-2026-000003 refusé : déjà en cours de validation ; RV-2026-000004 refusé : traitement en cours sur ce reversement : réessayez",
+    );
+    expect(summary).not.toMatch(/[a-z]+_[a-z]+/);
+  });
+
+  it("gives a remittance command's lock timeout its own words, not the payments' (review M2c-4 tests-ui#5)", () => {
+    expect(runErrorCode("canceling statement due to lock timeout")).toBe("run_busy");
+    expect(runErrorCode('could not obtain lock on row in relation "remittance_run"')).toBe("run_busy");
+    expect(errorText("run_busy")).toContain("reversement");
+    expect(errorText("run_busy")).not.toContain("rapprochement");
+  });
+
+  it("shows a failed preparation as such, not as a preparation running for ever (review M2c-4 tests-ui#3, C4)", () => {
+    const failed = {
+      status: "draft",
+      job: null,
+      prepared_at: null,
+      last_failure: { code: "prepare_failed", step: "prepare" },
+    };
+    expect(prepareFailed(failed)).toBe(true);
+    expect(runStatus(failed)).toEqual({ label: "Préparation échouée — actualisez", tone: "error" });
+    expect(runBusy(failed)).toBe(false);
+    // still preparing: the job is in flight, or a first prepare not yet picked up
+    expect(runStatus({ status: "draft", job: "prepare", prepared_at: null, last_failure: null }).label).toBe(
+      "Préparation en cours",
+    );
+    expect(runBusy({ status: "draft", job: "prepare", prepared_at: null, last_failure: null })).toBe(true);
+    expect(runBusy({ status: "draft", job: null, prepared_at: null, last_failure: null })).toBe(true);
+    // a prepare retried by « Actualiser » after a failure is running again
+    expect(prepareFailed({ ...failed, job: "prepare" })).toBe(false);
+    expect(runBusy({ ...failed, job: "prepare" })).toBe(true);
+    // an approval sent back to draft is not a failed preparation
+    const back = { status: "draft", job: null, prepared_at: "x", last_failure: { code: "stale", step: "approve" } };
+    expect(prepareFailed(back)).toBe(false);
+    expect(runStatus(back).label).toBe("Brouillon");
+    expect(runBusy(back)).toBe(false);
+    expect(runBusy({ status: "approved", job: null, prepared_at: "x", last_failure: null })).toBe(false);
+    expect(runBusy({ status: "draft", job: "approve", prepared_at: "x", last_failure: null })).toBe(true);
+    // the card's note says what to do, not « Renvoyé en brouillon » for a draft never prepared
+    expect(failureNote(failed.last_failure)).toBe("Préparation échouée : la préparation a échoué — « Actualiser » la relance");
+    expect(failureNote({ code: "data_error:23514", step: "prepare" })).toContain("refusées par la base");
+    expect(failureNote(back.last_failure)).toBe("Renvoyé en brouillon : le brouillon a changé depuis l'affichage");
+    expect(failureNote(null)).toBeNull();
+  });
+
+  it("asks the reason for a late approval, an N = 0 run when today is past its date (review M2c-4 money#3)", () => {
+    const transfer = { net_minor: "65601", earliest_latest_execution_date: "2026-12-01" };
+    const settled = { net_minor: "0", earliest_latest_execution_date: "2026-12-01" };
+    // N > 0: the requested execution date decides
+    expect(lateReasonRequired([transfer], "2026-12-01", "2026-11-30")).toBe(false);
+    expect(lateReasonRequired([transfer], "2026-12-02", "2026-11-30")).toBe(true);
+    // N = 0: settled at approval, today (Paris) decides, whatever the date requested
+    expect(lateReasonRequired([settled], "2026-12-04", "2026-12-01")).toBe(false);
+    expect(lateReasonRequired([settled], "2026-12-03", "2026-12-02")).toBe(true);
+    expect(lateReasonRequired([settled, transfer], "2026-11-30", "2026-12-02")).toBe(true);
+    expect(lateReasonRequired([{ net_minor: "0", earliest_latest_execution_date: null }], "2026-12-03", "2026-12-02")).toBe(
+      false,
+    );
+    expect(lateReasonRequired([], "2026-12-03", "2026-12-02")).toBe(false);
+  });
+
+  it("never says a credit note's refund was paid before the run is booked (review M2c-4 legal#5)", () => {
+    for (const status of ["draft", "approved", "sent"]) {
+      const note = refundNote({ status, refund_minor: "1200", currency: "EUR" });
+      expect(note, status).toMatch(/^remboursement d'avoir inclus dans le virement : 12,00\s€$/);
+      expect(note, status).not.toContain("remboursé");
+    }
+    expect(refundNote({ status: "booked", refund_minor: "1200", currency: "EUR" })).toMatch(/^avoir remboursé 12,00\s€$/);
+    expect(refundNote({ status: "approved", refund_minor: "0", currency: "EUR" })).toBeNull();
+    expect(refundNote({ status: "draft", refund_minor: null, currency: "EUR" })).toBeNull();
   });
 
   it("reads the tab and the IBAN badge", () => {

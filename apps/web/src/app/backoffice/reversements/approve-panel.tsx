@@ -7,17 +7,27 @@ import { Badge, ErrorNote, InfoNote, buttonClass, inputClass } from "@/component
 import { errorText } from "@/lib/boarding/forms";
 import { money } from "@/lib/payments/statements";
 import {
+  type ApprovalOutcome,
   type RunCard,
   TRIGGER_LABEL,
   blockerLabel,
   confirmedAgo,
   deadlineChip,
-  failureLabel,
+  failureNote,
   frenchDate,
+  lateReasonRequired,
   runStatus,
   sumMinor,
+  summaryTone,
 } from "@/lib/remittance/runs";
 import { approveRuns } from "./actions";
+
+/** The approval's result line, coloured by what was refused (review M2c-4 tests-ui#4). */
+const SUMMARY_CLASS: Record<ReturnType<typeof summaryTone>, string> = {
+  ok: "bg-emerald-50 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
+  action: "bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
+  error: "bg-red-50 text-red-800 dark:bg-red-950 dark:text-red-200",
+};
 
 /** A run whose draft can be approved now (prepared, nothing in flight, nothing blocking its payout). */
 function approvable(r: RunCard): boolean {
@@ -33,10 +43,13 @@ function approvable(r: RunCard): boolean {
  */
 export function ApprovePanel({
   runs,
+  today,
   nextBusinessDay,
   canApprove,
 }: {
   runs: RunCard[];
+  /** Today in Europe/Paris, as the database says it (`private.paris_today()`). */
+  today: string;
   nextBusinessDay: string;
   canApprove: boolean;
 }) {
@@ -45,7 +58,7 @@ export function ApprovePanel({
   const [sheet, setSheet] = useState(false);
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [summary, setSummary] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<ApprovalOutcome | null>(null);
   const [date, setDate] = useState(nextBusinessDay);
   const [lateReason, setLateReason] = useState("");
   const chosen = useMemo(() => runs.filter((r) => selected.has(r.id)), [runs, selected]);
@@ -53,7 +66,8 @@ export function ApprovePanel({
   const transfers = chosen.filter((r) => r.net_minor !== null && BigInt(r.net_minor) > BigInt(0)).length;
   const invoices = chosen.filter((r) => r.invoice_ttc_minor && r.invoice_ttc_minor !== "0").length;
   const credits = chosen.filter((r) => r.credit_ttc_minor && r.credit_ttc_minor !== "0").length;
-  const late = chosen.some((r) => r.earliest_latest_execution_date !== null && date > r.earliest_latest_execution_date);
+  // N > 0: the requested date after a latest execution date; N = 0 (settled today): today after it (money#3)
+  const late = lateReasonRequired(chosen, date, today);
 
   function toggle(id: string) {
     setSelected((s) => {
@@ -73,7 +87,7 @@ export function ApprovePanel({
       const result = await approveRuns(formData);
       if ("error" in result) setError(errorText(result.error));
       else {
-        setSummary(result.summary);
+        setOutcome({ summary: result.summary, queued: result.queued, refused: result.refused });
         setSheet(false);
         setSelected(new Set());
         router.refresh();
@@ -83,9 +97,14 @@ export function ApprovePanel({
 
   return (
     <div className="flex flex-col gap-3">
-      {summary ? (
-        <p className="rounded-md bg-emerald-50 p-3 text-sm text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200" data-testid="approve-summary">
-          {summary}
+      {outcome ? (
+        <p
+          role={outcome.refused > 0 ? "alert" : "status"}
+          className={`rounded-md p-3 text-sm ${SUMMARY_CLASS[summaryTone(outcome)]}`}
+          data-testid="approve-summary"
+          data-tone={summaryTone(outcome)}
+        >
+          {outcome.summary}
         </p>
       ) : null}
       <ul className="flex flex-col gap-3" data-testid="runs">
@@ -150,7 +169,7 @@ export function ApprovePanel({
                   ) : null}
                   {r.last_failure ? (
                     <p className="text-sm text-amber-800 dark:text-amber-300" data-testid="run-failure">
-                      Renvoyé en brouillon : {failureLabel(r.last_failure.code)}
+                      {failureNote(r.last_failure)}
                     </p>
                   ) : null}
                 </div>
@@ -190,7 +209,7 @@ export function ApprovePanel({
             </p>
             {late ? (
               <label className="flex flex-col gap-1 text-sm">
-                Motif du retard (la date dépasse une date limite de reversement, art. R124-6 CPCE)
+                Motif du retard (une date limite de reversement est dépassée, art. R124-6 CPCE)
                 <textarea name="late_reason" className={inputClass} value={lateReason} onChange={(e) => setLateReason(e.target.value)} required />
               </label>
             ) : null}

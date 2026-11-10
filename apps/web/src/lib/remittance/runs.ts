@@ -1,4 +1,5 @@
 import type { ErrorCode } from "@/lib/boarding/forms";
+import { money } from "@/lib/payments/statements";
 
 /**
  * M2c-4 « Reversements » (design §17.1–§17.2): the words of the runs' states, blockers and failures, the deadline
@@ -58,8 +59,24 @@ export function runTab(value: string | string[] | undefined): string {
   return v && v in RUN_TABS ? v : "a-valider";
 }
 
-export function runStatus(card: Pick<RunCard, "status" | "job" | "prepared_at">): { label: string; tone: Tone } {
+type RunState = Pick<RunCard, "status" | "job" | "prepared_at"> & Partial<Pick<RunCard, "last_failure">>;
+
+/**
+ * A draft whose preparation failed (review M2c-4 tests-ui#3): no job in flight, never prepared, its last failure at
+ * the prepare step (`private.remittance_prepare_failed`). Nothing retries it: ops « Actualiser » or « Abandonner ».
+ */
+export function prepareFailed(card: RunState): boolean {
+  return card.status === "draft" && card.job === null && card.prepared_at === null && card.last_failure?.step === "prepare";
+}
+
+/** A run with work in flight (a job, or a draft not yet prepared): the pages refresh themselves meanwhile. */
+export function runBusy(card: RunState): boolean {
+  return card.job !== null || (card.status === "draft" && card.prepared_at === null && !prepareFailed(card));
+}
+
+export function runStatus(card: RunState): { label: string; tone: Tone } {
   if (card.status === "draft") {
+    if (prepareFailed(card)) return { label: "Préparation échouée — actualisez", tone: "error" };
     if (card.job === "prepare" || card.prepared_at === null) return { label: "Préparation en cours", tone: "busy" };
     if (card.job === "approve") return { label: "Validation en cours", tone: "busy" };
     return { label: "Brouillon", tone: "action" };
@@ -112,7 +129,17 @@ const FAILURE_LABEL: Record<string, string> = {
   documents_changed: "les factures ouvertes ont changé : actualisez",
   items_changed: "les encaissements réservés ont changé : actualisez",
   negative_net: "net négatif",
-  late_reason_required: "date d'exécution après la date limite : motif requis",
+  late_reason_required: "motif du retard requis",
+  // the command's own refusals (review M2c-4 tests-ui#4, contract C1)
+  unknown_run: "reversement introuvable",
+  not_draft: "n'est plus un brouillon : rechargez",
+  preparing: "préparation en cours : réessayez",
+  approval_in_progress: "déjà en cours de validation",
+  payout_blocked: "virement bloqué",
+  busy: "traitement en cours sur ce reversement : réessayez",
+  // the job's re-checks against what the draft was prepared with (money#1, money#2)
+  vat_option_changed: "option TVA modifiée depuis la préparation : actualisez",
+  client_status_changed: "situation du client modifiée depuis la préparation : actualisez",
   execution_date_passed: "la date d'exécution demandée est passée",
   execution_date_not_business_day: "la date d'exécution demandée n'est pas un jour ouvré",
   execution_date_after_cutoff: "exécution le jour même impossible après l'heure limite de la banque",
@@ -122,11 +149,21 @@ const FAILURE_LABEL: Record<string, string> = {
   not_prepared: "le brouillon n'est pas préparé",
 };
 
-/** Why a run went back to draft (last_failure.code), as « Renvoyé en brouillon : … ». */
+/** Why a run went back to draft (last_failure.code), as « Renvoyé en brouillon : … », or why the approval refused it. */
 export function failureLabel(code: string): string {
   if (code.startsWith("payout_blocked:")) return `virement bloqué — ${blockerLabel(code.slice("payout_blocked:".length))}`;
   if (code.startsWith("data_error:")) return "les données ont été refusées par la base (voir le support)";
   return FAILURE_LABEL[code] ?? code;
+}
+
+/**
+ * The note a draft's last failure shows (review M2c-4 tests-ui#3): a failed preparation says what to do; an approval
+ * sent back says why (« Renvoyé en brouillon : … »).
+ */
+export function failureNote(failure: RunCard["last_failure"]): string | null {
+  if (!failure) return null;
+  if (failure.step === "prepare") return `Préparation échouée : ${failureLabel(failure.code)} — « Actualiser » la relance`;
+  return `Renvoyé en brouillon : ${failureLabel(failure.code)}`;
 }
 
 /** The deadline chip (§17.1): green, orange from J-5 business days, red from J-1 and past. */
@@ -183,8 +220,9 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
   ["a reason is required", "reason_required"],
   ["1 to 200 runs", "run_none_selected"],
   ["business calendar", "execution_date_invalid"],
-  ["could not obtain lock", "busy"],
-  ["lock timeout", "busy"],
+  // a run, or the servicer's allocation work, locked by a job or another command (review M2c-4 tests-ui#5)
+  ["could not obtain lock", "run_busy"],
+  ["lock timeout", "run_busy"],
 ];
 
 /** Code for an error raised by a run command (never the database's text on the page). */
@@ -193,11 +231,50 @@ export function runErrorCode(message: string): ErrorCode {
   return "unknown";
 }
 
-/** The approval's per-run outcome, as the result line says it (« 3 validés ; 1 refusé : … »). */
-export function approvalSummary(results: { number: string | null; status: string; reason: string | null }[]): string {
+export type ApprovalOutcome = { summary: string; queued: number; refused: number };
+
+/** The approval's per-run outcome, as the result line says it (« 3 en validation ; RV-… refusé : … »), and its counts. */
+export function approvalSummary(results: { number: string | null; status: string; reason: string | null }[]): ApprovalOutcome {
   const queued = results.filter((r) => r.status === "queued").length;
   const refused = results.filter((r) => r.status !== "queued");
   const parts = [`${queued} en validation`];
   for (const r of refused) parts.push(`${r.number ?? "?"} refusé : ${failureLabel(r.reason ?? "")}`);
-  return parts.join(" ; ");
+  return { summary: parts.join(" ; "), queued, refused: refused.length };
+}
+
+/** The result line's colour: green when every run was queued, orange when some were refused, red when all were. */
+export function summaryTone(o: Pick<ApprovalOutcome, "queued" | "refused">): "ok" | "action" | "error" {
+  if (o.refused === 0) return "ok";
+  return o.queued > 0 ? "action" : "error";
+}
+
+const MINOR = /^-?\d+$/;
+
+/**
+ * Whether the approval needs « Motif du retard » (design §9.5; review M2c-4 money#3), as the command decides it: a run
+ * that transfers (N > 0) when the requested execution date is after its earliest latest execution date; a run that
+ * transfers nothing (N = 0, settled at approval, today) when today (Europe/Paris) is after it.
+ */
+export function lateReasonRequired(
+  runs: Pick<RunCard, "net_minor" | "earliest_latest_execution_date">[],
+  date: string,
+  today: string,
+): boolean {
+  return runs.some((r) => {
+    const latest = r.earliest_latest_execution_date;
+    if (latest === null || r.net_minor === null || !MINOR.test(r.net_minor)) return false;
+    const net = BigInt(r.net_minor);
+    if (net > BigInt(0)) return date > latest;
+    return net === BigInt(0) && today > latest;
+  });
+}
+
+/**
+ * A credit note's refund owed to the client (review M2c-4 legal#5): paid with the run's payout, so « remboursé » only
+ * once the run is booked (the bank's debit, M2c-6; or settled at approval when nothing is transferred).
+ */
+export function refundNote(card: Pick<RunCard, "status" | "refund_minor" | "currency">): string | null {
+  if (!card.refund_minor || !MINOR.test(card.refund_minor) || BigInt(card.refund_minor) === BigInt(0)) return null;
+  const amount = money(card.refund_minor, card.currency);
+  return card.status === "booked" ? `avoir remboursé ${amount}` : `remboursement d'avoir inclus dans le virement : ${amount}`;
 }
