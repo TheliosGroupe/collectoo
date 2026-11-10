@@ -66,6 +66,7 @@ class EarlierCharge:
     order: tuple[int, int]  # (year, seq) in the invoice series: LIFO takes the highest first
     charged_minor: int
     credited_minor: int = 0
+    vat_rate: Decimal | None = None  # the invoice's own rate (M2c-4 stores it; None: the run's)
 
     @property
     def open_minor(self) -> int:
@@ -316,5 +317,7 @@ def after_issue(
             inv_id, order = numbers[mandate]
             new_invoices[inv_id] = EarlierInvoice(inv_id, d.invoice.ht_minor, d.invoice.vat_rate)
             for key, amount in d.invoice.charges:
-                new_charges.setdefault(key, []).append(EarlierCharge(inv_id, order, amount))
+                new_charges.setdefault(key, []).append(
+                    EarlierCharge(inv_id, order, amount, vat_rate=d.invoice.vat_rate)
+                )
     return new_charges, new_invoices
