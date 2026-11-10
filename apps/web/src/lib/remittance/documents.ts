@@ -1,7 +1,9 @@
 /**
- * M2c-5 (design §10, §14, §17): words of the client space « Reversements » and « Factures », and of the accountant's
- * export. Amounts stay text in minor units (never JS numbers); the database computes them.
+ * M2c-5 (design §10, §14, §17): words of the client space « Reversements » and « Factures », of the run's documents in
+ * the back office, and the CSV writer of the accountant's export. Amounts stay text in minor units (never JS numbers);
+ * the database computes them.
  */
+import { money } from "@/lib/payments/statements";
 
 export type StatementRow = {
   run_id: string;
@@ -28,16 +30,23 @@ export type InvoiceRow = {
   payload: { buyer?: { invoice_acceptance_ref?: string | null } } | null;
 };
 
-/** How an invoice reaches the client (CGI 289 VI): in the client space once the buyer accepted electronic invoices
- * (recorded at issue in its payload), otherwise by post — the PDF is not served then. */
+/**
+ * How an invoice reaches the client (CGI 289 VI): in the client space once the buyer accepted electronic invoices
+ * (recorded at issue in its payload); otherwise the PDF is not served and the client space says so — never that it
+ * was posted, since no dispatch is recorded yet (review M2c-5 legal#7, K6; OQ-74).
+ */
 export function invoiceDelivery(
   inv: Pick<InvoiceRow, "payload">,
   pdf: { document_id: string } | null,
-): { mode: "pdf"; documentId: string } | { mode: "post" } | { mode: "pending" } {
+): { mode: "pdf"; documentId: string } | { mode: "not_online" } | { mode: "pending" } {
   const accepted = Boolean(inv.payload?.buyer?.invoice_acceptance_ref?.trim());
-  if (!accepted) return { mode: "post" };
+  if (!accepted) return { mode: "not_online" };
   return pdf ? { mode: "pdf", documentId: pdf.document_id } : { mode: "pending" };
 }
+
+/** K6: what the client reads for an invoice whose PDF is not served (no claim of a postal dispatch). */
+export const NOT_ONLINE_TEXT =
+  "PDF non disponible en ligne : vous n'aviez pas accepté la facture électronique à son émission. Demandez-la au cabinet.";
 
 /** « Facture » / « Avoir ». */
 export function invoiceKind(kind: string): string {
@@ -56,6 +65,121 @@ export function runStatusText(status: string, net: string | null): string {
   if (status === "booked") return net === "0" ? "Réglé par compensation, sans virement" : "Virement débité de notre compte";
   if (status === "cancelled") return "Annulé avant son exécution";
   return "Virement ordonné";
+}
+
+/**
+ * A statement's line in the client space, from its run as it stands (review M2c-5 figures#1 = tests-ui#1, K7): the
+ * statement's payload is frozen when it is drawn, so its status stays « approved » after a cancellation or the debit;
+ * the page reads `remittance_run.status` and `net_minor` live. A cancelled run shows no amount to transfer.
+ */
+export function statementRunView(run: { status: string; net_minor: string | number | null } | null): {
+  label: string;
+  tone: "neutral" | "ok" | "error";
+  net: string | null;
+} {
+  if (!run) return { label: "Statut indisponible", tone: "neutral", net: null };
+  const net = run.net_minor === null ? null : String(run.net_minor);
+  const label = runStatusText(run.status, net);
+  if (run.status === "cancelled") return { label, tone: "error", net: null };
+  return { label, tone: run.status === "booked" ? "ok" : "neutral", net };
+}
+
+export type InFlightRun = { number: string; gross_minor: string; net_minor: string; commission_minor: string };
+export type OwedEntry = {
+  currency: string;
+  owed_minor: string;
+  /** K2: Σ gross of the client's runs approved or sent and not booked, in this currency. */
+  in_flight_gross_minor?: string | null;
+  in_flight_runs?: InFlightRun[] | null;
+};
+export type RemittanceSummary = {
+  owed: OwedEntry[];
+  in_flight: { number: string; status: string; currency: string; net_minor: string; requested_execution_date: string | null }[];
+  next_run_day?: string | null;
+};
+
+/** One in-flight run in words: what is transferred, what is set off at the debit, a credit note refunded in it. */
+function inFlightDetail(r: InFlightRun, currency: string): string {
+  const gross = BigInt(r.gross_minor);
+  const net = BigInt(r.net_minor);
+  const commission = BigInt(r.commission_minor);
+  const other = gross - net - commission; // > 0: other sums owed to us set off; < 0: a credit note refunded
+  const zero = BigInt(0);
+  const transfer = `${money(r.net_minor, currency)} à virer${
+    other < zero ? ` dont ${money((-other).toString(), currency)} de remboursement d'avoir` : ""
+  }`;
+  const setOffs = [
+    commission !== zero ? `${money(r.commission_minor, currency)} de commission` : null,
+    other > zero ? `${money(other.toString(), currency)} d'autres sommes dues au cabinet` : null,
+  ].filter((x): x is string => x !== null);
+  return setOffs.length > 0 ? `${transfer} ; ${setOffs.join(" et ")} à compenser au débit du virement` : transfer;
+}
+
+/**
+ * « À reverser à ce jour » reconciled with the payout in flight (review M2c-5 tests-ui#5, K2): the running 4670 balance
+ * still holds the gross of a run approved and not debited (its gross leaves 4670 at the debit, M2c-6), so each
+ * currency with such runs gets one sentence saying that part is the ordered payout — what it transfers and what it sets
+ * off — and is not an extra amount. Nothing is « compensé » or « réglé » before the debit. `covered` names the runs
+ * these sentences word (the page words any other run in flight on its own).
+ */
+export function inFlightNotes(summary: Pick<RemittanceSummary, "owed" | "in_flight"> | null): {
+  sentences: string[];
+  covered: Set<string>;
+} {
+  const sentences: string[] = [];
+  const covered = new Set<string>();
+  const minor = (v: unknown) => typeof v === "string" && /^-?\d+$/.test(v);
+  for (const o of summary?.owed ?? []) {
+    const runs = o.in_flight_runs ?? [];
+    // amounts are text in minor units; anything else is left to the page's own in-flight note (never a guess)
+    const wellFormed = runs.every((r) => [r.gross_minor, r.net_minor, r.commission_minor].every(minor));
+    if (!minor(o.in_flight_gross_minor) || !minor(o.owed_minor) || !wellFormed || runs.length === 0) continue;
+    if (BigInt(o.in_flight_gross_minor as string) === BigInt(0)) continue;
+    const head = `À reverser à ce jour : ${money(o.owed_minor, o.currency)}, dont ${money(o.in_flight_gross_minor, o.currency)}`;
+    if (runs.length === 1) {
+      const r = runs[0];
+      const date = summary?.in_flight.find((f) => f.number === r.number)?.requested_execution_date;
+      sentences.push(
+        `${head} compris dans le reversement ${r.number} ordonné${date ? `, exécution demandée le ${frenchDay(date)}` : ""} (${inFlightDetail(r, o.currency)}).`,
+      );
+    } else {
+      const each = runs.map((r) => `${r.number} (${money(r.gross_minor, o.currency)} : ${inFlightDetail(r, o.currency)})`);
+      sentences.push(`${head} compris dans les reversements ordonnés ${each.slice(0, -1).join(", ")} et ${each[each.length - 1]}.`);
+    }
+    for (const r of runs) covered.add(r.number);
+  }
+  return { sentences, covered };
+}
+
+/**
+ * A page of a client list (review M2c-5 tests-ui#7): `?page=N` (from 0), rows `from` … `to` inclusive — one row more
+ * than the page shows, so the page knows whether older ones follow (« Plus anciens »).
+ */
+export function listPage(raw: string | string[] | undefined, size: number): { page: number; from: number; to: number } {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const page = value !== undefined && /^\d{1,5}$/.test(value) ? Number(value) : 0;
+  return { page, from: page * size, to: page * size + size };
+}
+
+/** The rows a page shows, and whether more follow (the query asked one more, `listPage`). */
+export function pageOf<T>(rows: readonly T[] | null, size: number): { rows: T[]; more: boolean } {
+  const all = rows ?? [];
+  return { rows: all.slice(0, size), more: all.length > size };
+}
+
+/**
+ * Where a run's statement stands on its back-office page (review M2c-5 perf#6 = tests-ui#3): a statement is queued
+ * when the approval is recorded, so only a run with `approved_at` waits for one — a cancelled run approved before
+ * included; a draft discarded or cancelled before its approval never gets one, and the page neither polls nor says
+ * « en préparation ».
+ */
+export function runStatementState(
+  run: { status: string; approved_at: string | null },
+  statement: object | null,
+): "drawn" | "pending" | "draft" | "none" {
+  if (statement) return "drawn";
+  if (run.approved_at) return "pending";
+  return run.status === "draft" ? "draft" : "none";
 }
 
 export function frenchDay(iso: string): string {
@@ -85,67 +209,29 @@ export function csvAmount(minor: string | number | bigint, exponent = 2): string
   return `${negative ? "-" : ""}${units}${fraction}`;
 }
 
-/** A CSV in French conventions: UTF-8 with a BOM, `;`, CRLF, fields quoted when needed (RFC 4180). */
-export function csvFile(header: readonly string[], rows: readonly (readonly (string | null | undefined)[])[]): string {
-  const cell = (v: string | null | undefined) => {
-    const s = v ?? "";
-    return /[;"\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  return `﻿${[header, ...rows].map((r) => r.map(cell).join(";")).join("\r\n")}\r\n`;
+/** K3: the first characters a spreadsheet reads as the start of a formula (= + - @, TAB, CR). */
+const FORMULA_START = /^[=+\-@\t\r]/;
+
+/** A text cell made inert: an apostrophe before a leading = + - @ TAB or CR (review M2c-5 security#0, K3). */
+export function neutraliseText(value: string): string {
+  return FORMULA_START.test(value) ? `'${value}` : value;
 }
 
-export const EXPORT_DOCUMENT_HEADER = [
-  "numero",
-  "type",
-  "date_emission",
-  "client",
-  "siren_client",
-  "mandat",
-  "releve",
-  "periode_du",
-  "periode_au",
-  "montant_ht",
-  "montant_ht_centimes",
-  "taux_tva",
-  "tva",
-  "tva_centimes",
-  "montant_ttc",
-  "montant_ttc_centimes",
-  "tva_compte",
-  "reglement",
-  "echeance",
-  "rectifie",
-  "regle_centimes",
-  "reglements",
-  "reste_du_centimes",
-] as const;
-
-export const EXPORT_ENTRY_HEADER = [
-  "date",
-  "ecriture",
-  "type",
-  "piece_type",
-  "piece",
-  "client",
-  "compte",
-  "libelle_compte",
-  "debit",
-  "debit_centimes",
-  "credit",
-  "credit_centimes",
-  "devise",
-  "enregistree_le",
-] as const;
-
-export const BOOK_LABEL: Record<string, string> = {
-  servicer_revenue: "Commissions de recouvrement",
-  vat_collected: "TVA collectée",
-  vat_pending: "TVA en attente d'exigibilité",
-  bank_fees: "Frais bancaires",
-  servicer_losses: "Pertes du cabinet",
-  commission_receivable: "Mandants — factures et avoirs",
-  client_advance_receivable: "Mandants — avances",
-  own_cash: "Compte propre (mouvements constatés)",
-};
-
-export const DOC_TYPE: Record<string, string> = { invoice: "facture", credit_note: "avoir" };
+/**
+ * A CSV in French conventions: UTF-8 with a BOM, `;`, CRLF, fields quoted when needed (RFC 4180). `textColumns` names
+ * the header's free-text columns one by one: their cells are neutralised (K3) before quoting; every other column
+ * (dates, amounts, cents, counts, rates) is written as given, so a negative amount stays « -12,34 ».
+ */
+export function csvFile(
+  header: readonly string[],
+  rows: readonly (readonly (string | null | undefined)[])[],
+  textColumns: ReadonlySet<string>,
+): string {
+  for (const name of textColumns) {
+    if (!header.includes(name)) throw new Error(`csvFile: text column ${name} is not in the header`);
+  }
+  const text = header.map((name) => textColumns.has(name));
+  const quote = (s: string) => (/[;"\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+  const lines = rows.map((r) => r.map((v, i) => quote(text[i] ? neutraliseText(v ?? "") : (v ?? ""))).join(";"));
+  return `﻿${[header.map(quote).join(";"), ...lines].join("\r\n")}\r\n`;
+}

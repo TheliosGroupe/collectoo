@@ -228,8 +228,9 @@ Migration `20261113090000_remittance_documents.sql` (forward-only; nothing earli
     up to 2,000 files »; the PDF carries the summary, the natures and one row per file (≤ 2,000, else the CSV's
     SHA-256 for the detail), the CSV one row per line — so a 50,000-line statement's PDF stays short. The PDF always
     names the CSV's SHA-256 (CSV = PDF), and its footer the first 16 characters.
-  - **CSV columns**: the design's list plus `hors_delai` (« oui – motif » for a line approved after its latest execution
-    date, §10.2 « hors délai with its cause »); several items or components of one line joined with « ; » in
+  - **CSV columns**: the design's list plus `hors_delai` (« oui » and a cause category for a line approved after its
+    latest execution date, §10.2 « hors délai with its cause » — never the approver's free-text reason since the review,
+    K5 below); several items or components of one line joined with « ; » in
     `piece` / `composante`; `regle` / `taux` the rules and band rates of the line's parts (« Commission en attente »
     when pending); `base_commission_centimes` the basis its parts priced. **Dates ISO** (AAAA-MM-JJ) in the CSV
     (§10's « ISO and French dates » read as ISO dates and French amounts), French in the PDF. Amounts « 1 234,56 »
@@ -264,13 +265,16 @@ Migration `20261113090000_remittance_documents.sql` (forward-only; nothing earli
   compensation sur le reversement RV-… (exécution demandée le … ; mandat …, art. …) »; `next_run`: « … sur le prochain
   reversement, au plus tard le … »; a due invoice: « À régler au plus tard le … par virement sur le compte … (BIC …),
   titulaire … » from `own_account`), « Pas d'escompte pour paiement anticipé », `penalty_text`, the 40 € flat
-  indemnity when `flat_indemnity.applies`, `po_number` when present; a credit note names each invoice it rectifies
+  indemnity when `flat_indemnity.applies`, `po_number` when present (review below: the 40 € for every professional
+  buyer, the buyer's two addresses, the amount set off and the remainder's date, N = 0, template `fr-2`; no
+  purchase-order number is captured yet, OQ-77); a credit note names each invoice it rectifies
   (number and date read from the append-only invoice rows, 289 I 5) and carries no payment mentions. No CGI article
   number is printed (§3.1).
 - **Electronic delivery (CGI 289 VI)**: `commission_invoice_document.electronic` = the buyer's
-  `invoice_acceptance_ref` frozen in the payload at issue. Without it, the client space lists the invoice « Adressée par
-  courrier » and neither the document row nor the object is readable by the client; the back office flags « Envoi
-  postal » (OQ-74).
+  `invoice_acceptance_ref` frozen in the payload at issue. Without it, neither the document row nor the object is
+  readable by the client, the client space says « PDF non disponible en ligne : vous n'aviez pas accepté la facture
+  électronique à son émission. Demandez-la au cabinet. » (it said « Adressée par courrier » before the review, K6) and
+  the back office flags « À envoyer par courrier » (OQ-74).
 - **Read access** (OQ-48): `remittance_statement` and the statement documents — money staff (aal2) and the client's
   members with access to the whole client; `commission_invoice_document` and the invoice PDF — money staff, and the
   client's whole-client members when electronic. A restrictive policy on `document` narrows `document_read` for the
@@ -287,7 +291,8 @@ Migration `20261113090000_remittance_documents.sql` (forward-only; nothing earli
   amount and its rows, open amount) and `public.accounting_export_entries(from, to)` (postings of 7060, 44571, 44574,
   6270, 6780, 4111, 4112, 5122 with their entry, type, document reference and client), money staff at aal2, one year at
   most; `/backoffice/reversements/comptabilite` writes them as CSV (BOM, `;`, CRLF, French headers, amounts twice,
-  deterministic order). Not a FEC: the servicer's general ledger is out of scope (§1, OQ-76).
+  deterministic order). Not a FEC: the servicer's general ledger is out of scope (§1, OQ-76). Read in keyset pages of
+  1,000 rows at most and text cells neutralised since the review (K1, K3 below).
 - **Left for later slices:**
   - **`issue_credit_note` (the manual credit note, §14.1, risk R2) is not built.** It needs a change of the commission
     engine's contract, not a document: the engine requires each (file, tier key)'s invoices' open charges to add up to
@@ -297,10 +302,15 @@ Migration `20261113090000_remittance_documents.sql` (forward-only; nothing earli
     approval with 23514). It needs a waived amount per key (`KeyState.waived_minor`: open charges + waived = K; LIFO
     credits capped by each invoice's remaining HT and absorbed by the waiver first), with its Hypothesis properties —
     the engine's slice, before go-live. Meanwhile R2's mitigations stay the draft's lines, the golden cases and the
-    approval sheet; a wrong invoice is corrected by cancelling the run before its file (M2c-4).
-  - **The nightly `document_missing` alert** (§15): `private.remittance_documents_missing(org, age)` lists what has
-    been due longer than an age; wiring it into `private.run_remittance_checks` is left to M2c-6, which redefines that
-    function for its transfer alerts. The pages say « Relevé en préparation » / « PDF en préparation » meanwhile.
+    approval sheet; a wrong invoice is corrected by cancelling the run before its file (M2c-4). **Review M2c-5: it
+    moves to its own slice, M2c-5b** — the engine's waived amount per (file, tier key) with its Hypothesis properties,
+    then `issue_credit_note` on top — so no document of this slice waits for it.
+  - ~~The nightly `document_missing` alert~~ — wired by the review (K4 below): `remittance_document_failed` and
+    `remittance_document_missing` in the nightly checks.
+  - **The production `documents` bucket must allow `text/csv`** (a manual step on the Supabase project before the
+    merge reaches production; `supabase/config.toml` allows it locally): without it every statement's CSV upload is
+    refused. Since the review that failure no longer blocks other documents (K4) and raises
+    `remittance_document_failed`, but no statement is drawn until the bucket accepts it.
   - Postal dispatch of invoices without electronic acceptance (ops' record of the sending), the orphan-object sweep for
     statements and invoices (`private.remittance_document_orphans` is ready; the job removes its own uploads on
     failure), the Factur-X / UBL mapping of the payload (OQ-44), the statement's « Suivi » once M2c-6 books debits.
@@ -314,6 +324,39 @@ Migration `20261113090000_remittance_documents.sql` (forward-only; nothing earli
   re-rendered, CSV = PDF = run, another process, a due invoice's own account frozen at issue, a cancelled run's credit
   note, a failed upload leaves nothing, the next run day = the schedule); the 50k scale run draws its statement; vitest
   `documents.test.ts`; E2E `remittances` (documents downloaded by ops and the client, the export).
+
+## M2c-5 review fixes (2026-11-10)
+<!-- integrator: check against the merged code -->
+Confirmed findings of the five-lens review (legal, figures, security, performance, tests and UI), fixed in this slice. The migration `20261113090000_remittance_documents.sql`, not yet applied in production, is edited in place; the earlier functions it must change (`private.issue_commission_documents` of M2c-4, `private.run_remittance_checks`, `private.run_payment_checks`) are redefined in it with `CREATE OR REPLACE`, their `SET` clauses, `SECURITY DEFINER` and grants restated; no earlier migration file is edited. The database, the worker and the pages follow one contract:
+- **K1 export paging** (perf#0 = tests-ui#0, perf#1): `public.accounting_export_documents` and `public.accounting_export_entries` take `p_after text default null` and `p_limit integer default 1000` (capped at 1,000), return keyset-ordered pages, and every row carries `page_key` (opaque, rising in the export's order). PostgREST cut any answer at `max_rows` (1,000), an RPC's too, and answered 206 as a success: a year of postings (≈ 4–6 per run) silently lost its later rows. The route (`lib/remittance/accounting-export.ts`) asks page after page with `p_after` = the last row's `page_key` until a page is shorter than the limit; a failing page, or a full page whose last key does not move on, refuses the whole file (« Export refusé. »), never a CSV cut short. The entries' document references are looked up by key (`e.source_id::uuid` under a `CASE` on the source type, no per-row scan of every servicer's invoices or runs: perf#1, pg_stat check in pgTAP), and the statement build's `v_earlier` likewise. Vitest: a fake RPC answering 1,000 + 1,000 + 3 rows gives 2,003 CSV rows for both exports with `p_after` chained; an exactly full last page; an empty period; a failing second page; a key that does not move on.
+- **K2 client summary** (tests-ui#5): `public.client_remittance_summary` also returns, per currency in `owed`, `in_flight_gross_minor` (Σ gross of the client's runs approved or sent and not booked) and `in_flight_runs` [{`number`, `gross_minor`, `net_minor`, `commission_minor`}] (amounts as text). The running 4670 balance still holds an ordered run's gross until its debit (decision 4), so « À reverser à ce jour » read as an amount on top of the payout; the page now says « À reverser à ce jour : X €, dont Y € compris dans le reversement RV-… ordonné, exécution demandée le … (N € à virer ; C € de commission à compenser au débit du virement) », naming other set-offs or a refunded credit note when the amounts say so, and never « compensé » or « réglé » before the debit. Vitest (one run, several runs with other set-offs and a refund, none); E2E.
+- **K3 CSV neutralisation** (security#0 = tests-ui#6): in the statement's CSV (worker, template `releve-reversement-fr-2`) and the accountant's export (web), a text cell whose first character is = + - @, TAB or CR is written behind an apostrophe; amount, count and date columns are never altered (a negative amount stays « -12,34 »). Each writer lists its text columns explicitly (statement: mandat, portefeuille, dossier, debiteur, piece, regle, facture, quittance, hors_delai; export: `EXPORT_DOCUMENT_TEXT_COLUMNS`, `EXPORT_ENTRY_TEXT_COLUMNS`). Boarded names and references (a client admin's tape, an NPL seller's) reached servicer staff's spreadsheets as formulas. Golden case with a hostile debtor, file and mandate (the earlier fixture's bytes unchanged); vitest with = + - @ cells and a negative amount.
+- **K4 document job failures** (perf#2 = tests-ui#2): each statement and each chunk of invoice PDFs is drawn under its own savepoint; a failure records `attempts` and `last_error` on its `private.remittance_document_todo` row and the job moves on to the next item — one undrawable statement (the production bucket refusing `text/csv` is the concrete case) blocked every later statement and invoice PDF of the servicer, silently. The nightly checks (redefined in this migration) raise `remittance_document_failed` (alert: rows with attempts > 0 still not drawn) and `remittance_document_missing` (alert: rows older than 24 h, `private.remittance_documents_missing`); « Contrôles » words both (vitest). Integration: a storage stub refusing `.csv` still records the invoice PDFs and the failure.
+- **K5 late-line cause** (legal#6): the statement (PDF and CSV `hors_delai`) prints a cause category — « validation tardive », « délai contractuel intenable (art. R124-6 : un mois) », « encaissement identifié tardivement » when the line reached the queue after its J-5 date, or what the data supports — never the approver's free-text reason, which stays in `remittance_late_approval` for staff (GDPR minimisation, CPCE-06's rule); reasons typed under M2c-4 are never published.
+- **K6 client invoice without electronic acceptance** (legal#7): « PDF non disponible en ligne : vous n'aviez pas accepté la facture électronique à son émission. Demandez-la au cabinet. » instead of « Adressée par courrier », which stated a dispatch nothing records; ops read « À envoyer par courrier » (OQ-74). Vitest.
+- **K7 live run status** (figures#1 = tests-ui#1): the client « Reversements » list reads each statement's run as it stands (`remittance_run!run_id(status, gross_minor, net_minor)`), never `payload.status`, which is frozen at the drawing (« approved ») and kept « Virement ordonné » beside a cancelled run forever; a cancelled run shows « Annulé avant son exécution » and no amount to transfer. The back-office pages already read the run live. It also stops detoasting each statement's payload twice per row (perf#4). The PDF keeps its own frozen wording (legal#2 below). Vitest.
+- **K8 purchase order** (legal#8): not captured in this slice; FAC-02 marks the item « not yet supported » and OQ-77 records the default (a recovery mandate is not a purchase order; the number is printed once a client gives one, from an optional mandate field frozen at issue in a later slice).
+
+Invoices (template `facture-commission-fr-2`, `private.issue_commission_documents` redefined):
+- **The 40 € flat indemnity is printed for every professional buyer** (legal#0): `fr-1` dropped it for good once any `proceeding_opened` or `liquidation` client event existed (`client_status_event` is append-only and has no closing event). L441-9 I asks for « le montant de l'indemnité forfaitaire pour frais de recouvrement » with no exception; L441-10 II only bars the creditor from invoking it while the opening « interdit le paiement à son échéance de la créance ». `flat_indemnity` freezes {`applies` = the buyer is professional, `amount_minor` 4000} and the proceeding apart (`claimable` false, its event and date) for a later dunning or posting step. Golden: a professional buyer with a proceeding prints the mention.
+- **The buyer's address and its billing address when different** (legal#1): « Siège social : … » and, when the frozen billing address differs, « Adresse de facturation : … » (L441-9 I); credit notes alike. Golden with two addresses.
+- **The payment line states what the plan sets off** (legal#4 = figures#4): `payment_reference` freezes the amount this run's plan sets off with its execution date and, when the plan leaves part of the invoice open (earlier invoices first, the pool's cap, nothing to set off when D = 0), the remainder with its latest date (issue + least(`invoice_payment_days` or 30, 45), as OQ-72) — « À régler par compensation sur le reversement RV-… : X € (exécution demandée le …) ; le solde de Y € sur le prochain reversement, au plus tard le … »; the remainder is in `invoice_overdue`; the statement prints the same amounts and date. Test: the invoice's payment line agrees with the statement's text for deferred and partial plans.
+- **A run that transfers nothing** (legal#5): N = 0 prints « Réglée par compensation sur le relevé RV-… du … (aucun virement) »; its statement words the set-offs as made on its date, without « au débit du virement ».
+
+Statement (template `releve-reversement-fr-2`, `private.remittance_statement_build`):
+- **A run cancelled before its statement is drawn** (legal#2 = figures#0): its statement presented the cancelled payout and set-offs as happening (« Montant net du reversement », « À régler par compensation sur le présent reversement », « Après le présent reversement : 0,00 € »), also for every run the migration's back-fill queued. For `status = 'cancelled'`: `settles_minor` 0 on every document and no earlier settlements, owed after = owed before (the run's gross), advances after = before, receivable after = before + the TTC of all the run's documents (`run_cancelled` included), the approval's documents « annulée par l'avoir … du … »; the summary and the payout drop « Montant net » and the set-off rows. pgTAP (approve → cancel → build) and integration (cancel before the queue drains).
+- **Section 6 at one instant** (figures#2): the money waiting on 4710 and the refunds are both read at K — the payments whose cash-in was posted by K, their unallocated part from the postings by K whatever their current status (`refund_pending` included), the reason from `review_reason`.
+- **Bounced refunds** (legal#3 = figures#3): a refund the bank sent back by K is not « restitué au payeur » and its money is not counted twice; executed refunds, plus those bounced after K.
+- **Reversal lines credited by the run's credit note** (figures#5): the CSV's `facture` names that credit note (keyed lookup on `commission_credit_alloc.entry_id`), not an empty cell; the unit fixture's reversal line comes from a real SQL payload.
+- **One snapshot of the run** (figures#6): the build reads the run `for share`, so a cancellation committing mid-build waits (or the build sees it and words it, above).
+- **Repriced lines through the database** (tests-ui#4): an integration (or pgTAP) case where run 1 leaves a minimum per file pending and run 2 prices it — Σ line commission = the documents' HT net of credits, the repriced row at amount 0 naming run 1, the `repricing` nature, Σ files = totals; the per-file table and the file count agree.
+
+Pages (`apps/web`; vitest `documents.test.ts`, `accounting-export.test.ts`, `debits.test.ts`; E2E `remittances` updated, run by the integrator):
+- K1, K3 in the export route (`accountingExportCsv`); K2, K7 on `/client/reversements`; K6 on `/client/factures` and the run page; K4's labels on « Contrôles ».
+- **Client « Factures » reads the PDFs of the invoices shown** (perf#3): `.in("invoice_id", …)` on at most 200 ids after the invoices query — the unordered read of every PDF of the client was cut at 1,000 and lost the newest; **both client lists page** (tests-ui#7): `?page=N`, one row more asked to know whether « Plus anciens » / « Plus anciennes » follow.
+- **The run page waits only for a statement that will come** (perf#6 = tests-ui#3): only a run with `approved_at` gets one; a draft discarded or cancelled before its approval no longer polls for two minutes nor says « Relevé en préparation » — it reads « Aucun relevé : reversement abandonné avant sa validation. » (`runStatementState`).
+
+Docs: COMPLIANCE FAC-01, FAC-02 (the 40 €, the addresses, the set-off amount and date, N = 0, the purchase order « not yet supported »), FAC-04, CPCE-06, CPCE-08 (K5), OQ-40, OQ-74 (K6), new OQ-77 (K8); DOMAIN (K1, K3, K4, K5); design §10.2, §14.2, §17.7. « Left for later » above: `issue_credit_note` moves to its own slice M2c-5b; the production `documents` bucket must allow `text/csv`.
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

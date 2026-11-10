@@ -17,6 +17,7 @@ import {
   runBusy,
   runStatus,
 } from "@/lib/remittance/runs";
+import { runStatementState } from "@/lib/remittance/documents";
 import { cancelRun, discardRun, refreshRun } from "../actions";
 import { ApprovePanel } from "../approve-panel";
 
@@ -160,9 +161,12 @@ export default async function RemittanceRunPage({
   const busy = runBusy(r);
   const draft = r.status === "draft";
   const refund = refundNote(r);
+  // review M2c-5 (perf#6 = tests-ui#3): only an approved run gets a statement — a draft discarded or cancelled before
+  // its approval never does, so the page neither polls for it nor says « en préparation »
+  const statementState = runStatementState(r, statement ?? null);
   return (
     <WidePage title={`${r.client_name} · ${r.number}`} back={{ href: "/backoffice/reversements", label: "Reversements" }}>
-      <AutoRefresh active={busy || (!draft && !statement)} abandonable={false} everyMs={2000} maxMs={120_000} />
+      <AutoRefresh active={busy || statementState === "pending"} abandonable={false} everyMs={2000} maxMs={120_000} />
       <div className="flex flex-wrap gap-2">
         <Badge tone={status.tone} testId="run-status">
           {status.label}
@@ -261,7 +265,7 @@ export default async function RemittanceRunPage({
                     </a>
                     {pdfOf.get(doc.id)?.electronic ? null : (
                       <Badge tone="action" testId="run-document-post">
-                        Envoi postal (pas d&apos;accord pour la facture électronique)
+                        À envoyer par courrier (pas d&apos;accord pour la facture électronique)
                       </Badge>
                     )}
                     <span className="break-all text-xs text-zinc-500">SHA-256 {pdfOf.get(doc.id)?.pdf_sha256}</span>
@@ -277,7 +281,13 @@ export default async function RemittanceRunPage({
         )}
       </Section>
 
-      {!draft ? (
+      {statementState === "none" ? (
+        <Section title="Relevé de reversement" testId="run-statement">
+          <p className="text-sm text-zinc-600 dark:text-zinc-400" data-testid="run-statement-none">
+            Aucun relevé : reversement abandonné avant sa validation.
+          </p>
+        </Section>
+      ) : statementState !== "draft" ? (
         <Section title="Relevé de reversement" testId="run-statement">
           {statement ? (
             <div className="flex flex-col gap-1 text-sm">

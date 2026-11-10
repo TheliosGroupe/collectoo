@@ -398,6 +398,15 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Facture de commission non réglée à sa date",
     help: "Une facture de commission reste ouverte après la date de règlement qu'elle indique : une facture à régler au compte propre, ou une facture rétablie par l'annulation d'un reversement que le reversement suivant n'a pas compensée à temps. Préparez le reversement du client ou vérifiez son règlement.",
   },
+  // review M2c-5 (perf#2 = tests-ui#2, K4): a statement or an invoice's PDF the documents job could not draw
+  remittance_document_failed: {
+    label: "Document de reversement en échec",
+    help: "Le relevé d'un reversement, ou le PDF d'une facture ou d'un avoir, n'a pas pu être établi (dernière erreur dans les détails) ; les autres documents continuent d'être établis et celui-ci est retenté à chaque passage. Le client ne le voit pas encore : prévenez le support.",
+  },
+  remittance_document_missing: {
+    label: "Document de reversement en attente depuis plus de 24 h",
+    help: "Le relevé d'un reversement, ou le PDF d'une facture ou d'un avoir, attend d'être établi depuis plus de 24 heures : le traitement des documents ne passe plus. Le client ne le voit pas encore : prévenez le support.",
+  },
   unallocated_deadline: {
     label: "Fonds rattachés à un dossier non imputés",
     help: "De l'argent rattaché au dossier d'un client attend son imputation alors que son délai de reversement court (OQ-26) ; « bloqué » quand une procédure l'interdit.",
