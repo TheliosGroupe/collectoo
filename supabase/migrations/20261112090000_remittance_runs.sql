@@ -709,7 +709,12 @@ begin
                                                 where r.schedule_key = p_schedule_key)) then
     return null;
   end if;
-  select (min(q.posted_at) at time zone 'Europe/Paris')::date into v_from from private.remittance_pending q
+  -- the service period of a first run starts at its earliest encaissement (a payment's E, else the posting day)
+  select min(least((q.posted_at at time zone 'Europe/Paris')::date,
+                   coalesce((select private.encaissement_date(p.booking_date, p.value_date)
+                             from public.ledger_entry e join public.payment p on p.id = e.payment_id
+                             where e.id = q.ledger_entry_id), 'infinity'::date)))
+  into v_from from private.remittance_pending q
   where q.organization_id = p_organization_id and q.client_organization_id = p_client_organization_id
     and q.currency = p_currency and q.draft_run_id is null;
   if v_from is null then
@@ -2478,6 +2483,20 @@ $$;
 -- Reads for « Reversements » (§17.1, §17.2): money staff at aal2; amounts as text
 ------------------------------------------------------------------------------------------
 
+-- The chip of a latest execution date (§17.1): ok, soon (5 business days or less), critical (1 or less), late.
+create or replace function private.deadline_state(p_latest date)
+returns text
+language sql
+stable
+set search_path = ''
+as $$
+  select case when p_latest is null then null
+              when p_latest < private.paris_today() then 'late'
+              when private.business_days_between(private.paris_today(), p_latest) <= 1 then 'critical'
+              when private.business_days_between(private.paris_today(), p_latest) <= 5 then 'soon'
+              else 'ok' end;
+$$;
+
 create or replace function private.remittance_run_card(r public.remittance_run)
 returns jsonb
 language sql
@@ -2499,6 +2518,7 @@ as $$
     'inputs_hash', r.inputs_hash, 'last_failure', r.last_failure, 'approved_at', r.approved_at,
     'booked_on', r.booked_on, 'cancelled_at', r.cancelled_at, 'cancel_reason', r.cancel_reason,
     'invoice_late', r.invoice_late,
+    'deadline_state', private.deadline_state(r.earliest_latest_execution_date),
     'payout', case when pa.id is not null then jsonb_build_object(
        'iban_last4', right(pa.iban, 4), 'holder_name', pa.holder_name, 'confirmed_at', pa.confirmed_at,
        'new_iban', not exists (select 1 from public.bank_transfer t
@@ -2540,7 +2560,8 @@ begin
   -- clients with collections waiting and no pending run: « Préparer maintenant »
   select coalesce(jsonb_agg(jsonb_build_object(
            'client_id', w.client_organization_id, 'client_name', o.legal_name, 'currency', w.currency,
-           'owed_minor', w.owed::text, 'items', w.n, 'earliest_latest_execution_date', d.latest)
+           'owed_minor', w.owed::text, 'items', w.n, 'earliest_latest_execution_date', d.latest,
+           'deadline_state', private.deadline_state(d.latest))
            order by d.latest nulls last, o.legal_name), '[]')
   into v_prepare
   from (select q.client_organization_id, q.currency, sum(q.amount_minor) as owed, count(*) as n
@@ -2800,7 +2821,8 @@ revoke execute on function
   private.pending_item_deadlines(uuid), private.queue_remittance_schedule(),
   private.remittance_schedule_candidates(uuid, date), private.remittance_stuck_jobs(uuid),
   private.run_remittance_checks(uuid, uuid),
-  private.remittance_run_card(public.remittance_run), private.client_reads_run(uuid, text, timestamptz)
+  private.remittance_run_card(public.remittance_run), private.client_reads_run(uuid, text, timestamptz),
+  private.deadline_state(date)
   from public, anon, authenticated;
 -- the RLS helper runs as the caller
 grant execute on function private.client_reads_run(uuid, text, timestamptz) to authenticated;

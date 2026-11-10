@@ -165,6 +165,15 @@ export type ErrorCode =
   | "max_days_invalid"
   | "clause_required"
   | "not_ready"
+  | "run_pending"
+  | "nothing_pending"
+  | "run_version_changed"
+  | "run_not_draft"
+  | "run_approval_in_progress"
+  | "run_not_cancellable"
+  | "run_already_sent"
+  | "run_none_selected"
+  | "execution_date_invalid"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -317,6 +326,17 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   clause_required: "La référence de la clause est obligatoire (200 caractères au plus).",
   not_ready:
     "Le portefeuille n'est pas prêt pour la confirmation : complétez d'abord les éléments listés (identités, conditions du mandat).",
+  run_pending:
+    "Un reversement de ce client est déjà en cours (brouillon, validé ou transmis) : un seul à la fois par client et par devise.",
+  nothing_pending: "Rien à reverser pour ce client : aucun encaissement n'attend.",
+  run_version_changed: "Le reversement a changé depuis l'affichage de la page : rechargez-la puis recommencez.",
+  run_not_draft: "Ce reversement n'est plus un brouillon.",
+  run_approval_in_progress: "La validation de ce reversement est en cours : attendez son résultat.",
+  run_not_cancellable: "Seul un reversement validé, dont le virement n'est pas encore dans un fichier, peut être annulé.",
+  run_already_sent:
+    "Le fichier de virements a déjà été transmis à la banque : l'annulation suit la procédure d'attestation (à venir).",
+  run_none_selected: "Cochez au moins un reversement à valider.",
+  execution_date_invalid: "La date d'exécution demandée doit être un jour ouvré, à partir d'aujourd'hui.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 

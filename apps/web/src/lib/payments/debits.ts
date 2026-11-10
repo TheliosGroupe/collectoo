@@ -319,7 +319,71 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   remittance_completeness: {
     label: "Encaissements à reverser incomplets",
-    help: "Ce qui est dû à un client ne vaut pas la somme de ses encaissements en attente de reversement.",
+    help: "Ce qui est dû à un client ne vaut pas ses encaissements en attente de reversement plus ses reversements validés et non encore débités (I14).",
+  },
+  remittance_item_twice: {
+    label: "Encaissement à la fois en attente et reversé",
+    help: "Une écriture figure dans la file d'attente et dans un reversement : chaque encaissement est reversé une seule fois (I15).",
+  },
+  remittance_run_totals: {
+    label: "Totaux d'un reversement incohérents",
+    help: "Brut ≠ somme des lignes, net + compensation ≠ brut, virement ≠ net, ou commission des factures ≠ commission des lignes (I16).",
+  },
+  invoice_numbering: {
+    label: "Numérotation des factures discontinue",
+    help: "La série annuelle des factures et avoirs a un trou, un compteur en avance ou une date qui recule (I17).",
+  },
+  invoice_ledger: {
+    label: "Facture ≠ son écriture",
+    help: "L'écriture d'une facture ou d'un avoir ne vaut pas son TTC (4111) et son HT (7060) (I17).",
+  },
+  settlement_ledger: {
+    label: "Factures ouvertes ≠ compte client 4111",
+    help: "Ce que les factures et avoirs d'un client laissent ouvert ne vaut pas son compte 4111 (I18).",
+  },
+  vat_pending_ledger: {
+    label: "TVA en attente ≠ factures",
+    help: "La TVA sur commissions non réglées (44574) ne vaut pas la TVA des parts de factures non réglées (I18).",
+  },
+  remittance_deadline_breached: {
+    label: "Délai de reversement dépassé",
+    help: "Des encaissements d'un client n'ont pas été reversés avant leur dernière date d'exécution (art. R124-6 CPCE) : préparez et validez son reversement (« Reversements »).",
+  },
+  remittance_delay_unmeetable: {
+    label: "Délai de reversement intenable",
+    help: "Le délai du mandat (moins de 6 jours) ne laisse aucun jour ouvré pour exécuter le virement à temps : à revoir avec le client.",
+  },
+  remittance_due_critical: {
+    label: "Reversement à exécuter demain au plus tard",
+    help: "La dernière date d'exécution d'encaissements d'un client est dans un jour ouvré.",
+  },
+  remittance_due_soon: {
+    label: "Reversement à exécuter sous 5 jours ouvrés",
+    help: "La dernière date d'exécution d'encaissements d'un client approche.",
+  },
+  payout_blocked: {
+    label: "Reversement bloqué",
+    help: "Un brouillon de reversement ne peut pas être validé (IBAN de reversement manquant, non confirmé ou revenu, événement du client) : levez le blocage avant la date limite.",
+  },
+  draft_waiting: {
+    label: "Brouillon de reversement en attente",
+    help: "Un brouillon préparé attend sa validation depuis plus d'un jour ouvré.",
+  },
+  invoice_late: {
+    label: "Facture émise tardivement",
+    help: "Un reversement a été validé plus de 2 jours ouvrés après sa préparation : la facture de commission est datée du jour de la validation.",
+  },
+  unallocated_deadline: {
+    label: "Fonds rattachés à un dossier non imputés",
+    help: "De l'argent rattaché au dossier d'un client attend son imputation alors que son délai de reversement court (OQ-26) ; « bloqué » quand une procédure l'interdit.",
+  },
+  vat_pack_review: {
+    label: "Taux de TVA à revoir",
+    help: "Le pack de TVA doit être relu avant la recodification du 1er janvier 2027 (CIBS).",
+  },
+  calendar_horizon: {
+    label: "Calendrier des jours ouvrés à prolonger",
+    help: "Moins de 12 mois de jours ouvrés sont renseignés : les délais de reversement ne pourront plus être calculés.",
   },
   cash_in_statement: {
     label: "Encaissement d'un jour ≠ ses paiements",

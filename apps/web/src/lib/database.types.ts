@@ -431,14 +431,14 @@ isOneToOne: false
                   ]
                 },"bank_transfer": {
                   Row: {
-                    "amount_minor": number,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"client_organization_id": string | null,"created_at": string,"creditor_bank_account_id": string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id": string | null,"id": string,"kind": string,"ordered_by": string | null,"organization_id": string,"payee_bic": string | null,"payee_iban": string,"payee_name": string,"reason": string | null,"remittance_info": string | null,"requested_execution_date": string,"return_entry_id": string | null,"status": string,"updated_at": string
+                    "amount_minor": number,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"client_organization_id": string | null,"created_at": string,"creditor_bank_account_id": string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id": string | null,"id": string,"kind": string,"ordered_by": string | null,"organization_id": string,"payee_bic": string | null,"payee_iban": string,"payee_name": string,"reason": string | null,"remittance_info": string | null,"requested_execution_date": string,"return_entry_id": string | null,"run_id": string | null,"status": string,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "amount_minor": number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id"?: string | null,"id"?: string,"kind": string,"ordered_by"?: string | null,"organization_id": string,"payee_bic"?: string | null,"payee_iban": string,"payee_name": string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date": string,"return_entry_id"?: string | null,"status"?: string,"updated_at"?: string
+                    "amount_minor": number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id"?: string | null,"id"?: string,"kind": string,"ordered_by"?: string | null,"organization_id": string,"payee_bic"?: string | null,"payee_iban": string,"payee_name": string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date": string,"return_entry_id"?: string | null,"run_id"?: string | null,"status"?: string,"updated_at"?: string
                   }
                   Update: {
-                    "amount_minor"?: number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency"?: string,"debtor_bank_account_id"?: string,"end_to_end_id"?: string,"entry_id"?: string | null,"id"?: string,"kind"?: string,"ordered_by"?: string | null,"organization_id"?: string,"payee_bic"?: string | null,"payee_iban"?: string,"payee_name"?: string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date"?: string,"return_entry_id"?: string | null,"status"?: string,"updated_at"?: string
+                    "amount_minor"?: number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency"?: string,"debtor_bank_account_id"?: string,"end_to_end_id"?: string,"entry_id"?: string | null,"id"?: string,"kind"?: string,"ordered_by"?: string | null,"organization_id"?: string,"payee_bic"?: string | null,"payee_iban"?: string,"payee_name"?: string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date"?: string,"return_entry_id"?: string | null,"run_id"?: string | null,"status"?: string,"updated_at"?: string
                   }
                   Relationships: [
                     {
@@ -476,6 +476,12 @@ isOneToOne: false
       columns: ["return_entry_id"]
 isOneToOne: true
       referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "bank_transfer_run_id_fkey"
+      columns: ["run_id"]
+isOneToOne: false
+      referencedRelation: "remittance_run"
       referencedColumns: ["id"]
     }
                   ]
@@ -792,6 +798,210 @@ isOneToOne: false
       columns: ["recorded_by"]
 isOneToOne: false
       referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"commission_credit_alloc": {
+                  Row: {
+                    "account_id": string,"credit_note_id": string,"entry_id": string | null,"ht_minor": number,"line_no": number,"original_invoice_id": string,"tier_key": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id": string,"credit_note_id": string,"entry_id"?: string | null,"ht_minor": number,"line_no": number,"original_invoice_id": string,"tier_key": string
+                  }
+                  Update: {
+                    "account_id"?: string,"credit_note_id"?: string,"entry_id"?: string | null,"ht_minor"?: number,"line_no"?: number,"original_invoice_id"?: string,"tier_key"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "commission_credit_alloc_account_id_fkey"
+      columns: ["account_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_credit_alloc_credit_note_id_fkey"
+      columns: ["credit_note_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_credit_alloc_entry_id_fkey"
+      columns: ["entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_credit_alloc_original_invoice_id_fkey"
+      columns: ["original_invoice_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"commission_credit_correction": {
+                  Row: {
+                    "applied_minor": number,"credit_note_id": string,"excess_minor": number,"ht_minor": number,"original_invoice_id": string,"vat_collected_minor": number,"vat_minor": number,"vat_pending_minor": number,"vat_rate": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "applied_minor": number,"credit_note_id": string,"excess_minor": number,"ht_minor": number,"original_invoice_id": string,"vat_collected_minor": number,"vat_minor": number,"vat_pending_minor": number,"vat_rate": number
+                  }
+                  Update: {
+                    "applied_minor"?: number,"credit_note_id"?: string,"excess_minor"?: number,"ht_minor"?: number,"original_invoice_id"?: string,"vat_collected_minor"?: number,"vat_minor"?: number,"vat_pending_minor"?: number,"vat_rate"?: number
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "commission_credit_correction_credit_note_id_fkey"
+      columns: ["credit_note_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_credit_correction_original_invoice_id_fkey"
+      columns: ["original_invoice_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"commission_invoice": {
+                  Row: {
+                    "client_organization_id": string,"created_at": string,"currency": string,"due_date": string | null,"ht_minor": number,"id": string,"issue_date": string,"kind": string,"ledger_entry_id": string,"mandate_id": string,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"reason": string,"run_id": string | null,"seq": number,"series": string,"service_from": string | null,"service_to": string | null,"settlement": string,"ttc_minor": number,"vat_book": string | null,"vat_minor": number,"vat_rate": number | null,"year": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "client_organization_id": string,"created_at"?: string,"currency": string,"due_date"?: string | null,"ht_minor": number,"id": string,"issue_date": string,"kind": string,"ledger_entry_id": string,"mandate_id": string,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"reason": string,"run_id"?: string | null,"seq": number,"series": string,"service_from"?: string | null,"service_to"?: string | null,"settlement": string,"ttc_minor": number,"vat_book"?: string | null,"vat_minor": number,"vat_rate"?: number | null,"year": number
+                  }
+                  Update: {
+                    "client_organization_id"?: string,"created_at"?: string,"currency"?: string,"due_date"?: string | null,"ht_minor"?: number,"id"?: string,"issue_date"?: string,"kind"?: string,"ledger_entry_id"?: string,"mandate_id"?: string,"number"?: string,"organization_id"?: string,"payload"?: NonNullable<Json>,"payload_sha256"?: string,"reason"?: string,"run_id"?: string | null,"seq"?: number,"series"?: string,"service_from"?: string | null,"service_to"?: string | null,"settlement"?: string,"ttc_minor"?: number,"vat_book"?: string | null,"vat_minor"?: number,"vat_rate"?: number | null,"year"?: number
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "commission_invoice_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_invoice_ledger_entry_id_fkey"
+      columns: ["ledger_entry_id"]
+isOneToOne: true
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_invoice_mandate_id_fkey"
+      columns: ["mandate_id"]
+isOneToOne: false
+      referencedRelation: "mandate"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_invoice_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_invoice_run_id_fkey"
+      columns: ["run_id"]
+isOneToOne: false
+      referencedRelation: "remittance_run"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"commission_invoice_charge": {
+                  Row: {
+                    "account_id": string,"charged_minor": number,"invoice_id": string,"tier_key": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id": string,"charged_minor": number,"invoice_id": string,"tier_key": string
+                  }
+                  Update: {
+                    "account_id"?: string,"charged_minor"?: number,"invoice_id"?: string,"tier_key"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "commission_invoice_charge_account_id_fkey"
+      columns: ["account_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_invoice_charge_invoice_id_fkey"
+      columns: ["invoice_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"commission_invoice_line": {
+                  Row: {
+                    "claim_type_code": string | null,"designation_fr": string,"families": (string)[],"ht_minor": number,"invoice_id": string,"kind": string,"line_no": number,"original_invoice_id": string | null,"quantity": number,"rule_id": string | null,"tiers": NonNullable<Json>,"vat_rate": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "claim_type_code"?: string | null,"designation_fr": string,"families"?: (string)[],"ht_minor": number,"invoice_id": string,"kind": string,"line_no": number,"original_invoice_id"?: string | null,"quantity"?: number,"rule_id"?: string | null,"tiers"?: NonNullable<Json>,"vat_rate": number
+                  }
+                  Update: {
+                    "claim_type_code"?: string | null,"designation_fr"?: string,"families"?: (string)[],"ht_minor"?: number,"invoice_id"?: string,"kind"?: string,"line_no"?: number,"original_invoice_id"?: string | null,"quantity"?: number,"rule_id"?: string | null,"tiers"?: NonNullable<Json>,"vat_rate"?: number
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "commission_invoice_line_invoice_id_fkey"
+      columns: ["invoice_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_invoice_line_original_invoice_id_fkey"
+      columns: ["original_invoice_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"commission_settlement": {
+                  Row: {
+                    "amount_minor": number,"client_organization_id": string,"created_at": string,"credit_note_id": string | null,"document_id": string,"document_kind": string,"entry_id": string | null,"id": string,"kind": string,"organization_id": string,"run_id": string | null,"settled_on": string,"vat_moved_minor": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "amount_minor": number,"client_organization_id": string,"created_at"?: string,"credit_note_id"?: string | null,"document_id": string,"document_kind": string,"entry_id"?: string | null,"id"?: string,"kind": string,"organization_id": string,"run_id"?: string | null,"settled_on": string,"vat_moved_minor"?: number
+                  }
+                  Update: {
+                    "amount_minor"?: number,"client_organization_id"?: string,"created_at"?: string,"credit_note_id"?: string | null,"document_id"?: string,"document_kind"?: string,"entry_id"?: string | null,"id"?: string,"kind"?: string,"organization_id"?: string,"run_id"?: string | null,"settled_on"?: string,"vat_moved_minor"?: number
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "commission_settlement_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_settlement_credit_note_id_fkey"
+      columns: ["credit_note_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_settlement_entry_id_fkey"
+      columns: ["entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_settlement_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "commission_settlement_run_id_fkey"
+      columns: ["run_id"]
+isOneToOne: false
+      referencedRelation: "remittance_run"
       referencedColumns: ["id"]
     }
                   ]
@@ -1633,6 +1843,280 @@ isOneToOne: false
       referencedColumns: ["id","organization_id"]
     }
                   ]
+                },"remittance_deadline_breach": {
+                  Row: {
+                    "blocked_reason": string | null,"client_organization_id": string,"deadline": string | null,"detected_at": string,"id": string,"late_reason": string | null,"latest_execution_date": string,"ledger_entry_id": string,"organization_id": string,"payment_id": string | null,"requested_execution_date": string | null,"run_id": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "blocked_reason"?: string | null,"client_organization_id": string,"deadline"?: string | null,"detected_at"?: string,"id"?: string,"late_reason"?: string | null,"latest_execution_date": string,"ledger_entry_id": string,"organization_id": string,"payment_id"?: string | null,"requested_execution_date"?: string | null,"run_id"?: string | null
+                  }
+                  Update: {
+                    "blocked_reason"?: string | null,"client_organization_id"?: string,"deadline"?: string | null,"detected_at"?: string,"id"?: string,"late_reason"?: string | null,"latest_execution_date"?: string,"ledger_entry_id"?: string,"organization_id"?: string,"payment_id"?: string | null,"requested_execution_date"?: string | null,"run_id"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "remittance_deadline_breach_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_deadline_breach_ledger_entry_id_fkey"
+      columns: ["ledger_entry_id"]
+isOneToOne: true
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_deadline_breach_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_deadline_breach_payment_id_fkey"
+      columns: ["payment_id"]
+isOneToOne: false
+      referencedRelation: "payment"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_deadline_breach_run_id_fkey"
+      columns: ["run_id"]
+isOneToOne: false
+      referencedRelation: "remittance_run"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"remittance_key_state": {
+                  Row: {
+                    "account_id": string,"basis": NonNullable<Json>,"cause": string,"client_organization_id": string,"commission_minor": number,"created_at": string,"kept_basis_minor": number,"kept_minor": number,"organization_id": string,"run_id": string,"seq": number,"tier_key": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id": string,"basis"?: NonNullable<Json>,"cause": string,"client_organization_id": string,"commission_minor"?: number,"created_at"?: string,"kept_basis_minor"?: number,"kept_minor"?: number,"organization_id": string,"run_id": string,"seq"?: never,"tier_key": string
+                  }
+                  Update: {
+                    "account_id"?: string,"basis"?: NonNullable<Json>,"cause"?: string,"client_organization_id"?: string,"commission_minor"?: number,"created_at"?: string,"kept_basis_minor"?: number,"kept_minor"?: number,"organization_id"?: string,"run_id"?: string,"seq"?: never,"tier_key"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "remittance_key_state_account_id_fkey"
+      columns: ["account_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_key_state_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_key_state_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_key_state_run_id_fkey"
+      columns: ["run_id"]
+isOneToOne: false
+      referencedRelation: "remittance_run"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"remittance_line": {
+                  Row: {
+                    "account_id": string | null,"amount_minor": number,"basis": NonNullable<Json>,"client_organization_id": string,"commission_minor": number,"commission_reason": string | null,"commission_state": string,"currency": string,"deadline": string | null,"effective_date": string,"encaissement_date": string | null,"invoice_id": string | null,"kind": string,"latest_execution_date": string | null,"ledger_entry_id": string,"line_no": number,"mandate_id": string | null,"mandate_terms_id": string | null,"organization_id": string,"original_entry_id": string | null,"parts": NonNullable<Json>,"payment_id": string | null,"portfolio_id": string | null,"posted_at": string,"released": boolean,"released_at": string | null,"run_id": string,"unmeetable": boolean
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "account_id"?: string | null,"amount_minor": number,"basis"?: NonNullable<Json>,"client_organization_id": string,"commission_minor"?: number,"commission_reason"?: string | null,"commission_state": string,"currency": string,"deadline"?: string | null,"effective_date": string,"encaissement_date"?: string | null,"invoice_id"?: string | null,"kind": string,"latest_execution_date"?: string | null,"ledger_entry_id": string,"line_no": number,"mandate_id"?: string | null,"mandate_terms_id"?: string | null,"organization_id": string,"original_entry_id"?: string | null,"parts"?: NonNullable<Json>,"payment_id"?: string | null,"portfolio_id"?: string | null,"posted_at": string,"released"?: boolean,"released_at"?: string | null,"run_id": string,"unmeetable"?: boolean
+                  }
+                  Update: {
+                    "account_id"?: string | null,"amount_minor"?: number,"basis"?: NonNullable<Json>,"client_organization_id"?: string,"commission_minor"?: number,"commission_reason"?: string | null,"commission_state"?: string,"currency"?: string,"deadline"?: string | null,"effective_date"?: string,"encaissement_date"?: string | null,"invoice_id"?: string | null,"kind"?: string,"latest_execution_date"?: string | null,"ledger_entry_id"?: string,"line_no"?: number,"mandate_id"?: string | null,"mandate_terms_id"?: string | null,"organization_id"?: string,"original_entry_id"?: string | null,"parts"?: NonNullable<Json>,"payment_id"?: string | null,"portfolio_id"?: string | null,"posted_at"?: string,"released"?: boolean,"released_at"?: string | null,"run_id"?: string,"unmeetable"?: boolean
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "remittance_line_account_id_fkey"
+      columns: ["account_id"]
+isOneToOne: false
+      referencedRelation: "account"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_invoice_fk"
+      columns: ["invoice_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_ledger_entry_id_fkey"
+      columns: ["ledger_entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_mandate_id_fkey"
+      columns: ["mandate_id"]
+isOneToOne: false
+      referencedRelation: "mandate"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_mandate_terms_id_fkey"
+      columns: ["mandate_terms_id"]
+isOneToOne: false
+      referencedRelation: "mandate_terms"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_original_entry_id_fkey"
+      columns: ["original_entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_payment_id_fkey"
+      columns: ["payment_id"]
+isOneToOne: false
+      referencedRelation: "payment"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_portfolio_id_fkey"
+      columns: ["portfolio_id"]
+isOneToOne: false
+      referencedRelation: "portfolio"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_run_id_fkey"
+      columns: ["run_id"]
+isOneToOne: false
+      referencedRelation: "remittance_run"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"remittance_line_repricing": {
+                  Row: {
+                    "commission_minor": number,"commission_reason": string | null,"commission_state": string,"invoice_id": string | null,"ledger_entry_id": string,"line_no": number,"parts": NonNullable<Json>,"pricing_run_id": string,"run_id": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "commission_minor": number,"commission_reason"?: string | null,"commission_state": string,"invoice_id"?: string | null,"ledger_entry_id": string,"line_no": number,"parts"?: NonNullable<Json>,"pricing_run_id": string,"run_id": string
+                  }
+                  Update: {
+                    "commission_minor"?: number,"commission_reason"?: string | null,"commission_state"?: string,"invoice_id"?: string | null,"ledger_entry_id"?: string,"line_no"?: number,"parts"?: NonNullable<Json>,"pricing_run_id"?: string,"run_id"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "remittance_line_repricing_invoice_fk"
+      columns: ["invoice_id"]
+isOneToOne: false
+      referencedRelation: "commission_invoice"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_repricing_ledger_entry_id_fkey"
+      columns: ["ledger_entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_repricing_pricing_run_id_fkey"
+      columns: ["pricing_run_id"]
+isOneToOne: false
+      referencedRelation: "remittance_run"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_line_repricing_run_id_line_no_fkey"
+      columns: ["run_id","line_no"]
+isOneToOne: false
+      referencedRelation: "remittance_line"
+      referencedColumns: ["run_id","line_no"]
+    }
+                  ]
+                },"remittance_run": {
+                  Row: {
+                    "advance_recovered_minor": number | null,"approval_requested_by": string | null,"approved_at": string | null,"approved_by": string | null,"blockers": (string)[],"booked_on": string | null,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"client_organization_id": string,"commission_blockers": (string)[],"commission_taken_minor": number | null,"created_at": string,"created_by": string | null,"credit_ht_minor": number | null,"credit_ttc_minor": number | null,"credit_vat_minor": number | null,"currency": string,"earliest_deadline": string | null,"earliest_latest_execution_date": string | null,"engine_version": string | null,"gross_minor": number | null,"id": string,"inputs_hash": string | null,"invoice_ht_minor": number | null,"invoice_late": boolean,"invoice_ttc_minor": number | null,"invoice_vat_minor": number | null,"item_count": number,"job": string | null,"job_queued_at": string | null,"job_token": string | null,"known_at": string,"last_failure": Json | null,"late_reason": string | null,"line_count": number | null,"net_minor": number | null,"number": string,"organization_id": string,"payout_account_id": string | null,"payout_snapshot": Json | null,"prepared_at": string | null,"previous_run_id": string | null,"refund_minor": number | null,"requested_execution_date": string | null,"schedule_key": string | null,"service_from": string | null,"service_to": string | null,"settlement_minor": number | null,"settlement_plan": Json | null,"status": string,"transfer_id": string | null,"trigger": string,"unmeetable_count": number,"updated_at": string,"vat_rate": number | null,"version": number
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "advance_recovered_minor"?: number | null,"approval_requested_by"?: string | null,"approved_at"?: string | null,"approved_by"?: string | null,"blockers"?: (string)[],"booked_on"?: string | null,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id": string,"commission_blockers"?: (string)[],"commission_taken_minor"?: number | null,"created_at"?: string,"created_by"?: string | null,"credit_ht_minor"?: number | null,"credit_ttc_minor"?: number | null,"credit_vat_minor"?: number | null,"currency": string,"earliest_deadline"?: string | null,"earliest_latest_execution_date"?: string | null,"engine_version"?: string | null,"gross_minor"?: number | null,"id"?: string,"inputs_hash"?: string | null,"invoice_ht_minor"?: number | null,"invoice_late"?: boolean,"invoice_ttc_minor"?: number | null,"invoice_vat_minor"?: number | null,"item_count"?: number,"job"?: string | null,"job_queued_at"?: string | null,"job_token"?: string | null,"known_at": string,"last_failure"?: Json | null,"late_reason"?: string | null,"line_count"?: number | null,"net_minor"?: number | null,"number": string,"organization_id": string,"payout_account_id"?: string | null,"payout_snapshot"?: Json | null,"prepared_at"?: string | null,"previous_run_id"?: string | null,"refund_minor"?: number | null,"requested_execution_date"?: string | null,"schedule_key"?: string | null,"service_from"?: string | null,"service_to"?: string | null,"settlement_minor"?: number | null,"settlement_plan"?: Json | null,"status"?: string,"transfer_id"?: string | null,"trigger": string,"unmeetable_count"?: number,"updated_at"?: string,"vat_rate"?: number | null,"version"?: number
+                  }
+                  Update: {
+                    "advance_recovered_minor"?: number | null,"approval_requested_by"?: string | null,"approved_at"?: string | null,"approved_by"?: string | null,"blockers"?: (string)[],"booked_on"?: string | null,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string,"commission_blockers"?: (string)[],"commission_taken_minor"?: number | null,"created_at"?: string,"created_by"?: string | null,"credit_ht_minor"?: number | null,"credit_ttc_minor"?: number | null,"credit_vat_minor"?: number | null,"currency"?: string,"earliest_deadline"?: string | null,"earliest_latest_execution_date"?: string | null,"engine_version"?: string | null,"gross_minor"?: number | null,"id"?: string,"inputs_hash"?: string | null,"invoice_ht_minor"?: number | null,"invoice_late"?: boolean,"invoice_ttc_minor"?: number | null,"invoice_vat_minor"?: number | null,"item_count"?: number,"job"?: string | null,"job_queued_at"?: string | null,"job_token"?: string | null,"known_at"?: string,"last_failure"?: Json | null,"late_reason"?: string | null,"line_count"?: number | null,"net_minor"?: number | null,"number"?: string,"organization_id"?: string,"payout_account_id"?: string | null,"payout_snapshot"?: Json | null,"prepared_at"?: string | null,"previous_run_id"?: string | null,"refund_minor"?: number | null,"requested_execution_date"?: string | null,"schedule_key"?: string | null,"service_from"?: string | null,"service_to"?: string | null,"settlement_minor"?: number | null,"settlement_plan"?: Json | null,"status"?: string,"transfer_id"?: string | null,"trigger"?: string,"unmeetable_count"?: number,"updated_at"?: string,"vat_rate"?: number | null,"version"?: number
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "remittance_run_approval_requested_by_fkey"
+      columns: ["approval_requested_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_run_approved_by_fkey"
+      columns: ["approved_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_run_cancelled_by_fkey"
+      columns: ["cancelled_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_run_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_run_created_by_fkey"
+      columns: ["created_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_run_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "remittance_run_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_run_payout_account_id_fkey"
+      columns: ["payout_account_id"]
+isOneToOne: false
+      referencedRelation: "client_payout_account"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_run_previous_run_id_fkey"
+      columns: ["previous_run_id"]
+isOneToOne: false
+      referencedRelation: "remittance_run"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "remittance_run_transfer_id_fkey"
+      columns: ["transfer_id"]
+isOneToOne: true
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"servicer_billing_settings": {
                   Row: {
                     "bank_cutoff": NonNullable<Json>,"created_at": string,"invoice_prefix": string,"organization_id": string,"own_bank_account_id": string | null,"penalty_text": string,"updated_at": string,"updated_by": string | null,"vat_on_debits": boolean,"version": number
@@ -1737,6 +2221,9 @@ isOneToOne: false
 "approve_mapping":
 { Args: { "p_batch_id": string,"p_overrides"?: Json }; Returns: undefined
                            },
+"approve_remittance_runs":
+{ Args: { "p_idempotency_key": string,"p_items": Json,"p_late_reason"?: string,"p_requested_execution_date"?: string }; Returns: Json
+                           },
 "assign_payment":
 { Args: { "p_designation": Json,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string,"p_splits": Json }; Returns: Json
                            },
@@ -1748,6 +2235,9 @@ isOneToOne: false
                            },
 "cancel_refund":
 { Args: { "p_idempotency_key": string,"p_reason": string,"p_refund_request_id": string }; Returns: Json
+                           },
+"cancel_remittance_run":
+{ Args: { "p_expected_version": number,"p_idempotency_key": string,"p_reason": string,"p_run_id": string }; Returns: Json
                            },
 "cancel_top_up":
 { Args: { "p_idempotency_key": string,"p_reason": string,"p_transfer_id": string }; Returns: Json
@@ -1799,6 +2289,9 @@ isOneToOne: false
               "age_days": number,"amount_minor": string,"bank_account_id": string,"bank_transaction_id": string,"booking_date": string,"candidates": Json,"counterparty_iban_end": string,"counterparty_name": string,"currency": string,"decided_at": string,"decided_payment_id": string,"decision": string,"direction": string,"end_to_end_id": string,"held_kind": string,"kind": string,"original_end_to_end_id": string,"remittance_text": string,"return_reason": string,"review_reason": string,"statement_id": string,"total": number
             }[]
                            },
+"discard_remittance_run":
+{ Args: { "p_expected_version": number,"p_idempotency_key": string,"p_reason": string,"p_run_id": string }; Returns: Json
+                           },
 "forward_payment":
 { Args: { "p_client_organization_id": string,"p_evidence_document_id": string,"p_expected_minor": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
                            },
@@ -1844,6 +2337,9 @@ isOneToOne: false
 "record_direct_payment":
 { Args: { "p_account_id": string,"p_amount_minor": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_item_ids": (string)[],"p_paid_on": string,"p_reason": string }; Returns: Json
                            },
+"refresh_remittance_run":
+{ Args: { "p_expected_version": number,"p_idempotency_key": string,"p_run_id": string }; Returns: Json
+                           },
 "register_bank_account":
 { Args: { "p_bic"?: string,"p_currency": string,"p_feed": string,"p_iban": string,"p_idempotency_key": string,"p_label": string,"p_opened_on"?: string,"p_organization_id": string,"p_purpose"?: string }; Returns: string
                            },
@@ -1859,11 +2355,20 @@ isOneToOne: false
 "release_own_credit":
 { Args: { "p_bank_transaction_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
                            },
+"remittance_overview":
+{ Args: { "p_tab"?: string }; Returns: Json
+                           },
+"remittance_run_detail":
+{ Args: { "p_limit"?: number,"p_offset"?: number,"p_run_id": string }; Returns: Json
+                           },
 "request_payment_checks":
 { Args: { "p_organization_id": string }; Returns: Json
                            },
 "request_refund":
 { Args: { "p_amount_minor": string,"p_expected_left_minor": string,"p_expected_review_reason": string,"p_idempotency_key": string,"p_payee_iban": string,"p_payee_name": string,"p_payment_id": string,"p_reason": string,"p_reason_code": string }; Returns: Json
+                           },
+"request_remittance_run":
+{ Args: { "p_client_organization_id": string,"p_currency"?: string,"p_idempotency_key": string }; Returns: Json
                            },
 "request_top_up":
 { Args: { "p_amount_minor": string,"p_client_funds_bank_account_id": string,"p_idempotency_key": string,"p_own_bank_account_id": string,"p_reason": string,"p_requested_execution_date"?: string }; Returns: Json
