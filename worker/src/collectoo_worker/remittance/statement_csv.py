@@ -6,8 +6,15 @@ f(payload): the same payload always gives the same file (golden: tests/test_stat
 Columns (`statement.CSV_HEADER`): releve;date_releve;mandat;portefeuille;dossier;debiteur;piece;
 composante;nature;date_encaissement;date_imputation;date_limite_reversement;montant;
 montant_centimes;regle;taux;base_commission_centimes;commission_ht;commission_ht_centimes;facture;
-quittance;hors_delai — the design's list, plus `hors_delai` (« oui — motif » for a line approved
-after its latest execution date, §10.2 « hors délai with its cause »).
+quittance;hors_delai — the design's list, plus `hors_delai` (« oui — cause » for a line paid after
+its latest execution date, §10.2 « hors délai with its cause »: a category the data supports, never
+the approver's free text, review legal#6).
+
+Spreadsheet formulas (review security#0): a text cell whose first character is one of `= + - @`,
+TAB or CR — a debtor's name or a file reference from a boarded tape — is written with a leading
+apostrophe, so a spreadsheet shows it as text instead of evaluating it. The text columns are
+`TEXT_COLUMNS`; amounts, cents, rates and dates are never altered (a negative amount stays
+« -12,34 », numeric).
 """
 
 from __future__ import annotations
@@ -32,8 +39,38 @@ def csv_amount(minor: int, exponent: int) -> str:
     return ("-" if minor < 0 else "") + text
 
 
-def _cell(value: str) -> str:
-    """A field quoted when it holds the separator, a quote or a line break (RFC 4180)."""
+FORMULA_START = frozenset("=+-@\t\r")
+# the columns holding text (boarded, staff-entered or worded): neutralised; every other column is an
+# amount, a rate or an ISO date and is written as is
+TEXT_COLUMNS = frozenset(
+    {
+        "releve",
+        "mandat",
+        "portefeuille",
+        "dossier",
+        "debiteur",
+        "piece",
+        "composante",
+        "nature",
+        "regle",
+        "facture",
+        "quittance",
+        "hors_delai",
+    }
+)
+_TEXT_AT = tuple(name in TEXT_COLUMNS for name in CSV_HEADER)
+
+
+def neutralise(value: str) -> str:
+    """A text cell a spreadsheet would read as a formula, prefixed with an apostrophe."""
+    return "'" + value if value[:1] in FORMULA_START else value
+
+
+def _cell(value: str, text: bool = False) -> str:
+    """A field (a text one neutralised first), quoted when it holds the separator, a quote or a
+    line break (RFC 4180)."""
+    if text:
+        value = neutralise(value)
     if any(ch in value for ch in ';"\r\n'):
         return '"' + value.replace('"', '""') + '"'
     return value
@@ -71,7 +108,7 @@ def render_statement_csv(payload: Mapping[str, Any]) -> bytes:
             ln.receipt,
             ln.late,
         )
-        out.write(";".join(_cell(c) for c in row) + "\r\n")
+        out.write(";".join(_cell(c, t) for c, t in zip(row, _TEXT_AT, strict=True)) + "\r\n")
     return out.getvalue().encode("utf-8")
 
 

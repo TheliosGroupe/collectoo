@@ -1,5 +1,5 @@
 """The PDF of a commission invoice or credit note (design §14.2; template
-`facture-commission-fr-1`): `invoice.invoice_view` drawn on A4. Deterministic: bytes = f(the
+`facture-commission-fr-2`): `invoice.invoice_view` drawn on A4. Deterministic: bytes = f(the
 document's row and frozen payload, the numbers it names, the template and renderer versions), dated
 by its issue date (`remittance.pdf`), never by the clock.
 """

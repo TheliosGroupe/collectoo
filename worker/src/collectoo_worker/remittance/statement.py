@@ -8,7 +8,10 @@ template `TEMPLATE_VERSION`); `statement_csv` writes its lines and `statement_pd
 summary. Nothing is computed here but the layout: every amount, total and date is the payload's,
 which comes from the run's frozen lines, its documents and the ledger; no model or LLM is involved.
 No wording says « payé » or « réglé » before the bank's debit (M2c-6 books it): a payout is
-« ordonné », a set-off « à régler par compensation ».
+« ordonné », a set-off « à régler par compensation » — « compensé le … » only when the run transfers
+nothing (N = 0: the settlement is posted at approval). A run cancelled before its statement is drawn
+says so, and sets nothing off. A late line states a cause the data supports, never the approver's
+free text (review legal#6).
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from collectoo_worker.payments.receipts import (
 )
 from collectoo_worker.remittance.run import percent
 
-TEMPLATE_VERSION = "releve-reversement-fr-1"
+TEMPLATE_VERSION = "releve-reversement-fr-2"  # M2c-5 review (fr-1 never left the slice)
 TEMPLATE_VERSIONS = (TEMPLATE_VERSION,)
 PDF_FILE_ROWS_MAX = 2000  # above this, the PDF names the CSV for the detail (design §10)
 
@@ -68,6 +71,14 @@ HELD_REASON = {
     "account_not_confirmed": "dossier non confirmé",
     "allocation_reversed": "imputation annulée",
     "pending": "en cours d'imputation",
+    "refund_pending": "à restituer au payeur",
+}
+# why a line was paid after its latest execution date (payload `late_cause`, a category the data
+# supports: review legal#6)
+LATE_CAUSE = {
+    "unmeetable": "délai contractuel intenable (art. R124-6 : un mois)",
+    "identified_late": "encaissement identifié tardivement",
+    "approved_late": "validation tardive",
 }
 REFUND_REASON = {
     "overpayment": "trop-perçu",
@@ -157,7 +168,7 @@ def line_records(payload: Mapping[str, Any]) -> list[StatementLine]:
                 commission_minor=int(v["commission_minor"]),
                 invoice=str(v["invoice"] or ""),
                 receipt=str(v["receipt"] or ""),
-                late=_late(v["late"], v["late_reason"]),
+                late=_late(v["late"], v.get("late_cause")),
             )
         )
     return out
@@ -178,10 +189,11 @@ def _rules(v: Mapping[str, Any]) -> str:
     return " ; ".join(str(r) for r in v["rules"] or ())
 
 
-def _late(late: Any, reason: Any) -> str:
+def _late(late: Any, cause: Any) -> str:
     if not late:
         return ""
-    return f"oui {DASH} {reason}" if reason else "oui"
+    label = LATE_CAUSE.get(str(cause)) if cause else None
+    return f"oui {DASH} {label}" if label else "oui"
 
 
 def nature(kind: str, reason: Any, from_run: Any) -> str:
@@ -240,7 +252,7 @@ def _paris(at: datetime) -> str:
 
 
 def statement_view(payload: Mapping[str, Any], csv_sha256: str) -> StatementView:
-    """The locked French template `releve-reversement-fr-1` filled from the payload."""
+    """The locked French template `releve-reversement-fr-2` filled from the payload."""
     money = money_of(payload)
     k = known_at(payload)
     number = str(payload["number"])
@@ -312,6 +324,16 @@ def _mandate_line(m: Mapping[str, Any]) -> str:
     return line + (f" ({' ; '.join(refs)})" if refs else "")
 
 
+def _cancelled(p: Mapping[str, Any]) -> bool:
+    return p.get("status") == "cancelled"
+
+
+def _settled_on(p: Mapping[str, Any]) -> str:
+    """The approval date when the run transfers nothing (N = 0: its settlement posted then), else
+    empty."""
+    return format_date(p.get("settled_on")) if p.get("settled_on") else ""
+
+
 def _summary(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Section:
     t = p["totals"]
     rows = [
@@ -322,14 +344,23 @@ def _summary(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Section
     if int(t["invoice_ttc_minor"]) or int(t["credit_ttc_minor"]):
         rows.append(("Factures de commission (TTC)", money(t["invoice_ttc_minor"])))
         rows.append(("Avoirs (TTC)", money(-int(t["credit_ttc_minor"]))))
+    if _cancelled(p):
+        # nothing is transferred nor set off: the run's documents are annulled by credit note
+        texts = (
+            f"Reversement annulé le {format_date(p.get('cancelled_on'))} avant l'exécution de son "
+            "virement : rien n'a été viré ni compensé ; les sommes vous revenant figureront sur un "
+            "prochain relevé.",
+        )
+        return Section("Récapitulatif", rows=tuple(rows), texts=texts)
+    done = _settled_on(p)
     if int(t["commission_taken_minor"]):
-        rows.append(
-            ("Commission à régler par compensation", money(-int(t["commission_taken_minor"])))
+        label = (
+            f"Commission compensée le {done}" if done else "Commission à régler par compensation"
         )
+        rows.append((label, money(-int(t["commission_taken_minor"]))))
     if int(t["advance_recovered_minor"]):
-        rows.append(
-            ("Avances à régler par compensation", money(-int(t["advance_recovered_minor"])))
-        )
+        label = f"Avances compensées le {done}" if done else "Avances à régler par compensation"
+        rows.append((label, money(-int(t["advance_recovered_minor"]))))
     if int(t["refund_minor"]):
         rows.append(("Remboursement d'avoir inclus", money(t["refund_minor"])))
     rows.append(("Montant net du reversement", money(t["net_minor"])))
@@ -347,9 +378,14 @@ def _collected(p: Mapping[str, Any], money: Callable[[int | str], str], csv_sha2
             f"Dont la commission de {t['repriced_count']} encaissement(s) de relevés précédents, "
             "restée en attente jusqu'ici."
         )
+    if int(t.get("repriced_only_file_count", 0)):
+        texts.append(
+            f"{t['repriced_only_file_count']} dossier(s) du tableau n'ont pas d'encaissement "
+            "dans ce relevé : seule la commission d'encaissements précédents y est calculée."
+        )
     if int(t["late_count"]):
         texts.append(
-            f"{t['late_count']} encaissement(s) reversé(s) hors délai : le détail et leur motif "
+            f"{t['late_count']} encaissement(s) reversé(s) hors délai : le détail et leur cause "
             "figurent dans le fichier CSV (colonne hors_delai)."
         )
     files = p["files"]
@@ -391,22 +427,32 @@ def _deductions(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Sect
     texts: list[str] = []
     for d in p["documents"]:
         texts.append(_document_text(d, p, money))
+    done = _settled_on(p)
+    on_run = (
+        f"compensation le {done}"
+        if done
+        else "à régler par compensation sur le présent reversement"
+    )
     for e in p["earlier_settled"]:
         what = "Facture" if e.get("document_kind") == "invoice" else "Avoir"
         if e["kind"] == "refund":
+            how = (
+                f"remboursement par compensation le {done}"
+                if done
+                else "remboursement inclus dans le présent reversement"
+            )
             texts.append(
-                f"Avoir {e['number']} du {format_date(e['issue_date'])} : remboursement "
-                f"inclus dans le présent reversement : {money(e['amount_minor'])}."
+                f"Avoir {e['number']} du {format_date(e['issue_date'])} : {how} : "
+                f"{money(e['amount_minor'])}."
             )
         elif e["kind"] == "advance":
             texts.append(
-                "Remboursement d'une avance du cabinet : à régler par compensation sur le présent "
-                f"reversement : {money(e['amount_minor'])}."
+                f"Remboursement d'une avance du cabinet : {on_run} : {money(e['amount_minor'])}."
             )
         else:
             texts.append(
-                f"{what} {e['number']} du {format_date(e['issue_date'])} : à régler par "
-                f"compensation sur le présent reversement : {money(e['amount_minor'])}."
+                f"{what} {e['number']} du {format_date(e['issue_date'])} : {on_run} : "
+                f"{money(e['amount_minor'])}."
             )
     if not texts:
         texts.append("Aucune retenue ni compensation sur ce reversement.")
@@ -433,47 +479,81 @@ def _document_text(
             )
             + "."
         )
-    clause = f" ({d['clause_ref']} du mandat)" if d.get("clause_ref") else ""
-    settles = int(d.get("settles_minor") or 0)
-    ref = d.get("payment_reference") or {}
-    if d["kind"] == "invoice":
-        if d["settlement"] == "due":
-            acc = d.get("own_account") or {}
-            text += f" À régler au plus tard le {format_date(d['due_date'])}"
-            if acc.get("iban"):
-                text += f" sur le compte {acc['iban']} (compte propre du cabinet)"
-            text += "."
-        elif settles:
-            text += (
-                f" À régler par compensation sur le présent reversement{clause} : {money(settles)}."
-            )
-        elif ref.get("mode") == "next_run":
-            text += (
-                f" À régler par compensation sur le prochain reversement{clause}, au plus tard le "
-                f"{format_date(ref.get('latest_date'))}."
-            )
-        else:
-            text += f" À régler par compensation sur un prochain reversement{clause}."
-    else:
+    if d["kind"] != "invoice":
         text += " Son montant est déduit des factures qu'il rectifie"
-        if settles:
+        settles = int(d.get("settles_minor") or 0)
+        if settles and _settled_on(p):
+            text += f" ; l'excédent vous est remboursé par compensation : {money(settles)}"
+        elif settles:
             text += (
                 f" ; l'excédent vous est remboursé avec le présent reversement : {money(settles)}"
             )
-        text += "."
-    return text
+        return text + "."
+    return text + _invoice_payment(d, p, money)
+
+
+def _invoice_payment(
+    d: Mapping[str, Any], p: Mapping[str, Any], money: Callable[[int | str], str]
+) -> str:
+    """How the run's invoice is paid, as its frozen payment reference states it (review legal#4:
+    what the plan sets off on this run, and the remainder on the next run by its date)."""
+    annulled = d.get("cancelled_by") or []
+    if annulled:
+        return (
+            " Annulée par "
+            + ", ".join(
+                f"l'avoir {c['number']} du {format_date(c['issue_date'])}" for c in annulled
+            )
+            + "."
+        )
+    if d["settlement"] == "due":
+        acc = d.get("own_account") or {}
+        text = f" À régler au plus tard le {format_date(d['due_date'])}"
+        if acc.get("iban"):
+            text += f" sur le compte {acc['iban']} (compte propre du cabinet)"
+        return text + "."
+    clause = f" ({d['clause_ref']} du mandat)" if d.get("clause_ref") else ""
+    settles = 0 if _cancelled(p) else int(d.get("settles_minor") or 0)
+    ref = d.get("payment_reference") or {}
+    ttc = int(d["ttc_minor"])
+    latest = ref.get("latest_date") or d.get("due_date")
+    text = ""
+    if settles:
+        done = _settled_on(p)
+        if done:
+            text += (
+                f" Compensée le {done} avec les sommes vous revenant{clause} : {money(settles)}."
+            )
+        else:
+            text += (
+                f" À régler par compensation sur le présent reversement{clause} : {money(settles)}."
+            )
+        rest = ttc - settles
+        if rest > 0:
+            text += (
+                f" Solde de {money(rest)} : à régler par compensation sur le prochain reversement"
+            )
+            text += f", au plus tard le {format_date(latest)}." if latest else "."
+        return text
+    if latest:
+        return (
+            f" À régler par compensation sur le prochain reversement{clause}, au plus tard le "
+            f"{format_date(latest)}."
+        )
+    return f" À régler par compensation sur un prochain reversement{clause}."
 
 
 def _payout(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Section:
     t = p["totals"]
     out = p.get("payout")
-    if p.get("status") == "cancelled":
+    if _cancelled(p):
         texts = [
             f"Reversement annulé le {format_date(p.get('cancelled_on'))} avant l'exécution de "
             "son virement : les sommes vous revenant figureront sur un prochain relevé, et ses "
             "factures sont annulées par avoir."
         ]
-    elif out:
+        return Section("Reversement", texts=tuple(texts))
+    if out:
         texts = [
             f"Virement de {money(out['amount_minor'])} ordonné le {format_date(out['ordered_on'])} "
             f"vers {out['iban']} (titulaire {out['holder']}), exécution demandée le "
@@ -537,7 +617,10 @@ def _not_remitted(p: Mapping[str, Any]) -> Section:
         )
     if not texts:
         texts.append("Aucune somme reçue sur vos dossiers n'est restée sans reversement.")
-    return Section("Sommes reçues sur vos dossiers et non reversées", texts=tuple(texts))
+    return Section(
+        "Sommes reçues sur vos dossiers et non reversées",
+        texts=(f"Au {_paris(known_at(p))} :", *texts),
+    )
 
 
 def _currency_money(currency: str, p: Mapping[str, Any]) -> Callable[[int | str], str]:
@@ -555,25 +638,41 @@ def _dates(x: Mapping[str, Any], single: str = "reçus le") -> str:
 def _position(p: Mapping[str, Any], money: Callable[[int | str], str], k: datetime) -> Section:
     pos = p["position"]
     at = format_date(k.astimezone(PARIS).date())
+    cancelled = _cancelled(p)
+    done = _settled_on(p)
+    if cancelled:
+        after = "Après l'annulation du reversement"
+    elif done:
+        after = f"Après les compensations du {done}"
+    else:
+        after = "Après le présent reversement"
     rows = [
         (f"Sommes vous revenant au {at}", money(pos["owed_before_minor"])),
-        ("Après le présent reversement", money(pos["owed_after_minor"])),
+        (after, money(pos["owed_after_minor"])),
         (f"Factures de commission restant dues au {at}", money(pos["receivable_before_minor"])),
-        ("Après le présent relevé et son règlement", money(pos["receivable_after_minor"])),
+        (
+            "Après le présent relevé" if cancelled else "Après le présent relevé et son règlement",
+            money(pos["receivable_after_minor"]),
+        ),
     ]
     if int(pos["advances_before_minor"]) or int(pos["advances_after_minor"]):
         rows += [
             (f"Avances du cabinet à rembourser au {at}", money(pos["advances_before_minor"])),
-            ("Après le présent reversement", money(pos["advances_after_minor"])),
+            (after, money(pos["advances_after_minor"])),
         ]
-    return Section(
-        "Position",
-        rows=tuple(rows),
-        texts=(
+    if cancelled:
+        text = (
+            "Le reversement étant annulé, aucune compensation n'est réalisée : les factures de ce "
+            "relevé sont annulées par avoir."
+        )
+    elif done:
+        text = f"Les compensations ci-dessus ont été réalisées le {done}, sans virement."
+    else:
+        text = (
             "Les compensations sont réalisées au débit du virement sur notre compte dédié ; "
-            "jusque-là elles restent à régler.",
-        ),
-    )
+            "jusque-là elles restent à régler."
+        )
+    return Section("Position", rows=tuple(rows), texts=(text,))
 
 
 def statement_text(payload: Mapping[str, Any], csv_sha256: str) -> str:

@@ -1,5 +1,5 @@
 """Commission invoices and credit notes (M2-15; design §14.2; locked template
-`facture-commission-fr-1`): the French wording of a document, from the payload M2c-4 froze at
+`facture-commission-fr-2`): the French wording of a document, from the payload M2c-4 froze at
 issue (`private.issue_commission_documents`) — never from the current settings. Amounts are text
 in minor units, dates ISO; nothing is computed here, no model or LLM is involved.
 
@@ -7,7 +7,10 @@ Mentions and their basis (design §14.2):
 * « Facture » / « Avoir », its number and issue date — CGI ann. II 242 nonies A 6°, 7°;
 * the seller: legal name, legal form and capital, SIREN, RCS city, registered office, VAT number,
   « en liquidation » / « EI » when they apply — 242 nonies A 1°, 2°; C. com. R123-237, R123-238;
-* the buyer: legal name, SIREN, billing address (and VAT number when known) — 242 nonies A 1°;
+  its billing address too when it differs — L441-9 I;
+* the buyer: legal name, SIREN, its address (registered office) and its billing address when it
+  differs (« le nom des parties ainsi que leur adresse et leur adresse de facturation si elle est
+  différente », L441-9 I; review legal#1), VAT number when known — 242 nonies A 1°;
 * « Prestations de services » — 242 nonies A 8° bis;
 * the service and its period, « Recouvrement amiable de créances pour votre compte — encaissements
   du … au … » — 242 nonies A 10°;
@@ -15,13 +18,20 @@ Mentions and their basis (design §14.2):
 * « Aucun rabais, remise ni ristourne » — 242 nonies A 9°;
 * total HT, VAT per rate, TTC — 242 nonies A 11°; « Option pour le paiement de la taxe d'après les
   débits » only when opted — 11° bis;
-* the payment date (« À régler par compensation sur le reversement RV-… (exécution demandée le …)
-  », « … sur le prochain reversement, au plus tard le … » or « À régler au plus tard le … par
-  virement sur … »), « Pas d'escompte pour paiement anticipé », the penalty text and, for a
-  professional buyer outside a proceeding, the 40 € flat indemnity — C. com. L441-9 I, L441-10 II,
-  D441-5;
+* the payment date — C. com. L441-9 I « la date à laquelle le règlement doit intervenir »: what the
+  run's plan sets off on its payout (« À régler par compensation sur le reversement RV-… : X €
+  (exécution demandée le …) ») and the remainder on the next run by its date (review legal#4), or
+  « Compensation le … » when the run transfers nothing (N = 0, legal#5), « … sur le prochain
+  reversement, au plus tard le … », or « À régler au plus tard le … par virement sur … »;
+* « Pas d'escompte pour paiement anticipé », the penalty text and, for every professional buyer,
+  the 40 € flat indemnity for recovery costs (L441-9 I: the invoice states « le montant de
+  l'indemnité forfaitaire pour frais de recouvrement due au créancier en cas de retard de
+  paiement »; L441-10 II; D441-5: 40 euros). A proceeding of the client does not remove the
+  mention: L441-10 II only bars invoking the indemnity while the opening forbids paying the claim
+  at its date — the dunning step's concern (review legal#0);
 * a credit note: each line names the invoice it rectifies and why — CGI 289 I 5, 272 1.
 No CGI article number is printed (the VAT articles move to the CIBS on 2027-01-01: design §3.1).
+Nothing says « payé » or « réglé » before the bank's debit.
 """
 
 from __future__ import annotations
@@ -37,8 +47,11 @@ from collectoo_worker.payments.receipts import NNBSP, format_date, format_money,
 from collectoo_worker.remittance.run import percent
 from collectoo_worker.remittance.statement import address
 
-TEMPLATE_VERSION = "facture-commission-fr-1"
+TEMPLATE_VERSION = "facture-commission-fr-2"  # M2c-5 review (fr-1 never left the slice)
 TEMPLATE_VERSIONS = (TEMPLATE_VERSION,)
+FLAT_INDEMNITY_MINOR = (
+    4000  # C. com. D441-5: « fixé à 40 euros » (when the payload names no amount)
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,15 +107,22 @@ def invoice_view(doc: InvoiceDocument) -> InvoiceView:
     credit = doc.kind == "credit_note"
     seller = p["seller"]
     seller_lines = [*issuer_block(seller)] or [str(seller["name"])]
+    billing = _other_billing_address(seller)
+    if billing:
+        seller_lines.append(f"Adresse de facturation : {billing}")
     if seller.get("vat_number"):
         seller_lines.append(f"N° de TVA intracommunautaire : {seller['vat_number']}")
     buyer = p["buyer"]
     buyer_lines = [f"Client : {buyer['name']}"]
     if buyer.get("siren"):
         buyer_lines.append(f"SIREN {_siren(str(buyer['siren']))}")
-    addr = buyer.get("billing_address") or buyer.get("registered_office")
-    if addr:
-        buyer_lines.append(address(addr))
+    if buyer.get("registered_office"):
+        buyer_lines.append(f"Siège social : {address(buyer['registered_office'])}")
+        billing = _other_billing_address(buyer)
+        if billing:
+            buyer_lines.append(f"Adresse de facturation : {billing}")
+    elif buyer.get("billing_address"):
+        buyer_lines.append(f"Adresse de facturation : {address(buyer['billing_address'])}")
     if buyer.get("vat_number"):
         buyer_lines.append(f"N° de TVA intracommunautaire : {buyer['vat_number']}")
     period = p.get("service_period") or {}
@@ -135,6 +155,16 @@ def invoice_view(doc: InvoiceDocument) -> InvoiceView:
         mentions=_mentions(doc, credit),
         footer=f"{'Avoir' if credit else 'Facture'} n° {doc.number}",
     )
+
+
+def _other_billing_address(party: Mapping[str, Any]) -> str:
+    """A party's billing address, worded, when it differs from its registered office as printed
+    (L441-9 I: « leur adresse de facturation si elle est différente »); empty otherwise."""
+    billing, office = party.get("billing_address"), party.get("registered_office")
+    if not billing or not office:
+        return ""
+    text = address(billing)
+    return text if text != address(office) else ""
 
 
 def _line(x: Mapping[str, Any]) -> InvoiceLineView:
@@ -194,10 +224,31 @@ def _payment_line(doc: InvoiceDocument) -> str:
             "À régler par compensation sur le prochain reversement de vos encaissements, au plus "
             f"tard le {format_date(ref.get('latest_date'))} ({on})."
         )
-    return (
-        f"À régler par compensation sur le reversement {ref.get('run_number')} (exécution demandée "
-        f"le {format_date(ref.get('execution_date'))} ; {on})."
-    )
+    run = ref.get("run_number")
+    when = format_date(ref.get("execution_date"))
+    if ref.get("amount_minor") is None:  # a payload without the plan's amount: the run sets it off
+        return (
+            f"À régler par compensation sur le reversement {run} (exécution demandée le {when} ; "
+            f"{on})."
+        )
+    amount = _money(ref["amount_minor"])
+    if ref.get("transfer") is False:  # N = 0: the plan is posted at approval, nothing transferred
+        text = (
+            f"Compensation le {when} avec les sommes encaissées pour votre compte, relevé de "
+            f"reversement {run} (aucun virement) : {amount} ({on})."
+        )
+    else:
+        text = (
+            f"À régler par compensation sur le reversement {run} : {amount} (exécution demandée "
+            f"le {when} ; {on})."
+        )
+    if ref.get("remainder_minor"):
+        text += (
+            f" Le solde de {_money(ref['remainder_minor'])} : à régler par compensation sur le "
+            "prochain reversement de vos encaissements, au plus tard le "
+            f"{format_date(ref.get('latest_date'))}."
+        )
+    return text
 
 
 def _iban(iban: str) -> str:
@@ -225,11 +276,13 @@ def _mentions(doc: InvoiceDocument, credit: bool) -> tuple[str, ...]:
         out.append(_payment_line(doc))
         out.append("Pas d'escompte pour paiement anticipé.")
         out.append(str(p["penalty_text"]))
+        # to every professional buyer, whatever was frozen about a proceeding (L441-9 I; legal#0)
         indemnity = p.get("flat_indemnity") or {}
-        if indemnity.get("applies"):
+        professional = (p.get("buyer") or {}).get("is_professional")
+        if professional or (professional is None and indemnity.get("applies")):
             out.append(
                 "Indemnité forfaitaire pour frais de recouvrement en cas de retard de paiement : "
-                f"{_money(indemnity['amount_minor'])}."
+                f"{_money(indemnity.get('amount_minor') or FLAT_INDEMNITY_MINOR)}."
             )
     if p.get("vat_on_debits"):
         out.append("Option pour le paiement de la taxe d'après les débits.")

