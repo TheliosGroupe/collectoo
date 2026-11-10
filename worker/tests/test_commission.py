@@ -26,7 +26,15 @@ Hypothesis properties and the input errors.
   the invoice's VAT and equal to it on a full credit; Σ open charges = the commission charged; no
   invoice line shows a negative band (a re-tiering is its own regularisation line); a reversal is
   credited on its original's invoice first;
-* the inputs hash: the same inputs in any order give the same hash, any change another.
+* the inputs hash: the same inputs in any order give the same hash, any change another;
+* manual credit notes (M2c-5b): Σ open charges + Σ waivers = V for every key at every step; the
+  waiver is invisible to what the engine charges (V, tiers, kept fees and invoices are those of a
+  twin without manual credit notes), so no later collection re-charges a waived amount, whatever
+  the partition into runs and the order of a run's lines; a later credit is absorbed by the
+  credited invoice's waiver first, then credited, never beyond that invoice's remaining HT; a full
+  reversal leaves every invoice credited in full, its VAT exactly; a cancelled run restores the
+  state before it; a manual credit is spread over the invoice's keys in proportion to what each
+  still charges.
 """
 
 from __future__ import annotations
@@ -54,12 +62,20 @@ from collectoo_worker.remittance.commission import (
     Part,
     TermsVersion,
     cap_of,
+    chain,
     compute,
     cumulative,
     inputs_hash,
     schedule_commission,
 )
-from collectoo_worker.remittance.documents import EarlierCharge, MandateDocuments, run_documents
+from collectoo_worker.remittance.documents import (
+    EarlierCharge,
+    EarlierInvoice,
+    MandateDocuments,
+    ManualCreditError,
+    manual_credit,
+    run_documents,
+)
 from collectoo_worker.remittance.terms import CommissionSchedule
 from collectoo_worker.remittance.vat import vat_of
 
@@ -573,7 +589,7 @@ def test_documents_never_show_a_negative_band_and_credit_the_originals_invoice_f
     clause = {v.id: v.schedule.basis.on_reversal for v in versions["M"]}
     sim = Simulator(files, versions, tau)
     for run in _runs(lines, cuts):
-        originals = dict(sim.line_invoices)
+        originals = {k: chain(v)[0] for k, v in sim.line_invoices.items()}
         result, docs = sim.run(run)
         by_entry = {r.entry_id: r for r in result.lines}
         invoiced = {e for d in docs.values() if d.invoice for e in d.invoice.entries}
@@ -1345,3 +1361,364 @@ def test_a_credit_beyond_earlier_invoices_nets_in_the_run() -> None:
     second, docs = sim.run([c, _undo(3, a)])
     assert [r.commission_minor for r in second.lines] == [100_000, -100_000]
     assert docs == {} and sim.history[("F", "k")].commission_minor == 0
+
+
+# -- manual credit notes: the waiver per (invoice, file, tier key) (M2c-5b) -----------------------
+
+
+Plan = list[
+    tuple[int, int, int, bool]
+]  # (after run n, invoice pick, ‱ of its remaining HT, one file)
+
+
+@st.composite
+def credit_plans(draw: st.DrawFn, runs: int = 12) -> Plan:
+    """Manual credit notes between runs: after which run, on which invoice still open, how much of
+    what it still charges (at least a cent), on the whole invoice or on one of its files."""
+    return draw(
+        st.lists(
+            st.tuples(
+                st.integers(0, runs),
+                st.integers(0, 10**6),
+                st.integers(1, 10_000),
+                st.booleans(),
+            ),
+            max_size=6,
+        )
+    )
+
+
+def _open_invoices(sim: Simulator) -> list[str]:
+    return sorted(n for n, inv in sim.invoices.items() if inv.ht_minor - inv.credited_ht_minor > 0)
+
+
+def _credit(sim: Simulator, pick: int, share: int, one_file: bool) -> bool:
+    """One manual credit note as `credit_plans` drew it (none when no invoice is open): issued?"""
+    open_ = _open_invoices(sim)
+    if not open_:
+        return False
+    number = open_[pick % len(open_)]
+    by_file: dict[str, int] = defaultdict(int)
+    for (owner, _), cs in sim.charges.items():
+        for c in cs:
+            if c.invoice_id == number:
+                by_file[owner] += c.open_minor
+    account: str | None = None
+    if one_file:
+        files = sorted(a for a, o in by_file.items() if o > 0)
+        account = files[pick % len(files)]
+    remaining = by_file[account] if account else sum(by_file.values())
+    sim.manual_credit(number, max(1, remaining * share // 10_000), account)
+    return True
+
+
+def _invariants(sim: Simulator) -> None:
+    """Σ open charges + Σ waivers = V for every key; each (invoice, key)'s waiver within what it
+    charged net of the engine's credits; nothing credited beyond what an invoice charged."""
+    for key, state in sim.history.items():
+        cs = sim.charges.get(key, [])
+        assert sum(c.open_minor + c.waived_minor for c in cs) == state.commission_minor, key
+        assert sum(c.waived_minor for c in cs) == state.waived_minor >= 0, key
+        for c in cs:
+            assert c.waived_minor >= 0 and c.open_minor >= 0, (key, c)
+            assert 0 <= c.credited_minor <= c.charged_minor, (key, c)
+    for inv in sim.invoices.values():
+        assert 0 <= inv.credited_ht_minor <= inv.ht_minor
+        assert sim.vat_credited.get(inv.invoice_id, 0) <= sim.invoice_vat[inv.invoice_id]
+
+
+def _state_of(history: dict[Key, KeyState]) -> dict[Key, tuple[Any, int, int, int]]:
+    """What the engine charges from (the waiver aside)."""
+    return {
+        k: (s.basis, s.kept_basis_minor, s.kept_minor, s.commission_minor)
+        for k, s in history.items()
+        if s.basis or s.kept_minor or s.commission_minor
+    }
+
+
+def _takes(d: MandateDocuments | None) -> dict[tuple[str, Key], list[int]]:
+    """Per (earlier invoice, key): what a run credits on it and what its waiver absorbs."""
+    took: dict[tuple[str, Key], list[int]] = defaultdict(lambda: [0, 0])
+    for a in d.credit_note.allocations if d and d.credit_note else ():
+        took[(a.original_invoice_id, (a.account_id, a.tier_key))][0] -= a.ht_minor
+    for w in d.absorbed if d else ():
+        took[(w.invoice_id, (w.account_id, w.tier_key))][1] += w.amount_minor
+    return took
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    versions=terms(on_reversal="mixed", two_keys=True),
+    lines=histories(max_ops=25, accounts=("F", "G"), interest=True),
+    cuts=st.lists(st.integers(0, 60), max_size=10),
+    plan=credit_plans(),
+    small=st.booleans(),
+)
+def test_a_manual_credit_note_never_changes_what_the_engine_charges(
+    versions: dict[str, list[TermsVersion]],
+    lines: list[Line],
+    cuts: list[int],
+    plan: Plan,
+    small: bool,
+) -> None:
+    """Manual credit notes between runs, beside a twin without them: after every step Σ open
+    charges + Σ waivers = V for every key; V, the tier positions and the kept fees stay the twin's
+    (the waiver is invisible: no later collection re-charges a waived amount, whatever the
+    partition); a run's invoices are the twin's to the cent, and each credit the twin issues is
+    absorbed by the waiver first, then credited, on the same invoice and key, never beyond its
+    remaining HT."""
+    if small:
+        lines = _small(lines)
+    files = {"F": _file(), "G": _file(2_000_000, "G")}
+    sim = Simulator(files, versions, TAU)
+    twin = Simulator(files, versions, TAU)
+    runs = _runs(lines, cuts)
+    alias: dict[str, str] = {}  # the sim's invoice number → the twin's (manual credits: numbered)
+    for n, run in enumerate(runs):
+        for at, pick, share, one_file in plan:
+            if at == n:
+                _credit(sim, pick, share, one_file)
+                _invariants(sim)
+        waived = {(c.invoice_id, k): c.waived_minor for k, cs in sim.charges.items() for c in cs}
+        opened = {(c.invoice_id, k): c.open_minor for k, cs in sim.charges.items() for c in cs}
+        _, docs = sim.run(run)
+        _, twin_docs = twin.run(run)
+        assert sim.last is not None and twin.last is not None
+        for mandate, (number, _) in sim.last[3].items():
+            alias[number] = twin.last[3][mandate][0]
+        _invariants(sim)
+        assert _state_of(sim.history) == _state_of(twin.history)
+        assert set(docs) <= set(twin_docs)
+        for mandate, t in twin_docs.items():
+            d = docs.get(mandate)
+            inv = d.invoice if d else None
+            assert (inv.ht_minor if inv else 0) == (t.invoice.ht_minor if t.invoice else 0)
+            took = _takes(d)
+            assert {(alias[i], k): c + w for (i, k), (c, w) in took.items()} == {
+                k: c for k, (c, _) in _takes(t).items()
+            }
+            for k, (credited, absorbed) in took.items():
+                assert credited <= opened[k] and absorbed <= waived[k], k
+                if credited:  # the waiver first
+                    assert absorbed == waived[k], k
+    for at, pick, share, one_file in plan:
+        if at >= len(runs):
+            _credit(sim, pick, share, one_file)
+    _invariants(sim)
+    if all(v.schedule.basis.on_reversal == "credit" for v in versions["M"]):
+        # whatever the partition (under `keep` the events' order matters, never the split)
+        once = compute(lines, files, versions, {}, TAU)
+        assert _nonzero(_targets(sim.history, files, versions, TAU)) == _nonzero(
+            _targets(once.history, files, versions, TAU)
+        )
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    schedule=schedules(two_keys=True),
+    lines=histories(max_ops=15, interest=True),
+    plan=credit_plans(runs=1),
+    more=st.lists(st.integers(1, 1_000_000), min_size=1, max_size=4),
+    seed=st.integers(0, 2**32),
+)
+def test_a_waived_amount_is_never_charged_again(
+    schedule: CommissionSchedule,
+    lines: list[Line],
+    plan: Plan,
+    more: list[int],
+    seed: int,
+) -> None:
+    """After manual credit notes, inside one version (no re-tiering), a run of collections only
+    invoices exactly what it adds to the schedule's commission, keeps every waiver and issues no
+    credit note; the same run in any order of its lines gives the same pricing. (Across versions
+    the first property compares every run with a twin without manual credit notes.)"""
+    files = {"F": _file()}
+    versions = _one_version(schedule)
+    sim = Simulator(files, versions, TAU)
+    sim.run(lines)
+    for _, pick, share, one_file in plan:
+        _credit(sim, pick, share, one_file)
+    waived = {k: s.waived_minor for k, s in sim.history.items()}
+    collections = [_line(8000 + i, a, D0 + timedelta(days=a % 300)) for i, a in enumerate(more)]
+    shuffled = list(collections)
+    random.Random(seed).shuffle(shuffled)
+    other = compute(
+        shuffled,
+        files,
+        versions,
+        sim.history,
+        TAU,
+        charges=sim.charges,
+        line_invoices=sim.line_invoices,
+    )
+    before = {k: s.commission_minor for k, s in sim.history.items()}
+    result, docs = sim.run(collections)
+    assert other.lines == result.lines and other.history == result.history
+    assert all(d.credit_note is None and not d.absorbed for d in docs.values())
+    assert {k: s.waived_minor for k, s in sim.history.items() if k in waived} == waived
+    charged = sum(d.invoice.ht_minor for d in docs.values() if d.invoice)
+    assert charged == sum(s.commission_minor - before.get(k, 0) for k, s in sim.history.items())
+
+
+@settings(max_examples=300, deadline=None)
+@given(scenario=scenarios(), plan=credit_plans(runs=8))
+def test_with_waivers_a_full_reversal_leaves_every_invoice_closed(
+    scenario: tuple[dict[str, list[TermsVersion]], list[list[Line]]], plan: Plan
+) -> None:
+    """Everything undone at the end, manual credit notes along the way: every file back to 0 with
+    no waiver left, every invoice credited in full by its manual and run credit notes together,
+    their VAT exactly the invoice's (nothing left pending)."""
+    versions, runs = scenario
+    files = {"F": _file(), "G": FileFacts("G", "M", "rent", "P", boarded_amount_minor=2_000_000)}
+    sim = Simulator(files, versions, TAU)
+    for n, run in enumerate(runs):
+        for at, pick, share, one_file in plan:
+            if at == n:
+                _credit(sim, pick, share, one_file)
+        sim.run(run)
+        _invariants(sim)
+    assert all(
+        s.commission_minor == 0 and s.basis_minor == 0 and s.waived_minor == 0
+        for s in sim.history.values()
+    )
+    for number, inv in sim.invoices.items():
+        assert inv.credited_ht_minor == inv.ht_minor, number
+        assert sim.vat_credited.get(number, 0) == sim.invoice_vat[number], number
+    assert all(c.open_minor == 0 and c.waived_minor == 0 for cs in sim.charges.values() for c in cs)
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    versions=terms(two_keys=True),
+    lines=histories(max_ops=20, accounts=("F", "G"), interest=True),
+    cut=st.integers(0, 60),
+    before=credit_plans(runs=1),
+    after=credit_plans(runs=0),
+)
+def test_with_waivers_a_cancellation_restores_the_state_before_the_run(
+    versions: dict[str, list[TermsVersion]],
+    lines: list[Line],
+    cut: int,
+    before: Plan,
+    after: Plan,
+) -> None:
+    """Manual credit notes before a run R and after it, then R cancelled (M2c-4 C7 with the
+    waivers): every key is back to its state before R — tier positions, kept fees, V — with Σ open
+    charges + Σ waivers = V; running R's lines again charges what R charged."""
+    files = {"F": _file(), "G": _file(2_000_000, "G")}
+    sim = Simulator(files, versions, TAU)
+    point = cut % (len(lines) + 1)
+    head, run = lines[:point], lines[point:]
+    if head:
+        sim.run(head)
+    for _, pick, share, one_file in before:
+        _credit(sim, pick, share, one_file)
+    state_before = _state_of(sim.history)
+    if not run:
+        return
+    sim.run(run)
+    state_after = _state_of(sim.history)
+    for _, pick, share, one_file in after:
+        _credit(sim, pick, share, one_file)
+    sim.cancel_last()
+    _invariants(sim)
+    assert _state_of(sim.history) == state_before
+    sim.run(run)
+    _invariants(sim)
+    assert _state_of(sim.history) == state_after
+
+
+# -- manual credit notes: the allocation over the invoice's keys ----------------------------------
+
+
+@settings(max_examples=500, deadline=None)
+@given(
+    opened=st.dictionaries(
+        st.tuples(st.sampled_from("ABC"), st.sampled_from(("k", "kp", "ko"))),
+        st.integers(0, 10**7),
+        min_size=1,
+        max_size=6,
+    ),
+    share=st.integers(1, 10_000),
+    one_file=st.booleans(),
+    credited=st.integers(0, 10**6),
+)
+def test_a_manual_credit_is_spread_in_proportion_never_beyond_a_keys_charge(
+    opened: dict[Key, int], share: int, one_file: bool, credited: int
+) -> None:
+    """The HT a manual credit note takes back is spread over what the invoice still charges each
+    (file, tier key) in proportion to it (largest remainders), adds up to the amount, never takes
+    more than a key's open charge, and its VAT is the cumulative difference at the invoice's rate
+    (all its remaining VAT when it credits all the rest)."""
+    account = sorted(opened)[0][0] if one_file else None
+    total = sum(o for k, o in opened.items() if account is None or k[0] == account)
+    inv = EarlierInvoice("FC", sum(opened.values()) + credited, TAU, credited)
+    if total == 0:
+        with pytest.raises(ManualCreditError):
+            manual_credit(inv, opened, 1, account)
+        return
+    amount = max(1, total * share // 10_000)
+    mc = manual_credit(inv, opened, amount, account)
+    got = dict(mc.allocations)
+    assert sum(got.values()) == amount == mc.ht_minor
+    for k, x in got.items():
+        assert 0 < x <= opened[k] and (account is None or k[0] == account)
+        exact = Decimal(amount * opened[k]) / Decimal(total)
+        assert abs(Decimal(x) - exact) < 1  # its share, rounded to a cent either way
+    assert mc.vat_minor == vat_of(credited + amount, TAU) - vat_of(credited, TAU)
+    if amount == inv.ht_minor - credited:
+        assert vat_of(credited, TAU) + mc.vat_minor == vat_of(inv.ht_minor, TAU)
+    with pytest.raises(ManualCreditError):
+        manual_credit(inv, opened, total + 1, account)
+    with pytest.raises(ManualCreditError):
+        manual_credit(inv, opened, 0, account)
+
+
+def test_the_waiver_is_per_invoice_a_reversal_never_takes_another_invoices() -> None:
+    """10 % flat. A charged on FC-1 (100,00 €), B on FC-2 (100,00 €); a manual credit note of
+    40,00 € on FC-2. Undoing A credits FC-1 in full: FC-2's waiver stays (a waiver held per key
+    only would have absorbed 40,00 € of A's credit, the client billed again for B the 40,00 € it
+    was given back). Undoing B then: 40,00 € absorbed, 60,00 € credited on FC-2."""
+    sim = Simulator({"F": _file()}, _one_version(_flat("0.10")), TAU)
+    a, b = _line(1, 100_000, D0), _line(2, 100_000, D0 + timedelta(days=1))
+    sim.run([a])
+    sim.run([b])
+    sim.manual_credit("FC-2026-000002", 4_000)
+    assert sim.history[("F", "k")].waived_minor == 4_000
+    _, docs = sim.run([_undo(3, a)])
+    (d,) = docs.values()
+    assert d.credit_note is not None and not d.absorbed
+    assert [(c.invoice_id, c.ht_minor) for c in d.credit_note.corrected] == [
+        ("FC-2026-000001", -10_000)
+    ]
+    assert sim.history[("F", "k")].waived_minor == 4_000
+    _, docs = sim.run([_undo(4, b)])
+    (d,) = docs.values()
+    assert [(w.invoice_id, w.amount_minor) for w in d.absorbed] == [("FC-2026-000002", 4_000)]
+    assert d.credit_note is not None
+    assert [(c.invoice_id, c.ht_minor, c.vat_minor) for c in d.credit_note.corrected] == [
+        ("FC-2026-000002", -6_000, -1_200)
+    ]
+    assert sim.history[("F", "k")] == KeyState(commission_minor=0)
+    _invariants(sim)
+
+
+def test_input_errors_of_the_waiver() -> None:
+    """The engine refuses a history whose waivers and open charges do not add up to V."""
+    files = {"F": _file()}
+    versions = _one_version(_flat("0.10"))
+    ok = _line(1, 1_000, D0)
+    state = KeyState(basis=(("v", 100_000),), commission_minor=10_000, waived_minor=3_000)
+    good = [EarlierCharge("FC-1", (2026, 1), 10_000, 3_000, TAU, waived_minor=3_000)]
+    compute([ok], files, versions, {("F", "k"): state}, TAU, charges={("F", "k"): good})
+    bad = [
+        [EarlierCharge("FC-1", (2026, 1), 10_000, 3_000, TAU)],  # the waivers do not add up
+        [EarlierCharge("FC-1", (2026, 1), 10_000, 4_000, TAU, waived_minor=3_000)],  # ≠ V
+        [  # a negative waiver
+            EarlierCharge("FC-1", (2026, 1), 10_000, 0, TAU, waived_minor=-3_000),
+            EarlierCharge("FC-2", (2026, 2), 6_000, 0, TAU, waived_minor=6_000),
+        ],
+    ]
+    for charges in bad:
+        with pytest.raises(CommissionInputError):
+            compute([ok], files, versions, {("F", "k"): state}, TAU, charges={("F", "k"): charges})

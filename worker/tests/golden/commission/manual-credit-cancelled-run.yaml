@@ -1,0 +1,81 @@
+# A run whose credit is absorbed by a manual credit note's waiver, cancelled before its transfer (M2c-4 C7 with the
+# waivers of M2c-5b): its invoice credited in full (FC-5), one corrective invoice charging again the 70,00 € its credit
+# note credited on FC-1 (FC-6, with the VAT of its own HT), the 30,00 € its credit absorbed restored as FC-1's waiver —
+# the file is back to its state before the run (V = 100,00 €, 30,00 € waived). The run again: A's reversal credited on
+# the corrective invoice first (70,00 €), then on FC-1, where the waiver absorbs the last 30,00 €; B invoiced again.
+# Same net effect as the cancelled run. TO VALIDATE (OQ-78).
+case: manual-credit-cancelled-run
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  flat:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.10"}}
+mandates:
+  MAND-W: [{id: w-v1, from: "2026-01-01", to: null, schedule: flat}]
+files:
+  F-1: {mandate: MAND-W, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — A
+    lines:
+      - {entry: A, kind: allocation, file: F-1, e: "2026-10-12", eff: "2026-10-12", amount: "100000", basis: {principal: "100000"}}
+    expect:
+      lines: {A: {commission: "10000"}}
+      documents:
+        MAND-W: {invoice: {number: FC-2026-000001, ht: "10000", vat: "2000", ttc: "12000"}}
+  - name: a manual credit note of 30,00 € HT on FC-1 (FC-2026-000002)
+    manual_credit_notes:
+      - invoice: FC-2026-000001
+        amount: "3000"
+        expect: {ht: "3000", vat: "600", allocations: {F-1/tout: "3000"}}
+    expect:
+      state: {F-1/tout: {commission: "10000", waived: "3000"}}
+  - name: run 2 — A undone and B (to be cancelled)
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-1, e: "2026-10-12", eff: "2026-11-02", amount: "-100000", basis: {principal: "-100000"}}
+      - {entry: B, kind: allocation, file: F-1, e: "2026-11-03", eff: "2026-11-03", amount: "50000", basis: {principal: "50000"}}
+    expect:
+      lines:
+        R-A: {commission: "-10000"}
+        B: {commission: "5000"}
+      documents:
+        MAND-W:
+          invoice: {number: FC-2026-000003, ht: "5000", vat: "1000", ttc: "6000"}
+          credit_note:
+            number: FC-2026-000004
+            ht: "-7000"
+            vat: "-1400"
+            ttc: "-8400"
+            corrected:
+              FC-2026-000001: {ht: "-7000", vat: "-1400"}
+          absorbed:
+            FC-2026-000001: {F-1/tout: "3000"}
+      state: {F-1/tout: {commission: "5000", waived: "0"}}
+  - name: run 2 cancelled — FC-3 credited (FC-5), FC-6 charges again what FC-4 credited, the waiver restored
+    cancel_previous:
+      FC-2026-000006: {ht: "7000", vat: "1400"}
+    expect:
+      state: {F-1/tout: {commission: "10000", waived: "3000"}}
+  - name: run 3 — the same lines again
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-1, e: "2026-10-12", eff: "2026-11-02", amount: "-100000", basis: {principal: "-100000"}}
+      - {entry: B, kind: allocation, file: F-1, e: "2026-11-03", eff: "2026-11-03", amount: "50000", basis: {principal: "50000"}}
+    expect:
+      lines:
+        R-A: {commission: "-10000"}
+        B: {commission: "5000"}
+      documents:
+        MAND-W:
+          invoice: {number: FC-2026-000007, ht: "5000", vat: "1000", ttc: "6000"}
+          credit_note:
+            number: FC-2026-000008
+            ht: "-7000"
+            vat: "-1400"          # FC-6 credited in full: exactly its VAT
+            ttc: "-8400"
+            corrected:
+              FC-2026-000006: {ht: "-7000", vat: "-1400"}
+          absorbed:
+            FC-2026-000001: {F-1/tout: "3000"}
+      state: {F-1/tout: {commission: "5000", waived: "0"}}

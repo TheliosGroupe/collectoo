@@ -1,0 +1,65 @@
+# A manual credit note (M2c-5b; design §14.1, risk R2) on an invoice, then a later collection and the reversal of the
+# collection the invoice charged. The credit note takes back part of what FC-1 charges the file: it becomes a waiver
+# on (FC-1, F-1, tout). The commission charged (V) does not change, so the next collection charges only what it adds
+# (no re-charge of the 30,00 € given back); undoing A is absorbed by FC-1's waiver first (30,00 €, no document), the
+# rest credited on FC-1 (70,00 €), which is then credited in full — its VAT exactly (6,00 + 14,00 = 20,00).
+# TO VALIDATE: synthetic grid; « the waiver first » is the M2c-5b default (OQ-78).
+case: manual-credit-waiver
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  flat:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.10"}}
+mandates:
+  MAND-W: [{id: w-v1, from: "2026-01-01", to: null, schedule: flat}]
+files:
+  F-1: {mandate: MAND-W, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — A, 1 000,00 €
+    lines:
+      - {entry: A, kind: allocation, file: F-1, e: "2026-10-12", eff: "2026-10-12", amount: "100000", basis: {principal: "100000"}}
+    expect:
+      lines:
+        A: {commission: "10000", parts: {tout: "10000"}}
+      documents:
+        MAND-W:
+          invoice: {number: FC-2026-000001, ht: "10000", vat: "2000", ttc: "12000"}
+      state: {F-1/tout: {commission: "10000", waived: "0"}}
+  - name: a manual credit note of 30,00 € HT on FC-1 (FC-2026-000002)
+    manual_credit_notes:
+      - invoice: FC-2026-000001
+        amount: "3000"
+        expect: {ht: "3000", vat: "600", allocations: {F-1/tout: "3000"}}
+    expect:
+      state: {F-1/tout: {commission: "10000", waived: "3000"}}
+  - name: run 2 — B, 500,00 €, charges only what it adds
+    lines:
+      - {entry: B, kind: allocation, file: F-1, e: "2026-11-02", eff: "2026-11-02", amount: "50000", basis: {principal: "50000"}}
+    expect:
+      lines:
+        B: {commission: "5000", parts: {tout: "5000"}}
+      documents:
+        MAND-W:
+          invoice: {number: FC-2026-000003, ht: "5000", vat: "1000", ttc: "6000"}
+      state: {F-1/tout: {commission: "15000", waived: "3000"}}
+  - name: run 3 — A undone, absorbed by FC-1's waiver first
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-1, e: "2026-10-12", eff: "2026-11-20", amount: "-100000", basis: {principal: "-100000"}}
+    expect:
+      lines:
+        R-A: {commission: "-10000", parts: {tout: "-10000"}}
+      documents:
+        MAND-W:
+          credit_note:
+            number: FC-2026-000004
+            ht: "-7000"
+            vat: "-1400"          # R(100,00 × 20 %) − R(30,00 × 20 %): FC-1's VAT credited in full with FC-2's
+            ttc: "-8400"
+            corrected:
+              FC-2026-000001: {ht: "-7000", vat: "-1400"}
+          absorbed:
+            FC-2026-000001: {F-1/tout: "3000"}
+      state: {F-1/tout: {commission: "5000", waived: "0"}}

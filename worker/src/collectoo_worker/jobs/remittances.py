@@ -456,7 +456,7 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         }
     )
     history: dict[tuple[str, str], KeyState] = {}
-    for a, tier, b, kept_basis, kept, commission in conn.execute(
+    for a, tier, b, kept_basis, kept, commission, waived in conn.execute(
         "select * from private.remittance_key_states(%s::uuid[], %s::text[])",
         ([a for a, _ in keys], [t for _, t in keys]),
     ).fetchall():
@@ -465,15 +465,21 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
             kept_basis_minor=int(kept_basis),
             kept_minor=int(kept),
             commission_minor=int(commission),
+            waived_minor=int(waived),
         )
     seq_row = conn.execute("select private.remittance_history_seq(%s)", (client,)).fetchone()
+    # what each earlier invoice still charges each key (every credit note's allocations off, a manual one's
+    # included) and what manual credit notes left waived on it (M2c-5b): the engine's capacity is their sum
     charges: dict[tuple[str, str], list[EarlierCharge]] = defaultdict(list)
-    for a, tier, inv, year, seq, charged, credited, rate in conn.execute(
+    for a, tier, inv, year, seq, charged, credited, rate, waived in conn.execute(
         """select ch.account_id, ch.tier_key, ch.invoice_id, i.year, i.seq, ch.charged_minor,
                   coalesce((select -sum(x.ht_minor) from public.commission_credit_alloc x
                             where x.original_invoice_id = ch.invoice_id
                               and x.account_id = ch.account_id and x.tier_key = ch.tier_key), 0),
-                  i.vat_rate
+                  i.vat_rate,
+                  coalesce((select sum(w.amount_minor) from public.commission_waiver w
+                            where w.invoice_id = ch.invoice_id
+                              and w.account_id = ch.account_id and w.tier_key = ch.tier_key), 0)
            from public.commission_invoice_charge ch
            join public.commission_invoice i on i.id = ch.invoice_id
            where ch.account_id = any(%s::uuid[])""",
@@ -481,7 +487,12 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
     ).fetchall():
         charges[(str(a), tier)].append(
             EarlierCharge(
-                str(inv), (int(year), int(seq)), int(charged), int(credited), Decimal(rate)
+                str(inv),
+                (int(year), int(seq)),
+                int(charged),
+                int(credited),
+                Decimal(rate),
+                waived_minor=int(waived),
             )
         )
     invoice_ids = sorted({c.invoice_id for cs in charges.values() for c in cs})
@@ -496,9 +507,11 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
     ).fetchall():
         invoices[str(inv)] = EarlierInvoice(str(inv), int(ht), Decimal(rate), int(credited))
         numbers[str(inv)] = (num, issued)
-    # each reversal's original: the invoice that charges it now — its line's (or its live
-    # repricing's) invoice, or, when a cancelled run had credited this reversal, the corrective
-    # invoice that cancellation issued to charge it again (money review #0: credited there, once)
+    # each reversal's original: the invoices that charge it now — its line's (or its live
+    # repricing's) invoice and, when a cancelled run had credited this reversal, first the corrective
+    # invoice that cancellation issued to charge it again (money review #0: credited there, once;
+    # M2c-5b: then on the line's own invoice, where the cancellation restored what the run's credit
+    # had absorbed of a manual credit note's waiver)
     undone = sorted(
         {(i.entry_id, i.original_entry_id) for i in items if i.original_entry_id}
         | {
@@ -507,33 +520,33 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
             if p.item.original_entry_id
         }
     )
-    line_invoices = {
-        str(e): str(inv)
-        for e, inv in conn.execute(
-            """select l.ledger_entry_id,
-                 coalesce((select j.id from public.commission_credit_alloc a
-                           join public.commission_invoice cn on cn.id = a.credit_note_id
-                             and cn.reason = 'commission'
-                           join public.remittance_run cr on cr.id = cn.run_id
-                             and cr.status = 'cancelled'
-                           join public.commission_invoice o on o.id = a.original_invoice_id
-                           join public.commission_invoice j on j.run_id = cn.run_id
-                             and j.kind = 'invoice' and j.reason = 'run_cancelled'
-                             and j.mandate_id = cn.mandate_id and j.vat_rate = o.vat_rate
-                           where a.entry_id = u.reversal
-                           order by cn.year desc, cn.seq desc limit 1),
-                          (select rp.invoice_id from public.remittance_line_repricing rp
+    line_invoices: dict[str, str | tuple[str, ...]] = {}
+    for e, corrective, own in conn.execute(
+        """select l.ledger_entry_id,
+                 (select j.id from public.commission_credit_alloc a
+                  join public.commission_invoice cn on cn.id = a.credit_note_id
+                    and cn.reason = 'commission'
+                  join public.remittance_run cr on cr.id = cn.run_id
+                    and cr.status = 'cancelled'
+                  join public.commission_invoice o on o.id = a.original_invoice_id
+                  join public.commission_invoice j on j.run_id = cn.run_id
+                    and j.kind = 'invoice' and j.reason = 'run_cancelled'
+                    and j.mandate_id = cn.mandate_id and j.vat_rate = o.vat_rate
+                  where a.entry_id = u.reversal
+                  order by cn.year desc, cn.seq desc limit 1),
+                 coalesce((select rp.invoice_id from public.remittance_line_repricing rp
                            join public.remittance_run pr on pr.id = rp.pricing_run_id
                              and pr.status <> 'cancelled'
                            where rp.run_id = l.run_id and rp.line_no = l.line_no limit 1),
                           l.invoice_id)
-               from unnest(%s::uuid[], %s::uuid[]) u (reversal, original)
-               join public.remittance_line l on l.ledger_entry_id = u.original
-                 and not l.released""",
-            ([r for r, _ in undone], [o for _, o in undone]),
-        ).fetchall()
-        if inv is not None
-    }
+           from unnest(%s::uuid[], %s::uuid[]) u (reversal, original)
+           join public.remittance_line l on l.ledger_entry_id = u.original
+             and not l.released""",
+        ([r for r, _ in undone], [o for _, o in undone]),
+    ).fetchall():
+        chain_of = tuple(str(x) for x in (corrective, own) if x is not None)
+        if chain_of:
+            line_invoices[str(e)] = chain_of[0] if len(chain_of) == 1 else chain_of
     open_docs = [
         OpenInvoiceRow(str(i), str(m), kind, num, issued, (int(y), int(s)), int(o), int(v))
         for i, m, kind, num, issued, y, s, o, v in conn.execute(
