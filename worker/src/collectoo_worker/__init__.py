@@ -32,8 +32,8 @@ def _normaliser(name: str) -> Normaliser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`collectoo-worker consume boarding payments`: run queue consumers until stopped."""
-    from collectoo_worker.jobs import boarding, payments  # noqa: PLC0415 - fast --help
+    """`collectoo-worker consume boarding payments remittances`: run the consumers until stopped."""
+    from collectoo_worker.jobs import boarding, payments, remittances  # noqa: PLC0415 - fast --help
     from collectoo_worker.runtime.queue import (  # noqa: PLC0415
         QueueConsumer,
         json_log_formatter,
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="collectoo-worker")
     sub = parser.add_subparsers(dest="cmd", required=True)
     consume = sub.add_parser("consume", help="consume one or more queues")
-    consume.add_argument("queues", nargs="+", choices=["boarding", "payments"])
+    consume.add_argument("queues", nargs="+", choices=["boarding", "payments", "remittances"])
     args = parser.parse_args(argv)
 
     handler_ = logging.StreamHandler(sys.stdout)
@@ -60,6 +60,12 @@ def main(argv: list[str] | None = None) -> int:
             addresses = _normaliser(os.environ.get("ADDRESS_NORMALISER", "mock"))
             handler = boarding.make_handler(storage, provider, addresses)
             consumers.append(QueueConsumer(db, queue, handler, on_dead=boarding.record_dead_job))
+        elif queue == "remittances":
+            consumers.append(
+                QueueConsumer(
+                    db, queue, remittances.make_handler(), on_dead=remittances.record_dead_job
+                )
+            )
         else:
             handler = payments.make_handler(storage)
             consumers.append(QueueConsumer(db, queue, handler, on_dead=payments.record_dead_job))
