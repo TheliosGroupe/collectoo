@@ -3,7 +3,16 @@ import { notFound } from "next/navigation";
 import { Badge, InfoNote, Section, Stats, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { money } from "@/lib/payments/statements";
-import { type InvoiceDetail, percent, refusalText } from "@/lib/remittance/credit-notes";
+import {
+  type FileChoice,
+  type InvoiceDetail,
+  creditNoteBack,
+  invoiceFilesPage,
+  invoiceFilesRpc,
+  percent,
+  reasonCategoryLabel,
+  refusalText,
+} from "@/lib/remittance/credit-notes";
 import { frenchDate } from "@/lib/remittance/runs";
 import { CreditNotePanel } from "./credit-note-panel";
 
@@ -14,11 +23,18 @@ const REASON_LABEL: Record<string, string> = {
   reversal: "encaissements annulés",
 };
 
+type Corrected = { id: string; number: string; issue_date: string; ht: string; vat: string };
+
 /**
  * M2c-5b a commission invoice (design §14.1, §17.2; risk R2): what it charged, what credit notes took back, what it still
  * charges (HT) and owes (TTC), the files it charges, the credit notes that rectify it — a manual one with its reason
  * category and, for staff, its reason — and « Émettre un avoir » for an admin at aal2 when the invoice can take one (not
- * a credit note, something left to credit, no run in flight setting it off). Money staff; the database decides.
+ * a credit note, something left to credit, no run in flight setting it off or able to cancel it). Money staff; the
+ * database decides.
+ *
+ * Review M2c-5b: « Sur » offers every file the invoice still charges, a page of 200 at a time
+ * (`public.commission_invoice_files`, tests-ui#2); a credit note's own page names the invoices it rectifies, with what it
+ * took off each, a manual one's category and reason, and goes back to the invoice when no run issued it (tests-ui#3).
  */
 export default async function CommissionInvoicePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -30,15 +46,55 @@ export default async function CommissionInvoicePage({ params }: { params: Promis
   const invoice = d.kind === "invoice";
   const refusal = refusalText(d.refusal);
   const title = `${invoice ? "Facture" : "Avoir"} ${d.number}`;
+
+  // the file choice: the first page of the paged read; if it fails, the 200 files the detail lists (said so)
+  let files: FileChoice[] = [];
+  let nextFiles: string | null = null;
+  let filesPartial = false;
+  if (invoice && !refusal && d.can_credit) {
+    const page = await invoiceFilesPage(invoiceFilesRpc(supabase), d.id, null);
+    if ("error" in page) {
+      console.error("invoice files failed", { error: page.error });
+      files = d.files.filter((f) => BigInt(f.open_ht) > BigInt(0)).map((f) => ({ account_id: f.account_id, reference: f.reference }));
+      filesPartial = d.file_count > d.files.length;
+    } else {
+      files = page.files;
+      nextFiles = page.next;
+    }
+  }
+
+  // a credit note: the invoices it rectifies (its corrections, money staff's rows) and, a manual one, its reason
+  let corrected: Corrected[] = [];
+  let manual: { reason_code: string; reason: string } | null = null;
+  if (!invoice) {
+    const { data: corrections } = await supabase
+      .from("commission_credit_correction")
+      .select("original_invoice_id, ht:ht_minor::text, vat:vat_minor::text")
+      .eq("credit_note_id", d.id);
+    const ids = (corrections ?? []).map((c) => c.original_invoice_id);
+    const { data: originals } =
+      ids.length > 0
+        ? await supabase.from("commission_invoice").select("id, number, issue_date").in("id", ids)
+        : { data: [] as { id: string; number: string; issue_date: string }[] };
+    const originalOf = new Map((originals ?? []).map((o) => [o.id, o]));
+    corrected = (corrections ?? [])
+      .flatMap((c) => {
+        const o = originalOf.get(c.original_invoice_id);
+        return o ? [{ id: o.id, number: o.number, issue_date: o.issue_date, ht: String(c.ht), vat: String(c.vat) }] : [];
+      })
+      .sort((a, b) => a.number.localeCompare(b.number));
+    if (d.reason === "manual") {
+      const { data: m } = await supabase
+        .from("manual_credit_note")
+        .select("reason_code, reason")
+        .eq("credit_note_id", d.id)
+        .maybeSingle();
+      manual = m ?? null;
+    }
+  }
+
   return (
-    <WidePage
-      title={title}
-      back={
-        d.run_id
-          ? { href: `/backoffice/reversements/${d.run_id}`, label: `Reversement ${d.run_number ?? ""}`.trim() }
-          : { href: "/backoffice/reversements", label: "Reversements" }
-      }
-    >
+    <WidePage title={title} back={creditNoteBack(d, invoice ? [] : corrected)}>
       <div className="flex flex-wrap gap-2">
         <Badge tone="neutral">{REASON_LABEL[d.reason] ?? d.reason}</Badge>
         <Badge tone={d.settlement === "due" ? "action" : "neutral"}>
@@ -73,7 +129,9 @@ export default async function CommissionInvoicePage({ params }: { params: Promis
               invoiceId={d.id}
               invoiceNumber={d.number}
               remainingHt={d.remaining_ht}
-              files={d.files.filter((f) => BigInt(f.open_ht) > BigInt(0))}
+              files={files}
+              nextFiles={nextFiles}
+              filesPartial={filesPartial}
               currency="EUR"
             />
           ) : (
@@ -82,31 +140,60 @@ export default async function CommissionInvoicePage({ params }: { params: Promis
         </Section>
       ) : null}
 
-      <Section title="Avoirs qui rectifient cette facture" testId="invoice-credit-notes">
-        {d.credit_notes.length === 0 ? (
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucun avoir.</p>
-        ) : (
-          <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
-            {d.credit_notes.map((c) => (
-              <li key={c.id} className="flex flex-col gap-1 py-3" data-testid="invoice-credit-note">
-                <span className="flex flex-wrap items-center justify-between gap-2">
-                  <Link href={`/backoffice/reversements/factures/${c.id}`} className="font-medium underline underline-offset-4">
-                    Avoir {c.number} du {frenchDate(c.issue_date)}
-                  </Link>
+      {invoice ? (
+        <Section title="Avoirs qui rectifient cette facture" testId="invoice-credit-notes">
+          {d.credit_notes.length === 0 ? (
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucun avoir.</p>
+          ) : (
+            <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
+              {d.credit_notes.map((c) => (
+                <li key={c.id} className="flex flex-col gap-1 py-3" data-testid="invoice-credit-note">
+                  <span className="flex flex-wrap items-center justify-between gap-2">
+                    <Link href={`/backoffice/reversements/factures/${c.id}`} className="font-medium underline underline-offset-4">
+                      Avoir {c.number} du {frenchDate(c.issue_date)}
+                    </Link>
+                    <span className="tabular-nums">
+                      HT {money(c.ht, "EUR")} · TVA {money(c.vat, "EUR")}
+                    </span>
+                  </span>
+                  <span className="text-sm text-zinc-600 dark:text-zinc-400">
+                    {c.reason === "manual"
+                      ? `Avoir manuel : ${c.reason_fr ?? ""}${c.reason_text ? ` — « ${c.reason_text} » (interne)` : ""}`
+                      : `${REASON_LABEL[c.reason] ?? c.reason}${c.run_number ? ` · relevé ${c.run_number}` : ""}`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Section>
+      ) : (
+        <Section title={corrected.length > 1 ? "Factures rectifiées" : "Facture rectifiée"} testId="credit-note-corrects">
+          {corrected.length === 0 ? (
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">Facture rectifiée introuvable.</p>
+          ) : (
+            <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
+              {corrected.map((c) => (
+                <li key={c.id} className="flex flex-wrap items-center justify-between gap-2 py-3" data-testid="credit-note-corrected">
+                  <span>
+                    Rectifie la{" "}
+                    <Link href={`/backoffice/reversements/factures/${c.id}`} className="font-medium underline underline-offset-4">
+                      facture {c.number} du {frenchDate(c.issue_date)}
+                    </Link>
+                  </span>
                   <span className="tabular-nums">
                     HT {money(c.ht, "EUR")} · TVA {money(c.vat, "EUR")}
                   </span>
-                </span>
-                <span className="text-sm text-zinc-600 dark:text-zinc-400">
-                  {c.reason === "manual"
-                    ? `Avoir manuel : ${c.reason_fr ?? ""}${c.reason_text ? ` — « ${c.reason_text} » (interne)` : ""}`
-                    : `${REASON_LABEL[c.reason] ?? c.reason}${c.run_number ? ` · relevé ${c.run_number}` : ""}`}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Section>
+                </li>
+              ))}
+            </ul>
+          )}
+          {manual ? (
+            <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400" data-testid="credit-note-reason">
+              Avoir manuel : {reasonCategoryLabel(manual.reason_code)} — « {manual.reason} » (interne, jamais sur l&apos;avoir)
+            </p>
+          ) : null}
+        </Section>
+      )}
 
       {invoice ? (
         <Section title={`Dossiers facturés (${d.file_count})`} testId="invoice-files">

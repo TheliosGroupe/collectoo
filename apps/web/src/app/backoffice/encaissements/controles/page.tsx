@@ -3,7 +3,7 @@ import { ActionForm } from "@/components/action-form";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { Badge, InfoNote, Section, Stats, WidePage, buttonClass } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
-import { checkLabel } from "@/lib/payments/debits";
+import { checkLabel, checkSubjectLink } from "@/lib/payments/debits";
 import { money } from "@/lib/payments/statements";
 import { requestChecks } from "../debits/actions";
 
@@ -23,19 +23,6 @@ function frenchDateTime(iso: string): string {
   return new Intl.DateTimeFormat("fr-FR", { dateStyle: "short", timeStyle: "short", timeZone: "Europe/Paris" }).format(
     new Date(iso),
   );
-}
-
-/** Where a result leads: the payment, the statement, or the queue that holds what ages. */
-function subjectLink(r: Result): string | null {
-  if (r.subject_type === "payment" && r.subject_id) return `/backoffice/encaissements/paiements/${r.subject_id}`;
-  if (r.subject_type === "bank_statement" && r.subject_id) return `/backoffice/encaissements/releves/${r.subject_id}`;
-  if (r.code === "debit_unclassified") return "/backoffice/encaissements/debits";
-  if (r.code === "duplicate_unresolved") return "/backoffice/encaissements/debits?onglet=doublons";
-  if (r.code === "unmatched_ageing" || r.code === "unallocated_ageing") return "/backoffice/encaissements/a-traiter";
-  // M2c-4: a run's checks lead to the run, a client's deadlines to « Reversements »
-  if (r.subject_type === "remittance_run" && r.subject_id) return `/backoffice/reversements/${r.subject_id}`;
-  if (r.code.startsWith("remittance_")) return "/backoffice/reversements";
-  return null;
 }
 
 /**
@@ -116,7 +103,7 @@ export default async function ChecksPage() {
             <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
               {results.map((r) => {
                 const l = checkLabel(r.code);
-                const to = subjectLink(r);
+                const to = checkSubjectLink(r);
                 return (
                   <li key={r.id} className="flex flex-col gap-1 py-3" data-testid="check-row" data-code={r.code}>
                     <span className="flex flex-wrap items-center gap-2">

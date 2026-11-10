@@ -3,6 +3,7 @@ import { errorText } from "@/lib/boarding/forms";
 import {
   approvalSummary,
   blockerLabel,
+  commissionNotComputed,
   confirmedAgo,
   deadlineChip,
   failureLabel,
@@ -226,5 +227,20 @@ describe("runs (M2c-4 « Reversements »)", () => {
     expect(confirmedAgo("2026-11-07T09:00:00Z", now)).toBe("IBAN confirmé il y a 3 j");
     expect(confirmedAgo("2026-11-10T08:00:00Z", now)).toBe("IBAN confirmé aujourd'hui");
     expect(confirmedAgo(null, now)).toBeNull();
+  });
+});
+
+describe("review M2c-5b: a draft whose commission could not be computed (security-concurrency#0, F5)", () => {
+  it("words the approval's refusal engine_error, never the code", () => {
+    expect(failureLabel("engine_error")).not.toBe("engine_error");
+    expect(failureLabel("engine_error")).toMatch(/commission/);
+    expect(failureLabel("engine_error")).toMatch(/actualisez/);
+    expect(failureNote({ code: "engine_error", step: "approve" })).toMatch(/^Renvoyé en brouillon : /);
+  });
+
+  it("knows a draft the database will not approve: its lines' commission is an input error", () => {
+    expect(commissionNotComputed({ commission_blockers: ["commission_input_error: file F42, tout: …"] })).toBe(true);
+    expect(commissionNotComputed({ commission_blockers: ["servicer_identity_incomplete"] })).toBe(false);
+    expect(commissionNotComputed({ commission_blockers: [] })).toBe(false);
   });
 });

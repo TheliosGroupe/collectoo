@@ -4,8 +4,16 @@ import { useRouter } from "next/navigation";
 import { type FormEvent, useState, useTransition } from "react";
 import { ErrorNote, buttonClass, dangerButtonClass, inlineButtonClass, inputClass } from "@/components/ui";
 import { errorText } from "@/lib/boarding/forms";
-import { type CreditNotePreview, REASON_CATEGORIES, effectLines, vatSplitText } from "@/lib/remittance/credit-notes";
-import { issueCreditNote, previewCreditNote } from "../actions";
+import {
+  type CreditNotePreview,
+  type FileChoice,
+  REASON_CATEGORIES,
+  effectLines,
+  filterFiles,
+  mergeFiles,
+  vatSplitText,
+} from "@/lib/remittance/credit-notes";
+import { issueCreditNote, loadInvoiceFiles, previewCreditNote } from "../actions";
 
 /**
  * « Émettre un avoir » (M2c-5b; design §14.1, risk R2): the amount HT, the file it is limited to (or the whole invoice,
@@ -14,28 +22,62 @@ import { issueCreditNote, previewCreditNote } from "../actions";
  * the refund owed beyond it, what the invoice still owes after); « Émettre l'avoir » issues it against the remaining HT
  * the page read (compare and set). An admin at aal2 only: the page shows the panel to admins, the command refuses
  * anyone else.
+ *
+ * Review M2c-5b (tests-ui#2, F4): « Sur » offers every file the invoice still charges — 200 at a time, « Charger les
+ * dossiers suivants » reading the next page (`public.commission_invoice_files`) — and « Chercher un dossier » narrows the
+ * files loaded to a reference.
  */
 export function CreditNotePanel({
   invoiceId,
   invoiceNumber,
   remainingHt,
-  files,
+  files: firstFiles,
+  nextFiles,
+  filesPartial,
   currency,
 }: {
   invoiceId: string;
   invoiceNumber: string;
   remainingHt: string;
-  files: { account_id: string; reference: string | null; open_ht: string }[];
+  /** The first page of the files the invoice still charges, in the database's order. */
+  files: FileChoice[];
+  /** The cursor of the next page, or null when every file is loaded. */
+  nextFiles: string | null;
+  /** The paged read failed: the list holds the 200 files the invoice's detail lists. */
+  filesPartial: boolean;
   currency: string;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
+  const [loading, startLoading] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<CreditNotePreview | null>(null);
   const [issued, setIssued] = useState<string | null>(null);
   const [key, setKey] = useState(() => crypto.randomUUID());
+  const [files, setFiles] = useState<FileChoice[]>(firstFiles);
+  const [cursor, setCursor] = useState<string | null>(nextFiles);
+  const [query, setQuery] = useState("");
+  const [accountId, setAccountId] = useState("");
   const lines = effectLines(preview, currency);
   const vat = vatSplitText(preview, currency);
+  const shown = filterFiles(files, query);
+  const chosen = files.find((f) => f.account_id === accountId);
+  const options = chosen && !shown.includes(chosen) ? [chosen, ...shown] : shown;
+  const searchable = files.length > 10 || cursor !== null;
+
+  function loadMore() {
+    if (loading || !cursor) return;
+    const after = cursor;
+    setError(null);
+    startLoading(async () => {
+      const result = await loadInvoiceFiles(invoiceId, after);
+      if ("error" in result) setError(errorText(result.error));
+      else {
+        setFiles((current) => mergeFiles(current, result.files));
+        setCursor(result.next);
+      }
+    });
+  }
 
   function onPreview(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -68,6 +110,8 @@ export function CreditNotePanel({
         setIssued(result.number);
         setPreview(null);
         form.reset();
+        setAccountId("");
+        setQuery("");
         router.refresh();
       }
     });
@@ -84,17 +128,64 @@ export function CreditNotePanel({
         Montant HT de l&apos;avoir (€)
         <input name="amount" inputMode="decimal" className={inputClass} placeholder="ex. 30,00" required onChange={() => setPreview(null)} />
       </label>
+      {searchable ? (
+        <label className="flex flex-col gap-1 text-sm">
+          Chercher un dossier (référence)
+          <input
+            type="search"
+            className={inputClass}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.preventDefault();
+            }}
+            placeholder="ex. M-0042"
+            data-testid="credit-note-file-search"
+          />
+        </label>
+      ) : null}
       <label className="flex flex-col gap-1 text-sm">
         Sur
-        <select name="account_id" className={inputClass} defaultValue="" onChange={() => setPreview(null)}>
+        <select
+          name="account_id"
+          className={inputClass}
+          value={accountId}
+          onChange={(e) => {
+            setAccountId(e.target.value);
+            setPreview(null);
+          }}
+          data-testid="credit-note-file"
+        >
           <option value="">Toute la facture (au prorata des dossiers)</option>
-          {files.map((f) => (
+          {options.map((f) => (
             <option key={f.account_id} value={f.account_id}>
               Dossier {f.reference ?? f.account_id.slice(0, 8)}
             </option>
           ))}
         </select>
       </label>
+      {searchable || filesPartial ? (
+        <p className="text-xs text-zinc-600 dark:text-zinc-400" data-testid="credit-note-files-count">
+          {query ? `${shown.length} dossier${shown.length > 1 ? "s" : ""} trouvé${shown.length > 1 ? "s" : ""} sur ` : ""}
+          {files.length} dossier{files.length > 1 ? "s" : ""} chargé{files.length > 1 ? "s" : ""}
+          {cursor ? " ; d'autres dossiers suivent." : filesPartial ? " ; liste incomplète : rechargez la page." : "."}
+          {cursor ? (
+            <>
+              {" "}
+              <button
+                type="button"
+                className={inlineButtonClass}
+                onClick={loadMore}
+                disabled={loading}
+                aria-busy={loading}
+                data-testid="credit-note-files-more"
+              >
+                {loading ? "Chargement…" : "Charger les dossiers suivants"}
+              </button>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       <fieldset className="flex flex-col gap-2 text-sm">
         <legend className="mb-1">Motif porté sur l&apos;avoir</legend>
         {REASON_CATEGORIES.map((c, i) => (

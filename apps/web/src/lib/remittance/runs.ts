@@ -119,6 +119,15 @@ export function blockerLabel(code: string): string {
   return BLOCKER_LABEL[code] ?? code;
 }
 
+/**
+ * Review M2c-5b (security-concurrency#0, F5): a draft whose commission the engine refused to compute (its history read
+ * while a credit note committed, or data to check). The database refuses to approve it (`engine_error`); the card says
+ * « Actualiser » and its box stays unticked.
+ */
+export function commissionNotComputed(card: Pick<RunCard, "commission_blockers">): boolean {
+  return card.commission_blockers.some((b) => b.startsWith("commission_input_error"));
+}
+
 const FAILURE_LABEL: Record<string, string> = {
   stale: "le brouillon a changé depuis l'affichage",
   vat_rate_changed: "le taux de TVA du jour n'est plus celui du brouillon : actualisez",
@@ -147,6 +156,8 @@ const FAILURE_LABEL: Record<string, string> = {
   approval_failed: "la validation a échoué après plusieurs essais",
   prepare_failed: "la préparation a échoué",
   not_prepared: "le brouillon n'est pas préparé",
+  // review M2c-5b (security-concurrency#0, F5): the draft's commission could not be computed (data read mid-change)
+  engine_error: "la commission de certains encaissements n'a pas pu être calculée : actualisez le brouillon",
 };
 
 /** Why a run went back to draft (last_failure.code), as « Renvoyé en brouillon : … », or why the approval refused it. */

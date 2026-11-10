@@ -179,6 +179,7 @@ export type ErrorCode =
   | "credit_note_on_credit_note"
   | "credit_note_nothing_left"
   | "credit_note_in_flight"
+  | "credit_note_run_in_flight"
   | "credit_note_file"
   | "credit_note_amount"
   | "credit_note_too_much"
@@ -354,6 +355,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   credit_note_nothing_left: "Cette facture est déjà entièrement rectifiée : il ne reste rien à créditer.",
   credit_note_in_flight:
     "Un reversement validé compense cette facture sur son virement, pas encore débité : attendez son débit, ou annulez ce reversement.",
+  credit_note_run_in_flight:
+    "Le reversement qui a émis cette facture est validé mais pas encore débité : il peut encore être annulé. Attendez son débit, ou annulez-le, avant d'émettre un avoir.",
   credit_note_file: "Ce dossier n'a plus rien de facturé sur cette facture.",
   credit_note_amount: "Indiquez un montant HT positif, au centime près (par exemple 30,00).",
   credit_note_too_much: "Le montant dépasse ce qui reste facturé (sur la facture, ou sur le dossier choisi).",

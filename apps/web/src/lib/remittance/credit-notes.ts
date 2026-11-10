@@ -81,6 +81,9 @@ const REFUSAL_TEXT: Record<string, string> = {
   nothing_left: "Cette facture est déjà entièrement rectifiée : il ne reste rien à créditer.",
   in_flight:
     "Un reversement validé compense cette facture sur son virement, pas encore débité : attendez son débit, ou annulez ce reversement, avant d'émettre un avoir.",
+  // review M2c-5b (ledger-vat#0, F1): the invoice's own run can still be cancelled, which would credit the invoice in full
+  run_in_flight:
+    "Le reversement qui a émis cette facture est validé mais pas encore débité : il peut encore être annulé, ce qui rectifierait toute la facture. Attendez son débit, ou annulez-le, avant d'émettre un avoir.",
   file_not_on_invoice: "Ce dossier n'a plus rien de facturé sur cette facture.",
   amount_required: "Indiquez un montant HT positif, au centime près.",
   more_than_remaining: "Le montant dépasse ce qui reste facturé (sur la facture, ou sur le dossier choisi).",
@@ -97,6 +100,7 @@ const CREDIT_ERRORS: [string, ErrorCode][] = [
   ["not allowed", "not_allowed"],
   ["refused: credit_note", "credit_note_on_credit_note"],
   ["refused: nothing_left", "credit_note_nothing_left"],
+  ["refused: run_in_flight", "credit_note_run_in_flight"],
   ["refused: in_flight", "credit_note_in_flight"],
   ["refused: file_not_on_invoice", "credit_note_file"],
   ["refused: amount_required", "credit_note_amount"],
@@ -133,7 +137,11 @@ export function effectLines(p: CreditNotePreview | null, currency = "EUR"): { la
     { label: "Déduit de ce que la facture doit", value: money(p.applied!, currency) },
   ];
   if (BigInt(p.excess!) > BigInt(0)) {
-    rows.push({ label: "À rembourser au client (avec un prochain reversement)", value: money(p.excess!, currency) });
+    // review M2c-5b (legal#0): a later run pays it with its payout; with none, the servicer transfers it (M2c-7)
+    rows.push({
+      label: "À rembourser au client (avec son prochain reversement, sinon par virement du cabinet)",
+      value: money(p.excess!, currency),
+    });
   }
   rows.push(
     { label: "La facture devra encore (TTC)", value: money(p.open_after!, currency) },
@@ -176,4 +184,109 @@ export function creditNoteText(
   if (note.reason !== "manual" || !note.designation) return head;
   const why = note.designation.split(" — ").slice(1).join(" — ").trim();
   return why ? `${head} · ${why}` : head;
+}
+
+/**
+ * Review M2c-5b (tests-ui#2, contract F4): the files « Sur » offers. `commission_invoice_detail` lists 200 files at most
+ * (for display); the choice reads `public.commission_invoice_files(p_invoice_id, p_after, p_limit)` instead — the
+ * invoice's open charges per (file, tier key), keyset-ordered, each row with its opaque `page_key` — a page at a time,
+ * « Charger les dossiers suivants » asking after the last row's key, and the reference typed filters what is loaded.
+ * PostgREST cuts any answer at 1,000 rows (`max_rows`): 200 a page stays well below.
+ */
+export const FILES_PAGE_SIZE = 200;
+
+/** A file the credit note can be limited to (no amount: the plan computes the spread, the page shows its effect). */
+export type FileChoice = { account_id: string; reference: string | null };
+
+/** The paged read, called with the user's session (money staff at aal2: the database decides). */
+export type InvoiceFilesRpc = (
+  fn: "commission_invoice_files",
+  args: { p_invoice_id: string; p_after?: string; p_limit: number },
+) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+
+/**
+ * The paged read from a Supabase client. `commission_invoice_files` is new in this slice's migration: it is called
+ * through this narrow type (as a method, so the client keeps its `this`) until `database.types.ts` is regenerated.
+ */
+export function invoiceFilesRpc(client: unknown): InvoiceFilesRpc {
+  return (fn, args) => (client as { rpc: InvoiceFilesRpc }).rpc(fn, args);
+}
+
+const INTEGER = /^\d+$/;
+
+type FileRow = { file_id: string; file_ref: string | null; open_minor: string; page_key: string };
+
+function fileRow(x: unknown): FileRow | null {
+  if (typeof x !== "object" || x === null) return null;
+  const r = x as Record<string, unknown>;
+  const open = typeof r.open_minor === "number" && Number.isSafeInteger(r.open_minor) ? String(r.open_minor) : r.open_minor;
+  if (typeof r.file_id !== "string" || typeof r.page_key !== "string") return null;
+  if (r.file_ref !== null && typeof r.file_ref !== "string") return null;
+  if (typeof open !== "string" || !INTEGER.test(open)) return null;
+  return { file_id: r.file_id, file_ref: r.file_ref, open_minor: open, page_key: r.page_key };
+}
+
+/** Files of `incoming` not yet in `current`, appended in the database's order. */
+export function mergeFiles(current: FileChoice[], incoming: FileChoice[]): FileChoice[] {
+  const seen = new Set(current.map((f) => f.account_id));
+  const out = [...current];
+  for (const f of incoming) {
+    if (seen.has(f.account_id)) continue;
+    seen.add(f.account_id);
+    out.push(f);
+  }
+  return out;
+}
+
+/**
+ * One page of the files an invoice still charges: each file once (a file has a row per tier key), none with nothing
+ * left, malformed rows dropped; `next` is the cursor of the following page when this one is full and its last key moved
+ * on, else null (a key that does not move would ask the same page for ever).
+ */
+export async function invoiceFilesPage(
+  rpc: InvoiceFilesRpc,
+  invoiceId: string,
+  after: string | null,
+): Promise<{ files: FileChoice[]; next: string | null } | { error: string }> {
+  const { data, error } = await rpc("commission_invoice_files", {
+    p_invoice_id: invoiceId,
+    ...(after ? { p_after: after } : {}),
+    p_limit: FILES_PAGE_SIZE,
+  });
+  if (error) return { error: error.message };
+  const raw = Array.isArray(data) ? data : [];
+  const rows = raw.map(fileRow).filter((r): r is FileRow => r !== null);
+  const files = mergeFiles(
+    [],
+    rows.filter((r) => BigInt(r.open_minor) > BigInt(0)).map((r) => ({ account_id: r.file_id, reference: r.file_ref })),
+  );
+  const last = rows.length > 0 ? rows[rows.length - 1].page_key : null;
+  const next = raw.length >= FILES_PAGE_SIZE && last && last !== after ? last : null;
+  return { files, next };
+}
+
+/** The files whose reference (or, without one, whose id) contains what was typed, ignoring case and spaces. */
+export function filterFiles(files: FileChoice[], query: string): FileChoice[] {
+  const q = query.replace(/\s+/g, "").toLowerCase();
+  if (!q) return files;
+  return files.filter((f) => (f.reference ?? f.account_id).replace(/\s+/g, "").toLowerCase().includes(q));
+}
+
+/**
+ * Review M2c-5b (tests-ui#3, F4): a credit note's own page goes back to its run, or — a manual credit note has none — to
+ * the invoice it rectifies.
+ */
+export function creditNoteBack(
+  d: { run_id: string | null; run_number: string | null },
+  corrected: { id: string; number: string }[],
+): { href: string; label: string } {
+  if (d.run_id) return { href: `/backoffice/reversements/${d.run_id}`, label: `Reversement ${d.run_number ?? ""}`.trim() };
+  const first = corrected[0];
+  if (first) return { href: `/backoffice/reversements/factures/${first.id}`, label: `Facture ${first.number}` };
+  return { href: "/backoffice/reversements", label: "Reversements" };
+}
+
+/** A manual credit note's reason category, in the words of the sheet (the code when unknown). */
+export function reasonCategoryLabel(code: string): string {
+  return REASON_CATEGORIES.find((c) => c.code === code)?.label ?? code;
 }
