@@ -63,6 +63,7 @@ from collectoo_worker.remittance.commission import (
     LineCommission,
     LineKind,
     Part,
+    Retake,
     TermsVersion,
     cap_of,
     chain,
@@ -592,7 +593,7 @@ def test_documents_never_show_a_negative_band_and_credit_the_originals_invoice_f
     clause = {v.id: v.schedule.basis.on_reversal for v in versions["M"]}
     sim = Simulator(files, versions, tau)
     for run in _runs(lines, cuts):
-        originals = {k: chain(v)[0] for k, v in sim.line_invoices.items()}
+        originals = {k: str(chain(v)[0]) for k, v in sim.line_invoices.items()}  # no cancellation
         result, docs = sim.run(run)
         by_entry = {r.entry_id: r for r in result.lines}
         invoiced = {e for d in docs.values() if d.invoice for e in d.invoice.entries}
@@ -1194,6 +1195,57 @@ def test_the_inputs_hash_names_every_input() -> None:
     assert inputs_hash(lines, files, versions, {}, TAU) == inputs_hash(
         lines, files, versions, {}, TAU, line_invoices={first: "FC-1"}
     )  # only the invoices of the lines the run undoes
+    # M2c-5b (review tests-ui#5): the waivers, the chain of invoices and what a cancellation put
+    # back on each for the reversal are inputs; a history without them hashes as before
+    key = ("F", "k")
+    charge = EarlierCharge("FC-1", (2026, 1), 1)
+    hashed = {
+        "state": inputs_hash(lines, files, versions, {key: state}, TAU),
+        "state waived": inputs_hash(
+            lines, files, versions, {key: replace(state, waived_minor=1)}, TAU
+        ),
+        "charge": inputs_hash(lines, files, versions, {}, TAU, {key: [charge]}),
+        "charge waived": inputs_hash(
+            lines, files, versions, {}, TAU, {key: [replace(charge, waived_minor=1)]}
+        ),
+        "own": inputs_hash(undo, files, versions, {}, TAU, line_invoices={first: "FC-6"}),
+        "chain": inputs_hash(
+            undo, files, versions, {}, TAU, line_invoices={first: ("FC-6", "FC-1")}
+        ),
+        "retake": inputs_hash(
+            undo,
+            files,
+            versions,
+            {},
+            TAU,
+            line_invoices={first: (Retake("FC-6", ((key, 100),)), "FC-1")},
+        ),
+        "retake cap": inputs_hash(
+            undo,
+            files,
+            versions,
+            {},
+            TAU,
+            line_invoices={first: (Retake("FC-6", ((key, 101),)), "FC-1")},
+        ),
+        "retake key": inputs_hash(
+            undo,
+            files,
+            versions,
+            {},
+            TAU,
+            line_invoices={first: (Retake("FC-6", ((("F", "kp"), 100),)), "FC-1")},
+        ),
+    }
+    assert len(set(hashed.values())) == len(hashed), hashed
+    assert inputs_hash(
+        undo, files, versions, {}, TAU, line_invoices={first: ("FC-1",)}
+    ) == inputs_hash(undo, files, versions, {}, TAU, line_invoices={first: "FC-1"})
+    # pinned: the hash of a history without manual credit notes is the one M2c-4 drew
+    assert (
+        inputs_hash(undo, files, versions, {key: state}, TAU, {key: [charge]}, {first: "FC-1"})
+        == "1578d3f485633812740070e2fd446bf4f0b8c26d7cc47262d3d527f632058b09"
+    )  # main, M2c-5
 
 
 def test_input_errors() -> None:

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from collectoo_worker.remittance.commission import (
+    ChainLink,
     FileFacts,
     KeyState,
     Line,
@@ -124,7 +125,7 @@ class Simulator:
     invoices: dict[str, EarlierInvoice] = field(default_factory=dict)
     invoice_vat: dict[str, int] = field(default_factory=dict)  # number → VAT of the invoice
     # entry → the invoice(s) that charge it (a cancellation's corrective invoice first)
-    line_invoices: dict[str, str | tuple[str, ...]] = field(default_factory=dict)
+    line_invoices: dict[str, str | tuple[ChainLink, ...]] = field(default_factory=dict)
     seq: int = 0
     vat_credited: dict[str, int] = field(default_factory=dict)  # number → VAT credited on it
     # the last run, for `cancel_last`: the state before it, its documents and invoice numbers
@@ -258,35 +259,32 @@ class Simulator:
                 )
         # where no corrective invoice was issued at that rate (all the run took there was
         # absorbed), the waiver goes back on the invoice it was absorbed from
-        for _, where, inv, key, amount, was_absorbed in takes:
+        for _, where, at, key, amount, was_absorbed in takes:
             if was_absorbed and where not in number_of:
                 self.charges[key] = [
-                    replace(c, waived_minor=c.waived_minor + amount) if c.invoice_id == inv else c
+                    replace(c, waived_minor=c.waived_minor + amount) if c.invoice_id == at else c
                     for c in self.charges[key]
                 ]
         # the lines go back to pending: their invoices are the state's before the run, except that
         # a reversal the run took something for is credited first where the cancellation put it
         # back, up to what it took there for each key, then on its original's own invoice
         held: dict[str, dict[str, dict[Key, int]]] = {}
-        for entry, where, inv, key, amount, _ in takes:
-            at = number_of.get(where, inv)
-            per = held.setdefault(entry, {}).setdefault(at, {})
-            per[key] = per.get(key, 0) + amount
+        for entry, where, taken_on, key, amount, _ in takes:
+            share = held.setdefault(entry, {}).setdefault(number_of.get(where, taken_on), {})
+            share[key] = share.get(key, 0) + amount
         self.line_invoices = dict(line_invoices0)
         for reversal, original in originals.items():
             if reversal in held:
-                own_links = tuple(
-                    x for x in chain(line_invoices0.get(original)) if isinstance(x, str)
-                )
-                links = tuple(
+                links: list[ChainLink] = [
                     Retake(at, tuple(sorted(caps.items())))
                     for at, caps in sorted(held[reversal].items(), key=lambda x: self._order(x[0]))
-                )
-                self.line_invoices[original] = (*links, *own_links)
+                ]
+                links += [x for x in chain(line_invoices0.get(original)) if isinstance(x, str)]
+                self.line_invoices[original] = tuple(links)
         for key in touched:
             state = history0.get(key, KeyState())
-            waived = sum(c.waived_minor for c in self.charges.get(key, ()))
-            self.history[key] = replace(state, waived_minor=waived)
+            waiver = sum(c.waived_minor for c in self.charges.get(key, ()))
+            self.history[key] = replace(state, waived_minor=waiver)
         return corrective
 
     @staticmethod

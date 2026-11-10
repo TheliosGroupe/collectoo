@@ -51,6 +51,7 @@ def test_the_golden_set() -> None:
         "manual-credit-cancel-two-reversals",
         "manual-credit-cancel-all-absorbed",
         "cancel-credit-across-rates",
+        "manual-credit-rate-fall",
     } <= names
     for p in CASES:
         case = load_case(p)

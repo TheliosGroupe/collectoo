@@ -1,0 +1,42 @@
+# A waiver after a fall of the VAT rate (M2c-5b review tests-ui#1): the cap and the reserve weigh each open invoice at
+# its own rate, its waiver included. 1 % flat with a minimum of 20,00 € per file: 20,01 € collected at 20 % VAT — the
+# minimum capped at ⌊2 001 / 1,2⌋ = 16,67 €, held to 16,66 € by the rounding reserve (FC-1); a manual credit note of
+# 10,00 € HT on FC-1 (6,66 € still charged, 10,00 € waived). The rate falls to 5,5 %, then 0,01 € collected: FC-1 at
+# 20 % still weighs its 16,66 € (charged and waived), so nothing more fits within the 20,02 € collected — no document,
+# V 16,66 €, the waiver kept. (Reading only what FC-1 still charges, 6,66 €, would bill 2,31 € of the waived amount
+# again.) TO VALIDATE (OQ-78).
+case: manual-credit-rate-fall
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  minimum:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.0100"}, min_per_file_minor: "2000"}
+mandates:
+  MAND-R: [{id: r-v1, from: "2026-01-01", to: null, schedule: minimum}]
+files:
+  F-1: {mandate: MAND-R, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — 20,01 € at 20 % VAT
+    lines:
+      - {entry: A, kind: allocation, file: F-1, e: "2026-10-05", eff: "2026-10-05", amount: "2001", basis: {principal: "2001"}}
+    expect:
+      lines: {A: {commission: "1666"}}
+      documents:
+        MAND-R: {invoice: {number: FC-2026-000001, ht: "1666", vat: "333", ttc: "1999"}}
+  - name: a manual credit note of 10,00 € HT on FC-1 (FC-2026-000002)
+    manual_credit_notes:
+      - invoice: FC-2026-000001
+        amount: "1000"
+        expect: {ht: "1000", vat: "200", allocations: {F-1/tout: "1000"}}
+    expect:
+      state: {F-1/tout: {commission: "1666", waived: "1000", invoices: {FC-2026-000001: ["666", "1000"]}}}
+  - name: run 2 — the rate at 5,5 %, 0,01 € collected
+    vat_rate: "0.0550"
+    lines:
+      - {entry: B, kind: allocation, file: F-1, e: "2026-10-08", eff: "2026-10-08", amount: "1", basis: {principal: "1"}}
+    expect:
+      lines: {B: {commission: "0"}}
+      state: {F-1/tout: {commission: "1666", waived: "1000", invoices: {FC-2026-000001: ["666", "1000"]}}}
