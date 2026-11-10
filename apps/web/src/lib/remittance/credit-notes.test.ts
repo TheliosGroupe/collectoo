@@ -6,6 +6,7 @@ import {
   REASON_CATEGORIES,
   creditNoteBack,
   creditNoteErrorCode,
+  creditNoteFacts,
   creditNoteText,
   effectLines,
   filterFiles,
@@ -227,6 +228,29 @@ describe("review M2c-5b: a credit note's own page (tests-ui#3, F4)", () => {
   it("states a manual credit note's category in the words of the sheet", () => {
     expect(reasonCategoryLabel("basis_error")).toBe("Erreur d'assiette (encaissement non commissionnable)");
     expect(reasonCategoryLabel("something_new")).toBe("something_new");
+  });
+
+  it("reads what a credit note rectifies, and a manual one's reason, from the invoice detail", () => {
+    const corrects = [{ ...fc1, ht: "-3000", vat: "-600" }];
+    expect(
+      creditNoteFacts({
+        kind: "credit_note",
+        reason: "manual",
+        corrects,
+        reason_code: "billing_error",
+        reason_text: "taux du mandat mal saisi",
+      }),
+    ).toEqual({ corrected: corrects, manual: { reason_code: "billing_error", reason: "taux du mandat mal saisi" } });
+    // a run's credit note: what it rectifies, no reason; an invoice: nothing; a detail without the key: nothing
+    expect(creditNoteFacts({ kind: "credit_note", reason: "commission", corrects, reason_code: null, reason_text: null })).toEqual({
+      corrected: corrects,
+      manual: null,
+    });
+    expect(creditNoteFacts({ kind: "invoice", reason: "commission", corrects: [], reason_code: null, reason_text: null })).toEqual({
+      corrected: [],
+      manual: null,
+    });
+    expect(creditNoteFacts({ kind: "credit_note", reason: "manual" })).toEqual({ corrected: [], manual: null });
   });
 });
 

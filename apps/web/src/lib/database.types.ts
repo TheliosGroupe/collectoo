@@ -2472,6 +2472,11 @@ isOneToOne: false
 "commission_invoice_detail":
 { Args: { "p_invoice_id": string }; Returns: Json
                            },
+"commission_invoice_files":
+{ Args: { "p_after"?: string,"p_invoice_id": string,"p_limit"?: number }; Returns: {
+              "file_id": string,"file_ref": string,"open_minor": number,"page_key": string,"tier_key": string
+            }[]
+                           },
 "commit_boarding_batch":
 { Args: { "p_batch_id": string,"p_override_reason"?: string }; Returns: undefined
                            },

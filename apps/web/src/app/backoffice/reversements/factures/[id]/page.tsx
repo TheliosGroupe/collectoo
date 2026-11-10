@@ -7,6 +7,7 @@ import {
   type FileChoice,
   type InvoiceDetail,
   creditNoteBack,
+  creditNoteFacts,
   invoiceFilesPage,
   invoiceFilesRpc,
   percent,
@@ -22,8 +23,6 @@ const REASON_LABEL: Record<string, string> = {
   manual: "avoir manuel",
   reversal: "encaissements annulés",
 };
-
-type Corrected = { id: string; number: string; issue_date: string; ht: string; vat: string };
 
 /**
  * M2c-5b a commission invoice (design §14.1, §17.2; risk R2): what it charged, what credit notes took back, what it still
@@ -63,35 +62,9 @@ export default async function CommissionInvoicePage({ params }: { params: Promis
     }
   }
 
-  // a credit note: the invoices it rectifies (its corrections, money staff's rows) and, a manual one, its reason
-  let corrected: Corrected[] = [];
-  let manual: { reason_code: string; reason: string } | null = null;
-  if (!invoice) {
-    const { data: corrections } = await supabase
-      .from("commission_credit_correction")
-      .select("original_invoice_id, ht:ht_minor::text, vat:vat_minor::text")
-      .eq("credit_note_id", d.id);
-    const ids = (corrections ?? []).map((c) => c.original_invoice_id);
-    const { data: originals } =
-      ids.length > 0
-        ? await supabase.from("commission_invoice").select("id, number, issue_date").in("id", ids)
-        : { data: [] as { id: string; number: string; issue_date: string }[] };
-    const originalOf = new Map((originals ?? []).map((o) => [o.id, o]));
-    corrected = (corrections ?? [])
-      .flatMap((c) => {
-        const o = originalOf.get(c.original_invoice_id);
-        return o ? [{ id: o.id, number: o.number, issue_date: o.issue_date, ht: String(c.ht), vat: String(c.vat) }] : [];
-      })
-      .sort((a, b) => a.number.localeCompare(b.number));
-    if (d.reason === "manual") {
-      const { data: m } = await supabase
-        .from("manual_credit_note")
-        .select("reason_code, reason")
-        .eq("credit_note_id", d.id)
-        .maybeSingle();
-      manual = m ?? null;
-    }
-  }
+  // a credit note: the invoices it rectifies and, a manual one, its reason (the detail's `corrects`, `reason_code`,
+  // `reason_text`: one read, money staff at aal2)
+  const { corrected, manual } = creditNoteFacts(d);
 
   return (
     <WidePage title={title} back={creditNoteBack(d, invoice ? [] : corrected)}>

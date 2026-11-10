@@ -1,4 +1,6 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ErrorCode } from "@/lib/boarding/forms";
+import type { Database } from "@/lib/database.types";
 import { money } from "@/lib/payments/statements";
 import { frenchDate } from "@/lib/remittance/runs";
 
@@ -55,7 +57,16 @@ export type InvoiceDetail = {
   }[];
   refusal: string | null;
   can_credit: boolean;
+  // a credit note (review M2c-5b tests-ui#3): the invoices it rectifies with what it took off each, and a manual one's
+  // reason category and staff reason
+  corrects?: CorrectedInvoice[];
+  reason_code?: string | null;
+  reason_fr?: string | null;
+  reason_text?: string | null;
 };
+
+/** An invoice a credit note rectifies, with the HT and VAT the credit note took off it (negative, minor units). */
+export type CorrectedInvoice = { id: string; number: string; issue_date: string; ht: string; vat: string };
 
 export type CreditNotePreview = {
   refusal: string | null;
@@ -204,12 +215,9 @@ export type InvoiceFilesRpc = (
   args: { p_invoice_id: string; p_after?: string; p_limit: number },
 ) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
 
-/**
- * The paged read from a Supabase client. `commission_invoice_files` is new in this slice's migration: it is called
- * through this narrow type (as a method, so the client keeps its `this`) until `database.types.ts` is regenerated.
- */
-export function invoiceFilesRpc(client: unknown): InvoiceFilesRpc {
-  return (fn, args) => (client as { rpc: InvoiceFilesRpc }).rpc(fn, args);
+/** The paged read from the user's Supabase client (typed by `database.types.ts`). */
+export function invoiceFilesRpc(client: SupabaseClient<Database>): InvoiceFilesRpc {
+  return (fn, args) => client.rpc(fn, args);
 }
 
 const INTEGER = /^\d+$/;
@@ -284,6 +292,19 @@ export function creditNoteBack(
   const first = corrected[0];
   if (first) return { href: `/backoffice/reversements/factures/${first.id}`, label: `Facture ${first.number}` };
   return { href: "/backoffice/reversements", label: "Reversements" };
+}
+
+/**
+ * Review M2c-5b (tests-ui#3): what a credit note's page names, from `commission_invoice_detail` (money staff at aal2) —
+ * the invoices it rectifies (`corrects`) and, a manual one, its category and the staff's reason. Nothing for an invoice.
+ */
+export function creditNoteFacts(
+  d: Pick<InvoiceDetail, "kind" | "reason" | "corrects" | "reason_code" | "reason_text">,
+): { corrected: CorrectedInvoice[]; manual: { reason_code: string; reason: string } | null } {
+  if (d.kind !== "credit_note") return { corrected: [], manual: null };
+  const corrected = d.corrects ?? [];
+  const manual = d.reason === "manual" && d.reason_code ? { reason_code: d.reason_code, reason: d.reason_text ?? "" } : null;
+  return { corrected, manual };
 }
 
 /** A manual credit note's reason category, in the words of the sheet (the code when unknown). */
