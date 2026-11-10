@@ -238,3 +238,39 @@ waiting), overview 0.04 s, cancellation 3.74 s.
 | Receipts 5k | 25 jobs in 71.6 s (14.3 ms a receipt) |
 | Remittance run 50k (with its documents) | above |
 | Boarding 50k | 115 s (commit 31.4 s, confirm job 34.4 s) |
+
+### After the review fixes (M2c-5 review, integrated; 2026-11-10, same VM: 4 vCPU, 16 GB RAM, local stack)
+
+The review isolates each document under its own savepoint (K4: the invoice PDFs in chunks of 50, each statement
+alone, a failed upload's objects removed), builds section 6 as of K (figures#2: payments created and matched by K,
+their 4710 postings by K), names the credit note of a reversal line by a keyed lateral (figures#5), reads the run
+`for share` (figures#6), and records the statement's gross, net and drawn status on its row (perf#4). The CI `scale`
+job's command (`RECEIPT_FILES=5000`, every `*scale_integration.py` in one pytest run, right after `supabase db reset`):
+**6 passed in 933.9 s** (15 min 34 s; the CI job's budget is 30 min).
+
+| Step (the 50,000-line run's documents job) | Volume | Build | Review fixes | Design §19 target |
+|---|---|---|---|---|
+| Statement payload built in SQL (`remittance_statement_prepare`) | 50,000 lines, 50,000 files | 6.42 s | **6.51 s** | — |
+| Statement CSV (Python, text cells neutralised) | 50,000 rows | 1.60 s | **1.30 s** | < 2 s |
+| Statement PDF (no per-file table above 2,000 files) | 50,000 files | 1.50 s | **1.81 s** | — |
+| The documents job (statement + invoice PDF, uploads, records; 0 failed) | one 50,000-line run | 9.67 s + record 0.03 s | **10.04 s** | — |
+| Approval job then documents job (`drain()`) | 50,000 lines | 15.9 s | **16.2 s** | approval 2–4 s |
+
+The rest of the remittance run in the same pytest session: « Préparer maintenant » 1.25 s, prepare 13.8 s (50,000
+lines: load 3.62, price 5.33, write 2.34 s; then the 5,000-line run), approval command 0.02 s, nightly checks 4.1 s
+(5.1 s with the draft waiting, now with `remittance_document_failed` and `remittance_document_missing`), overview
+0.05 s, cancellation 3.67 s.
+
+| Run (same pytest session) | Review fixes | Build |
+|---|---|---|
+| Allocation 50k (boarded 96 s, imported + matched 31.3 s) | allocated in 75.4 s (post 11.5–12.7 s a job); 1,000 returns 27.5 s; nightly checks over 50,000 payments 3.3 s, no code | 80.2 s; 30.7 s; 3.5 s |
+| Statement 50k | 43.1 s imported + matched (ingest 8.8 s); history 13,500 credits 11.1 s | 43.3 s (ingest 9.3 s); 11.3 s |
+| Receipts 5k | 25 jobs in 71.7 s (14.3 ms a receipt) | 71.6 s |
+| Boarding 50k | 116 s (commit 31.6 s, confirm job 34.9 s) | 115 s |
+
+- The savepoints cost nothing measurable: the job is 0.4 s slower on one run, within the spread of its three steps
+  (the PDF +0.3 s, the CSV −0.3 s, the SQL build +0.1 s). The section-6 rewrite starts from the client's candidate
+  payments (those holding money now, refunded or returned since K, or with entries pending since K) and the build
+  stayed at ≈ 0.13 ms a line (6.51 s for 50,000).
+- The 5 s nightly-check target is exceeded once, with the 50,000-line draft waiting in this crowded database
+  (5.1 s; 6.5 s in the M2c-4 round-1 CI-order run); 4.1 s after the approval.
