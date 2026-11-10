@@ -31,7 +31,7 @@ pytestmark = pytest.mark.integration
 FILES = int(os.environ.get("REMIT_FILES", "50000"))
 
 
-def test_a_run_of_50k_lines(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_a_run_of_50k_lines(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:  # noqa: PLR0915
     caplog.set_level(logging.INFO, logger="collectoo.remittances")
     tenant = bank_tenant()
     _board(tenant, tmp_path, count=FILES)

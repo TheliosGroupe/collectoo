@@ -447,14 +447,7 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
     )
     history: dict[tuple[str, str], KeyState] = {}
     for a, tier, b, kept_basis, kept, commission in conn.execute(
-        """select k.account_id, k.tier_key, s.basis, s.kept_basis_minor, s.kept_minor,
-                  s.commission_minor
-           from unnest(%s::uuid[], %s::text[]) k (account_id, tier_key)
-           cross join lateral (select x.basis, x.kept_basis_minor, x.kept_minor,
-                                      x.commission_minor
-                               from public.remittance_key_state x
-                               where x.account_id = k.account_id and x.tier_key = k.tier_key
-                               order by x.seq desc limit 1) s""",
+        "select * from private.remittance_key_states(%s::uuid[], %s::text[])",
         ([a for a, _ in keys], [t for _, t in keys]),
     ).fetchall():
         history[(str(a), tier)] = KeyState(
@@ -463,11 +456,7 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
             kept_minor=int(kept),
             commission_minor=int(commission),
         )
-    seq_row = conn.execute(
-        "select coalesce(max(seq), 0) from public.remittance_key_state"
-        " where client_organization_id = %s",
-        (client,),
-    ).fetchone()
+    seq_row = conn.execute("select private.remittance_history_seq(%s)", (client,)).fetchone()
     charges: dict[tuple[str, str], list[EarlierCharge]] = defaultdict(list)
     for a, tier, inv, year, seq, charged, credited, rate in conn.execute(
         """select ch.account_id, ch.tier_key, ch.invoice_id, i.year, i.seq, ch.charged_minor,

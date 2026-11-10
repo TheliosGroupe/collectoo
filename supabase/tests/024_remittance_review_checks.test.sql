@@ -16,7 +16,7 @@
 -- The date-dependent checks run at a given Paris date (run_remittance_checks' p_today), so they never drift with the
 -- calendar.
 begin;
-select plan(49);
+select plan(52);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name, siren) values
@@ -376,6 +376,22 @@ reset role;
 select is((select v ->> 'items' from j where k = 'rf'), '2', '« Actualiser »: the reserved item and the new one');
 select is((select n_tup_upd from pg_temp.since_mark('private.remittance_pending')), 1::bigint,
   'one item updated: the reservation kept, only the new one reserved');
+
+-- perf#7: the prepare reads the latest tier-history state of each key, not the history ------------------------------
+insert into public.remittance_key_state (organization_id, client_organization_id, account_id, tier_key, run_id, cause,
+                                         commission_minor)
+select '00000000-0000-0000-0000-0000000000cc', pg_temp.c('3'), pg_temp.f('31'), 'tout', (select v from t where k = 'r3'),
+       'approved', g * 100
+from generate_series(1, 12) g;
+select pg_temp.mark();
+select results_eq($$ select tier_key, commission_minor from private.remittance_key_states(
+                       array[pg_temp.f('31'), pg_temp.f('32')], array['tout', 'tout']) $$,
+  $$ values ('tout'::text, 1200::bigint) $$, 'the latest state of each key asked (none for a key never priced)');
+select results_eq($$ select seq_scan, idx_tup_fetch from pg_temp.since_mark('public.remittance_key_state') $$,
+  $$ values (0::bigint, 1::bigint) $$, 'one row read, not the twelve');
+select is(private.remittance_history_seq(pg_temp.c('3')),
+  (select max(seq) from public.remittance_key_state where client_organization_id = pg_temp.c('3')),
+  'the client''s last history number');
 
 -- perf#6: the unreserved collections only ------------------------------------------------------------------------
 select is((select count(*)::int from private.pending_item_deadlines('00000000-0000-0000-0000-0000000000cc', true)

@@ -1993,9 +1993,42 @@ as $$
   from c where c.c_out or c.c_latest < p_today;
 $$;
 
+-- The tier history the prepare continues from (review perf#7): the latest state of each (file, tier key) asked for,
+-- one keyed read per key however many runs wrote it before (append-only), and the client's last history number.
+create or replace function private.remittance_key_states(p_account_ids uuid[], p_tier_keys text[])
+returns table (account_id uuid, tier_key text, basis jsonb, kept_basis_minor bigint, kept_minor bigint,
+               commission_minor bigint)
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select k.account_id, k.tier_key, s.basis, s.kept_basis_minor, s.kept_minor, s.commission_minor
+  from unnest(p_account_ids, p_tier_keys) k (account_id, tier_key)
+  cross join lateral (select x.basis, x.kept_basis_minor, x.kept_minor, x.commission_minor
+                      from public.remittance_key_state x
+                      where x.account_id = k.account_id and x.tier_key = k.tier_key
+                      order by x.seq desc limit 1) s;
+$$;
+
+create or replace function private.remittance_history_seq(p_client_organization_id uuid)
+returns bigint
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select coalesce((select k.seq from public.remittance_key_state k
+                   where k.client_organization_id = p_client_organization_id
+                   order by k.seq desc limit 1), 0);
+$$;
+
 revoke execute on function private.remittance_deadline_or_null(date, integer),
-  private.unallocated_payment_deadlines(uuid), private.inflight_overdue_lines(uuid, date)
+  private.unallocated_payment_deadlines(uuid), private.inflight_overdue_lines(uuid, date),
+  private.remittance_key_states(uuid[], text[]), private.remittance_history_seq(uuid)
   from public, anon, authenticated;
+grant execute on function private.remittance_key_states(uuid[], text[]), private.remittance_history_seq(uuid)
+  to service_role;
 
 ------------------------------------------------------------------------------------------
 -- The schedule (§9.3; founder #1): pg_cron hourly → one worker job per servicer, which decides once per Paris business
