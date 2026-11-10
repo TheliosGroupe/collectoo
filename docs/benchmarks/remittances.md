@@ -80,4 +80,9 @@ of each mandate; case 2 + history: every (file, tier key) with a prior state. `c
   lines in the prepare job, outside the allocation lock (§9.4); approval never reruns the engine (§9.5). The unit
   guard `worker/tests/test_commission_scale.py` (case 2, < 15 s each for the engine and the documents; 2.6 s and
   0.9 s here) catches a regression before the M2c-7 scale run.
+- **Second review** (the minimum and the rounding taken once on the file, the reserve counting the invoices the
+  run's documents leave open, the re-tiering line): case 2 on the same VM, three runs each, the previous engine
+  2.54–2.56 s and documents 1.07–1.21 s, now 2.84–3.04 s and 1.04–1.33 s (the VM was noisier that day: the same
+  code measured 2.6–3.7 s across sessions). The reserve's search over the run's documents runs only for a key whose
+  hold binds (the minimum per file on a small file); every other key takes the schedule's K in one comparison.
 

@@ -1,12 +1,12 @@
 """Helpers for the commission tests: golden-case loading (worker/tests/golden/commission/*.yaml) and
 a small run simulator that carries the history from run to run, as M2c-4's runs will (the state per
-(file, tier key) with its open invoices, the invoices and what they charged, which invoice charged
-each line)."""
+(file, tier key), the invoices and what they still charge each key, which invoice charged each
+line: what the engine's rounding reserve and the documents both read)."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -26,7 +26,6 @@ from collectoo_worker.remittance.documents import (
     EarlierInvoice,
     MandateDocuments,
     after_issue,
-    open_invoices,
     run_documents,
 )
 from collectoo_worker.remittance.packs import load_yaml
@@ -124,7 +123,15 @@ class Simulator:
     def run(
         self, lines: Sequence[Line], numbers: Mapping[str, str] | None = None
     ) -> tuple[RunCommission, dict[str, MandateDocuments]]:
-        result = compute(lines, self.files, self.versions, self.history, self.vat_rate)
+        result = compute(
+            lines,
+            self.files,
+            self.versions,
+            self.history,
+            self.vat_rate,
+            charges=self.charges,
+            line_invoices=self.line_invoices,
+        )
         docs = run_documents(
             result.lines,
             self.files,
@@ -147,8 +154,9 @@ class Simulator:
             if docs[mandate].credit_note:
                 self.seq += 1
         self.charges, self.invoices = after_issue(self.charges, self.invoices, docs, issued)
-        counts = open_invoices(self.charges)
-        self.history = {
-            k: replace(s, open_invoices=counts.get(k, 0)) for k, s in result.history.items()
-        }
+        self.history = dict(result.history)
         return result, docs
+
+    def open_invoices(self, key: Key) -> int:
+        """How many invoices still charge the key something (the rounding reserve's n)."""
+        return sum(1 for c in self.charges.get(key, []) if c.open_minor > 0)

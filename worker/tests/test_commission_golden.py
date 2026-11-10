@@ -2,11 +2,13 @@
 worked examples to the cent in worker/tests/golden/commission/*.yaml — flat; claim-type and family
 rates; marginal tiers crossed inside one collection and back; brackets by boarded amount and by age;
 the minimum per file, capped, across several runs; a version change; a collection made before a
-change undone after it; the cap across versions; a reversal and a new collection in one run (a
-credit note and an invoice); the fee kept by clause, flat and marginal; forwards; items that earn
-nothing; and the §7.2 worked example (RV-2026-000001 … 000003). Each run's lines, then its invoice
-and credit note per mandate (§8.4), with the history carried to the next run. Every case is
-marked TO VALIDATE until the founder's anonymised clauses replace the synthetic ones."""
+change undone after it; a minimum introduced or dropped by a new version; a marginal grid change
+re-tiering later collections (the regularisation line); the cap across versions; a reversal and a
+new collection in one run (a credit note and an invoice); the fee kept by clause, flat and
+marginal; forwards; items that earn nothing; and the §7.2 worked example (RV-2026-000001 …
+000003). Each run's lines, then its invoice and credit note per mandate (§8.4), with the history
+carried to the next run. Every case is marked TO VALIDATE until the founder's anonymised clauses
+replace the synthetic ones."""
 
 from decimal import Decimal
 from pathlib import Path
@@ -28,6 +30,8 @@ def test_the_golden_set() -> None:
         "minimum-capped",
         "version-change",
         "version-change-partial-reversal",
+        "version-change-retiering",
+        "minimum-new-version",
         "cross-version-cap",
         "same-run-credit-and-invoice",
         "reversal-keep",
@@ -79,10 +83,12 @@ def _check_documents(docs: Any, expect: dict[str, Any], where: str) -> None:
                         "families": list(ln.families),
                         "ht": str(ln.ht_minor),
                         "tiers": [[r, str(b)] for r, b in ln.tiers],
+                        "kind": ln.kind,
                     }
                     for ln in d.invoice.lines
                 ]
-                assert lines == inv["lines"], f"{where} {mandate}"
+                want_lines = [{"kind": "commission", **ln} for ln in inv["lines"]]
+                assert lines == want_lines, f"{where} {mandate}"
         if crn:
             got = (d.credit_note.ht_minor, d.credit_note.vat_minor, d.credit_note.ttc_minor)
             assert got == (int(crn["ht"]), int(crn["vat"]), int(crn["ttc"])), f"{where} {mandate}"
