@@ -1379,3 +1379,18 @@ Why: keeps the cash checks and our commission transfers exact.
 15. Payments to clients go in a bank file (pain.001) that ops download and upload to the bank; pending refunds go in the same file; we keep the bank's name check on.
 Default: yes; please send your bank's file specifications.
 Why: no bank connection needed, one upload, and the name check catches wrong IBANs.
+
+## 25. Commission edge cases to validate (M2c-3 reviews, 2026-11-10)
+
+Rare cases the three review rounds of the engine had to decide. Each default is what the engine does now (golden cases marked TO VALIDATE; CALCULATION_RULES §7). Answer « 1 ok, 2 b … ».
+
+1. Terms change with a minimum per file: each version's minimum is a floor on what the collections up to that version earn; later collections add their own rate. A 300 € minimum dropped → 300 + 100 = 400 €; a 300 € minimum added → 300 € for the whole file. Default: yes.
+2. A change of tiered grid that re-prices earlier collections: the invoice shows the collection's own rate line plus a separate « Régularisation de paliers (changement de conditions) » line (amount only). Default: yes.
+3. Undoing a collection across a grid change: its own fee is credited on its invoice and the re-pricing goes on a separate invoice or credit note, never netted (two documents for a small net amount). Default: yes.
+4. A reversal is credited first on the invoice that charged its collection, then on the newest other invoices. Default: yes.
+5. VAT rounding reserve: on small files near the cap, up to about 1 cent per open invoice is held back and released at the file's next collection; across a grid change an undo may give back 1 cent more or less than it was charged. Default: accept.
+6. « Keep the fee » clause: what a bounce keeps depends on what was posted before it, never on how payment runs are cut; across a grid change an undo can still raise the commission (regularisation invoice). Default: yes.
+7. Entries count in the order they were posted (booking time); a payment matched late counts after a bounce posted earlier. Default: yes.
+8. A collection undone within the same payment run is never invoiced (0 on both lines). Default: yes.
+
+Known gap, fixed in M2c-4: after a fall of the VAT rate, a small file at the cap can be billed slightly more (TTC) than it brought in; the fix needs each invoice's own rate in the engine (M2c-4 stores it).
