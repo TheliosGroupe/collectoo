@@ -44,7 +44,9 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from collectoo_worker.boarding.readers import SAMPLE_BYTES, SEPARATORS, sniff_separator
 from collectoo_worker.payments.rf import rf_normalise, rf_valid
 from collectoo_worker.payments.statement import (
+    NO_IBANS,
     DedupKeys,
+    KnownIbans,
     ParsedStatement,
     StatementLine,
     StatementRejected,
@@ -269,15 +271,17 @@ class _Columns:
             )
 
 
-def parse_csv(
+def parse_csv(  # noqa: PLR0913 - the bank account's settings
     path: Path,
     *,
     currency: str,
     exponent: int = 2,
     profile: CsvProfile | None = None,
     today: date | None = None,
+    ibans: KnownIbans = NO_IBANS,
 ) -> ParsedStatement:
-    """Parse a CSV export of the bank account, or refuse it (the file's line in the detail)."""
+    """Parse a CSV export of the bank account, or refuse it (the file's line in the detail).
+    `ibans`: the servicer's own and its clients' IBANs, to recognise our own transfers (M2c)."""
     profile = profile or CsvProfile()
     encoding = check_file(path)
     separator = _separator(path, encoding, profile)
@@ -286,7 +290,7 @@ def parse_csv(
     with path.open("r", encoding=encoding, newline="") as fh:
         reader = csv.reader(fh, delimiter=separator)
         columns = _find_header(reader, profile)
-        ctx = _File(columns, profile, currency, exponent, keys)
+        ctx = _File(columns, profile, currency, exponent, keys, ibans)
         for line_no, row in _data_rows(reader):
             try:
                 line = _line(row, ctx, line_no)
@@ -469,6 +473,7 @@ class _File:
     currency: str
     exponent: int
     keys: DedupKeys
+    ibans: KnownIbans = NO_IBANS
 
 
 def _line(row: list[str], ctx: _File, line_no: int) -> StatementLine | None:
@@ -502,7 +507,13 @@ def _line(row: list[str], ctx: _File, line_no: int) -> StatementLine | None:
         "return"
         if RETURN_RE.match(plain_upper(label.text[:64]))  # a match is at most 30 characters
         else classify(
-            direction, reversal=False, return_reason=None, sub_family=None, end_to_end_id=e2e
+            direction,
+            reversal=False,
+            return_reason=None,
+            sub_family=None,
+            end_to_end_id=e2e,
+            counterparty_iban=iban,
+            ibans=ctx.ibans,
         )
     )
     bank_id = columns.get(row, "bank_id")

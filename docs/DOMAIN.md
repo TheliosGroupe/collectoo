@@ -88,7 +88,18 @@ Contents: [1. Glossary](#1-glossary-fr--en) · [2. Conventions](#2-modelling-con
 | Imputation des paiements | Payment allocation | `allocation_order` (rule pack), `ledger_entry(entry_type = allocation)`, one entry per (payment, account) | INT-09; ADR-0013 |
 | Quittance | Receipt | `receipt` | CPCE-07 |
 | Reversement | Remittance to the client | `remittance_run` | CPCE-08 |
-| Compte dédié aux fonds de tiers | Client money account | `bank_account(purpose = client_funds)`, book `client_money_cash` (5120) | CPCE-02; ADR-0013 |
+| Compte dédié aux fonds de tiers | Client money account | `bank_account(purpose = client_funds)`, book `client_money_cash` (5120) | CPCE-02; ADR-0013; one active per currency (M2c-1) |
+| Compte propre du cabinet | Servicer's own bank account | `bank_account(purpose = own)`, book `own_cash` (5122: the movements the dedicated account shows, not the own account's balance) | M2c-1, ADR-0014; statements not imported |
+| Fonds du compte dédié / fonds du cabinet | Dedicated-account fund / servicer's fund | `ledger_book.money_of = client` (5120, 4710, 4670, 4679) / `= servicer` (5122, 4111, 4112, 44571, 44574, 4689, 7060, 6270, 6780) | Each closed in every entry (I2′); ADR-0014 |
+| Sommes revenant au cabinet sur le compte dédié | Servicer's share on the dedicated account | book `due_to_servicer` (4679), mirrored by `due_from_client_funds` (4689) | The only crossing between the funds (I12) |
+| Approvisionnement du compte dédié | Top-up from the own account | `bank_transfer(kind = top_up)` (our `TOP…` id), `ledger_entry(entry_type = servicer_top_up)` | Ordered by ops, booked from the credit (M2c-1) |
+| Virement au compte propre | Sweep | `ledger_entry(entry_type = servicer_sweep)`, `bank_transfer(kind = sweep)` (`SWP…`) | M2c-6 |
+| Frais bancaires du compte dédié | Bank fee on the dedicated account | `ledger_entry(entry_type = bank_fee)`, book `bank_fees` (6270) | The servicer's cost (founder #9) |
+| Perte à la charge du cabinet | Servicer's loss | `ledger_entry(entry_type = servicer_loss)` (a return beyond its payment, OQ-34), `advance_write_off`; book `servicer_losses` (6780) | Never a client's |
+| Avance au mandant | Advance to the client | `ledger_entry(entry_type = client_advance)`, book `client_advance_receivable` (4112) | Covers a remitted collection that came back (M2c-7) |
+| Encaissements à reverser | Pending remittance items | `private.remittance_pending` (allocations, forwards, their reversals, advances, returned payouts) | Fed by the 4670 trigger (M2c-1) |
+| Comptabilisation d'une ligne bancaire | Bank line booking | `bank_line_booking` (one bank line → n entries of the funds) | M2c-1 |
+| Virement émis / reçu du compte propre / reçu d'un client | Our transfer out / own transfer in / client transfer in | `bank_transaction.kind = transfer_out / own_transfer_in / client_transfer_in` | Never a debtor payment (M2c-1) |
 | Commission / honoraires | Collection commission | `mandate_terms.commission`, `commission_invoice` | |
 | Remise de dette / abandon | Debt forgiveness / write-off | `ledger_entry(entry_type = forgiveness)` | Template `3.42` |
 | Écriture / extourne | Ledger entry / reversal | `ledger_entry`, `reverses_entry_id` | Corrections only by reversal |
@@ -603,7 +614,8 @@ erDiagram
     }
     bank_account {
         uuid id PK
-        text purpose "client_funds (own: M2c)"
+        text purpose "client_funds|own (M2c-1)"
+        text feed "camt053|csv (own: none)"
         text iban
         text currency
         text status "active|closed"

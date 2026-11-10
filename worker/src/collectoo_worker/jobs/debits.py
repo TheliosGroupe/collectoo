@@ -15,6 +15,12 @@ duplicate): one transaction (the queue's, exactly once) under the servicer's deb
    link the posting itself refuses (a ledger check) is left to ops (`posting_failed`) and the
    others are posted: one bad line never stops a servicer's returns and refunds.
 
+4. M2c-1 (design m2c-remittances §12): the lines booked in the funds — the bank's charges
+   (`bank_fee`) and the credits carrying the TOP id of a top-up we ordered (`servicer_top_up`):
+   `private.bank_booking_candidates`, `payments.debits.decide_bookings`, then
+   `private.apply_bank_bookings` (transfers locked, then the remit lock); our other transfers and
+   credits are left to ops with why. A continuation pages them (`funds_after`) on their own.
+
 `CHUNK` lines per transaction (2,000 by default): the transaction holds the servicer's allocation
 lock while it posts. Measured on the 50k scale data (4 vCPU): 2,000 full returns posted in 5.7 s;
 with one line the posting refuses, the chunk's try, a try of each line on its own and the post of
@@ -46,11 +52,14 @@ from psycopg.types.json import Jsonb
 from collectoo_worker.jobs.allocation import CLOSED, load_files, load_policies, resolve_policy
 from collectoo_worker.payments.allocation import ENGINE_VERSION, inputs_hash
 from collectoo_worker.payments.debits import (
+    Booking,
     DebitLine,
     Decision,
+    FundsLine,
     PaymentCandidate,
     RefundCandidate,
     decide_all,
+    decide_bookings,
 )
 
 Conn = psycopg.Connection[Any]
@@ -62,9 +71,19 @@ RETRIES = 5  # runs re-queued for lines skipped on re-check; then they wait for 
 
 def run_process_debits(conn: Conn, payload: dict[str, Any]) -> dict[str, Any]:
     org = str(payload["organization_id"])
+    conn.execute("select pg_advisory_xact_lock(hashtext('debits:' || %s))", (org,))
+    summary: dict[str, Any] = {}
+    if "funds_after" not in payload:
+        summary = _process_debit_lines(conn, org, payload)
+    if "after" not in payload:  # the first run of a chain (or a retry), and the funds' pages
+        summary["funds"] = _process_funds_lines(conn, org, payload.get("funds_after"))
+    return summary
+
+
+def _process_debit_lines(conn: Conn, org: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Steps 1-3: returns, our refunds, refunds that came back (M2b-6)."""
     after = payload.get("after")
     started = time.monotonic()
-    conn.execute("select pg_advisory_xact_lock(hashtext('debits:' || %s))", (org,))
     rows = conn.execute(
         "select * from private.debit_candidates(%s, %s, %s, %s)",
         (org, after[0] if after else None, after[1] if after else None, CHUNK),
@@ -192,6 +211,81 @@ def apply(conn: Conn, org: str, decisions: list[Decision]) -> dict[str, Any]:
             if not d.linked:
                 copy.write_row((d.line_id, d.review_reason, Jsonb(list(d.candidates))))
     row = conn.execute("select private.apply_debit_decisions(%s)", (org,)).fetchone()
+    return dict(row[0]) if row else {}
+
+
+def _process_funds_lines(conn: Conn, org: str, after: list[str] | None) -> dict[str, Any]:
+    """Step 4 (M2c-1): the bank's charges and our top-ups booked in the funds; the rest to ops."""
+    started = time.monotonic()
+    rows = conn.execute(
+        "select * from private.bank_booking_candidates(%s, %s, %s, %s)",
+        (org, after[0] if after else None, after[1] if after else None, CHUNK),
+    ).fetchall()
+    lines = [
+        FundsLine(
+            id=str(r[0]),
+            kind=str(r[1]),
+            direction=str(r[2]),
+            bank_account_id=str(r[3]),
+            amount_minor=int(r[4]),
+            booking_date=r[5],
+            bank_tx_code=r[6],
+            transfer_id=str(r[8]) if r[8] is not None else None,
+            transfer_status=r[9],
+            transfer_amount_minor=int(r[10]) if r[10] is not None else None,
+            transfer_creditor=str(r[11]) if r[11] is not None else None,
+        )
+        for r in rows
+    ]
+    if len(lines) >= CHUNK:
+        last = lines[-1]
+        conn.execute(
+            "select pgmq.send('payments', %s)",
+            (
+                Jsonb(
+                    {
+                        "type": "process_debits",
+                        "organization_id": org,
+                        "funds_after": [last.booking_date.isoformat(), last.id],
+                    }
+                ),
+            ),
+        )
+    bookings = decide_bookings(lines)
+    if not bookings:
+        return {"lines": len(lines)}
+    summary = apply_bookings(conn, org, bookings)
+    log.info(
+        "process_debits %s (funds): %d lines, %d booked, %d to ops, %s refused, %.1fs",
+        org,
+        len(lines),
+        sum(1 for b in bookings if b.booked),
+        sum(1 for b in bookings if not b.booked),
+        summary.get("failed", 0),
+        time.monotonic() - started,
+    )
+    return summary
+
+
+def apply_bookings(conn: Conn, org: str, bookings: list[Booking]) -> dict[str, Any]:
+    conn.execute("select private.bank_booking_begin()")
+    with (
+        conn.cursor() as cur,
+        cur.copy(
+            """copy pg_temp._bank_booking (ord, bank_transaction_id, kind, transfer_id, method)
+               from stdin"""
+        ) as copy,
+    ):
+        for n, b in enumerate((b for b in bookings if b.booked), start=1):
+            copy.write_row((n, b.line_id, b.kind, b.transfer_id, "auto"))
+    with (
+        conn.cursor() as cur,
+        cur.copy("copy pg_temp._booking_review (bank_transaction_id, reason) from stdin") as copy,
+    ):
+        for b in bookings:
+            if not b.booked:
+                copy.write_row((b.line_id, b.review_reason))
+    row = conn.execute("select private.apply_bank_bookings(%s)", (org,)).fetchone()
     return dict(row[0]) if row else {}
 
 

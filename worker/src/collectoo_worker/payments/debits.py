@@ -29,7 +29,9 @@ The SQL re-checks every rule under its locks (the same codes): a line these rule
 posting refuses is skipped (the facts changed meanwhile) or left to ops (`posting_failed`), never
 taking the other lines of the run down.
 
-Bank fees and other debits are never classified here: they stay explained gaps (founder #20).
+M2c-1 adds the lines booked in the funds (`decide_bookings`): the bank's charges as fees, the
+top-ups we ordered when their credit shows; our other transfers and credits wait for ops. Other
+debits are classified by ops (« Frais bancaires »).
 """
 
 from __future__ import annotations
@@ -244,4 +246,105 @@ def decide_all(
         if d.linked and d.payment_id is not None:
             taken.add(d.payment_id)
         out.append(d)
+    return out
+
+
+# --- M2c-1: bank lines booked in the funds (design m2c-remittances §12) ------------------------
+#
+# A bank's own charge on the dedicated account (camt.053 BkTxCd sub-family CHRG or FEES) is a
+# `bank_fee`: the servicer's cost, booked automatically (founder #9). A credit carrying the TOP id
+# of a top-up we ordered, for its amount, on the account it was ordered to, is that top-up
+# (`servicer_top_up`). Everything else stays to ops: a credit from our own account matching no
+# order (or another amount), a credit from a client, our own transfer out (payouts and sweeps are
+# booked from M2c-6). Other debits are classified by ops (« Frais bancaires »).
+
+TOP_UP_NOT_FOUND = "top_up_not_found"  # a credit from our own account no order matches
+TOP_UP_DIFFERS = "top_up_differs"  # it carries our TOP id, for another amount or account
+CLIENT_CREDIT = "client_credit"  # a credit from a client's payout account
+OWN_TRANSFER_OUT = "own_transfer_out"  # one of our transfers out (booked from M2c-6)
+
+BOOKING_REVIEW_REASONS = frozenset(
+    {TOP_UP_NOT_FOUND, TOP_UP_DIFFERS, CLIENT_CREDIT, OWN_TRANSFER_OUT}
+)
+CHARGE_SUBFAMILIES = frozenset({"CHRG", "FEES"})
+
+
+@dataclass(frozen=True, slots=True)
+class FundsLine:
+    """A bank line not booked nor linked: a bank charge, our transfer out, a credit from our own
+    account (with the order its TOP id names, if any) or from a client
+    (`private.bank_booking_candidates`)."""
+
+    id: str
+    kind: str  # other_debit | transfer_out | own_transfer_in | client_transfer_in
+    direction: str
+    bank_account_id: str
+    amount_minor: int
+    booking_date: date
+    bank_tx_code: str | None = None
+    transfer_id: str | None = None  # the top-up its TOP id names
+    transfer_status: str | None = None
+    transfer_amount_minor: int | None = None
+    transfer_creditor: str | None = None  # the dedicated account the top-up was ordered to
+
+
+@dataclass(frozen=True, slots=True)
+class Booking:
+    """What the job does with a line: book it (`fee` or `top_up`), or leave it to ops."""
+
+    line_id: str
+    kind: str | None = None  # fee | top_up
+    transfer_id: str | None = None
+    review_reason: str | None = None
+
+    @property
+    def booked(self) -> bool:
+        return self.kind is not None
+
+
+def charge_code(code: str | None) -> bool:
+    """A bank's own charge: ISO bank transaction code DOMAIN/FAMILY/SUBFAMILY, sub-family CHRG or
+    FEES (proprietary codes are not read)."""
+    if not code or code.startswith("PRTRY:"):
+        return False
+    parts = [*code.split("/"), "", ""]
+    return parts[2] in CHARGE_SUBFAMILIES
+
+
+def decide_booking(line: FundsLine) -> Booking | None:  # noqa: PLR0911 - one outcome per case
+    """The job's decision for one line; None for a line it leaves untouched (an other debit with
+    no charge code: ops classify it, no review)."""
+    if line.direction == "debit" and line.kind == "other_debit":
+        return Booking(line.id, "fee") if charge_code(line.bank_tx_code) else None
+    if line.direction == "debit" and line.kind == "transfer_out":
+        return Booking(line.id, review_reason=OWN_TRANSFER_OUT)
+    if line.direction == "credit" and line.kind == "client_transfer_in":
+        return Booking(line.id, review_reason=CLIENT_CREDIT)
+    if line.direction == "credit" and line.kind == "own_transfer_in":
+        if line.transfer_id is None:
+            return Booking(line.id, review_reason=TOP_UP_NOT_FOUND)
+        if (
+            line.transfer_status != "ordered"
+            or line.transfer_amount_minor != line.amount_minor
+            or line.transfer_creditor != line.bank_account_id
+        ):
+            return Booking(line.id, review_reason=TOP_UP_DIFFERS)
+        return Booking(line.id, "top_up", transfer_id=line.transfer_id)
+    return None
+
+
+def decide_bookings(lines: Iterable[FundsLine]) -> list[Booking]:
+    """Every line in the order given (each order booked once: a second credit carrying the same TOP
+    id waits for ops)."""
+    out: list[Booking] = []
+    taken: set[str] = set()
+    for line in lines:
+        b = decide_booking(line)
+        if b is None:
+            continue
+        if b.transfer_id is not None and b.transfer_id in taken:
+            b = Booking(line.id, review_reason=TOP_UP_DIFFERS)
+        if b.transfer_id is not None:
+            taken.add(b.transfer_id)
+        out.append(b)
     return out

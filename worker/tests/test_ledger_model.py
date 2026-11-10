@@ -9,10 +9,11 @@ from uuid import uuid4
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-from ledger_machine import ACCOUNT, BANK, CLIENT, ITEMS, ORG, LedgerMachine, drafts
+from ledger_machine import ACCOUNT, BANK, CLIENT, ITEMS, ORG, OWN, LedgerMachine, drafts
 
 from collectoo_worker.ledger import (
     Book,
+    ClientMoneyShortError,
     Component,
     EntryDraft,
     EntryType,
@@ -26,7 +27,17 @@ from collectoo_worker.ledger import (
     from_db_error,
     mirror,
 )
-from collectoo_worker.ledger.model import ALLOWED_BOOKS, CLIENT_MONEY_BOOKS, PAYMENT_ENTRY_TYPES
+from collectoo_worker.ledger.model import (
+    ALLOWED_BOOKS,
+    BOOKS,
+    CLIENT_MONEY_BOOKS,
+    FUND_ENTRY_TYPES,
+    FUND_SOURCE_TYPES,
+    MIRROR_BOOKS,
+    PAYMENT_ENTRY_TYPES,
+    SERVICER_FUND_BOOKS,
+    has_fund_shape,
+)
 
 
 @given(drafts())
@@ -211,6 +222,7 @@ def test_payment_entry_rules() -> None:
         Book.CLIENT_MONEY_CASH,
         Book.UNALLOCATED_PAYMENT,
         Book.CLIENT_PAYABLE,
+        Book.DUE_TO_SERVICER,  # M2c: the servicer's money on the dedicated account
     } == CLIENT_MONEY_BOOKS
     assert all(Book.SERVICER_REVENUE not in ALLOWED_BOOKS[t] for t in PAYMENT_ENTRY_TYPES)
     with pytest.raises(InvalidRequestError):  # an allocation names its payment
@@ -270,6 +282,189 @@ class _DbError(Exception):
 def test_lg007_is_an_overdraft() -> None:
     mapped = from_db_error(_DbError("LG007"))  # type: ignore[arg-type]
     assert isinstance(mapped, OverdrawnError)
+
+
+def test_lg008_is_client_money_short() -> None:
+    mapped = from_db_error(_DbError("LG008"))  # type: ignore[arg-type]
+    assert isinstance(mapped, ClientMoneyShortError)
+
+
+# --- M2c: the funds (design m2c-remittances §5) -------------------------------------------------
+
+
+def _l(book: Book, amount: int, *, bank: bool = False) -> Line:
+    client = (
+        CLIENT
+        if book
+        in (
+            Book.CLIENT_PAYABLE,
+            Book.SERVICER_REVENUE,
+            Book.COMMISSION_RECEIVABLE,
+            Book.CLIENT_ADVANCE_RECEIVABLE,
+        )
+        else None
+    )
+    bank_id = None
+    if book is Book.CLIENT_MONEY_CASH:
+        bank_id = BANK
+    elif book is Book.OWN_CASH:
+        bank_id = OWN
+    return Line(book, amount, "EUR", client_organization_id=client, bank_account_id=bank_id)
+
+
+B = Book
+# The §7.2 worked example's entries (EUR, minor units), one per type.
+FUND_VALID: dict[EntryType, tuple[Line, ...]] = {
+    EntryType.COMMISSION_INVOICE: (
+        _l(B.COMMISSION_RECEIVABLE, 36000),
+        _l(B.SERVICER_REVENUE, -30000),
+        _l(B.VAT_PENDING, -6000),
+    ),
+    EntryType.COMMISSION_CREDIT_NOTE: (
+        _l(B.COMMISSION_RECEIVABLE, -36000),
+        _l(B.SERVICER_REVENUE, 30000),
+        _l(B.VAT_COLLECTED, 6000),
+    ),
+    EntryType.CLIENT_SETTLEMENT: (
+        _l(B.CLIENT_PAYABLE, 218000),
+        _l(B.DUE_TO_SERVICER, -218000),
+        _l(B.DUE_FROM_CLIENT_FUNDS, 218000),
+        _l(B.COMMISSION_RECEIVABLE, -18000),
+        _l(B.CLIENT_ADVANCE_RECEIVABLE, -200000),
+        _l(B.VAT_PENDING, 9000),
+        _l(B.VAT_COLLECTED, -9000),
+    ),
+    EntryType.REMITTANCE: (_l(B.CLIENT_PAYABLE, 82000), _l(B.CLIENT_MONEY_CASH, -82000)),
+    EntryType.SERVICER_SWEEP: (
+        _l(B.DUE_TO_SERVICER, 218000),
+        _l(B.CLIENT_MONEY_CASH, -218000),
+        _l(B.OWN_CASH, 218000),
+        _l(B.DUE_FROM_CLIENT_FUNDS, -218000),
+    ),
+    EntryType.SERVICER_TOP_UP: (
+        _l(B.CLIENT_MONEY_CASH, 200000),
+        _l(B.DUE_TO_SERVICER, -200000),
+        _l(B.DUE_FROM_CLIENT_FUNDS, 200000),
+        _l(B.OWN_CASH, -200000),
+    ),
+    EntryType.BANK_FEE: (
+        _l(B.DUE_TO_SERVICER, 1200),
+        _l(B.CLIENT_MONEY_CASH, -1200),
+        _l(B.BANK_FEES, 1200),
+        _l(B.DUE_FROM_CLIENT_FUNDS, -1200),
+    ),
+    EntryType.CLIENT_ADVANCE: (
+        _l(B.DUE_TO_SERVICER, 200000),
+        _l(B.CLIENT_PAYABLE, -200000),
+        _l(B.CLIENT_ADVANCE_RECEIVABLE, 200000),
+        _l(B.DUE_FROM_CLIENT_FUNDS, -200000),
+    ),
+    EntryType.SERVICER_LOSS: (
+        _l(B.DUE_TO_SERVICER, 500),
+        _l(B.CLIENT_MONEY_CASH, -500),
+        _l(B.SERVICER_LOSSES, 500),
+        _l(B.DUE_FROM_CLIENT_FUNDS, -500),
+    ),
+    EntryType.CLIENT_PAYMENT_OWN: (
+        _l(B.OWN_CASH, 236000),
+        _l(B.COMMISSION_RECEIVABLE, -36000),
+        _l(B.CLIENT_ADVANCE_RECEIVABLE, -200000),
+        _l(B.VAT_PENDING, 6000),
+        _l(B.VAT_COLLECTED, -6000),
+    ),
+    EntryType.CLIENT_PAYMENT_DEDICATED: (
+        _l(B.CLIENT_MONEY_CASH, 36000),
+        _l(B.DUE_TO_SERVICER, -36000),
+        _l(B.DUE_FROM_CLIENT_FUNDS, 36000),
+        _l(B.COMMISSION_RECEIVABLE, -36000),
+    ),
+    EntryType.CLIENT_REFUND_OWN: (_l(B.COMMISSION_RECEIVABLE, 36000), _l(B.OWN_CASH, -36000)),
+    EntryType.ADVANCE_WRITE_OFF: (
+        _l(B.SERVICER_LOSSES, 200000),
+        _l(B.CLIENT_ADVANCE_RECEIVABLE, -200000),
+    ),
+}
+CLIENT_TYPES = frozenset(
+    t for t, lines in FUND_VALID.items() if any(x.client_organization_id is not None for x in lines)
+)
+
+
+def _fund(entry_type: EntryType, lines: tuple[Line, ...], **kw: Any) -> EntryDraft:
+    defaults: dict[str, Any] = {
+        "source_type": sorted(FUND_SOURCE_TYPES[entry_type])[0],
+        "source_id": "doc-1",
+        "reason": "x",
+        "client_organization_id": CLIENT if entry_type in CLIENT_TYPES else None,
+    }
+    return EntryDraft(
+        organization_id=ORG,
+        entry_type=entry_type,
+        effective_date=date(2026, 3, 1),
+        idempotency_key="fund-entry-1",
+        lines=lines,
+        **{**defaults, **kw},
+    )
+
+
+def test_python_books_and_types_cover_the_funds() -> None:
+    assert frozenset(FUND_VALID) == FUND_ENTRY_TYPES == frozenset(FUND_SOURCE_TYPES)
+    assert {b for b, s in BOOKS.items() if s.money_of == "servicer"} == SERVICER_FUND_BOOKS
+    assert MIRROR_BOOKS <= CLIENT_MONEY_BOOKS | SERVICER_FUND_BOOKS
+    claims_or_pool = {Book.DEBTOR_RECEIVABLE, Book.OWNER_CLAIM, Book.UNALLOCATED_PAYMENT}
+    assert all(not (ALLOWED_BOOKS[t] & claims_or_pool) for t in FUND_ENTRY_TYPES)
+    revenue = {t for t, books in ALLOWED_BOOKS.items() if Book.SERVICER_REVENUE in books}
+    assert revenue == {EntryType.COMMISSION_INVOICE, EntryType.COMMISSION_CREDIT_NOTE}
+    servicer_or_share = SERVICER_FUND_BOOKS | {Book.DUE_TO_SERVICER}
+    assert all(not (ALLOWED_BOOKS[t] & servicer_or_share) for t in PAYMENT_ENTRY_TYPES)
+
+
+@pytest.mark.parametrize("entry_type", sorted(FUND_VALID))
+def test_fund_entries_of_the_design_validate(entry_type: EntryType) -> None:
+    draft = _fund(entry_type, FUND_VALID[entry_type])
+    draft.validate_set()
+    with pytest.raises(InvalidRequestError):
+        draft.validate()  # never through ledger_post
+
+
+@pytest.mark.parametrize("entry_type", sorted(FUND_VALID))
+def test_a_fund_entry_with_its_signs_flipped_is_refused(entry_type: EntryType) -> None:
+    """Balanced, each fund closed, the mirror kept, but of the wrong shape (I3')."""
+    flipped = mirror(FUND_VALID[entry_type])
+    assert not has_fund_shape(entry_type, flipped)
+    with pytest.raises(UnbalancedEntryError):
+        _fund(entry_type, flipped).validate_set()
+
+
+def test_fund_entry_rules() -> None:
+    fee = FUND_VALID[EntryType.BANK_FEE]
+    with pytest.raises(UnbalancedEntryError):  # 4679 without 4689: the mirror (I12)
+        _fund(EntryType.BANK_FEE, fee[:2]).validate_set()
+    with pytest.raises(ScopeError):  # Dr 4670 / Cr 7060: collections never reach 7060 (M2-12)
+        _fund(
+            EntryType.COMMISSION_INVOICE,
+            (_l(B.CLIENT_PAYABLE, 100), _l(B.SERVICER_REVENUE, -100)),
+        ).validate_set()
+    with pytest.raises(InvalidRequestError):  # a fee concerns no client
+        _fund(EntryType.BANK_FEE, fee, client_organization_id=CLIENT).validate_set()
+    with pytest.raises(InvalidRequestError):  # each entry names its document (R123-174)
+        _fund(EntryType.BANK_FEE, fee, source_type="document").validate_set()
+    with pytest.raises(InvalidRequestError):  # a loss needs its motif
+        _fund(
+            EntryType.SERVICER_LOSS, FUND_VALID[EntryType.SERVICER_LOSS], reason=None
+        ).validate_set()
+    with pytest.raises(InvalidRequestError):  # 5122 names its bank account; 4679 is pooled
+        Line(Book.OWN_CASH, 100, "EUR")
+    with pytest.raises(InvalidRequestError):
+        Line(Book.DUE_TO_SERVICER, 100, "EUR", client_organization_id=CLIENT)
+
+
+@given(st.sampled_from(sorted(FUND_VALID)), st.integers(min_value=1, max_value=10**9))
+def test_fund_shapes_hold_at_any_scale(entry_type: EntryType, k: int) -> None:
+    """Shapes are about books and signs: every amount scaled by k keeps the entry valid."""
+    lines = tuple(replace(x, amount_minor=x.amount_minor * k) for x in FUND_VALID[entry_type])
+    if any(abs(x.amount_minor) > 10**15 for x in lines):
+        return
+    _fund(entry_type, lines).validate_set()
 
 
 TestLedgerMachine = LedgerMachine.TestCase

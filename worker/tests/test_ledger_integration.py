@@ -21,6 +21,7 @@ from ledger_machine import (
     CLIENT,
     ITEMS,
     ORG,
+    OWN,
     Backend,
     Dim,
     LedgerMachine,
@@ -42,6 +43,7 @@ from collectoo_worker.ledger import (
 from collectoo_worker.ledger.model import ALLOWED_BOOKS, BOOKS
 
 IBAN = "FR3430001007940000000001001"  # synthetic
+OWN_IBAN = "FR1420041010050500013M02606"  # synthetic: the servicer's own account (M2c)
 
 pytestmark = pytest.mark.integration
 
@@ -97,6 +99,14 @@ def _bank_account(conn: psycopg.Connection[Any], org: UUID, bank: UUID) -> None:
         """insert into public.bank_account (id, organization_id, iban, currency, label, feed, opened_on)
            values (%s, %s, %s, 'EUR', 'Fonds de tiers', 'camt053', '2026-01-01')""",
         (bank, org, IBAN),
+    )
+
+
+def _own_account(conn: psycopg.Connection[Any], org: UUID, bank: UUID) -> None:
+    conn.execute(
+        """insert into public.bank_account (id, organization_id, purpose, iban, currency, label, opened_on)
+           values (%s, %s, 'own', %s, 'EUR', 'Compte propre', '2026-01-01')""",
+        (bank, org, OWN_IBAN),
     )
 
 
@@ -195,6 +205,7 @@ class DbBackend:
         self.conn = psycopg.connect(DB)
         _fixture(self.conn, ORG, CLIENT, ACCOUNT, ITEMS)
         _bank_account(self.conn, ORG, BANK)
+        _own_account(self.conn, ORG, OWN)
 
     def add_payment(self, payment: Payment) -> None:
         _payment(self.conn, ORG, BANK, payment)
@@ -207,7 +218,9 @@ class DbBackend:
 
     def post_set(self, draft: EntryDraft) -> PostResult:
         with self.conn.transaction():
-            return post_set(self.conn, draft)
+            result = post_set(self.conn, draft)
+            ledger.verify_pending(self.conn)  # the 4670 guard (LG008) too, inside the savepoint
+            return result
 
     def reverse(self, entry_id: UUID, key: str, when: date | None) -> PostResult:
         with self.conn.transaction():
