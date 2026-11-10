@@ -53,8 +53,8 @@ from collectoo_worker.remittance.commission import (
     LineCommission,
     LineInvoices,
     SidePart,
-    chain,
     key_side,
+    preferred_for,
 )
 from collectoo_worker.remittance.vat import credit_note_vat, vat_of
 
@@ -220,14 +220,15 @@ def _split(
         keys = by_mandate.setdefault(r.mandate_id, {})
         reversal = r.kind in REVERSALS
         same_run = reversal and r.original_entry_id in in_run
-        preferred = (
-            chain(line_invoices.get(r.original_entry_id))
+        found = (
+            line_invoices.get(r.original_entry_id)
             if reversal and r.original_entry_id and not same_run
-            else ()
+            else None
         )
         for p in r.parts:
-            keys.setdefault((p.account_id, p.tier_key), []).append(
-                SidePart(r.entry_id, p, p.commission_minor, same_run, preferred)
+            key = (p.account_id, p.tier_key)
+            keys.setdefault(key, []).append(
+                SidePart(r.entry_id, p, p.commission_minor, same_run, preferred_for(found, key))
             )
     return by_mandate
 

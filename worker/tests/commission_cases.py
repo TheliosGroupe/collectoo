@@ -17,6 +17,7 @@ from collectoo_worker.remittance.commission import (
     KeyState,
     Line,
     LineKind,
+    Retake,
     RunCommission,
     TermsVersion,
     chain,
@@ -213,53 +214,85 @@ class Simulator:
             self.vat_credited[number] = self.invoice_vat[number]  # a full credit: all its VAT
             self.invoices[number] = replace(inv, credited_ht_minor=inv.ht_minor)
             self.seq += 1
+        # per mandate and VAT rate of the invoices credited: what the run's credit notes took back
+        # per key (the corrective invoice's charge) and what its credits absorbed (its waiver)
         restore: dict[tuple[str, Decimal], dict[Key, int]] = {}
+        absorbed: dict[tuple[str, Decimal], dict[Key, int]] = {}
+        takes: list[tuple[str, tuple[str, Decimal], str, Key, int, bool]] = []
         for mandate, d in docs.items():
+            for a in d.credit_note.allocations if d.credit_note else ():
+                rate = self.invoices[a.original_invoice_id].vat_rate
+                key = (a.account_id, a.tier_key)
+                per = restore.setdefault((mandate, rate), {})
+                per[key] = per.get(key, 0) - a.ht_minor
+                takes.append(
+                    (a.entry_id, (mandate, rate), a.original_invoice_id, key, -a.ht_minor, False)
+                )
             for w in d.absorbed:
+                rate = self.invoices[w.invoice_id].vat_rate
                 key = (w.account_id, w.tier_key)
-                self.charges[key] = [
-                    replace(c, waived_minor=c.waived_minor + w.amount_minor)
-                    if c.invoice_id == w.invoice_id
-                    else c
-                    for c in self.charges[key]
-                ]
-            if d.credit_note:
-                for a in d.credit_note.allocations:
-                    rate = self.invoices[a.original_invoice_id].vat_rate
-                    per = restore.setdefault((mandate, rate), {})
-                    per[(a.account_id, a.tier_key)] = (
-                        per.get((a.account_id, a.tier_key), 0) - a.ht_minor
-                    )
+                per = absorbed.setdefault((mandate, rate), {})
+                per[key] = per.get(key, 0) + w.amount_minor
+                takes.append((w.entry_id, (mandate, rate), w.invoice_id, key, w.amount_minor, True))
         corrective: dict[str, EarlierInvoice] = {}
-        credited_on: dict[str, str] = {}  # the reversal → the corrective invoice charging it again
+        number_of: dict[tuple[str, Decimal], str] = {}
         for (mandate, rate), per in sorted(restore.items(), key=lambda x: (x[0][0], x[0][1])):
             self.seq += 1
-            number = f"FC-2026-{self.seq:06d}"
+            number = number_of[(mandate, rate)] = f"FC-2026-{self.seq:06d}"
             ht = sum(per.values())
             corrective[number] = self.invoices[number] = EarlierInvoice(number, ht, rate)
             self.invoice_vat[number] = vat_of(ht, rate)
-            for key, amount in sorted(per.items()):
+            # what the run's credits absorbed at that rate is restored on it, as its waiver (its
+            # charge is what was credited, 0 for a key only absorbed): the corrective invoice holds
+            # again all the run took at that rate, as the run without manual credit notes
+            waived = absorbed.get((mandate, rate), {})
+            for key in sorted(set(per) | set(waived)):
                 self.charges.setdefault(key, []).append(
-                    EarlierCharge(number, (2026, self.seq), amount, vat_rate=rate)
+                    EarlierCharge(
+                        number,
+                        (2026, self.seq),
+                        per.get(key, 0),
+                        vat_rate=rate,
+                        waived_minor=waived.get(key, 0),
+                    )
                 )
-            for a in docs[mandate].credit_note.allocations:
-                if self.invoices[a.original_invoice_id].vat_rate == rate:
-                    credited_on[a.entry_id] = number
+        # where no corrective invoice was issued at that rate (all the run took there was
+        # absorbed), the waiver goes back on the invoice it was absorbed from
+        for _, where, inv, key, amount, was_absorbed in takes:
+            if was_absorbed and where not in number_of:
+                self.charges[key] = [
+                    replace(c, waived_minor=c.waived_minor + amount) if c.invoice_id == inv else c
+                    for c in self.charges[key]
+                ]
         # the lines go back to pending: their invoices are the state's before the run, except that
-        # a reversal the run credited is credited first on the corrective invoice, then on its
-        # original's own invoice
+        # a reversal the run took something for is credited first where the cancellation put it
+        # back, up to what it took there for each key, then on its original's own invoice
+        held: dict[str, dict[str, dict[Key, int]]] = {}
+        for entry, where, inv, key, amount, _ in takes:
+            at = number_of.get(where, inv)
+            per = held.setdefault(entry, {}).setdefault(at, {})
+            per[key] = per.get(key, 0) + amount
         self.line_invoices = dict(line_invoices0)
         for reversal, original in originals.items():
-            if reversal in credited_on:
-                self.line_invoices[original] = (
-                    credited_on[reversal],
-                    *chain(line_invoices0.get(original)),
+            if reversal in held:
+                own_links = tuple(
+                    x for x in chain(line_invoices0.get(original)) if isinstance(x, str)
                 )
+                links = tuple(
+                    Retake(at, tuple(sorted(caps.items())))
+                    for at, caps in sorted(held[reversal].items(), key=lambda x: self._order(x[0]))
+                )
+                self.line_invoices[original] = (*links, *own_links)
         for key in touched:
             state = history0.get(key, KeyState())
             waived = sum(c.waived_minor for c in self.charges.get(key, ()))
             self.history[key] = replace(state, waived_minor=waived)
         return corrective
+
+    @staticmethod
+    def _order(number: str) -> tuple[int, int]:
+        _, year, seq = number.split("-")
+        return int(year), int(seq)
 
     def open_invoices(self, key: Key) -> int:
         """How many invoices still charge the key something (the rounding reserve's n: by capacity,

@@ -79,6 +79,17 @@ create table public.commission_waiver (
 create index commission_waiver_key_idx on public.commission_waiver (invoice_id, account_id, tier_key);
 create index commission_waiver_file_idx on public.commission_waiver (account_id, tier_key);
 create index commission_waiver_run_idx on public.commission_waiver (run_id) where run_id is not null;
+create index commission_waiver_entry_idx on public.commission_waiver (entry_id) where entry_id is not null;
+
+-- A cancellation's corrective invoice holds again all its run took at its VAT rate (review math#0): its charge what the
+-- run's credit notes credited, its waiver what the run's credits absorbed — a key the run only absorbed at that rate is
+-- charged 0 there and holds the waiver (every other charge is what an invoice bills: > 0, the engine's).
+-- the nightly `credit_refund_owed` alert reads the servicer's credit notes by issue date (review legal#0)
+create index commission_invoice_credit_note_idx on public.commission_invoice (organization_id, issue_date)
+  where kind = 'credit_note';
+alter table public.commission_invoice_charge drop constraint commission_invoice_charge_charged_minor_check;
+alter table public.commission_invoice_charge add constraint commission_invoice_charge_charged_minor_check
+  check (charged_minor >= 0);
 comment on table public.commission_waiver is
   'What manual credit notes waived per (invoice, file, tier key), and what later credits absorbed (M2c-5b).';
 
@@ -142,7 +153,8 @@ end;
 $$;
 
 -- A waiver movement names an invoice of its servicer and client; each (invoice, key) it touches keeps a balance
--- between 0 and what manual credit notes took back from it (once per (invoice, key) of the statement, keyed).
+-- between 0 and what manual credit notes took back from it — on a cancellation's corrective invoice, plus what that
+-- cancellation restored on it (review math#0) — and is charged by it (once per (invoice, key) of the statement, keyed).
 create or replace function private.commission_waiver_insert_guard()
 returns trigger
 language plpgsql
@@ -152,9 +164,11 @@ as $$
 begin
   if exists (select 1 from (select distinct n.invoice_id, n.account_id, n.tier_key, n.organization_id,
                                             n.client_organization_id from new_rows n) n
-             left join lateral (select i.kind, i.organization_id, i.client_organization_id
+             left join lateral (select i.kind, i.reason, i.organization_id, i.client_organization_id
                                 from public.commission_invoice i where i.id = n.invoice_id offset 0) i on true
-             cross join lateral (select coalesce(sum(w.amount_minor), 0) as balance
+             cross join lateral (select coalesce(sum(w.amount_minor), 0) as balance,
+                                        coalesce(sum(w.amount_minor) filter (where w.cause = 'restored'), 0)
+                                          as restored
                                  from public.commission_waiver w
                                  where w.invoice_id = n.invoice_id and w.account_id = n.account_id
                                    and w.tier_key = n.tier_key) b
@@ -167,9 +181,13 @@ begin
              where i.kind is distinct from 'invoice'
                 or (i.organization_id, i.client_organization_id)
                    is distinct from (n.organization_id, n.client_organization_id)
-                or b.balance < 0 or b.balance > m.waived) then
-    raise exception 'commission waiver: an invoice of its client, between 0 and what manual credit notes took back'
-      using errcode = 'check_violation';
+                or not exists (select 1 from public.commission_invoice_charge ch
+                               where ch.invoice_id = n.invoice_id and ch.account_id = n.account_id
+                                 and ch.tier_key = n.tier_key)
+                or b.balance < 0
+                or b.balance > m.waived + case when i.reason = 'run_cancelled' then b.restored else 0 end) then
+    raise exception 'commission waiver: an invoice of its client charging the key, between 0 and what manual credit '
+                    'notes took back' using errcode = 'check_violation';
   end if;
   return null;
 end;
@@ -196,9 +214,12 @@ as $$
 $$;
 
 -- Why an invoice cannot take a manual credit note now, or null: a credit note is never corrected by another; an
--- invoice with nothing left to credit (a cancelled run's are credited in full); an invoice a run in flight sets off
--- (approved or sent, its payout not debited: its stored settlement plan would set off more than is left — cancel the
--- run, or wait for its debit).
+-- invoice with nothing left to credit (a cancelled run's are credited in full); an invoice whose own run is still in
+-- flight (`run_in_flight`: approved or sent, so still cancellable — a cancellation credits its invoices in full and the
+-- run again bills its lines anew, so a rectification of that invoice would be billed again; review ledger-vat#0: wait
+-- for the run's debit, or cancel it and correct the run); an invoice a run in flight sets off (`in_flight`: its stored
+-- settlement plan would set off more than is left — cancel that run, or wait for its debit). A cancellation's
+-- corrective invoice carries the cancelled run's id: creditable.
 create or replace function private.manual_credit_refusal(p_invoice public.commission_invoice, p_remaining bigint)
 returns text
 language sql
@@ -210,6 +231,10 @@ as $$
   select case
            when p_invoice.kind <> 'invoice' then 'credit_note'
            when p_remaining <= 0 then 'nothing_left'
+           when p_invoice.reason = 'commission'
+                and exists (select 1 from public.remittance_run r
+                            where r.id = p_invoice.run_id and r.status in ('approved', 'sent'))
+             then 'run_in_flight'
            when exists (select 1 from public.remittance_run r
                         where r.client_organization_id = p_invoice.client_organization_id
                           and r.currency = p_invoice.currency and r.status in ('approved', 'sent')
@@ -509,6 +534,9 @@ declare
   v_files jsonb;
   v_notes jsonb;
   v_file_count integer;
+  v_corrects jsonb;
+  v_code text;
+  v_text text;
 begin
   select * into i from public.commission_invoice where id = p_invoice_id;
   if not found or not private.has_role(i.organization_id, array['admin', 'ops_manager']) then
@@ -546,8 +574,19 @@ begin
   left join public.remittance_run r on r.id = cn.run_id
   left join public.manual_credit_note m on m.credit_note_id = cn.id
   where c.original_invoice_id = i.id;
+  -- a credit note: the invoices it rectifies and, a manual one, its reason (review tests-ui#3)
+  select coalesce(jsonb_agg(jsonb_build_object('id', o.id, 'number', o.number, 'issue_date', o.issue_date,
+                                               'ht', c.ht_minor::text, 'vat', c.vat_minor::text)
+                            order by o.year, o.seq), '[]')
+  into v_corrects
+  from public.commission_credit_correction c
+  join public.commission_invoice o on o.id = c.original_invoice_id
+  where c.credit_note_id = i.id;
+  select m.reason_code, m.reason into v_code, v_text from public.manual_credit_note m where m.credit_note_id = i.id;
   return jsonb_build_object(
     'id', i.id, 'number', i.number, 'kind', i.kind, 'reason', i.reason, 'issue_date', i.issue_date,
+    'corrects', v_corrects, 'reason_code', v_code, 'reason_fr', private.manual_credit_reason_fr(v_code),
+    'reason_text', v_text,
     'client_id', i.client_organization_id,
     'client_name', (select o.legal_name from public.organization o where o.id = i.client_organization_id),
     'mandate_reference', (select m.reference from public.mandate m where m.id = i.mandate_id),
@@ -559,6 +598,49 @@ begin
     'files', v_files, 'file_count', v_file_count, 'credit_notes', v_notes,
     'refusal', private.manual_credit_refusal(i, i.ht_minor - v_credited),
     'can_credit', private.has_role(i.organization_id, array['admin']));
+end;
+$$;
+
+-- The invoice page's file choice beyond its first 200 files (review tests-ui#2): what the invoice still charges each
+-- (file, tier key), a page at a time in key order — the charges by their primary key from `p_after` (the last row's
+-- `page_key`), each one's credits by their index — with the file's reference. Money staff at aal2, as the page.
+create or replace function public.commission_invoice_files(p_invoice_id uuid, p_after text default null,
+                                                           p_limit integer default 200)
+returns table (file_id uuid, file_ref text, tier_key text, open_minor bigint, page_key text)
+language plpgsql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  i public.commission_invoice;
+  v_account uuid;
+  v_tier text;
+begin
+  select * into i from public.commission_invoice where id = p_invoice_id;
+  if not found or not private.has_role(i.organization_id, array['admin', 'ops_manager']) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  if p_after is not null then
+    if p_after !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/' then
+      raise exception 'invoice files: a page key from this read' using errcode = '22023';
+    end if;
+    v_account := left(p_after, 36)::uuid;
+    v_tier := substr(p_after, 38);
+  end if;
+  return query
+  select ch.account_id, a.external_ref, ch.tier_key, (ch.charged_minor + c.credited)::bigint,
+         ch.account_id::text || '/' || ch.tier_key
+  from public.commission_invoice_charge ch
+  cross join lateral (select coalesce(sum(x.ht_minor), 0) as credited from public.commission_credit_alloc x
+                      where x.original_invoice_id = ch.invoice_id and x.account_id = ch.account_id
+                        and x.tier_key = ch.tier_key) c
+  cross join lateral (select q.external_ref from public.account q where q.id = ch.account_id offset 0) a
+  where ch.invoice_id = i.id and (v_account is null or (ch.account_id, ch.tier_key) > (v_account, v_tier))
+    and ch.charged_minor + c.credited > 0
+  order by ch.account_id, ch.tier_key
+  limit least(greatest(coalesce(p_limit, 200), 1), 1000);
 end;
 $$;
 
@@ -586,7 +668,10 @@ as $$
 $$;
 
 -- Redefined from 20261112090000 (M2c-5b): a manual credit note's key state (no run) counts in the history the draft
--- assumed, so a draft prepared before one is sent back (`history_changed`).
+-- assumed, so a draft prepared before one is sent back (`history_changed`); a draft the engine could not price because
+-- its inputs disagreed (`commission_input_error`: a key's waivers or open charges not its state's — a credit note
+-- committed while the prepare read the history, or a data error) is never approved as is (`engine_error`: « Actualiser »
+-- prices it again from one consistent read; review security-concurrency#0).
 create or replace function private.remittance_approval_refusal(p_run public.remittance_run,
                                                                p_draft private.remittance_draft, p_today date)
 returns text
@@ -606,6 +691,9 @@ begin
   end if;
   if (select count(*) from private.remittance_pending q where q.draft_run_id = p_run.id) <> p_run.item_count then
     return 'items_changed';
+  end if;
+  if exists (select 1 from unnest(p_run.commission_blockers) b where b like 'commission_input_error%') then
+    return 'engine_error';
   end if;
   if jsonb_array_length(p_draft.documents) > 0 and private.vat_rate_on(p_today) <> p_draft.vat_rate then
     return 'vat_rate_changed';
@@ -996,8 +1084,14 @@ begin
                                                  v_docs || v_restore, 'run_cancelled');
 
   -- 3. the waivers (M2c-5b): the run's own invoices are credited in full above, so what manual credit notes left
-  -- waived on them is cleared; what the run's credits absorbed of earlier invoices' waivers is restored on them (the
-  -- corrective invoice charges again only what its credit notes credited)
+  -- waived on them is cleared (none since review ledger-vat#0: a manual credit note on the invoice of a run in flight is
+  -- refused); what the run's credits absorbed of earlier invoices' waivers is restored (review math#0) on the corrective
+  -- invoice of the absorbing invoice's mandate and VAT rate, which then holds again all the run took at that rate — its
+  -- charge what the run's credit notes credited (0 for a key the run only absorbed there), its waiver what they
+  -- absorbed — as the corrective invoice of the same history without manual credit notes charges it; where the
+  -- cancellation issued none at that rate (all the run took there was absorbed: nothing to charge again), on the
+  -- absorbing invoice itself, so the file is exactly as before the run. One row per absorption, with its line: the next
+  -- run credits each reversal first where its own share went back, up to that share (`jobs.remittances`).
   insert into public.commission_waiver (organization_id, client_organization_id, invoice_id, account_id, tier_key,
                                         amount_minor, cause, run_id)
   select r.organization_id, r.client_organization_id, w.invoice_id, w.account_id, w.tier_key, -sum(w.amount_minor),
@@ -1007,13 +1101,28 @@ begin
   where i.run_id = r.id and i.kind = 'invoice' and i.reason = 'commission'
   group by w.invoice_id, w.account_id, w.tier_key
   having sum(w.amount_minor) > 0;
-  insert into public.commission_waiver (organization_id, client_organization_id, invoice_id, account_id, tier_key,
-                                        amount_minor, cause, run_id)
-  select r.organization_id, r.client_organization_id, w.invoice_id, w.account_id, w.tier_key, -sum(w.amount_minor),
-         'restored', r.id
+  drop table if exists pg_temp._restore;
+  create temp table _restore on commit drop as
+  select w.account_id, w.tier_key, w.entry_id, -w.amount_minor as amount, coalesce(j.id, w.invoice_id) as invoice_id,
+         j.id is not null as on_corrective
   from public.commission_waiver w
-  where w.run_id = r.id and w.cause = 'absorbed'
-  group by w.invoice_id, w.account_id, w.tier_key;
+  cross join lateral (select q.mandate_id, q.vat_rate from public.commission_invoice q where q.id = w.invoice_id
+                      offset 0) o
+  left join lateral (select q.id from public.commission_invoice q
+                     where q.run_id = r.id and q.kind = 'invoice' and q.reason = 'run_cancelled'
+                       and q.mandate_id = o.mandate_id and q.vat_rate = o.vat_rate offset 0) j on true
+  where w.run_id = r.id and w.cause = 'absorbed';
+  insert into public.commission_invoice_charge (invoice_id, account_id, tier_key, charged_minor)
+  select distinct x.invoice_id, x.account_id, x.tier_key, 0::bigint
+  from pg_temp._restore x
+  where x.on_corrective
+    and not exists (select 1 from public.commission_invoice_charge ch
+                    where ch.invoice_id = x.invoice_id and ch.account_id = x.account_id and ch.tier_key = x.tier_key);
+  insert into public.commission_waiver (organization_id, client_organization_id, invoice_id, account_id, tier_key,
+                                        amount_minor, cause, run_id, entry_id)
+  select r.organization_id, r.client_organization_id, x.invoice_id, x.account_id, x.tier_key, x.amount, 'restored',
+         r.id, x.entry_id
+  from pg_temp._restore x;
 
   -- 4. the lines released, their items back in the queue (posted when they were); the history exactly as before the
   -- run (its documents credited or restored: what the invoices still charge each key, plus the waivers, is that
@@ -1334,6 +1443,27 @@ begin
   cross join lateral (select private.document_open(i.id) as open) o
   where i.organization_id = p_organization_id and i.due_date is not null and i.due_date < v_today and o.open > 0
   union all
+  -- a refund owed to the client still unpaid 30 days after its credit note (M2c-5b review legal#0; an operating
+  -- threshold, not a legal deadline): what a credit note gives back beyond what its invoices still owed is paid with a
+  -- later run's payout (the plan's refunds); with no later run (no collection left, a proceeding, the mandate ended)
+  -- nothing pays it until M2c-7's record_client_refund (design §16: an ops-ordered transfer from the own account).
+  -- Credit notes that owed a refund at issue only, by their index; `planned_run`: a run in flight whose plan pays it.
+  select 'credit_refund_owed', 'alert', 'commission_invoice', i.id, i.currency, o.open, null, v_today - i.issue_date,
+         jsonb_build_object('number', i.number, 'client_id', i.client_organization_id, 'reason', i.reason,
+                            'issue_date', i.issue_date,
+                            'planned_run', (select r.number from public.remittance_run r
+                                            where r.client_organization_id = i.client_organization_id
+                                              and r.currency = i.currency and r.status in ('approved', 'sent')
+                                              and exists (select 1 from jsonb_array_elements(
+                                                                   coalesce(r.settlement_plan -> 'settles', '[]')) s
+                                                          where s ->> 'document_id' = i.id::text)
+                                            limit 1))
+  from public.commission_invoice i
+  cross join lateral (select private.document_open(i.id) as open) o
+  where i.organization_id = p_organization_id and i.kind = 'credit_note' and i.issue_date < v_today - 30
+    and exists (select 1 from public.commission_credit_correction c where c.credit_note_id = i.id and c.excess_minor > 0)
+    and o.open > 0
+  union all
   -- money matched to a client's file but not allocated (still in 4710) gets the same clock (OQ-26, compliance B7)
   select 'unallocated_deadline', 'alert', 'servicer', null, u.currency, sum(u.unallocated_minor)::bigint,
          count(*)::integer, null,
@@ -1386,6 +1516,43 @@ begin
 end;
 $$;
 
+
+-- The manual credit notes whose waivers a run's credits absorbed (review legal#4): those that waived the (invoice, file,
+-- tier key) the run absorbed on, issued before the run's approval; when that waiver had been restored there by a
+-- cancellation (on its corrective invoice, review math#0), those of the invoices its run had absorbed it from, and so
+-- on (keyed per movement: the waivers by (invoice, key) and by line). [{number, invoice}] by number.
+create or replace function private.absorbed_credit_notes(p_run_id uuid)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+  with recursive src (invoice_id, account_id, tier_key, depth) as (
+    select distinct w.invoice_id, w.account_id, w.tier_key, 0
+    from public.commission_waiver w where w.run_id = p_run_id and w.cause = 'absorbed'
+    union
+    select a.invoice_id, a.account_id, a.tier_key, s.depth + 1
+    from src s
+    join public.commission_waiver rs on rs.invoice_id = s.invoice_id and rs.account_id = s.account_id
+      and rs.tier_key = s.tier_key and rs.cause = 'restored' and rs.entry_id is not null
+    join public.commission_waiver a on a.entry_id = rs.entry_id and a.run_id = rs.run_id and a.cause = 'absorbed'
+      and a.account_id = rs.account_id and a.tier_key = rs.tier_key
+    where s.depth < 32)
+  select coalesce(jsonb_agg(jsonb_build_object('number', cn.number, 'invoice', o.number) order by cn.year, cn.seq),
+                  '[]')
+  from (select distinct w.credit_note_id
+        from (select distinct s.invoice_id, s.account_id, s.tier_key from src s) s
+        join public.commission_waiver w on w.invoice_id = s.invoice_id and w.account_id = s.account_id
+          and w.tier_key = s.tier_key and w.cause = 'credit_note'
+        where w.created_at < (select r.approved_at from public.remittance_run r where r.id = p_run_id)) x
+  cross join lateral (select q.number, q.year, q.seq from public.commission_invoice q where q.id = x.credit_note_id
+                      offset 0) cn
+  cross join lateral (select q.number from public.manual_credit_note m
+                      join public.commission_invoice q on q.id = m.invoice_id
+                      where m.credit_note_id = x.credit_note_id offset 0) o;
+$$;
 
 -- Redefined from 20261113090000 (M2c-5b): the statement's totals name what the run's credits absorbed of manual
 -- credit notes' waivers, so its commission (the lines') and its documents' agree in words (CSV = PDF = run).
@@ -1572,12 +1739,15 @@ begin
            'refund_minor', coalesce(r.refund_minor, 0)::text,
            'settlement_minor', r.settlement_minor::text,
            'net_minor', r.net_minor::text)
-         -- M2c-5b: what the run's credits absorbed of manual credit notes' waivers (lines with no document: the
-         -- client had it back already), named with the invoices it was on; absent when nothing was (payloads drawn
-         -- before keep their bytes)
+         -- M2c-5b: what the run's credits absorbed of manual credit notes' waivers (lines with no document: a
+         -- manual credit note credited it already), named with the invoices it was on and the manual credit notes
+         -- that waived it (review legal#4: « avoir n° … rectifiant la facture … », followed back through a
+         -- cancellation's corrective invoice); absent when nothing was (payloads drawn before keep their bytes)
          || coalesce((select jsonb_build_object('waived_absorbed_minor', (-sum(w.amount_minor))::text,
                                                 'waived_absorbed_invoices',
-                                                jsonb_agg(distinct i.number order by i.number))
+                                                jsonb_agg(distinct i.number order by i.number),
+                                                'waived_absorbed_credit_notes',
+                                                private.absorbed_credit_notes(r.id))
                       from public.commission_waiver w
                       cross join lateral (select q.number from public.commission_invoice q
                                           where q.id = w.invoice_id offset 0) i
@@ -1805,6 +1975,303 @@ begin
 end;
 $$;
 
+-- Redefined from 20261113090000 (M2c-5b review legal#1; same settings and grants): every credit note — a run's, a
+-- cancellation's, a manual one — freezes per invoice it rectifies `ht_after` and `vat_after`, that invoice's HT and VAT
+-- once the note is applied (its earlier credit notes and those issued before it in the same call included), which the
+-- template `facture-commission-fr-3` prints (« Après cet avoir, la facture … s'élève à … HT, TVA … »): the note states
+-- « le montant du total hors taxes et de la TVA due après application de la réduction de prix »
+-- (BOI-TVA-DECLA-30-20-20-20 §260, BOI-TVA-DED-40-10-20 §80, read on LibreJustice).
+create or replace function private.issue_commission_documents(p_organization_id uuid, p_client_organization_id uuid,
+                                                              p_run_id uuid, p_docs jsonb, p_reason text,
+                                                              p_vat_on_debits boolean default null)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_set public.servicer_billing_settings;
+  v_series text;
+  v_on_debits boolean;
+  v_issue date;
+  v_last integer;
+  v_n integer := jsonb_array_length(p_docs);
+  v_run public.remittance_run;
+  v_out jsonb := '{}';
+  v_doc record;
+  v_seller jsonb;
+  v_buyer jsonb;
+  v_own jsonb;
+  v_professional boolean;
+  v_proceeding jsonb;
+  v_plan jsonb;
+  v_transfer boolean;
+  v_exec date;
+begin
+  if v_n = 0 then
+    return jsonb_build_object('issue_date', null, 'documents', '{}'::jsonb);
+  end if;
+  -- the settings in force at issue, held to the commit (the payload freezes them: L441-9, legal review #4)
+  select * into v_set from public.servicer_billing_settings s where s.organization_id = p_organization_id for share;
+  v_series := coalesce(v_set.invoice_prefix, 'FC');
+  -- the VAT book of the invoices: the one their plan assumed (the approval checked it is still the servicer's), else
+  -- the servicer's now (money review #1)
+  v_on_debits := coalesce(p_vat_on_debits, v_set.vat_on_debits, false);
+  select * into v_run from public.remittance_run where id = p_run_id;
+  -- Numbered on the transaction's Paris day: the counter of its year created if needed and locked in one statement
+  -- (the year of the issue date). The ledger dates entries up to the transaction's day (paris_today() = now()): a
+  -- clock past midnight once the counter is ours means the transaction began the day before; it is retried in a
+  -- fresh one rather than refused as data (numbering review #1). The dates then follow the numbers.
+  v_issue := private.paris_today();
+  insert into private.invoice_counter as c (organization_id, series, year, last_seq, last_issue_date)
+  values (p_organization_id, v_series, extract(year from v_issue)::integer, v_n, v_issue)
+  on conflict (organization_id, series, year)
+    do update set last_seq = c.last_seq + excluded.last_seq, last_issue_date = excluded.last_issue_date
+  returning c.last_seq - v_n into v_last;
+  if (clock_timestamp() at time zone 'Europe/Paris')::date <> v_issue then
+    raise exception 'commission documents: the day turned during the transaction, retry' using errcode = '40001';
+  end if;
+
+  -- the parties, the indemnity (L441-9 I, L441-10 II, D441-5: 40 €, stated to every professional buyer; the latest
+  -- proceeding of the client recorded by the issue date kept beside it, for the dunning step), the own account a due
+  -- invoice is paid to
+  v_seller := private.invoice_party(p_organization_id);
+  v_buyer := private.invoice_party(p_client_organization_id);
+  v_professional := coalesce((v_buyer ->> 'is_professional')::boolean, false);
+  select jsonb_build_object('kind', e.kind, 'effective_date', e.effective_date) into v_proceeding
+  from public.client_status_event e
+  where e.client_organization_id = p_client_organization_id and e.kind in ('proceeding_opened', 'liquidation')
+    and e.effective_date <= v_issue
+  order by e.effective_date desc, e.recorded_at desc, e.id desc limit 1;
+  select jsonb_build_object('iban', b.iban, 'bic', b.bic, 'holder', o.legal_name) into v_own
+  from public.bank_account b join public.organization o on o.id = b.organization_id
+  where b.id = v_set.own_bank_account_id;
+  -- an approval's netted documents are set off with its run, as far as its settlement plan (the draft's, approved
+  -- here) sets them off: on its payout of the requested date, or on the approval date when nothing is transferred
+  -- (N = 0, the plan posted at approval); a due document's date is its due date (legal review #4, round 2)
+  if p_reason = 'commission' and v_run.id is not null then
+    select d.plan into v_plan from private.remittance_draft d where d.run_id = v_run.id;
+    v_transfer := coalesce(v_run.net_minor, 0) > 0;
+    v_exec := coalesce(v_run.requested_execution_date, v_issue);
+  end if;
+
+  drop table if exists pg_temp._docs;
+  create temp table _docs on commit drop as
+  select x.ord::integer as entry_no, (x.doc ->> 'id')::uuid as id, x.doc ->> 'ref' as ref, x.doc ->> 'key' as key,
+         x.doc ->> 'kind' as kind, (x.doc ->> 'mandate_id')::uuid as mandate_id,
+         (x.doc ->> 'ht')::bigint as ht, (x.doc ->> 'vat')::bigint as vat, (x.doc ->> 'ttc')::bigint as ttc,
+         (x.doc ->> 'vat_rate')::numeric as vat_rate,
+         case when x.doc ->> 'kind' = 'invoice' and x.doc ->> 'settlement' = 'due' then 'due' else 'netted' end
+           as settlement,
+         -- what the run's plan sets off on this document (a run's own documents only)
+         pl.planned,
+         -- a due invoice's date, a corrective invoice's set off on the next run at the latest by then (OQ-72), and
+         -- the date by which the next run sets off what this run's plan leaves of a netted invoice (legal#4): the
+         -- mandate's term, 30 days without one, never more than 45 after issue (L441-10 I)
+         case when x.doc ->> 'kind' = 'invoice'
+                   and (x.doc ->> 'settlement' = 'due' or x.doc ->> 'payment' = 'next_run'
+                        or (v_plan is not null and pl.planned < (x.doc ->> 'ttc')::bigint))
+              then v_issue + least(coalesce((x.doc ->> 'due_days')::integer, tm.days, 30), 45) end as due_date,
+         (x.doc ->> 'due_days')::integer as due_days, x.doc,
+         coalesce((x.doc ->> 'service_from')::date, v_run.service_from) as service_from,
+         coalesce((x.doc ->> 'service_to')::date, v_run.service_to) as service_to,
+         v_last + x.ord::integer as seq,
+         coalesce((select sum((c ->> 'vat_pending')::bigint) from jsonb_array_elements(x.doc -> 'corrections') c), 0)
+           as v_pending,
+         coalesce((select sum((c ->> 'vat_collected')::bigint) from jsonb_array_elements(x.doc -> 'corrections') c), 0)
+           as v_collected
+  from jsonb_array_elements(p_docs) with ordinality x (doc, ord)
+  cross join lateral (select coalesce(sum((s ->> 'amount')::bigint), 0)::bigint as planned
+                      from jsonb_array_elements(coalesce(v_plan -> 'settles', '[]')) s
+                      where s ->> 'ref' = x.doc ->> 'ref') pl
+  left join lateral (select (mt.remittance_terms ->> 'invoice_payment_days')::integer as days
+                     from public.mandate_terms mt
+                     where mt.mandate_id = (x.doc ->> 'mandate_id')::uuid and mt.valid_from <= v_issue
+                       and (mt.valid_to is null or v_issue < mt.valid_to)
+                     order by mt.valid_from desc limit 1) tm on true;
+  if exists (select 1 from pg_temp._docs where kind not in ('invoice', 'credit_note') or ttc <> ht + vat
+               or (kind = 'invoice' and (ht <= 0 or vat < 0)) or (kind = 'credit_note' and (ht >= 0 or vat > 0
+                   or v_pending + v_collected <> -vat)))
+     or exists (select 1 from pg_temp._docs d cross join lateral jsonb_array_elements(coalesce(d.doc -> 'corrections', '[]')) c
+                where (c ->> 'vat_pending')::bigint < 0 or (c ->> 'vat_collected')::bigint < 0) then
+    raise exception 'commission documents: amounts out of shape' using errcode = '23514';
+  end if;
+
+  perform private.ledger_post_set_begin();
+  -- the engine and the run's inputs hash on each entry (ADR-0012: what computed it)
+  insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key,
+                                  client_organization_id, source_type, source_id, reason, engine_version,
+                                  inputs_hash)
+  select d.entry_no, p_organization_id,
+         case d.kind when 'invoice' then 'commission_invoice' else 'commission_credit_note' end, v_issue, d.key,
+         p_client_organization_id, 'commission_invoice', d.id::text, null,
+         case when v_run.inputs_hash is not null then coalesce(v_run.engine_version, 'commission-1') end,
+         v_run.inputs_hash
+  from pg_temp._docs d;
+  insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency)
+  select l.entry_no, row_number() over (partition by l.entry_no order by l.o)::integer, l.book, l.amount, 'EUR'
+  from (select d.entry_no, 1 as o, 'commission_receivable' as book, d.ttc as amount from pg_temp._docs d
+        union all select d.entry_no, 2, 'servicer_revenue', -d.ht from pg_temp._docs d
+        union all select d.entry_no, 3, case when v_on_debits then 'vat_collected' else 'vat_pending' end, -d.vat
+          from pg_temp._docs d where d.kind = 'invoice' and d.vat > 0
+        union all select d.entry_no, 3, 'vat_pending', d.v_pending from pg_temp._docs d
+          where d.kind = 'credit_note' and d.v_pending > 0
+        union all select d.entry_no, 4, 'vat_collected', d.v_collected from pg_temp._docs d
+          where d.kind = 'credit_note' and d.v_collected > 0) l;
+  drop table if exists pg_temp._doc_entries;
+  create temp table _doc_entries on commit drop as select * from private.ledger_post_set();
+
+  for v_doc in select x.*, e.entry_id from pg_temp._docs x join pg_temp._doc_entries e on e.entry_no = x.entry_no
+           order by x.seq loop
+    insert into public.commission_invoice (id, organization_id, client_organization_id, mandate_id, run_id, kind,
+                                           series, year, seq, number, issue_date, service_from, service_to, currency,
+                                           ht_minor, vat_rate, vat_minor, ttc_minor, vat_book, settlement, due_date,
+                                           reason, payload, payload_sha256, ledger_entry_id)
+    select v_doc.id, p_organization_id, p_client_organization_id, v_doc.mandate_id, p_run_id, v_doc.kind, v_series,
+           extract(year from v_issue)::integer, v_doc.seq,
+           v_series || '-' || extract(year from v_issue)::integer || '-' || lpad(v_doc.seq::text, 6, '0'), v_issue,
+           v_doc.service_from, v_doc.service_to, 'EUR', v_doc.ht, case when v_doc.kind = 'invoice' then v_doc.vat_rate end,
+           v_doc.vat,
+           v_doc.ttc, case when v_doc.kind = 'invoice' then case when v_on_debits then 'vat_collected' else 'vat_pending' end end,
+           v_doc.settlement, v_doc.due_date,
+           p_reason, y.payload, encode(sha256(convert_to(y.payload::text, 'UTF8')), 'hex'), v_doc.entry_id
+    from (select jsonb_build_object(
+            'kind', v_doc.kind,
+            'number', v_series || '-' || extract(year from v_issue)::integer || '-' || lpad(v_doc.seq::text, 6, '0'),
+            'issue_date', v_issue,
+            'seller', v_seller,
+            'buyer', v_buyer,
+            'mandate', (select jsonb_build_object('id', m.id, 'reference', m.reference) from public.mandate m
+                        where m.id = v_doc.mandate_id),
+            'run', case when v_run.id is not null then jsonb_build_object('id', v_run.id, 'number', v_run.number) end,
+            'service_period', jsonb_build_object('from', v_doc.service_from, 'to', v_doc.service_to),
+            'lines', coalesce(v_doc.doc -> 'lines', '[]'),
+            -- per invoice it rectifies, its HT and VAT once this note is applied, all its credit notes included
+            -- (M2c-5b review legal#1: « le montant du total hors taxes et de la TVA due après application de la
+            -- réduction de prix », BOI-TVA-DECLA-30-20-20-20 §260, BOI-TVA-DED-40-10-20 §80)
+            'corrections', (select coalesce(jsonb_agg(x.c || jsonb_build_object(
+                                     'ht_after', (o.ht_minor + pc.ht + ea.ht + (x.c ->> 'ht')::bigint)::text,
+                                     'vat_after', (o.vat_minor + pc.vat + ea.vat + (x.c ->> 'vat')::bigint)::text)
+                                   order by x.ord), '[]')
+                            from jsonb_array_elements(coalesce(v_doc.doc -> 'corrections', '[]'))
+                              with ordinality x (c, ord)
+                            cross join lateral (select q.ht_minor, q.vat_minor from public.commission_invoice q
+                                                where q.id = (x.c ->> 'original_invoice_id')::uuid offset 0) o
+                            cross join lateral (select coalesce(sum(y.ht_minor), 0) as ht,
+                                                       coalesce(sum(y.vat_minor), 0) as vat
+                                                from public.commission_credit_correction y
+                                                where y.original_invoice_id = (x.c ->> 'original_invoice_id')::uuid) pc
+                            cross join lateral (select coalesce(sum((z ->> 'ht')::bigint), 0) as ht,
+                                                       coalesce(sum((z ->> 'vat')::bigint), 0) as vat
+                                                from pg_temp._docs d2
+                                                cross join lateral jsonb_array_elements(
+                                                  coalesce(d2.doc -> 'corrections', '[]')) z
+                                                where d2.seq < v_doc.seq
+                                                  and z ->> 'original_invoice_id' = x.c ->> 'original_invoice_id') ea),
+            'totals', jsonb_build_object('ht_minor', v_doc.ht::text, 'vat_minor', v_doc.vat::text, 'ttc_minor', v_doc.ttc::text,
+                                         'vat_rate', v_doc.vat_rate::text, 'currency', 'EUR'),
+            'settlement', jsonb_build_object('mode', v_doc.settlement, 'clause_ref', v_doc.doc ->> 'clause_ref',
+                                             'due_days', v_doc.due_days),
+            -- the mentions that change over time, as in force at issue (L441-9 I; legal review #4)
+            'due_date', v_doc.due_date,
+            -- netted documents only: what the run sets off (its payout of the requested date; the approval date and
+            -- no transfer when N = 0) and the remainder set off on the next run by a date, or all of it on the next
+            -- run by a date; a due one is paid by its due date to the own account below
+            'payment_reference', case when v_doc.settlement = 'netted' then
+                                   case when v_doc.doc ->> 'payment' = 'next_run'
+                                          or (v_plan is not null and v_doc.kind = 'invoice' and v_doc.planned = 0)
+                                        then jsonb_build_object('mode', 'next_run', 'latest_date', v_doc.due_date)
+                                             || case when v_plan is not null
+                                                     then jsonb_build_object('amount_minor', v_doc.ttc::text)
+                                                     else '{}' end
+                                        when v_plan is not null
+                                        then jsonb_build_object('mode', 'run', 'run_number', v_run.number,
+                                                                'execution_date', v_exec, 'transfer', v_transfer,
+                                                                'amount_minor', v_doc.planned::text)
+                                             || case when v_doc.kind = 'invoice' and v_doc.planned < v_doc.ttc
+                                                     then jsonb_build_object(
+                                                            'remainder_minor', (v_doc.ttc - v_doc.planned)::text,
+                                                            'latest_date', v_doc.due_date)
+                                                     else '{}' end
+                                        when p_reason = 'commission' and v_run.id is not null
+                                        then jsonb_build_object('mode', 'run', 'run_number', v_run.number,
+                                                                'execution_date', v_exec, 'transfer', v_transfer)
+                                   end end,
+            'own_account', case when v_doc.settlement = 'due' then v_own end,
+            'penalty_text', coalesce(v_set.penalty_text,
+              'Pénalités de retard : taux d''intérêt appliqué par la Banque centrale européenne à son opération de '
+              'refinancement la plus récente, majoré de 10 points de pourcentage.'),
+            'flat_indemnity', jsonb_build_object('applies', v_professional,
+                                                 'amount_minor', case when v_professional then '4000' end,
+                                                 'proceeding', v_proceeding),
+            'vat_on_debits', v_on_debits,
+            'reason', p_reason) as payload) y;
+    v_out := v_out || jsonb_build_object(v_doc.ref, jsonb_build_object(
+      'id', v_doc.id, 'number', v_series || '-' || extract(year from v_issue)::integer || '-' || lpad(v_doc.seq::text, 6, '0')));
+  end loop;
+
+  insert into public.commission_invoice_line (invoice_id, line_no, kind, designation_fr, claim_type_code, rule_id,
+                                              families, tiers, ht_minor, vat_rate, original_invoice_id)
+  select d.id, l.ord::integer, l.line ->> 'kind', l.line ->> 'designation_fr', l.line ->> 'claim_type',
+         l.line ->> 'rule_id', coalesce(array(select jsonb_array_elements_text(l.line -> 'families')), '{}'),
+         coalesce(l.line -> 'tiers', '[]'), (l.line ->> 'ht')::bigint, (l.line ->> 'vat_rate')::numeric,
+         (l.line ->> 'original_invoice_id')::uuid
+  from pg_temp._docs d cross join lateral jsonb_array_elements(d.doc -> 'lines') with ordinality l (line, ord);
+  insert into public.commission_invoice_charge (invoice_id, account_id, tier_key, charged_minor)
+  select d.id, (c ->> 'account_id')::uuid, c ->> 'tier_key', (c ->> 'amount')::bigint
+  from pg_temp._docs d cross join lateral jsonb_array_elements(coalesce(d.doc -> 'charges', '[]')) c
+  where d.kind = 'invoice';
+  insert into public.commission_credit_alloc (credit_note_id, line_no, original_invoice_id, account_id, tier_key,
+                                              ht_minor, entry_id)
+  select d.id, a.ord::integer, (a.x ->> 'original_invoice_id')::uuid, (a.x ->> 'account_id')::uuid, a.x ->> 'tier_key',
+         (a.x ->> 'ht')::bigint, (a.x ->> 'entry_id')::uuid
+  from pg_temp._docs d cross join lateral jsonb_array_elements(coalesce(d.doc -> 'allocations', '[]'))
+    with ordinality a (x, ord)
+  where d.kind = 'credit_note';
+  insert into public.commission_credit_correction (credit_note_id, original_invoice_id, vat_rate, ht_minor, vat_minor,
+                                                   vat_pending_minor, vat_collected_minor, applied_minor, excess_minor)
+  select d.id, (c ->> 'original_invoice_id')::uuid, (c ->> 'vat_rate')::numeric, (c ->> 'ht')::bigint,
+         (c ->> 'vat')::bigint, (c ->> 'vat_pending')::bigint, (c ->> 'vat_collected')::bigint,
+         (c ->> 'applied')::bigint, (c ->> 'excess')::bigint
+  from pg_temp._docs d cross join lateral jsonb_array_elements(coalesce(d.doc -> 'corrections', '[]')) c
+  where d.kind = 'credit_note';
+  -- A credit note reduces the invoices it corrects first (a price correction, 289 I 5): settled at once.
+  insert into public.commission_settlement (organization_id, client_organization_id, document_kind, document_id,
+                                            credit_note_id, entry_id, kind, amount_minor, vat_moved_minor, settled_on,
+                                            run_id)
+  select p_organization_id, p_client_organization_id, 'invoice', (c ->> 'original_invoice_id')::uuid, d.id, null,
+         'credit_note', (c ->> 'applied')::bigint, (c ->> 'vat_pending')::bigint, v_issue, p_run_id
+  from pg_temp._docs d cross join lateral jsonb_array_elements(coalesce(d.doc -> 'corrections', '[]')) c
+  where d.kind = 'credit_note' and ((c ->> 'applied')::bigint > 0 or (c ->> 'vat_pending')::bigint > 0);
+  -- what was credited never exceeds what each invoice charged each key, nor its HT, nor its VAT
+  if exists (select 1 from pg_temp._docs d
+             join public.commission_credit_alloc a on a.credit_note_id = d.id
+             cross join lateral (select ch.charged_minor + coalesce((select sum(x.ht_minor)
+                                   from public.commission_credit_alloc x
+                                   where x.original_invoice_id = ch.invoice_id and x.account_id = ch.account_id
+                                     and x.tier_key = ch.tier_key), 0) as open
+                                 from public.commission_invoice_charge ch
+                                 where ch.invoice_id = a.original_invoice_id and ch.account_id = a.account_id
+                                   and ch.tier_key = a.tier_key) o
+             where o.open < 0)
+     or exists (select 1 from pg_temp._docs d
+                join public.commission_credit_correction c on c.credit_note_id = d.id
+                join public.commission_invoice i on i.id = c.original_invoice_id
+                cross join lateral (select coalesce(sum(y.ht_minor), 0) as ht, coalesce(sum(y.vat_minor), 0) as vat
+                                    from public.commission_credit_correction y
+                                    where y.original_invoice_id = i.id) t
+                where i.ht_minor + t.ht < 0 or i.vat_minor + t.vat < 0
+                   or c.ht_minor <> (select coalesce(sum(a.ht_minor), 0) from public.commission_credit_alloc a
+                                     where a.credit_note_id = d.id and a.original_invoice_id = i.id)) then
+    raise exception 'commission credit note: more credited than the invoice charged' using errcode = '23514';
+  end if;
+  return jsonb_build_object('issue_date', v_issue, 'documents', v_out);
+end;
+$$;
+
+revoke execute on function private.issue_commission_documents(uuid, uuid, uuid, jsonb, text, boolean)
+  from public, anon, authenticated;
+
 ------------------------------------------------------------------------------------------
 -- Read access and privileges (§6.2): the waivers and the manual credit notes' reasons are money staff's; the credit
 -- note itself is a commission_invoice row the client reads as any (its reason category is in its line, never the
@@ -1826,7 +2293,7 @@ revoke execute on function private.remittance_key_state_insert_guard(), private.
   private.remittance_key_states(uuid[], text[]),
   private.remittance_approval_refusal(public.remittance_run, private.remittance_draft, date),
   private.approve_remittance_run(uuid, uuid), private.run_remittance_checks(uuid, uuid, date),
-  private.remittance_statement_build(uuid)
+  private.remittance_statement_build(uuid), private.absorbed_credit_notes(uuid)
   from public, anon, authenticated;
 -- the worker (service role): the prepare's history, the approval job, the statement; the plan and the key check for
 -- its tests
@@ -1836,7 +2303,9 @@ grant execute on function private.remittance_key_states(uuid[], text[]), private
   to service_role;
 revoke execute on function public.issue_credit_note(text, uuid, text, text, text, text, uuid),
   public.credit_note_preview(uuid, text, uuid), public.commission_invoice_detail(uuid),
+  public.commission_invoice_files(uuid, text, integer),
   public.cancel_remittance_run(text, uuid, integer, text) from public, anon;
 grant execute on function public.issue_credit_note(text, uuid, text, text, text, text, uuid),
   public.credit_note_preview(uuid, text, uuid), public.commission_invoice_detail(uuid),
+  public.commission_invoice_files(uuid, text, integer),
   public.cancel_remittance_run(text, uuid, integer, text) to authenticated;

@@ -514,6 +514,9 @@ def credit_note_payload() -> dict[str, Any]:
                 "vat_rate": "0.2000",
                 "ht": "-3000",
                 "vat": "-600",
+                # FC-1 (100,00 € HT, 20,00 € VAT) once this note is applied (review legal#1)
+                "ht_after": "7000",
+                "vat_after": "1400",
             },
         ],
         totals={

@@ -205,7 +205,7 @@ def test_a_waiver_is_never_charged_again_and_a_reversal_meets_it_first() -> None
         == reversal
     )
     assert _state(f.id) == (45_000, 0, "approved")
-    # its statement names what FC-1's waiver absorbed (the lines' commission -150,00 vs the documents)
+    # its statement names what FC-1's waiver absorbed (the lines' commission -150,00, the documents)
     totals = _value(
         "select payload -> 'totals' from public.remittance_statement where run_id = %s", rv2
     )
