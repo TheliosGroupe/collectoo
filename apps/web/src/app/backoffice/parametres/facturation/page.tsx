@@ -55,7 +55,7 @@ export default async function BillingSettingsPage() {
     <WidePage title="Facturation" back={{ href: "/backoffice", label: "Back-office" }}>
       <Section title="Identité du cabinet" testId="servicer-identity">
         {missing.length === 0 ? (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col items-start gap-2">
             <Badge tone="ok">Complète</Badge>
             <p className="text-sm text-zinc-600 dark:text-zinc-400">
               En-tête des quittances, relevés et factures (art. R123-237 et R123-238 C. com.) :
