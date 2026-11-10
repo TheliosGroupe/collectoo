@@ -97,24 +97,26 @@ class _Collection:
 def _simulate(
     terms: RemittanceTerms,
     collections: list[_Collection],
-    start: date,
-    end: date,
+    window: tuple[date, date],
     *,
     one_live_run: bool = False,
+    latency: int = 0,
 ) -> dict[int, date]:
-    """The hourly schedule of one client, a day at a time from `start` to `end`: the day's
+    """The hourly schedule of one client, a day at a time over `window` (first, last day): the day's
     collections reach the queue first; then a run is cut on a scheduled business day of the
     mandate, or on any day the deadline guard is due over the waiting items' latest execution dates
     (the job runs every hour, every day). The run takes every waiting item and pays them out on the
     next business day (approved the day it is drafted, the default execution date). With
     `one_live_run`, as `private.create_remittance_run` holds today, no run is cut while the previous
-    one is in flight — until its debit is booked, here on its execution day. Returns each
-    collection's execution date."""
+    one is in flight — until its debit is booked, here on its execution day. With `latency`, a run
+    is approved that many business days after it is cut (ops take the J-5 … J-1 window the
+    overview's chip and the alerts give them) and paid out the next business day after its
+    approval. Returns each collection's execution date."""
     cal = conservative()
     executed: dict[int, date] = {}
     waiting: list[int] = []
     in_flight: date | None = None  # the execution date of the run not yet debited
-    day = start
+    day, end = window
     while day <= end and len(executed) < len(collections):
         waiting += [i for i, c in enumerate(collections) if c.posted == day]
         if in_flight is not None and day >= in_flight:
@@ -123,7 +125,7 @@ def _simulate(
             scheduled = cal.is_business_day(day) and is_scheduled(terms, day, cal)
             latest = [collections[i].own.latest_execution for i in waiting]
             if scheduled or guard_due(day, latest, cal):
-                in_flight = cal.after(day)
+                in_flight = cal.after(cal.after(day, latency) if latency else day)
                 executed.update(dict.fromkeys(waiting, in_flight))
                 waiting = []
         day += timedelta(days=1)
@@ -161,7 +163,7 @@ def test_no_collection_waits_past_its_latest_execution_date(
     by the one-month latest execution date, the date the checks then hold it to. Each collection is
     paid out, after it reached the queue. (No miss in 290,000 collections checked offline.)"""
     collections = _collections(start, days, events)
-    executed = _simulate(terms, collections, start, start + timedelta(days=45 + 4 + 40))
+    executed = _simulate(terms, collections, (start, start + timedelta(days=45 + 4 + 40)))
     assert len(executed) == len(collections)
     for i, c in enumerate(collections):
         assert executed[i] > c.posted
@@ -169,6 +171,26 @@ def test_no_collection_waits_past_its_latest_execution_date(
             assert executed[i] <= c.month.latest_execution, (c, executed[i])
         elif c.posted == c.e or c.posted <= c.own.alert_soon:
             assert executed[i] <= c.own.latest_execution, (c, executed[i])
+
+
+@settings(max_examples=400, deadline=None)
+@given(**SCHEDULE_CASES, latency=st.integers(0, 4))
+def test_the_guard_leaves_room_for_ops_to_approve(
+    start: date, terms: RemittanceTerms, days: int, events: list[tuple[int, int]], latency: int
+) -> None:
+    """What the J-5 margin is for (review round 3): a run approved up to 4 business days after it is
+    cut — inside the J-5 … J-1 window — still pays out every meetable collection that reached the
+    queue by its J-5 alert date on or before its latest execution date. It fails if the guard fires
+    one business day later (checked by mutation: margin 4, start 2026-02-03, twice a month, 8 days,
+    a collection on day 0, latency 4)."""
+    collections = _collections(start, days, events)
+    executed = _simulate(
+        terms, collections, (start, start + timedelta(days=45 + 4 + 60)), latency=latency
+    )
+    assert len(executed) == len(collections)
+    for i, c in enumerate(collections):
+        if not c.own.unmeetable and c.posted <= c.own.alert_soon:
+            assert executed[i] <= c.own.latest_execution, (c, executed[i], latency)
 
 
 @settings(max_examples=400, deadline=None)
@@ -183,7 +205,7 @@ def test_one_live_run_per_client_still_pays_on_time_from_six_days_or_a_business_
     cal = conservative()
     collections = _collections(start, days, events)
     executed = _simulate(
-        terms, collections, start, start + timedelta(days=45 + 4 + 40), one_live_run=True
+        terms, collections, (start, start + timedelta(days=45 + 4 + 40)), one_live_run=True
     )
     assert len(executed) == len(collections)
     for i, c in enumerate(collections):
@@ -216,7 +238,9 @@ def test_a_short_delay_collected_while_a_payout_is_in_flight() -> None:
         D("2026-06-28"), D("2026-06-28"), remittance_deadline(D("2026-06-28"), 2),
         remittance_deadline(D("2026-06-28"), 30),
     )  # fmt: skip
-    executed = _simulate(TWICE, [late, sunday], D("2026-06-22"), D("2026-07-31"), one_live_run=True)
+    executed = _simulate(
+        TWICE, [late, sunday], (D("2026-06-22"), D("2026-07-31")), one_live_run=True
+    )
     assert executed[0] == D("2026-06-29") and sunday.own.latest_execution == D("2026-06-29")
     assert executed[1] <= sunday.own.latest_execution  # fails: Tue 30/06
 
@@ -228,6 +252,6 @@ def test_the_simulation_pays_a_short_delay_within_the_month() -> None:
     e = D("2026-10-05")
     c = _Collection(e, e, remittance_deadline(e, 1), remittance_deadline(e, 30))
     assert c.own.unmeetable and c.month.latest_execution == D("2026-11-03")
-    assert _simulate(TWICE, [c], e, e + timedelta(days=40), one_live_run=True) == {
+    assert _simulate(TWICE, [c], (e, e + timedelta(days=40)), one_live_run=True) == {
         0: D("2026-10-06")
     }
