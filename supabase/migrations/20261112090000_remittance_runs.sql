@@ -197,6 +197,7 @@ create table private.remittance_draft_line (
   invoiced boolean not null default false,          -- charged by the run's invoice of its mandate
   primary key (run_id, line_no)
 );
+create index remittance_draft_line_entry_idx on private.remittance_draft_line (run_id, ledger_entry_id);
 
 -- Lines of earlier runs whose commission was left pending, priced by this draft (§9.1: « the next run invoices them »).
 create table private.remittance_draft_repricing (
@@ -962,10 +963,12 @@ begin
   end if;
   select count(*), coalesce(sum(d.amount_minor), 0) into v_lines, v_gross
   from private.remittance_draft_line d where d.run_id = p_run_id;
+  -- each reserved item has its line (one keyed probe per item, whatever the statistics)
   select count(*) into v_reserved from private.remittance_pending q
-  where q.draft_run_id = p_run_id
-    and exists (select 1 from private.remittance_draft_line d where d.run_id = p_run_id
-                  and d.ledger_entry_id = q.ledger_entry_id and d.amount_minor = q.amount_minor);
+  cross join lateral (select 1 from private.remittance_draft_line d where d.run_id = p_run_id
+                        and d.ledger_entry_id = q.ledger_entry_id and d.amount_minor = q.amount_minor
+                      limit 1) d
+  where q.draft_run_id = p_run_id;
   if v_lines <> r.item_count or v_reserved <> r.item_count or v_gross <> (p ->> 'gross')::bigint
      or v_lines <> (p ->> 'line_count')::integer then
     raise exception 'remittance draft %: its lines are not the items reserved (% lines, % reserved, % items)',
