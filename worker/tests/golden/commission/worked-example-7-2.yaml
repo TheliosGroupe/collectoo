@@ -1,0 +1,91 @@
+# The worked example of docs/design/m2c-remittances.md §7.2 (runs RV-2026-000001 … 000003), to the cent.
+# Synthetic mandate terms. TO VALIDATE: the founder's anonymised clauses replace them (R13); the reading that a
+# collection undone after it was invoiced is credited on the original invoice is founder #6 / OQ-39.
+case: worked-example-7-2
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  martin:        # MAND-MARTIN-2026: 15 % flat on everything allocated
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.15"}}
+  lilas:         # MAND-LILAS-2026: marginal per file, 10 % up to 5 000,00 € collected then 6 %, minimum 30,00 € per file
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - id: autres
+        tier_key: autres
+        label_fr: "Autres créances"
+        match: {}
+        rate: {kind: marginal, tiers: [{up_to_minor: "500000", rate: "0.1000"}, {up_to_minor: null, rate: "0.0600"}]}
+        min_per_file_minor: "3000"
+mandates:
+  MAND-MARTIN-2026: [{id: martin-v1, from: "2026-01-15", to: null, schedule: martin}]
+  MAND-LILAS-2026: [{id: lilas-v1, from: "2026-01-15", to: null, schedule: lilas}]
+files:
+  M-0042: {mandate: MAND-MARTIN-2026, claim_type: b2b_invoice, portfolio: P-MARTIN}
+  M-0077: {mandate: MAND-MARTIN-2026, claim_type: b2b_invoice, portfolio: P-MARTIN}
+  L-9: {mandate: MAND-LILAS-2026, claim_type: consumer_instalment_loan, portfolio: P-LILAS}
+runs:
+  - name: RV-2026-000001 (Martin, Mon 02/11)
+    lines:
+      # E2: P1 booked Mon 12/10 on M-0042 — F-103 40 000, F-101 130 000, F-102 30 000, principal
+      - {entry: E2, kind: allocation, file: M-0042, e: "2026-10-12", eff: "2026-10-12", amount: "200000", basis: {principal: "200000"}}
+    expect:
+      lines:
+        E2: {commission: "30000", parts: {tout: "30000"}}
+      documents:
+        MAND-MARTIN-2026:
+          invoice:
+            number: FC-2026-000001
+            ht: "30000"
+            vat: "6000"
+            ttc: "36000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "30000", tiers: [["0.15", "200000"]]}
+  - name: RV-2026-000002 (Lilas, Mon 02/11)
+    lines:
+      # E3: P2 booked 12/10 on L-9 — interest 12 000, principal 500 000
+      - {entry: E3, kind: allocation, file: L-9, e: "2026-10-12", eff: "2026-10-12", amount: "512000", basis: {interest: "12000", principal: "500000"}}
+    expect:
+      lines:
+        E3: {commission: "50720", parts: {autres: "50720"}}       # 10 % × 500 000 + 6 % × 12 000, above the 3 000 minimum
+      documents:
+        MAND-LILAS-2026:
+          invoice:
+            number: FC-2026-000002
+            ht: "50720"
+            vat: "10144"
+            ttc: "60864"
+            lines:
+              - {claim_type: consumer_instalment_loan, rule: autres, families: [interest, principal], ht: "50720", tiers: [["0.1000", "500000"], ["0.0600", "12000"]]}
+  - name: RV-2026-000003 (Martin, Mon 16/11)
+    lines:
+      # E10: P6 300 000 booked Tue 10/11 on M-0077
+      - {entry: E10, kind: allocation, file: M-0077, e: "2026-11-10", eff: "2026-11-10", amount: "300000", basis: {principal: "300000"}}
+      # R(E2): the bank took P1 back on Thu 12/11 (encaissement date: P1's, 12/10)
+      - {entry: R-E2, kind: allocation_reversal, file: M-0042, e: "2026-10-12", eff: "2026-11-12", amount: "-200000", basis: {principal: "-200000"}}
+      # A1: the servicer's advance of the reversed amount (basis 0)
+      - {entry: A1, kind: client_advance, file: M-0042, e: "2026-11-12", eff: "2026-11-12", amount: "200000"}
+    expect:
+      lines:
+        E10: {commission: "45000", parts: {tout: "45000"}}
+        R-E2: {commission: "-30000", parts: {tout: "-30000"}}
+        A1: {commission: "0", state: none, reason: not_commissionable}
+      documents:
+        MAND-MARTIN-2026:
+          invoice:
+            number: FC-2026-000003
+            ht: "45000"
+            vat: "9000"
+            ttc: "54000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "45000", tiers: [["0.15", "300000"]]}
+          credit_note:
+            number: FC-2026-000004
+            ht: "-30000"
+            vat: "-6000"         # FC-1 fully credited: its whole VAT
+            ttc: "-36000"
+            corrected:
+              FC-2026-000001: {ht: "-30000", vat: "-6000"}

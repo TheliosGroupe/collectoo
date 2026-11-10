@@ -1,0 +1,109 @@
+# VAT on the servicer's commission (design docs/design/m2c-remittances.md §3, §8.4, §8.5; ADR-0014 M2c-3).
+#
+# Data, not code: the rate rows are seeded into public.vat_rate by migration 20261111150000_engines.sql and a CI test
+# (worker/tests/test_engines_integration.py) checks the table equals this file. A changed or new row needs a new,
+# forward-only migration.
+#
+# Texts read on LibreJustice on 2026-11-10, in the version in force that day unless the row says another date. The
+# CGI articles below are « abrogées à compter du 1er janvier 2027 » (ordonnance n° 2025-1247 du 17 décembre 2025,
+# art. 9, 15, 49), except the paragraphs that art. 15 maintains; the CIBS articles that replace them enter into
+# force on 2027-01-01 (ordonnance n° 2026-671 du 27 juillet 2026, art. 19 I). No CGI or CIBS article number is printed
+# in fixed invoice text: every reference is dated data here.
+#
+# Tripwire: a row with `review` must be re-read and marked reviewed (reviewed_on, reviewed_by) before its `due_from`;
+# from that day CI fails (worker/tests/test_vat.py) and private.reference_data_alerts raises `vat_pack_review` until a
+# migration records the review. Marking a row reviewed is a human's act (the founder, counsel or the accountant), never
+# the build's.
+pack: vat/fr
+schema: vat-pack-1
+label_fr: "TVA sur la commission de recouvrement (France métropolitaine)"
+read_on: "2026-11-10"
+
+rates:
+  - code: standard
+    territory: FR-metro
+    rate: "0.2000"
+    valid_from: "2014-01-01"
+    valid_to: "2027-01-01"          # exclusive
+    legal_ref:
+      title: "CGI art. 278"
+      url: "https://librejustice.fr/norm/fr/code-general-des-impots/278"
+      version: "version du 2014-01-01 au 2027-01-01 (abrogée à compter du 1er janvier 2027, ordonnance n° 2025-1247, art. 9)"
+      quote: "Le taux normal de la taxe sur la valeur ajoutée est fixé à 20 %."
+  - code: standard
+    territory: FR-metro
+    rate: "0.2000"
+    valid_from: "2027-01-01"
+    valid_to: null
+    legal_ref:
+      title: "CIBS art. L213-151"
+      url: "https://librejustice.fr/norm/fr/code-des-impositions-sur-les-biens-et-services/l213-151"
+      version: "version à compter du 2027-01-01 (ordonnance n° 2026-671 du 27 juillet 2026, art. 19 I ; la version du 2026-09-01 est « mort-née »)"
+      quote: "DÉNOMINATION DU TAUX | NIVEAU EN MÉTROPOLE | NIVEAU EN GUADELOUPE, EN MARTINIQUE ET À LA RÉUNION … Taux normal | 20 % | 8,5 %"
+    review:
+      due_from: "2026-12-01"
+      reviewed_on: null
+      reviewed_by: null
+
+# What the engine and the documents rely on besides the rate. Not seeded: they explain the rows and the postings.
+references:
+  - id: taxable
+    applies: "La commission est une prestation de services à titre onéreux : elle est soumise à la TVA (les fonds reversés restent ceux du créancier)."
+    texts:
+      - title: "CGI art. 256 I"
+        url: "https://librejustice.fr/norm/fr/code-general-des-impots/256"
+        version: "version du 2022-01-01 au 2027-01-01"
+        quote: "Sont soumises à la taxe sur la valeur ajoutée les livraisons de biens et les prestations de services effectuées à titre onéreux par un assujetti agissant en tant que tel."
+        valid_from: "2022-01-01"
+        valid_to: "2027-01-01"
+      - title: "CIBS art. L211-4"
+        url: "https://librejustice.fr/norm/fr/code-des-impositions-sur-les-biens-et-services/l211-4"
+        version: "version à compter du 2027-01-01 (ordonnance n° 2026-671, art. 19 I)"
+        quote: "Chaque opération relevant d'activités économiques est qualifiée soit de livraison de biens effectuée à titre onéreux par un assujetti, soit de prestation de services effectuée à titre onéreux par un assujetti …"
+        valid_from: "2027-01-01"
+        valid_to: null
+  - id: exigibility
+    applies: "TVA exigible à l'encaissement de la rémunération (44574 en attente, 44571 exigible au règlement), ou à l'émission de la facture si le cabinet a opté pour les débits (M2c-4)."
+    texts:
+      - title: "CGI art. 269 2 c"
+        url: "https://librejustice.fr/norm/fr/code-general-des-impots/269"
+        version: "version du 2023-01-01 ; abrogée à compter du 2027-01-01, sauf les premier et dernier alinéas du c du 2, « maintenues en vigueur jusqu'à leur reprise par les mesures réglementaires mentionnées à l'article L. 234-15 » du CIBS (ordonnance n° 2025-1247, art. 15)"
+        quote: "c) Pour les prestations de services autres que celles visées au b bis, lors de l'encaissement des acomptes, du prix, de la rémunération ou, sur option du redevable, d'après les débits."
+        valid_from: "2023-01-01"
+        valid_to: null
+      - title: "CIBS art. L214-6"
+        url: "https://librejustice.fr/norm/fr/code-des-impositions-sur-les-biens-et-services/l214-6"
+        version: "version à compter du 2027-01-01 (ordonnance n° 2026-671, art. 19 I)"
+        quote: "… la taxe à laquelle est soumise une prestation de services, autre qu'une opération assimilée, devient exigible au moment de chaque perception par le fournisseur d'une contrepartie de cette opération. Le fournisseur d'une prestation de services peut, toutefois, exercer l'option pour les débits prévue à l'article L. 214-9. En cas de restitution d'une contrepartie par le fournisseur, le droit à minoration de taxe devient exigible à ce moment."
+        valid_from: "2027-01-01"
+        valid_to: null
+      - title: "CIBS art. L214-9"
+        url: "https://librejustice.fr/norm/fr/code-des-impositions-sur-les-biens-et-services/l214-9"
+        version: "version à compter du 2027-01-01 (ordonnance n° 2026-671, art. 19 I)"
+        quote: "Lorsqu'une catégorie d'opérations relève de l'option pour les débits et que le redevable a exercé cette option, la taxe ou le droit à minoration de taxe devient exigible lors de l'émission de la facture ou de la facture rectificative."
+        valid_from: "2027-01-01"
+        valid_to: null
+  - id: tax_point
+    applies: "Période de la prestation = du reversement précédent à celui-ci ; le taux est celui en vigueur à la date d'émission de la facture, qui clôt la période (choix du produit, OQ-70)."
+    texts:
+      - title: "CGI art. 269 1 a bis"
+        url: "https://librejustice.fr/norm/fr/code-general-des-impots/269"
+        version: "version du 2023-01-01 au 2027-01-01 ; l'article du CIBS qui le reprend n'est pas identifié (OQ-42)"
+        quote: "… pour les prestations de services qui donnent lieu à l'établissement de décomptes ou à des encaissements successifs, au moment de l'expiration des périodes auxquelles ces décomptes ou encaissements se rapportent ;"
+        valid_from: "2023-01-01"
+        valid_to: "2027-01-01"
+  - id: invoicing
+    applies: "Une facture par (reversement, mandat) au client professionnel (assujetti) ; les avoirs rectifient la facture initiale qu'ils nomment (M2c-4, M2c-5)."
+    texts:
+      - title: "CGI art. 289 I 1 a"
+        url: "https://librejustice.fr/norm/fr/code-general-des-impots/289"
+        version: "version du 2023-12-31 ; abrogée à compter du 2027-01-01, sauf le 3 du I, le IV et le VII, maintenus jusqu'à leur reprise par voie réglementaire (ordonnance n° 2025-1247, art. 15)"
+        quote: "Pour les livraisons de biens ou les prestations de services qu'il effectue pour un autre assujetti, ou pour une personne morale non assujettie, et qui ne sont pas exonérées en application des articles 261 à 261 E ;"
+        valid_from: "2023-12-31"
+        valid_to: "2027-01-01"
+      - title: "CIBS art. L216-30 1°"
+        url: "https://librejustice.fr/norm/fr/code-des-impositions-sur-les-biens-et-services/l216-30"
+        version: "version à compter du 2027-01-01 (ordonnance n° 2026-671, art. 19 I)"
+        quote: "Le fournisseur assujetti s'assure de l'émission d'une facture comprenant les informations prévues à l'article L. 216-33 pour chaque opération qu'il effectue à titre onéreux et qui remplit l'une des conditions suivantes : 1° Le destinataire est un assujetti ou une personne morale non assujettie, sous réserve de l'article L. 216-31 ;"
+        valid_from: "2027-01-01"
+        valid_to: null

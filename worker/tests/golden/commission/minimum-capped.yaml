@@ -1,0 +1,78 @@
+# A minimum per file, never above what the file brought in (founder #5; design §2.2 #9, ops critique #7): the
+# commission's TTC stays within the file's basis, HT ≤ ⌊basis / 1,20⌋. Undone in full, the file is back to 0.
+# TO VALIDATE: synthetic grid; « never above what the file brought in » read as the TTC (founder #5).
+case: minimum-capped
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  minimum:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.05"}, min_per_file_minor: "3000"}
+mandates:
+  MAND-M: [{id: m-v1, from: "2026-01-01", to: null, schedule: minimum}]
+files:
+  F-MIN: {mandate: MAND-M, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — 20,00 € collected
+    lines:
+      - {entry: A, kind: allocation, file: F-MIN, e: "2026-10-01", eff: "2026-10-01", amount: "2000", basis: {principal: "2000"}}
+    expect:
+      lines:
+        A: {commission: "1666", parts: {tout: "1666"}}     # min 30,00 € capped at ⌊20,00 / 1,2⌋ = 16,66 €
+      documents:
+        MAND-M:
+          invoice: {number: FC-2026-000001, ht: "1666", vat: "333", ttc: "1999"}     # TTC ≤ 20,00 €
+  - name: run 2 — 100,00 € in all
+    lines:
+      - {entry: B, kind: allocation, file: F-MIN, e: "2026-10-15", eff: "2026-10-15", amount: "8000", basis: {principal: "8000"}}
+    expect:
+      lines:
+        B: {commission: "1334", parts: {tout: "1334"}}     # the minimum, 30,00 €, now fits: 30,00 − 16,66
+      documents:
+        MAND-M:
+          invoice: {number: FC-2026-000002, ht: "1334", vat: "267", ttc: "1601"}
+  - name: run 3 — 1 100,00 € in all, above the minimum
+    lines:
+      - {entry: C, kind: allocation, file: F-MIN, e: "2026-11-02", eff: "2026-11-02", amount: "100000", basis: {principal: "100000"}}
+    expect:
+      lines:
+        C: {commission: "2500", parts: {tout: "2500"}}     # 5 % × 1 100,00 = 55,00 − 30,00
+      documents:
+        MAND-M:
+          invoice: {number: FC-2026-000003, ht: "2500", vat: "500", ttc: "3000"}
+  - name: run 4 — C undone
+    lines:
+      - {entry: R-C, kind: allocation_reversal, file: F-MIN, e: "2026-11-02", eff: "2026-11-20", amount: "-100000", basis: {principal: "-100000"}}
+    expect:
+      lines:
+        R-C: {commission: "-2500", parts: {tout: "-2500"}}
+      documents:
+        MAND-M:
+          credit_note:
+            number: FC-2026-000004
+            ht: "-2500"
+            vat: "-500"
+            ttc: "-3000"
+            corrected:
+              FC-2026-000003: {ht: "-2500", vat: "-500"}
+  - name: run 5 — A and B undone, the file back to 0
+    lines:
+      # sorted by encaissement date: R-A first (100,00 → 80,00: the minimum still applies, nothing back), then R-B
+      - {entry: R-B, kind: allocation_reversal, file: F-MIN, e: "2026-10-15", eff: "2026-12-01", amount: "-8000", basis: {principal: "-8000"}}
+      - {entry: R-A, kind: allocation_reversal, file: F-MIN, e: "2026-10-01", eff: "2026-12-01", amount: "-2000", basis: {principal: "-2000"}}
+    expect:
+      lines:
+        R-A: {commission: "0", parts: {tout: "0"}}
+        R-B: {commission: "-3000", parts: {tout: "-3000"}}
+      documents:
+        MAND-M:
+          credit_note:
+            number: FC-2026-000005
+            ht: "-3000"
+            vat: "-600"
+            ttc: "-3600"
+            corrected:
+              FC-2026-000001: {ht: "-1666", vat: "-333"}
+              FC-2026-000002: {ht: "-1334", vat: "-267"}

@@ -240,6 +240,48 @@ Implemented by the pure waterfall `worker/src/collectoo_worker/payments/allocati
 
 **Re-run by date (M3, founder #16).** The waterfall is a pure function of (amount, slots at D, policy, designation, D); each allocation entry keeps its inputs hash and its plan (policy, designation). M3-13 re-allocates earlier payments by reversing their entries at their dates and posting the waterfall's result on the balances including accrued interest; with nothing changed, a re-run gives the same lines (property and integration tests).
 
-## 7. What I need from you (golden cases)
+## 7. Commission (M2c-3, M2-13)
+
+The servicer's remuneration, charged to the **client** (never to a debtor: L111-8, CPCE-09), computed by the pure engine `worker/src/collectoo_worker/remittance/commission.py` (engine version `commission-1`) from the mandate's schedule (`mandate_terms.commission_schedule`, schema `commission-1`, clause reference R124-3 3°; ADR-0014 M2c-2, M2c-3; design `docs/design/m2c-remittances.md` §8). No legal rate, cap or minimum exists: the agreement decides (design §3.2 #10). **Every example below is a golden case in `worker/tests/golden/commission/` and is TO VALIDATE until the founder's anonymised clauses replace the synthetic ones (risk R13).**
+
+**What earns commission (founder #4).** What is allocated to the client's claims: the allocation's 1100 credits per component family, limited to the families the schedule names (`basis.families`). Money passed on without allocation (a forward: file recalled, payment before the servicing start, the client's ratification) only when the schedule lists that reason; payments made to the client directly never. A reversal gives back what its original earned (`on_reversal: credit`, founder #6), unless the mandate's clause keeps the fee (`keep`, OQ-39). Advances, returned and unplanned payouts never earn anything. An item with no terms in force on its date earns nothing and is remitted gross (an alert in M2c-4).
+
+**Which rule.** Per component family of the line, the first rule that matches the file's claim type, the family and the portfolio; the last rule matches everything. A forward has no family: rules that filter on families skip it. Each rule has a **tier key**, stable across versions, so tiers continue when the terms change.
+
+**Which version.** The one in force on the line's **encaissement date** (E, §9.2 of the design: the earlier of the payment's booking and value dates). New versions start tomorrow at the earliest: never retroactive (founder #5).
+
+**The cumulative function.** Per (file, tier key), with `c` the commissionable basis collected so far net of reversals (integer cents):
+
+| Rate kind | g(c) |
+|---|---|
+| `flat` | r × c |
+| `marginal` (tiers on what the file brought in) | Σ rᵢ × (part of c between lᵢ and uᵢ) |
+| `bracket` (one rate set at boarding by the boarded amount or the claim's age; a bound is included, « jusqu'à ») | r(attribute) × c |
+
+F(c) = 0 if c = 0, else min(max(m, R(g(c))), ⌊c / (1 + τ)⌋), with m the minimum per file, τ the VAT rate and R the rounding **half-up to the cent, once per value of F** (the sum over the bands is exact before it). The commission of a line is F(c after) − F(c before). Hence:
+- **Telescoping:** inside one version, a file's commission is F(total collected), however the collections fall into lines and runs; a reversal gives back exactly what F says across tiers; a file undone in full is back to 0 (Hypothesis, `worker/tests/test_commission.py`).
+- **The minimum never exceeds what the file brought in:** HT ≤ ⌊c / 1,2⌋, so HT + VAT ≤ c.
+- **Across versions** the per-version differences do not telescope; the engine keeps each (file, tier key)'s commission within [0, ⌊c / (1 + τ)⌋]: a credit never exceeds what was charged, and a file undone in full is back to 0. Inside one version the bound never binds (property test).
+
+**Documents (§8.4).** Per (mandate, file, tier key) the run's net Δ: positive to the mandate's invoice, negative to its credit note; nothing when every Δ is 0. Invoice lines group (claim type, rule, families), with the base that moved in each rate band. Invoice VAT = R(HT × rate) at the rate of the issue date (`public.vat_rate`, rule pack `worker/rule_packs/vat/fr.yaml`; OQ-70). A negative Δ is credited LIFO on the invoices that charged that key; the credit note's VAT on each corrected invoice is R(credited HT after × its rate) − R(credited HT before × its rate): never above the invoice's VAT, exactly it on a full credit. Numbering, posting and PDFs are M2c-4 and M2c-5.
+
+**Worked examples (golden cases, all TO VALIDATE).**
+
+| Case | Grid | Collections | Commission HT |
+|---|---|---|---|
+| `worked-example-7-2` (design §7.2) | Martin 15 % flat | M-0042 2 000,00 € (RV-1); M-0077 3 000,00 € and M-0042 undone (RV-3) | FC-1 300,00 € + 60,00 € VAT; FC-3 450,00 €; FC-4 credit note −300,00 € −60,00 € on FC-1 |
+| idem | Lilas 10 % to 5 000,00 € then 6 %, minimum 30,00 € | L-9 5 120,00 € (interest 120,00) | 500,00 + 7,20 = 507,20 € (FC-2, 101,44 € VAT) |
+| `claim-type-and-family-rates` | B2B 15 %; interest 20 %; other 10 %; basis principal + interest | B2B file 1 140,00 € (charge 40,00 excluded); loan 570,00 € (interest 50,00, charge 20,00) | 165,00 €; 10,00 + 50,00 € |
+| `marginal-tiers-crossed` | 10 % to 5 000,00 €, then 6 % | 4 000,00 €, then 2 000,00 € (crosses), then the first undone, then the second | 400,00; 160,00; −360,00 (LIFO: 160,00 on the second invoice, 200,00 on the first); −200,00 |
+| `brackets` | boarded ≤ 5 000,00 € 12 %, else 8 %; age ≤ 365 d 15 %, ≤ 1 095 d 20 %, else 25 % | 100,00 € on six files | 12,00 / 12,00 (exactly 5 000,00) / 8,00 / 15,00 / 20,00 (exactly 1 095 d) / 25,00 € |
+| `minimum-capped` | 5 %, minimum 30,00 € | 20,00 €, then 80,00 €, then 1 000,00 €, then all undone | 16,66 € (⌊20,00 / 1,2⌋); 13,34; 25,00; back to 0 |
+| `version-change` | 15 % until 15/11, 12 % from 16/11 | 1 000,00 € on 10/11 and on 20/11; the first undone | 150,00 + 120,00; −150,00 (credited at the old rate) |
+| `cross-version-bounds` | 0 % until 15/11, then 0 % to 1 000,00 € and 100 % beyond | 5 000,00 € on 10/11, 1 000,00 € on 20/11; both undone | 0 + 1 000,00; −166,67 (held at ⌊1 000,00 / 1,2⌋); −833,33 |
+| `reversal-keep` | 10 %, `on_reversal: keep` | 1 000,00 €, undone, collected again | 100,00; 0; 100,00 |
+| `forwards` | interest 20 %, other 10 %; ratification listed | forward 500,00 € (ratification), forward 300,00 € (recalled file), allocation 100,00 € | 50,00; 0; 2,00 + 9,00 |
+
+**What we need from you.** Two or three real fee clauses (anonymised) with a collection history and the invoices the client accepted: they replace the synthetic grids, and any difference to the cent is either fixed or documented.
+
+## 8. What I need from you (golden cases)
 
 For each of the four M3 claim types: 2–3 anonymised real files with contract terms, schedule, events (due dates, notice, acceleration, judgment), payments, and the **expected statement** at a given date from a source you trust (bank décompte, bailiff décompte or judgment). These become the golden tests; the engine must match to the cent or we document why not.
