@@ -22,7 +22,9 @@ M2c-4 numbers, posts and stores them; M2c-5 renders them.
 4. A reversal's credit is allocated first to the invoice that charged the line it undoes (its
    original), up to what that invoice still charges the (file, tier key) — every reversal of the
    run there before any credit goes LIFO — then LIFO to the other invoices that charged the key;
-   every allocation names its invoice (289 I 5) and its line. The per-key logic is
+   every allocation names its invoice (289 I 5) and its line. After a cancelled run, a reversal
+   it took something for is credited first on the invoices that cancellation put it back on, up
+   to its own share on each (`commission.Retake`, M2c-5b review math#0). The per-key logic is
    `commission.key_side`, which the engine's rounding reserve simulates too.
 5. Credit-note VAT per corrected invoice by cumulative difference at that invoice's rate: never
    above its VAT, exactly it on a full credit.

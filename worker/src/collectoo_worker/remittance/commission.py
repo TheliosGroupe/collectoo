@@ -80,6 +80,17 @@ and a file undone in full is back to 0.
   allocates to an invoice (its original's first, then LIFO) is absorbed by that invoice's waiver
   for the key first (no credit note for that part: the client already has it), and only the rest
   is credited, so no invoice is credited beyond its remaining HT.
+* **After a cancelled run** (M2c-4 C7; M2c-5b review math#0): its corrective invoice of each
+  (mandate, VAT rate) charges again what the run credited at that rate and holds, as its waiver,
+  what the run's credits absorbed there (where no corrective invoice was issued at a rate, the
+  waiver goes back on the invoice it was absorbed from: the file is then exactly as before the
+  run). Running a reversal again takes first, on each of those invoices, exactly what the
+  cancelled run took for it there per (file, tier key) (`Retake`, a capped link of its chain),
+  then its original's own invoice — so a corrective invoice pooling several reversals, or a credit
+  that fell on invoices at two rates, gives each reversal its own share in any order: the run
+  again gives the documents of the run never approved. (With no corrective invoice at a rate,
+  the same history without manual credit notes has one more open invoice than this one: its
+  reserve, and under mixed VAT rates its LIFO order, can then differ — review math#1.)
 
 Basis (founder #4): an allocation's 1100 credits per component family, filtered by the schedule's
 families; a forward's amount only when the schedule lists its reason; a reversal minus its

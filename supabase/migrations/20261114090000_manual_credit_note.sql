@@ -20,6 +20,16 @@
 --     documents job (the queue trigger on commission_invoice);
 --   * reads for the back-office invoice page: public.commission_invoice_detail, public.credit_note_preview.
 --
+-- Review fixes (M2c-5b review): a cancellation restores what its run's credits absorbed as the waiver of its
+-- corrective invoice of the absorbing invoice's rate (a 0 charge for a key only absorbed there), else on the absorbing
+-- invoice, one row per absorption with its line, and the next run credits each reversal there up to its own share
+-- (math#0); issue_credit_note refuses the invoice of a run still in flight (`run_in_flight`, ledger-vat#0); every credit
+-- note freezes each rectified invoice's HT and VAT after it (`ht_after`, `vat_after`: private.issue_commission_documents
+-- redefined, legal#1); the nightly alert `credit_refund_owed` (legal#0); the statement names the manual credit notes a
+-- run's credits met (private.absorbed_credit_notes, legal#4); a draft the engine could not price is refused
+-- (`engine_error`, security-concurrency#0); public.commission_invoice_files pages an invoice's files and a credit note's
+-- page names what it rectifies (tests-ui#2, #3).
+--
 -- Redefined with their settings and grants restated: private.remittance_key_state_insert_guard (a credit note's key
 -- state), private.remittance_key_states (+ waived_minor: dropped and created, its return type changes),
 -- private.remittance_approval_refusal (the credit notes' key states count in the history the draft assumed),
