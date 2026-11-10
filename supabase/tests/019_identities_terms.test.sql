@@ -7,7 +7,7 @@
 -- client users (OQ-48), collectors and another servicer. Design docs/design/m2c-remittances.md §6, §8, §9.1, §10, §14.2,
 -- §16, §17, §21; ADR-0014 (M2c-2).
 begin;
-select plan(158);
+select plan(201);
 
 -- Fixtures --------------------------------------------------------------------------------------
 -- Synthetic SIRENs (Luhn) and their VAT numbers (collectoo_worker.synth.ids); synthetic IBANs.
@@ -21,7 +21,7 @@ insert into public.organization (id, kind, servicer_organization_id, legal_name,
   ('00000000-0000-0000-0000-0000000000b1', 'creditor_client', '00000000-0000-0000-0000-0000000000bb', 'Bleu SARL', '438120669');
 insert into auth.users (id, email, aud, role)
 select ('10000000-0000-0000-0000-0000000000' || n)::uuid, 'u' || n || '@terms.test', 'authenticated', 'authenticated'
-from unnest(array['01', '02', '03', '04', '05', '06', '07', '08', '09', '10']) n;
+from unnest(array['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11']) n;
 insert into public.membership (user_id, organization_id, role) values
   ('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000aa', 'ops_manager'),
   ('10000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-0000000000aa', 'collector'),
@@ -32,7 +32,8 @@ insert into public.membership (user_id, organization_id, role) values
   ('10000000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-0000000000a1', 'client_viewer'),
   ('10000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-0000000000a1', 'client_admin'),
   ('10000000-0000-0000-0000-000000000009', '00000000-0000-0000-0000-0000000000a2', 'client_admin'),
-  ('10000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-0000000000b1', 'client_admin');
+  ('10000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-0000000000b1', 'client_admin'),
+  ('10000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-0000000000a1', 'client_viewer');  -- whole client
 insert into public.mandate (id, organization_id, client_organization_id, reference, mandate_type, signed_on) values
   ('70000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a1',
    'MAND-A1', 'mandate_amicable', '2026-01-15'),
@@ -63,7 +64,8 @@ insert into public.bank_account (id, organization_id, purpose, iban, currency, l
    'FR7623754538827637495136203', 'EUR', 'Compte propre', null, '2026-01-01'),
   ('80000000-0000-0000-0000-0000000000b0', '00000000-0000-0000-0000-0000000000bb', 'own',
    'FR7625006153088170839583250', 'EUR', 'Compte propre B', null, '2026-01-01');
--- client documents of a1 (two RIBs, the liquidator's, its signed mandate, an evidence), a2 (mandate, RIB), b1 (RIB)
+-- client documents of a1 (two RIBs, the liquidator's, its signed mandate, an evidence), a2 (mandate, RIB, an
+-- evidence), b1 (RIB)
 create or replace function pg_temp.d(p_n text) returns uuid language sql as $$
   select ('d0000000-0000-0000-0000-0000000000' || p_n)::uuid;
 $$;
@@ -80,7 +82,7 @@ select pg_temp.d(n), case c when 'b1' then '00000000-0000-0000-0000-0000000000bb
        'application/pdf', k || '.pdf'
 from (values ('01', 'a1', 'payout_rib'), ('02', 'a1', 'payout_rib'), ('03', 'a1', 'payout_rib'),
              ('04', 'a1', 'mandate_document'), ('05', 'a1', 'client_status_evidence'), ('06', 'a2', 'mandate_document'),
-             ('07', 'a2', 'payout_rib'), ('08', 'b1', 'payout_rib')) v (n, c, k);
+             ('07', 'a2', 'payout_rib'), ('08', 'b1', 'payout_rib'), ('09', 'a2', 'client_status_evidence')) v (n, c, k);
 
 -- The money terms of the §8.1 / §8.2 examples (clause references are columns of the version).
 create temporary table j (k text primary key, v jsonb) on commit drop;
@@ -332,6 +334,11 @@ select pg_temp.as_user('07');
 set local role authenticated;
 select is((select count(*)::int from public.document), 0, 'a client viewer reads no client document');
 reset role;
+select pg_temp.as_user('11');
+set local role authenticated;
+select is((select count(*)::int from public.document), 0,
+  'nor a client viewer of the whole client (the role is checked, not only the portfolio restriction)');
+reset role;
 select pg_temp.as_user('08');
 set local role authenticated;
 select is((select count(*)::int from public.document), 0,
@@ -392,6 +399,15 @@ select pg_temp.as_user('07');
 set local role authenticated;
 select throws_ok(format($$ select public.confirm_payout_account('payout-conf-0004', %L, 'FR7642606140114176606002310') $$,
   (select v from t where k = 'pa1')), '42501', null, 'nor a client viewer');
+reset role;
+select pg_temp.as_user('11');
+set local role authenticated;
+select throws_ok(format($$ select public.confirm_payout_account('payout-conf-0008', %L, 'FR7642606140114176606002310') $$,
+  (select v from t where k = 'pa1')), '42501', null, 'nor a client viewer of the whole client, at aal2');
+select throws_ok(format($$ select public.reject_payout_account('payout-rej-0008', %L, 'non') $$,
+  (select v from t where k = 'pa1')), '42501', null, 'who refuses nothing either');
+select throws_ok($$ select * from public.payout_accounts('00000000-0000-0000-0000-0000000000a1') $$, '42501', null,
+  'and does not read them');
 reset role;
 select pg_temp.as_user('09');
 set local role authenticated;
@@ -470,71 +486,6 @@ select throws_ok(format($$ select public.reject_payout_account('payout-rej-0001'
 select is(public.reject_payout_account('payout-rej-0002', (select v from t where k = 'pa3'), 'Ce n''est pas notre compte')
           ->> 'status', 'rejected', 'the client''s administrator refuses a proposal');
 reset role;
--- The liquidator's account (court-appointed): confirmed by a second admin only, never by the client's users (L641-9)
-select pg_temp.as_user('04');
-set local role authenticated;
-select lives_ok($$ select public.retire_payout_account('payout-ret-0001', (select v from t where k = 'pa2'), 'Liquidation') $$,
-  'an admin retires the current account');
-insert into t select 'pa4', (public.propose_payout_account('payout-prop-0030', '00000000-0000-0000-0000-0000000000a1',
-  'EUR', 'FR7643625512382429355294717', 'SELARL MANDATAIRE ès qualités', null, pg_temp.d('03'), 'court_appointed')
-  ->> 'payout_account_id')::uuid;
-reset role;
-select pg_temp.as_user('03');
-set local role authenticated;
-select throws_ok(format($$ select public.confirm_payout_account('payout-conf-0030', %L, 'FR7643625512382429355294717') $$,
-  (select v from t where k = 'pa4')), '42501', null, 'the client''s administrator does not confirm a liquidator''s account');
-reset role;
-select pg_temp.as_user('05');
-set local role authenticated;
-select is(public.confirm_payout_account('payout-conf-0031', (select v from t where k = 'pa4'), 'FR7643625512382429355294717')
-          ->> 'confirmed_via', 'second_admin', 'a second admin does');
-reset role;
-select pg_temp.as_user('01');
-set local role authenticated;
-select is((select count(*)::int from public.client_payout_account), 4, 'money staff read every payout account of the servicer');
-reset role;
-select pg_temp.as_user('06');
-set local role authenticated;
-select is((select count(*)::int from public.client_payout_account), 0, 'another servicer reads none');
-select throws_ok($$ select * from public.payout_accounts('00000000-0000-0000-0000-0000000000a1') $$, '42501', null,
-  'nor through the read');
-reset role;
-
--- Client status events (2003, L622-7, L641-9): append-only, with evidence ------------------------------------------
-select pg_temp.as_user('04');
-set local role authenticated;
-select throws_ok($$ select public.record_client_status_event('event-0001', '00000000-0000-0000-0000-0000000000a1',
-  'liquidation', private.paris_today() + 1, pg_temp.d('05'), null) $$, '23514', 'client event: the date cannot be in the future',
-  'an event is recorded once it happened');
-select throws_ok($$ select public.record_client_status_event('event-0002', '00000000-0000-0000-0000-0000000000a1',
-  'liquidation', '2026-11-02', pg_temp.d('01'), null) $$, '23514', 'client event: the evidence is required',
-  'its evidence is a document of that kind');
-select throws_ok($$ select public.record_client_status_event('event-0003', '00000000-0000-0000-0000-0000000000a1',
-  'liquidation', '2026-11-02', pg_temp.d('05'), null, (select v from t where k = 'pa2')) $$, '23514', null,
-  'only a court-appointed account is named');
-insert into t select 'ev1', (public.record_client_status_event('event-0004', '00000000-0000-0000-0000-0000000000a1',
-  'liquidation', '2026-11-02', pg_temp.d('05'), 'Jugement du TC de Lyon', (select v from t where k = 'pa4'))
-  ->> 'client_status_event_id')::uuid;
-reset role;
-select is((select array[kind, effective_date::text, note] from public.client_status_event
-           where id = (select v from t where k = 'ev1')),
-  array['liquidation', '2026-11-02', 'Jugement du TC de Lyon'], 'an admin records the liquidation with its evidence');
-select throws_ok($$ update public.client_status_event set note = 'x' $$, '23514', null, 'events are append-only');
-select pg_temp.as_user('01');
-set local role authenticated;
-select throws_ok($$ select public.record_client_status_event('event-0005', '00000000-0000-0000-0000-0000000000a1',
-  'death', '2026-11-02', pg_temp.d('05'), null) $$, '42501', null, 'admins only record them');
-select is((select count(*)::int from public.client_status_event), 1, 'money staff read them');
-reset role;
-select pg_temp.as_user('03');
-set local role authenticated;
-select is((select count(*)::int from public.client_status_event), 0, 'clients do not');
-reset role;
-select pg_temp.as_user('02');
-set local role authenticated;
-select is((select count(*)::int from public.client_status_event), 0, 'nor collectors');
-reset role;
-
 -- Money terms: validators (SQL twin of collectoo_worker.remittance.terms) -----------------------------------------
 select is(private.commission_schedule_error((select v from j where k = 'schedule')), null, 'the §8.1 example is valid');
 select is(private.remittance_terms_error((select v from j where k = 'terms')), null, 'the §8.2 example is valid');
@@ -582,11 +533,26 @@ select lives_ok($$ update public.mandate_terms set valid_to = null
   where mandate_id = '70000000-0000-0000-0000-000000000001' $$, 'or open again');
 select throws_ok($$ delete from public.mandate_terms where mandate_id = '70000000-0000-0000-0000-000000000001' $$, '23514',
   null, 'a version in force is never deleted');
-select throws_ok($$ delete from public.mandate where id = '70000000-0000-0000-0000-000000000002' $$, '23503', null,
-  'a mandate with versions is never deleted (ON DELETE RESTRICT)');
 select throws_ok($$ insert into public.mandate_terms (mandate_id, valid_from, valid_to, commission_rate)
-  values ('70000000-0000-0000-0000-000000000002', '2025-01-01', '2026-01-15', 0.1) $$, '23514', null,
-  'a second version never starts before today (never retroactive)');
+  values ('70000000-0000-0000-0000-000000000002', '2025-01-01', '2026-01-15', 0.1) $$, '23514',
+  'mandate terms refused: starts_too_early', 'a second version never starts before today (never retroactive)');
+-- M5 (a2): no portfolio, a first version that ended in February
+insert into public.mandate (id, organization_id, client_organization_id, reference, mandate_type, signed_on) values
+  ('70000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a2',
+   'MAND-A2-BIS', 'mandate_amicable', '2026-01-15');
+insert into public.mandate_terms (mandate_id, valid_from, valid_to, commission_rate)
+values ('70000000-0000-0000-0000-000000000005', '2026-01-15', '2026-02-01', 0.1);
+select throws_ok($$ insert into public.mandate_terms (mandate_id, valid_from, commission_rate)
+  values ('70000000-0000-0000-0000-000000000005', private.paris_today(), 0.1) $$, '23514',
+  'mandate terms refused: starts_too_early',
+  'nor today: a new version starts tomorrow at the earliest, whoever writes (never on money encaissé that day)');
+select lives_ok($$ insert into public.mandate_terms (mandate_id, valid_from, commission_rate)
+  values ('70000000-0000-0000-0000-000000000005', private.paris_today() + 1, 0.1) $$, 'tomorrow it may');
+select is((select confdeltype::text from pg_constraint where conname = 'mandate_terms_mandate_id_fkey'), 'r',
+  'the versions'' foreign key is ON DELETE RESTRICT');
+select throws_ok($$ delete from public.mandate where id = '70000000-0000-0000-0000-000000000005' $$, '23503',
+  'update or delete on table "mandate" violates foreign key constraint "mandate_terms_mandate_id_fkey" on table "mandate_terms"',
+  'a mandate with versions is never deleted (ON DELETE RESTRICT; no portfolio names it)');
 
 -- set_mandate_terms (admin at aal2) -------------------------------------------------------------------------------
 insert into t select 'm1v1', id from public.mandate_terms where mandate_id = '70000000-0000-0000-0000-000000000001';
@@ -594,7 +560,12 @@ select pg_temp.as_user('04');
 set local role authenticated;
 select throws_ok($$ select public.set_mandate_terms('terms-0001', '70000000-0000-0000-0000-000000000001',
   private.paris_today() - 1, (select v from j where k = 'schedule'), 'art. 6', (select v from j where k = 'terms'), 'art. 7',
-  pg_temp.d('04'), 30, (select v from t where k = 'm1v1')) $$, '23514', null, 'never from a past day');
+  pg_temp.d('04'), 30, (select v from t where k = 'm1v1')) $$, '23514', 'mandate terms refused: starts_too_early',
+  'never from a past day');
+select throws_ok($$ select public.set_mandate_terms('terms-0012', '70000000-0000-0000-0000-000000000001',
+  private.paris_today(), (select v from j where k = 'schedule'), 'art. 6', (select v from j where k = 'terms'), 'art. 7',
+  pg_temp.d('04'), 30, (select v from t where k = 'm1v1')) $$, '23514', 'mandate terms refused: starts_too_early',
+  'nor from today: tomorrow at the earliest (Paris), so money encaissé today stays under the terms in force');
 select throws_ok($$ select public.set_mandate_terms('terms-0002', '70000000-0000-0000-0000-000000000001',
   private.paris_today() + 7, (select v from j where k = 'schedule'), ' ', (select v from j where k = 'terms'), 'art. 7',
   pg_temp.d('04'), 30, (select v from t where k = 'm1v1')) $$, '23514',
@@ -696,7 +667,8 @@ create or replace function pg_temp.committed_batch(p_id uuid, p_portfolio uuid) 
 begin
   insert into public.boarding_batch (id, organization_id, client_organization_id, portfolio_id, version, cut_off_date,
                                      dq_report)
-  select p_id, p.organization_id, p.client_organization_id, p.id, 1, '2026-09-30',
+  select p_id, p.organization_id, p.client_organization_id, p.id,
+         (select coalesce(max(b.version), 0) + 1 from public.boarding_batch b where b.portfolio_id = p.id), '2026-09-30',
          '{"staging": {"opening": {"currencies": {}}}}'
   from public.portfolio p where p.id = p_portfolio;
   perform private.transition_batch(p_id, s, 'test')
@@ -758,6 +730,273 @@ set local role authenticated;
 select throws_ok($$ select public.client_readiness('00000000-0000-0000-0000-0000000000a1') $$, '42501', null,
   'nor another servicer');
 reset role;
+
+-- The liquidator's account (court-appointed): confirmed by a second admin only, never by the client's users (L641-9)
+select pg_temp.as_user('04');
+set local role authenticated;
+select lives_ok($$ select public.retire_payout_account('payout-ret-0001', (select v from t where k = 'pa2'), 'Liquidation') $$,
+  'an admin retires the current account');
+insert into t select 'pa4', (public.propose_payout_account('payout-prop-0030', '00000000-0000-0000-0000-0000000000a1',
+  'EUR', 'FR7643625512382429355294717', 'SELARL MANDATAIRE ès qualités', null, pg_temp.d('03'), 'court_appointed')
+  ->> 'payout_account_id')::uuid;
+reset role;
+select pg_temp.as_user('03');
+set local role authenticated;
+select throws_ok(format($$ select public.confirm_payout_account('payout-conf-0030', %L, 'FR7643625512382429355294717') $$,
+  (select v from t where k = 'pa4')), '42501', 'payout account refused: court_appointed',
+  'the client''s administrator does not confirm a liquidator''s account');
+select throws_ok(format($$ select public.reject_payout_account('payout-rej-0030', %L, 'pas notre compte') $$,
+  (select v from t where k = 'pa4')), '42501', 'payout account refused: court_appointed', 'nor refuses it');
+reset role;
+select pg_temp.as_user('05');
+set local role authenticated;
+select is(public.confirm_payout_account('payout-conf-0031', (select v from t where k = 'pa4'), 'FR7643625512382429355294717')
+          ->> 'confirmed_via', 'second_admin', 'a second admin does');
+reset role;
+select pg_temp.as_user('01');
+set local role authenticated;
+select is((select count(*)::int from public.client_payout_account), 4, 'money staff read every payout account of the servicer');
+reset role;
+select pg_temp.as_user('06');
+set local role authenticated;
+select is((select count(*)::int from public.client_payout_account), 0, 'another servicer reads none');
+select throws_ok($$ select * from public.payout_accounts('00000000-0000-0000-0000-0000000000a1') $$, '42501', null,
+  'nor through the read');
+reset role;
+
+-- Client status events (2003, L622-7, L641-9): append-only, with evidence ------------------------------------------
+-- (a batch of P2 requested before the liquidation is recorded: ready then)
+select pg_temp.committed_batch('30000000-0000-0000-0000-000000000004', '20000000-0000-0000-0000-0000000000a2');
+select pg_temp.as_user('01');
+set local role authenticated;
+select lives_ok($$ select public.confirm_boarding_batch('30000000-0000-0000-0000-000000000004') $$,
+  'a batch of P2 is requested while the client has no event');
+reset role;
+select pg_temp.as_user('04');
+set local role authenticated;
+select throws_ok($$ select public.record_client_status_event('event-0001', '00000000-0000-0000-0000-0000000000a1',
+  'liquidation', private.paris_today() + 1, pg_temp.d('05'), null) $$, '23514', 'client event: the date cannot be in the future',
+  'an event is recorded once it happened');
+select throws_ok($$ select public.record_client_status_event('event-0002', '00000000-0000-0000-0000-0000000000a1',
+  'liquidation', '2026-11-02', pg_temp.d('01'), null) $$, '23514', 'client event: the evidence is required',
+  'its evidence is a document of that kind');
+select throws_ok($$ select public.record_client_status_event('event-0003', '00000000-0000-0000-0000-0000000000a1',
+  'liquidation', '2026-11-02', pg_temp.d('05'), null, (select v from t where k = 'pa2')) $$, '23514', null,
+  'only a court-appointed account is named');
+insert into t select 'ev1', (public.record_client_status_event('event-0004', '00000000-0000-0000-0000-0000000000a1',
+  'liquidation', '2026-11-02', pg_temp.d('05'), 'Jugement du TC de Lyon', (select v from t where k = 'pa4'))
+  ->> 'client_status_event_id')::uuid;
+reset role;
+select is((select array[kind, effective_date::text, note] from public.client_status_event
+           where id = (select v from t where k = 'ev1')),
+  array['liquidation', '2026-11-02', 'Jugement du TC de Lyon'], 'an admin records the liquidation with its evidence');
+select throws_ok($$ update public.client_status_event set note = 'x' $$, '23514', null, 'events are append-only');
+select pg_temp.as_user('01');
+set local role authenticated;
+select throws_ok($$ select public.record_client_status_event('event-0005', '00000000-0000-0000-0000-0000000000a1',
+  'death', '2026-11-02', pg_temp.d('05'), null) $$, '42501', null, 'admins only record them');
+select is((select count(*)::int from public.client_status_event), 1, 'money staff read them');
+reset role;
+select pg_temp.as_user('03');
+set local role authenticated;
+select is((select count(*)::int from public.client_status_event), 0, 'clients do not');
+reset role;
+select pg_temp.as_user('02');
+set local role authenticated;
+select is((select count(*)::int from public.client_status_event), 0, 'nor collectors');
+reset role;
+
+-- Once the liquidation is recorded, the client's own users act on no payout account (L641-9 I); money staff still do
+select pg_temp.as_user('01');
+set local role authenticated;
+insert into t select 'pa5', (public.propose_payout_account('payout-prop-0040', '00000000-0000-0000-0000-0000000000a1',
+  'EUR', 'FR7611790967787158343046874', 'MARTIN SAS', null, pg_temp.d('01')) ->> 'payout_account_id')::uuid;
+reset role;
+select pg_temp.as_user('03');
+set local role authenticated;
+select throws_ok(format($$ select public.confirm_payout_account('payout-conf-0040', %L, 'FR7611790967787158343046874') $$,
+  (select v from t where k = 'pa5')), '42501', 'payout account refused: court_appointed',
+  'after the liquidation, the client''s administrator confirms no IBAN, even of its own kind');
+select throws_ok(format($$ select public.reject_payout_account('payout-rej-0040', %L, 'non') $$,
+  (select v from t where k = 'pa5')), '42501', 'payout account refused: court_appointed', 'refuses none');
+select throws_ok(format($$ select public.retire_payout_account('payout-ret-0040', %L, 'non') $$,
+  (select v from t where k = 'pa4')), '42501', 'payout account refused: court_appointed', 'and retires none');
+reset role;
+select is((select status from public.client_payout_account where id = (select v from t where k = 'pa5')), 'proposed',
+  'the proposal waits for the servicer');
+select pg_temp.as_user('04');
+set local role authenticated;
+select is(public.reject_payout_account('payout-rej-0041', (select v from t where k = 'pa5'), 'Le liquidateur a son compte')
+          ->> 'status', 'rejected', 'money staff decide it');
+reset role;
+
+-- The gate stops on the client's recorded events, each named with its date (C. civ. 2003; liquidation: product choice)
+select is(private.portfolio_confirmation_blockers('20000000-0000-0000-0000-0000000000a1', private.paris_today()),
+  array['client_in_liquidation:2026-11-02'], 'P1: its client is in liquidation since 2 November');
+select is(private.portfolio_confirmation_blockers('20000000-0000-0000-0000-0000000000a1', '2026-11-01'), '{}'::text[],
+  'not on a day before the event');
+select is(private.complete_batch_confirmation('30000000-0000-0000-0000-000000000004'), 'not_ready',
+  'the job checks the events again: the batch requested before the liquidation is not confirmed');
+select is((select array[status, failed_job ->> 'error', failed_job ->> 'blockers'] from public.boarding_batch
+           where id = '30000000-0000-0000-0000-000000000004'),
+  array['committed', 'not_ready', '["client_in_liquidation:2026-11-02"]'], 'back to committed with the event and its date');
+select pg_temp.as_user('01');
+set local role authenticated;
+select throws_ok($$ select public.confirm_boarding_batch('30000000-0000-0000-0000-000000000004') $$, '23514',
+  'the portfolio is not ready for confirmation: client_in_liquidation:2026-11-02', 'nor requested again');
+reset role;
+select pg_temp.as_user('04');
+set local role authenticated;
+select lives_ok($$ select public.record_client_status_event('event-0010', '00000000-0000-0000-0000-0000000000a2',
+  'proceeding_opened', '2026-11-03', pg_temp.d('09'), null) $$, 'a2: a proceeding opened');
+reset role;
+select is(private.portfolio_confirmation_blockers('20000000-0000-0000-0000-0000000000a3', private.paris_today()),
+  array['commission_schedule_missing', 'commission_clause_missing', 'remittance_terms_missing', 'remittance_clause_missing',
+        'terms_document_missing', 'client_not_professional', 'client_not_mainland_france'],
+  'a proceeding opened does not stop the gate (servicing goes on, design §13 #9)');
+select pg_temp.as_user('04');
+set local role authenticated;
+select lives_ok($$ select public.record_client_status_event('event-0011', '00000000-0000-0000-0000-0000000000a2',
+  'mandate_ended', '2026-11-05', pg_temp.d('09'), null) $$, 'the mandate ended');
+select lives_ok($$ select public.record_client_status_event('event-0012', '00000000-0000-0000-0000-0000000000a2',
+  'guardianship', '2026-11-04', pg_temp.d('09'), null) $$, 'a guardianship');
+select lives_ok($$ select public.record_client_status_event('event-0013', '00000000-0000-0000-0000-0000000000a2',
+  'death', '2026-11-06', pg_temp.d('09'), null) $$, 'a death');
+reset role;
+select is(private.portfolio_confirmation_blockers('20000000-0000-0000-0000-0000000000a3', private.paris_today()),
+  array['client_mandate_ended:2026-11-04', 'client_deceased:2026-11-06', 'commission_schedule_missing',
+        'commission_clause_missing', 'remittance_terms_missing', 'remittance_clause_missing', 'terms_document_missing',
+        'client_not_professional', 'client_not_mainland_france'],
+  'P3: the mandate ended (the earliest of its end and the guardianship), the death; then the other reasons');
+select is(private.portfolio_confirmation_blockers('20000000-0000-0000-0000-0000000000a3', '2026-11-05'),
+  array['client_mandate_ended:2026-11-04', 'commission_schedule_missing', 'commission_clause_missing',
+        'remittance_terms_missing', 'remittance_clause_missing', 'terms_document_missing', 'client_not_professional',
+        'client_not_mainland_france'], 'each event from its date');
+
+-- A credit from a client's IBAN released as a debtor payment the client relays --------------------------------------
+insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                   size_bytes, storage_path)
+values ('e2000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf',
+        'EUR', 'camt053', 'r.xml', repeat('c', 64), 1, 'test/e2');
+update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = 'e2000000-0000-0000-0000-000000000001';
+insert into public.bank_transaction (id, organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+                                     amount_minor, currency, booking_date, kind, end_to_end_id, counterparty_iban,
+                                     counterparty_name, remittance_text)
+values ('e2100000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf',
+        'e2000000-0000-0000-0000-000000000001', 1, 't:CL1', 'credit', 2500, 'EUR', '2026-11-06', 'client_transfer_in',
+        'E2E-CL1', 'FR7642606140114176606002310', 'MARTIN SAS', 'REGLEMENT DUPONT DOSSIER 12'),
+       ('e2100000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf',
+        'e2000000-0000-0000-0000-000000000001', 2, 't:CL2', 'credit', 900, 'EUR', '2026-11-06', 'debtor_credit',
+        'E2E-CL2', 'FR7616693172992875188907588', 'M. DURAND', null);
+select pg_temp.as_user('01');
+set local role authenticated;
+select is((select count(*)::int from public.debit_queue('a-classer', 0, 100) q
+           where q.bank_transaction_id = 'e2100000-0000-0000-0000-000000000001'), 1,
+  'a credit from a client''s IBAN waits in « À classer »');
+select throws_ok($$ select public.release_own_credit('release-cl-0001', 'e2100000-0000-0000-0000-000000000001', ' ') $$,
+  '23514', 'own credit release refused: reason_required', 'its release needs a motif');
+select throws_ok($$ select public.release_own_credit('release-cl-0002', 'e2100000-0000-0000-0000-000000000002', 'x') $$,
+  '23514', 'own credit release refused: not_own_credit', 'a debtor''s credit is not released (it is a payment already)');
+insert into t select 'relay_cl', (public.release_own_credit('release-cl-0003', 'e2100000-0000-0000-0000-000000000001',
+  'Martin SAS nous reverse le paiement de M. Dupont') ->> 'payment_id')::uuid;
+select is(public.release_own_credit('release-cl-0003', 'e2100000-0000-0000-0000-000000000001',
+  'Martin SAS nous reverse le paiement de M. Dupont'),
+  jsonb_build_object('payment_id', (select v from t where k = 'relay_cl'), 'status', 'unmatched'),
+  'ops release it as a debtor payment the client relays (a replay returns the same)');
+select throws_ok($$ select public.release_own_credit('release-cl-0004', 'e2100000-0000-0000-0000-000000000001', 'encore') $$,
+  '23514', 'own credit release refused: already_booked', 'once');
+select is((select count(*)::int from public.debit_queue('a-classer', 0, 100) q
+           where q.bank_transaction_id = 'e2100000-0000-0000-0000-000000000001'), 0, 'it leaves « À classer »');
+reset role;
+select is((select array[p.status, p.review_reason, p.payer_name, coalesce(p.payer_iban, '-'), p.amount_minor::text,
+                        p.booking_date::text, p.method, p.remittance_text]
+           from public.payment p where p.id = (select v from t where k = 'relay_cl')),
+  array['unmatched', 'no_match', 'Versement relayé par le client', '-', '2500', '2026-11-06', 'other',
+        'REGLEMENT DUPONT DOSSIER 12'],
+  'a payment of the dedicated account, for ops to assign; never the client''s IBAN as payer');
+select is((select count(*)::int from public.bank_own_credit_release
+           where bank_transaction_id = 'e2100000-0000-0000-0000-000000000001'), 1, 'ops'' decision and motif kept');
+
+-- « Nouvel IBAN »: until a payout of that client to that IBAN is booked and not returned (founder #10) ------------------
+create or replace function pg_temp.entry(p_key text) returns uuid language plpgsql as $$
+declare v uuid;
+begin
+  perform private.ledger_post_set_begin();
+  insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key, source_type,
+                                  source_id)
+  values (1, '00000000-0000-0000-0000-0000000000aa', 'cash_in', '2026-11-06', p_key, 'bank_statement',
+          'e2000000-0000-0000-0000-000000000001');
+  insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency, bank_account_id) values
+    (1, 1, 'client_money_cash', 100, 'EUR', '80000000-0000-0000-0000-0000000000cf'),
+    (1, 2, 'unallocated_payment', -100, 'EUR', null);
+  select r.entry_id into v from private.ledger_post_set() r;
+  return v;
+end $$;
+create or replace function pg_temp.payout(p_e2e text, p_client text, p_iban text) returns uuid language sql as $$
+  insert into public.bank_transfer (organization_id, client_organization_id, kind, debtor_bank_account_id, currency,
+                                    amount_minor, payee_name, payee_iban, end_to_end_id, requested_execution_date)
+  values ('00000000-0000-0000-0000-0000000000aa', ('00000000-0000-0000-0000-0000000000' || p_client)::uuid, 'payout',
+          '80000000-0000-0000-0000-0000000000cf', 'EUR', 100, 'PAYEE', p_iban, p_e2e, '2026-11-09')
+  returning id;
+$$;
+select throws_ok($$ insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id, currency, amount_minor,
+  payee_name, payee_iban, end_to_end_id, requested_execution_date) values ('00000000-0000-0000-0000-0000000000aa', 'payout',
+  '80000000-0000-0000-0000-0000000000cf', 'EUR', 100, 'X', 'FR7663953752338647431575659', 'RMT0000000000F1', '2026-11-09') $$,
+  '23514', null, 'a payout names its client');
+select throws_ok($$ select pg_temp.payout('RMT0000000000F2', 'b1', 'FR7663953752338647431575659') $$, '23514',
+  'bank transfer: a payout goes to a client of the servicer', 'a client of the servicer');
+-- a1: a payout booked to pa2's IBAN; one to pa1's that came back; a2: one booked to pa4's IBAN (another client's)
+insert into t values ('t1', pg_temp.payout('RMT0000000000A1', 'a1', 'FR7663953752338647431575659')),
+                     ('t2', pg_temp.payout('RMT0000000000A2', 'a1', 'FR7642606140114176606002310')),
+                     ('t3', pg_temp.payout('RMT0000000000A3', 'a2', 'FR7643625512382429355294717')),
+                     ('e1', pg_temp.entry('payout:t1')), ('e2', pg_temp.entry('payout:t2')),
+                     ('e2r', pg_temp.entry('payout:t2r')), ('e3', pg_temp.entry('payout:t3'));
+update public.bank_transfer x set status = 'booked', entry_id = e.v
+from t p join t e on e.k = 'e' || substr(p.k, 2) where p.k in ('t1', 't2', 't3') and x.id = p.v;
+update public.bank_transfer set status = 'returned', return_entry_id = (select v from t where k = 'e2r')
+where id = (select v from t where k = 't2');
+select is((select count(*)::int from public.bank_transfer where kind = 'payout' and status = 'booked'), 2,
+  'two payouts booked, one returned');
+select throws_ok($$ update public.bank_transfer set client_organization_id = '00000000-0000-0000-0000-0000000000a2'
+  where end_to_end_id = 'RMT0000000000A1' $$, '23514', null, 'the client of a payout never changes');
+select pg_temp.as_user('01');
+set local role authenticated;
+select is((select array_agg(iban_last4 || ':' || status || ':' || paid_before order by iban_last4)
+           from public.payout_accounts('00000000-0000-0000-0000-0000000000a1')),
+  array['2310:retired:false', '4717:active:false', '5659:retired:true', '6874:rejected:false'],
+  'paid before: the IBAN a payout of that client was booked to; not the one whose payout came back, nor one only '
+  'another client''s payout went to');
+reset role;
+
+-- The import's classification joins the lines with the clients' IBANs once (plan robustness, review fix) --------------
+create temp table _bi_stage (line_no integer primary key, kind text, direction text, end_to_end_id text,
+                             counterparty_iban text) on commit drop;
+insert into _bi_stage
+select g, 'debtor_credit', 'credit', 'E2E-' || g,
+       case g % 4 when 0 then 'FR7642606140114176606002310'      -- a1's, retired: still the client's
+                  when 1 then 'FR7611790967787158343046874'      -- a proposal refused: never confirmed
+                  when 2 then 'FR7623754538827637495136203'      -- our own account
+                  else 'FR7616693172992875188907588' end         -- a debtor's
+from generate_series(1, 4000) g;
+analyze _bi_stage;
+create temp table _mark_cpa (seq_scan bigint, idx_scan bigint);
+insert into _mark_cpa select x.seq_scan, x.idx_scan from pg_stat_xact_user_tables x
+where x.relid = 'public.client_payout_account'::regclass;
+create temp table _refined as
+select * from private.stage_refined_kinds('00000000-0000-0000-0000-0000000000aa', array['FR7623754538827637495136203']);
+select is((select array_agg(k.kind || ':' || k.n order by k.kind)
+           from (select r.kind, count(*) as n from _refined r group by r.kind) k),
+  array['client_transfer_in:1000', 'own_transfer_in:1000'],
+  'the lines from a client''s confirmed IBAN are the client''s, from our own IBAN ours; the others unchanged');
+select is((select (x.seq_scan + x.idx_scan) - (m.seq_scan + m.idx_scan) from pg_stat_xact_user_tables x, _mark_cpa m
+           where x.relid = 'public.client_payout_account'::regclass), 1::bigint,
+  'the clients'' IBANs are read once for the 4 000 lines (one join), never per line');
+drop table _bi_stage;
+
+select is((select array_agg(indexname::text order by indexname) from pg_indexes
+           where indexname in ('document_client_kind_idx', 'bank_transfer_payout_iban_idx')),
+  array['bank_transfer_payout_iban_idx', 'document_client_kind_idx'],
+  'a client''s documents by kind, and the payouts of a client by IBAN, are indexed');
 
 -- The receipt issuer block (R123-237 1°–4°, 9°; R123-238) -----------------------------------------------------
 select is(private.receipt_issuer('00000000-0000-0000-0000-0000000000aa'),

@@ -431,17 +431,23 @@ isOneToOne: false
                   ]
                 },"bank_transfer": {
                   Row: {
-                    "amount_minor": number,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"created_at": string,"creditor_bank_account_id": string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id": string | null,"id": string,"kind": string,"ordered_by": string | null,"organization_id": string,"payee_bic": string | null,"payee_iban": string,"payee_name": string,"reason": string | null,"remittance_info": string | null,"requested_execution_date": string,"return_entry_id": string | null,"status": string,"updated_at": string
+                    "amount_minor": number,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"client_organization_id": string | null,"created_at": string,"creditor_bank_account_id": string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id": string | null,"id": string,"kind": string,"ordered_by": string | null,"organization_id": string,"payee_bic": string | null,"payee_iban": string,"payee_name": string,"reason": string | null,"remittance_info": string | null,"requested_execution_date": string,"return_entry_id": string | null,"status": string,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "amount_minor": number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id"?: string | null,"id"?: string,"kind": string,"ordered_by"?: string | null,"organization_id": string,"payee_bic"?: string | null,"payee_iban": string,"payee_name": string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date": string,"return_entry_id"?: string | null,"status"?: string,"updated_at"?: string
+                    "amount_minor": number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id"?: string | null,"id"?: string,"kind": string,"ordered_by"?: string | null,"organization_id": string,"payee_bic"?: string | null,"payee_iban": string,"payee_name": string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date": string,"return_entry_id"?: string | null,"status"?: string,"updated_at"?: string
                   }
                   Update: {
-                    "amount_minor"?: number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency"?: string,"debtor_bank_account_id"?: string,"end_to_end_id"?: string,"entry_id"?: string | null,"id"?: string,"kind"?: string,"ordered_by"?: string | null,"organization_id"?: string,"payee_bic"?: string | null,"payee_iban"?: string,"payee_name"?: string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date"?: string,"return_entry_id"?: string | null,"status"?: string,"updated_at"?: string
+                    "amount_minor"?: number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency"?: string,"debtor_bank_account_id"?: string,"end_to_end_id"?: string,"entry_id"?: string | null,"id"?: string,"kind"?: string,"ordered_by"?: string | null,"organization_id"?: string,"payee_bic"?: string | null,"payee_iban"?: string,"payee_name"?: string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date"?: string,"return_entry_id"?: string | null,"status"?: string,"updated_at"?: string
                   }
                   Relationships: [
                     {
+      foreignKeyName: "bank_transfer_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
       foreignKeyName: "bank_transfer_creditor_fk"
       columns: ["creditor_bank_account_id","organization_id","currency"]
 isOneToOne: false

@@ -2,7 +2,8 @@
 ops and confirmed by a second person (the client's administrator at aal2, founder #10), through the
 commands as the API runs them; a credit from that IBAN on the dedicated account is then the
 client's money (`client_transfer_in`, design §12) — read so by the parser and by the import — and
-never a debtor payment, while the same credit before the confirmation was one. Design
+never a debtor payment by itself, while the same credit before the confirmation was one; ops may
+release it as a debtor's payment the client relays (review fix). Design
 docs/design/m2c-remittances.md §6.1, §12, §16."""
 
 import hashlib
@@ -46,6 +47,23 @@ def _payments(tenant: dict[str, Any]) -> int:
         )
 
 
+def _admin(tenant: dict[str, Any]) -> str:
+    """An admin of the tenant's servicer (the ops manager is its only staff member)."""
+    admin = uuid.uuid4()
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            "insert into auth.users (id, email, aud, role)"
+            " values (%s, %s, 'authenticated', 'authenticated')",
+            (admin, f"{admin}@s.test"),
+        )
+        conn.execute(
+            "insert into public.membership (user_id, organization_id, role)"
+            " values (%s, %s, 'admin')",
+            (admin, tenant["servicer"]),
+        )
+    return str(admin)
+
+
 def _kind(line: str) -> str:
     with psycopg.connect(DB) as conn:
         return str(one(conn, "select kind from public.bank_transaction where id = %s", (line,)))
@@ -80,8 +98,10 @@ def test_a_confirmed_payout_iban_makes_its_credits_the_clients_money() -> None:
         key,
         hashlib.sha256(rib).hexdigest(),
     )
+    # an admin of the servicer proposes it (the confirmer is then a second person)
+    admin = _admin(tenant)
     proposal = _as(
-        tenant["staff"],
+        admin,
         "select public.propose_payout_account(%s, %s, 'EUR', %s, 'C SAS', null, %s)",
         str(uuid.uuid4()),
         tenant["client"],
@@ -93,7 +113,11 @@ def test_a_confirmed_payout_iban_makes_its_credits_the_clients_money() -> None:
     import_entries(tenant, store, [credit(2, 6_000)], day=DAY, opening=5_000)
     assert _kind(line_id(tenant, f"A2{tag}")) == "debtor_credit"
 
-    # the person who proposed it cannot confirm it; the client's administrator does, at aal2
+    # the admin who proposed it cannot confirm it, although admins confirm (a second person does)
+    with pytest.raises(psycopg.errors.CheckViolation, match="cannot confirm it"):
+        _as(admin, "select public.confirm_payout_account(%s, %s, %s)",
+            str(uuid.uuid4()), account, client_iban)  # fmt: skip
+    # an ops manager confirms nothing; the client's administrator does, at aal2
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         _as(tenant["staff"], "select public.confirm_payout_account(%s, %s, %s)",
             str(uuid.uuid4()), account, client_iban)  # fmt: skip
@@ -115,3 +139,24 @@ def test_a_confirmed_payout_iban_makes_its_credits_the_clients_money() -> None:
     assert _kind(line) == "client_transfer_in"
     assert review_of(line) == "client_credit"
     assert _payments(tenant) == 2
+
+    # unless ops know it is a debtor's payment the client relays: released, it becomes a payment
+    released = _as(
+        tenant["staff"],
+        "select public.release_own_credit(%s, %s, %s)",
+        str(uuid.uuid4()),
+        line,
+        "C SAS nous reverse le paiement d'un débiteur",
+    )
+    assert released["status"] == "unmatched"
+    assert _payments(tenant) == 3
+    with psycopg.connect(DB) as conn:
+        payer = one(
+            conn,
+            "select payer_name from public.payment where id = %s",
+            (released["payment_id"],),
+        )
+    assert payer == "Versement relayé par le client"
+    with pytest.raises(psycopg.errors.CheckViolation, match="already_booked"):
+        _as(tenant["staff"], "select public.release_own_credit(%s, %s, 'encore')",
+            str(uuid.uuid4()), line)  # fmt: skip
