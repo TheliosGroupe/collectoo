@@ -12,26 +12,37 @@ M2-15; ADR-0014 M2c-4 addendum).
 * N = 0: a run whose collection was undone in it is booked at approval with nothing posted;
 * cancellation before the transfer is in a file: one full credit note per invoice, the lines
   released, the items back in the queue, the tier history restored, and the next run prices them
-  again;
+  again; a cancelled run's credit note on an earlier invoice restored by a corrective invoice at
+  that invoice's rate, so the next run credits each reversal once (the VAT rate changed meanwhile);
+* numbering: the counter row's lock alone serialises two issuers (no advisory lock);
+* « Valider »: a run a job holds is refused alone ('busy'), the others queued; a command that waits
+  past its lock timeout on the allocation lock says so ('allocation_busy');
 * the schedule (a frozen Paris time): a draft on a scheduled day, the deadline guard on another day;
-* R124-6: an item past its latest execution date writes a breach row and a violation; a stale page
-  (its inputs hash) is refused without queuing.
+* R124-6: an item past its latest execution date writes a breach row and a violation, and its late
+  approval is recorded with the reason and the date; a stale page (its inputs hash) is refused
+  without queuing.
 """
 
 from __future__ import annotations
 
+import json
 import threading
+import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import psycopg
 import pytest
+from allocation_helpers import File, Item, create_file, credit, statement
 from debit_helpers import checks
-from integration_helpers import DB, one
+from integration_helpers import DB, one, storage
 from psycopg.types.json import Jsonb
 from remittance_helpers import (
+    add_admin,
     add_client,
     approve,
     documents,
@@ -39,6 +50,7 @@ from remittance_helpers import (
     entry_books,
     next_business_day,
     paid_file,
+    recent_business_day,
     remittance_tenant,
     request_run,
     run_row,
@@ -212,14 +224,30 @@ def test_one_stale_run_never_blocks_the_others() -> None:
     assert stale["last_failure"]["code"] == "payout_blocked:payout_account_missing"
     assert fine["status"] == "approved"
     assert documents(ra) == [] and len(documents(rb)) == 1
-    # a page that showed an older version is refused, nothing queued
+    # a page that showed an older version of a draft is refused as stale, nothing queued
+    c = add_client(a, "Page ancienne")
+    paid_file(c, 70_000)
+    rc = request_run(c)
     refused = staff(
         a,
         "select public.approve_remittance_runs(%s, %s::jsonb)",
         str(uuid.uuid4()),
-        f'[{{"run_id": "{rb}", "inputs_hash": "{"0" * 64}", "net_text": "1"}}]',
+        json.dumps(
+            [
+                {
+                    "run_id": rc,
+                    "inputs_hash": "0" * 64,
+                    "net_text": str(run_row(rc)["net_minor"]),
+                }
+            ]
+        ),
     )
-    assert refused["results"][0]["status"] == "refused"
+    assert (refused["results"][0]["status"], refused["results"][0]["reason"]) == (
+        "refused",
+        "stale",
+    )
+    assert run_row(rc)["job"] is None
+    assert _queued_approvals(rc) == 0
 
 
 def test_a_run_whose_collection_was_undone_in_it_is_booked_at_once() -> None:
@@ -363,6 +391,31 @@ def test_a_collection_past_its_latest_execution_date_is_a_breach() -> None:
     approve(tenant, run, day=next_business_day(), late_reason="Encaissement identifié tardivement")
     drain()
     assert run_row(run)["status"] == "approved"
+    with psycopg.connect(DB) as conn:
+        late = conn.execute(
+            """select a.latest_execution_date, a.requested_execution_date, a.late_reason,
+                      a.approved_by::text
+               from public.remittance_late_approval a
+               join public.remittance_line l on l.run_id = a.run_id
+                 and l.ledger_entry_id = a.ledger_entry_id
+               where a.run_id = %s""",
+            (run,),
+        ).fetchall()
+        kept = conn.execute(
+            """select late_reason from public.remittance_deadline_breach
+               where client_organization_id = %s""",
+            (tenant["client"],),
+        ).fetchall()
+    # the nightly's breach row came first (append-only, one per item): the late approval is apart
+    assert late == [
+        (
+            date(2026, 11, 3),
+            next_business_day(),
+            "Encaissement identifié tardivement",
+            tenant["staff"],
+        )
+    ]
+    assert kept == [(None,)]
 
 
 def _book_payout(run: str) -> None:
@@ -487,3 +540,330 @@ def test_the_worked_example_continues_a_credit_note_on_a_settled_invoice() -> No
     # (the emulated debit has no bank line: I19 flags it; M2c-6 books from the statement)
     found = _remittance_violations(str(run_checks["run_id"]))
     assert [code for code, _ in found if code != "bank_cash_identity"] == []
+
+
+def _queued_approvals(run: str) -> int:
+    with psycopg.connect(DB) as conn:
+        return int(
+            one(
+                conn,
+                """select count(*) from pgmq.q_remittances
+                   where message ->> 'type' = 'approve' and message ->> 'run_id' = %s""",
+                (run,),
+            )
+        )
+
+
+@contextmanager
+def _vat_rate_from_today(rate: str) -> Iterator[None]:
+    """Another standard rate from today (a change of the reference data), restored afterwards."""
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute("alter table public.vat_rate disable trigger vat_rate_guard")
+        conn.execute(
+            "update public.vat_rate set valid_to = private.paris_today()"
+            " where valid_from = '2014-01-01'"
+        )
+        conn.execute(
+            """insert into public.vat_rate (code, territory, rate, valid_from, valid_to, legal_ref,
+                 legal_url) values ('standard', 'FR-metro', %s, private.paris_today(), '2027-01-01',
+                 'test', 'https://librejustice.fr/norm/fr/code-general-des-impots/278')""",
+            (rate,),
+        )
+        conn.execute("alter table public.vat_rate enable always trigger vat_rate_guard")
+    try:
+        yield
+    finally:
+        with psycopg.connect(DB) as conn, conn.transaction():
+            conn.execute("alter table public.vat_rate disable trigger vat_rate_guard")
+            conn.execute("delete from public.vat_rate where legal_ref = 'test'")
+            conn.execute(
+                "update public.vat_rate set valid_to = '2027-01-01' where valid_from = '2014-01-01'"
+            )
+            conn.execute("alter table public.vat_rate enable always trigger vat_rate_guard")
+
+
+@pytest.mark.parametrize("rate_change", [False, True], ids=["same-rate", "rate-changed"])
+def test_a_cancelled_runs_credit_note_is_restored_and_the_reversal_credited_once(  # noqa: PLR0915
+    rate_change: bool,
+) -> None:
+    """Money review #0: A 2 000 € and B 1 500 € on file F (15 %): FC-1 525 € HT, debited. Then C
+    3 000 € on F and B undone: RV-2 invoices 450 € and credits 225 € on FC-1; RV-2 cancelled: its
+    invoice credited in full, and its credit note on FC-1 restored by a corrective invoice of 225 €
+    at FC-1's own rate. RV-3 (C and B's reversal again) invoices 450 € « 15 % sur 3 000 € » and
+    credits B once, on the corrective invoice; FC-1 still charges A's 300 €. With the VAT rate at
+    10 % from RV-2's cancellation, C is invoiced at 10 % and the credits stay at 20 %: the VAT of
+    all the documents is A's at 20 % plus C's at 10 %."""
+    tenant = remittance_tenant()
+    admin = add_admin(tenant)
+    f = create_file(
+        tenant,
+        File(
+            f"F-{uuid.uuid4().hex[:8]}",
+            "b2b",
+            "Débiteur SARL",
+            [Item("INV-1", {"principal": 700_000}, date(2026, 9, 1))],
+        ),
+    )
+    store = storage()
+    (pa,) = statement(
+        tenant, store, [credit(200_000, rf=f.rf)], "RA", recent_business_day(8)
+    ).values()
+    (pb,) = statement(
+        tenant, store, [credit(150_000, rf=f.rf)], "RB", recent_business_day(6)
+    ).values()
+    rv1 = request_run(tenant)
+    approve(tenant, rv1)
+    drain()
+    assert run_row(rv1)["status"] == "approved", run_row(rv1)["last_failure"]
+    _book_payout(rv1)
+    (fc1,) = documents(rv1)
+    assert fc1["ht_minor"] == 52_500
+    statement(tenant, store, [credit(300_000, rf=f.rf)], "RC", recent_business_day(3))
+    eb = one_value(
+        "select id from public.ledger_entry where payment_id = %s and entry_type = 'allocation'", pb
+    )
+    staff(
+        tenant,
+        "select public.reverse_allocation(%s, %s, %s, %s::uuid[], %s)",
+        str(uuid.uuid4()),
+        pb,
+        f.id,
+        [str(eb)],
+        "paiement repris par la banque",
+    )
+    rb_ = str(one_value("select id from public.ledger_entry where reverses_entry_id = %s", eb))
+    rv2 = request_run(tenant)
+    approve(tenant, rv2)
+    drain()
+    done = run_row(rv2)
+    assert done["status"] == "approved", done["last_failure"]
+    assert [(d["kind"], d["ht_minor"]) for d in documents(rv2)] == [
+        ("invoice", 45_000),
+        ("credit_note", -22_500),
+    ]
+    rate = "0.1000" if rate_change else "0.2000"
+    with _vat_rate_from_today(rate) if rate_change else _same_rate():
+        cancelled = staff(
+            tenant,
+            "select public.cancel_remittance_run(%s, %s, %s, %s)",
+            str(uuid.uuid4()),
+            rv2,
+            done["version"],
+            "IBAN à vérifier",
+            user=admin,
+        )
+        assert cancelled["status"] == "cancelled"
+        with psycopg.connect(DB) as conn:
+            restore = conn.execute(
+                """select i.id::text, i.ht_minor, i.vat_minor, i.vat_rate::text, i.settlement,
+                          (select designation_fr from public.commission_invoice_line l
+                           where l.invoice_id = i.id)
+                   from public.commission_invoice i
+                   where i.run_id = %s and i.kind = 'invoice' and i.reason = 'run_cancelled'""",
+                (rv2,),
+            ).fetchone()
+        assert restore is not None
+        assert restore[1:5] == (22_500, 4_500, "0.2000", "netted")  # FC-1's rate, whatever today's
+        assert restore[5].startswith(f"Annulation du reversement {done['number']} — rétablissement")
+        rv3 = request_run(tenant)
+        draft = run_row(rv3)
+        # the same net as if RV-2 had been paid: C less its invoice, plus FC-1's credit owed back
+        c_ttc = 45_000 + (4_500 if rate_change else 9_000)
+        assert (draft["refund_minor"], draft["net_minor"]) == (27_000, 150_000 + 27_000 - c_ttc), (
+            draft["last_failure"]
+        )
+        approve(tenant, rv3)
+        drain()
+        assert run_row(rv3)["status"] == "approved", run_row(rv3)["last_failure"]
+    with psycopg.connect(DB) as conn:
+        docs3 = conn.execute(
+            """select i.kind, i.ht_minor, i.vat_minor,
+                      (select jsonb_agg(l.tiers) from public.commission_invoice_line l
+                       where l.invoice_id = i.id),
+                      (select array_agg(c.original_invoice_id::text)
+                       from public.commission_credit_correction c where c.credit_note_id = i.id)
+               from public.commission_invoice i where i.run_id = %s order by i.seq""",
+            (rv3,),
+        ).fetchall()
+        credits_of_b = one(
+            conn,
+            """select count(*) from public.commission_credit_alloc a
+               join public.commission_invoice n on n.id = a.credit_note_id
+               join public.remittance_run r on r.id = n.run_id and r.status <> 'cancelled'
+               where a.entry_id = %s""",
+            (rb_,),
+        )
+        fc1_open = one(
+            conn,
+            """select ch.charged_minor + coalesce((select sum(a.ht_minor)
+                 from public.commission_credit_alloc a where a.original_invoice_id = ch.invoice_id
+                   and a.account_id = ch.account_id and a.tier_key = ch.tier_key), 0)
+               from public.commission_invoice_charge ch
+               join public.commission_invoice i on i.id = ch.invoice_id
+               where i.run_id = %s""",
+            (rv1,),
+        )
+        state = one(
+            conn,
+            """select commission_minor from public.remittance_key_state where account_id = %s
+               order by seq desc limit 1""",
+            (f.id,),
+        )
+        vat = one(
+            conn,
+            "select sum(vat_minor) from public.commission_invoice"
+            " where client_organization_id = %s",
+            (tenant["client"],),
+        )
+    inv, crn = docs3
+    # the invoice's HT is its designation's: 15 % of the 3 000 € collected, no more
+    assert inv[:3] == ("invoice", 45_000, 4_500 if rate_change else 9_000)
+    assert inv[3] == [[["0.15", "300000"]]]
+    # B's reversal credited once among the live runs, on the corrective invoice, at its 20 %
+    assert (crn[0], crn[1], crn[2], crn[4]) == ("credit_note", -22_500, -4_500, [restore[0]])
+    assert credits_of_b == 1
+    assert fc1_open == 30_000  # A's commission still on FC-1
+    assert state == 75_000  # A + C
+    assert vat == 6_000 + (4_500 if rate_change else 9_000)
+    del pa
+
+
+@contextmanager
+def _same_rate() -> Iterator[None]:
+    yield
+
+
+def test_the_counter_row_alone_serialises_two_issuers() -> None:
+    """Tests-ui #7: without the allocation and remit locks, an issuer waits on the counter row a
+    first one holds (its lock, not the advisory ones, keeps the numbers gapless), then takes the
+    next number; two issuers started together take consecutive numbers."""
+    tenant = remittance_tenant()
+
+    def doc(key: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": str(uuid.uuid4()),
+                "ref": key,
+                "key": f"test-{key}-{uuid.uuid4()}",
+                "kind": "invoice",
+                "mandate_id": tenant["mandate"],
+                "ht": "1000",
+                "vat": "200",
+                "ttc": "1200",
+                "vat_rate": "0.2",
+                "settlement": "netted",
+                "lines": [
+                    {
+                        "kind": "commission",
+                        "designation_fr": "Test",
+                        "ht": "1000",
+                        "vat_rate": "0.2",
+                    }
+                ],
+            }
+        ]
+
+    def issue(conn: psycopg.Connection[Any], key: str) -> int:
+        out = one(
+            conn,
+            "select private.issue_commission_documents(%s, %s, null, %s, 'commission')",
+            (tenant["servicer"], tenant["client"], Jsonb(doc(key))),
+        )
+        number = str(out["documents"][key]["number"])
+        return int(number.rsplit("-", 1)[1])
+
+    with psycopg.connect(DB) as conn:
+        first = issue(conn, "first")
+    seqs: dict[str, int] = {}
+    pids: dict[str, int] = {}
+    errors: list[BaseException] = []
+
+    def waiter(key: str) -> None:
+        try:
+            with psycopg.connect(DB) as conn:
+                pids[key] = conn.info.backend_pid
+                seqs[key] = issue(conn, key)
+        except BaseException as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    with psycopg.connect(DB) as holder:
+        holder.execute(
+            "select last_seq from private.invoice_counter where organization_id = %s for update",
+            (tenant["servicer"],),
+        )
+        t = threading.Thread(target=waiter, args=("second",))
+        t.start()
+        waited = False
+        for _ in range(100):
+            time.sleep(0.05)
+            if "second" in pids:
+                row = holder.execute(
+                    "select wait_event_type from pg_stat_activity where pid = %s",
+                    (pids["second"],),
+                ).fetchone()
+                if row and row[0] == "Lock":
+                    waited = True
+                    break
+        assert waited and "second" not in seqs  # blocked on the counter row, not yet numbered
+        holder.rollback()
+    t.join()
+    assert errors == [] and seqs["second"] == first + 1
+    barrier = threading.Barrier(2)
+
+    def together(key: str) -> None:
+        barrier.wait()
+        waiter(key)
+
+    threads = [threading.Thread(target=together, args=(k,)) for k in ("x", "y")]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert errors == [] and sorted([seqs["x"], seqs["y"]]) == [first + 2, first + 3]
+
+
+def test_a_run_a_job_holds_is_refused_alone_and_the_others_are_queued() -> None:
+    """Numbering #2 / tests-ui #5: « Valider » on two runs while a job holds one of them (its row
+    locked, as the approval job or the prepare's write does): that one is refused 'busy' at once,
+    the other is queued and approved."""
+    a = remittance_tenant()
+    b = add_client(a, "Occupé")
+    paid_file(a, 50_000)
+    paid_file(b, 60_000)
+    ra, rb = request_run(a), request_run(b)
+    with psycopg.connect(DB) as holder, holder.transaction():
+        holder.execute("select 1 from public.remittance_run where id = %s for update", (ra,))
+        started = time.monotonic()
+        result = approve(a, ra, rb)
+        waited = time.monotonic() - started
+    by_run = {r["run_id"]: (r["status"], r["reason"]) for r in result["results"]}
+    assert by_run == {ra: ("refused", "busy"), rb: ("queued", None)}
+    assert waited < 2  # no lock wait: refused at once
+    drain()
+    assert run_row(rb)["status"] == "approved"
+    assert (run_row(ra)["status"], run_row(ra)["job"]) == ("draft", None)
+
+
+def test_a_command_waiting_too_long_on_the_allocation_lock_says_so() -> None:
+    """Performance #4: an allocation or an approval job holds the servicer's allocation lock; a
+    command that waits past its lock timeout is refused with 'allocation_busy' (« réessayez »), not
+    the database's lock-timeout text."""
+    tenant = remittance_tenant()
+    paid_file(tenant, 20_000)
+    run = request_run(tenant)
+    with psycopg.connect(DB) as holder, holder.transaction():
+        holder.execute(
+            "select pg_advisory_xact_lock(hashtext('payments:' || %s::text))",
+            (str(tenant["servicer"]),),
+        )
+        with pytest.raises(psycopg.errors.LockNotAvailable) as refused:
+            staff(
+                tenant,
+                "select public.discard_remittance_run(%s, %s, %s, %s)",
+                str(uuid.uuid4()),
+                run,
+                run_row(run)["version"],
+                "test",
+            )
+    assert "remittance run refused: allocation_busy" in str(refused.value)
+    assert run_row(run)["status"] == "draft"

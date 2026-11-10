@@ -1,0 +1,88 @@
+# A descending marginal grid (20 % to 5 000,00 €, then 5 %) from 16/11: a collection dated before the change and booked
+# after the later one moves that one down into the 5 % band. Nothing is undone: the commission it lowers (−750,00) is
+# credited on the later collection's invoice (founder #6, CGI 289 I 5), as a « Régularisation de paliers (changement de
+# conditions) », never as « encaissements annulés » (legal review M2c-4 #6: 272 1, the rectification states its real
+# cause); the earlier collection's own 10 % is invoiced. Then the later collection is undone: its credit is a reversal's.
+# TO VALIDATE: the designation of a re-tiering credit (founder §25 #2/#3).
+case: retiering-credit-descending
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  dix:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.10"}}
+  descendant:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - id: tout
+        tier_key: tout
+        label_fr: "Toutes créances"
+        match: {}
+        rate: {kind: marginal, tiers: [{up_to_minor: "500000", rate: "0.20"}, {up_to_minor: null, rate: "0.05"}]}
+mandates:
+  MAND-D:
+    - {id: d1, from: "2026-01-01", to: "2026-11-16", schedule: dix}
+    - {id: d2, from: "2026-11-16", to: null, schedule: descendant}
+files:
+  F-D: {mandate: MAND-D, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — 5 000,00 € on 20/11, the grid's first band
+    lines:
+      - {entry: B, kind: allocation, file: F-D, e: "2026-11-20", eff: "2026-11-20", amount: "500000", basis: {principal: "500000"}}
+    expect:
+      lines:
+        B: {commission: "100000", parts: {tout: "100000"}, terms: d2}     # 20 % on 0 → 5 000,00
+      documents:
+        MAND-D:
+          invoice:
+            number: FC-2026-000001
+            ht: "100000"
+            vat: "20000"
+            ttc: "120000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "100000", tiers: [["0.20", "500000"]]}
+  - name: run 2 — 5 000,00 € dated 10/11 (before the change) booked on 25/11
+    lines:
+      - {entry: A, kind: allocation, file: F-D, e: "2026-11-10", eff: "2026-11-25", amount: "500000", basis: {principal: "500000"}}
+    expect:
+      lines:
+        # A: its own 10 % (500,00); B now sits on 5 000,00 → 10 000,00: 5 % instead of 20 % (−750,00)
+        A: {commission: "-25000", parts: {tout: "-25000"}, terms: d1}
+      documents:
+        MAND-D:
+          invoice:          # A's own band only: never « 20 % sur -5 000,00 € »
+            number: FC-2026-000002
+            ht: "50000"
+            vat: "10000"
+            ttc: "60000"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "50000", tiers: [["0.10", "500000"]]}
+          credit_note:      # B's re-tiering, on B's invoice: a regularisation, nothing undone
+            number: FC-2026-000003
+            ht: "-75000"
+            vat: "-15000"
+            ttc: "-90000"
+            corrected:
+              FC-2026-000001: {ht: "-75000", vat: "-15000"}
+            causes:
+              FC-2026-000001: {retiering: "-75000"}
+  - name: run 3 — B undone
+    lines:
+      - {entry: R-B, kind: allocation_reversal, original: B, file: F-D, e: "2026-11-20", eff: "2026-12-01", amount: "-500000", basis: {principal: "-500000"}}
+    expect:
+      lines:
+        R-B: {commission: "-25000", parts: {tout: "-25000"}, terms: d2}  # B's 5 % taken back
+      documents:
+        MAND-D:
+          credit_note:      # on B's invoice, what it still charges: a collection undone
+            number: FC-2026-000004
+            ht: "-25000"
+            vat: "-5000"
+            ttc: "-30000"
+            corrected:
+              FC-2026-000001: {ht: "-25000", vat: "-5000"}
+            causes:
+              FC-2026-000001: {reversal: "-25000"}

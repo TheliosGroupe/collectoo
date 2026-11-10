@@ -3,7 +3,8 @@ the worked example's RV-1 and RV-3 (§7.2: a credit note on an invoice already s
 owed), the commission kept pending (a reason, or an engine input error: a same-run reversal that
 does not mirror its collection), the lines of an earlier run left pending priced with this run's,
 the proceeding-opened rule (no set-off of earlier documents), deadlines per (E, delay), the French
-designation, and the inputs hash."""
+designation (a credit's cause: a collection undone, or a change of terms re-tiering), what the plan
+assumed for the approval to re-check (VAT on debits, the proceeding), and the inputs hash."""
 
 from __future__ import annotations
 
@@ -280,6 +281,97 @@ def test_the_inputs_hash_names_the_inputs_not_their_order() -> None:
     assert prepare_run(_facts([b, a])).header["inputs_hash"] == h1
     assert prepare_run(_facts([a, replace(b, amount_minor=40_001)])).header["inputs_hash"] != h1
     assert prepare_run(_facts([a, b], payout_account_id="PB")).header["inputs_hash"] != h1
+
+
+DESCENDING: dict[str, Any] = {
+    **SCHEDULE,
+    "rules": [
+        {
+            "id": "tout",
+            "tier_key": "tout",
+            "label_fr": "Toutes créances",
+            "match": {},
+            "rate": {
+                "kind": "marginal",
+                "tiers": [
+                    {"up_to_minor": "500000", "rate": "0.20"},
+                    {"up_to_minor": None, "rate": "0.05"},
+                ],
+            },
+        }
+    ],
+}
+FLAT_10: dict[str, Any] = {
+    **SCHEDULE,
+    "rules": [{**SCHEDULE["rules"][0], "rate": {"kind": "flat", "rate": "0.10"}}],
+}
+
+
+def test_a_retiering_credit_says_so_and_a_reversal_credit_says_collections_undone() -> None:
+    """Legal review M2c-4 #6 (289 I 5, 272 1): 20 % then 5 % from 16/11; B 5 000 € on 20/11 was
+    invoiced 1 000 € (FC-1); A 5 000 € dated 10/11 booked on 25/11 (10 %) moves B into the 5 %
+    band: A's 500 € invoiced, and B's 750 € taken back on FC-1 as a « Régularisation de paliers »,
+    not « encaissements annulés »; undoing a collection still says so."""
+    t1 = Terms(
+        "T1", "M", date(2026, 1, 1), date(2026, 11, 16), 30, FLAT_10, NETTING, "art. 6", "art. 7"
+    )
+    t2 = Terms("T2", "M", date(2026, 11, 16), None, 30, DESCENDING, NETTING, "art. 6", "art. 7")
+    a = replace(
+        _alloc("A", 500_000, date(2026, 11, 10)),
+        effective_date=date(2026, 11, 25),
+        posted_at=_at(date(2026, 11, 25)),
+    )
+    b = _alloc("B", 500_000, date(2026, 11, 20))
+    earlier: dict[str, Any] = {
+        "terms": {"M": [t1, t2]},
+        "today": date(2026, 11, 26),
+        "number": "RV-2026-000002",
+        "history": {("F42", "tout"): KeyState((("T2", 500_000),), commission_minor=100_000)},
+        "history_seq": 1,
+        "charges": {("F42", "tout"): [EarlierCharge("FC1", (2026, 1), 100_000, vat_rate=TAU)]},
+        "invoices": {"FC1": EarlierInvoice("FC1", 100_000, TAU)},
+        "invoice_numbers": {"FC1": ("FC-2026-000001", date(2026, 11, 20))},
+        "line_invoices": {"B": "FC1"},
+    }
+    d = prepare_run(_facts([a], **earlier))
+    inv, crn = d.documents
+    assert (inv["kind"], inv["ht"], crn["kind"], crn["ht"], crn["vat"]) == (
+        "invoice",
+        "50000",
+        "credit_note",
+        "-75000",
+        "-15000",
+    )
+    assert "10\u00a0% sur 5\u202f000,00\u00a0€" in inv["lines"][0]["designation_fr"]
+    (line,) = crn["lines"]
+    assert line["designation_fr"] == (
+        "Avoir rectifiant la facture FC-2026-000001 du 20/11/2026 — Régularisation de paliers"
+        " (changement de conditions) (relevé RV-2026-000002)"
+    )
+    assert line["ht"] == "-75000"
+    undone = prepare_run(_facts([_undo("RB", b, date(2026, 11, 26))], **earlier))
+    (only,) = undone.documents
+    (line,) = only["lines"]
+    assert line["designation_fr"] == (
+        "Avoir rectifiant la facture FC-2026-000001 du 20/11/2026 — encaissements annulés"
+        " (relevé RV-2026-000002)"
+    )
+
+
+def test_the_draft_records_what_its_plan_assumed() -> None:
+    """Money review #1, #2: the VAT book of the run's invoices (VAT on debits) and the client's
+    proceeding are in the header (the approval sends the draft back when either changed) and in
+    the inputs hash."""
+    e1 = _alloc("E1", 100_000, date(2026, 11, 2))
+    base = prepare_run(_facts([e1]))
+    assert (base.header["vat_on_debits"], base.header["proceeding_opened_on"]) == (False, None)
+    on_debits = prepare_run(_facts([e1], vat_on_debits=True))
+    assert on_debits.header["vat_on_debits"] is True
+    assert on_debits.plan.vat_moved_minor == 0 and base.plan.vat_moved_minor == 3_000
+    held = prepare_run(_facts([e1], proceeding_opened_on=date(2026, 10, 15)))
+    assert held.header["proceeding_opened_on"] == date(2026, 10, 15)
+    hashes = {d.header["inputs_hash"] for d in (base, on_debits, held)}
+    assert len(hashes) == 3
 
 
 def test_percent_is_french() -> None:

@@ -6,8 +6,10 @@ change undone after it; a minimum introduced or dropped by a new version; a marg
 re-tiering later collections (the regularisation line); the cap across versions; a reversal and a
 new collection in one run (a credit note and an invoice); the fee kept by clause, flat and
 marginal; forwards; items that earn nothing; a change of the VAT rate between runs; and the §7.2
-worked example (RV-2026-000001 … 000003). Each run's lines, then its invoice and credit note per
-mandate (§8.4), with the history carried to the next run. Every case is marked TO VALIDATE until
+worked example (RV-2026-000001 … 000003); a descending grid re-tiered down by a late-booked earlier
+collection (a credit note whose cause is the re-tiering, not a collection undone). Each run's lines,
+then its invoice and credit note per mandate (§8.4) — a credit's cause per corrected invoice — with
+the history carried to the next run. Every case is marked TO VALIDATE until
 the founder's anonymised clauses replace the synthetic ones."""
 
 from decimal import Decimal
@@ -39,6 +41,7 @@ def test_the_golden_set() -> None:
         "forwards",
         "none-states",
         "vat-rate-change",
+        "retiering-credit-descending",
     } <= names
     for p in CASES:
         case = load_case(p)
@@ -97,6 +100,13 @@ def _check_documents(docs: Any, expect: dict[str, Any], where: str) -> None:
             assert corrected == {
                 k: (int(v["ht"]), int(v["vat"])) for k, v in crn["corrected"].items()
             }, f"{where} {mandate}"
+            for c in d.credit_note.corrected:  # each credit's causes sum to its corrected HT
+                assert sum(ht for _, ht in c.causes) == c.ht_minor, f"{where} {c.invoice_id}"
+            if "causes" in crn:
+                causes = {c.invoice_id: dict(c.causes) for c in d.credit_note.corrected}
+                assert causes == {
+                    k: {cause: int(ht) for cause, ht in v.items()} for k, v in crn["causes"].items()
+                }, f"{where} {mandate}"
 
 
 @pytest.mark.parametrize("path", CASES, ids=[p.stem for p in CASES])

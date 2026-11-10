@@ -221,6 +221,11 @@ create table private.remittance_draft (
   key_states jsonb not null default '[]',
   history_seq bigint not null default 0,            -- the latest key state of the client when prepared
   plan jsonb not null default '{}',
+  -- what the plan assumed, re-checked at approval (money review #1, #2): the VAT book of the run's invoices (VAT on
+  -- debits: 44571 at once, else 44574 until settled, 242 nonies A 11° bis) and the client's proceeding (§9.6: the
+  -- documents dated before its opening are not set off, L622-7 I)
+  vat_on_debits boolean not null default false,
+  proceeding_opened_on date,
   created_at timestamptz not null default now()
 );
 
@@ -387,6 +392,7 @@ create table public.commission_credit_alloc (
 );
 create index commission_credit_alloc_original_idx
   on public.commission_credit_alloc (original_invoice_id, account_id, tier_key);
+create index commission_credit_alloc_entry_idx on public.commission_credit_alloc (entry_id) where entry_id is not null;
 
 -- Per corrected invoice: the HT and VAT a credit note takes back (VAT by cumulative difference at that invoice's rate),
 -- the VAT split — off the pending VAT first (44574), the rest off the VAT already due (44571) — and its TTC applied to
@@ -473,26 +479,60 @@ create index remittance_deadline_breach_org_idx on public.remittance_deadline_br
 comment on table public.remittance_deadline_breach is
   'R124-6 breaches: an item approved for after its latest execution date, or not paid by it (append-only).';
 
+-- Each late approval (§9.5 step 2: « a later date is allowed only with a recorded late_reason »): per run and positive
+-- line whose latest execution date is before the payout's requested execution date (N > 0) or the settlement date
+-- (N = 0), the approver's reason and the date, whether or not the nightly checks already wrote the item's breach row
+-- (which is unique per item and append-only: review M2c-4, tests-ui #2, legal #8).
+create table public.remittance_late_approval (
+  run_id uuid not null references public.remittance_run (id),
+  ledger_entry_id uuid not null references public.ledger_entry (id),
+  organization_id uuid not null references public.organization (id),
+  client_organization_id uuid not null references public.organization (id),
+  latest_execution_date date not null,
+  requested_execution_date date not null,          -- the payout's; the settlement date when N = 0
+  late_reason text not null check (length(btrim(late_reason)) between 1 and 2000),
+  approved_by uuid references public.app_user (id),
+  created_at timestamptz not null default clock_timestamp(),
+  primary key (run_id, ledger_entry_id),
+  constraint remittance_late_approval_late check (latest_execution_date < requested_execution_date)
+);
+create index remittance_late_approval_entry_idx on public.remittance_late_approval (ledger_entry_id);
+create index remittance_late_approval_org_idx on public.remittance_late_approval (organization_id, created_at desc);
+create index remittance_late_approval_client_idx on public.remittance_late_approval (client_organization_id);
+comment on table public.remittance_late_approval is
+  'R124-6: each line approved for after its latest execution date, with the approver''s reason (append-only).';
+
 -- Append-only facts (§6.2): lines change only by their release (false → true, by the cancellation); invoices, their
--- lines, charges, credit allocations and corrections, settlements, key states, breaches and repricings never change.
+-- lines, charges, credit allocations and corrections, settlements, key states, breaches, late approvals and
+-- repricings never change. The line's release is checked by a column comparison in the trigger's WHEN, so a released
+-- line costs no function call (a 50k-line cancellation stays within the API's 8 s: performance review #1); a column
+-- added to remittance_line must be added to this list (pgTAP 023 counts them).
 create or replace function private.remittance_line_guard()
 returns trigger
 language plpgsql
 set search_path = ''
 as $$
 begin
-  if tg_op <> 'UPDATE' or old.released or not new.released
-     or (to_jsonb(new) - 'released' - 'released_at') is distinct from (to_jsonb(old) - 'released' - 'released_at') then
-    raise exception 'remittance line %/%: frozen (only its release by a cancellation)', old.run_id, old.line_no
-      using errcode = 'check_violation';
-  end if;
-  return new;
+  raise exception 'remittance line %/%: frozen (only its release by a cancellation)', old.run_id, old.line_no
+    using errcode = 'check_violation';
 end;
 $$;
-create trigger remittance_line_guard before update or delete on public.remittance_line
-  for each row execute function private.remittance_line_guard();
+create trigger remittance_line_guard before update on public.remittance_line
+  for each row when (old.released or not new.released
+    or (new.run_id, new.line_no, new.organization_id, new.client_organization_id, new.currency, new.ledger_entry_id,
+        new.kind, new.account_id, new.portfolio_id, new.mandate_id, new.mandate_terms_id, new.payment_id,
+        new.encaissement_date, new.effective_date, new.posted_at, new.deadline, new.latest_execution_date,
+        new.unmeetable, new.amount_minor, new.basis, new.commission_minor, new.commission_state, new.commission_reason,
+        new.parts, new.original_entry_id, new.invoice_id)
+       is distinct from
+       (old.run_id, old.line_no, old.organization_id, old.client_organization_id, old.currency, old.ledger_entry_id,
+        old.kind, old.account_id, old.portfolio_id, old.mandate_id, old.mandate_terms_id, old.payment_id,
+        old.encaissement_date, old.effective_date, old.posted_at, old.deadline, old.latest_execution_date,
+        old.unmeetable, old.amount_minor, old.basis, old.commission_minor, old.commission_state, old.commission_reason,
+        old.parts, old.original_entry_id, old.invoice_id))
+  execute function private.remittance_line_guard();
 alter table public.remittance_line enable always trigger remittance_line_guard;
-create trigger remittance_line_no_truncate before truncate on public.remittance_line
+create trigger remittance_line_no_truncate before delete or truncate on public.remittance_line
   for each statement execute function private.refuse_change();
 alter table public.remittance_line enable always trigger remittance_line_no_truncate;
 
@@ -501,7 +541,8 @@ declare t text;
 begin
   foreach t in array array['commission_invoice', 'commission_invoice_line', 'commission_invoice_charge',
                            'commission_credit_alloc', 'commission_credit_correction', 'commission_settlement',
-                           'remittance_key_state', 'remittance_deadline_breach', 'remittance_line_repricing'] loop
+                           'remittance_key_state', 'remittance_deadline_breach', 'remittance_line_repricing',
+                           'remittance_late_approval'] loop
     execute format('create trigger %I before update or delete or truncate on public.%I '
                    'for each statement execute function private.refuse_change()', t || '_append_only', t);
     execute format('alter table public.%I enable always trigger %I', t, t || '_append_only');
@@ -814,7 +855,7 @@ begin
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
   end if;
   select * into r from public.remittance_run where id = p_run_id for update;
-  perform pg_advisory_xact_lock(hashtext('payments:' || r.organization_id::text));
+  perform private.remittance_command_locks(r.organization_id);
   if r.status <> 'draft' then
     raise exception 'remittance run refused: not_draft' using errcode = 'check_violation';
   end if;
@@ -944,7 +985,8 @@ $$;
 -- The header of a prepared draft. p: {line_count, gross, invoice_ht, invoice_vat, invoice_ttc, credit_ht, credit_vat,
 -- credit_ttc, taken, advances, refunds, settlement, net (text amounts), vat_rate, earliest_deadline,
 -- earliest_latest_execution_date, unmeetable, blockers, commission_blockers, engine_version, inputs_hash,
--- payout_account_id, history_seq, documents, key_states, plan, repricing}. The lines must be the items reserved.
+-- payout_account_id, history_seq, vat_on_debits, proceeding_opened_on, documents, key_states, plan, repricing}. The
+-- lines must be the items reserved.
 create or replace function private.remittance_record_draft(p_run_id uuid, p_token uuid, p jsonb)
 returns void
 language plpgsql
@@ -974,9 +1016,11 @@ begin
     raise exception 'remittance draft %: its lines are not the items reserved (% lines, % reserved, % items)',
       p_run_id, v_lines, v_reserved, r.item_count using errcode = '23514';
   end if;
-  insert into private.remittance_draft (run_id, vat_rate, documents, key_states, history_seq, plan)
+  insert into private.remittance_draft (run_id, vat_rate, documents, key_states, history_seq, plan, vat_on_debits,
+                                        proceeding_opened_on)
   values (p_run_id, (p ->> 'vat_rate')::numeric, coalesce(p -> 'documents', '[]'), coalesce(p -> 'key_states', '[]'),
-          coalesce((p ->> 'history_seq')::bigint, 0), coalesce(p -> 'plan', '{}'));
+          coalesce((p ->> 'history_seq')::bigint, 0), coalesce(p -> 'plan', '{}'),
+          coalesce((p ->> 'vat_on_debits')::boolean, false), (p ->> 'proceeding_opened_on')::date);
   insert into private.remittance_draft_repricing (run_id, line_run_id, line_no, ledger_entry_id, commission_minor,
                                                   commission_state, commission_reason, parts, invoiced)
   select p_run_id, (x ->> 'run_id')::uuid, (x ->> 'line_no')::integer, (x ->> 'ledger_entry_id')::uuid,
@@ -1018,7 +1062,8 @@ $$;
 
 ------------------------------------------------------------------------------------------
 -- Issuing invoices and credit notes (§8.4, §14.1; founder #12): numbered in the issuing transaction from the counter
--- row, locked last; dated by the clock read after the lock (compliance critique D3); entries posted at once
+-- row, locked last; dated by the transaction's Paris day, which the clock read after the lock must still be (compliance
+-- critique D3; numbering review #1: else 40001, retried); entries posted at once
 ------------------------------------------------------------------------------------------
 
 -- A party as the document prints it (frozen into the payload; 242 nonies A 1°–2°, R123-237/238, L441-9).
@@ -1040,55 +1085,86 @@ $$;
 
 -- Issues the documents `p_docs` (in order; each with its `id`, `key`, kind, mandate_id, amounts as text, lines,
 -- charges, allocations, corrections, settlement mode and due days) for a client: one number each, the counter row of
--- the servicer's series and year locked FOR UPDATE (after the allocation and remit locks the caller holds), the date
--- read after it; their entries in one ledger_post_set; each credit note applied to the invoices it corrects
--- (commission_settlement kind credit_note). Returns {issue_date, documents: {ref: {id, number}}}.
+-- the servicer's series and year locked (after the allocation and remit locks the caller holds), dated the
+-- transaction's day; their entries in one ledger_post_set, the invoices' VAT in the book `p_vat_on_debits` says (the
+-- plan's; null: the servicer's setting); each credit note applied to the invoices it corrects (commission_settlement
+-- kind credit_note); the payload frozen with the mentions in force (L441-9). Returns {issue_date, documents: {ref:
+-- {id, number}}}.
 create or replace function private.issue_commission_documents(p_organization_id uuid, p_client_organization_id uuid,
-                                                              p_run_id uuid, p_docs jsonb, p_reason text)
+                                                              p_run_id uuid, p_docs jsonb, p_reason text,
+                                                              p_vat_on_debits boolean default null)
 returns jsonb
 language plpgsql
 security definer
 set search_path = ''
 as $$
 declare
+  v_set public.servicer_billing_settings;
   v_series text;
   v_on_debits boolean;
   v_issue date;
-  v_now date;
   v_last integer;
   v_n integer := jsonb_array_length(p_docs);
   v_run public.remittance_run;
   v_out jsonb := '{}';
   v_doc record;
+  v_seller jsonb;
+  v_buyer jsonb;
+  v_own jsonb;
+  v_indemnity boolean;
+  v_pay jsonb;
 begin
   if v_n = 0 then
     return jsonb_build_object('issue_date', null, 'documents', '{}'::jsonb);
   end if;
-  select coalesce(s.invoice_prefix, 'FC'), coalesce(s.vat_on_debits, false) into v_series, v_on_debits
-  from (select 1) x left join public.servicer_billing_settings s on s.organization_id = p_organization_id;
+  -- the settings in force at issue, held to the commit (the payload freezes them: L441-9, legal review #4)
+  select * into v_set from public.servicer_billing_settings s where s.organization_id = p_organization_id for share;
+  v_series := coalesce(v_set.invoice_prefix, 'FC');
+  -- the VAT book of the invoices: the one their plan assumed (the approval checked it is still the servicer's), else
+  -- the servicer's now (money review #1)
+  v_on_debits := coalesce(p_vat_on_debits, v_set.vat_on_debits, false);
   select * into v_run from public.remittance_run where id = p_run_id;
-  -- The counter of the year, locked; the date read after the lock (a year turning while waiting: the new year's row).
-  v_issue := (clock_timestamp() at time zone 'Europe/Paris')::date;
-  loop
-    insert into private.invoice_counter (organization_id, series, year, last_seq)
-    values (p_organization_id, v_series, extract(year from v_issue)::integer, 0) on conflict do nothing;
-    select c.last_seq into v_last from private.invoice_counter c
-    where c.organization_id = p_organization_id and c.series = v_series and c.year = extract(year from v_issue)::integer
-    for update;
-    v_now := (clock_timestamp() at time zone 'Europe/Paris')::date;
-    exit when extract(year from v_now) = extract(year from v_issue);
-    v_issue := v_now;
-  end loop;
-  v_issue := v_now;
-  update private.invoice_counter c set last_seq = c.last_seq + v_n, last_issue_date = v_issue
-  where c.organization_id = p_organization_id and c.series = v_series and c.year = extract(year from v_issue)::integer;
+  -- Numbered on the transaction's Paris day: the counter of its year created if needed and locked in one statement
+  -- (the year of the issue date). The ledger dates entries up to the transaction's day (paris_today() = now()): a
+  -- clock past midnight once the counter is ours means the transaction began the day before; it is retried in a
+  -- fresh one rather than refused as data (numbering review #1). The dates then follow the numbers.
+  v_issue := private.paris_today();
+  insert into private.invoice_counter as c (organization_id, series, year, last_seq, last_issue_date)
+  values (p_organization_id, v_series, extract(year from v_issue)::integer, v_n, v_issue)
+  on conflict (organization_id, series, year)
+    do update set last_seq = c.last_seq + excluded.last_seq, last_issue_date = excluded.last_issue_date
+  returning c.last_seq - v_n into v_last;
+  if (clock_timestamp() at time zone 'Europe/Paris')::date <> v_issue then
+    raise exception 'commission documents: the day turned during the transaction, retry' using errcode = '40001';
+  end if;
+
+  -- the parties, the indemnity (L441-10 II, D441-5: 40 € to a professional buyer; not claimed while a proceeding of
+  -- the client is recorded, design §14.2), the own account a due invoice is paid to
+  v_seller := private.invoice_party(p_organization_id);
+  v_buyer := private.invoice_party(p_client_organization_id);
+  v_indemnity := coalesce((v_buyer ->> 'is_professional')::boolean, false)
+                 and not exists (select 1 from public.client_status_event e
+                                 where e.client_organization_id = p_client_organization_id
+                                   and e.kind in ('proceeding_opened', 'liquidation') and e.effective_date <= v_issue);
+  select jsonb_build_object('iban', b.iban, 'bic', b.bic, 'holder', o.legal_name) into v_own
+  from public.bank_account b join public.organization o on o.id = b.organization_id
+  where b.id = v_set.own_bank_account_id;
+  -- an approval's documents are paid with its run: set off on its payout of the requested date, or on the approval
+  -- date when nothing is transferred (N = 0)
+  v_pay := case when p_reason = 'commission' and v_run.id is not null
+                then jsonb_build_object('run_number', v_run.number,
+                                        'execution_date', coalesce(v_run.requested_execution_date, v_issue)) end;
 
   drop table if exists pg_temp._docs;
   create temp table _docs on commit drop as
   select x.ord::integer as entry_no, (x.doc ->> 'id')::uuid as id, x.doc ->> 'ref' as ref, x.doc ->> 'key' as key,
          x.doc ->> 'kind' as kind, (x.doc ->> 'mandate_id')::uuid as mandate_id,
          (x.doc ->> 'ht')::bigint as ht, (x.doc ->> 'vat')::bigint as vat, (x.doc ->> 'ttc')::bigint as ttc,
-         (x.doc ->> 'vat_rate')::numeric as vat_rate, coalesce(x.doc ->> 'settlement', 'netted') as settlement,
+         (x.doc ->> 'vat_rate')::numeric as vat_rate,
+         case when x.doc ->> 'kind' = 'invoice' and x.doc ->> 'settlement' = 'due' then 'due' else 'netted' end
+           as settlement,
+         case when x.doc ->> 'kind' = 'invoice' and x.doc ->> 'settlement' = 'due'
+              then v_issue + least(coalesce((x.doc ->> 'due_days')::integer, 30), 45) end as due_date,
          (x.doc ->> 'due_days')::integer as due_days, x.doc,
          v_last + x.ord::integer as seq,
          coalesce((select sum((c ->> 'vat_pending')::bigint) from jsonb_array_elements(x.doc -> 'corrections') c), 0)
@@ -1139,15 +1215,14 @@ begin
            v_series || '-' || extract(year from v_issue)::integer || '-' || lpad(v_doc.seq::text, 6, '0'), v_issue,
            v_run.service_from, v_run.service_to, 'EUR', v_doc.ht, case when v_doc.kind = 'invoice' then v_doc.vat_rate end, v_doc.vat,
            v_doc.ttc, case when v_doc.kind = 'invoice' then case when v_on_debits then 'vat_collected' else 'vat_pending' end end,
-           case when v_doc.kind = 'invoice' and v_doc.settlement = 'due' then 'due' else 'netted' end,
-           case when v_doc.kind = 'invoice' and v_doc.settlement = 'due' then v_issue + least(coalesce(v_doc.due_days, 30), 45) end,
+           v_doc.settlement, v_doc.due_date,
            p_reason, y.payload, encode(sha256(convert_to(y.payload::text, 'UTF8')), 'hex'), v_doc.entry_id
     from (select jsonb_build_object(
             'kind', v_doc.kind,
             'number', v_series || '-' || extract(year from v_issue)::integer || '-' || lpad(v_doc.seq::text, 6, '0'),
             'issue_date', v_issue,
-            'seller', private.invoice_party(p_organization_id),
-            'buyer', private.invoice_party(p_client_organization_id),
+            'seller', v_seller,
+            'buyer', v_buyer,
             'mandate', (select jsonb_build_object('id', m.id, 'reference', m.reference) from public.mandate m
                         where m.id = v_doc.mandate_id),
             'run', case when v_run.id is not null then jsonb_build_object('id', v_run.id, 'number', v_run.number) end,
@@ -1158,6 +1233,15 @@ begin
                                          'vat_rate', v_doc.vat_rate::text, 'currency', 'EUR'),
             'settlement', jsonb_build_object('mode', v_doc.settlement, 'clause_ref', v_doc.doc ->> 'clause_ref',
                                              'due_days', v_doc.due_days),
+            -- the mentions that change over time, as in force at issue (L441-9 I; legal review #4)
+            'due_date', v_doc.due_date,
+            'payment_reference', v_pay,
+            'own_account', case when v_doc.settlement = 'due' then v_own end,
+            'penalty_text', coalesce(v_set.penalty_text,
+              'Pénalités de retard : taux d''intérêt appliqué par la Banque centrale européenne à son opération de '
+              'refinancement la plus récente, majoré de 10 points de pourcentage.'),
+            'flat_indemnity', jsonb_build_object('applies', v_indemnity,
+                                                 'amount_minor', case when v_indemnity then '4000' end),
             'vat_on_debits', v_on_debits,
             'reason', p_reason) as payload) y;
     v_out := v_out || jsonb_build_object(v_doc.ref, jsonb_build_object(
@@ -1331,6 +1415,9 @@ declare
   v_reason text := nullif(btrim(coalesce(p_late_reason, '')), '');
   v_why text;
   v_token uuid;
+  v_found boolean;
+  v_busy boolean;
+  v_late boolean;
   it record;
   r public.remittance_run;
 begin
@@ -1352,9 +1439,21 @@ begin
   v_date := coalesce(p_requested_execution_date, private.next_business_day(private.paris_today()));
   for it in select (e ->> 'run_id')::uuid as run_id, e ->> 'inputs_hash' as inputs_hash, e ->> 'net_text' as net_text
             from jsonb_array_elements(p_items) e order by (e ->> 'run_id') loop
-    select * into r from public.remittance_run where id = it.run_id for update;
+    -- read first without a lock (an unknown run keeps its reason), then locked without waiting: a run a job or
+    -- another command holds is refused alone ('busy') and the others go on (numbering review #2, tests-ui #5)
+    select * into r from public.remittance_run where id = it.run_id;
+    v_found := found and r.organization_id = v_org;
+    v_busy := false;
+    if v_found then
+      begin
+        select * into r from public.remittance_run where id = it.run_id for update nowait;
+      exception when lock_not_available then
+        v_busy := true;
+      end;
+    end if;
     v_why := case
-      when not found or r.organization_id <> v_org then 'unknown_run'
+      when not v_found then 'unknown_run'
+      when v_busy then 'busy'
       when r.status <> 'draft' then 'not_draft'
       when r.job = 'prepare' then 'preparing'
       when r.job = 'approve' then 'approval_in_progress'
@@ -1364,14 +1463,19 @@ begin
       when r.net_minor > 0 and cardinality(r.blockers) > 0 then 'payout_blocked'
       when r.net_minor > 0 then private.execution_date_refusal(r.organization_id, r.currency, v_date)
       end;
-    if v_why is null and r.net_minor > 0 and v_date > r.earliest_latest_execution_date and v_reason is null then
+    -- paid after its latest execution date: by the payout's requested date (N > 0), or by the settlement today
+    -- (N = 0, money review #3); allowed only with the reason (paying late beats not paying)
+    v_late := v_found and not v_busy and coalesce(case when r.net_minor > 0 then v_date
+                                                      else private.paris_today() end
+                                                 > r.earliest_latest_execution_date, false);
+    if v_why is null and v_late and v_reason is null then
       v_why := 'late_reason_required';
     end if;
     if v_why is null then
       v_token := gen_random_uuid();
       update public.remittance_run set job = 'approve', job_token = v_token, job_queued_at = clock_timestamp(),
         requested_execution_date = case when r.net_minor > 0 then v_date end,
-        late_reason = case when r.net_minor > 0 and v_date > r.earliest_latest_execution_date then v_reason end,
+        late_reason = case when v_late then v_reason end,
         approval_requested_by = auth.uid(), last_failure = null, version = version + 1
       where id = r.id;
       perform pgmq.send('remittances', jsonb_build_object('type', 'approve', 'run_id', r.id, 'token', v_token));
@@ -1427,9 +1531,23 @@ begin
   if jsonb_array_length(p_draft.documents) > 0 and private.vat_rate_on(p_today) <> p_draft.vat_rate then
     return 'vat_rate_changed';
   end if;
+  -- the VAT book the plan assumed for the run's invoices (money review #1): 44571 at once on debits, else 44574
+  if jsonb_array_length(p_draft.documents) > 0
+     and coalesce((select s.vat_on_debits from public.servicer_billing_settings s
+                   where s.organization_id = p_run.organization_id), false) <> p_draft.vat_on_debits then
+    return 'vat_option_changed';
+  end if;
   if jsonb_array_length(p_draft.documents) > 0
      and cardinality(private.remittance_commission_blockers(p_run.client_organization_id)) > 0 then
     return 'commission_blocked';
+  end if;
+  -- the client's proceeding the plan's set-offs assumed (§9.6, L622-7 I; money review #2): recorded or in force since
+  if exists (select 1 from jsonb_array_elements(coalesce(p_draft.plan -> 'settles', '[]')) s
+             where s ->> 'kind' in ('compensation', 'advance'))
+     and (select min(e.effective_date) from public.client_status_event e
+          where e.client_organization_id = p_run.client_organization_id and e.kind = 'proceeding_opened'
+            and e.effective_date <= p_today) is distinct from p_draft.proceeding_opened_on then
+    return 'client_status_changed';
   end if;
   if p_run.net_minor > 0 then
     v_blockers := private.remittance_payout_blockers(p_run.client_organization_id, p_run.currency, p_today);
@@ -1450,6 +1568,10 @@ begin
       return 'late_reason_required';
     end if;
   end if;
+  -- N = 0 settles today: after the latest execution date, the reason too (money review #3)
+  if p_run.net_minor = 0 and p_today > p_run.earliest_latest_execution_date and p_run.late_reason is null then
+    return 'late_reason_required';
+  end if;
   if p_run.net_minor < 0 then
     return 'negative_net';
   end if;
@@ -1462,9 +1584,11 @@ begin
   if p_run.gross_minor > coalesce(v_owed, 0) - v_inflight then
     return 'balance_changed';
   end if;
-  -- the tier history and the documents the plan continued from
+  -- the tier history and the documents the plan continued from (the run's own key states, written before the locks
+  -- in this transaction, excepted)
   if coalesce((select max(k.seq) from public.remittance_key_state k
-               where k.client_organization_id = p_run.client_organization_id), 0) <> p_draft.history_seq then
+               where k.client_organization_id = p_run.client_organization_id and k.run_id <> p_run.id), 0)
+     <> p_draft.history_seq then
     return 'history_changed';
   end if;
   if exists (select 1 from jsonb_array_elements(coalesce(p_draft.plan -> 'settles', '[]')) s
@@ -1551,111 +1675,170 @@ begin
     v_bank := private.paying_account(r.organization_id, r.currency);
     perform 1 from public.bank_account b where b.id = v_bank for share;
   end if;
-  -- lock order (ADR-0014): allocation lock → remit lock → invoice counter (last, in issue_commission_documents)
-  perform pg_advisory_xact_lock(hashtext('payments:' || r.organization_id::text));
-  perform pg_advisory_xact_lock(hashtext('remit:' || r.organization_id::text));
-  v_today := private.paris_today();
-  v_why := private.remittance_approval_refusal(r, d, v_today);
-  if v_why is not null then
-    perform private.remittance_back_to_draft(r.id, p_token, v_why, null);
-    return jsonb_build_object('status', 'back_to_draft', 'reason', v_why);
-  end if;
-
   -- the documents' ids first (the lines name their invoice; the foreign key is checked at commit)
   select coalesce(jsonb_agg(x.doc || jsonb_build_object('id', gen_random_uuid(),
                                                         'key', case x.doc ->> 'kind' when 'invoice' then 'inv:'
                                                                                      else 'crn:' end
                                                                || r.id || ':' || (x.doc ->> 'mandate_id'))
                             order by x.ord), '[]')
-  into v_docs from jsonb_array_elements(d.documents) with ordinality x (doc, ord);
+  into v_docs from jsonb_array_elements(coalesce(d.documents, '[]')) with ordinality x (doc, ord);
   select coalesce(jsonb_object_agg(x ->> 'ref', x ->> 'id'), '{}') into v_ids from jsonb_array_elements(v_docs) x;
 
-  -- the lines, frozen; their items leave the pending queue (each in exactly one live line, I15)
-  insert into public.remittance_line (run_id, line_no, organization_id, client_organization_id, currency, ledger_entry_id,
-                                      kind, account_id, portfolio_id, mandate_id, mandate_terms_id, payment_id,
-                                      encaissement_date, effective_date, posted_at, deadline, latest_execution_date,
-                                      unmeetable, amount_minor, basis, commission_minor, commission_state,
-                                      commission_reason, parts, original_entry_id, invoice_id)
-  select l.run_id, l.line_no, r.organization_id, r.client_organization_id, r.currency, l.ledger_entry_id, l.kind,
-         l.account_id, l.portfolio_id, l.mandate_id, l.mandate_terms_id, l.payment_id, l.encaissement_date,
-         l.effective_date, l.posted_at, l.deadline, l.latest_execution_date, l.unmeetable, l.amount_minor, l.basis,
-         l.commission_minor, l.commission_state, l.commission_reason, l.parts, l.original_entry_id,
-         case when l.invoiced then (v_ids ->> ('new:' || l.mandate_id))::uuid end
-  from private.remittance_draft_line l where l.run_id = r.id;
-  get diagnostics v_n = row_count;
-  delete from private.remittance_pending q where q.draft_run_id = r.id;
-  if v_n <> r.line_count then
-    raise exception 'approval of %: % lines frozen for % prepared', r.number, v_n, r.line_count using errcode = '23514';
-  end if;
-  insert into public.remittance_line_repricing (pricing_run_id, run_id, line_no, ledger_entry_id, commission_minor,
-                                                commission_state, commission_reason, parts, invoice_id)
-  select r.id, x.line_run_id, x.line_no, x.ledger_entry_id, x.commission_minor, x.commission_state,
-         x.commission_reason, x.parts,
-         case when x.invoiced then (v_ids ->> ('new:' || l.mandate_id))::uuid end
-  from private.remittance_draft_repricing x
-  join public.remittance_line l on l.run_id = x.line_run_id and l.line_no = x.line_no
-  where x.run_id = r.id;
+  begin
+    -- The frozen facts, written under the run's row lock only, before the allocation lock (performance review #4):
+    -- the lines, their repricings and the tier history depend only on the draft and on immutable entries; the
+    -- refusal below rolls them back with this block. Holding the allocation lock is then the checks, the queue, the
+    -- documents and the payout (each item in exactly one live line, I15).
+    insert into public.remittance_line (run_id, line_no, organization_id, client_organization_id, currency,
+                                        ledger_entry_id, kind, account_id, portfolio_id, mandate_id, mandate_terms_id,
+                                        payment_id, encaissement_date, effective_date, posted_at, deadline,
+                                        latest_execution_date, unmeetable, amount_minor, basis, commission_minor,
+                                        commission_state, commission_reason, parts, original_entry_id, invoice_id)
+    select l.run_id, l.line_no, r.organization_id, r.client_organization_id, r.currency, l.ledger_entry_id, l.kind,
+           l.account_id, l.portfolio_id, l.mandate_id, l.mandate_terms_id, l.payment_id, l.encaissement_date,
+           l.effective_date, l.posted_at, l.deadline, l.latest_execution_date, l.unmeetable, l.amount_minor, l.basis,
+           l.commission_minor, l.commission_state, l.commission_reason, l.parts, l.original_entry_id,
+           case when l.invoiced then (v_ids ->> ('new:' || l.mandate_id))::uuid end
+    from private.remittance_draft_line l where l.run_id = r.id;
+    get diagnostics v_n = row_count;
+    insert into public.remittance_line_repricing (pricing_run_id, run_id, line_no, ledger_entry_id, commission_minor,
+                                                  commission_state, commission_reason, parts, invoice_id)
+    select r.id, x.line_run_id, x.line_no, x.ledger_entry_id, x.commission_minor, x.commission_state,
+           x.commission_reason, x.parts,
+           case when x.invoiced then (v_ids ->> ('new:' || l.mandate_id))::uuid end
+    from private.remittance_draft_repricing x
+    join public.remittance_line l on l.run_id = x.line_run_id and l.line_no = x.line_no
+    where x.run_id = r.id;
+    insert into public.remittance_key_state (organization_id, client_organization_id, account_id, tier_key, run_id,
+                                             cause, basis, kept_basis_minor, kept_minor, commission_minor)
+    select r.organization_id, r.client_organization_id, (k ->> 'account_id')::uuid, k ->> 'tier_key', r.id, 'approved',
+           coalesce(k -> 'basis', '[]'), (k ->> 'kept_basis')::bigint, (k ->> 'kept')::bigint,
+           (k ->> 'commission')::bigint
+    from jsonb_array_elements(coalesce(d.key_states, '[]')) k;
 
-  -- invoices and credit notes, numbered (the counter locked last), their entries posted
-  v_issued := private.issue_commission_documents(r.organization_id, r.client_organization_id, r.id, v_docs,
-                                                 'commission');
-  insert into public.remittance_key_state (organization_id, client_organization_id, account_id, tier_key, run_id, cause,
-                                           basis, kept_basis_minor, kept_minor, commission_minor)
-  select r.organization_id, r.client_organization_id, (k ->> 'account_id')::uuid, k ->> 'tier_key', r.id, 'approved',
-         coalesce(k -> 'basis', '[]'), (k ->> 'kept_basis')::bigint, (k ->> 'kept')::bigint, (k ->> 'commission')::bigint
-  from jsonb_array_elements(d.key_states) k;
+    -- lock order (ADR-0014): the run row → allocation lock → remit lock → invoice counter (last, in
+    -- issue_commission_documents)
+    perform pg_advisory_xact_lock(hashtext('payments:' || r.organization_id::text));
+    perform pg_advisory_xact_lock(hashtext('remit:' || r.organization_id::text));
+    v_today := private.paris_today();
+    v_why := private.remittance_approval_refusal(r, d, v_today);
+    if v_why is not null then
+      raise exception '%', v_why using errcode = 'RR001';
+    end if;
+    if v_n <> r.line_count then
+      raise exception 'approval of %: % lines frozen for % prepared', r.number, v_n, r.line_count
+        using errcode = '23514';
+    end if;
+    -- their items leave the pending queue
+    delete from private.remittance_pending q where q.draft_run_id = r.id;
 
-  -- the plan with the run's documents named (M2c-6 posts it at the debit)
-  select d.plan || jsonb_build_object('settles', coalesce(jsonb_agg(
-           s || jsonb_build_object('document_id', coalesce(v_ids ->> (s ->> 'ref'), s ->> 'ref'))), '[]'))
-  into v_plan from jsonb_array_elements(coalesce(d.plan -> 'settles', '[]')) s;
+    -- invoices and credit notes, numbered (the counter locked last), their entries posted, in the VAT book the plan
+    -- assumed (money review #1)
+    v_issued := private.issue_commission_documents(r.organization_id, r.client_organization_id, r.id, v_docs,
+                                                   'commission', d.vat_on_debits);
 
-  v_late := private.business_days_between((r.known_at at time zone 'Europe/Paris')::date, v_today) > 2;
-  if r.net_minor > 0 then
-    select left('REVERSEMENT ' || r.number || coalesce(' FACTURE ' || string_agg(i.number, ' ' order by i.seq), ''),
-                140)
-    into v_info from public.commission_invoice i where i.run_id = r.id and i.kind = 'invoice';
-    insert into public.bank_transfer (organization_id, client_organization_id, kind, debtor_bank_account_id, currency,
-                                      amount_minor, payee_name, payee_iban, payee_bic, end_to_end_id, remittance_info,
-                                      requested_execution_date, run_id, ordered_by)
-    values (r.organization_id, r.client_organization_id, 'payout', v_bank, r.currency, r.net_minor, pa.holder_name,
-            pa.iban, pa.bic, 'RMT' || upper(substr(md5(gen_random_uuid()::text), 1, 12)), v_info,
-            r.requested_execution_date, r.id, r.approval_requested_by)
-    returning id into v_transfer;
-    -- an item paid after its latest execution date (approved late, with its reason): a breach row (I21)
-    insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
-                                                   run_id, deadline, latest_execution_date, requested_execution_date,
-                                                   blocked_reason, late_reason)
-    select r.organization_id, r.client_organization_id, l.ledger_entry_id, l.payment_id, r.id, l.deadline,
-           l.latest_execution_date, r.requested_execution_date,
-           case when l.unmeetable then 'unmeetable_delay' end, r.late_reason
-    from public.remittance_line l
-    where l.run_id = r.id and l.amount_minor > 0 and l.latest_execution_date < r.requested_execution_date
-    on conflict (ledger_entry_id) do nothing;
-    update public.remittance_run set status = 'approved', approved_by = r.approval_requested_by,
-      approved_at = clock_timestamp(), transfer_id = v_transfer, settlement_plan = v_plan, invoice_late = v_late,
-      payout_snapshot = jsonb_build_object('payout_account_id', pa.id, 'holder_name', pa.holder_name, 'iban', pa.iban,
-                                           'bic', pa.bic, 'kind', pa.kind, 'confirmed_at', pa.confirmed_at),
-      job = null, job_token = null, job_queued_at = null, version = version + 1
+    -- the plan with the run's documents named (M2c-6 posts it at the debit)
+    select d.plan || jsonb_build_object('settles', coalesce(jsonb_agg(
+             s || jsonb_build_object('document_id', coalesce(v_ids ->> (s ->> 'ref'), s ->> 'ref'))), '[]'))
+    into v_plan from jsonb_array_elements(coalesce(d.plan -> 'settles', '[]')) s;
+
+    v_late := private.business_days_between((r.known_at at time zone 'Europe/Paris')::date, v_today) > 2;
+    if r.net_minor > 0 then
+      select left('REVERSEMENT ' || r.number || coalesce(' FACTURE ' || string_agg(i.number, ' ' order by i.seq), ''),
+                  140)
+      into v_info from public.commission_invoice i where i.run_id = r.id and i.kind = 'invoice';
+      insert into public.bank_transfer (organization_id, client_organization_id, kind, debtor_bank_account_id, currency,
+                                        amount_minor, payee_name, payee_iban, payee_bic, end_to_end_id,
+                                        remittance_info, requested_execution_date, run_id, ordered_by)
+      values (r.organization_id, r.client_organization_id, 'payout', v_bank, r.currency, r.net_minor, pa.holder_name,
+              pa.iban, pa.bic, 'RMT' || upper(substr(md5(gen_random_uuid()::text), 1, 12)), v_info,
+              r.requested_execution_date, r.id, r.approval_requested_by)
+      returning id into v_transfer;
+      perform private.remittance_late_lines(r, r.requested_execution_date);
+      update public.remittance_run set status = 'approved', approved_by = r.approval_requested_by,
+        approved_at = clock_timestamp(), transfer_id = v_transfer, settlement_plan = v_plan, invoice_late = v_late,
+        payout_snapshot = jsonb_build_object('payout_account_id', pa.id, 'holder_name', pa.holder_name,
+                                             'iban', pa.iban, 'bic', pa.bic, 'kind', pa.kind,
+                                             'confirmed_at', pa.confirmed_at),
+        job = null, job_token = null, job_queued_at = null, version = version + 1
+      where id = r.id;
+      return jsonb_build_object('status', 'approved', 'transfer_id', v_transfer, 'documents', v_issued -> 'documents');
+    end if;
+    -- N = 0 (§9.5 step 5): nothing to transfer; the settlement is posted now and the run is booked — its date is the
+    -- items' payment date (I21: « settled when N = 0 », money review #3)
+    perform private.remittance_late_lines(r, v_today);
+    v_entry := private.post_run_settlement(r.id, v_plan, v_today);
+    update public.remittance_run set status = 'booked', booked_on = v_today, approved_by = r.approval_requested_by,
+      approved_at = clock_timestamp(), settlement_plan = v_plan || jsonb_build_object('entry_id', v_entry),
+      invoice_late = v_late, job = null, job_token = null, job_queued_at = null, version = version + 1
     where id = r.id;
-    return jsonb_build_object('status', 'approved', 'transfer_id', v_transfer, 'documents', v_issued -> 'documents');
+    return jsonb_build_object('status', 'booked', 'entry_id', v_entry, 'documents', v_issued -> 'documents');
+  exception when sqlstate 'RR001' then
+    -- a business refusal: everything above rolled back, the locks released; back to draft with the reason
+    perform private.remittance_back_to_draft(r.id, p_token, sqlerrm, null);
+    return jsonb_build_object('status', 'back_to_draft', 'reason', sqlerrm);
+  end;
+end;
+$$;
+
+-- The lines of an approved run paid after their latest execution date (§9.5 step 2: approved late with its reason):
+-- a breach row per item unless the nightly checks wrote it first (I21; one per item, append-only), and the late
+-- approval itself, always (review M2c-4: tests-ui #2, legal #8). p_paid_on: the payout's requested execution date, or
+-- the settlement date when N = 0.
+create or replace function private.remittance_late_lines(r public.remittance_run, p_paid_on date)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if r.earliest_latest_execution_date is null or p_paid_on <= r.earliest_latest_execution_date then
+    return;   -- no line late (the header's earliest date is the lines' minimum)
   end if;
-  -- N = 0 (§9.5 step 5): nothing to transfer; the settlement is posted now and the run is booked
-  v_entry := private.post_run_settlement(r.id, v_plan, v_today);
-  update public.remittance_run set status = 'booked', booked_on = v_today, approved_by = r.approval_requested_by,
-    approved_at = clock_timestamp(), settlement_plan = v_plan || jsonb_build_object('entry_id', v_entry),
-    invoice_late = v_late, job = null, job_token = null, job_queued_at = null, version = version + 1
-  where id = r.id;
-  return jsonb_build_object('status', 'booked', 'entry_id', v_entry, 'documents', v_issued -> 'documents');
+  insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
+                                                 run_id, deadline, latest_execution_date, requested_execution_date,
+                                                 blocked_reason, late_reason)
+  select r.organization_id, r.client_organization_id, l.ledger_entry_id, l.payment_id, r.id, l.deadline,
+         l.latest_execution_date, p_paid_on, case when l.unmeetable then 'unmeetable_delay' end, r.late_reason
+  from public.remittance_line l
+  where l.run_id = r.id and l.amount_minor > 0 and l.latest_execution_date < p_paid_on
+  on conflict (ledger_entry_id) do nothing;
+  insert into public.remittance_late_approval (run_id, ledger_entry_id, organization_id, client_organization_id,
+                                               latest_execution_date, requested_execution_date, late_reason,
+                                               approved_by)
+  select r.id, l.ledger_entry_id, r.organization_id, r.client_organization_id, l.latest_execution_date, p_paid_on,
+         r.late_reason, r.approval_requested_by
+  from public.remittance_line l
+  where l.run_id = r.id and l.amount_minor > 0 and l.latest_execution_date < p_paid_on;
 end;
 $$;
 
 ------------------------------------------------------------------------------------------
 -- Cancellation of an approved run before its transfer is in a file (§9.7; the attestation path after download is
--- M2c-6's): the transfer cancelled, one full credit note per invoice of the run (numbers never reused), the lines
--- released and their items back to pending, the tier history as before the run. Nothing else is reversed: the
--- settlement is not booked before the debit.
+-- M2c-6's): the transfer cancelled, one full credit note per invoice of the run and one corrective invoice restoring
+-- what its credit notes took back from earlier invoices (numbers never reused), the lines released and their items
+-- back to pending, the tier history exactly as before the run. Nothing else is reversed: the settlement is not booked
+-- before the debit. One synchronous command within the API's 8 s at 50k lines (performance review #1).
 ------------------------------------------------------------------------------------------
+
+-- The servicer's allocation lock (and, for what numbers documents, the remit lock) taken by a command: a wait past the
+-- command's lock timeout (an allocation, or an approval job holding it while it numbers and orders) is refused with a
+-- reason the page says (« réessayez »), not the database's text (performance review #4).
+create or replace function private.remittance_command_locks(p_organization_id uuid, p_remit boolean default false)
+returns void
+language plpgsql
+set search_path = ''
+as $$
+begin
+  perform pg_advisory_xact_lock(hashtext('payments:' || p_organization_id::text));
+  if p_remit then
+    perform pg_advisory_xact_lock(hashtext('remit:' || p_organization_id::text));
+  end if;
+exception when lock_not_available then
+  raise exception 'remittance run refused: allocation_busy' using errcode = '55P03',
+    hint = 'An allocation or an approval of this servicer holds the lock: retry in a few seconds.';
+end;
+$$;
 
 create or replace function public.cancel_remittance_run(p_idempotency_key text, p_run_id uuid,
                                                         p_expected_version integer, p_reason text)
@@ -1671,8 +1854,10 @@ declare
   v_request jsonb := jsonb_build_object('run_id', p_run_id, 'expected_version', p_expected_version, 'reason', v_reason);
   v_result jsonb;
   v_docs jsonb;
+  v_restore jsonb;
   v_issued jsonb;
   v_n integer;
+  v_today date := private.paris_today();
 begin
   select * into r from public.remittance_run where id = p_run_id;
   if not found or not private.has_role(r.organization_id, array['admin']) then
@@ -1686,8 +1871,7 @@ begin
     raise exception 'a reason is required' using errcode = 'check_violation';
   end if;
   select * into r from public.remittance_run where id = p_run_id for update;
-  perform pg_advisory_xact_lock(hashtext('payments:' || r.organization_id::text));
-  perform pg_advisory_xact_lock(hashtext('remit:' || r.organization_id::text));
+  perform private.remittance_command_locks(r.organization_id, true);
   if r.status <> 'approved' then
     raise exception 'remittance run refused: %', case r.status when 'draft' then 'draft_use_discard'
                                                                when 'sent' then 'already_sent'
@@ -1704,13 +1888,13 @@ begin
     raise exception 'remittance run refused: transfer_in_file' using errcode = 'check_violation';
   end if;
 
-  -- one full credit note per invoice of the run: what each still charges each key, its VAT by cumulative difference
-  -- at the invoice's own rate, off its pending VAT first
+  -- 1. one full credit note per invoice of the run: what each still charges each key, its VAT by cumulative
+  -- difference at the invoice's own rate, off its pending VAT first
   with inv as (
     select i.*, coalesce((select -sum(c.ht_minor) from public.commission_credit_correction c
                           where c.original_invoice_id = i.id), 0) as credited_before,
            private.document_open(i.id) as open_before, private.document_pending_vat(i.id) as pending_before
-    from public.commission_invoice i where i.run_id = r.id and i.kind = 'invoice'),
+    from public.commission_invoice i where i.run_id = r.id and i.kind = 'invoice' and i.reason = 'commission'),
   keys as (
     select i.id as invoice_id, ch.account_id, ch.tier_key,
            ch.charged_minor + coalesce((select sum(a.ht_minor) from public.commission_credit_alloc a
@@ -1743,10 +1927,59 @@ begin
              'excess', (a.ht + a.vat::bigint - least(a.ht + a.vat::bigint, a.open_before))::text,
              'open_before', a.open_before::text))) order by a.seq), '[]')
   into v_docs from amounts a;
-  v_issued := private.issue_commission_documents(r.organization_id, r.client_organization_id, r.id, v_docs,
-                                                 'run_cancelled');
 
-  -- the lines released, their items back in the queue (posted when they were); the history as before the run
+  -- 2. the run's own credit notes on earlier invoices undone (money review #0): per mandate and VAT rate, one corrective
+  -- invoice charging again, per (file, tier key), what they took back — its HT and VAT exactly what they credited, at
+  -- each credited invoice's own rate — so that the tier history goes back exactly as before the run and the next run
+  -- credits each reversal once (on this invoice: it charges the line now). Settled as the mandate's terms say today.
+  with crd as (   -- per credit note of the run and invoice it corrected: what it took back
+    select cn.mandate_id, cn.number as credit_number, c.original_invoice_id, o.number as original_number,
+           o.issue_date as original_date, o.vat_rate, -c.ht_minor as ht, -c.vat_minor as vat, cn.seq
+    from public.commission_invoice cn
+    join public.commission_credit_correction c on c.credit_note_id = cn.id
+    join public.commission_invoice o on o.id = c.original_invoice_id
+    where cn.run_id = r.id and cn.kind = 'credit_note' and cn.reason = 'commission'),
+  keys as (       -- per mandate, rate and (file, tier key): what they took back
+    select cn.mandate_id, o.vat_rate, a.account_id, a.tier_key, -sum(a.ht_minor) as ht
+    from public.commission_invoice cn
+    join public.commission_credit_alloc a on a.credit_note_id = cn.id
+    join public.commission_invoice o on o.id = a.original_invoice_id
+    where cn.run_id = r.id and cn.kind = 'credit_note' and cn.reason = 'commission'
+    group by cn.mandate_id, o.vat_rate, a.account_id, a.tier_key),
+  docs as (
+    select x.mandate_id, x.vat_rate, sum(x.ht) as ht, sum(x.vat) as vat, m.reference,
+           (select mt.remittance_terms from public.mandate_terms mt
+            where mt.mandate_id = x.mandate_id and mt.valid_from <= v_today
+              and (mt.valid_to is null or v_today < mt.valid_to)
+            order by mt.valid_from desc limit 1) as terms
+    from crd x join public.mandate m on m.id = x.mandate_id
+    group by x.mandate_id, x.vat_rate, m.reference)
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'id', gen_random_uuid(), 'ref', 'restore:' || d.mandate_id || ':' || d.vat_rate,
+           'key', 'inv-restore:' || r.id || ':' || d.mandate_id || ':' || d.vat_rate, 'kind', 'invoice',
+           'mandate_id', d.mandate_id, 'ht', d.ht::text, 'vat', d.vat::text, 'ttc', (d.ht + d.vat)::text,
+           'vat_rate', d.vat_rate::text,
+           'settlement', case when jsonb_typeof(d.terms -> 'netting') = 'object' then 'netted' else 'due' end,
+           'due_days', case when jsonb_typeof(d.terms -> 'netting') = 'object' then null
+                            else coalesce((d.terms ->> 'invoice_payment_days')::integer, 30) end,
+           'clause_ref', d.terms #>> '{netting,clause_ref}',
+           'lines', (select jsonb_agg(jsonb_build_object(
+                       'kind', 'commission',
+                       'designation_fr', 'Annulation du reversement ' || r.number || ' — rétablissement de l''avoir '
+                                         || x.credit_number || ' (facture ' || x.original_number || ' du '
+                                         || to_char(x.original_date, 'DD/MM/YYYY') || ')',
+                       'ht', x.ht::text, 'vat_rate', x.vat_rate::text) order by x.seq, x.original_number)
+                     from crd x where x.mandate_id = d.mandate_id and x.vat_rate = d.vat_rate),
+           'charges', (select jsonb_agg(jsonb_build_object('account_id', k.account_id, 'tier_key', k.tier_key,
+                                                           'amount', k.ht::text) order by k.account_id, k.tier_key)
+                       from keys k where k.mandate_id = d.mandate_id and k.vat_rate = d.vat_rate))
+           order by d.reference, d.mandate_id, d.vat_rate), '[]')
+  into v_restore from docs d;
+  v_issued := private.issue_commission_documents(r.organization_id, r.client_organization_id, r.id,
+                                                 v_docs || v_restore, 'run_cancelled');
+
+  -- 3. the lines released, their items back in the queue (posted when they were); the history exactly as before the
+  -- run (its documents credited or restored: what the invoices still charge each key is that state's commission)
   update public.remittance_line set released = true, released_at = clock_timestamp() where run_id = r.id;
   get diagnostics v_n = row_count;
   insert into private.remittance_pending (ledger_entry_id, organization_id, client_organization_id, currency, kind,
@@ -1757,17 +1990,31 @@ begin
                                            basis, kept_basis_minor, kept_minor, commission_minor)
   select r.organization_id, r.client_organization_id, k.account_id, k.tier_key, r.id, 'cancelled',
          coalesce(p.basis, '[]'), coalesce(p.kept_basis_minor, 0), coalesce(p.kept_minor, 0),
-         coalesce((select sum(ch.charged_minor + coalesce((select sum(a.ht_minor) from public.commission_credit_alloc a
-                                                          where a.original_invoice_id = ch.invoice_id
-                                                            and a.account_id = ch.account_id
-                                                            and a.tier_key = ch.tier_key), 0))
-                   from public.commission_invoice_charge ch
-                   where ch.account_id = k.account_id and ch.tier_key = k.tier_key), 0)
+         coalesce(p.commission_minor, 0)
   from public.remittance_key_state k
-  left join lateral (select x.* from public.remittance_key_state x
+  left join lateral (select x.basis, x.kept_basis_minor, x.kept_minor, x.commission_minor
+                     from public.remittance_key_state x
                      where x.account_id = k.account_id and x.tier_key = k.tier_key and x.seq < k.seq
                      order by x.seq desc limit 1) p on true
   where k.run_id = r.id and k.cause = 'approved';
+  -- (the engine's input check where the run credited earlier invoices — elsewhere the run's invoice is credited in
+  -- full: what the invoices still charge each key it credited is the state's commission again; keyed, per such key)
+  if exists (select 1
+             from (select distinct a.account_id, a.tier_key from public.commission_invoice cn
+                   join public.commission_credit_alloc a on a.credit_note_id = cn.id
+                   where cn.run_id = r.id and cn.kind = 'credit_note' and cn.reason = 'commission' offset 0) x
+             cross join lateral (select k.commission_minor from public.remittance_key_state k
+                                 where k.account_id = x.account_id and k.tier_key = x.tier_key
+                                 order by k.seq desc limit 1) st
+             cross join lateral (select coalesce(sum(ch.charged_minor + coalesce(
+                                   (select sum(a.ht_minor) from public.commission_credit_alloc a
+                                    where a.original_invoice_id = ch.invoice_id and a.account_id = ch.account_id
+                                      and a.tier_key = ch.tier_key), 0)), 0) as open
+                                 from public.commission_invoice_charge ch
+                                 where ch.account_id = x.account_id and ch.tier_key = x.tier_key) o
+             where o.open <> st.commission_minor) then
+    raise exception 'cancellation of %: the tier history and the documents disagree', r.number using errcode = '23514';
+  end if;
   update public.remittance_run set status = 'cancelled', cancelled_by = auth.uid(), cancelled_at = clock_timestamp(),
     cancel_reason = v_reason, version = version + 1
   where id = r.id;
@@ -2747,6 +2994,7 @@ alter table public.commission_credit_correction enable row level security;
 alter table public.commission_settlement enable row level security;
 alter table public.remittance_key_state enable row level security;
 alter table public.remittance_deadline_breach enable row level security;
+alter table public.remittance_late_approval enable row level security;
 alter table private.remittance_draft_line enable row level security;
 alter table private.remittance_draft_repricing enable row level security;
 alter table private.remittance_draft enable row level security;
@@ -2755,14 +3003,15 @@ alter table private.invoice_counter enable row level security;
 revoke all on public.remittance_run, public.remittance_line, public.remittance_line_repricing,
   public.commission_invoice, public.commission_invoice_line, public.commission_invoice_charge,
   public.commission_credit_alloc, public.commission_credit_correction, public.commission_settlement,
-  public.remittance_key_state, public.remittance_deadline_breach from public, anon, authenticated;
+  public.remittance_key_state, public.remittance_deadline_breach, public.remittance_late_approval
+  from public, anon, authenticated;
 revoke all on private.remittance_draft_line, private.remittance_draft_repricing, private.remittance_draft,
   private.invoice_counter from public, anon, authenticated;
 revoke all on sequence private.remittance_run_number_seq from public, anon, authenticated;
 grant select on public.remittance_run, public.remittance_line, public.remittance_line_repricing,
   public.commission_invoice, public.commission_invoice_line, public.commission_invoice_charge,
   public.commission_credit_alloc, public.commission_credit_correction, public.commission_settlement,
-  public.remittance_key_state, public.remittance_deadline_breach to authenticated;
+  public.remittance_key_state, public.remittance_deadline_breach, public.remittance_late_approval to authenticated;
 
 -- a client member with access to the whole client: a run once approved (a draft is the servicer's work)
 create or replace function private.client_reads_run(p_client_organization_id uuid, p_status text,
@@ -2806,6 +3055,10 @@ create policy remittance_key_state_read on public.remittance_key_state for selec
   organization_id = any ((select private.money_staff_org_ids())::uuid[]));
 create policy remittance_deadline_breach_read on public.remittance_deadline_breach for select to authenticated using (
   organization_id = any ((select private.money_staff_org_ids())::uuid[]));
+-- a client's members with access to the whole client read the late approvals of its runs (always approved runs)
+create policy remittance_late_approval_read on public.remittance_late_approval for select to authenticated using (
+  organization_id = any ((select private.money_staff_org_ids())::uuid[])
+  or client_organization_id = any ((select private.client_whole_org_ids())::uuid[]));
 
 -- Functions: the commands and reads are the API's; the rest the worker's (service role) or internal.
 revoke execute on function
@@ -2816,7 +3069,8 @@ revoke execute on function
   private.create_remittance_run(uuid, uuid, char, text, text, uuid), private.remittance_clear_draft(uuid),
   private.remittance_draft_for_command(uuid, integer, text[]), private.remittance_prepare_begin(uuid, uuid),
   private.remittance_record_draft(uuid, uuid, jsonb), private.remittance_prepare_failed(uuid, uuid, text, text),
-  private.invoice_party(uuid), private.issue_commission_documents(uuid, uuid, uuid, jsonb, text),
+  private.invoice_party(uuid), private.issue_commission_documents(uuid, uuid, uuid, jsonb, text, boolean),
+  private.remittance_late_lines(public.remittance_run, date), private.remittance_command_locks(uuid, boolean),
   private.post_run_settlement(uuid, jsonb, date), private.execution_date_refusal(uuid, char, date),
   private.remittance_back_to_draft(uuid, uuid, text, text),
   private.remittance_approval_refusal(public.remittance_run, private.remittance_draft, date),
