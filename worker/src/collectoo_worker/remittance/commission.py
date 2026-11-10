@@ -167,10 +167,11 @@ class Line:
     )
     original_entry_id: str | None = None  # a reversal: the entry it undoes (its invoice, §8.4)
 
-    def event_key(self) -> tuple[date, datetime, str]:
-        """The order events happened in, and runs are cut in (third review): not the encaissement
-        date, which only chooses the version (a bounce carries its collection's date)."""
-        return (self.effective_date, self.posted_at, self.entry_id)
+    def event_key(self) -> tuple[datetime, str]:
+        """The order runs are cut in: the posting order of the pending queue (final review). Not the
+        encaissement date, which only chooses the version (a bounce carries its collection's date),
+        nor the effective date (a payment matched late is posted after a bounce dated before it)."""
+        return (self.posted_at, self.entry_id)
 
 
 @dataclass(frozen=True, slots=True)

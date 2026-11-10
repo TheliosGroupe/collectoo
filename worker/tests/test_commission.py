@@ -854,6 +854,43 @@ def test_keep_a_bounce_after_a_later_collection(
         assert out == [expected, expected], (tau, out)
 
 
+@pytest.mark.parametrize(
+    ("versions", "amount", "expected"),
+    [
+        (_keep({"kind": "flat", "rate": "0.01"}, min_per_file_minor="30000"), 100_000, 31_000),
+        (_keep(_marginal(("500000", "0.10"), (None, "0.05"))), 500_000, 100_000),
+    ],
+)
+def test_keep_a_collection_matched_after_a_bounce(
+    versions: dict[str, list[TermsVersion]], amount: int, expected: int
+) -> None:
+    """Final review: X collected on 02/11 (run 1); X's cheque bounces, posted 12/12; Y was booked by
+    the bank on 10/12 but matched by ops and posted on 15/12. Runs are cut in posting order (the
+    pending queue), so the bounce comes first: one run or two, the same commission (1 % with a
+    300,00 € minimum: 310,00 €; 10 % to 5 000,00 € then 5 %: 1 000,00 €). Sorting a run by
+    effective date instead put Y before the bounce in one run only (300,00 € / 750,00 €)."""
+    for tau in (NO_VAT, TAU):
+        out = []
+        for split in (False, True):
+            sim = Simulator({"F": _file()}, versions, tau)
+            x = _line(1, amount, date(2026, 11, 2))
+            sim.run([x])
+            bounce = replace(
+                _undo(2, x),
+                effective_date=date(2026, 12, 12),
+                posted_at=datetime(2026, 12, 12, 12, tzinfo=UTC),
+            )
+            y = replace(
+                _line(3, amount, date(2026, 12, 10)),
+                effective_date=date(2026, 12, 10),
+                posted_at=datetime(2026, 12, 15, 12, tzinfo=UTC),
+            )
+            for run in [[bounce], [y]] if split else [[bounce, y]]:
+                sim.run(run)
+            out.append(sim.history[("F", "k")].commission_minor)
+        assert out == [expected, expected], (tau, out)
+
+
 def test_a_kept_reversal_between_a_credit_pair_keeps_the_same_fee() -> None:
     """A mandate whose clause changes: v1 `keep`, v2 `credit`, both 10 % to 5 000,00 € then 5 %.
     A 5 000,00 € under v1 (run 1); then X 5 000,00 € under v2, A bounces, X is undone. However
