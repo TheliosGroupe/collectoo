@@ -163,7 +163,8 @@ create trigger remittance_run_change_log after insert or update or delete on pub
 -- The payout a run orders (M2c-6 puts it in a file and books it from the bank's debit).
 alter table public.bank_transfer add column run_id uuid references public.remittance_run (id);
 create unique index bank_transfer_run_uq on public.bank_transfer (run_id) where run_id is not null and status <> 'cancelled';
-alter table public.bank_transfer add constraint bank_transfer_payout_run check ((kind = 'payout') = (run_id is not null));
+-- (a payout booked before runs existed, or an unplanned one M2c-6 records, has none)
+alter table public.bank_transfer add constraint bank_transfer_payout_run check (run_id is null or kind = 'payout');
 
 ------------------------------------------------------------------------------------------
 -- Drafts (§9.4): replaceable, private; copied into the frozen tables at approval
@@ -1089,7 +1090,9 @@ begin
   from jsonb_array_elements(p_docs) with ordinality x (doc, ord);
   if exists (select 1 from pg_temp._docs where kind not in ('invoice', 'credit_note') or ttc <> ht + vat
                or (kind = 'invoice' and (ht <= 0 or vat < 0)) or (kind = 'credit_note' and (ht >= 0 or vat > 0
-                   or v_pending + v_collected <> -vat))) then
+                   or v_pending + v_collected <> -vat)))
+     or exists (select 1 from pg_temp._docs d cross join lateral jsonb_array_elements(coalesce(d.doc -> 'corrections', '[]')) c
+                where (c ->> 'vat_pending')::bigint < 0 or (c ->> 'vat_collected')::bigint < 0) then
     raise exception 'commission documents: amounts out of shape' using errcode = '23514';
   end if;
 
@@ -2674,7 +2677,7 @@ begin
                                              and c.servicer_organization_id = new.organization_id) then
       raise exception 'bank transfer: a payout goes to a client of the servicer' using errcode = 'check_violation';
     end if;
-    if new.kind = 'payout' and not exists (select 1 from public.remittance_run r where r.id = new.run_id
+    if new.run_id is not null and not exists (select 1 from public.remittance_run r where r.id = new.run_id
                                              and r.client_organization_id = new.client_organization_id
                                              and r.currency = new.currency) then
       raise exception 'bank transfer: a payout belongs to a run of its client' using errcode = 'check_violation';
