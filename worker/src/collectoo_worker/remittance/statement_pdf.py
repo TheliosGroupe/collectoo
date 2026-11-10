@@ -1,4 +1,4 @@
-"""The statement's PDF (design §10; template `releve-reversement-fr-1`): the header and the seven
+"""The statement's PDF (design §10; template `releve-reversement-fr-2`): the header and the seven
 sections of `statement.statement_view`, with the per-file table up to 2,000 files (above that, the
 CSV's SHA-256 for the detail). Deterministic: the bytes are a function of the payload and the CSV's
 hash (`remittance.pdf`: reportlab pinned, invariant mode, DejaVu Sans, the PDF dated K, never the

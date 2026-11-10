@@ -18,8 +18,9 @@
   its reason at once; other errors are retried by the queue, then the dead-letter hook sends it
   back.
 - `documents {organization_id}` (M2c-5): the statements and the invoice PDFs due for one servicer
-  (`jobs.remittance_documents`); a document still due after an hour is the nightly alert
-  `document_missing`.
+  (`jobs.remittance_documents`), each under its own savepoint: one that cannot be drawn is recorded
+  and retried, the others go on; the nightly alerts are `remittance_document_failed` and
+  `remittance_document_missing` (still due after 24 hours).
 
 No model, no LLM: every amount comes from the ledger and the engines (CLAUDE.md).
 """

@@ -438,10 +438,14 @@ select results_eq($$ select i.payload ->> 'penalty_text' like 'Pénalités de re
                             i.payload -> 'flat_indemnity', i.payload ->> 'due_date', i.payload -> 'payment_reference',
                             i.payload -> 'own_account'
                      from public.commission_invoice i where i.run_id = (select v from t where k = 'r1') $$,
-  $$ values (true, '{"applies": true, "amount_minor": "4000"}'::jsonb, null::text,
+  $$ values (true, '{"applies": true, "amount_minor": "4000", "proceeding": null}'::jsonb, null::text,
              jsonb_build_object('mode', 'run',
                                 'run_number', (select number from public.remittance_run where id = (select v from t where k = 'r1')),
-                                'execution_date', private.next_business_day(private.paris_today())),
+                                'execution_date', private.next_business_day(private.paris_today()),
+                                -- M2c-5 review legal#4, #5: what the plan sets off on the payout, a transfer ordered
+                                'transfer', true,
+                                'amount_minor', (select ttc_minor::text from public.commission_invoice
+                                                 where run_id = (select v from t where k = 'r1'))),
              'null'::jsonb) $$,
   'a netted invoice: the penalty rate, the 40 € indemnity (professional buyer, L441-10 II), set off on the payout''s date');
 select is((select payload -> 'payment_reference' ->> 'execution_date' from public.commission_invoice
@@ -471,9 +475,11 @@ select is((select payload_sha256 from public.commission_invoice where id = 'e300
 select private.issue_commission_documents('00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a3',
   null, jsonb_build_array((pg_temp.invoice('a3', '05', 2000) - 'charges') || '{"id": "e3000000-0000-0000-0000-000000000003",
                                                               "key": "proceeding-0001"}'), 'commission');
-select is((select payload -> 'flat_indemnity' from public.commission_invoice
-           where id = 'e3000000-0000-0000-0000-000000000003'), '{"applies": false, "amount_minor": null}'::jsonb,
-  'not claimed while the client''s proceeding is open');
+-- M2c-5 review legal#0 (L441-9 I; L441-10 II only bars invoking it while the opening forbids paying the claim): the
+-- mention stays, the proceeding is frozen beside it for the dunning step
+select is((select (payload -> 'flat_indemnity') - 'proceeding' from public.commission_invoice
+           where id = 'e3000000-0000-0000-0000-000000000003'), '{"applies": true, "amount_minor": "4000"}'::jsonb,
+  'stated even while the client''s proceeding is open, the proceeding kept beside it');
 
 -- The cancellation restores the run's credit notes on earlier invoices (money #0) ----------------------------------
 -- Martin's first run debited (emulated M2c-6): FC-1 charges file 01 30 000; then file 01's collection undone and a
