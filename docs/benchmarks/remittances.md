@@ -1,7 +1,7 @@
 # Remittances benchmarks (M2c)
 
-Targets: design `docs/design/m2c-remittances.md` §19. Each slice adds its section; runs, approvals, documents and
-transfer files come with M2c-2 … M2c-7.
+Targets: design `docs/design/m2c-remittances.md` §19. Each slice adds its section; documents and
+transfer files come with M2c-5 … M2c-7.
 
 ## Funds ledger (M2c-1, migration `20261111090000`)
 
@@ -89,3 +89,34 @@ of each mandate; case 2 + history: every (file, tier key) with a prior state. `c
   change of VAT rate): case 2 on the same VM, three runs each, interleaved: the second-review engine 2.75–3.18 s and
   documents 1.05–1.22 s, now 2.86–3.16 s and 1.11–1.38 s — no measurable change (one more O(n) pass over the run).
 
+
+## Runs and invoices (M2c-4, migration `20261112090000`)
+
+`worker/tests/test_remittance_scale_integration.py` (CI `scale` job): 50,000 files boarded from the synthetic EU loan
+tape, a statement paying each by its RF reference imported, matched and allocated (the payments queue), then one run
+of the client: « Préparer maintenant » (the command: the draft created and its 50,000 items reserved under the
+allocation lock), the prepare job, the approval command and its job, the nightly checks. The remittance tables are
+never analysed (their statistics forgotten before the run). Cloud session VM, 2026-11-10, local stack.
+
+| Step | Volume | Measured | Design §19 target |
+|---|---|---|---|
+| « Préparer maintenant » (reserve under the allocation lock, the command) | 50,000 items | **1.34 s** | < 1 s |
+| Prepare job: load the facts | 50,000 lines | 3.06 s | ≈ 1 s |
+| Prepare job: deadlines, commission, documents, settlement plan (pure Python) | 50,000 lines | 4.61 s | ≈ 0.5 s (1.5–2.6 s measured in M2c-3) |
+| Prepare job: COPY of the draft lines + header (its checks) | 50,000 lines | 2.28 s | ≈ 0.5 s |
+| Approval command (compare and set, queue) | 1 run | **0.02 s** | < 1 s |
+| Approval job (lines frozen, invoice with 50,000 charges, key states, entry, payout) | 50,000 lines | **7.9 s** | 2–4 s, counter held for the numbering only |
+| Nightly checks of the servicer (payments + runs: I14–I18, R124-6) | 50,000 lines | **3.4 s** | < 5 s |
+
+The same at 5,000 items: reserve 0.16 s, prepare 1.0 s (load 0.34, price 0.33, write 0.25), approval job 1.0 s.
+
+- **Above target, accepted for now:** the reservation (1.3 s for 50,000 items: one UPDATE of the pending rows, the
+  allocation lock held for its duration — allocations wait that long, once per run); the prepare job (10 s, outside
+  every lock: the engine's pure-Python cost dominates, as M2c-3 measured; the loading is set-based by keys); the
+  approval job (7.9 s in its own transaction: inserting the 50,000 frozen lines with their per-line guard against the
+  entry's 4670 posting, 50,000 invoice charges and 50,000 key states from the draft's JSON). The invoice counter is
+  locked only from the numbering to the commit (the documents' inserts): other servicers never wait, and a servicer's
+  other runs wait at most that long. A client with 50,000 collections in one fortnight is far above the expected
+  volumes; if needed, the charges and key states can be copied from typed draft tables instead of JSON.
+- The plans rest on keys, not statistics: the draft lines are checked against the items by one keyed probe per item
+  (`remittance_draft_line (run_id, ledger_entry_id)`), the line guard reads each entry's postings by key.

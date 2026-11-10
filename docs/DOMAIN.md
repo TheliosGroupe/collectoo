@@ -821,6 +821,15 @@ R1 a valid RF reference in the structured field; R2 an RF in the free text (spac
 
 A bank account's `csv_profile` names its own headers (`{"columns": {"booking_date": "Date opé"}, "decimal": ","}`). A line is a `return` only when its label **starts** with the bank's operation type and a return word, in either order: `RETOUR`, `RETOURNÉ`, `REJET`, `REJETÉ`, `IMPAYÉ` or `ANNULATION` (optionally followed by `DE`/`DU`) with `VIR`, `VIREMENT`, `PRLV`, `PRÉLÈVEMENT`, `SEPA`, `CHQ`, `CHÈQUE`, `REM`, `REMISE`, `CB` or `CARTE` (« RETOUR VIR SEPA », « REJET DE PRLV », « PRLV SEPA REJETÉ », « IMPAYÉ CHQ »). Words further in the label may be the payer's (« REGLEMENT IMPAYE ») and are never read for this: a debtor's credit is never turned into a non-payment by its motif. A CSV proves no balance: no opening/closing check.
 
+#### Remittance runs and commission invoices (M2c-4; ADR-0014 M2c-4, design §9, §14)
+
+- **Reversement** (`remittance_run`, `RV-AAAA-NNNNNN`): what the servicer pays one client in one currency. At most one is pending per (client, currency): a draft, or approved and not yet debited. A draft **reserves** every collection of the client waiting in the pending queue at a moment K (`known_at`), under the allocation lock; what is posted later waits for the next run.
+- **Ligne de reversement** (`remittance_line`): one entry that moved the client's 4670 (an allocation, a forward, their reversals, an advance, a payout that came back), with its amount (+ owed to the client), its encaissement date E, its R124-6 deadline and **latest execution date**, its commission (HT, `charged`, `pending` or `none`) and the engine's parts (the bands, the hold). Each item is in exactly one live line. A line never changes; a cancelled run **releases** its lines and their items go back to the queue.
+- **Brut / commission / compensation / net** (`gross`, D, N): gross = Σ lines; under the mandate's netting clause the run's invoice (and earlier open ones) is **compensated** with the payout (D); a refund owed by a credit note is paid with it; N = gross − D is what the transfer pays. N + D = gross.
+- **Facture / avoir de commission** (`commission_invoice`, `FC-AAAA-NNNNNN`): one invoice per (run, mandate) when the commission rises, one credit note when it falls (on the invoice that charged the undone collection first, then the latest); **one gapless series per servicer and calendar year for both**, numbered at approval from a counter row locked in the issuing transaction (a rollback takes the number back). An invoice is final: corrections are credit notes; a cancelled run is credited in full.
+- **Historique des paliers** (`remittance_key_state`): per (file, tier key) where the tiers stand (the net basis per terms version), what `keep` clauses kept, and what is charged: the commission engine continues from it at the next run.
+- **Délai intenable**: a mandate delay of 1–5 days that leaves no business day to execute after E (recorded, not a breach; OQ-71).
+
 ### 3.6 Plans, promises, disputes, holds, legal
 
 ```mermaid
@@ -1401,6 +1410,10 @@ Gates, first that applies (match runs, the job and the confirmation sheet alike)
 **Receipt** (M2b-5): `v1 original → vN update | void`, each version kept; a new version only when its content changes; `void` when the payment leaves its file, before anything about another file (a later file gives an `update`, same number); a bank return (M2b-6) voids it for good.
 
 **Bank lines** (M2b-6): `return` / `refund_out` lines are `unclassified → return_linked | refund_linked | refund_returned | explained` (the link is final; until then, `bank_debit_review` says why the job left them to ops; `explained` never for a debit, which is linked or stays unclassified: review fix); `other_debit` lines are explained gaps, or `unclassified → refund_linked | return_linked | explained` when listed to classify (the amount of a refund waiting for its debit on the same bank account); `suspected_duplicate` lines are `held → released | duplicate`.
+
+### 4.7 Remittance run (M2c-4)
+
+`draft` (preparing → prepared; « Actualiser » prepares again with a new K; back from approval with a reason) → `approved` (lines frozen, documents numbered, payout ordered) → `sent` (file transmitted, M2c-6) → `booked` (payout debited, M2c-6). `draft` → `booked` when nothing is transferred (N = 0: the settlement posted at approval). `draft` → `cancelled` (« Abandonner »: items unreserved); `approved` → `cancelled` before its transfer is in a file (a full credit note per invoice, lines released). Never back from `approved`.
 
 ## 5. Open questions (❓ founder)
 

@@ -42,7 +42,7 @@ def recent_business_day(back: int = 3) -> date:
         )
 
 
-def _confirm_payout(conn: psycopg.Connection[Any], tenant: dict[str, Any], client: str) -> str:
+def confirm_payout(conn: psycopg.Connection[Any], tenant: dict[str, Any], client: str) -> str:
     iban = iban_fr(random.Random(f"payout-{client}"))
     doc = one(
         conn,
@@ -91,7 +91,7 @@ def remittance_tenant(
                     tenant["mandate"],
                 ),
             )
-        tenant["payout"] = _confirm_payout(conn, tenant, tenant["client"])
+        tenant["payout"] = confirm_payout(conn, tenant, tenant["client"])
         admin = uuid.uuid4()
         conn.execute(
             USER_SQL,
@@ -123,7 +123,7 @@ def add_client(tenant: dict[str, Any], name: str = "C2") -> dict[str, Any]:
         )
         other = {**tenant, "client": client, "portfolio": portfolio}
         other["mandate"] = ready_mandate(conn, other, f"MAND-{uuid.uuid4().hex[:6]}")
-        other["payout"] = _confirm_payout(conn, other, str(client))
+        other["payout"] = confirm_payout(conn, other, str(client))
     return other
 
 
