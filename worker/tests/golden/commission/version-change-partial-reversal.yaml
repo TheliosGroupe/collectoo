@@ -54,14 +54,14 @@ runs:
     expect:
       lines:
         R-A: {commission: "-50000", parts: {tout: "-50000"}, terms: v1}     # A's own 500,00: F-1 keeps B's 400,00
-        A2: {commission: "50000", parts: {tout: "50000"}, terms: v1}
-        R-A2: {commission: "-50000", parts: {tout: "-50000"}, terms: v1}
+        A2: {commission: "0", parts: {}, terms: v1}       # undone in its own run: never priced (third review)
+        R-A2: {commission: "0", parts: {}, terms: v1}
         B2: {commission: "40000", parts: {tout: "40000"}, terms: v2}
       documents:
         MAND-V:
           invoice:
             number: FC-2026-000003
-            ht: "40000"              # F-2: A2 and its reversal in the same run net; B2 at 8 %
+            ht: "40000"              # F-2: A2 and its reversal in the same run are taken out; B2 at 8 %
             vat: "8000"
             ttc: "48000"
             lines:

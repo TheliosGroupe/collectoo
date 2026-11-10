@@ -4,16 +4,20 @@ M2c-4 numbers, posts and stores them; M2c-5 renders them.
 1. Per (mandate, file, tier key), the parts that raise the commission go to the mandate's invoice
    and the parts that lower it to its credit note — never netted across documents (review fix,
    founder #6: « a credit note on the original invoice »; CGI 289 I 5, 272 1). What the run nets
-   was never invoiced: a reversal whose original is in the same run, and a credit beyond what the
-   earlier invoices charge the key (the run's own collections moved the tiers it takes back). A
-   mandate whose amounts are all 0 issues nothing (and draws no number).
+   was never invoiced: what a kept reversal of a same-run collection moves (under `credit` the
+   engine never prices such a pair: both lines are charged 0 with no parts, so no invoice charges
+   a collection its own run undoes), and a credit beyond what the earlier invoices charge the key
+   (the run's own collections moved the tiers it takes back). A mandate whose amounts are all 0
+   issues nothing (and draws no number).
 2. Invoice lines group the keys per (claim type, rule, families): quantity 1, unit price HT, the
    base that moved in each rate band of the collections' own versions (for the designation:
    242 nonies A 8°, « la dénomination précise »). When a change of terms re-tiers collections of a
    later version (a collection dated before the change booked after them, or one undone), that
    re-tiering is its own line, « Régularisation de paliers (changement de conditions) », with its
    net HT and no bands, never a negative band (second review); when it lowers the commission it is
-   credited like any decrease (a reversal's on its original's invoice first, else LIFO).
+   credited like any decrease (a reversal's on its original's invoice first, else LIFO). A
+   commission line only ever sums collections' own bands; a negative band would be an engine
+   error, refused (`CommissionInputError`: the commission stays pending) rather than issued.
 3. Invoice VAT = R(HT x rate) at the rate of the issue date (11°).
 4. A reversal's credit is allocated first to the invoice that charged the line it undoes (its
    original), up to what that invoice still charges the (file, tier key) — every reversal of the
@@ -37,6 +41,7 @@ from typing import Literal
 from collectoo_worker.remittance.commission import (
     REGULARISATION_LABEL_FR,
     REVERSALS,
+    CommissionInputError,
     FileFacts,
     KeySide,
     LineCommission,
@@ -213,6 +218,11 @@ def _invoice(
         for _, _, moved in items:
             for rate, base in moved.items():
                 tiers[rate] += base
+        if any(base < 0 for base in tiers.values()):  # 242 nonies A 8°: never « 5 % sur -… »
+            raise CommissionInputError(
+                f"mandate {mandate}: a negative band on an invoice line (an engine error: the"
+                " commission stays pending)"
+            )
         lines.append(
             InvoiceLine(
                 claim_type=claim_type,

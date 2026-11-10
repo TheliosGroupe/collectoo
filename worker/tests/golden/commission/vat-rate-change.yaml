@@ -1,0 +1,64 @@
+# A change of the VAT rate between runs (third review). Synthetic rates, 10 % then 20 % (the cap's τ is the rate the
+# run's invoices bear: OQ-70). An invoice issued within the basis at its own rate is never taken back by a run with no
+# reversal on the file: the new rate's cap and rounding reserve are not re-applied to it (they credited 1,51 € on a
+# 0,01 € collection). A run that undoes a collection re-applies the cap at the new rate to the whole file: here it
+# gives back 1,51 € more than the collection was charged (TO VALIDATE). TO VALIDATE: synthetic grid and rates.
+case: vat-rate-change
+status: TO VALIDATE
+vat_rate: "0.1000"
+schedules:
+  minimum:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.05"}, min_per_file_minor: "3000"}
+mandates:
+  MAND-T: [{id: t-v1, from: "2026-01-01", to: null, schedule: minimum}]
+files:
+  F-T: {mandate: MAND-T, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — 20,00 € collected, VAT 10 %
+    lines:
+      - {entry: A, kind: allocation, file: F-T, e: "2026-12-01", eff: "2026-12-01", amount: "2000", basis: {principal: "2000"}}
+    expect:
+      lines:
+        A: {commission: "1817", parts: {tout: "1817"}}     # min 30,00 € capped at ⌊(20,00 − 0,01) / 1,1⌋ = 18,17 €
+      documents:
+        MAND-T:
+          invoice: {number: FC-2026-000001, ht: "1817", vat: "182", ttc: "1999"}     # TTC ≤ 20,00 €
+  - name: run 2 — 0,01 € collected, VAT now 20 %
+    vat_rate: "0.2000"
+    lines:
+      - {entry: B, kind: allocation, file: F-T, e: "2027-01-05", eff: "2027-01-05", amount: "1", basis: {principal: "1"}}
+    expect:
+      lines:
+        # at 20 % the cap would be ⌊20,01 / 1,2⌋ = 16,67 €: FC-1 is not taken back, nothing is issued
+        B: {commission: "0", parts: {tout: "0"}}
+  - name: run 3 — 80,00 € more, VAT 20 %
+    vat_rate: "0.2000"
+    lines:
+      - {entry: C, kind: allocation, file: F-T, e: "2027-01-20", eff: "2027-01-20", amount: "8000", basis: {principal: "8000"}}
+    expect:
+      lines:
+        C: {commission: "1183", parts: {tout: "1183"}}     # the minimum, 30,00 €, now fits: 30,00 − 18,17
+      documents:
+        MAND-T:
+          invoice: {number: FC-2027-000001, ht: "1183", vat: "237", ttc: "1420"}     # 34,19 € billed for 100,01 €
+  - name: run 4 — C undone, VAT 20 %
+    vat_rate: "0.2000"
+    lines:
+      - {entry: R-C, kind: allocation_reversal, original: C, file: F-T, e: "2027-01-20", eff: "2027-02-10", amount: "-8000", basis: {principal: "-8000"}}
+    expect:
+      lines:
+        # back to 20,01 €: the cap at 20 % with one open invoice, ⌊(20,01 − 0,01) / 1,2⌋ = 16,66 €, so 30,00 − 16,66
+        R-C: {commission: "-1334", parts: {tout: "-1334"}}
+      documents:
+        MAND-T:
+          credit_note:
+            number: FC-2027-000002
+            ht: "-1334"
+            vat: "-252"
+            ttc: "-1586"
+            corrected:
+              FC-2027-000001: {ht: "-1183", vat: "-237"}     # C's own invoice first, in full
+              FC-2026-000001: {ht: "-151", vat: "-15"}       # then FC-1, at its own 10 %: 18,33 € billed for 20,01 €

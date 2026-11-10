@@ -5,8 +5,14 @@ Hypothesis properties and the input errors.
   is the same however its lines fell into runs and in whatever order the runs came; it is what one
   run over the surviving lines alone gives; inside one version it is F(Σ basis) (telescoping);
 * undoing one collection gives back what it adds to the file — exactly its own charge when nothing
-  else changed since, priced under its own version, with VAT too (the rounding reserve included);
-  undoing everything brings the file back to 0;
+  else changed since, priced under its own version, with VAT too (the rounding reserve included),
+  except by at most one cent when the undo issues a tier regularisation invoice at the hold (third
+  review, a documented bound); undoing everything brings the file back to 0;
+* event order (third review): under `keep` one run over the events gives what any split of them
+  into consecutive runs gives (a bounce after a later collection); under `credit` a collection
+  undone in its own run is never priced, so no invoice charges it and no band moves twice;
+* a change of the VAT rate: a run of collections never issues a credit note nor lowers what is
+  charged; while the rate only rises the TTC billed stays within the basis;
 * with flat or bracket rates, any minimums, across versions: a reversal never raises the commission
   and a collection never lowers it (the minimum is taken on the file: second review);
 * the cap and the minimum: F monotone; HT x 1,2 plus one cent per open invoice within the basis,
@@ -42,7 +48,9 @@ from collectoo_worker.remittance.commission import (
     FileFacts,
     KeyState,
     Line,
+    LineCommission,
     LineKind,
+    Part,
     TermsVersion,
     cap_of,
     compute,
@@ -50,7 +58,7 @@ from collectoo_worker.remittance.commission import (
     inputs_hash,
     schedule_commission,
 )
-from collectoo_worker.remittance.documents import EarlierCharge
+from collectoo_worker.remittance.documents import EarlierCharge, MandateDocuments, run_documents
 from collectoo_worker.remittance.terms import CommissionSchedule
 from collectoo_worker.remittance.vat import vat_of
 
@@ -212,27 +220,32 @@ def terms(
     kinds: tuple[str, ...] = ALL_KINDS,
     two_keys: bool = False,
 ) -> dict[str, list[TermsVersion]]:
-    """One to three versions of mandate M sharing its tier keys, each from its own date."""
+    """One to three versions of mandate M sharing its tier keys, each from its own date; with
+    `on_reversal="mixed"` each version draws its own clause (a mandate whose clause changes)."""
     switches = sorted(draw(st.sets(st.integers(1, 299), max_size=2)))
     starts = [date(2026, 1, 1), *(D0 + timedelta(days=s) for s in switches)]
     ends: list[date | None] = [*starts[1:], None]
-    return {
-        "M": [
-            TermsVersion(
-                f"v{i}",
-                "M",
-                a,
-                b,
-                draw(schedules(on_reversal=on_reversal, kinds=kinds, two_keys=two_keys)),
-            )
-            for i, (a, b) in enumerate(zip(starts, ends, strict=True))
-        ]
-    }
+    out = []
+    for i, (a, b) in enumerate(zip(starts, ends, strict=True)):
+        clause = (
+            draw(st.sampled_from(("credit", "keep"))) if on_reversal == "mixed" else on_reversal
+        )
+        schedule = draw(schedules(on_reversal=clause, kinds=kinds, two_keys=two_keys))
+        out.append(TermsVersion(f"v{i}", "M", a, b, schedule))
+    return {"M": out}
+
+
+CLAUSES = st.sampled_from(("credit", "keep", "mixed"))
 
 
 def _live(lines: list[Line]) -> list[Line]:
     undone = {ln.original_entry_id for ln in lines if ln.original_entry_id}
     return [ln for ln in lines if ln.kind is LineKind.ALLOCATION and ln.entry_id not in undone]
+
+
+def _nonzero(amounts: dict[Key, int]) -> dict[Key, int]:
+    """A key a run never priced (a collection undone in its own run) is absent: as if 0."""
+    return {k: v for k, v in amounts.items() if v}
 
 
 def _targets(
@@ -272,17 +285,14 @@ def test_partition_invariance_across_versions(
         sim = Simulator(files, versions, tau)
         for run in _runs(lines, cuts):
             sim.run(run)
-        target = _targets(sim.history, files, versions, tau)
+        target = _nonzero(_targets(sim.history, files, versions, tau))
         if tau == TAU:
-            assert target == _targets(once.history, files, versions, tau)
-            survivors = _targets(alive.history, files, versions, tau)
-            assert {k: v for k, v in target.items() if v} == {
-                k: v for k, v in survivors.items() if v
-            }
+            assert target == _nonzero(_targets(once.history, files, versions, tau))
+            assert target == _nonzero(_targets(alive.history, files, versions, tau))
         else:
-            assert {k: s.commission_minor for k, s in sim.history.items()} == target
+            assert _nonzero({k: s.commission_minor for k, s in sim.history.items()}) == target
             single = compute(lines, files, versions, {}, tau)
-            assert {k: s.commission_minor for k, s in single.history.items()} == target
+            assert _nonzero({k: s.commission_minor for k, s in single.history.items()}) == target
     # the runs in another order (a run's lines are sorted by the engine; history only grows)
     shuffled = list(lines)
     random.Random(seed).shuffle(shuffled)
@@ -311,7 +321,9 @@ def test_telescoping_inside_one_version(
     c = sum(ln.amount_minor for ln in lines)
     rule = schedule.rules[0]
     assert (
-        total == cumulative(c, rule, files["F"], NO_VAT) == sim.history[("F", "k")].commission_minor
+        total
+        == cumulative(c, rule, files["F"], NO_VAT)
+        == sim.history.get(("F", "k"), KeyState()).commission_minor
     )
 
 
@@ -342,9 +354,9 @@ def test_undoing_one_collection_gives_back_its_own_charge(  # noqa: PLR0913, PLR
             sim.run(run)
         fresh = _line(9000, amount, D0 + timedelta(days=day))
         charged, _ = sim.run([fresh])
-        undone, _ = sim.run([_undo(9001, fresh)])
+        undone, docs = sim.run([_undo(9001, fresh)])
         target = _targets(sim.history, files, versions, tau)
-        _gives_back(charged.lines[0].commission_minor, undone.lines[0].commission_minor)
+        _gives_back(charged.lines[0].commission_minor, undone.lines[0].commission_minor, docs)
         before = _targets(compute(lines, files, versions, {}, tau).history, files, versions, tau)
         assert target.get(("F", "k"), 0) == before.get(("F", "k"), 0)
     live = _live(lines)
@@ -359,15 +371,19 @@ def test_undoing_one_collection_gives_back_its_own_charge(  # noqa: PLR0913, PLR
         )
 
 
-def _gives_back(charge: int, back: int) -> None:
+def _gives_back(charge: int, back: int, docs: dict[str, MandateDocuments]) -> None:
     """A collection charged in one run and undone in the next gives back exactly its charge. The
-    one exception: a collection that lowered the commission (a change of marginal grid re-tiered
-    later ones) on a file at its rounding hold — its undoing needs an invoice, whose VAT rounding
-    the reserve must then cover: at most one cent less, released at the file's next collection."""
-    if charge >= 0:
-        assert back == -charge, (charge, back)
+    one exception (third review, a documented bound): an undo that issues a tier regularisation
+    invoice (a change of tiered grid re-tiers later collections) on a file at its rounding hold —
+    one more open invoice whose VAT rounding the reserve must cover — gives back up to one cent
+    more or less than the charge, released at the file's next collection."""
+    regularised = any(
+        il.kind == "regularisation" for d in docs.values() if d.invoice for il in d.invoice.lines
+    )
+    if regularised:
+        assert abs(back + charge) <= 1, (charge, back)
     else:
-        assert -charge - 1 <= back <= -charge, (charge, back)
+        assert back == -charge, (charge, back)
 
 
 @settings(max_examples=300, deadline=None)
@@ -394,8 +410,8 @@ def test_with_vat_an_undone_collection_gives_back_its_charge(
         sim.run(run)
     fresh = _line(9000, amount, D0 + timedelta(days=day))
     charged, _ = sim.run([fresh])
-    undone, _ = sim.run([_undo(9001, fresh)])
-    _gives_back(charged.lines[0].commission_minor, undone.lines[0].commission_minor)
+    undone, docs = sim.run([_undo(9001, fresh)])
+    _gives_back(charged.lines[0].commission_minor, undone.lines[0].commission_minor, docs)
     if len(versions["M"]) == 1:
         assert undone.lines[0].commission_minor == -charged.lines[0].commission_minor
 
@@ -530,22 +546,41 @@ def test_with_vat_a_kept_reversal_never_issues_a_credit_note(
 
 @settings(max_examples=300, deadline=None)
 @given(
-    versions=terms(two_keys=True),
+    versions=CLAUSES.flatmap(lambda c: terms(on_reversal=c, two_keys=True)),
     lines=histories(max_ops=25, accounts=("F", "G"), interest=True),
     cuts=st.lists(st.integers(0, 60), max_size=10),
+    small=st.booleans(),
+    tau=st.sampled_from((TAU, NO_VAT)),
 )
 def test_documents_never_show_a_negative_band_and_credit_the_originals_invoice_first(
-    versions: dict[str, list[TermsVersion]], lines: list[Line], cuts: list[int]
+    versions: dict[str, list[TermsVersion]],
+    lines: list[Line],
+    cuts: list[int],
+    small: bool,
+    tau: Decimal,
 ) -> None:
-    """Across versions: every invoice line's bands are positive (a re-tiering is its own
-    regularisation line, with no bands) and the lines add up to the invoice; a reversal's credit
-    goes to the invoice that charged its original, and elsewhere only once that invoice charges
-    the key nothing more."""
+    """Across versions and clauses, with reversals of the same run or of earlier ones: every
+    invoice line's bands are positive (a re-tiering is its own regularisation line, with no bands;
+    third review: a collection undone in its own run is never priced under `credit`, so its band
+    never moves twice) and the lines add up to the invoice; under `credit` no invoice charges a
+    collection its own run undoes (both lines charged 0, no parts); a reversal's credit goes to
+    the invoice that charged its original, and elsewhere only once that invoice charges the key
+    nothing more."""
+    if small:
+        lines = _small(lines)
     files = {"F": _file(), "G": _file(2_000_000, "G")}
-    sim = Simulator(files, versions, TAU)
+    clause = {v.id: v.schedule.basis.on_reversal for v in versions["M"]}
+    sim = Simulator(files, versions, tau)
     for run in _runs(lines, cuts):
         originals = dict(sim.line_invoices)
         result, docs = sim.run(run)
+        by_entry = {r.entry_id: r for r in result.lines}
+        invoiced = {e for d in docs.values() if d.invoice for e in d.invoice.entries}
+        for r in result.lines:
+            undone = by_entry.get(r.original_entry_id or "")
+            if undone is not None and clause[r.terms_id or ""] == "credit":
+                assert r.commission_minor == undone.commission_minor == 0, (r, undone)
+                assert not r.parts and not undone.parts and undone.entry_id not in invoiced
         for d in docs.values():
             if d.invoice:
                 assert sum(il.ht_minor for il in d.invoice.lines) == d.invoice.ht_minor
@@ -719,6 +754,302 @@ def test_a_kept_reversal_never_lowers_the_commission(
         ) - cumulative(net, rule, files["F"], NO_VAT)
 
 
+# -- event order, same-run pairs, a change of VAT rate (third review) ------------------------------
+
+
+def _positions(history: dict[Key, KeyState]) -> dict[Key, tuple[Any, int, int]]:
+    """What no split into runs may change: the tier positions, the kept basis and the kept fee
+    (V may differ by the rounding hold)."""
+    return {
+        k: (s.basis, s.kept_basis_minor, s.kept_minor)
+        for k, s in history.items()
+        if s.basis or s.kept_basis_minor or s.kept_minor
+    }
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    versions=st.sampled_from(("keep", "mixed")).flatmap(
+        lambda c: terms(on_reversal=c, two_keys=True)
+    ),
+    lines=histories(max_ops=25, accounts=("F", "G"), interest=True),
+    cuts=st.lists(st.integers(0, 60), max_size=10),
+    small=st.booleans(),
+)
+def test_keep_one_run_or_any_split_of_the_same_events(
+    versions: dict[str, list[TermsVersion]], lines: list[Line], cuts: list[int], small: bool
+) -> None:
+    """Under `keep` (and a mandate whose clause changes across versions) the kept fee is what a
+    reversal would give back when it happens, so the order of the events matters — never how
+    that sequence is cut into runs (third review: lines were taken in encaissement-date order, so a
+    bounce, which carries its collection's date, came before a later collection in one run and
+    after it in two). One run over the events gives the same tier positions, kept basis and fee,
+    and schedule K as any split into consecutive runs; with no VAT, the same charge."""
+    if small:
+        lines = _small(lines)
+    files = {"F": _file(), "G": _file(2_000_000, "G")}
+    events = sorted(lines, key=Line.event_key)
+    for tau in (TAU, NO_VAT):
+        once = Simulator(files, versions, tau)
+        once.run(events)
+        split = Simulator(files, versions, tau)
+        for run in _runs(events, cuts):
+            split.run(run)
+        assert _positions(split.history) == _positions(once.history)
+        target = _nonzero(_targets(split.history, files, versions, tau))
+        assert target == _nonzero(_targets(once.history, files, versions, tau))
+        if tau == NO_VAT:
+            assert _nonzero({k: s.commission_minor for k, s in split.history.items()}) == target
+            assert _nonzero({k: s.commission_minor for k, s in once.history.items()}) == target
+
+
+def _keep(rate: dict[str, Any], **rule: Any) -> dict[str, list[TermsVersion]]:
+    schedule = CommissionSchedule.model_validate(
+        {
+            "schema": "commission-1",
+            "basis": {**BASIS, "on_reversal": "keep"},
+            "rules": [
+                {"id": "r", "tier_key": "k", "label_fr": "R", "match": {}, "rate": rate, **rule}
+            ],
+        }
+    )
+    return _one_version(schedule)
+
+
+def _marginal(*tiers: tuple[str | None, str]) -> dict[str, Any]:
+    return {"kind": "marginal", "tiers": [{"up_to_minor": u, "rate": r} for u, r in tiers]}
+
+
+@pytest.mark.parametrize(
+    ("versions", "amount", "expected"),
+    [
+        (_keep({"kind": "flat", "rate": "0.01"}, min_per_file_minor="30000"), 100_000, 30_000),
+        (_keep(_marginal(("500000", "0.10"), (None, "0.05"))), 500_000, 75_000),
+    ],
+)
+def test_keep_a_bounce_after_a_later_collection(
+    versions: dict[str, list[TermsVersion]], amount: int, expected: int
+) -> None:
+    """The review's case: X collected on 02/11 (run 1), Y on 20/11, X's cheque bounces on 12/12.
+    Y and the bounce in one run or in two: the same commission (1 % with a 300,00 € minimum:
+    300,00 €, not 310,00 €; 10 % to 5 000,00 € then 5 %: 750,00 €, not 1 000,00 €) — the bounce
+    keeps what X would give back after Y, as it happened."""
+    for tau in (NO_VAT, TAU):
+        out = []
+        for split in (False, True):
+            sim = Simulator({"F": _file()}, versions, tau)
+            x = _line(1, amount, date(2026, 11, 2))
+            sim.run([x])
+            y = _line(2, amount, date(2026, 11, 20))
+            bounce = replace(
+                _undo(3, x),
+                effective_date=date(2026, 12, 12),
+                posted_at=datetime(2026, 12, 12, 9, tzinfo=UTC),
+            )
+            for run in [[y], [bounce]] if split else [[y, bounce]]:
+                sim.run(run)
+            out.append(schedule_commission(sim.history[("F", "k")], _file(), "k", versions, tau))
+            if tau == NO_VAT:
+                assert sim.history[("F", "k")].commission_minor == expected
+        assert out == [expected, expected], (tau, out)
+
+
+def test_a_kept_reversal_between_a_credit_pair_keeps_the_same_fee() -> None:
+    """A mandate whose clause changes: v1 `keep`, v2 `credit`, both 10 % to 5 000,00 € then 5 %.
+    A 5 000,00 € under v1 (run 1); then X 5 000,00 € under v2, A bounces, X is undone. However
+    the last three fall into runs, A keeps 250,00 € (what it would give back with X live, X now in
+    the first tier) and X gives back its 500,00 €: 250,00 € in all. In one run X and its reversal
+    are never priced, so the kept fee is taken with X's basis live between them (third review)."""
+    grid = _marginal(("500000", "0.10"), (None, "0.05"))
+    rule = {"id": "r", "tier_key": "k", "label_fr": "R", "match": {}, "rate": grid}
+    credit = CommissionSchedule.model_validate(
+        {"schema": "commission-1", "basis": BASIS, "rules": [rule]}
+    )
+    change = date(2026, 11, 16)
+    versions = {
+        "M": [
+            TermsVersion("v1", "M", date(2026, 1, 1), change, _keep(grid)["M"][0].schedule),
+            TermsVersion("v2", "M", change, None, credit),
+        ]
+    }
+    a = _line(1, 500_000, date(2026, 11, 2))
+    x = _line(2, 500_000, date(2026, 11, 20))
+    bounce = replace(
+        _undo(3, a), effective_date=date(2026, 11, 25), posted_at=datetime(2026, 11, 25, tzinfo=UTC)
+    )
+    undo_x = _undo(4, x)
+    for tau in (NO_VAT, TAU):
+        for runs in ([[x, bounce, undo_x]], [[x], [bounce, undo_x]], [[x, bounce], [undo_x]]):
+            sim = Simulator({"F": _file()}, versions, tau)
+            sim.run([a])
+            for run in runs:
+                sim.run(run)
+            state = sim.history[("F", "k")]
+            assert (state.basis, state.kept_minor) == ((), 25_000), (tau, runs)
+            assert schedule_commission(state, _file(), "k", versions, tau) == 25_000
+
+
+def test_a_collection_undone_in_its_own_run_is_never_priced() -> None:
+    """The review's cases. (a) 10 %, minimum 30,00 €, τ 0,20: X1 2,40, X2 33,60, X3 1,20, X4
+    34,80 € and the reversals of X1, X4, X2 in one run: only X3 is priced — « 10 % sur 1,20 € »
+    for 0,99 € (⌊(1,20 - 0,01) / 1,2⌋), not « 10 % sur -32,40 € ». (b) 2 % to 4 000,00 €, then
+    10 %: A 1 000,00 € and A2 3 800,00 € earlier; one run with B 500,00 € (dated with them, booked
+    later), A undone, then B undone: no invoice (B never charged), a credit note of 84,00 €, A's
+    own 20,00 € on A's invoice first."""
+    sim = Simulator({"F": _file()}, _one_version(_flat("0.10", min_per_file_minor="3000")), TAU)
+    d = date(2026, 3, 2)
+    xs = [_line(i, a, d) for i, a in enumerate((240, 3360, 120, 3480), 1)]
+    undo = [_undo(10 + n, xs[i]) for n, i in enumerate((0, 3, 1))]  # X1, X4, X2 in that order
+    result, docs = sim.run([*xs, *undo])
+    assert [(r.entry_id, r.commission_minor, len(r.parts)) for r in result.lines] == [
+        ("A00001", 0, 0),
+        ("A00002", 0, 0),
+        ("A00003", 99, 1),
+        ("A00004", 0, 0),
+        ("R00010", 0, 0),
+        ("R00011", 0, 0),
+        ("R00012", 0, 0),
+    ]
+    invoice = docs["M"].invoice
+    assert invoice is not None and docs["M"].credit_note is None
+    assert [(il.tiers, il.ht_minor) for il in invoice.lines] == [((("0.10", 120),), 99)]
+    assert (invoice.ht_minor, invoice.vat_minor, invoice.entries) == (99, 20, ("A00003",))
+
+    tiered = _one_version(
+        CommissionSchedule.model_validate(
+            {
+                "schema": "commission-1",
+                "basis": BASIS,
+                "rules": [
+                    {
+                        "id": "r",
+                        "tier_key": "k",
+                        "label_fr": "R",
+                        "match": {},
+                        "rate": _marginal(("400000", "0.02"), (None, "0.10")),
+                    }
+                ],
+            }
+        )
+    )
+    for tau in (NO_VAT, TAU):
+        sim = Simulator({"F": _file()}, tiered, tau)
+        a, a2 = _line(1, 100_000, d), _line(2, 380_000, d)
+        sim.run([a])
+        sim.run([a2])
+        b = replace(
+            _line(3, 50_000, d),
+            effective_date=d + timedelta(days=5),
+            posted_at=datetime(2026, 3, 7, 12, tzinfo=UTC),
+        )
+        result, docs = sim.run([b, _undo(4, a), _undo(5, b)])
+        assert {r.entry_id: r.commission_minor for r in result.lines} == {
+            "A00003": 0,
+            "R00004": -8_400,  # 2 % of 3 800,00 = 76,00 against 160,00
+            "R00005": 0,
+        }
+        note = docs["M"].credit_note
+        assert docs["M"].invoice is None and note is not None
+        assert [(x.original_invoice_id, x.ht_minor) for x in note.allocations] == [
+            ("FC-2026-000001", -2_000),
+            ("FC-2026-000002", -6_400),
+        ]
+
+
+def test_an_undo_across_a_tiered_grid_change_at_the_hold() -> None:
+    """The documented bound (third review): v1 10 %, minimum 50,00 € until 15/11; v2 5 % to 100,00
+    € then 10 %, minimum 50,00 €. 52,00 € on 20/11, then 10,00 € dated 10/11, then x = 57,00 €
+    dated 10/11 (charged +1,90 €: its own 5,70 € invoiced, 3,80 € of re-tiering credited), then x
+    undone: its own 5,70 € credited on its invoice and a regularisation invoice of 3,79 € — one
+    more open invoice for the reserve, so it gives back 1,91 €, one cent more than its charge; the
+    hold (2 cents) is released at the file's next collection."""
+    tiered = CommissionSchedule.model_validate(
+        {
+            "schema": "commission-1",
+            "basis": BASIS,
+            "rules": [
+                {
+                    "id": "r",
+                    "tier_key": "k",
+                    "label_fr": "R",
+                    "match": {},
+                    "rate": _marginal(("10000", "0.05"), (None, "0.10")),
+                    "min_per_file_minor": "5000",
+                }
+            ],
+        }
+    )
+    change = date(2026, 11, 16)
+    versions = {
+        "M": [
+            TermsVersion(
+                "v1", "M", date(2026, 1, 1), change, _flat("0.10", min_per_file_minor="5000")
+            ),
+            TermsVersion("v2", "M", change, None, tiered),
+        ]
+    }
+    sim = Simulator({"F": _file()}, versions, TAU)
+    sim.run([_line(1, 5_200, date(2026, 11, 20))])
+    sim.run([_line(2, 1_000, date(2026, 11, 10))])
+    x = _line(3, 5_700, date(2026, 11, 10))
+    charged, _ = sim.run([x])
+    undone, docs = sim.run([_undo(4, x)])
+    assert (charged.lines[0].commission_minor, undone.lines[0].commission_minor) == (190, -191)
+    invoice, note = docs["M"].invoice, docs["M"].credit_note
+    assert invoice is not None and note is not None
+    assert [(il.kind, il.ht_minor) for il in invoice.lines] == [("regularisation", 379)]
+    assert [(a.entry_id, a.ht_minor) for a in note.allocations] == [("R00004", -570)]
+    _gives_back(190, -191, docs)
+    state = sim.history[("F", "k")]
+    assert schedule_commission(state, _file(), "k", versions, TAU) - state.commission_minor == 2
+    sim.run([_line(5, 10_000, date(2026, 11, 25))])
+    state = sim.history[("F", "k")]
+    assert schedule_commission(state, _file(), "k", versions, TAU) == state.commission_minor
+
+
+RATES = st.sampled_from((Decimal("0"), Decimal("0.055"), Decimal("0.1"), Decimal("0.2")))
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    versions=st.one_of(
+        terms(kinds=LINEAR, two_keys=True), schedules(two_keys=True).map(_one_version)
+    ),
+    lines=histories(max_ops=25, small=True, interest=True),
+    rates=st.lists(RATES, min_size=1, max_size=25),
+    rising=st.booleans(),
+)
+def test_after_a_vat_rate_change_a_run_of_collections_never_credits(
+    versions: dict[str, list[TermsVersion]],
+    lines: list[Line],
+    rates: list[Decimal],
+    rising: bool,
+) -> None:
+    """Each line in its own run at its own VAT rate (flat or bracket rates across versions, or any
+    grid in one): a run with no reversal never issues a credit note and never lowers what is
+    charged — earlier invoices were within the basis at their own rate when issued (third review:
+    the new rate's cap and reserve re-applied to them credited 1,51 € on a 0,01 € collection).
+    While the rate only rises, the TTC billed to a file alone on its mandate stays within what it
+    brought in (a fall is not covered: CALCULATION_RULES §7)."""
+    if rising:
+        rates = sorted(rates)
+    sim = Simulator({"F": _file()}, versions, TAU)
+    billed = 0
+    for n, ln in enumerate(lines):
+        sim.vat_rate = rates[min(n, len(rates) - 1)] if rising else rates[n % len(rates)]
+        before = {k: s.commission_minor for k, s in sim.history.items()}
+        _, docs = sim.run([ln])
+        for d in docs.values():
+            billed += (d.invoice.ttc_minor if d.invoice else 0) + (
+                d.credit_note.ttc_minor if d.credit_note else 0
+            )
+        if ln.kind is LineKind.ALLOCATION:
+            assert all(d.credit_note is None for d in docs.values()), docs
+            assert all(s.commission_minor >= before.get(k, 0) for k, s in sim.history.items())
+        if rising:
+            assert billed <= sum(s.basis_minor for s in sim.history.values()), billed
+
+
 # -- the inputs hash and the input errors ----------------------------------------------------------
 
 
@@ -811,6 +1142,24 @@ def test_input_errors() -> None:
         compute([ok], files, versions, {("F", "k"): KeyState(basis=(("x", 5),))}, TAU)
     with pytest.raises(CommissionInputError, match="negative kept"):
         compute([ok], files, versions, {("F", "k"): KeyState(kept_minor=-1)}, TAU)
+    # a reversal of a collection of the same run mirrors it (third review: such a pair is taken
+    # out before pricing, so it must leave K unchanged), and an entry is undone once
+    undo = _undo(2, ok)
+    with pytest.raises(CommissionInputError, match="undone twice"):
+        compute([ok, undo, replace(undo, entry_id="R2")], files, versions, {}, TAU)
+    with pytest.raises(CommissionInputError, match="minus its original"):
+        compute([ok, replace(undo, basis={"principal": -1})], files, versions, {}, TAU)
+    with pytest.raises(CommissionInputError, match="of its own file"):
+        compute([ok, replace(undo, kind=LineKind.FORWARD_REVERSAL)], files, versions, {}, TAU)
+    later = {
+        "M": [
+            TermsVersion("a", "M", D0, D0 + timedelta(days=1), _flat()),
+            TermsVersion("b", "M", D0 + timedelta(days=1), None, _flat()),
+        ]
+    }
+    moved = replace(undo, encaissement_date=D0 + timedelta(days=1))
+    with pytest.raises(CommissionInputError, match="original's terms version"):
+        compute([ok, moved], files, later, {}, TAU)
     overlap = {
         "M": [TermsVersion("a", "M", D0, None, _flat()), TermsVersion("b", "M", D0, None, _flat())]
     }
@@ -837,6 +1186,15 @@ def test_input_errors() -> None:
     )
     with pytest.raises(CommissionInputError, match="age_days_at_boarding"):
         compute([ok], files, _one_version(bracket), {}, TAU)
+
+
+def test_an_invoice_line_never_shows_a_negative_band() -> None:
+    """The documents' guard (third review): a commission line whose bands net below 0 is an
+    engine error, refused (the commission stays pending) rather than issued."""
+    part = Part("F", "k", "r", "R", ("principal",), 100, 0, 100, 10, (("0.1", -100),), False, False)
+    line = LineCommission("A1", LineKind.ALLOCATION, "F", "M", "v", "charged", None, 10, (part,))
+    with pytest.raises(CommissionInputError, match="negative band"):
+        run_documents([line], {"F": _file()}, {}, {}, TAU)
 
 
 def test_minimum_cap_and_reserve_flags() -> None:

@@ -85,4 +85,7 @@ of each mandate; case 2 + history: every (file, tier key) with a prior state. `c
   2.54–2.56 s and documents 1.07–1.21 s, now 2.84–3.04 s and 1.04–1.33 s (the VM was noisier that day: the same
   code measured 2.6–3.7 s across sessions). The reserve's search over the run's documents runs only for a key whose
   hold binds (the minimum per file on a small file); every other key takes the schedule's K in one comparison.
+- **Third review** (event order, a collection undone in its own run taken out before pricing, the floor after a
+  change of VAT rate): case 2 on the same VM, three runs each, interleaved: the second-review engine 2.75–3.18 s and
+  documents 1.05–1.22 s, now 2.86–3.16 s and 1.11–1.38 s — no measurable change (one more O(n) pass over the run).
 

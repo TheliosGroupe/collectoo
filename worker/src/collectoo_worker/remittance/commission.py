@@ -12,11 +12,11 @@ min(max(m, R(g(c))), ⌊c / (1 + τ)⌋) — m the minimum per file, τ the VAT 
 half-up to the cent.
 
 The commission of a (file, tier key) is a function of its live lines only, never of how they fell
-into runs (review fixes of 2026-11-10): the live lines in order of encaissement date, each priced
-by the version in force on its date (founder #5: new rates only for the future), each version's
-tiers continuing where the earlier versions' net basis ends (the tier key is stable across
-versions). With b_v the net basis the live lines brought in under v, C_<v and C_≤v the net basis
-of the versions before v and up to v, and C the file's net basis:
+into runs (review fixes of 2026-11-10): each live line priced by the version in force on its
+encaissement date (founder #5: new rates only for the future), each version's tiers continuing
+where the earlier versions' net basis ends (the tier key is stable across versions; the
+versions' segments in version order). With b_v the net basis the live lines brought in under v,
+C_<v and C_≤v the net basis of the versions before v and up to v, and C the file's net basis:
 
     K°  = Σ_v [g_v(C_≤v) - g_v(C_<v)]                  exact: the rates alone, never rounded
     K°_≤v = the same sum over the versions up to v
@@ -33,6 +33,16 @@ lines still live, so a reversal gives back exactly what its collection adds to t
 charge when nothing else changed since; priced in its own version, the same encaissement date),
 and a file undone in full is back to 0.
 
+* **Event order** (third review): a run takes its lines in the order the events happened —
+  (effective date, posted at, entry id), the order runs are cut in — so any split of the same
+  events into consecutive runs goes through the same states. The encaissement date only chooses
+  the version (a bounce carries its collection's). Under `credit` the order only attributes K to
+  the lines; under `keep` it is the order the kept fees are taken in.
+* **A collection undone in its own run** under `credit` is taken out with its reversal before
+  pricing: both are charged 0 with no parts (they leave K unchanged), so no invoice charges it and
+  no band moves twice. The reversal must mirror it (same file and version, minus its basis).
+  Under `keep` both are priced: the clause keeps the collection's fee. A kept reversal between
+  them still sees the collection live (`transient`), as in any split.
 * **Fees kept by the clause** (`on_reversal: keep`, OQ-39): the reversal leaves the tier position
   (net of reversals, design §8.1), so later collections are priced where the undone money was; the
   commission it would have given back is kept (κ) and the minimum per file is charged once:
@@ -46,10 +56,15 @@ and a file undone in full is back to 0.
   n holds it, simulating the run's documents for the key (`key_side`, shared with documents.py)
   on the open charges of its earlier invoices. The hold binds only near the cap (the minimum per
   file on a small file), is at most ⌈(n + 1) / (1 + τ)⌉ cents, and is released only by a run in
-  which the key has a collection.
+  which the key has a collection. Across a change of tiered grid an undo can need an invoice of
+  its own (a tier regularisation), one more open invoice for the reserve: then it gives back up
+  to 1 cent more or less than its collection was charged (otherwise exactly that charge).
 * **The hold on the parts**: the difference between V and the parts' sum goes to the key's
   positive parts, last to first, never below 0 (only what they cannot absorb goes to its
   reversals); a release goes to its last positive collection.
+* **A change of the VAT rate**: a run with no reversal on a key never takes back what its earlier
+  invoices charged at their own rate (V ≥ what was charged before, less only its own collections'
+  re-tiering); a run with a reversal re-applies the cap and the reserve at the new rate.
 
 Basis (founder #4): an allocation's 1100 credits per component family, filtered by the schedule's
 families; a forward's amount only when the schedule lists its reason; a reversal minus its
@@ -152,8 +167,10 @@ class Line:
     )
     original_entry_id: str | None = None  # a reversal: the entry it undoes (its invoice, §8.4)
 
-    def sort_key(self) -> tuple[date, date, datetime, str]:
-        return (self.encaissement_date, self.effective_date, self.posted_at, self.entry_id)
+    def event_key(self) -> tuple[date, datetime, str]:
+        """The order events happened in, and runs are cut in (third review): not the encaissement
+        date, which only chooses the version (a bounce carries its collection's date)."""
+        return (self.effective_date, self.posted_at, self.entry_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +250,15 @@ class RunCommission:
     history: dict[tuple[str, str], KeyState]  # (file, tier key) after the run
     inputs_hash: str
     engine_version: str = ENGINE_VERSION
+
+
+Head = tuple[Line, str | None, str | None, str | None]  # the line, mandate, terms, why nothing
+# per (file, tier key): (event index of the collection, of its reversal, terms version, basis)
+Transient = dict[Key, list[tuple[int, int, str, int]]]
+_UNDOES = {
+    LineKind.ALLOCATION_REVERSAL: LineKind.ALLOCATION,
+    LineKind.FORWARD_REVERSAL: LineKind.FORWARD,
+}
 
 
 # -- the rate function ----------------------------------------------------------------------------
@@ -423,8 +449,9 @@ REGULARISATION_LABEL_FR = "Régularisation de paliers (changement de conditions)
 @dataclass(frozen=True, slots=True)
 class SidePart:
     """A part as a run's documents see it: its line, its commission (after the hold), whether it
-    undoes a collection of the same run (never invoiced: netted), and, for a reversal, the
-    invoice that charged its original (credited first)."""
+    undoes a collection of the same run (a kept reversal: under `credit` such a pair is never
+    priced; its regularisation nets in the run), and, for a reversal, the invoice that charged its
+    original (credited first)."""
 
     entry_id: str
     part: Part
@@ -473,9 +500,10 @@ def key_side(parts: Sequence[SidePart], earlier: Sequence[OpenCharge]) -> KeySid
     amended): what raises the commission goes to the invoice, what lowers it to the credit note —
     never netted across documents. A credit is allocated first to the invoice that charged the
     collection it undoes (up to what that invoice still charges the key), then LIFO. Only what was
-    never invoiced nets inside the run: a reversal of a same-run collection, and a credit beyond
-    what the earlier invoices charge the key (the run's own collections moved the tiers it takes
-    back), netted on the regularisation first."""
+    never invoiced nets inside the run: what a kept reversal of a same-run collection moves (a
+    regularisation), and a credit beyond what the earlier invoices charge the key (the run's own
+    collections moved the tiers it takes back), netted on the regularisation first. The
+    commission line carries only collections' own bands: never a negative base."""
     if len(parts) == 1:  # the usual key of a run: one collection, nothing re-tiered
         sp = parts[0]
         p = sp.part
@@ -510,24 +538,22 @@ def _place(parts: Sequence[SidePart]) -> tuple[KeySide, list[tuple[int, str | No
     line) or as a credit (amount > 0, the invoice to credit first, the line)."""
     side = KeySide()
     credits: list[tuple[int, str | None, str]] = []
-    last = ["", ""]  # the last line on the commission side, on the regularisation side
+    last = ""  # the last line on the regularisation side
     for sp in parts:
         if not sp.commission_minor:
             continue
         p = sp.part
         own, reg = _components(p, sp.commission_minor)
-        if own > 0 or (own and sp.same_run):
+        if own > 0:  # only a collection's own band: never a negative base (third review)
             side.commission_minor += own
-            last[0] = sp.entry_id
             for rate, base in p.tiers:
                 side.tiers[rate] = side.tiers.get(rate, 0) + base
-            if own > 0:
-                side.entries.append(sp.entry_id)
+            side.entries.append(sp.entry_id)
         elif own:
             credits.append((-own, sp.preferred, sp.entry_id))
-        if reg > 0 or (reg and sp.same_run):
+        if reg > 0 or (reg and sp.same_run):  # a kept reversal of a same-run collection nets
             side.regularisation_minor += reg
-            last[1] = sp.entry_id
+            last = sp.entry_id
             if reg > 0:
                 side.regularisation_entries.append(sp.entry_id)
         elif reg:  # what it re-tiers: a reversal's, on its original's invoice first, else LIFO
@@ -535,11 +561,8 @@ def _place(parts: Sequence[SidePart]) -> tuple[KeySide, list[tuple[int, str | No
         if own > 0 or reg > 0:  # the rule and label of the key's last raising part
             side.families.update(p.families)
             side.rule_id, side.label_fr = p.rule_id, p.label_fr
-    if side.commission_minor < 0:  # a same-run reversal beyond what its run charged the key
-        credits.append((-side.commission_minor, None, last[0]))
-        side.commission_minor = 0
     if side.regularisation_minor < 0:
-        credits.append((-side.regularisation_minor, None, last[1]))
+        credits.append((-side.regularisation_minor, None, last))
         side.regularisation_minor = 0
     return side, credits
 
@@ -652,6 +675,9 @@ class _Key:
     # its parts in the run: (line index, part index, a collection's, undoes a same-run line,
     # the invoice that charged the line a reversal undoes)
     where: list[tuple[int, int, bool, bool, str | None]] = field(default_factory=list)
+    # the collections of this run undone in it under `credit` (never priced): (event index of the
+    # collection, of its reversal, terms version, basis) — live between the two for `keep`
+    transient: list[tuple[int, int, str, int]] = field(default_factory=list)
 
 
 class _Eval(NamedTuple):
@@ -788,10 +814,17 @@ def compute(  # noqa: PLR0913 - the run's lines, its world and its documents' hi
     line_invoices = line_invoices or {}
     pricer = _Pricer(versions, vat_rate)
     keys: dict[tuple[str, str], _Key] = {}
-    heads: list[tuple[Line, str | None, str | None, str | None]] = []
+    heads: list[Head] = []
     parts: list[list[Part]] = []
     in_run = set(ids)
-    for ln in sorted(lines, key=Line.sort_key):
+    order = sorted(lines, key=Line.event_key)
+    paired, transient = _same_run_pairs(order, files, pricer)
+    for ln in order:
+        pair = paired.get(ln.entry_id)
+        if pair is not None:  # a collection undone in its own run, under `credit`: never priced
+            heads.append(pair)
+            parts.append([])
+            continue
         reversal = ln.kind in REVERSALS
         same_run = reversal and ln.original_entry_id in in_run
         preferred = (
@@ -800,7 +833,7 @@ def compute(  # noqa: PLR0913 - the run's lines, its world and its documents' hi
             else None
         )
         mark = (len(heads), not reversal, same_run, preferred)
-        head, line_parts = _line(ln, files, history, keys, pricer, charges, mark)
+        head, line_parts = _line(ln, files, history, keys, pricer, charges, mark, transient)
         heads.append(head)
         parts.append(line_parts)
 
@@ -837,6 +870,76 @@ def compute(  # noqa: PLR0913 - the run's lines, its world and its documents' hi
         new_history,
         inputs_hash(lines, files, versions, history, vat_rate, charges, line_invoices),
     )
+
+
+def _grouped(
+    parts: Iterable[tuple[str, int]], version: TermsVersion, file: FileFacts, pricer: _Pricer
+) -> dict[str, tuple[Rule, list[str], int]]:
+    """A line's basis parts per rule (rule id → the rule, its families, their basis)."""
+    grouped: dict[str, tuple[Rule, list[str], int]] = {}
+    for family, amount in parts:
+        rule = pricer.rule(version, file, family)
+        prev = grouped.get(rule.id)
+        if prev is None:
+            grouped[rule.id] = (rule, [family], amount)
+        else:
+            grouped[rule.id] = (rule, [*prev[1], family], prev[2] + amount)
+    return grouped
+
+
+def _same_run_pairs(
+    order: Sequence[Line], files: Mapping[str, FileFacts], pricer: _Pricer
+) -> tuple[dict[str, Head], Transient]:
+    """Under `credit`, a collection and its reversal in the same run leave K unchanged (K is a
+    function of the live lines): both are taken out before pricing, charged 0 with no parts, so no
+    invoice charges a collection its own run undoes and no band moves twice (third review). Under
+    `keep` they are priced (the clause keeps the fee). What such a pair still weighs on is the fee
+    a kept reversal between them keeps (a mandate whose clause differs across versions): in any
+    split into runs the collection is live then, so its basis is returned per (file, tier key)
+    with the event indexes it is live between (`transient`). A reversal must mirror its original:
+    the same file and terms version, minus its commissionable basis; an entry is undone once."""
+    by_id = {ln.entry_id: ln for ln in order}
+    at = {ln.entry_id: i for i, ln in enumerate(order)}
+    paired: dict[str, Head] = {}
+    transient: Transient = {}
+    undone: set[str] = set()
+    for rev in order:
+        if rev.kind not in REVERSALS or rev.original_entry_id is None:
+            continue
+        if rev.original_entry_id in undone:
+            raise CommissionInputError(f"{rev.original_entry_id}: undone twice in the run")
+        undone.add(rev.original_entry_id)
+        orig = by_id.get(rev.original_entry_id)
+        if orig is None:
+            continue
+        if orig.kind is not _UNDOES[rev.kind] or orig.account_id != rev.account_id:
+            raise CommissionInputError(
+                f"{rev.entry_id}: a reversal undoes a {_UNDOES[rev.kind]} of its own file,"
+                f" not {orig.entry_id}"
+            )
+        file = files.get(rev.account_id) if rev.account_id is not None else None
+        if file is None:
+            continue  # no file: both `none` (or not given: `_line` refuses it)
+        version = pricer.version(file.mandate_id, rev.encaissement_date)
+        if version is not pricer.version(file.mandate_id, orig.encaissement_date):
+            raise CommissionInputError(
+                f"{rev.entry_id}: a reversal falls under its original's terms version"
+                f" ({orig.entry_id})"
+            )
+        if version is None or version.schedule.basis.on_reversal != "credit":
+            continue
+        given = basis_parts(orig, version.schedule)
+        if basis_parts(rev, version.schedule) != [(f, -a) for f, a in given]:
+            raise CommissionInputError(
+                f"{rev.entry_id}: a reversal's basis is minus its original's ({orig.entry_id})"
+            )
+        for ln in (orig, rev):
+            paired[ln.entry_id] = (ln, file.mandate_id, version.id, None)
+        for rule, _, amount in _grouped(given, version, file, pricer).values():
+            transient.setdefault((file.account_id, rule.tier_key), []).append(
+                (at[orig.entry_id], at[rev.entry_id], version.id, amount)
+            )
+    return paired, transient
 
 
 def _spread(base: list[int], collection: list[bool], adjust: int) -> list[int]:
@@ -878,15 +981,24 @@ def _finish(
     key: _Key,
     pricer: _Pricer,
     parts: list[list[Part]],
-    heads: Sequence[tuple[Line, str | None, str | None, str | None]],
+    heads: Sequence[Head],
 ) -> int:
     """Charge the key V: the schedule's K within the rounding reserve, for the n its own documents
-    leave open; spread the difference over its parts (`_spread`). Returns V."""
+    leave open; spread the difference over its parts (`_spread`). Returns V.
+
+    A run with no reversal on the key never takes back what earlier invoices charged: V stays at
+    least what was charged before, less only what the run's own collections take back by
+    re-tiering (third review: after a change of τ the cap and the reserve re-applied at the new
+    rate to invoices issued, within the basis, at their own rate; at an unchanged τ this floor
+    never binds)."""
     where = key.where
     cb, sched, drift = key.charged_before, key.sched, key.sched - key.sched_before
     hi = sched
     if sched - cb > max(0, drift) and not any(w[2] for w in where):
         hi = cb + max(0, drift)  # a run of reversals only never releases a hold
+    floor = cb + min(0, drift) if all(w[2] for w in where) else None
+    if floor is not None and hi < floor:
+        hi = floor
     charged = hi
     c = sum(key.net.values()) + key.kept_basis
     open_before = sum(1 for ch in key.earlier if ch.open_minor > 0)
@@ -900,6 +1012,8 @@ def _finish(
         base = [parts[i][j].commission_minor for i, j, *_ in where]
         collection = [w[2] for w in where]
         low = reserve(open_before + 1)  # always holds: at most one more invoice
+        if floor is not None and low < floor:
+            low = floor
         charged = low
         for v in range(hi, low, -1):  # the largest V that its own documents' n holds
             commissions = _spread(base, collection, (v - cb) - drift)
@@ -924,7 +1038,7 @@ def _finish(
         p = parts[i][j]
         last = n == len(where) - 1
         if m != p.commission_minor or (last and held):
-            parts[i][j] = replace(p, commission_minor=m, held_minor=held if last else 0)
+            parts[i][j] = replace(p, commission_minor=m, held_minor=max(0, held) if last else 0)
     return charged
 
 
@@ -936,9 +1050,10 @@ def _line(  # noqa: PLR0913, PLR0917 - a line and the run it is priced in
     pricer: _Pricer,
     charges: Mapping[Key, Sequence[OpenCharge]],
     mark: tuple[int, bool, bool, str | None],
-) -> tuple[tuple[Line, str | None, str | None, str | None], list[Part]]:
+    transient: Transient,
+) -> tuple[Head, list[Part]]:
     """(the line, its mandate, its terms version, why it earns nothing), and its parts; each key
-    it reaches records where its part is (`mark`: the line's index, a collection's, undoes a
+    it reaches records where its part is (`mark`: the line's event index, a collection's, undoes a
     same-run line, the invoice of the line it undoes)."""
     if line.kind in NEVER_COMMISSIONED:
         known = files.get(line.account_id) if line.account_id is not None else None
@@ -952,15 +1067,7 @@ def _line(  # noqa: PLR0913, PLR0917 - a line and the run it is priced in
     if version is None:
         return (line, file.mandate_id, None, "no_terms"), []
     keep = line.kind in REVERSALS and version.schedule.basis.on_reversal == "keep"
-
-    grouped: dict[str, tuple[Rule, list[str], int]] = {}
-    for family, amount in basis_parts(line, version.schedule):
-        rule = pricer.rule(version, file, family)
-        prev = grouped.get(rule.id)
-        if prev is None:
-            grouped[rule.id] = (rule, [family], amount)
-        else:
-            grouped[rule.id] = (rule, [*prev[1], family], prev[2] + amount)
+    grouped = _grouped(basis_parts(line, version.schedule), version, file, pricer)
 
     parts: list[Part] = []
     rules = version.schedule.rules if len(grouped) > 1 else [g[0] for g in grouped.values()]
@@ -975,8 +1082,9 @@ def _line(  # noqa: PLR0913, PLR0917 - a line and the run it is priced in
             key = keys[k] = _key_of(
                 history.get(k, KeyState()), file, rule.tier_key, pricer, charges.get(k, ())
             )
+            key.transient = transient.get(k, [])
         key.where.append((mark[0], len(parts), mark[1], mark[2], mark[3]))
-        parts.append(_part(key, version.id, rule, fams, amount, keep, pricer))
+        parts.append(_part(key, version.id, rule, fams, amount, keep, pricer, mark[0]))
     return (line, file.mandate_id, version.id, None), parts
 
 
@@ -988,6 +1096,7 @@ def _part(  # noqa: PLR0913, PLR0917 - one part: its key, version, rule and amou
     amount: int,
     keep: bool,
     pricer: _Pricer,
+    at: int,
 ) -> Part:
     before = key.sched
     if not key.kept_basis and not key.kept and not (keep and amount < 0):
@@ -995,11 +1104,20 @@ def _part(  # noqa: PLR0913, PLR0917 - one part: its key, version, rule and amou
     own, retier = _tier_moves(key, version_id, amount, pricer)
     basis_before = sum(key.net.values())
     if keep and amount < 0:
-        # the clause keeps the fee (OQ-39): the basis leaves the tier position, its fee stays
+        # the clause keeps the fee (OQ-39): the basis leaves the tier position, its fee stays —
+        # what the reversal would give back at this point of the events, with the collections
+        # live then that a later reversal of this run undoes (as in any split into runs)
+        live = [(vid, b) for lo, hi, vid, b in key.transient if lo < at < hi]
+        for vid, b in live:
+            key.net[vid] = key.net.get(vid, 0) + b
         pre = _evaluate(key, pricer).pre_cap
-        _add(key, version_id, amount)
+        key.net[version_id] = key.net.get(version_id, 0) + amount
         key.kept_basis -= amount
-        key.kept = max(0, pre - _evaluate(key, pricer, kept=0).k0)
+        k0 = _evaluate(key, pricer, kept=0).k0
+        for vid, b in live:
+            key.net[vid] -= b
+        _add(key, version_id, 0)  # never below 0 without them
+        key.kept = max(0, pre - k0)
     else:
         _add(key, version_id, amount)
     after = _evaluate(key, pricer)

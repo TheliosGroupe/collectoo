@@ -5,10 +5,10 @@ the minimum per file, capped, across several runs; a version change; a collectio
 change undone after it; a minimum introduced or dropped by a new version; a marginal grid change
 re-tiering later collections (the regularisation line); the cap across versions; a reversal and a
 new collection in one run (a credit note and an invoice); the fee kept by clause, flat and
-marginal; forwards; items that earn nothing; and the §7.2 worked example (RV-2026-000001 …
-000003). Each run's lines, then its invoice and credit note per mandate (§8.4), with the history
-carried to the next run. Every case is marked TO VALIDATE until the founder's anonymised clauses
-replace the synthetic ones."""
+marginal; forwards; items that earn nothing; a change of the VAT rate between runs; and the §7.2
+worked example (RV-2026-000001 … 000003). Each run's lines, then its invoice and credit note per
+mandate (§8.4), with the history carried to the next run. Every case is marked TO VALIDATE until
+the founder's anonymised clauses replace the synthetic ones."""
 
 from decimal import Decimal
 from pathlib import Path
@@ -38,6 +38,7 @@ def test_the_golden_set() -> None:
         "reversal-keep-marginal",
         "forwards",
         "none-states",
+        "vat-rate-change",
     } <= names
     for p in CASES:
         case = load_case(p)
@@ -109,6 +110,8 @@ def test_golden_case(path: Path) -> None:
             for m, d in (expect.get("documents") or {}).items()
             if d.get("invoice")
         }
+        if "vat_rate" in run:  # a change of the rate between runs (third review)
+            sim.vat_rate = Decimal(run["vat_rate"])
         result, docs = sim.run(lines_of(run), numbers)
         where = f"{case['case']} / {run['name']}"
         _check_lines(result, expect["lines"], where)

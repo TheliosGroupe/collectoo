@@ -64,7 +64,7 @@ runs:
               FC-2026-000003: {ht: "-2500", vat: "-500"}
   - name: run 5 — A and B undone, the file back to 0
     lines:
-      # sorted by encaissement date: R-A first (100,00 → 80,00: the minimum still applies, nothing back), then R-B
+      # in event order (same date and time: by entry): R-A first (100,00 → 80,00: the minimum still applies), then R-B
       - {entry: R-B, kind: allocation_reversal, original: B, file: F-MIN, e: "2026-10-15", eff: "2026-12-01", amount: "-8000", basis: {principal: "-8000"}}
       - {entry: R-A, kind: allocation_reversal, original: A, file: F-MIN, e: "2026-10-01", eff: "2026-12-01", amount: "-2000", basis: {principal: "-2000"}}
     expect:
