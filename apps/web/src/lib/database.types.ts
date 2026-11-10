@@ -601,6 +601,20 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"business_calendar": {
+                  Row: {
+                    "closed": boolean,"day": string,"label": string | null,"scope": string,"sources": (string)[]
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "closed": boolean,"day": string,"label"?: string | null,"scope"?: string,"sources"?: (string)[]
+                  }
+                  Update: {
+                    "closed"?: boolean,"day"?: string,"label"?: string | null,"scope"?: string,"sources"?: (string)[]
+                  }
+                  Relationships: [
+                    
+                  ]
                 },"claim_item": {
                   Row: {
                     "account_id": string,"created_at": string,"currency": string,"due_date": string | null,"id": string,"issue_date": string | null,"kind": string,"original_minor": number,"ref": string,"seller_paid_minor": number
@@ -1676,6 +1690,20 @@ isOneToOne: false
       referencedRelation: "boarding_file"
       referencedColumns: ["id"]
     }
+                  ]
+                },"vat_rate": {
+                  Row: {
+                    "code": string,"legal_ref": string,"legal_url": string,"rate": number,"review_due_on": string | null,"reviewed_by": string | null,"reviewed_on": string | null,"territory": string,"valid_from": string,"valid_to": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "code": string,"legal_ref": string,"legal_url": string,"rate": number,"review_due_on"?: string | null,"reviewed_by"?: string | null,"reviewed_on"?: string | null,"territory": string,"valid_from": string,"valid_to"?: string | null
+                  }
+                  Update: {
+                    "code"?: string,"legal_ref"?: string,"legal_url"?: string,"rate"?: number,"review_due_on"?: string | null,"reviewed_by"?: string | null,"reviewed_on"?: string | null,"territory"?: string,"valid_from"?: string,"valid_to"?: string | null
+                  }
+                  Relationships: [
+                    
                   ]
                 }
           }

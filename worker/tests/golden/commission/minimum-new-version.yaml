@@ -1,0 +1,93 @@
+# A minimum per file across a change of terms (second review, 2026-11-10). The minimum and the rounding are taken once
+# on the file, not per version: K = min(R(K° + top), ⌊C / 1,2⌋), K° the rates of each version on its own collections
+# (exact), top the largest shortfall of a version's minimum on what the collections up to that version earn. Each
+# version's minimum is a floor on the collections up to it; later collections earn their own rates on top.
+# MAND-N introduces a minimum of 300,00 € on 16/11: a file with collections on both sides of the change is charged it
+# once, like a file collected after the change only, and undoing (or adding) a collection made before the change
+# changes nothing while the minimum binds — no invoice from a reversal, no credit note from a payment.
+# MAND-D drops its minimum on 16/11: the collection before the change keeps the minimum it earned, the one after earns
+# its 10 % on top (new rates only for the future, founder #5), and undoing the first gives back its 300,00 €.
+# TO VALIDATE: which minimum applies to a file with collections under versions with different minimums (we take each
+# version's minimum as a floor on the collections up to that version: the review proposed the minimum of the version
+# of the file's latest live collection, which a later version without a minimum would let a payment lower).
+case: minimum-new-version
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  dix:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances (10 %)", match: {}, rate: {kind: flat, rate: "0.10"}}
+  dix-minimum:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances (10 %, minimum 300,00 €)", match: {}, rate: {kind: flat, rate: "0.10"}, min_per_file_minor: "30000"}
+mandates:
+  MAND-N:
+    - {id: n1, from: "2026-01-01", to: "2026-11-16", schedule: dix}
+    - {id: n2, from: "2026-11-16", to: null, schedule: dix-minimum}
+  MAND-D:
+    - {id: d1, from: "2026-01-01", to: "2026-11-16", schedule: dix-minimum}
+    - {id: d2, from: "2026-11-16", to: null, schedule: dix}
+files:
+  F-N1: {mandate: MAND-N, claim_type: b2b_invoice, portfolio: P1}
+  F-N2: {mandate: MAND-N, claim_type: b2b_invoice, portfolio: P1}
+  F-D: {mandate: MAND-D, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — 400,00 € before the change on F-N1 and on F-D
+    lines:
+      - {entry: A, kind: allocation, file: F-N1, e: "2026-11-10", eff: "2026-11-10", amount: "40000", basis: {principal: "40000"}}
+      - {entry: DA, kind: allocation, file: F-D, e: "2026-11-10", eff: "2026-11-10", amount: "40000", basis: {principal: "40000"}}
+    expect:
+      lines:
+        A: {commission: "4000", parts: {tout: "4000"}, terms: n1}     # 10 %, no minimum yet
+        DA: {commission: "30000", parts: {tout: "30000"}, terms: d1}  # the minimum (10 % would be 40,00)
+      documents:
+        MAND-D:
+          invoice: {number: FC-2026-000001, ht: "30000", vat: "6000", ttc: "36000"}
+        MAND-N:
+          invoice: {number: FC-2026-000002, ht: "4000", vat: "800", ttc: "4800"}
+  - name: run 2 — 1 000,00 € after the change on each file
+    lines:
+      - {entry: B, kind: allocation, file: F-N1, e: "2026-11-20", eff: "2026-11-20", amount: "100000", basis: {principal: "100000"}}
+      - {entry: B2, kind: allocation, file: F-N2, e: "2026-11-20", eff: "2026-11-20", amount: "100000", basis: {principal: "100000"}}
+      - {entry: DB, kind: allocation, file: F-D, e: "2026-11-20", eff: "2026-11-20", amount: "100000", basis: {principal: "100000"}}
+    expect:
+      lines:
+        # F-N1: K° = 40,00 + 100,00; n2's minimum binds on the collections up to n2: 300,00 in all
+        B: {commission: "26000", parts: {tout: "26000"}, terms: n2}
+        B2: {commission: "30000", parts: {tout: "30000"}, terms: n2}  # alone after the change: the same 300,00
+        # F-D: d1's minimum still covers DA (300,00 − 40,00 short), DB earns d2's 10 % on top: 400,00 in all
+        DB: {commission: "10000", parts: {tout: "10000"}, terms: d2}
+      documents:
+        MAND-D:
+          invoice: {number: FC-2026-000003, ht: "10000", vat: "2000", ttc: "12000"}
+        MAND-N:
+          invoice:
+            number: FC-2026-000004
+            ht: "56000"
+            vat: "11200"
+            ttc: "67200"
+            lines:
+              - {claim_type: b2b_invoice, rule: tout, families: [principal], ht: "56000", tiers: [["0.10", "200000"]]}
+  - name: run 3 — A and DA undone; on F-N2 a 400,00 € collection dated before the change, booked after
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-N1, e: "2026-11-10", eff: "2026-12-01", amount: "-40000", basis: {principal: "-40000"}}
+      - {entry: R-DA, kind: allocation_reversal, original: DA, file: F-D, e: "2026-11-10", eff: "2026-12-01", amount: "-40000", basis: {principal: "-40000"}}
+      - {entry: A2, kind: allocation, file: F-N2, e: "2026-11-10", eff: "2026-12-01", amount: "40000", basis: {principal: "40000"}}
+    expect:
+      lines:
+        R-A: {commission: "0", parts: {tout: "0"}, terms: n1}      # B alone still earns n2's minimum: no invoice
+        A2: {commission: "0", parts: {tout: "0"}, terms: n1}       # the minimum still binds: no credit note
+        R-DA: {commission: "-30000", parts: {tout: "-30000"}, terms: d1}   # DB alone: 100,00; DA's own 300,00 back
+      documents:
+        MAND-D:
+          credit_note:
+            number: FC-2026-000005
+            ht: "-30000"
+            vat: "-6000"
+            ttc: "-36000"
+            corrected:
+              FC-2026-000001: {ht: "-30000", vat: "-6000"}

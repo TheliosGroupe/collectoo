@@ -1,0 +1,57 @@
+# A rate set by a file attribute fixed at boarding (founder #5): the boarded amount, or the claim's age at boarding.
+# One rate for the whole file; a bound is included (« jusqu'à », as the terms page words it). TO VALIDATE: synthetic
+# grid; the inclusive bound is our reading of « jusqu'à ».
+case: brackets
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  tranches:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - id: montant
+        tier_key: montant
+        label_fr: "Factures entre professionnels, selon le montant repris"
+        match: {claim_types: [b2b_invoice]}
+        rate: {kind: bracket, attribute: boarded_amount, brackets: [{up_to: "500000", rate: "0.12"}, {up_to: null, rate: "0.08"}]}
+      - id: anciennete
+        tier_key: anciennete
+        label_fr: "Autres créances, selon l'ancienneté à la reprise"
+        match: {}
+        rate: {kind: bracket, attribute: age_days_at_boarding, brackets: [{up_to: "365", rate: "0.15"}, {up_to: "1095", rate: "0.20"}, {up_to: null, rate: "0.25"}]}
+mandates:
+  MAND-T: [{id: t-v1, from: "2026-01-01", to: null, schedule: tranches}]
+files:
+  B-BIG: {mandate: MAND-T, claim_type: b2b_invoice, portfolio: P1, boarded_minor: "2000000"}
+  B-EDGE: {mandate: MAND-T, claim_type: b2b_invoice, portfolio: P1, boarded_minor: "500000"}
+  B-SMALL: {mandate: MAND-T, claim_type: b2b_invoice, portfolio: P1, boarded_minor: "300000"}
+  R-MID: {mandate: MAND-T, claim_type: rent, portfolio: P1, age_days: "1095"}
+  R-OLD: {mandate: MAND-T, claim_type: rent, portfolio: P1, age_days: "4000"}
+  R-YOUNG: {mandate: MAND-T, claim_type: rent, portfolio: P1, age_days: "200"}
+runs:
+  - name: one run, 100,00 € on each file
+    lines:
+      - {entry: L1, kind: allocation, file: B-SMALL, e: "2026-11-02", eff: "2026-11-02", amount: "10000", basis: {principal: "10000"}}
+      - {entry: L2, kind: allocation, file: B-EDGE, e: "2026-11-02", eff: "2026-11-02", amount: "10000", basis: {principal: "10000"}}
+      - {entry: L3, kind: allocation, file: B-BIG, e: "2026-11-02", eff: "2026-11-02", amount: "10000", basis: {principal: "10000"}}
+      - {entry: L4, kind: allocation, file: R-YOUNG, e: "2026-11-02", eff: "2026-11-02", amount: "10000", basis: {principal: "10000"}}
+      - {entry: L5, kind: allocation, file: R-MID, e: "2026-11-02", eff: "2026-11-02", amount: "10000", basis: {principal: "10000"}}
+      - {entry: L6, kind: allocation, file: R-OLD, e: "2026-11-02", eff: "2026-11-02", amount: "10000", basis: {principal: "10000"}}
+    expect:
+      lines:
+        L1: {commission: "1200", parts: {montant: "1200"}}      # 3 000,00 € ≤ 5 000,00 € → 12 %
+        L2: {commission: "1200", parts: {montant: "1200"}}      # exactly 5 000,00 € → 12 % (bound included)
+        L3: {commission: "800", parts: {montant: "800"}}        # 20 000,00 € → 8 %
+        L4: {commission: "1500", parts: {anciennete: "1500"}}   # 200 days → 15 %
+        L5: {commission: "2000", parts: {anciennete: "2000"}}   # exactly 1 095 days → 20 % (bound included)
+        L6: {commission: "2500", parts: {anciennete: "2500"}}   # 4 000 days → 25 %
+      documents:
+        MAND-T:
+          invoice:
+            number: FC-2026-000001
+            ht: "9200"
+            vat: "1840"
+            ttc: "11040"
+            lines:
+              - {claim_type: b2b_invoice, rule: montant, families: [principal], ht: "3200", tiers: [["0.08", "10000"], ["0.12", "20000"]]}
+              - {claim_type: rent, rule: anciennete, families: [principal], ht: "6000", tiers: [["0.20", "10000"], ["0.25", "10000"], ["0.15", "10000"]]}
