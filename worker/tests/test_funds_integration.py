@@ -4,16 +4,25 @@ imported through the payments queue — the bank's charge and the top-up we orde
 by the debit job, a credit from our own account and a plain debit booked by ops, our transfer out
 explained — after which 5120 is the bank's closing balance less the one line explained, and the
 nightly checks find nothing (I8', I12, I13, I14, I19). Design docs/design/m2c-remittances.md
-§5, §12, §15, §18; acceptance « 5120 = bank after fees and top-ups »."""
+§5, §12, §15, §18; acceptance « 5120 = bank after fees and top-ups ». Then the review fixes: a
+credit from our own account released by ops as a debtor's payment the servicer relayed (a payment
+to assign, its cash_in, nothing left unposted, no violation); one decision per bank line when two
+sessions decide it at once (the line's lock: the second waits, then is refused); a top-up ordered
+while its own account is being closed waits for the close and is refused."""
 
+import json
 import random
+import threading
+import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date
 from typing import Any
 
 import psycopg
 import pytest
-from debit_helpers import api, checks, import_entries, line_id, review_of, violations
+from debit_helpers import API_DB, api, checks, import_entries, line_id, review_of, violations
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from integration_helpers import DB, one, storage
@@ -219,3 +228,250 @@ def test_5120_is_the_bank_after_fees_and_top_ups() -> None:
     assert own_cash == -23_000  # what the own account put in (5122 is not its bank balance)
     assert pmtinf == f"PI-{tag}"
     del statement
+
+
+def _statement(tenant: dict[str, Any], own_iban: str, tag: str) -> int:
+    """A statement of the dedicated account: a debtor's payment, a credit from our own account (no
+    TOP id: a debtor's payment the servicer relayed), two plain debits, a second own credit; the
+    payments queue drained. Returns the closing balance."""
+    debtor = iban_fr(random.Random(tag))
+
+    def credit(n: int, amount: int, iban: str, text: str) -> Entry:
+        tx = Tx(amount, ref=f"A{n}{tag}", end_to_end_id=f"E{n}-{tag}", iban=iban, ustrd=(text,))
+        return Entry(amount, True, DAY, DAY, ref=f"N{n}{tag}", txs=(tx,))
+
+    def debit(n: int, amount: int) -> Entry:
+        tx = Tx(amount, ref=f"A{n}{tag}", end_to_end_id=f"E{n}-{tag}", name="PRESTATAIRE")
+        return Entry(amount, False, DAY, DAY, ref=f"N{n}{tag}", code="PMNT/ICDT/ESCT", txs=(tx,))
+
+    entries = [
+        credit(1, 100_000, debtor, "FACTURE F-1"),
+        credit(2, 25_000, own_iban, "REGLEMENT DURAND DOSSIER D-77"),
+        debit(3, 40),
+        debit(4, 60),
+        credit(5, 7_000, own_iban, "VERSEMENT"),
+    ]
+    import_entries(tenant, storage(), entries, day=DAY, opening=0)
+    return 100_000 + 25_000 - 40 - 60 + 7_000
+
+
+def test_an_own_credit_released_as_a_relayed_debtor_payment() -> None:
+    tenant = bank_tenant()
+    _own, own_iban = _own_account(tenant)
+    tag = uuid.uuid4().hex[:6].upper()
+    closing = _statement(tenant, own_iban, tag)
+    relay = line_id(tenant, f"A2{tag}")
+    assert review_of(relay) == "top_up_not_found"  # the job never takes it for a debtor payment
+
+    key = str(uuid.uuid4())
+    reason = "M. Durand a payé le cabinet sur son compte ; reversé sur le compte dédié"
+    out = api(tenant, "select public.release_own_credit(%s, %s, %s)", key, relay, reason)
+    assert set(out) == {"payment_id", "status"}
+    assert out["status"] == "unmatched"
+    assert api(tenant, "select public.release_own_credit(%s, %s, %s)", key, relay, reason) == out
+    with psycopg.connect(DB) as conn:
+        payment = conn.execute(
+            """select status, review_reason, payer_name, payer_iban, amount_minor, booking_date,
+                      remittance_text
+               from public.payment where id = %s and bank_transaction_id = %s""",
+            (out["payment_id"], relay),
+        ).fetchone()
+    assert payment == (
+        "unmatched",
+        "no_match",
+        "Versement relayé par le cabinet",
+        None,
+        25_000,
+        DAY,
+        "REGLEMENT DURAND DOSSIER D-77",
+    )
+    assert review_of(relay) is None
+
+    # the other lines decided by ops; the queue drained: nothing changes the released payment
+    for line, kind, why in (
+        (line_id(tenant, f"A3{tag}"), "fee", "frais de tenue de compte"),
+        (line_id(tenant, f"A4{tag}"), "fee", "commission d'intervention"),
+        (line_id(tenant, f"A5{tag}"), "own_credit", "approvisionnement du compte dédié"),
+    ):
+        api(
+            tenant,
+            "select public.link_debit(%s, %s, %s, null, null, null, %s)",
+            str(uuid.uuid4()),
+            line,
+            kind,
+            why,
+        )
+    drain(storage())
+    with psycopg.connect(DB) as conn:
+        status = one(conn, "select status from public.payment where id = %s", (out["payment_id"],))
+        unposted = conn.execute(
+            "select minor, lines from private.bank_unposted(%s, %s)", (tenant["bank"], DAY)
+        ).fetchone()
+    assert status == "unmatched"  # waits in « Paiements à traiter » for ops to assign it
+    assert unposted == (0, 0)  # every line is in the ledger
+    assert _cash(tenant["bank"]) == closing  # 5120 = the bank (I9)
+    run = checks(tenant)
+    assert violations(str(run["run_id"])) == []  # I11 (its cash_in), I19, I8', I12, I13, I14
+
+
+def _session(user: str) -> psycopg.Connection[Any]:
+    """An API session (authenticator, then the authenticated role at aal2) with its transaction
+    left open: the caller commits."""
+    conn = psycopg.connect(API_DB)
+    claims = json.dumps({"sub": user, "role": "authenticated", "aal": "aal2"})
+    conn.execute("select set_config('request.jwt.claims', %s, true)", (claims,))
+    conn.execute("set local role authenticated")
+    conn.execute("set local statement_timeout = '8s'")
+    return conn
+
+
+@contextmanager
+def _second_session(user: str, sql: str, params: tuple[Any, ...]) -> Iterator[dict[str, Any]]:
+    """Runs `sql` in another session (a thread) while the block runs; yields what it reports: its
+    backend pid once connected, then `error` (the message it was refused with, or None)."""
+    out: dict[str, Any] = {}
+    ready = threading.Event()
+
+    def run() -> None:
+        try:
+            with _session(user) as conn:
+                out["pid"] = conn.info.backend_pid
+                ready.set()
+                conn.execute(sql, params)
+                conn.commit()
+            out["error"] = None
+        except psycopg.Error as exc:
+            out["error"] = exc.diag.message_primary
+        finally:
+            ready.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert ready.wait(10)
+    try:
+        yield out
+    finally:
+        thread.join(15)
+    assert not thread.is_alive()
+
+
+def _waits_for_a_lock(pid: int) -> bool:
+    """True once the session waits on a lock (polled for 1.5 s at most: the commands wait 2 s)."""
+    with psycopg.connect(DB, autocommit=True) as conn:
+        for _ in range(150):
+            row = conn.execute(
+                "select wait_event_type from pg_stat_activity where pid = %s", (pid,)
+            ).fetchone()
+            if row is not None and row[0] == "Lock":
+                return True
+            time.sleep(0.01)
+    return False
+
+
+def _decisions(line: str) -> list[str]:
+    with psycopg.connect(DB) as conn:
+        rows = conn.execute(
+            """select 'link:' || kind from public.bank_debit_link where bank_transaction_id = %s
+               union all
+               select 'booking:' || kind from public.bank_line_booking
+               where bank_transaction_id = %s
+               union all
+               select 'release' from public.bank_own_credit_release
+               where bank_transaction_id = %s""",
+            (line, line, line),
+        ).fetchall()
+    return sorted(str(r[0]) for r in rows)
+
+
+LINK = "select public.link_debit(%s, %s, %s, null, null, null, %s)"
+RELEASE = "select public.release_own_credit(%s, %s, %s)"
+LINKED = "bank booking refused: already_linked"
+BOOKED = "bank booking refused: already_booked"
+LINE_BOOKED = "debit link refused: already_booked"
+RELEASED = "own credit release refused: already_booked"
+STEPS = [
+    (("link", "explained"), ("link", "fee"), LINKED, "link:explained"),
+    (("link", "fee"), ("link", "explained"), LINE_BOOKED, "booking:fee"),
+    (("release", ""), ("link", "own_credit"), BOOKED, "release"),
+    (("link", "own_credit"), ("release", ""), RELEASED, "booking:top_up"),
+]
+
+
+@pytest.mark.parametrize(("first", "second", "refused", "decided"), STEPS)
+def test_a_bank_line_is_decided_once_when_two_sessions_decide_it_at_once(
+    first: tuple[str, str], second: tuple[str, str], refused: str, decided: str
+) -> None:
+    """Review fix (money #0, security #0): an M2b link and a booking in the funds (or an own credit
+    released) take the same lock, the line's row: the second session waits for the first, then
+    reads its decision and is refused. Before, both committed (a line linked as a refund and booked
+    as a fee took 5120 down twice)."""
+    tenant = bank_tenant()
+    _own, own_iban = _own_account(tenant)
+    tag = uuid.uuid4().hex[:6].upper()
+    _statement(tenant, own_iban, tag)
+    line = line_id(tenant, f"A3{tag}" if first[1] in ("explained", "fee") else f"A2{tag}")
+
+    def call(step: tuple[str, str]) -> tuple[str, tuple[Any, ...]]:
+        if step[0] == "release":
+            return RELEASE, (str(uuid.uuid4()), line, "un paiement relayé")
+        return LINK, (str(uuid.uuid4()), line, step[1], "décision d'ops")
+
+    sql_a, params_a = call(first)
+    sql_b, params_b = call(second)
+    a = _session(tenant["staff"])
+    try:
+        a.execute(sql_a, params_a)  # decided, not committed yet
+        with _second_session(tenant["staff"], sql_b, params_b) as b:
+            waited = _waits_for_a_lock(int(b["pid"]))
+            a.commit()
+    finally:
+        a.close()
+    assert waited, "the second session did not wait for the line's lock"
+    assert b["error"] == refused
+    assert _decisions(line) == [decided]
+
+
+def test_a_top_up_ordered_while_its_own_account_closes_waits_and_is_refused() -> None:
+    """Review fix (security #1): request_top_up locks both accounts before checking them, so a
+    close of the own account in flight is waited for and seen (the order is refused), never
+    committed with a top-up in flight from a closed account."""
+    tenant = bank_tenant()
+    own, _iban = _own_account(tenant)
+    admin = uuid.uuid4()
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            "insert into auth.users (id, email, aud, role)"
+            " values (%s, %s, 'authenticated', 'authenticated')",
+            (admin, f"{admin}@s.test"),
+        )
+        conn.execute(
+            "insert into public.membership (user_id, organization_id, role)"
+            " values (%s, %s, 'admin')",
+            (admin, tenant["servicer"]),
+        )
+    a = _session(str(admin))
+    try:
+        a.execute(
+            "select public.close_bank_account(%s, %s, %s)",
+            (str(uuid.uuid4()), own, "compte clôturé"),
+        )
+        with _second_session(
+            tenant["staff"],
+            "select public.request_top_up(%s, %s, %s, '1000', 'couvrir les frais')",
+            (str(uuid.uuid4()), own, tenant["bank"]),
+        ) as b:
+            waited = _waits_for_a_lock(int(b["pid"]))
+            a.commit()
+    finally:
+        a.close()
+    assert waited
+    assert b["error"] == (
+        "top-up: from an active own account to an active client_funds account in the same currency"
+    )
+    with psycopg.connect(DB) as conn:
+        orders = one(
+            conn,
+            "select count(*) from public.bank_transfer where debtor_bank_account_id = %s",
+            (own,),
+        )
+    assert orders == 0

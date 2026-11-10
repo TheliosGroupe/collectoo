@@ -2,13 +2,16 @@
 -- the thirteen M2c types (I3′), the lock decided by the lines and the remit lock, the per-client running balance of 4670
 -- with its commit guard (I13, LG008), the pending queue of remittance items, the own bank account, one client_funds
 -- account per currency, our own transfers classified at import, bank lines booked in the funds (fees, top-ups, the
--- servicer's loss on a return larger than its payment, OQ-34), the nightly checks (I8′, I12, I13, I14, I19) and the read
--- policies. Design docs/design/m2c-remittances.md §5, §6, §7, §12, §13, §15, §18; ADR-0014.
+-- servicer's loss on a return larger than its payment, OQ-34), an own credit released as a debtor payment the servicer
+-- relayed, one decision per bank line, the nightly checks (I8′, I12, I13, I14, I19, the shortfall alert) and the read
+-- policies (clients A/B, a restricted client viewer). Design docs/design/m2c-remittances.md §5, §6, §7, §12, §13, §15,
+-- §18; ADR-0014.
 -- Servicer aa: the shapes and the §7 worked example, posted directly through private.ledger_post_set (no bank lines:
 -- I19 flags them, which is checked last). Servicer bb: a statement imported, booked by the debit job's path and by ops,
--- with 5120 = the bank's closing balance and no violation.
+-- with 5120 = the bank's closing balance and no violation. Servicer cc: the checks fire on tampered data. Servicer dd:
+-- the funds candidates' reads at zero rows over the pages.
 begin;
-select plan(118);
+select plan(174);
 
 -- Fixtures --------------------------------------------------------------------------------------
 insert into public.organization (id, kind, legal_name) values
@@ -22,19 +25,21 @@ insert into public.organization (id, kind, servicer_organization_id, legal_name)
   ('00000000-0000-0000-0000-0000000000c1', 'creditor_client', '00000000-0000-0000-0000-0000000000cc', 'Vert SAS');
 insert into auth.users (id, email, aud, role)
 select ('10000000-0000-0000-0000-0000000000' || n)::uuid, 'u' || n || '@funds.test', 'authenticated', 'authenticated'
-from unnest(array['01', '02', '03', '04', '05', '06']) n;
+from unnest(array['01', '02', '03', '04', '05', '06', '07']) n;
 insert into public.membership (user_id, organization_id, role) values
   ('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000aa', 'ops_manager'),
   ('10000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-0000000000aa', 'collector'),
   ('10000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-0000000000a1', 'client_admin'),
   ('10000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-0000000000aa', 'admin'),
   ('10000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-0000000000bb', 'ops_manager'),
-  ('10000000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-0000000000bb', 'admin');
+  ('10000000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-0000000000bb', 'admin'),
+  ('10000000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-0000000000a1', 'client_viewer');
 insert into public.portfolio (id, organization_id, client_organization_id, name) values
   ('20000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a1', 'P1'),
   ('20000000-0000-0000-0000-0000000000a2', '00000000-0000-0000-0000-0000000000aa', '00000000-0000-0000-0000-0000000000a2', 'P2');
 insert into public.portfolio_access (user_id, portfolio_id) values
-  ('10000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-0000000000a1');
+  ('10000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-0000000000a1'),
+  ('10000000-0000-0000-0000-000000000007', '20000000-0000-0000-0000-0000000000a1');  -- a client viewer of P1 only
 -- cf: the dedicated account (5120); own: the servicer's own account (5122); the same for servicer bb
 insert into public.bank_account (id, organization_id, purpose, iban, currency, label, feed, opened_on) values
   ('80000000-0000-0000-0000-0000000000cf', '00000000-0000-0000-0000-0000000000aa', 'client_funds',
@@ -174,6 +179,8 @@ $$;
 grant execute on all functions in schema pg_temp to authenticated;
 create temporary table t (k text primary key, v uuid) on commit drop;
 grant all on t to authenticated;
+create temporary table n (k text primary key, v bigint) on commit drop;   -- counts computed as postgres
+grant all on n to authenticated;
 
 select pg_temp.file('01', '20000000-0000-0000-0000-0000000000a1', 200000);
 select pg_temp.file('02', '20000000-0000-0000-0000-0000000000a2', 512000);
@@ -218,6 +225,9 @@ select is((select count(*)::int from pg_trigger
              and tgenabled = 'A'), 8, 'the funds'' triggers fire always (owner and replica included)');
 select is((select tgdeferrable and tginitdeferred from pg_trigger where tgname = 'client_payable_in_credit'), true,
   'the 4670 guard is checked at commit (LG008)');
+select is((select pg_get_triggerdef(oid) ~ 'WHEN \(\(new\.balance_minor > 0\)\)' from pg_trigger
+           where tgname = 'client_payable_in_credit'), true,
+  'one check queued per update leaving a balance in debit, not per update (a loop of reversals stays linear)');
 select is((select array_agg(proname::text || '=' || prosecdef::text order by proname) from pg_proc
            where pronamespace = 'private'::regnamespace
              and proname in ('client_payable_check', 'bank_line_booking_check', 'ledger_posting_client_payable')),
@@ -225,8 +235,12 @@ select is((select array_agg(proname::text || '=' || prosecdef::text order by pro
   'the funds'' commit checks run as their owner (a command''s commit runs them as the API''s role)');
 select is((select array_agg(relrowsecurity order by relname) from pg_class
            where oid in ('public.bank_transfer'::regclass, 'public.bank_line_booking'::regclass,
+                         'public.bank_own_credit_release'::regclass,
                          'private.client_payable_balance'::regclass, 'private.remittance_pending'::regclass)),
-  array[true, true, true, true], 'RLS on the new tables');
+  array[true, true, true, true, true], 'RLS on the new tables');
+select is((select count(*)::int from pg_trigger
+           where tgname in ('bank_own_credit_release_guard', 'bank_own_credit_release_append_only') and tgenabled = 'A'),
+  2, 'an own credit''s release is checked and append-only, always');
 
 -- I3′: the thirteen shapes, the §7 worked example (Martin 15 %, Lilas marginal; VAT 20 % on encaissements) -------------
 select isnt(pg_temp.fund('commission_invoice', 'inv:rv1:martin', 'a1', 'commission_invoice/FC-2026-000001',
@@ -461,6 +475,15 @@ select pg_temp.fund('client_advance', 'adv:payout:over', 'a2', 'client_advance/c
   '[["due_to_servicer", 100], ["client_payable", -100], ["client_advance_receivable", 100], ["due_from_client_funds", -100]]',
   '2026-11-08');
 select lives_ok($$ select private.ledger_check_now() $$, 'covered by an advance, it commits');
+-- In debit for a moment within the transaction, back to zero before the commit: it commits (the check queued by the
+-- update in debit reads the balance at commit).
+insert into t select 'dip', pg_temp.fund('remittance', 'remit:dip:0001', 'a2', 'bank_transfer/RMT00000000000D',
+  '[["client_payable", 300], ["client_money_cash", -300, "cf"]]', '2026-11-08');
+select is(pg_temp.bal('client_payable', 'a2'), 300::bigint, 'a payout puts Lilas''s 4670 in debit for a moment');
+insert into t select 'dip_rev', z.entry_id from private.ledger_reverse((select v from t where k = 'dip'),
+  'reverse-dip-0001', 'Virement revenu (test)', '2026-11-08') z;
+select lives_ok($$ select private.ledger_check_now() $$,
+  'its payout returned before the commit: back to zero, it commits (I13 is checked at commit)');
 
 -- Bank accounts: own account, one client_funds per currency, statements of client_funds accounts only ---------
 select pg_temp.as_user('04');
@@ -475,6 +498,13 @@ set local role authenticated;
 select throws_ok($$ select public.register_bank_account('register-cf-0002', '00000000-0000-0000-0000-0000000000aa',
   'Deuxième compte dédié', 'FR4530001007940000000004004', 'EUR', 'camt053') $$, '23505', null,
   'a second active client_funds account in a currency is refused (founder #14)');
+select throws_ok($$ select public.register_bank_account('register-own-usd-0001', '00000000-0000-0000-0000-0000000000aa',
+  'Compte propre USD', 'FR3430001007940000000001001', 'USD', null, null, null, 'own') $$, '23505',
+  'this IBAN is already registered for another purpose',
+  'the dedicated account''s IBAN is never registered as an own account, in any currency');
+select throws_ok($$ select public.register_bank_account('register-cf-usd-0001', '00000000-0000-0000-0000-0000000000aa',
+  'Fonds de tiers USD', 'FR0930001007940000000003003', 'USD', 'camt053') $$, '23505',
+  'this IBAN is already registered for another purpose', 'nor an own account''s IBAN as a dedicated account');
 reset role;
 select throws_ok($$ insert into public.bank_statement (organization_id, bank_account_id, currency, format, file_name, file_sha256,
   size_bytes, storage_path) values ('00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000a0', 'EUR',
@@ -613,11 +643,38 @@ select throws_ok(format($$ select public.link_debit('link-fee-0003', %L, 'fee', 
 select throws_ok(format($$ select public.link_debit('link-exp-0001', %L, 'explained', null, null, null, 'déjà') $$,
   (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 5)),
   '23514', 'debit link refused: already_booked', 'a booked line is not explained as well');
+select throws_ok(format($$ select public.link_debit('link-fee-0004', %L, 'fee', null, null, null, 'retrait') $$,
+  (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 7)),
+  '23514', 'bank booking refused: not_a_fee',
+  'our transfer out is never a bank fee (a withdrawal to the own account or a payout is not the bank''s charge)');
+select throws_ok(format($$ select public.link_debit('link-ret-0002', %L, 'return', %L, null, '10000', 'retour') $$,
+  (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 7),
+  (select id from public.payment where end_to_end_id = 'E2E-B1')),
+  '23514', 'debit link refused: not_a_return', 'nor a payment''s return');
 select lives_ok(format($$ select public.link_debit('link-exp-0002', %L, 'explained', null, null, null,
   'virement manuel vers le compte propre (balayage, M2c-6)') $$,
   (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 7)),
   'our transfer out is explained for now (sweeps are booked from M2c-6)');
+select throws_ok(format($$ select public.link_debit('link-fee-0005', %L, 'fee', null, null, null, 'frais') $$,
+  (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 7)),
+  '23514', 'bank booking refused: already_linked', 'a line explained is not booked as well');
+-- A pending refund of the charge's amount: the charge the job booked is not listed to classify as maybe that refund.
+insert into t select 'rfd150', (public.request_refund('refund-150-0001',
+  (select id from public.payment where end_to_end_id = 'E2E-B1'), '150', 'FR1420041010050500013M02606', 'PAYEUR B1',
+  'other', null, '10000', 'trop-perçu (test)') ->> 'refund_request_id')::uuid;
+select is((select count(*)::int from public.debit_queue('a-classer', 0, 100) q
+           where q.bank_transaction_id = (select x.id from public.bank_transaction x
+                                          where x.statement_id = 'b0000000-0000-0000-0000-000000000001'
+                                            and x.line_no = 3)), 0,
+  'a bank charge booked by the job never waits in « À classer » as maybe a pending refund of its amount');
+select lives_ok(format($$ select public.cancel_refund('refund-150-cancel', %L, 'test') $$, (select v from t where k = 'rfd150')),
+  'the refund is cancelled');
 reset role;
+select throws_ok($$ insert into public.bank_debit_link (bank_transaction_id, organization_id, bank_account_id, kind, method,
+  reason, decided_by) select x.id, x.organization_id, x.bank_account_id, 'explained', 'ops', 'x',
+  '10000000-0000-0000-0000-000000000005' from public.bank_transaction x
+  where x.statement_id = 'b0000000-0000-0000-0000-000000000001' and x.line_no = 5 $$, '23514', null,
+  'even written directly, a line booked in the funds is not linked as well (the backstop of the line lock)');
 -- 5120 = the bank after the fees and the top-ups: closing 15 100 = 5120 + the one line explained (−700)
 select is(array[pg_temp.bal('client_money_cash', null, '00000000-0000-0000-0000-0000000000bb'),
                 (select minor from private.bank_unposted('80000000-0000-0000-0000-0000000000bf', '2026-11-06'))],
@@ -657,14 +714,139 @@ select throws_ok($$ insert into public.bank_line_booking (bank_transaction_id, s
   entry_id, amount_minor, method) select 'b1000000-0000-0000-0000-000000000001', 2, '00000000-0000-0000-0000-0000000000bb',
   '80000000-0000-0000-0000-0000000000bf', 'loss', id, 500, 'auto' from public.ledger_entry
   where idempotency_key = 'fee:cc-lock' $$, '23514', null, 'a booking fits its line and its entry');
+
+-- A debtor's payment the servicer received on its own account and passed on to the dedicated account (§12): ops
+-- release the own credit as a payment. And a return when nothing is left of its payment: the whole line is the loss.
+insert into public.bank_transaction (id, organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+                                     amount_minor, currency, booking_date, kind, end_to_end_id, original_end_to_end_id,
+                                     return_reason, counterparty_iban, remittance_text)
+values ('b1000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-0000000000bb', '80000000-0000-0000-0000-0000000000bf',
+        'b0000000-0000-0000-0000-000000000002', 2, 't:BR2', 'credit', 4000, 'EUR', '2026-11-07', 'own_transfer_in',
+        'E2E-RELAY', null, null, 'FR7030001007940000000002002', 'REGLEMENT DOSSIER D-77'),
+       ('b1000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-0000000000bb', '80000000-0000-0000-0000-0000000000bf',
+        'b0000000-0000-0000-0000-000000000002', 3, 't:BR3', 'credit', 600, 'EUR', '2026-11-07', 'own_transfer_in',
+        'E2E-OWN-600', null, null, 'FR7030001007940000000002002', null),
+       ('b1000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-0000000000bb', '80000000-0000-0000-0000-0000000000bf',
+        'b0000000-0000-0000-0000-000000000002', 4, 't:BR4', 'debit', 300, 'EUR', '2026-11-07', 'return', 'E2E-LOSS',
+        'E2E-LOSS', 'MD06', null, null);
+select pg_temp.as_user('05');
+set local role authenticated;
+select throws_ok($$ select public.link_debit('link-rfd-0009', 'b1000000-0000-0000-0000-000000000002', 'refund', null,
+  gen_random_uuid(), null, 'x') $$, '23514', 'debit link refused: not_a_return',
+  'an own credit is never a refund (whatever request is named)');
+select throws_ok($$ select public.link_debit('link-rfd-0010', 'b1000000-0000-0000-0000-000000000002', 'refund_returned',
+  null, gen_random_uuid(), null, 'x') $$, '23514', 'debit link refused: not_a_return', 'nor a refund that came back');
+select throws_ok($$ select public.release_own_credit('release-0000', 'b1000000-0000-0000-0000-000000000002', '  ') $$,
+  '23514', 'own credit release refused: reason_required', 'a release needs its motif');
+select throws_ok(format($$ select public.release_own_credit('release-0001', %L, 'paiement du débiteur') $$,
+  (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 1)),
+  '23514', 'own credit release refused: not_own_credit', 'a debtor''s credit is not an own credit');
+select throws_ok(format($$ select public.release_own_credit('release-0002', %L, 'paiement du débiteur') $$,
+  (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 4)),
+  '23514', 'own credit release refused: already_booked', 'an own credit booked as a top-up is not released');
+select lives_ok($$ select public.link_debit('link-exp-0600', 'b1000000-0000-0000-0000-000000000003', 'explained', null,
+  null, null, 'trop-versé au cabinet, rendu') $$, 'an own credit explained');
+select throws_ok($$ select public.release_own_credit('release-0003', 'b1000000-0000-0000-0000-000000000003',
+  'en fait un paiement') $$, '23514', 'own credit release refused: already_linked',
+  'an own credit explained is not released as well');
+insert into t select 'relay', (public.release_own_credit('release-0004', 'b1000000-0000-0000-0000-000000000002',
+  'paiement de M. Durand reçu sur le compte du cabinet, reversé') ->> 'payment_id')::uuid;
+select is(public.release_own_credit('release-0004', 'b1000000-0000-0000-0000-000000000002',
+  'paiement de M. Durand reçu sur le compte du cabinet, reversé'),
+  jsonb_build_object('payment_id', (select v from t where k = 'relay'), 'status', 'unmatched'),
+  'ops release an own credit as a debtor payment relayed by the cabinet (a replay returns the same)');
+select throws_ok($$ select public.release_own_credit('release-0005', 'b1000000-0000-0000-0000-000000000002', 'encore') $$,
+  '23514', 'own credit release refused: already_booked', 'once');
+select throws_ok($$ select public.link_debit('link-own-0009', 'b1000000-0000-0000-0000-000000000002', 'own_credit', null,
+  null, null, 'approvisionnement') $$, '23514', 'bank booking refused: already_booked',
+  'a released own credit is not booked as a top-up as well');
+select throws_ok($$ select public.link_debit('link-exp-0009', 'b1000000-0000-0000-0000-000000000002', 'explained', null,
+  null, null, 'x') $$, '23514', 'debit link refused: already_booked', 'nor explained');
+select is((select count(*)::int from public.debit_queue('a-classer', 0, 100) q
+           where q.bank_transaction_id = 'b1000000-0000-0000-0000-000000000002'), 0, 'it leaves « À classer »');
+select is((select array[q.decision, (q.decided_payment_id = (select v from t where k = 'relay'))::text]
+           from public.debit_queue('traites', 0, 100) q where q.bank_transaction_id = 'b1000000-0000-0000-0000-000000000002'),
+  array['relayed_payment', 'true'], 'and is listed among the lines decided, with its payment');
+select is((select count(*)::int from public.bank_own_credit_release), 1, 'money staff read the servicer''s releases');
+reset role;
+select pg_temp.as_user('05', 'aal1');
+set local role authenticated;
+select throws_ok($$ select public.release_own_credit('release-0006', 'b1000000-0000-0000-0000-000000000002', 'x') $$,
+  '42501', null, 'at aal2 only');
+reset role;
+select pg_temp.as_user('01');
+set local role authenticated;
+select throws_ok($$ select public.release_own_credit('release-0007', 'b1000000-0000-0000-0000-000000000002', 'x') $$,
+  '42501', null, 'never another servicer''s line');
+reset role;
+select is((select array[p.status, p.review_reason, p.payer_name, coalesce(p.payer_iban, '-'), p.amount_minor::text,
+                        p.booking_date::text, p.channel, p.method, p.remittance_text]
+           from public.payment p where p.id = (select v from t where k = 'relay')),
+  array['unmatched', 'no_match', 'Versement relayé par le cabinet', '-', '4000', '2026-11-07', 'camt053', 'other',
+        'REGLEMENT DOSSIER D-77'],
+  'a payment of the dedicated account, unmatched, for ops to assign (« Paiements à traiter »); never the own IBAN as payer');
+select is((select array[e.entry_type, e.effective_date::text, e.source_type || '/' || e.source_id,
+                        (select lp.amount_minor::text from public.ledger_posting lp
+                         join public.ledger_account la on la.id = lp.ledger_account_id
+                         where lp.entry_id = e.id and la.book = 'client_money_cash')]
+           from public.ledger_entry e where e.organization_id = '00000000-0000-0000-0000-0000000000bb'
+             and e.idempotency_key = 'cash_in:b0000000-0000-0000-0000-000000000002:2026-11-07:'
+                                     || 'b1000000-0000-0000-0000-000000000002'),
+  array['cash_in', '2026-11-07', 'bank_statement/b0000000-0000-0000-0000-000000000002', '4000'],
+  'its cash_in at the line''s date, tagged with its statement (as a released duplicate credit is: I11)');
+select is((select array[r.reason, r.decided_by::text] from public.bank_own_credit_release r
+           where r.bank_transaction_id = 'b1000000-0000-0000-0000-000000000002'),
+  array['paiement de M. Durand reçu sur le compte du cabinet, reversé', '10000000-0000-0000-0000-000000000005'],
+  'ops'' motif is kept');
+select is((select count(*)::int from private.bank_booking_candidates('00000000-0000-0000-0000-0000000000bb', null, null, 100) c
+           where c.line_id in ('b1000000-0000-0000-0000-000000000002', 'b1000000-0000-0000-0000-000000000003')), 0,
+  'the job looks at neither own credit again');
+select throws_ok($$ update public.bank_own_credit_release set reason = 'autre'
+  where bank_transaction_id = 'b1000000-0000-0000-0000-000000000002' $$, '23514', null, 'a release is a fact (append-only)');
+select throws_ok($$ insert into public.bank_own_credit_release (bank_transaction_id, organization_id, bank_account_id, reason,
+  decided_by) values ('b1000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-0000000000bb',
+  '80000000-0000-0000-0000-0000000000bf', 'x', '10000000-0000-0000-0000-000000000005') $$, '23514', null,
+  'even written directly, an own credit explained is not released');
+-- the return when nothing is left of its payment (E2E-LOSS returned in full above)
+select pg_temp.as_user('05');
+set local role authenticated;
+select is(public.link_debit('link-loss-0002', 'b1000000-0000-0000-0000-000000000004', 'loss',
+  (select id from public.payment where end_to_end_id = 'E2E-LOSS'), null, '0', 'second rejet, rien ne reste du paiement')
+  -> 'result' -> 'booking' ->> 'losses', '1', 'a return when nothing is left of its payment: the whole line is the loss');
+reset role;
+select is((select string_agg(k.kind || ':' || k.amount_minor, ' ') from public.bank_line_booking k
+           where k.bank_transaction_id = 'b1000000-0000-0000-0000-000000000004')
+          || ' links:' || (select count(*) from public.bank_debit_link l
+                           where l.bank_transaction_id = 'b1000000-0000-0000-0000-000000000004'),
+  'loss:300 links:0', 'booked as the servicer''s loss, with no link');
+select is((select count(*)::int from private.debit_candidates('00000000-0000-0000-0000-0000000000bb', null, null, 100) c
+           where c.line_id = 'b1000000-0000-0000-0000-000000000004'), 0,
+  'and no longer a candidate of the debit job (every run decided it again)');
+select private.debit_link_begin();
+insert into pg_temp._debit_review (bank_transaction_id, reason) values ('b1000000-0000-0000-0000-000000000004', 'already_returned');
+select is(private.apply_debit_decisions('00000000-0000-0000-0000-0000000000bb') ->> 'reviews', '1',
+  'a stale decision of the job about it');
+select is((select count(*)::int from public.bank_debit_review where bank_transaction_id = 'b1000000-0000-0000-0000-000000000004'),
+  0, 'writes no review for it');
 -- Nightly checks: servicer bb has none; servicer aa's direct test postings are caught ------------------------------
-select is((select (private.run_payment_checks('00000000-0000-0000-0000-0000000000bb') ->> 'violations')::int), 0,
-  'servicer bb (its lines imported, booked by the job and by ops): no violation (I8′, I12, I13, I14, I19 hold)');
+insert into t select 'run_bb', (private.run_payment_checks('00000000-0000-0000-0000-0000000000bb') ->> 'run_id')::uuid;
+select is((select violations from public.payment_check_run where id = (select v from t where k = 'run_bb')), 0,
+  'servicer bb (its lines imported, booked by the job and by ops, an own credit released): no violation (I8′, I11, I12, '
+  || 'I13, I14, I19 hold)');
+select is((select count(*)::int from public.payment_check_result r
+           where r.run_id = (select v from t where k = 'run_bb') and r.code = 'servicer_shortfall'), 0,
+  'its fees and losses are covered by its top-ups (4679 in credit): no shortfall');
 insert into t select 'run_cc', (private.run_payment_checks('00000000-0000-0000-0000-0000000000cc') ->> 'run_id')::uuid;
 insert into t select 'run_aa', (private.run_payment_checks('00000000-0000-0000-0000-0000000000aa') ->> 'run_id')::uuid;
 select is((select string_agg(r.code, ' ') from public.payment_check_result r
            where r.run_id = (select v from t where k = 'run_cc') and r.severity = 'violation'),
   'bank_cash_identity', 'servicer cc''s fee posted without its bank line is caught (I19: no 5120 movement without its line)');
+select is((select array[r.amount_minor::text, r.currency::text, r.details ->> 'due_to_servicer_minor',
+                        r.details ->> 'top_ups_ordered_minor']
+           from public.payment_check_result r
+           where r.run_id = (select v from t where k = 'run_cc') and r.code = 'servicer_shortfall' and r.severity = 'alert'),
+  array['200', 'EUR', '200', '0'],
+  'servicer cc''s fee and advance left it owing the dedicated account 200, no top-up ordered: an alert to top up');
 select is((select string_agg(distinct r.code, ' ' order by r.code) from public.payment_check_result r
            where r.run_id = (select v from t where k = 'run_aa') and r.severity = 'violation'),
   'bank_cash_identity notification_missing payment_position remittance_completeness',
@@ -673,24 +855,147 @@ select is((select string_agg(distinct r.code, ' ' order by r.code) from public.p
 update private.client_payable_balance set balance_minor = balance_minor - 1
 where client_organization_id = '00000000-0000-0000-0000-0000000000c1';
 delete from private.remittance_pending where client_organization_id = '00000000-0000-0000-0000-0000000000c1';
+-- (and a top-up of 150 ordered from an own account of cc)
+insert into public.bank_account (id, organization_id, purpose, iban, currency, label, feed, opened_on) values
+  ('80000000-0000-0000-0000-0000000000c0', '00000000-0000-0000-0000-0000000000cc', 'own', 'FR7652911690573468086161054',
+   'EUR', 'Compte propre C', null, '2026-01-01');
+insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id, creditor_bank_account_id, currency,
+                                  amount_minor, payee_name, payee_iban, end_to_end_id, requested_execution_date)
+values ('00000000-0000-0000-0000-0000000000cc', 'top_up', '80000000-0000-0000-0000-0000000000c0',
+        '80000000-0000-0000-0000-0000000000cc', 'EUR', 150, 'Troisième cabinet SAS', 'FR8130001007940000000005005',
+        'TOP000000000CC1', '2026-11-09');
 insert into t select 'run_cc2', (private.run_payment_checks('00000000-0000-0000-0000-0000000000cc') ->> 'run_id')::uuid;
 select is((select string_agg(distinct r.code, ' ' order by r.code) from public.payment_check_result r
            where r.run_id = (select v from t where k = 'run_cc2') and r.severity = 'violation'),
   'bank_cash_identity client_payable_debit remittance_completeness',
   'a running balance that drifts and a missing pending item are caught (I13, I14)');
+select is((select r.amount_minor::text || ' ' || (r.details ->> 'top_ups_ordered_minor') from public.payment_check_result r
+           where r.run_id = (select v from t where k = 'run_cc2') and r.code = 'servicer_shortfall'), '50 150',
+  'the top-up ordered counts: 50 left to order');
+-- Plans that hold whatever the statistics (ARCHITECTURE §4): the debit job's funds candidates, checked by what they read
+-- (pg_stat_xact_user_tables: this transaction's scans), in the state that made them slow — bank_line_booking and
+-- bank_transfer counted at (nearly) zero rows over their pages, as after aborted inserts. Servicer dd: 300 charges
+-- booked, 5 more charges and 5 credits carrying the TOP ids of 5 of its 305 orders, not booked yet.
+insert into public.organization (id, kind, legal_name) values
+  ('00000000-0000-0000-0000-0000000000dd', 'servicer', 'Quatrième cabinet SAS');
+insert into public.bank_account (id, organization_id, purpose, iban, currency, label, feed, opened_on) values
+  ('80000000-0000-0000-0000-0000000000df', '00000000-0000-0000-0000-0000000000dd', 'client_funds',
+   'FR3130001007940000000009009', 'EUR', 'Fonds de tiers D', 'camt053', '2026-01-01'),
+  ('80000000-0000-0000-0000-0000000000d0', '00000000-0000-0000-0000-0000000000dd', 'own',
+   'FR6730001007940000000010010', 'EUR', 'Compte propre D', null, '2026-01-01');
+select pg_temp.stmt('b0000000-0000-0000-0000-0000000000d1', '80000000-0000-0000-0000-0000000000df');
+insert into public.bank_transaction (organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+                                     amount_minor, currency, booking_date, kind, bank_tx_code, end_to_end_id)
+select '00000000-0000-0000-0000-0000000000dd', '80000000-0000-0000-0000-0000000000df',
+       'b0000000-0000-0000-0000-0000000000d1', g, 't:D' || g, case when g between 301 and 305 then 'credit' else 'debit' end,
+       100, 'EUR', '2026-11-05', case when g between 301 and 305 then 'own_transfer_in' else 'other_debit' end,
+       case when g between 301 and 305 then 'PMNT/RCDT/ESCT' else 'ACMT/MDOP/CHRG' end,
+       case when g between 301 and 305 then 'TOP' || upper(lpad(to_hex(g), 12, '0')) end
+from generate_series(1, 310) g;
+create or replace function pg_temp.dd_orders() returns void language sql as $$
+  insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id, creditor_bank_account_id, currency,
+                                    amount_minor, payee_name, payee_iban, end_to_end_id, requested_execution_date)
+  select '00000000-0000-0000-0000-0000000000dd', 'top_up', '80000000-0000-0000-0000-0000000000d0',
+         '80000000-0000-0000-0000-0000000000df', 'EUR', 100, 'Quatrième cabinet SAS', 'FR3130001007940000000009009',
+         'TOP' || upper(lpad(to_hex(g), 12, '0')), '2026-11-05'
+  from generate_series(1, 305) g;
+$$;
+create or replace function pg_temp.dd_fees() returns jsonb language plpgsql as $$
+begin
+  perform private.bank_booking_begin();
+  insert into pg_temp._bank_booking (ord, bank_transaction_id, kind, method)
+  select x.line_no, x.id, 'fee', 'auto' from public.bank_transaction x
+  where x.statement_id = 'b0000000-0000-0000-0000-0000000000d1' and x.line_no <= 300;
+  return private.apply_bank_bookings('00000000-0000-0000-0000-0000000000dd');
+end $$;
+create temp table _mark (relid oid primary key, seq_scan bigint, idx_scan bigint, idx_tup_fetch bigint);
+create or replace function pg_temp.mark() returns void language sql as $$
+  delete from _mark;
+  insert into _mark select x.relid, x.seq_scan, x.idx_scan, x.idx_tup_fetch from pg_stat_xact_user_tables x
+  where x.relid in ('public.bank_line_booking'::regclass, 'public.bank_transfer'::regclass);
+$$;
+create or replace function pg_temp.read_since_mark(p_rel regclass)
+returns table (seq_scan bigint, idx_scan bigint, idx_tup_fetch bigint) language sql as $$
+  select x.seq_scan - m.seq_scan, x.idx_scan - m.idx_scan, x.idx_tup_fetch - m.idx_tup_fetch
+  from pg_stat_xact_user_tables x join _mark m on m.relid = x.relid where x.relid = p_rel;
+$$;
+-- the orders and bookings written once and rolled back, the tables analysed then, then written again
+savepoint zero_density;
+select pg_temp.dd_orders();
+select pg_temp.dd_fees();
+rollback to savepoint zero_density;
+analyze public.bank_line_booking;
+analyze public.bank_transfer;
+select pg_temp.dd_orders();
+select is(pg_temp.dd_fees() - 'reviews', '{"fees": 300, "top_ups": 0, "losses": 0, "skipped": 0, "failed": 0}'::jsonb,
+  'servicer dd: 300 charges booked by the job');
+select ok((select bool_and(c.reltuples < 50 and pg_relation_size(c.oid) / 8192 > c.relpages) from pg_class c
+           where c.oid in ('public.bank_line_booking'::regclass, 'public.bank_transfer'::regclass))
+          and (select count(*) from public.bank_line_booking) > 300 and (select count(*) from public.bank_transfer) > 300,
+  'the statistics count (nearly) no booking and no order over their pages, while there are hundreds');
+select pg_temp.mark();
+create temp table _dd_cand as
+select * from private.bank_booking_candidates('00000000-0000-0000-0000-0000000000dd', null, null, 2000);
+select is((select string_agg(c.line_kind || coalesce('+' || c.transfer_status, ''), ' ' order by c.line_kind)
+           from (select distinct line_kind, transfer_status from _dd_cand) c)
+          || ' ' || (select count(*) from _dd_cand),
+  'other_debit own_transfer_in+ordered 10', 'the 5 charges not booked and the 5 credits with their orders');
+-- Before the review fix, this read the bookings in a sequential scan per line (310 here; 48 150 bookings read through
+-- a whole index on a fresh database) and 1 515 orders (each own credit read the servicer's orders through its
+-- organization index).
+select ok((select r.seq_scan = 0 and r.idx_tup_fetch <= 310 from pg_temp.read_since_mark('public.bank_line_booking') r),
+  'each line probes the bookings by its key (one row at most per line of these kinds, never every booking per line)');
+select ok((select r.seq_scan = 0 and r.idx_tup_fetch <= 5 from pg_temp.read_since_mark('public.bank_transfer') r),
+  'each own credit finds its order by its TOP id (never the servicer''s other orders)');
+
+-- Postings written straight to the tables for servicer cc, never committed (the deferred ledger checks would refuse
+-- them at commit): 4679 moved without 4689 (70), and the servicer's 6270 against the client fund's 5120 (30). The nightly
+-- checks see each break, whatever wrote it.
+insert into public.ledger_entry (id, organization_id, entry_type, effective_date, line_count, idempotency_key,
+                                 request_hash, source_type, source_id)
+values ('e9000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000cc', 'bank_fee', '2026-11-06', 2,
+        'tamper:mirror:0001', repeat('0', 64), 'bank_transaction', 'x'),
+       ('e9000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-0000000000cc', 'bank_fee', '2026-11-06', 2,
+        'tamper:fund:0001', repeat('0', 64), 'bank_transaction', 'y');
+insert into public.ledger_posting (entry_id, line_no, ledger_account_id, amount_minor, currency, effective_date)
+select x.e::uuid, x.n, la.id, x.amount, 'EUR', '2026-11-06'
+from (values ('e9000000-0000-0000-0000-000000000001', 1, 'due_to_servicer', 70),
+             ('e9000000-0000-0000-0000-000000000001', 2, 'client_money_cash', -70),
+             ('e9000000-0000-0000-0000-000000000002', 1, 'bank_fees', 30),
+             ('e9000000-0000-0000-0000-000000000002', 2, 'client_money_cash', -30)) x (e, n, book, amount)
+join public.ledger_account la on la.organization_id = '00000000-0000-0000-0000-0000000000cc' and la.book = x.book;
+insert into t select 'run_cc3', (private.run_payment_checks('00000000-0000-0000-0000-0000000000cc') ->> 'run_id')::uuid;
+select is((select string_agg(r.code || ':' || r.amount_minor, ' ' order by r.code) from public.payment_check_result r
+           where r.run_id = (select v from t where k = 'run_cc3')
+             and r.code in ('client_money_identity', 'fund_mirror', 'own_fund_identity')),
+  'client_money_identity:-30 fund_mirror:70 own_fund_identity:30',
+  '4679 moved without 4689 breaks the mirror (I12); a servicer-fund book moved alone leaves both funds open');
 -- Read access ------------------------------------------------------------------------------------------------
+-- What each client should read without a portfolio, counted as postgres: its own 4670 and its own entries of the types
+-- that move it (Lilas has rows of the same books and types).
+insert into n select 'a1_acc', count(*) from public.ledger_account
+  where portfolio_id is null and book = 'client_payable' and client_organization_id = '00000000-0000-0000-0000-0000000000a1';
+insert into n select 'a1_ent', count(*) from public.ledger_entry
+  where portfolio_id is null and client_organization_id = '00000000-0000-0000-0000-0000000000a1' and entry_type in ('forward', 'reversal', 'remittance', 'client_settlement', 'client_advance');
+insert into n select 'a2_rows', (select count(*) from public.ledger_account
+                                 where portfolio_id is null and book = 'client_payable' and client_organization_id = '00000000-0000-0000-0000-0000000000a2')
+                                * (select count(*) from public.ledger_entry
+                                   where portfolio_id is null and client_organization_id = '00000000-0000-0000-0000-0000000000a2' and entry_type in ('forward', 'reversal', 'remittance', 'client_settlement', 'client_advance'));
+insert into t select 'a1_4670', id from public.ledger_account
+  where portfolio_id is null and book = 'client_payable' and client_organization_id = '00000000-0000-0000-0000-0000000000a1';
 select pg_temp.as_user('01');
 set local role authenticated;
 select is((select count(distinct book)::int from public.ledger_account
            where book in ('due_to_servicer', 'due_from_client_funds', 'own_cash', 'commission_receivable',
                           'client_advance_receivable', 'vat_collected', 'vat_pending', 'servicer_revenue', 'bank_fees',
                           'servicer_losses')), 10, 'money staff read every book of both funds');
-select ok((select count(*) from public.bank_line_booking) = 0 and (select count(*) from public.bank_transfer) = 0,
-  'and only their own servicer''s bookings and transfers');
+select ok((select count(*) from public.bank_line_booking) = 0 and (select count(*) from public.bank_transfer) = 0
+          and (select count(*) from public.bank_own_credit_release) = 0,
+  'and only their own servicer''s bookings, transfers and releases');
 reset role;
 select pg_temp.as_user('05');
 set local role authenticated;
-select is((select count(*)::int from public.bank_line_booking), 5, 'servicer bb''s money staff read its bookings');
+select is((select count(*)::int from public.bank_line_booking), 6, 'servicer bb''s money staff read its bookings');
 select is((select count(*)::int from public.bank_transfer), 2, 'and its transfers');
 reset role;
 select pg_temp.as_user('02');
@@ -706,6 +1011,16 @@ select is((select array_agg(distinct book) from public.ledger_account where port
 select is((select array_agg(distinct entry_type order by entry_type) from public.ledger_entry where portfolio_id is null),
   array['client_advance', 'client_settlement', 'remittance'],
   'and its own entries of the types that move what it is owed (never commission documents or its payments to us)');
+select is(array[(select count(*) from public.ledger_account where portfolio_id is null),
+                (select count(*) from public.ledger_entry where portfolio_id is null)],
+          array[(select v from n where k = 'a1_acc'), (select v from n where k = 'a1_ent')],
+  'exactly its own: as many rows as Martin has');
+select is((select count(*)::int from public.ledger_account where client_organization_id = '00000000-0000-0000-0000-0000000000a2')
+          + (select count(*)::int from public.ledger_entry where client_organization_id = '00000000-0000-0000-0000-0000000000a2'), 0,
+  'never another client''s, though Lilas has 4670 rows and entries of the same types');
+select ok((select v from n where k = 'a2_rows') > 0, '(Lilas has such rows)');
+select isnt(public.ledger_balance((select v from t where k = 'a1_4670')), null, 'a client member reads its 4670 balance');
+select is((select count(*)::int from public.bank_own_credit_release), 0, 'clients read no release');
 select throws_ok($$ select count(*) from private.client_payable_balance $$, '42501', null,
   'the running balance is not readable through the API');
 select throws_ok($$ insert into public.bank_line_booking (bank_transaction_id, seq, organization_id, bank_account_id, kind,
@@ -713,6 +1028,18 @@ select throws_ok($$ insert into public.bank_line_booking (bank_transaction_id, s
   '80000000-0000-0000-0000-0000000000bf', 'fee', gen_random_uuid(), 1, 'auto') $$, '42501', null,
   'nobody writes a booking directly');
 select is((select count(*)::int from public.bank_transfer), 0, 'clients read no transfer');
+reset role;
+-- A client viewer restricted to some of the client's portfolios (P1): what covers all of them (what the client is owed,
+-- its remittances) is whole-client data (OQ-48 default: whole-client access only).
+select pg_temp.as_user('07');
+set local role authenticated;
+select is(array[(select count(*)::int from public.ledger_account where portfolio_id is null),
+                (select count(*)::int from public.ledger_entry where portfolio_id is null)], array[0, 0],
+  'a client viewer restricted to some portfolios reads neither the client''s 4670 nor its remittances or advances');
+select throws_ok(format($$ select public.ledger_balance(%L) $$, (select v from t where k = 'a1_4670')), '42501', null,
+  'nor the 4670 balance by id');
+select ok((select count(*) from public.ledger_account where portfolio_id = '20000000-0000-0000-0000-0000000000a1') > 0,
+  'it reads its portfolio''s ledger');
 reset role;
 
 select * from finish();
