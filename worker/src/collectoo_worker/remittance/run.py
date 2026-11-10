@@ -36,6 +36,7 @@ from collectoo_worker.remittance.calendar import Calendar, conservative
 from collectoo_worker.remittance.commission import (
     ENGINE_VERSION,
     NEVER_COMMISSIONED,
+    REGULARISATION_LABEL_FR,
     CommissionInputError,
     FileFacts,
     KeyState,
@@ -48,6 +49,8 @@ from collectoo_worker.remittance.commission import (
 )
 from collectoo_worker.remittance.deadline import RemittanceDeadline, remittance_deadline
 from collectoo_worker.remittance.documents import (
+    REVERSAL,
+    CreditCause,
     EarlierCharge,
     EarlierInvoice,
     InvoiceLine,
@@ -455,15 +458,16 @@ def _documents(facts: Facts, docs: Mapping[str, MandateDocuments]) -> list[dict[
                     "vat_rate": None,
                     "settlement": "netted",
                     "clause_ref": clause_ref,
-                    "lines": [
+                    "lines": [  # one per corrected invoice and cause (289 I 5, 272 1)
                         {
                             "kind": "credit",
-                            "designation_fr": _credit_designation(facts, c.invoice_id),
-                            "ht": str(c.ht_minor),
+                            "designation_fr": _credit_designation(facts, c.invoice_id, cause),
+                            "ht": str(ht),
                             "vat_rate": str(c.vat_rate),
                             "original_invoice_id": c.invoice_id,
                         }
                         for c in cn.corrected
+                        for cause, ht in (c.causes or ((REVERSAL, c.ht_minor),))
                     ],
                     "allocations": [
                         {
@@ -489,10 +493,13 @@ def _documents(facts: Facts, docs: Mapping[str, MandateDocuments]) -> list[dict[
     return out
 
 
-def _credit_designation(facts: Facts, invoice_id: str) -> str:
+def _credit_designation(facts: Facts, invoice_id: str, cause: CreditCause = REVERSAL) -> str:
+    """A credit line names the invoice it corrects and why (289 I 5; 272 1): collections undone,
+    or the tiers a change of terms moved (no collection undone: legal review M2c-4)."""
     number, issued = facts.invoice_numbers.get(invoice_id, (invoice_id, facts.today))
+    why = "encaissements annulés" if cause == REVERSAL else REGULARISATION_LABEL_FR
     return (
-        f"Avoir rectifiant la facture {number} du {format_date(issued)} — encaissements annulés "
+        f"Avoir rectifiant la facture {number} du {format_date(issued)} — {why} "
         f"(relevé {facts.number})"
     )
 
@@ -608,6 +615,8 @@ def _header(  # noqa: PLR0913, PLR0917 - the draft's totals and identity
         "payout_account": facts.payout_account_id,
         "history_seq": facts.history_seq,
         "keys": list(key_states),
+        "vat_on_debits": facts.vat_on_debits,
+        "proceeding_opened_on": str(facts.proceeding_opened_on),
     }
     digest = hashlib.sha256(json.dumps(hashed, sort_keys=True, default=str).encode()).hexdigest()
     return {
@@ -634,4 +643,7 @@ def _header(  # noqa: PLR0913, PLR0917 - the draft's totals and identity
         "inputs_hash": digest,
         "payout_account_id": facts.payout_account_id,
         "history_seq": facts.history_seq,
+        # what the plan assumed: the approval sends the draft back when either changed
+        "vat_on_debits": facts.vat_on_debits,
+        "proceeding_opened_on": facts.proceeding_opened_on,
     }

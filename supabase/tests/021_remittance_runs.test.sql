@@ -634,8 +634,9 @@ select throws_ok($$ update public.remittance_run set cancel_reason = 'x' $$, '42
 select throws_ok($$ select private.approve_remittance_run((select v from t where k = 'r1'), gen_random_uuid()) $$,
   '42501', null, 'the job''s function is the worker''s');
 reset role;
-select ok(not has_function_privilege('authenticated', 'private.issue_commission_documents(uuid,uuid,uuid,jsonb,text)',
-                                     'execute'), 'issuing documents is internal');
+select ok(not has_function_privilege('authenticated',
+                                     'private.issue_commission_documents(uuid,uuid,uuid,jsonb,text,boolean)', 'execute'),
+  'issuing documents is internal');
 select ok(has_function_privilege('service_role', 'private.approve_remittance_run(uuid,uuid)', 'execute'),
   'the worker approves');
 select ok((select count(*) from private.change_log where table_name = 'public.remittance_run') > 0,

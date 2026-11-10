@@ -428,22 +428,41 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
     ).fetchall():
         invoices[str(inv)] = EarlierInvoice(str(inv), int(ht), Decimal(rate), int(credited))
         numbers[str(inv)] = (num, issued)
-    originals = sorted(
-        {i.original_entry_id for i in items if i.original_entry_id}
-        | {p.item.original_entry_id for p in pending_lines if p.item.original_entry_id}
+    # each reversal's original: the invoice that charges it now — its line's (or its live
+    # repricing's) invoice, or, when a cancelled run had credited this reversal, the corrective
+    # invoice that cancellation issued to charge it again (money review #0: credited there, once)
+    undone = sorted(
+        {(i.entry_id, i.original_entry_id) for i in items if i.original_entry_id}
+        | {
+            (p.item.entry_id, p.item.original_entry_id)
+            for p in pending_lines
+            if p.item.original_entry_id
+        }
     )
     line_invoices = {
         str(e): str(inv)
         for e, inv in conn.execute(
             """select l.ledger_entry_id,
-                      coalesce((select rp.invoice_id from public.remittance_line_repricing rp
-                                join public.remittance_run pr on pr.id = rp.pricing_run_id
-                                  and pr.status <> 'cancelled'
-                                where rp.run_id = l.run_id and rp.line_no = l.line_no limit 1),
-                               l.invoice_id)
-               from public.remittance_line l
-               where l.ledger_entry_id = any(%s::uuid[]) and not l.released""",
-            (originals,),
+                 coalesce((select j.id from public.commission_credit_alloc a
+                           join public.commission_invoice cn on cn.id = a.credit_note_id
+                             and cn.reason = 'commission'
+                           join public.remittance_run cr on cr.id = cn.run_id
+                             and cr.status = 'cancelled'
+                           join public.commission_invoice o on o.id = a.original_invoice_id
+                           join public.commission_invoice j on j.run_id = cn.run_id
+                             and j.kind = 'invoice' and j.reason = 'run_cancelled'
+                             and j.mandate_id = cn.mandate_id and j.vat_rate = o.vat_rate
+                           where a.entry_id = u.reversal
+                           order by cn.year desc, cn.seq desc limit 1),
+                          (select rp.invoice_id from public.remittance_line_repricing rp
+                           join public.remittance_run pr on pr.id = rp.pricing_run_id
+                             and pr.status <> 'cancelled'
+                           where rp.run_id = l.run_id and rp.line_no = l.line_no limit 1),
+                          l.invoice_id)
+               from unnest(%s::uuid[], %s::uuid[]) u (reversal, original)
+               join public.remittance_line l on l.ledger_entry_id = u.original
+                 and not l.released""",
+            ([r for r, _ in undone], [o for _, o in undone]),
         ).fetchall()
         if inv is not None
     }

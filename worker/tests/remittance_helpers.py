@@ -106,6 +106,19 @@ def remittance_tenant(
     return tenant
 
 
+def add_admin(tenant: dict[str, Any]) -> str:
+    """An admin of the tenant's servicer (cancellations are an admin's)."""
+    admin = uuid.uuid4()
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(USER_SQL, (admin, f"{admin}@s.test"))
+        conn.execute(
+            "insert into public.membership (user_id, organization_id, role)"
+            " values (%s, %s, 'admin')",
+            (admin, tenant["servicer"]),
+        )
+    return str(admin)
+
+
 def add_client(tenant: dict[str, Any], name: str = "C2") -> dict[str, Any]:
     """Another client of the same servicer, ready for runs (its portfolio, mandate and IBAN)."""
     with psycopg.connect(DB) as conn, conn.transaction():
