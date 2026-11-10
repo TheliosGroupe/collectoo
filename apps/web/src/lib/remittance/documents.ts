@@ -85,12 +85,19 @@ export function settlementText(
     return `à régler par compensation sur le prochain reversement, au plus tard le ${frenchDay(latest)}`;
   }
   if (ref?.mode === "run" && ref.run_number) {
+    const digits = (v: string | null | undefined): v is string => typeof v === "string" && /^\d+$/.test(v);
+    const amount = digits(ref.amount_minor) ? money(ref.amount_minor, "EUR") : null;
+    // the remainder the plan leaves open, with its date (review M2c-5 legal#4): stated whether or not money moves
+    const remainder =
+      digits(ref.remainder_minor) && BigInt(ref.remainder_minor) > BigInt(0) && latest
+        ? ` ; le solde de ${money(ref.remainder_minor, "EUR")} sur le prochain reversement, au plus tard le ${frenchDay(latest)}`
+        : "";
     if (ref.transfer === false && ref.execution_date) {
-      return `compensée le ${frenchDay(ref.execution_date)} avec vos encaissements (relevé ${ref.run_number}, aucun virement)`;
+      // N = 0: set off at approval, no transfer (round 2: the amount and the remainder, as the PDF prints them)
+      return `compensée le ${frenchDay(ref.execution_date)} avec vos encaissements (relevé ${ref.run_number}, aucun virement)${amount ? ` : ${amount}` : ""}${remainder}`;
     }
-    const remainder = ref.remainder_minor && /^\d+$/.test(ref.remainder_minor) && BigInt(ref.remainder_minor) > BigInt(0);
-    if (remainder && ref.amount_minor && /^\d+$/.test(ref.amount_minor) && latest) {
-      return `à régler par compensation sur le reversement ${ref.run_number} : ${money(ref.amount_minor, "EUR")} ; le solde de ${money(ref.remainder_minor as string, "EUR")} sur le prochain reversement, au plus tard le ${frenchDay(latest)}`;
+    if (remainder && amount) {
+      return `à régler par compensation sur le reversement ${ref.run_number} : ${amount}${remainder}`;
     }
     return `à régler par compensation sur le reversement ${ref.run_number}`;
   }

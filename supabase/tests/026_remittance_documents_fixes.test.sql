@@ -11,7 +11,7 @@
 --   * legal#0 — the 40 € flat indemnity frozen as applying to a professional buyer, a proceeding kept beside it.
 -- Design docs/design/m2c-remittances.md §9.6, §10, §14, §15; ADR-0014 M2c-5 (review fixes).
 begin;
-select plan(39);
+select plan(43);
 
 -- Fixtures (as 021: Martin (a1) and Lilas (a2) of the servicer aa, each with a file paid; Martin accepted electronic
 -- invoices in its mandate, Lilas did not) ----------------------------------------------------------------
@@ -645,6 +645,19 @@ select results_eq($$ select (i.payload #>> '{flat_indemnity,applies}')::boolean,
                      from j, public.commission_invoice i where j.k = 'ind' and i.id = (j.v #>> '{documents,ind,id}')::uuid $$,
   $$ values (true, '4000'::text, 'proceeding_opened'::text, private.paris_today() - 5) $$,
   'stated (L441-9 I): 40 €; the proceeding kept beside it for the dunning step (L441-10 II), not removing it');
+
+-- legal#6, round 2: the approver's free text is staff data; a client member reads status and amounts only ----------
+reset role;
+select pg_temp.as_user('03');
+set local role authenticated;
+select throws_ok($$ select late_reason from public.remittance_run $$, '42501', null,
+  'a client member reads no late reason from a run (review M2c-5 legal#6)');
+select throws_ok($$ select cancel_reason, last_failure from public.remittance_run $$, '42501', null,
+  'nor the cancellation reason or the job''s last failure');
+select lives_ok($$ select id, number, status, gross_minor, net_minor from public.remittance_run $$,
+  'but reads its runs'' status and amounts (the client space''s embed)');
+select is((select count(*)::int from public.remittance_late_approval), 0, 'and no late approval');
+reset role;
 
 select * from finish();
 rollback;

@@ -710,13 +710,12 @@ select throws_ok($$ insert into public.remittance_late_approval (run_id, ledger_
                             '2026-01-01', '2026-01-02', 'x') $$,
   '42501', null, 'no direct write by the API');
 select pg_temp.as_user('03');
-select is((select count(*)::int from public.remittance_late_approval where run_id = (select v from t where k = 'r1')), 1,
-  'Martin''s admin reads its own');
+select is((select count(*)::int from public.remittance_late_approval where run_id = (select v from t where k = 'r1')), 0,
+  'Martin''s admin reads none of its own: the approver''s reason is staff data (review M2c-5 legal#6)');
 select is((select count(*)::int from public.remittance_late_approval where run_id = (select v from t where k = 'r2')), 0,
-  'not Lilas''s');
+  'nor Lilas''s');
 select pg_temp.as_user('08');
-select is((select string_agg(run_id::text, ',') from public.remittance_late_approval),
-  (select v from t where k = 'r2')::text, 'Lilas''s admin reads only Lilas''s');
+select is((select count(*)::int from public.remittance_late_approval), 0, 'Lilas''s admin reads none either');
 select pg_temp.as_user('07');
 select is((select count(*)::int from public.remittance_late_approval), 0,
   'a client viewer restricted to some portfolios reads none (OQ-48)');

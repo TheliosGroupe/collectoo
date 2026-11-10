@@ -118,8 +118,29 @@ describe("M2c-5 documents", () => {
         amount_minor: "6000",
       },
     });
-    expect(none).toBe("compensée le 10/11/2026 avec vos encaissements (relevé RV-2026-000003, aucun virement)");
+    expect(none).toBe(
+      `compensée le 10/11/2026 avec vos encaissements (relevé RV-2026-000003, aucun virement) : ${money("6000", "EUR")}`,
+    );
     expect(none).not.toMatch(/payé|réglé/i);
+    // N = 0 that sets off only part of the invoice (the usual partial case for a one-mandate client): the remainder
+    // and its date are stated, as the PDF and the statement do (review M2c-5 round 2, legal#4)
+    const partial = settlementText({
+      ...netted,
+      due_date: "2026-12-10",
+      payment_reference: {
+        mode: "run",
+        run_number: "RV-2026-000003",
+        execution_date: "2026-11-10",
+        transfer: false,
+        amount_minor: "2000",
+        remainder_minor: "4000",
+        latest_date: "2026-12-10",
+      },
+    });
+    expect(partial).toBe(
+      `compensée le 10/11/2026 avec vos encaissements (relevé RV-2026-000003, aucun virement) : ${money("2000", "EUR")} ; le solde de ${money("4000", "EUR")} sur le prochain reversement, au plus tard le 10/12/2026`,
+    );
+    expect(partial).not.toMatch(/payé|réglé/i);
     // a payload without the reference but a date: the date is still stated
     expect(settlementText({ ...netted, due_date: "2026-12-10" })).toBe(
       "à régler par compensation sur un reversement, au plus tard le 10/12/2026 pour ce que le reversement ne compense pas",

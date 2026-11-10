@@ -1829,3 +1829,23 @@ revoke execute on function public.client_remittance_summary(uuid),
 grant execute on function public.client_remittance_summary(uuid),
   public.accounting_export_documents(date, date, text, integer),
   public.accounting_export_entries(date, date, text, integer) to authenticated;
+
+-- Review M2c-5, round 2 (legal#6): the approver's free text is staff data (GDPR minimisation). The statement prints a
+-- cause category (K5); the reason itself stays with money staff. A client member read it through PostgREST in two
+-- places: the late approvals (M2c-4 let the whole client read them) and remittance_run's columns. The cancellation
+-- reason and the job's last failure are staff free texts too. Staff read runs through the SECURITY DEFINER
+-- remittance_run_detail; the client space reads status and amounts only (remittance_run!run_id embed, K7).
+drop policy remittance_late_approval_read on public.remittance_late_approval;
+create policy remittance_late_approval_read on public.remittance_late_approval for select to authenticated using (
+  organization_id = any ((select private.money_staff_org_ids())::uuid[]));
+revoke select on public.remittance_run from authenticated;
+grant select (id, organization_id, client_organization_id, currency, number, status, trigger, schedule_key, job,
+              job_token, job_queued_at, version, known_at, prepared_at, previous_run_id, service_from, service_to,
+              item_count, line_count, gross_minor, invoice_ht_minor, invoice_vat_minor, invoice_ttc_minor,
+              credit_ht_minor, credit_vat_minor, credit_ttc_minor, commission_taken_minor, advance_recovered_minor,
+              refund_minor, settlement_minor, net_minor, vat_rate, earliest_deadline, earliest_latest_execution_date,
+              unmeetable_count, requested_execution_date, payout_account_id, payout_snapshot, blockers,
+              commission_blockers, engine_version, inputs_hash, settlement_plan, transfer_id, approval_requested_by,
+              approved_by, approved_at, invoice_late, booked_on, cancelled_by, cancelled_at, created_by, created_at,
+              updated_at)
+  on public.remittance_run to authenticated;
