@@ -319,7 +319,96 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   remittance_completeness: {
     label: "Encaissements à reverser incomplets",
-    help: "Ce qui est dû à un client ne vaut pas la somme de ses encaissements en attente de reversement.",
+    help: "Ce qui est dû à un client ne vaut pas ses encaissements en attente de reversement plus ses reversements validés et non encore débités (I14).",
+  },
+  remittance_item_twice: {
+    label: "Encaissement à la fois en attente et reversé",
+    help: "Une écriture figure dans la file d'attente et dans un reversement : chaque encaissement est reversé une seule fois (I15).",
+  },
+  remittance_run_totals: {
+    label: "Totaux d'un reversement incohérents",
+    help: "Brut ≠ somme des lignes, net + compensation ≠ brut, virement ≠ net, ou commission des factures ≠ commission des lignes (I16).",
+  },
+  invoice_numbering: {
+    label: "Numérotation des factures discontinue",
+    help: "La série annuelle des factures et avoirs a un trou, un compteur en avance ou une date qui recule (I17).",
+  },
+  invoice_ledger: {
+    label: "Facture ≠ son écriture",
+    help: "L'écriture d'une facture ou d'un avoir ne vaut pas son TTC (4111) et son HT (7060) (I17).",
+  },
+  settlement_ledger: {
+    label: "Factures ouvertes ≠ compte client 4111",
+    help: "Ce que les factures et avoirs d'un client laissent ouvert ne vaut pas son compte 4111 (I18).",
+  },
+  vat_pending_ledger: {
+    label: "TVA en attente ≠ factures",
+    help: "La TVA sur commissions non réglées (44574) ne vaut pas la TVA des parts de factures non réglées (I18).",
+  },
+  remittance_deadline_breached: {
+    label: "Délai de reversement dépassé",
+    help: "Des encaissements d'un client n'ont pas été reversés avant leur dernière date d'exécution (art. R124-6 CPCE) : préparez et validez son reversement (« Reversements »).",
+  },
+  remittance_delay_unmeetable: {
+    label: "Délai de reversement intenable",
+    // review M2c-4 (legal#1): the J-5, J-1 alerts and the breach then count one month from the encaissement
+    help: "Le délai du mandat (moins de 6 jours) ne laisse aucun jour ouvré pour exécuter le virement à temps : à revoir avec le client. Les alertes à 5 et 1 jours ouvrés, puis le dépassement, sont alors comptés sur un mois après l'encaissement.",
+  },
+  remittance_due_critical: {
+    label: "Reversement à exécuter demain au plus tard",
+    help: "La dernière date d'exécution d'encaissements d'un client est dans un jour ouvré.",
+  },
+  remittance_due_soon: {
+    label: "Reversement à exécuter sous 5 jours ouvrés",
+    help: "La dernière date d'exécution d'encaissements d'un client approche.",
+  },
+  payout_blocked: {
+    label: "Reversement bloqué",
+    help: "Un brouillon de reversement ne peut pas être validé (IBAN de reversement manquant, non confirmé ou revenu, événement du client) : levez le blocage avant la date limite.",
+  },
+  draft_waiting: {
+    label: "Brouillon de reversement en attente",
+    // review M2c-4 (tests-ui#3, C4): also, at once, a draft whose preparation failed (details.prepare_failed)
+    help: "Un brouillon de reversement attend sa validation depuis plus d'un jour ouvré, ou sa préparation a échoué et rien ne la relance : validez-le, ou ouvrez-le et cliquez « Actualiser » (ou « Abandonner »).",
+  },
+  // review M2c-4 (legal#3): an approved run is not paid until the bank's debit
+  remittance_payout_overdue: {
+    label: "Reversement validé non débité après la date limite",
+    help: "Le virement d'un reversement validé n'est pas débité par la banque alors que la dernière date d'exécution de certains de ses encaissements est passée (art. R124-6 CPCE) : vérifiez qu'il a été transmis et exécuté.",
+  },
+  remittance_payout_not_executed: {
+    label: "Reversement non exécuté à la date demandée",
+    help: "La date d'exécution demandée d'un reversement validé est passée et son débit n'est pas comptabilisé : vérifiez la transmission du fichier de virements à la banque.",
+  },
+  // review M2c-4 (nc#0): what the deadline engine or the hourly schedule could not do
+  remittance_deadline_not_computable: {
+    label: "Délai de reversement non calculable",
+    help: "Des encaissements ou des paiements ont une date d'encaissement hors du calendrier des jours ouvrés renseigné : leur dernière date d'exécution ne peut pas être calculée. Vérifiez-les et reversez-les sans attendre ; prévenez le support.",
+  },
+  remittance_schedule_failed: {
+    label: "Préparation automatique des reversements en échec",
+    help: "La tâche horaire qui prépare les reversements du cabinet (jours du mandat, garde du délai) a échoué : préparez les reversements dus (« Préparer maintenant ») et prévenez le support.",
+  },
+  invoice_late: {
+    label: "Facture émise tardivement",
+    help: "Un reversement a été validé plus de 2 jours ouvrés après sa préparation : la facture de commission est datée du jour de la validation.",
+  },
+  // review M2c-4, round 2 (legal#4): the date printed on the invoice has passed (L441-10 II: penalties from the next day)
+  invoice_overdue: {
+    label: "Facture de commission non réglée à sa date",
+    help: "Une facture de commission reste ouverte après la date de règlement qu'elle indique : une facture à régler au compte propre, ou une facture rétablie par l'annulation d'un reversement que le reversement suivant n'a pas compensée à temps. Préparez le reversement du client ou vérifiez son règlement.",
+  },
+  unallocated_deadline: {
+    label: "Fonds rattachés à un dossier non imputés",
+    help: "De l'argent rattaché au dossier d'un client attend son imputation alors que son délai de reversement court (OQ-26) ; « bloqué » quand une procédure l'interdit.",
+  },
+  vat_pack_review: {
+    label: "Taux de TVA à revoir",
+    help: "Le pack de TVA doit être relu avant la recodification du 1er janvier 2027 (CIBS).",
+  },
+  calendar_horizon: {
+    label: "Calendrier des jours ouvrés à prolonger",
+    help: "Moins de 12 mois de jours ouvrés sont renseignés : les délais de reversement ne pourront plus être calculés.",
   },
   cash_in_statement: {
     label: "Encaissement d'un jour ≠ ses paiements",

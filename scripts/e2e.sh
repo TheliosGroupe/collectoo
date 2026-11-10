@@ -12,11 +12,11 @@ export SUPABASE_SECRET_KEY="$SECRET_KEY"
 export MAILPIT_URL="$MAILPIT_URL"
 export NEXT_TELEMETRY_DISABLED=1
 
-# The worker consumes the boarding and payments queues during the run (mock LLM and mock addresses).
+# The worker consumes the boarding, payments and remittances queues during the run (mock LLM and mock addresses).
 (
   eval "$(./scripts/local-env.sh)"
   cd worker
-  LLM_PROVIDER=mock ADDRESS_NORMALISER=mock exec uv run collectoo-worker consume boarding payments
+  LLM_PROVIDER=mock ADDRESS_NORMALISER=mock exec uv run collectoo-worker consume boarding payments remittances
 ) >tmp/e2e-worker.log 2>&1 &
 worker_pid=$!
 trap 'kill $worker_pid 2>/dev/null || true' EXIT

@@ -32,6 +32,9 @@ function subjectLink(r: Result): string | null {
   if (r.code === "debit_unclassified") return "/backoffice/encaissements/debits";
   if (r.code === "duplicate_unresolved") return "/backoffice/encaissements/debits?onglet=doublons";
   if (r.code === "unmatched_ageing" || r.code === "unallocated_ageing") return "/backoffice/encaissements/a-traiter";
+  // M2c-4: a run's checks lead to the run, a client's deadlines to « Reversements »
+  if (r.subject_type === "remittance_run" && r.subject_id) return `/backoffice/reversements/${r.subject_id}`;
+  if (r.code.startsWith("remittance_")) return "/backoffice/reversements";
   return null;
 }
 

@@ -12,7 +12,8 @@ Hypothesis properties and the input errors.
   into consecutive runs gives (a bounce after a later collection); under `credit` a collection
   undone in its own run is never priced, so no invoice charges it and no band moves twice;
 * a change of the VAT rate: a run of collections never issues a credit note nor lowers what is
-  charged; while the rate only rises the TTC billed stays within the basis;
+  charged; whether the rate rises or falls the TTC billed stays within the basis (each invoice
+  keeps its own rate in the reserve, M2c-4);
 * with flat or bracket rates, any minimums, across versions: a reversal never raises the commission
   and a collection never lowers it (the minimum is taken on the file: second review);
 * the cap and the minimum: F monotone; HT x 1,2 plus one cent per open invoice within the basis,
@@ -1066,8 +1067,9 @@ def test_after_a_vat_rate_change_a_run_of_collections_never_credits(
     grid in one): a run with no reversal never issues a credit note and never lowers what is
     charged — earlier invoices were within the basis at their own rate when issued (third review:
     the new rate's cap and reserve re-applied to them credited 1,51 € on a 0,01 € collection).
-    While the rate only rises, the TTC billed to a file alone on its mandate stays within what it
-    brought in (a fall is not covered: CALCULATION_RULES §7)."""
+    Whether the rate rises or falls, the TTC billed to a file alone on its mandate stays within
+    what it brought in: each earlier invoice keeps its own rate in the reserve (M2c-4; before,
+    after a fall a capped file was billed 21,65 € for 20,01 €)."""
     if rising:
         rates = sorted(rates)
     sim = Simulator({"F": _file()}, versions, TAU)
@@ -1083,8 +1085,30 @@ def test_after_a_vat_rate_change_a_run_of_collections_never_credits(
         if ln.kind is LineKind.ALLOCATION:
             assert all(d.credit_note is None for d in docs.values()), docs
             assert all(s.commission_minor >= before.get(k, 0) for k, s in sim.history.items())
-        if rising:
-            assert billed <= sum(s.basis_minor for s in sim.history.values()), billed
+        assert billed <= sum(s.basis_minor for s in sim.history.values()), (billed, rates)
+
+
+def test_after_a_fall_of_the_vat_rate_a_capped_file_stays_within_its_basis() -> None:
+    """The gap M2c-3 left (CALCULATION_RULES §7): a 20,00 € minimum on a file that brought in
+    20,01 € is capped (HT 16,66 €, TTC 19,99 € at 20 %); after the rate falls to 5,5 %, a 0,01 €
+    collection was charged 2,29 € more HT at 5,5 % (22,41 € billed for 20,02 €). Each earlier
+    invoice now keeps its own rate in the reserve: nothing more is charged."""
+    versions = _one_version(_flat("0.0100", min_per_file_minor="2000"))
+    sim = Simulator({"F": _file()}, versions, TAU)
+    _, docs = sim.run([_line(1, 2001, D0)])
+    invoice = docs["M"].invoice
+    assert invoice is not None
+    assert (invoice.ht_minor, invoice.vat_minor, invoice.ttc_minor) == (1666, 333, 1999)
+    sim.vat_rate = Decimal("0.055")
+    _, docs = sim.run([_line(2, 1, D0 + timedelta(days=3))])
+    assert docs == {}  # nothing more fits: TTC stays 19,99 € ≤ 20,02 €
+    assert sim.history[("F", "k")].commission_minor == 1666
+    sim.vat_rate = TAU  # the rate rises back: the same invoice at its own rate, nothing to credit
+    _, docs = sim.run([_line(3, 1_000, D0 + timedelta(days=6))])
+    billed = 1999 + sum(d.invoice.ttc_minor for d in docs.values() if d.invoice)
+    assert billed <= 2001 + 1 + 1_000
+    charges = sim.charges[("F", "k")]
+    assert [c.vat_rate for c in charges] == [TAU] * len(charges)
 
 
 # -- the inputs hash and the input errors ----------------------------------------------------------

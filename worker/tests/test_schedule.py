@@ -1,13 +1,15 @@
 """When a run is due (design §9.3; founder #1): the 1st and the 16th, or a weekday, moved to the
 next business day; the deadline guard 5 business days before the earliest latest execution date."""
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 
-from hypothesis import given
+import pytest
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from collectoo_worker.remittance.calendar import conservative
-from collectoo_worker.remittance.deadline import remittance_deadline
+from collectoo_worker.remittance.deadline import RemittanceDeadline, remittance_deadline
 from collectoo_worker.remittance.schedule import guard_due, is_scheduled, scheduled_days
 from collectoo_worker.remittance.terms import RemittanceTerms
 
@@ -79,3 +81,177 @@ def test_the_guard_leaves_five_business_days(e: date, days: int) -> None:
     before = cal.before(d.alert_soon)
     assert not guard_due(before, [d.latest_execution])
     assert cal.after(d.alert_soon, 5) == d.latest_execution
+
+
+# -- the scheduler's promise (COMPLIANCE CPCE-08; review M2c-4 legal#8, round 2) -------------------
+
+
+@dataclass(frozen=True)
+class _Collection:
+    e: date  # its encaissement date
+    posted: date  # the day its allocation reaches the pending queue
+    own: RemittanceDeadline  # under the mandate's delay
+    month: RemittanceDeadline  # one month (R124-6): what an unmeetable delay is held to
+
+
+def _simulate(
+    terms: RemittanceTerms,
+    collections: list[_Collection],
+    window: tuple[date, date],
+    *,
+    one_live_run: bool = False,
+    latency: int = 0,
+) -> dict[int, date]:
+    """The hourly schedule of one client, a day at a time over `window` (first, last day): the day's
+    collections reach the queue first; then a run is cut on a scheduled business day of the
+    mandate, or on any day the deadline guard is due over the waiting items' latest execution dates
+    (the job runs every hour, every day). The run takes every waiting item and pays them out on the
+    next business day (approved the day it is drafted, the default execution date). With
+    `one_live_run`, as `private.create_remittance_run` holds today, no run is cut while the previous
+    one is in flight — until its debit is booked, here on its execution day. With `latency`, a run
+    is approved that many business days after it is cut (ops take the J-5 … J-1 window the
+    overview's chip and the alerts give them) and paid out the next business day after its
+    approval. Returns each collection's execution date."""
+    cal = conservative()
+    executed: dict[int, date] = {}
+    waiting: list[int] = []
+    in_flight: date | None = None  # the execution date of the run not yet debited
+    day, end = window
+    while day <= end and len(executed) < len(collections):
+        waiting += [i for i, c in enumerate(collections) if c.posted == day]
+        if in_flight is not None and day >= in_flight:
+            in_flight = None  # its debit booked
+        if waiting and (in_flight is None or not one_live_run):
+            scheduled = cal.is_business_day(day) and is_scheduled(terms, day, cal)
+            latest = [collections[i].own.latest_execution for i in waiting]
+            if scheduled or guard_due(day, latest, cal):
+                in_flight = cal.after(cal.after(day, latency) if latency else day)
+                executed.update(dict.fromkeys(waiting, in_flight))
+                waiting = []
+        day += timedelta(days=1)
+    return executed
+
+
+def _collections(start: date, days: int, events: list[tuple[int, int]]) -> list[_Collection]:
+    return [
+        _Collection(
+            e, e + timedelta(days=lag), remittance_deadline(e, days), remittance_deadline(e, 30)
+        )
+        for offset, lag in events
+        for e in [start + timedelta(days=offset)]
+    ]
+
+
+SCHEDULE_CASES = {
+    "start": st.dates(min_value=D("2026-02-01"), max_value=D("2031-08-31")),  # (seeded calendar)
+    "terms": st.one_of(st.just(TWICE), st.integers(1, 5).map(weekly)),
+    "days": st.one_of(st.integers(1, 5), st.integers(6, 30)),  # 1 to 5: unmeetable at times (OQ-71)
+    "events": st.lists(st.tuples(st.integers(0, 45), st.integers(0, 4)), min_size=1, max_size=30),
+}
+
+
+@settings(max_examples=400, deadline=None)
+@given(**SCHEDULE_CASES)
+def test_no_collection_waits_past_its_latest_execution_date(
+    start: date, terms: RemittanceTerms, days: int, events: list[tuple[int, int]]
+) -> None:
+    """CPCE-08: with the mandate's run days and the deadline guard, every collection is paid out on
+    or before its latest execution date — whatever the calendar (weekends, holidays, TARGET days),
+    the frequency and the delay — when it reached the queue on its encaissement date or by its J-5
+    alert date (one allocated later is the guard's to draft at once, not this promise's). A delay
+    no payout can meet (latest execution on or before E: some 1- to 5-day delays, OQ-71) is paid out
+    by the one-month latest execution date, the date the checks then hold it to. Each collection is
+    paid out, after it reached the queue. (No miss in 290,000 collections checked offline.)"""
+    collections = _collections(start, days, events)
+    executed = _simulate(terms, collections, (start, start + timedelta(days=45 + 4 + 40)))
+    assert len(executed) == len(collections)
+    for i, c in enumerate(collections):
+        assert executed[i] > c.posted
+        if c.own.unmeetable:
+            assert executed[i] <= c.month.latest_execution, (c, executed[i])
+        elif c.posted == c.e or c.posted <= c.own.alert_soon:
+            assert executed[i] <= c.own.latest_execution, (c, executed[i])
+
+
+@settings(max_examples=400, deadline=None)
+@given(**SCHEDULE_CASES, latency=st.integers(0, 4))
+def test_the_guard_leaves_room_for_ops_to_approve(
+    start: date, terms: RemittanceTerms, days: int, events: list[tuple[int, int]], latency: int
+) -> None:
+    """What the J-5 margin is for (review round 3): a run approved up to 4 business days after it is
+    cut — inside the J-5 … J-1 window — still pays out every meetable collection that reached the
+    queue by its J-5 alert date on or before its latest execution date. It fails if the guard fires
+    one business day later (checked by mutation: margin 4, start 2026-02-03, twice a month, 8 days,
+    a collection on day 0, latency 4)."""
+    collections = _collections(start, days, events)
+    executed = _simulate(
+        terms, collections, (start, start + timedelta(days=45 + 4 + 60)), latency=latency
+    )
+    assert len(executed) == len(collections)
+    for i, c in enumerate(collections):
+        if not c.own.unmeetable and c.posted <= c.own.alert_soon:
+            assert executed[i] <= c.own.latest_execution, (c, executed[i], latency)
+
+
+@settings(max_examples=400, deadline=None)
+@given(**SCHEDULE_CASES)
+def test_one_live_run_per_client_still_pays_on_time_from_six_days_or_a_business_day(
+    start: date, terms: RemittanceTerms, days: int, events: list[tuple[int, int]]
+) -> None:
+    """The same promise with one live run per client (the run in flight debited on its execution
+    day), where it holds: a delay of 6 days or more, or an encaissement on a business day; and an
+    unmeetable delay within the month. Outside it, see the gap below (OQ-73). (No miss in 670,000
+    collections checked offline.)"""
+    cal = conservative()
+    collections = _collections(start, days, events)
+    executed = _simulate(
+        terms, collections, (start, start + timedelta(days=45 + 4 + 40)), one_live_run=True
+    )
+    assert len(executed) == len(collections)
+    for i, c in enumerate(collections):
+        if c.own.unmeetable:
+            assert executed[i] <= c.month.latest_execution, (c, executed[i])
+        elif (c.posted == c.e or c.posted <= c.own.alert_soon) and (
+            days >= 6 or cal.is_business_day(c.e)
+        ):
+            assert executed[i] <= c.own.latest_execution, (c, executed[i])
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="OQ-73: one live run per client holds back a collection that arrives while a payout is"
+    " in flight; a 2- to 5-day delay can then miss its date (M2c-6 decides)",
+)
+def test_a_short_delay_collected_while_a_payout_is_in_flight() -> None:
+    """The gap the property found (round 2): a 2-day mandate; a collection of Mon 22/06/2026
+    allocated late, on Fri 26/06, is drafted at once and paid out on Mon 29/06; another, collected
+    and allocated on Sun 28/06 (an instant payment), has its latest execution date on Mon 29/06,
+    but no run can be cut while the first is in flight: it is drafted on Mon 29/06 and paid out on
+    Tue 30/06, a business day late. The guard is due on time; the rule « one live run per client »
+    (`private.create_remittance_run`) holds it back. With the debit booked the next business day,
+    2- to 5-day delays miss on business days too (2,558 of 143,071 collections offline)."""
+    late = _Collection(
+        D("2026-06-22"), D("2026-06-26"), remittance_deadline(D("2026-06-22"), 2),
+        remittance_deadline(D("2026-06-22"), 30),
+    )  # fmt: skip
+    sunday = _Collection(
+        D("2026-06-28"), D("2026-06-28"), remittance_deadline(D("2026-06-28"), 2),
+        remittance_deadline(D("2026-06-28"), 30),
+    )  # fmt: skip
+    executed = _simulate(
+        TWICE, [late, sunday], (D("2026-06-22"), D("2026-07-31")), one_live_run=True
+    )
+    assert executed[0] == D("2026-06-29") and sunday.own.latest_execution == D("2026-06-29")
+    assert executed[1] <= sunday.own.latest_execution  # fails: Tue 30/06
+
+
+def test_the_simulation_pays_a_short_delay_within_the_month() -> None:
+    """(the model on one example) A 1-day delay: E Mon 05/10/2026 leaves no business day (latest
+    execution on E); the guard is due at once, the run cut that day pays out on Tue 06/10, within
+    the month (its latest execution date Tue 03/11)."""
+    e = D("2026-10-05")
+    c = _Collection(e, e, remittance_deadline(e, 1), remittance_deadline(e, 30))
+    assert c.own.unmeetable and c.month.latest_execution == D("2026-11-03")
+    assert _simulate(TWICE, [c], (e, e + timedelta(days=40)), one_live_run=True) == {
+        0: D("2026-10-06")
+    }
