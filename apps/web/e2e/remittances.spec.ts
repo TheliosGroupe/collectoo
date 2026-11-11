@@ -15,7 +15,10 @@ import { reviewShot } from "./screenshot";
  * the dedicated account before the bank's debit, M2c-6). M2c-5: the documents job draws the statement (PDF, CSV) and the
  * invoice's PDF; ops download them and the accountant's export; the client's administrator reads « Reversements » (what
  * is owed, the payout ordered, the statement) and « Factures » (the invoice, accepted electronically) in the client
- * space and downloads them. Phone-first. Synthetic data.
+ * space and downloads them. M2c-6a: the payout goes in a pain.001 file (« Virements »), downloaded once by a tap (the
+ * page refreshes itself), the second time only past the warning (a refusal comes back to the file's page with it open:
+ * review tests-ui#9), marked as sent; once downloaded it cannot be cancelled in Collectoo, the page says so (review
+ * round 5, fail-closed until M2c-6b). Phone-first. Synthetic data.
  */
 const BANK_IBAN = ibanFr(434343);
 const FIXTURE = {
@@ -253,4 +256,76 @@ test("ops prepare, read and approve a client's remittance run", async ({ page, b
   const clientInvoice = await client.request.get((await invoice.getByTestId("invoice-pdf").getAttribute("href"))!);
   expect(clientInvoice.status()).toBe(200);
   await context.close();
+
+  // M2c-6a « Virements »: the payout goes in a pain.001 file the worker writes; ops download it (the hash checked by
+  // the route), a second download only past the warning, then « Marquer comme transmis ». Nothing is booked before
+  // the bank's debit (M2c-6b).
+  await page.goto("/backoffice/reversements");
+  await page.getByTestId("transfers-link").click();
+  await expect(page).toHaveURL(/\/backoffice\/reversements\/virements$/);
+  const account = page.getByTestId("paying-account").filter({ hasText: "Fonds de tiers – Banque R" });
+  await expect(account.getByTestId("cash-check")).toContainText("disponible pour un fichier");
+  const waitingTransfer = account.getByTestId("transfer-row").filter({ hasText: tenant.clientName });
+  await expect(waitingTransfer).toContainText("656,01");
+  await expect(waitingTransfer).toContainText("BOULANGERIE DURAND");
+  await expect(waitingTransfer.getByTestId("transfer-hold")).toHaveCount(0);
+  await reviewShot(page, testInfo, "m2c-virements");
+  await account.getByTestId("generate-file").getByRole("button", { name: "Générer le fichier" }).click();
+  const generate = page.getByRole("dialog", { name: "Générer le fichier de virements" });
+  await expect(generate.getByTestId("generate-effects")).toContainText("1 virement depuis Fonds de tiers – Banque R");
+  await expect(generate.getByTestId("generate-effects")).toContainText("Rien n'est comptabilisé avant le débit");
+  await reviewShot(page, testInfo, "m2c-virements-generer");
+  await generate.getByRole("button", { name: "Générer", exact: true }).click();
+  const fileRow = account.getByTestId("file-row").first();
+  // the transfer_file job writes it (the page refreshes itself meanwhile)
+  await expect(fileRow.getByTestId("file-status")).toHaveText("Prêt à télécharger", { timeout: 60_000 });
+  const href = (await fileRow.getByTestId("file-download").getAttribute("href"))!;
+  // review tests-ui#9: a tap downloads the file (the command first: its checks, the download recorded) and the page
+  // refreshes itself — the warning and « Marquer comme transmis » appear with no manual reload
+  const [download] = await Promise.all([page.waitForEvent("download"), fileRow.getByTestId("file-download").click()]);
+  expect(download.suggestedFilename()).toMatch(/^TF-\d{4}-\d{6}\.xml$/);
+  const body = readFileSync(await download.path()).toString("utf-8");
+  expect(body).toContain('xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09"');
+  expect(body).toContain("<CtrlSum>656.01</CtrlSum>");
+  expect(body).toContain("<BtchBookg>false</BtchBookg>");
+  expect(body).toContain("<Nm>BOULANGERIE DURAND</Nm>");
+  expect(body).toMatch(/<EndToEndId>RMT[0-9A-F]{12}<\/EndToEndId>/);
+  expect(body).toMatch(/<Ustrd>REVERSEMENT RV-\d{4}-\d{6} FACTURE FC-\d{4}-000001<\/Ustrd>/);
+  await expect(fileRow.getByTestId("file-mark-sent")).toBeVisible({ timeout: 15_000 });
+  await expect(fileRow.getByTestId("file-status")).toHaveText("Téléchargé — à déposer à la banque");
+  await expect(fileRow.getByTestId("download-warning")).toContainText(/Déjà téléchargé par .+ le \d{2}\/\d{2} à \d{2}:\d{2}/);
+  // a second download without the warning acknowledged is refused: back to the file's page (never a bare text page),
+  // where the warning sheet is open with who downloaded it and when
+  const twice = await page.request.get(href, { maxRedirects: 0 });
+  expect(twice.status()).toBe(303);
+  const back = twice.headers()["location"];
+  // a path, resolved by the browser against its own origin (an absolute URL from `request.url` names `localhost`)
+  expect(back).toMatch(/^\/backoffice\/reversements\/virements\/[0-9a-f-]{36}\?refus=already_downloaded$/);
+  await page.goto(back);
+  await expect(page.getByTestId("download-again-warning")).toBeVisible();
+  await expect(page.getByTestId("download-again-warning")).toContainText("ne le déposez pas deux fois");
+  await page.goto(new URL(back, page.url()).pathname);
+  await expect(page.getByTestId("file-items").getByTestId("file-item")).toHaveCount(1);
+  await expect(page.getByTestId("file-downloads").getByTestId("file-download-row")).toHaveCount(1);
+  // review tests-ui#6: « vérifié » once the ISO 20022 schemas are vendored, « non vérifié » until then
+  await expect(page.getByTestId("file-integrity")).toContainText(/schéma XSD ISO 20022 (non )?vérifié/);
+  // review round 5 (fail-closed): a downloaded file cannot be cancelled in Collectoo until M2c-6b books its debits —
+  // no « Demander l'annulation », no « Virement refusé par la banque »; the page says its transfers stay « en cours »
+  const note = page.getByTestId("file-no-cancellation");
+  await expect(note).toContainText("Un fichier téléchargé ne peut pas encore être annulé dans Collectoo");
+  await expect(note).toContainText("« en cours »");
+  await expect(page.getByTestId("file-cancellation")).toHaveCount(0);
+  await expect(page.getByTestId("request-cancellation")).toHaveCount(0);
+  await expect(page.getByTestId("confirm-cancellation")).toHaveCount(0);
+  await expect(page.getByTestId("transfer-refused")).toHaveCount(0);
+  await reviewShot(page, testInfo, "m2c-virement-telecharge");
+  await page.getByTestId("file-mark-sent").getByRole("button", { name: "Marquer comme transmis" }).click();
+  await expect(page.getByTestId("file-status")).toHaveText("Transmis à la banque");
+  await expect(page.getByTestId("file-no-cancellation")).toBeVisible();
+  await expect(page.getByTestId("file-cancellation")).toHaveCount(0);
+  await reviewShot(page, testInfo, "m2c-virement-fichier");
+  // the run: its payout in the file, sent (still not « payé »: M2c-6b books it from the statement)
+  await page.getByTestId("file-item").getByRole("link", { name: /^RV-/ }).click();
+  await expect(page.getByTestId("run-status")).toHaveText("Fichier transmis à la banque");
+  await expect(page.getByTestId("run-transfer-file")).toContainText("Transmis à la banque");
 });

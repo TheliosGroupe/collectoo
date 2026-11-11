@@ -48,6 +48,8 @@ export function refundable(p: { status: string; review_reason: string | null }, 
 
 export const REFUND_STATUS: Record<string, { label: string; tone: Tone }> = {
   requested: { label: "À exécuter dans la banque", tone: "action" },
+  // M2c-6a: a refund in the transfer file (execution_mode 'file'): never executed by hand
+  requested_file: { label: "Dans le fichier de virements", tone: "action" },
   executed: { label: "Exécuté", tone: "ok" },
   cancelled: { label: "Annulé", tone: "neutral" },
   bounced: { label: "Revenu impayé", tone: "error" },
@@ -416,6 +418,50 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Document de reversement en attente depuis plus de 24 h",
     help: "Le relevé d'un reversement, ou le PDF d'une facture ou d'un avoir, attend d'être établi depuis plus de 24 heures : le traitement des documents ne passe plus. Le client ne le voit pas encore : prévenez le support.",
   },
+  // M2c-6a (design §15): the transfer files
+  transfer_not_filed: {
+    label: "Virements en attente de fichier",
+    help: "Des reversements ou des remboursements ordonnés attendent depuis plus d'un jour ouvré d'être mis dans un fichier de virements, ou y sont retenus (IBAN changé, nom non concordant, nom du bénéficiaire hors de l'alphabet latin, IBAN hors de la zone SEPA… : leur motif est sur « Virements »). Générez le fichier, ou levez le motif.",
+  },
+  file_not_downloaded: {
+    label: "Fichier de virements non téléchargé",
+    help: "Un fichier généré depuis plus d'un jour ouvré n'a pas été téléchargé : téléchargez-le et déposez-le à la banque (s'il n'est plus à jour, le téléchargement le remplace : régénérez-le), ou annulez-le.",
+  },
+  file_not_marked_sent: {
+    label: "Fichier téléchargé, non marqué comme transmis",
+    help: "Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis ». Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : s'il ne doit pas partir, gardez-le tel quel, vérifiez le relevé et voyez avec la banque ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé (celui d'un remboursement l'est dès qu'il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l'être).",
+  },
+  transfer_not_debited: {
+    label: "Virements sans débit sur le relevé",
+    help: "Des virements d'un fichier téléchargé n'apparaissent sur aucun relevé plus de deux jours ouvrés après leur date d'exécution : importez le relevé, ou vérifiez auprès de la banque que le fichier a été exécuté.",
+  },
+  transfer_file_failed: {
+    label: "Fichier de virements en échec",
+    help: "Un fichier n'a pas pu être écrit après plusieurs essais ; ses virements attendent le prochain fichier. Générez-le de nouveau ; si l'échec se répète, prévenez le support.",
+  },
+  // M2c-6a review (T6, tests-ui#10): the job that writes a file has not finished it
+  transfer_file_pending: {
+    label: "Fichier de virements en préparation depuis plus de 15 minutes",
+    help: "Le traitement qui écrit le fichier ne l'a pas terminé : ses virements y attendent (« En préparation »). Rechargez « Virements » ; s'il reste bloqué, annulez ce fichier (ses virements reviennent « à mettre dans un fichier ») et prévenez le support.",
+  },
+  // M2c-6a review (T3): transfers held out of every file until their data changes, should the checks raise them alone
+  payee_name_not_epc: {
+    label: "Nom de bénéficiaire hors de l'alphabet latin",
+    help: "Un virement est retenu hors des fichiers : le nom du bénéficiaire n'a aucun caractère accepté par le format SEPA. Remboursement : annulez-le et redemandez-le avec le nom en lettres latines ; reversement : faites confirmer le compte de reversement avec le nom du titulaire en lettres latines.",
+  },
+  iban_not_sepa: {
+    label: "IBAN de bénéficiaire hors de la zone SEPA",
+    help: "Un virement est retenu hors des fichiers : l'IBAN du bénéficiaire est d'un pays hors de la zone SEPA. Remboursement : annulez-le et redemandez-le « à exécuter vous-même » ; reversement : faites confirmer un IBAN de la zone SEPA.",
+  },
+  // M2c-6a review, round 2 (D4): a cancelled file executed late after all
+  transfer_already_debited: {
+    label: "Virement déjà débité malgré son annulation",
+    help: "Un relevé montre le débit d'un virement alors que son fichier a été annulé (exécuté plus tard malgré tout), sous sa référence de bout en bout, celle du virement qu'il remplace ou dans une ligne groupée du fichier annulé — ou alors qu'il avait été annulé seul, la banque l'ayant d'abord laissé hors de la ligne groupée de son lot : le reversement ou le remboursement reste hors des fichiers pour ne pas payer deux fois — s'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter —, et aucune nouvelle quote-part du cabinet n'est mise dans un fichier tant qu'une quote-part annulée débitée n'est pas revenue (une quote-part déjà dans un fichier téléchargé n'est pas arrêtée : demandez à la banque de ne pas l'exécuter). Ne refaites aucun virement ; prévenez le support pour rattacher ce débit.",
+  },
+  payee_name_mismatch: {
+    label: "Nom de bénéficiaire non concordant",
+    help: "La vérification du bénéficiaire de la banque a signalé un nom différent ou proche pour un compte de reversement : les virements vers ce compte sont bloqués jusqu'à ce qu'une autre personne vérifie le titulaire (« Virements »).",
+  },
   unallocated_deadline: {
     label: "Fonds rattachés à un dossier non imputés",
     help: "De l'argent rattaché au dossier d'un client attend son imputation alors que son délai de reversement court (OQ-26) ; « bloqué » quand une procédure l'interdit.",
@@ -504,9 +550,24 @@ export function checkLabel(code: string): { label: string; help: string } {
   return CHECK_LABEL[code] ?? { label: code, help: "" };
 }
 
+/** The checks of the transfers and their files (M2c-6a, design §15; its review's T3 and T6). */
+const TRANSFER_CHECKS = new Set([
+  "transfer_not_filed",
+  "transfer_not_debited",
+  "payee_name_mismatch",
+  "payee_name_not_epc",
+  "iban_not_sepa",
+  "file_not_downloaded",
+  "file_not_marked_sent",
+  "transfer_file_failed",
+  "transfer_file_pending",
+  "transfer_already_debited",
+]);
+
 /**
- * Where a check result leads (« Contrôles »): the payment, the statement, the queue that holds what ages, the run, and
- * (review M2c-5b F2) the invoice or credit note it is about — `invoice_overdue`, `credit_refund_owed`.
+ * Where a check result leads (« Contrôles »): the payment, the statement, the queue that holds what ages, the run,
+ * (review M2c-5b F2) the invoice or credit note it is about — `invoice_overdue`, `credit_refund_owed` —, and (M2c-6a)
+ * the transfer file, or « Virements ».
  */
 export function checkSubjectLink(r: { code: string; subject_type: string; subject_id: string | null }): string | null {
   if (r.subject_type === "payment" && r.subject_id) return `/backoffice/encaissements/paiements/${r.subject_id}`;
@@ -518,7 +579,84 @@ export function checkSubjectLink(r: { code: string; subject_type: string; subjec
   if (r.subject_type === "remittance_run" && r.subject_id) return `/backoffice/reversements/${r.subject_id}`;
   if (r.subject_type === "commission_invoice" && r.subject_id) return `/backoffice/reversements/factures/${r.subject_id}`;
   if (r.code.startsWith("remittance_")) return "/backoffice/reversements";
+  // M2c-6a: a file's alert leads to the file, the others of the transfers to « Virements »
+  if (r.subject_type === "transfer_file" && r.subject_id) return `/backoffice/reversements/virements/${r.subject_id}`;
+  if (TRANSFER_CHECKS.has(r.code)) return "/backoffice/reversements/virements";
   return null;
+}
+
+/**
+ * How a refund is executed (M2c-6a review, tests-ui#8): only an explicit choice is sent; without one the database
+ * decides — the transfer file when the payment's account is the servicer's active dedicated account in EUR and the IBAN
+ * is in the SEPA scheme, by hand otherwise.
+ */
+export function refundExecutionMode(value: string): "file" | "manual" | undefined {
+  return value === "file" || value === "manual" ? value : undefined;
+}
+
+/**
+ * What the payment's page tells ops about its pending refund, after « demandé : » (integration of the M2c-6a review):
+ * a refund in the transfer file is never executed by hand too (risk R4: paid twice); one by hand needs its RFD id as
+ * the end-to-end reference. With the sheet's default the database chose, so this is where ops read which it is. Its
+ * transfer (review round 7): once in a downloaded or sent file, the page names that file instead of « the next one ».
+ */
+export function pendingRefundInstruction(inFile: boolean, transfer?: RefundTransfer | null): string {
+  // review round 7 (round 6's verifier, N2): its transfer already in a downloaded or sent file — not « the next file »
+  const file = inFile && refundInDownloadedFile(transfer) ? transfer?.file : null;
+  if (file)
+    return `il est dans le fichier de virements ${file.number}, déjà téléchargé, avec la référence ci-dessous comme référence de bout en bout ; ne l'exécutez pas dans la banque.`;
+  if (inFile)
+    return "il part dans le prochain fichier de virements (« Virements »), avec la référence ci-dessous comme référence de bout en bout ; ne l'exécutez pas dans la banque.";
+  return "exécutez le virement dans la banque avec la référence ci-dessous saisie comme « référence de bout en bout ».";
+}
+
+/** A refund's transfer as the payment's page reads it: its status and the file it is in (none before a file). */
+export type RefundTransfer = {
+  status: string;
+  file: { id: string; number: string; status: string; download_count: number } | null;
+};
+
+/** The refunds' transfers by refund id, from the refund rows (their transfer) and the transfers read with their file. */
+export function refundTransfers(
+  refunds: { id: string; transfer_id: string | null }[],
+  transfers: { id: string; status: string; transfer_file: RefundTransfer["file"] }[],
+): Map<string, RefundTransfer> {
+  const byId = new Map(transfers.map((t) => [t.id, { status: t.status, file: t.transfer_file ?? null }]));
+  const out = new Map<string, RefundTransfer>();
+  for (const r of refunds) {
+    const t = r.transfer_id ? byId.get(r.transfer_id) : undefined;
+    if (t) out.set(r.id, t);
+  }
+  return out;
+}
+
+/**
+ * Review round 6 (round 5's verifier): the refund's transfer is in a file already downloaded (or sent) — that file may
+ * still pay it, so the refund is not cancelled until its debit, or its rejection, is read from the statement (the
+ * database refuses: `in_downloaded_file`). « Annuler » is not offered then; the page says why (as the run's page).
+ */
+export function refundInDownloadedFile(transfer: RefundTransfer | null | undefined): boolean {
+  if (!transfer || transfer.status !== "in_file" || !transfer.file) return false;
+  return transfer.file.download_count > 0 || transfer.file.status === "downloaded" || transfer.file.status === "sent";
+}
+
+/** Whether « Annuler » is offered on a refund: requested, and its transfer (if any) not in a downloaded file. */
+export function refundCancellable(status: string, transfer: RefundTransfer | null | undefined): boolean {
+  return status === "requested" && !refundInDownloadedFile(transfer);
+}
+
+/** What the payment's page says in place of « Annuler » for a refund whose transfer is in a downloaded file. */
+export function refundInDownloadedFileNote(fileNumber: string): string {
+  return `Le virement de ce remboursement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire, et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.`;
+}
+
+/** What the refund sheet says the RFD reference becomes, by the execution chosen (« auto »: the database's default). */
+export function refundModeEffect(mode: string): string {
+  if (mode === "file")
+    return "le virement part dans le prochain fichier de virements (« Virements ») ; ne l'exécutez pas aussi à la main.";
+  if (mode === "manual")
+    return "dans la banque, saisissez-la comme « référence de bout en bout » du virement (pas seulement dans le libellé), c'est elle qui fait reconnaître son débit sur le relevé.";
+  return "le virement part dans le prochain fichier de virements si le compte de fonds de tiers peut le payer (en euros, vers un IBAN de la zone SEPA) ; sinon il est à exécuter dans la banque avec cette référence de bout en bout. La page du paiement dit lequel une fois la demande faite.";
 }
 
 /** Why a payment made to the client directly was refused (direct_payment.refusal_code). */
@@ -562,6 +700,18 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("invalid IBAN")) return "iban_invalid";
   if (message.includes("cannot be refunded from here")) return "refund_not_possible";
   if (message.includes("no longer pending")) return "refund_not_pending";
+  // M2c-6a: a refund in a file already downloaded is cancelled once its transfer is (review T1: two people, the
+  // statement's evidence); a file mode the account cannot pay
+  // M2c-6a review, round 4 (G2): the debit of a re-issued refund's old reference while the re-issue is in a downloaded
+  // file (checked before the general « in a downloaded file »)
+  if (message.includes("reissue_in_downloaded_file")) return "refund_reissue_in_downloaded_file";
+  if (message.includes("already downloaded") || message.includes("in_downloaded_file")) return "refund_in_downloaded_file";
+  // M2c-6a review, round 3 (E2): its transfer, or one it re-issues, was debited already: cancelling it refunds twice
+  if (message.includes("refund refused: already_debited")) return "refund_already_debited";
+  if (message.includes("pays no transfer file")) return "transfer_not_paying_account";
+  // M2c-6a review (T3): what a SEPA transfer file cannot carry
+  if (message.includes("payee_name_not_epc")) return "refund_payee_name_not_epc";
+  if (message.includes("iban_not_sepa")) return "refund_iban_not_sepa";
   if (message.includes("a refund is pending") || message.includes("debit link refused: refund_pending"))
     return "refund_pending";
   if (message.includes("already_linked")) return "already_linked";

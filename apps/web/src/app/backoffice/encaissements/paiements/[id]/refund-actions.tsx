@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ActionForm } from "@/components/action-form";
 import { buttonClass, dangerButtonClass, inputClass } from "@/components/ui";
-import { REFUND_REASON } from "@/lib/payments/debits";
+import { REFUND_REASON, refundModeEffect } from "@/lib/payments/debits";
 import { ConfirmSheet, secondaryClass } from "../../a-traiter/queue-actions";
 import { cancelRefund, requestRefund } from "./actions";
 
@@ -36,6 +36,9 @@ export function RequestRefund({
   idempotencyKey: string;
 }) {
   const [payee, setPayee] = useState(payerIbanValid ? "payer" : "other");
+  // M2c-6a (founder #15) and its review (tests-ui#8): without a choice the database decides — the next transfer file
+  // when the payment's account can pay it (the dedicated account in EUR, an IBAN in the SEPA scheme), by hand otherwise
+  const [mode, setMode] = useState("auto");
   // the bank may send the payer's IBAN without a name: request_refund needs one (its own, or the payer's)
   const payerNamed = (payerName ?? "").trim() !== "";
   return (
@@ -43,10 +46,9 @@ export function RequestRefund({
       {(close) => (
         <>
           <p className="text-sm" data-testid="sheet-effect">
-            {left} restent sur ce paiement. La demande crée une référence « RFD… » : dans la banque, saisissez-la comme
-            « référence de bout en bout » du virement (pas seulement dans le libellé), c&apos;est elle qui fait reconnaître
-            son débit sur le relevé. Le remboursement est comptabilisé quand ce débit apparaît sur le relevé du compte
-            de fonds de tiers ; jamais plus que ce qui reste du paiement.
+            {left} restent sur ce paiement. La demande crée une référence « RFD… » : {refundModeEffect(mode)} Le remboursement
+            est comptabilisé quand ce débit apparaît sur le relevé du compte de fonds de tiers ; jamais plus que ce qui reste du
+            paiement.
           </p>
           <ActionForm onDone={close} action={requestRefund} submitLabel="Demander le remboursement" buttonClassName={buttonClass}>
             <input type="hidden" name="payment_id" value={paymentId} />
@@ -94,6 +96,21 @@ export function RequestRefund({
                   <input name="payee_name" required maxLength={140} autoComplete="off" className={inputClass} />
                 </label>
               ) : null}
+            </fieldset>
+            <fieldset className="flex flex-col gap-2 text-sm">
+              <legend className="mb-1">Exécution</legend>
+              <label className="flex items-center gap-2">
+                <input type="radio" name="execution_mode" value="auto" checked={mode === "auto"} onChange={() => setMode("auto")} />
+                Dans le prochain fichier si le compte le permet, sinon à exécuter dans la banque
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="radio" name="execution_mode" value="file" checked={mode === "file"} onChange={() => setMode("file")} />
+                Dans le prochain fichier de virements
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="radio" name="execution_mode" value="manual" checked={mode === "manual"} onChange={() => setMode("manual")} />
+                Je l&apos;exécute moi-même dans la banque (ou c&apos;est déjà fait)
+              </label>
             </fieldset>
             <label className="flex flex-col gap-1 text-sm">
               Motif du remboursement

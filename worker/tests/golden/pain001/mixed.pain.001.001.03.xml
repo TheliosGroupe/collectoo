@@ -1,0 +1,112 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03">
+  <CstmrCdtTrfInitn>
+    <GrpHdr>
+      <MsgId>TF-2026-000002</MsgId>
+      <CreDtTm>2026-11-03T16:05:00+01:00</CreDtTm>
+      <NbOfTxs>2</NbOfTxs>
+      <CtrlSum>1048.64</CtrlSum>
+      <InitgPty>
+        <Nm>Collectoo SAS</Nm>
+      </InitgPty>
+    </GrpHdr>
+    <PmtInf>
+      <PmtInfId>TF-2026-000002-1</PmtInfId>
+      <PmtMtd>TRF</PmtMtd>
+      <BtchBookg>false</BtchBookg>
+      <NbOfTxs>1</NbOfTxs>
+      <CtrlSum>80.00</CtrlSum>
+      <PmtTpInf>
+        <SvcLvl>
+          <Cd>SEPA</Cd>
+        </SvcLvl>
+      </PmtTpInf>
+      <ReqdExctnDt>2026-11-04</ReqdExctnDt>
+      <Dbtr>
+        <Nm>Collectoo SAS</Nm>
+      </Dbtr>
+      <DbtrAcct>
+        <Id>
+          <IBAN>FR3430001007940000000001001</IBAN>
+        </Id>
+      </DbtrAcct>
+      <DbtrAgt>
+        <FinInstnId>
+          <Othr>
+            <Id>NOTPROVIDED</Id>
+          </Othr>
+        </FinInstnId>
+      </DbtrAgt>
+      <ChrgBr>SLEV</ChrgBr>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>RFD00AABBCCDDEE</InstrId>
+          <EndToEndId>RFD00AABBCCDDEE</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="EUR">80.00</InstdAmt>
+        </Amt>
+        <Cdtr>
+          <Nm>Societe OEuvres Batiments d'Ile-de-France - Etablissement Saint-Etienn</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <IBAN>FR7630006000011234567890189</IBAN>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>REMBOURSEMENT RFD00AABBCCDDEE trop-percu 80,00 dossier L-9</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+    </PmtInf>
+    <PmtInf>
+      <PmtInfId>TF-2026-000002-2</PmtInfId>
+      <PmtMtd>TRF</PmtMtd>
+      <BtchBookg>false</BtchBookg>
+      <NbOfTxs>1</NbOfTxs>
+      <CtrlSum>968.64</CtrlSum>
+      <PmtTpInf>
+        <SvcLvl>
+          <Cd>SEPA</Cd>
+        </SvcLvl>
+      </PmtTpInf>
+      <ReqdExctnDt>2026-11-04</ReqdExctnDt>
+      <Dbtr>
+        <Nm>Collectoo SAS</Nm>
+      </Dbtr>
+      <DbtrAcct>
+        <Id>
+          <IBAN>FR3430001007940000000001001</IBAN>
+        </Id>
+      </DbtrAcct>
+      <DbtrAgt>
+        <FinInstnId>
+          <Othr>
+            <Id>NOTPROVIDED</Id>
+          </Othr>
+        </FinInstnId>
+      </DbtrAgt>
+      <ChrgBr>SLEV</ChrgBr>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>SWPFEDCBA987654</InstrId>
+          <EndToEndId>SWPFEDCBA987654</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="EUR">968.64</InstdAmt>
+        </Amt>
+        <Cdtr>
+          <Nm>Collectoo SAS</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <IBAN>FR7610107001011234567890129</IBAN>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>VIREMENT AU COMPTE PROPRE SWPFEDCBA987654</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+    </PmtInf>
+  </CstmrCdtTrfInitn>
+</Document>

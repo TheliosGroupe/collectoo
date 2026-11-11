@@ -119,6 +119,9 @@ describe("messages", () => {
     );
     expect(importErrorText("csv_row", "line 12: '12,345' has more decimals")).toMatch(/\(ligne 12\)$/);
     expect(importErrorText("something_new", "boom")).toContain("Contactez le support");
+    // an internal fault of the import's own checks (M2c-6a review rounds 3 and 4: the creation time, the whole days
+    // the reader sends): « contactez le support »
+    expect(importErrorText("header_invalid", null)).toContain("Contactez le support");
     expect(uploadErrorText("the file format does not match the bank account feed")).toContain("autre format");
     expect(uploadErrorText("not allowed")).toBe("Action non autorisée pour votre rôle.");
     expect(uploadErrorText("the file is already a statement of another bank account")).toContain(

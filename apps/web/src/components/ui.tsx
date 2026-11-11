@@ -96,8 +96,10 @@ export function ErrorNote({ children }: { children: ReactNode }) {
   );
 }
 
-export function InfoNote({ children }: { children: ReactNode }) {
+export function InfoNote({ children, testId }: { children: ReactNode; testId?: string }) {
   return (
-    <p className="rounded-md bg-sky-50 px-3 py-2 text-sm text-sky-900 dark:bg-sky-950 dark:text-sky-200">{children}</p>
+    <p className="rounded-md bg-sky-50 px-3 py-2 text-sm text-sky-900 dark:bg-sky-950 dark:text-sky-200" data-testid={testId}>
+      {children}
+    </p>
   );
 }

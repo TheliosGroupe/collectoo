@@ -83,7 +83,12 @@ export async function discardRun(formData: FormData): Promise<ActionResult> {
   return done(error, run);
 }
 
-/** « Annuler » an approved run before its transfer is in a file (admin): a full credit note per invoice. */
+/**
+ * « Annuler » an approved run (admin): a full credit note per invoice. Before its file is downloaded the transfer is
+ * cancelled (its file replaced). After download (M2c-6a review T1, money#2) its transfer is cancelled first — asked by
+ * one person, confirmed by another, with the statement's evidence (« Virements ») —, and the run then, with no
+ * attestation: the database refuses it until then (`payout_in_downloaded_file`).
+ */
 export async function cancelRun(formData: FormData): Promise<ActionResult> {
   const key = field(formData, "idempotency_key");
   const run = field(formData, "run_id");

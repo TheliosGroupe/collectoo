@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { staffSession } from "@/lib/auth/staff";
 import { type ActionResult, parseEurosToMinor } from "@/lib/boarding/forms";
 import { allocationErrorCode } from "@/lib/payments/allocation";
-import { debitErrorCode, normaliseIban } from "@/lib/payments/debits";
+import { debitErrorCode, normaliseIban, refundExecutionMode } from "@/lib/payments/debits";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const AMOUNT = /^\d{1,16}$/;
@@ -160,6 +160,9 @@ export async function requestRefund(formData: FormData): Promise<ActionResult> {
   const useOther = field(formData, "payee") === "other";
   const iban = useOther ? normaliseIban(field(formData, "payee_iban")) : null;
   if (useOther && iban === null) return { error: "refund_iban_required" };
+  // M2c-6a: in the next transfer file, or executed by hand; review tests-ui#8: sent only when chosen, otherwise the
+  // database's default (the file when the payment's account and the IBAN allow it, by hand otherwise)
+  const mode = refundExecutionMode(field(formData, "execution_mode"));
   const { supabase } = await staffSession();
   const { error } = await supabase.rpc("request_refund", {
     p_idempotency_key: key,
@@ -171,6 +174,7 @@ export async function requestRefund(formData: FormData): Promise<ActionResult> {
     p_expected_review_reason: (expectedReason || null) as string,
     p_expected_left_minor: expectedLeft,
     p_reason: reason,
+    ...(mode ? { p_execution_mode: mode } : {}),
   });
   return debitDone(payment, error);
 }
