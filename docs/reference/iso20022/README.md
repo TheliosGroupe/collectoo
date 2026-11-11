@@ -34,10 +34,21 @@ to a usage guideline); record the download date and the SHA-256 of each file in 
 | `pain.001.001.09.xsd` | — | — |
 | `pain.001.001.03.xsd` | — | — |
 
-Then: remove the `xfail` marker of the test above, run `cd worker && uv run pytest
-tests/test_pain001.py`, and check a generated file on the « Virements » page shows « Schéma XSD
-vérifié ». The worker finds this directory from its source tree, or from `PAIN001_XSD_DIR` when it
-is deployed without the repository.
+Then (M2c-6a review tests-ui#6: three tests read whether the schemas are here, not one):
+
+1. `worker/tests/test_pain001.py::test_the_goldens_validate_against_the_iso20022_xsd`: remove its
+   `xfail` marker; run `cd worker && uv run pytest tests/test_pain001.py`.
+2. `worker/tests/test_transfer_files_integration.py` (the job's file, `f["xsd_validated"]`): it must
+   assert what `pain001.xsd_available("pain.001.001.09")` says, not `is False` — the job and CI find
+   this directory from the source tree, so the file is validated as soon as the schemas are
+   committed; if it still reads `is False`, change it then (`make test-integration`).
+   <!-- integrator: check against the merged m6a-fix-db branch -->
+3. `apps/web/e2e/remittances.spec.ts` (the file's page): it accepts « schéma XSD ISO 20022 vérifié »
+   and « … non vérifié » alike since the review; nothing to change. Check a generated file on the
+   « Virements » page now shows « Schéma XSD vérifié » (`make e2e`).
+
+The worker finds this directory from its source tree, or from `PAIN001_XSD_DIR` when it is
+deployed without the repository.
 
 The bank's own implementation guide (founder #15: « please send your bank's file specifications »)
 may restrict the schema further (character set, lengths, the BIC); it is read against these files
