@@ -83,20 +83,27 @@ export async function discardRun(formData: FormData): Promise<ActionResult> {
   return done(error, run);
 }
 
-/** « Annuler » an approved run before its transfer is in a file (admin): a full credit note per invoice. */
+/**
+ * « Annuler » an approved run (admin): a full credit note per invoice. Before its file is downloaded the transfer is
+ * cancelled (its file replaced); after download (M2c-6a) only with the attestation that the bank did not execute it,
+ * once the statement of its execution day is imported without its debit.
+ */
 export async function cancelRun(formData: FormData): Promise<ActionResult> {
   const key = field(formData, "idempotency_key");
   const run = field(formData, "run_id");
   const v = version(formData);
   const reason = field(formData, "reason");
+  const attested = field(formData, "attestation") === "not_executed";
   if (!UUID.test(key) || !UUID.test(run) || v === null) return { error: "unknown" };
   if (!reason) return { error: "reason_required" };
+  if (field(formData, "attestation_required") === "1" && !attested) return { error: "transfer_attestation_required" };
   const { supabase } = await staffSession();
   const { error } = await supabase.rpc("cancel_remittance_run", {
     p_idempotency_key: key,
     p_run_id: run,
     p_expected_version: v,
     p_reason: reason,
+    p_attestation: (attested ? "not_executed" : null) as string,
   });
   return done(error, run);
 }

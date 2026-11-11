@@ -48,6 +48,8 @@ export function refundable(p: { status: string; review_reason: string | null }, 
 
 export const REFUND_STATUS: Record<string, { label: string; tone: Tone }> = {
   requested: { label: "À exécuter dans la banque", tone: "action" },
+  // M2c-6a: a refund in the transfer file (execution_mode 'file'): never executed by hand
+  requested_file: { label: "Dans le fichier de virements", tone: "action" },
   executed: { label: "Exécuté", tone: "ok" },
   cancelled: { label: "Annulé", tone: "neutral" },
   bounced: { label: "Revenu impayé", tone: "error" },
@@ -416,6 +418,31 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Document de reversement en attente depuis plus de 24 h",
     help: "Le relevé d'un reversement, ou le PDF d'une facture ou d'un avoir, attend d'être établi depuis plus de 24 heures : le traitement des documents ne passe plus. Le client ne le voit pas encore : prévenez le support.",
   },
+  // M2c-6a (design §15): the transfer files
+  transfer_not_filed: {
+    label: "Virements en attente de fichier",
+    help: "Des reversements ou des remboursements ordonnés attendent depuis plus d'un jour ouvré d'être mis dans un fichier de virements (ou y sont retenus : leur motif est sur « Virements »). Générez le fichier.",
+  },
+  file_not_downloaded: {
+    label: "Fichier de virements non téléchargé",
+    help: "Un fichier généré depuis plus d'un jour ouvré n'a pas été téléchargé : téléchargez-le et déposez-le à la banque, ou annulez-le.",
+  },
+  file_not_marked_sent: {
+    label: "Fichier téléchargé, non marqué comme transmis",
+    help: "Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de son jour d'exécution est passée : déposez-le, puis « Marquer comme transmis » (ou annulez-le s'il n'a pas été déposé).",
+  },
+  transfer_not_debited: {
+    label: "Virements sans débit sur le relevé",
+    help: "Des virements d'un fichier téléchargé n'apparaissent sur aucun relevé plus de deux jours ouvrés après leur date d'exécution : importez le relevé, ou vérifiez auprès de la banque que le fichier a été exécuté.",
+  },
+  transfer_file_failed: {
+    label: "Fichier de virements en échec",
+    help: "Un fichier n'a pas pu être écrit (par exemple un nom de bénéficiaire sans aucun caractère autorisé par le format SEPA) ; ses virements attendent le prochain fichier. Corrigez la donnée en cause ou prévenez le support.",
+  },
+  payee_name_mismatch: {
+    label: "Nom de bénéficiaire non concordant",
+    help: "La vérification du bénéficiaire de la banque a signalé un nom différent ou proche pour un compte de reversement : les virements vers ce compte sont bloqués jusqu'à ce qu'une autre personne vérifie le titulaire (« Virements »).",
+  },
   unallocated_deadline: {
     label: "Fonds rattachés à un dossier non imputés",
     help: "De l'argent rattaché au dossier d'un client attend son imputation alors que son délai de reversement court (OQ-26) ; « bloqué » quand une procédure l'interdit.",
@@ -562,6 +589,9 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("invalid IBAN")) return "iban_invalid";
   if (message.includes("cannot be refunded from here")) return "refund_not_possible";
   if (message.includes("no longer pending")) return "refund_not_pending";
+  // M2c-6a: a refund in a file already downloaded is cancelled with its file; a file mode the account cannot pay
+  if (message.includes("already downloaded: cancel the file first")) return "transfer_attestation_required";
+  if (message.includes("pays no transfer file")) return "transfer_not_paying_account";
   if (message.includes("a refund is pending") || message.includes("debit link refused: refund_pending"))
     return "refund_pending";
   if (message.includes("already_linked")) return "already_linked";

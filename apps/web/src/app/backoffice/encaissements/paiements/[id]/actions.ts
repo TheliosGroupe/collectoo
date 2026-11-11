@@ -171,6 +171,8 @@ export async function requestRefund(formData: FormData): Promise<ActionResult> {
     p_expected_review_reason: (expectedReason || null) as string,
     p_expected_left_minor: expectedLeft,
     p_reason: reason,
+    // M2c-6a: in the next transfer file (default), or executed by hand
+    p_execution_mode: field(formData, "execution_mode") === "manual" ? "manual" : "file",
   });
   return debitDone(payment, error);
 }

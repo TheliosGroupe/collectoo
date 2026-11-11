@@ -18,6 +18,7 @@ import {
   runStatus,
 } from "@/lib/remittance/runs";
 import { runStatementState } from "@/lib/remittance/documents";
+import { fileStatus } from "@/lib/remittance/transfers";
 import { cancelRun, discardRun, refreshRun } from "../actions";
 import { ApprovePanel } from "../approve-panel";
 
@@ -95,7 +96,7 @@ const LINE_KIND: Record<string, string> = {
   unplanned_payout: "Virement non prévu",
 };
 const TRANSFER_STATUS: Record<string, string> = {
-  ordered: "Ordonné (fichier de virements à venir)",
+  ordered: "Ordonné — à mettre dans un fichier de virements",
   in_file: "Dans un fichier de virements",
   booked: "Débité",
   returned: "Revenu",
@@ -144,7 +145,9 @@ export default async function RemittanceRunPage({
   const r = d.run;
   // M2c-5: the statement and the invoices' PDFs, once the documents job has drawn them
   const docIds = d.documents.map((x) => x.id).filter((x): x is string => Boolean(x));
-  const [{ data: statement }, { data: pdfs }] = await Promise.all([
+  // M2c-6a: the file holding the payout (« Virements »), and whether it was downloaded (cancelling then needs the
+  // attestation)
+  const [{ data: statement }, { data: pdfs }, { data: inFile }] = await Promise.all([
     supabase
       .from("remittance_statement")
       .select("number, issue_date, pdf_document_id, pdf_sha256, csv_document_id, csv_sha256, line_count, file_count")
@@ -153,7 +156,17 @@ export default async function RemittanceRunPage({
     docIds.length > 0
       ? supabase.from("commission_invoice_document").select("invoice_id, document_id, pdf_sha256, electronic").in("invoice_id", docIds)
       : Promise.resolve({ data: [] as { invoice_id: string; document_id: string; pdf_sha256: string; electronic: boolean }[] }),
+    supabase
+      .from("bank_transfer")
+      .select("transfer_file_id, transfer_file:transfer_file_id(number, status, download_count)")
+      .eq("run_id", id)
+      .neq("status", "cancelled")
+      .maybeSingle(),
   ]);
+  const transferFile = inFile?.transfer_file_id
+    ? { id: inFile.transfer_file_id, ...(inFile.transfer_file as unknown as { number: string; status: string; download_count: number }) }
+    : null;
+  const afterDownload = d.transfer?.status === "in_file" && (transferFile?.download_count ?? 0) > 0;
   const pdfOf = new Map((pdfs ?? []).map((x) => [x.invoice_id, x]));
   const status = runStatus(r);
   const chip = deadlineChip(r.earliest_latest_execution_date, r.deadline_state);
@@ -216,15 +229,24 @@ export default async function RemittanceRunPage({
           </ActionForm>
         </div>
       ) : null}
-      {r.status === "approved" && d.can_cancel ? (
+      {(r.status === "approved" || r.status === "sent") && d.can_cancel && d.transfer?.status !== "booked" ? (
         <ActionForm action={cancelRun} submitLabel="Annuler le reversement" buttonClassName={dangerButtonClass} testId="run-cancel" className="flex flex-col gap-2">
           <p className="text-sm">
-            Le virement n&apos;est pas encore dans un fichier : il est annulé, un avoir est émis pour chaque facture, et les
-            encaissements reviennent en attente pour un prochain reversement.
+            {afterDownload
+              ? `Le fichier ${transferFile?.number ?? ""} a été téléchargé : le reversement n'est annulé que si la banque n'a pas exécuté le virement, et une fois importé le relevé du jour d'exécution, sans ce débit. Un avoir est alors émis pour chaque facture et les encaissements reviennent en attente.`
+              : "Le virement n'est pas encore parti : il est annulé (son fichier, s'il n'a pas été téléchargé, est remplacé), un avoir est émis pour chaque facture, et les encaissements reviennent en attente pour un prochain reversement."}
           </p>
           <input type="hidden" name="idempotency_key" value={crypto.randomUUID()} />
           <input type="hidden" name="run_id" value={r.id} />
           <input type="hidden" name="expected_version" value={r.version} />
+          <input type="hidden" name="attestation_required" value={afterDownload ? "1" : "0"} />
+          {afterDownload ? (
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" name="attestation" value="not_executed" required data-testid="run-cancel-attestation" />
+              J&apos;atteste que la banque n&apos;a pas exécuté ce virement (fichier non déposé, rejeté, ou virement refusé — nom du
+              bénéficiaire non concordant).
+            </label>
+          ) : null}
           <input name="reason" className={inputClass} placeholder="Motif (interne)" aria-label="Motif de l'annulation" required />
         </ActionForm>
       ) : null}
@@ -339,6 +361,21 @@ export default async function RemittanceRunPage({
           <p className="text-xs text-zinc-500">
             Référence {d.transfer.end_to_end_id} · {d.transfer.remittance_info}
           </p>
+          {transferFile ? (
+            <p className="text-sm" data-testid="run-transfer-file">
+              Fichier{" "}
+              <Link href={`/backoffice/reversements/virements/${transferFile.id}`} className="underline underline-offset-4">
+                {transferFile.number}
+              </Link>{" "}
+              — {fileStatus(transferFile.status).label}
+            </p>
+          ) : d.transfer.status === "ordered" ? (
+            <p className="text-sm">
+              <Link href="/backoffice/reversements/virements" className="underline underline-offset-4">
+                Mettre dans un fichier de virements
+              </Link>
+            </p>
+          ) : null}
         </Section>
       ) : null}
 

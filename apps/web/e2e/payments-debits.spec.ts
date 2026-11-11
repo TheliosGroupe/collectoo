@@ -126,7 +126,8 @@ test("refund, bank return, lines to classify, direct payment and the checks", as
   await expect(page.getByTestId("payment-status")).toHaveText("Remboursement demandé");
   const reference = (await page.getByTestId("refund-reference").textContent())?.trim() ?? "";
   expect(reference).toMatch(/^RFD[0-9A-F]{12}$/);
-  await expect(page.getByTestId("refund-row")).toContainText("À exécuter dans la banque");
+  // M2c-6a (founder #15): the refund goes in the next transfer file by default (its RFD debit books it all the same)
+  await expect(page.getByTestId("refund-row")).toContainText("Dans le fichier de virements");
   await reviewShot(page, testInfo, "m2-payment-refund");
 
   // The next statement: the refund executed, Rivière's payment returned, a fee, a return nobody can name

@@ -53,9 +53,14 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
       title="Reversements"
       back={back}
       actions={
-        <Link href="/backoffice/reversements/comptabilite" className="text-sm underline underline-offset-4" data-testid="accounting-export-link">
-          Export comptable
-        </Link>
+        <span className="flex flex-wrap gap-3">
+          <Link href="/backoffice/reversements/virements" className="text-sm underline underline-offset-4" data-testid="transfers-link">
+            Virements
+          </Link>
+          <Link href="/backoffice/reversements/comptabilite" className="text-sm underline underline-offset-4" data-testid="accounting-export-link">
+            Export comptable
+          </Link>
+        </span>
       }
     >
       <AutoRefresh active={busy} abandonable={false} everyMs={2000} maxMs={120_000} />

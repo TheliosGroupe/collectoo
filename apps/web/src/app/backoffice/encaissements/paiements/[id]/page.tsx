@@ -88,6 +88,13 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   const lastAssign = [...d.matches].reverse().find((m) => m.action === "assign");
   // M2b-6: refunds (one pending at a time) and the bank lines linked to this payment (returns, refunds)
   const refunds = d.refunds ?? [];
+  // M2c-6a: which refunds go in the transfer file (their execution mode is not in payment_detail)
+  const { data: modes } =
+    refunds.length > 0
+      ? await supabase.from("refund_request").select("id, execution_mode").in("id", refunds.map((r) => r.id))
+      : { data: [] as { id: string; execution_mode: string }[] };
+  const inFile = new Set((modes ?? []).filter((m) => m.execution_mode === "file").map((m) => m.id));
+  const refundState = (r: { id: string; status: string }) => (r.status === "requested" && inFile.has(r.id) ? "requested_file" : r.status);
   const pendingRefund = refunds.find((r) => r.status === "requested") ?? null;
   const bankLines = d.bank_lines ?? [];
   const canRefund = refundable(p, d.position.unallocated_minor);
@@ -302,8 +309,8 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
               >
                 <span className="min-w-0">
                   <span className="font-medium">Remboursement {money(r.amount_minor, cur)}</span>{" "}
-                  <Badge tone={(REFUND_STATUS[r.status] ?? REFUND_STATUS.requested).tone}>
-                    {(REFUND_STATUS[r.status] ?? { label: r.status }).label}
+                  <Badge tone={(REFUND_STATUS[refundState(r)] ?? REFUND_STATUS.requested).tone}>
+                    {(REFUND_STATUS[refundState(r)] ?? { label: r.status }).label}
                   </Badge>
                   <span className="block text-xs text-zinc-600 dark:text-zinc-400">
                     {REFUND_REASON[r.reason_code]?.label ?? r.reason_code} · à {r.payee_name} (IBAN …{r.payee_iban_end}

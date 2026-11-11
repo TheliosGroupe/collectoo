@@ -185,6 +185,22 @@ export type ErrorCode =
   | "credit_note_too_much"
   | "credit_note_changed"
   | "credit_note_category"
+  | "transfer_nothing_to_file"
+  | "transfer_cash_not_covered"
+  | "transfer_no_closing_balance"
+  | "transfer_not_paying_account"
+  | "transfer_already_downloaded"
+  | "transfer_hash_mismatch"
+  | "transfer_not_ready"
+  | "transfer_not_downloaded"
+  | "transfer_attestation_required"
+  | "transfer_debit_seen"
+  | "transfer_statement_not_imported"
+  | "transfer_version_changed"
+  | "transfer_already_sent"
+  | "transfer_pain_version"
+  | "payee_check_four_eyes"
+  | "payee_check_cleared"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -343,9 +359,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   run_version_changed: "Le reversement a changé depuis l'affichage de la page : rechargez-la puis recommencez.",
   run_not_draft: "Ce reversement n'est plus un brouillon.",
   run_approval_in_progress: "La validation de ce reversement est en cours : attendez son résultat.",
-  run_not_cancellable: "Seul un reversement validé, dont le virement n'est pas encore dans un fichier, peut être annulé.",
+  run_not_cancellable: "Seul un reversement validé, dont le virement n'est pas encore débité, peut être annulé.",
   run_already_sent:
-    "Le fichier de virements a déjà été transmis à la banque : l'annulation suit la procédure d'attestation (à venir).",
+    "Le fichier de virements a déjà été téléchargé : l'annulation demande l'attestation que la banque n'a pas exécuté le virement.",
   run_none_selected: "Cochez au moins un reversement à valider.",
   run_busy:
     "Un traitement est en cours sur ce reversement ou pour ce cabinet (préparation, validation, imputation ou établissement du relevé) : réessayez dans un instant.",
@@ -362,6 +378,28 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   credit_note_too_much: "Le montant dépasse ce qui reste facturé (sur la facture, ou sur le dossier choisi).",
   credit_note_changed: "La facture a changé depuis l'affichage de la page (un autre avoir ?) : rechargez-la puis recommencez.",
   credit_note_category: "Choisissez le motif de l'avoir dans la liste.",
+  transfer_nothing_to_file: "Aucun virement à mettre dans un fichier : ceux qui attendent sont retenus (motif affiché).",
+  transfer_cash_not_covered:
+    "Le solde du compte dédié ne couvre pas ce fichier (solde du dernier relevé, moins ce qui est déjà en route) : importez le dernier relevé, puis recommencez.",
+  transfer_no_closing_balance: "Aucun relevé avec solde de clôture n'est importé pour ce compte : importez-en un d'abord.",
+  transfer_not_paying_account: "Ce compte ne paie pas de fichier de virements (seul le compte dédié actif en euros).",
+  transfer_already_downloaded:
+    "Ce fichier a déjà été téléchargé : confirmez l'avertissement pour le télécharger de nouveau, et ne le déposez pas deux fois.",
+  transfer_hash_mismatch:
+    "Le fichier stocké ne correspond pas à celui qui a été généré : il n'est pas servi. Prévenez le support.",
+  transfer_not_ready: "Le fichier est en cours d'écriture : réessayez dans quelques secondes.",
+  transfer_not_downloaded: "Ce fichier n'a pas été téléchargé : il est simplement remplacé, sans attestation.",
+  transfer_attestation_required:
+    "Le fichier a été téléchargé : cochez l'attestation (non déposé, ou rejeté par la banque) pour l'annuler.",
+  transfer_debit_seen:
+    "Un relevé montre déjà le débit d'un virement de ce fichier : il n'est pas annulé (risque de double paiement).",
+  transfer_statement_not_imported:
+    "Importez d'abord le relevé du jour d'exécution demandé : il doit montrer que la banque n'a pas débité ce virement.",
+  transfer_version_changed: "Le fichier a changé depuis l'affichage de la page : rechargez-la.",
+  transfer_already_sent: "Ce fichier est déjà marqué comme transmis.",
+  transfer_pain_version: "Choisissez pain.001.001.09 ou pain.001.001.03.",
+  payee_check_four_eyes: "Le signalement doit être levé par une autre personne que celle qui l'a enregistré.",
+  payee_check_cleared: "Ce signalement est déjà levé.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 

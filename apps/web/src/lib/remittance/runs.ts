@@ -214,7 +214,12 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
   ["not_draft", "run_not_draft"],
   ["approval_in_progress", "run_approval_in_progress"],
   ["already_sent", "run_already_sent"],
-  ["transfer_in_file", "run_already_sent"],
+  // M2c-6a: a run whose file was downloaded is cancelled only with the attestation and a statement without its debit
+  ["attestation_required", "transfer_attestation_required"],
+  ["statement_not_imported", "transfer_statement_not_imported"],
+  ["debit_seen", "transfer_debit_seen"],
+  ["not_downloaded", "transfer_not_downloaded"],
+  ["transfer_booked", "run_not_cancellable"],
   ["not_cancellable", "run_not_cancellable"],
   ["draft_use_discard", "run_not_cancellable"],
   ["a reason is required", "reason_required"],
