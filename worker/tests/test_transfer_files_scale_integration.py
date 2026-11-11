@@ -40,11 +40,20 @@ def _credits(n: int) -> list[Credit]:
     ]
 
 
-def _cash(tenant: dict[str, Any]) -> tuple[dict[str, Any], float]:
+_FETCHED = (
+    "select coalesce(sum(idx_tup_fetch + seq_tup_read), 0) from pg_stat_xact_user_tables"
+    " where relid = 'public.bank_transaction'::regclass"
+)
+
+
+def _cash(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, int]:
+    """The cash check, its time, and the bank lines it read (this transaction's counters)."""
     started = time.monotonic()
     with psycopg.connect(DB) as conn:
+        before = one(conn, _FETCHED)
         cash = one(conn, "select private.transfer_cash_position(%s)", (tenant["bank"],))
-    return dict(cash), time.monotonic() - started
+        read = one(conn, _FETCHED) - before
+    return dict(cash), time.monotonic() - started, int(read)
 
 
 def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings printed together
@@ -125,7 +134,7 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
     downloading = time.monotonic()
     staff(tenant, "select public.transfer_file_download(%s, %s)", generated["file_id"], digest)
     download_s = time.monotonic() - downloading
-    cash, cash_s = _cash(tenant)
+    cash, cash_s, cash_read = _cash(tenant)
     assert int(cash["in_flight_minor"]) == int(generated["ctrl_sum_minor"])
     assert cash["in_flight_count"] == SIZE
     showing = time.monotonic()
@@ -169,15 +178,22 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
                  finished_at = now() where id = %s""",
             (closing, closing - int(generated["ctrl_sum_minor"]), st),
         )
-    seen, seen_s = _cash(tenant)
+    seen, seen_s, seen_read = _cash(tenant)
     assert seen["in_flight_minor"] == "0" and seen["in_flight_count"] == 0
+    # keyed whatever the statistics (ARCHITECTURE §4): each transfer's own debit is probed by
+    # its end-to-end id, reading its line at most, never the account's other lines (integration
+    # of the M2c-6a review: right after the debits' import the planner took the account's
+    # unposted-lines index, every line of the account read per probe: 2 s)
+    assert cash_read <= 2 * SIZE, cash_read
+    assert seen_read <= 2 * SIZE, seen_read
 
     logs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("transfer file ")]
     print(
         f"\n{SIZE} transfers: refunds asked in {asked_s:.1f}s; generation (command)"
         f" {generate_s:.2f}s; job {write_s:.2f}s ({'; '.join(logs)}); structural check"
         f" {check_s:.2f}s; {len(data)} bytes; download (command) {download_s:.2f}s; cash check with"
-        f" {SIZE} in flight {cash_s:.2f}s, once their debits are seen {seen_s:.2f}s; « Virements »"
+        f" {SIZE} in flight {cash_s:.2f}s ({cash_read} bank lines read), once their debits are seen"
+        f" {seen_s:.2f}s ({seen_read} read); « Virements »"
         f" {overview_s:.2f}s"
     )
     # the commands within the API's 8 s; the job well within the queue's visibility timeout

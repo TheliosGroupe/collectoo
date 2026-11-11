@@ -356,3 +356,37 @@ check 0.41 s, download 0.04 s, cash check 0.13 s (0.09 s once debited), « Virem
 - The nightly figure is the whole `run_payment_checks` in CI order (the earlier scale tests' rows in the same
   database); the transfers' checks alone (`private.run_transfer_checks`, keyed) take 7 ms on that data, the runs'
   checks (`private.run_remittance_runs_checks`, unchanged) 3.1 s.
+
+### M2c-6a review fixes (integration, 2026-11-11)
+
+Same VM, `RECEIPT_FILES=5000`, right after `supabase db reset`, the two scale tests in one run
+(`test_transfer_files_scale_integration.py` then `test_remittance_scale_integration.py`: 2 passed in 283 s).
+
+| Step (5,000 transfers) | M2c-6a | Review fixes |
+|---|---|---|
+| 5,000 `request_refund` in file mode | 16.9 s | 18.2 s (also the SEPA and EPC tests, review T3) |
+| « Générer le fichier » (command) | 1.69 s | **1.80 s** (1.93–2.52 s over three more cold runs; the EPC and SEPA holds, `private.transfers_in_flight`) |
+| `transfer_file` job (write) | 0.90 s (0.69 s) | 0.87 s (0.65 s) |
+| `pain001.check` of the file | 0.46 s | 0.51 s (one tamper check more per field) |
+| Download (command) | 0.06 s | **0.21 s** (0.23–0.29 s): the first download now re-runs, under the generation's locks, every transfer's hold reason, the date rule and the cash check (review T2) |
+| Cash check, 5,000 in flight | 0.13 s | **0.12 s** — 0 bank lines read |
+| Cash check once their 5,000 debits are on a statement | 0.09 s | **0.11 s** (0.08–0.13 s) — 5,000 lines read, one per transfer |
+| « Virements » (`transfer_overview`) | 0.14 s | 0.12 s |
+
+- The cash check once the debits are seen first measured **1.8–2.2 s** after the review fixes, in three of five
+  cold runs (0.07 s once the statistics caught up): each transfer's own-debit probe stated `direction = 'debit'`,
+  which made the account's unposted-lines index (partial on the direction) usable with no condition, and with the
+  statistics lagging the import the planner scanned it in full for every transfer — 12,502,500 lines read
+  (auto_explain: a full scan of `bank_transaction_unposted_idx` per probe, up to 5,000 lines removed by its filter). The probes now hold
+  only the end-to-end id, in a subquery that cannot be pulled up, on indexes led by the id and not partial on the
+  direction or kind (ADR-0014 « M2c-6a review fixes », Integration); the scale test asserts the lines read (at most
+  one per transfer).
+
+| Step (50,000 lines, `test_remittance_scale_integration.py`, after the transfer file test) | M2c-6a (CI order) | Review fixes |
+|---|---|---|
+| « Préparer maintenant » (the reserve) | 1.30 s | 1.53 s |
+| Prepare job | 12.1 s | 11.4 s (3.38, 5.32, 2.45) |
+| Approval job then documents job | 16.4 s | 17.5 s |
+| Nightly checks after the approval | 5.6 s | 4.3 s (3.5 s with the draft waiting) |
+| « Générer le fichier » of the run's payout | 0.05 s | 0.05 s |
+| Cancellation (its file, not downloaded, superseded) | 3.63 s | 3.81 s |

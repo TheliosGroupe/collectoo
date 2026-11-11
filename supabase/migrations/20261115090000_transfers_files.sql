@@ -211,13 +211,18 @@ alter table public.refund_request add constraint refund_request_in_file
 comment on column public.refund_request.execution_mode is
   'file: in the next transfer file of its account (never executed by hand); manual: ops execute it in the bank.';
 
--- Our debits on a statement, looked up by our end-to-end id (the cash check, cancellations; M2c-6b's bookings).
-create index bank_transaction_debit_e2e_idx on public.bank_transaction (bank_account_id, end_to_end_id)
-  where direction = 'debit' and end_to_end_id is not null;
--- The bank's return of one of our transfers (a credit carrying its end-to-end id): evidence it was not paid (review T1).
+-- Our debits on a statement, looked up by our end-to-end id (the cash check, cancellations; M2c-6b's bookings), and
+-- the bank's return of one of our transfers (a credit carrying its end-to-end id: evidence it was not paid, review
+-- T1). The id leads and neither index is partial on the direction or kind: the probes (private.transfer_own_debit_seen,
+-- private.transfer_return_seen) hold only the id, so no other index can serve them — a probe stating the direction
+-- made the account's unposted-lines index (partial on it) usable with no condition at all, and the planner took it
+-- whenever the statistics lagged an import: every line of the account read per transfer, 2 s for 5,000 in the scale
+-- test (integration of the review; ARCHITECTURE §4).
+create index bank_transaction_end_to_end_idx on public.bank_transaction (end_to_end_id, bank_account_id)
+  where end_to_end_id is not null;
 create index bank_transaction_return_e2e_idx
-  on public.bank_transaction (bank_account_id, (coalesce(original_end_to_end_id, end_to_end_id)))
-  where direction = 'credit' and kind = 'return';
+  on public.bank_transaction ((coalesce(original_end_to_end_id, end_to_end_id)), bank_account_id)
+  where coalesce(original_end_to_end_id, end_to_end_id) is not null;
 
 -- A downloaded file cancelled (its transfers re-queued), or one of its transfers the bank refused cancelled, on
 -- evidence and by four eyes (review T1; design §9.7, risk R4): one money-staff member asks with what the statements
@@ -612,7 +617,9 @@ begin
 end;
 $$;
 
--- Our own debit of a transfer on an imported statement of its account: a line carrying its end-to-end id.
+-- Our own debit of a transfer on an imported statement of its account: a line carrying its end-to-end id. Keyed by
+-- the id alone — a subquery that cannot be pulled up, the account and the direction checked on the lines found
+-- (ARCHITECTURE §4) — so bank_transaction_end_to_end_idx is the one index that can serve it, whatever the statistics.
 create or replace function private.transfer_own_debit_seen(p_bank_account_id uuid, p_end_to_end_id text)
 returns boolean
 language sql
@@ -620,9 +627,9 @@ stable
 set search_path = ''
 set enable_seqscan = off
 as $$
-  select exists (select 1 from public.bank_transaction x
-                 where x.bank_account_id = p_bank_account_id and x.end_to_end_id = p_end_to_end_id
-                   and x.direction = 'debit');
+  select count(*) > 0 from (select x.bank_account_id, x.direction from public.bank_transaction x
+                            where x.end_to_end_id = p_end_to_end_id offset 0) x
+  where x.bank_account_id = p_bank_account_id and x.direction = 'debit';
 $$;
 
 -- The bank ignored BtchBookg and debited a PmtInf of our file as one line (camt.053 Btch/PmtInfId, no end-to-end id):
@@ -695,12 +702,12 @@ stable
 set search_path = ''
 set enable_seqscan = off
 as $$
-  select exists (select 1 from public.bank_transfer t
-                 cross join lateral (select 1 from public.bank_transaction x
-                                     where x.bank_account_id = t.debtor_bank_account_id
-                                       and coalesce(x.original_end_to_end_id, x.end_to_end_id) = t.end_to_end_id
-                                       and x.direction = 'credit' and x.kind = 'return' limit 1) x
-                 where t.id = p_transfer_id);
+  -- keyed by the transfer, then its id alone (as private.transfer_own_debit_seen): bank_transaction_return_e2e_idx
+  select count(*) > 0 from public.bank_transfer t
+  cross join lateral (select x.bank_account_id, x.direction, x.kind from public.bank_transaction x
+                      where coalesce(x.original_end_to_end_id, x.end_to_end_id) = t.end_to_end_id offset 0) x
+  where t.id = p_transfer_id and x.bank_account_id = t.debtor_bank_account_id and x.direction = 'credit'
+    and x.kind = 'return';
 $$;
 
 -- Every business day from p_from to p_to is in an imported statement of the account (review T1: a statement that
