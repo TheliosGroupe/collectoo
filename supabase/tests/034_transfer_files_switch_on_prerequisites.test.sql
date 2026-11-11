@@ -7,6 +7,8 @@
 --   * G2, the batch-line variant (met in round 6, passes): a refund-only file cancelled whole, its refund re-issued in a
 --     downloaded file, the old file executed late as one batch line of its PmtInf — that line does not execute the
 --     refund while the re-issue sits in its downloaded file (`reissue_in_downloaded_file`), the re-issue stays alerted;
+--     nor does a line naming no reference at all (round 7, the founder's decision on round 6's N1: such a line executes a
+--     refund in a downloaded file only while its transfer re-issues none — 033), and the refusals say why;
 --   * SW2 / SW3, a second sweep (todo: fails today): a file holding the sweep cancelled whole, the next file's new sweep
 --     downloaded (SW2) or only generated (SW3), then the cancelled sweep debited late under its own id — the new sweep's
 --     file is refused at a re-download (`holds_debited_transfer`) and the sweep alerted (SW2), or superseded at its first
@@ -18,7 +20,7 @@
 -- scenarios may gain the debit bookings M2c-6b adds, never lose an assertion — and 033 turned into the switch-on test.
 -- pgTAP's TODO failures do not fail `supabase test db`.
 begin;
-select plan(15);
+select plan(16);
 
 
 -- Fixtures (as 028: Martin (a1), Lilas (a2), Cyprès (a3), Omega (a4: a RIB holder in Greek letters), Tunis Trading
@@ -576,6 +578,44 @@ end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 
 -- G2, the batch-line variant (round 4's verifier, g2b; met in round 6) -------------------------------------------------
+create or replace function pg_temp.line(p_statement text, p_no integer) returns uuid language sql as $$
+  select id from public.bank_transaction
+  where statement_id = ('e2000000-0000-0000-0000-0000000000' || p_statement)::uuid and line_no = p_no $$;
+-- review round 7: what the refund's trigger says (its message and hint) when a debit line executes it, written straight
+-- to the refund as the debit posting does (link_debit keeps only the code); rolled back either way
+create or replace function pg_temp.follow(p_rf text, p_line uuid) returns text language plpgsql as $$
+declare v_msg text; v_hint text;
+begin
+  begin
+    update public.refund_request set status = 'executed', bank_transaction_id = p_line,
+      executed_on = private.paris_today(),
+      cash_out_entry_id = (select e.id from public.ledger_entry e
+                           where e.organization_id = '00000000-0000-0000-0000-0000000000aa'
+                             and not exists (select 1 from public.refund_request q where q.cash_out_entry_id = e.id)
+                           order by e.id limit 1)
+    where id = pg_temp.rq(p_rf);
+    raise exception 'executed' using errcode = 'TR002';
+  exception when sqlstate 'TR002' then
+    return 'ok';
+  when others then
+    get stacked diagnostics v_msg = message_text, v_hint = pg_exception_hint;
+    return v_msg || ' | ' || coalesce(v_hint, '');
+  end;
+end $$;
+create or replace function pg_temp.says(p_text text) returns text language sql as $$
+  select concat_ws(',',
+    case when p_text ~ '^refund refused: reissue_in_downloaded_file \| ' then 'refused' end,
+    case when p_text ~ 'porte la référence d''un autre virement' then 'other_transfer' end,
+    case when p_text ~ 'porte la référence d''un autre lot' then 'other_batch' end,
+    case when p_text ~ 'ne porte aucune référence, et le virement de ce remboursement en remplace un autre' then 'no_reference' end,
+    case when p_text ~ 'il ne peut pas exécuter ce remboursement, dont le virement est dans le fichier TF-[0-9]{4}-[0-9]{6}, déjà téléchargé'
+         then 'its_file' end,
+    case when p_text ~ 'S''il exécute, en retard, le virement que celui-ci remplace, faites d''abord annuler ce fichier, relevé à l''appui, puis rattachez ce débit'
+         then 'cancel_file_first' end,
+    case when p_text ~ 'rattaché avant, le remboursement serait payé une seconde fois si la banque exécute ce fichier'
+         then 'twice' end,
+    case when p_text ~ 'Ne le rattachez pas à ce remboursement ;' then 'do_not_link' end) $$;
+grant execute on all functions in schema pg_temp to authenticated;
 create or replace function pg_temp.sc_g2() returns jsonb language plpgsql as $$
 declare v jsonb := '{}';
 begin
@@ -604,9 +644,34 @@ begin
                                'reissue_in_f2', pg_temp.file_of(pg_temp.v('q1')) = pg_temp.v('f2'));
   insert into t select 'c1', pg_temp.chk(null);
   v := v || jsonb_build_object('alerts', to_jsonb(pg_temp.already_debited('c1')));
+  -- review round 7 (the founder's decision on round 6's N1, option (b)): a line naming neither an end-to-end id nor a
+  -- PmtInf executes a refund in a downloaded file only while its transfer re-issues none — this one is a re-issue, and
+  -- such a line may be the old file's execution; what the refusals say
+  perform pg_temp.statement('b3', private.paris_today(), null, jsonb_build_array(
+    jsonb_build_object('amount', 5000, 'kind', 'other_debit')));
+  v := v || jsonb_build_object('link_none', pg_temp.try('01', format(
+    $q$ select public.link_debit('g2-link-0002', %L, 'refund', null, %L, null, 'sans référence') -> 'result' ->> 'refunds' $q$,
+    pg_temp.line('b3', 1), pg_temp.rq('rq'))));
+  v := v || jsonb_build_object('says_none', pg_temp.says(pg_temp.follow('rq', pg_temp.line('b3', 1))),
+                               'says_old', pg_temp.says(pg_temp.follow('rq', pg_temp.line('b2', 1))),
+                               'refund_after', (select status from public.refund_request where id = pg_temp.rq('rq')),
+                               'reissue_after', pg_temp.status(pg_temp.v('q1')));
   return v;
 end $$;
 insert into j select 'g2', pg_temp.isolated('sc_g2');
+-- and a refund in a downloaded file that re-issues none, the switch on: a line of another end-to-end id is not linked —
+-- not « cancel the file first » (that line cannot be this refund's)
+create or replace function pg_temp.sc_g2n() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.handed_out('f0', 'g2n-gen-0000', 0);
+  insert into j select 'rq', pg_temp.refund('71', 5000);
+  perform pg_temp.handed_out('f1', 'g2n-gen-0001', 0);
+  perform pg_temp.statement('b2', private.paris_today(), null, jsonb_build_array(
+    jsonb_build_object('amount', 5000, 'e2e', 'RFDOTHER00000001', 'kind', 'refund_out')));
+  return jsonb_build_object('says_other', pg_temp.says(pg_temp.follow('rq', pg_temp.line('b2', 1))),
+                            'replaces', pg_temp.replaces(pg_temp.rft('rq')));
+end $$;
+insert into j select 'g2n', pg_temp.isolated('sc_g2n');
 select results_eq($$ select v ->> 'request', v ->> 'confirm', (v ->> 'reissued')::boolean from j where k = 'g2' $$,
   $$ values ('requested'::text, 'superseded'::text, true) $$,
   'G2: a refund-only file cancelled whole on evidence, its refund re-issued under a fresh id in a downloaded file');
@@ -617,6 +682,14 @@ select results_eq($$ select v ->> 'refund', v ->> 'reissue', (v ->> 'reissue_in_
   'G2: the refund stays requested, its re-issue in its downloaded file (not booked there: refunded twice)');
 select is((select v -> 'alerts' from j where k = 'g2'), '["refund 5000 in_file"]'::jsonb,
   'G2: the re-issue is alerted (transfer_already_debited: ask the bank not to execute it)');
+select results_eq($$ select v ->> 'link_none' ~ 'refund refused: reissue_in_downloaded_file', v ->> 'says_none',
+                            v ->> 'says_old', v ->> 'refund_after', v ->> 'reissue_after',
+                            (select n.v ->> 'says_other' from j n where n.k = 'g2n'),
+                            (select n.v ->> 'replaces' from j n where n.k = 'g2n') from j where k = 'g2' $$,
+  $$ values (true, 'refused,no_reference,its_file,cancel_file_first,twice'::text,
+             'refused,other_batch,its_file,cancel_file_first,twice'::text, 'requested'::text, 'in_file'::text,
+             'refused,other_transfer,its_file,do_not_link'::text, null::text) $$,
+  'G2 (round 7): nor a line naming no reference at all while the refund''s transfer is a re-issue; the refusals say why — to cancel the file first only for a re-issue (the line may be the old one''s execution: linked before, refunded twice)');
 
 -- SW2, a second sweep downloaded before the cancelled one is debited (round 4's verifier, sw2) ------------------------
 create or replace function pg_temp.sc_sw2() returns jsonb language plpgsql as $$

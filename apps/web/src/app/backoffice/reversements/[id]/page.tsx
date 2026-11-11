@@ -18,7 +18,7 @@ import {
   runStatus,
 } from "@/lib/remittance/runs";
 import { runStatementState } from "@/lib/remittance/documents";
-import { fileStatus, runCancelPath } from "@/lib/remittance/transfers";
+import { fileStatus, runCancelPath, runPayoutInDownloadedFileNote } from "@/lib/remittance/transfers";
 import { cancelRun, discardRun, refreshRun } from "../actions";
 import { ApprovePanel } from "../approve-panel";
 
@@ -233,12 +233,7 @@ export default async function RemittanceRunPage({
       {(r.status === "approved" || r.status === "sent") && d.can_cancel && cancelPath === "transfer_first" && transferFile ? (
         <div className="flex flex-col gap-2 text-sm" data-testid="run-cancel-transfer-first">
           {/* review round 5 (fail-closed): nothing of a downloaded file is cancelled until M2c-6b books its debits */}
-          <p>
-            Le virement est dans le fichier {transferFile.number}, déjà téléchargé : il reste « en cours » jusqu&apos;à ce que son
-            débit, ou son rejet, soit lu sur le relevé bancaire, et le reversement ne peut pas être annulé d&apos;ici là
-            (l&apos;annulation après téléchargement n&apos;est pas encore disponible). Gardez le fichier tel quel, vérifiez le
-            relevé et voyez avec la banque.
-          </p>
+          <p>{runPayoutInDownloadedFileNote(transferFile.number)}</p>
           <Link href={`/backoffice/reversements/virements/${transferFile.id}`} className="underline underline-offset-4" data-testid="run-cancel-transfer-link">
             Voir le fichier {transferFile.number}
           </Link>

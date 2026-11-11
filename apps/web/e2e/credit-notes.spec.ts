@@ -152,7 +152,7 @@ test("an admin issues a manual credit note on an invoice and the client reads it
 
   // review M2c-5b (ledger-vat#0, F1): while its own run can still be cancelled (validated, not debited), the invoice
   // takes no manual credit note — a cancellation would credit it in full and the re-run bill the rectified amount again
-  await expect(page.getByTestId("credit-note")).toContainText("Le reversement qui a émis cette facture est validé mais pas encore débité");
+  await expect(page.getByTestId("credit-note")).toContainText("Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé");
   await expect(page.getByTestId("credit-note-form")).toHaveCount(0);
   // the payout's debit is booked by M2c-6 (not built yet): the service role stands in for it, the run « Comptabilisé »
   const { error: bookError } = await adminClient()

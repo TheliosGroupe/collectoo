@@ -559,9 +559,35 @@ describe("M2c-6a review, round 6: a refund whose transfer is in a downloaded fil
     expect(note).not.toMatch(/annulez-le|demandez (son |l')annulation|faites d'abord annuler/);
   });
 
-  it("refuses a debit that carries neither the refund's reference nor its lot's in that file (G2's rule, now)", () => {
-    expect(errorText("refund_reissue_in_downloaded_file")).toContain(
-      "ni la référence du virement de ce remboursement ni celle de son lot",
+  it("refuses a debit that carries another transfer's or lot's reference in that file (G2's rule, now)", () => {
+    expect(errorText("refund_reissue_in_downloaded_file")).toContain("porte la référence d'un autre virement ou d'un autre lot");
+  });
+});
+
+describe("M2c-6a review, round 7 (round 6's verifiers)", () => {
+  const file = (status: string, download_count: number) => ({ id: "f1", number: "TF-2026-000142", status, download_count });
+  it("names the downloaded file a pending refund's transfer is in, not « the next file » (N2)", () => {
+    const downloaded = pendingRefundInstruction(true, { status: "in_file", file: file("downloaded", 1) });
+    expect(downloaded).toContain("il est dans le fichier de virements TF-2026-000142, déjà téléchargé");
+    expect(downloaded).toContain("ne l'exécutez pas dans la banque");
+    expect(downloaded).not.toContain("prochain fichier");
+    expect(pendingRefundInstruction(true, { status: "in_file", file: file("sent", 2) })).toContain(
+      "dans le fichier de virements TF-2026-000142, déjà téléchargé",
     );
+    // not in a file yet, or in one not downloaded: the next file, as before
+    for (const t of [undefined, null, { status: "ordered", file: null }, { status: "in_file", file: file("generated", 0) }])
+      expect(pendingRefundInstruction(true, t)).toContain("il part dans le prochain fichier de virements");
+    // booked: not « in » the file any more (the refund is executed then, the banner gone)
+    expect(pendingRefundInstruction(true, { status: "booked", file: file("sent", 2) })).not.toContain("TF-2026-000142");
+  });
+
+  it("says what a refused line carries and why, never « refunded a second time » (N1, the founder's option (b))", () => {
+    const text = errorText("refund_reissue_in_downloaded_file");
+    expect(text).toContain("porte la référence d'un autre virement ou d'un autre lot");
+    expect(text).toContain("(ou, pour un remboursement réémis, ne porte aucune référence)");
+    expect(text).toContain("il ne peut pas exécuter ce remboursement, dont le virement est dans un fichier déjà téléchargé");
+    expect(text).toContain("Ne le rattachez pas à ce remboursement");
+    expect(text).not.toContain("seconde fois");
+    expect(text).not.toContain("annuler ce fichier");
   });
 });

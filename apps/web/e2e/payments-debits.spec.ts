@@ -151,6 +151,9 @@ test("refund, bank return, lines to classify, direct payment and the checks", as
   await expect(inFile).toContainText("« en cours »");
   await expect(inFile).toContainText("ne peut pas être annulé d'ici là");
   await expect(page.getByTestId("cancel-refund")).toHaveCount(0);
+  // review round 7 (N2): the banner names that file, not « the next file »
+  await expect(page.getByTestId("refund-instruction")).toContainText(/il est dans le fichier de virements TF-\d{4}-\d{6}, déjà téléchargé/);
+  await expect(page.getByTestId("refund-instruction")).not.toContainText("prochain fichier");
   await reviewShot(page, testInfo, "m2-payment-refund-file");
 
   // The next statement: the refund executed, Rivière's payment returned, a fee, a return nobody can name

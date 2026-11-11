@@ -154,8 +154,9 @@
 --     job) — goes through
 --     private.refund_transfer_follow (trigger, enabled always): `cancelled` while its transfer is in a downloaded or
 --     sent file is refused (`in_downloaded_file`); `executed` books the transfer (its debit read from the statement, not
---     a cancellation) — since round 6 only by its own end-to-end id or a batch line of its own PmtInf in that file,
---     anything else `reissue_in_downloaded_file`; `bounced` only from booked;
+--     a cancellation) — since round 6 only by its own end-to-end id or a batch line of its own PmtInf in that file, or
+--     (round 7) a line naming neither while the transfer re-issues none, anything else `reissue_in_downloaded_file`;
+--     `bounced` only from booked;
 --   * public.record_payee_name_mismatch, clear_payee_name_mismatch: write payee_name_check only; they hold or free
 --     transfers not filed yet (private.transfer_hold_reason at generation and at a generated file's first download), a
 --     downloaded file's transfers stay in_file;
@@ -182,6 +183,19 @@
 --     file, `executed` only by that transfer's own end-to-end id or a batch line (no end-to-end id) whose PmtInfId is its
 --     transfer_file_item.pmt_inf_id in that file; anything else `reissue_in_downloaded_file` (the first of M2c-6b's
 --     three prerequisites to switching cancellation after download on; the other two are pgTAP 034's todo() cases).
+--
+-- M2c-6a review, round 7 (round 6's verifiers; ADR-0014 « M2c-6a review fixes », round 7; COMPLIANCE OQ-80 (n)):
+--   * private.refund_transfer_follow (the founder's decision on round 6's N1, option (b)): while the refund's transfer
+--     is in a downloaded or sent file, `executed` is also accepted from a line carrying neither an end-to-end id nor a
+--     PmtInfId when that transfer re-issues none (`replaces_transfer_id` null — always so while the switch is off): M2b's
+--     behaviour for a CSV feed without the reference column (a CSV never carries a PmtInfId). A line naming another
+--     end-to-end id or another PmtInf (of the same file — the sweep's — or another) stays refused, and so does a
+--     reference-less line for a re-issue (it may be the old file's execution). The `reissue_in_downloaded_file` hint
+--     names the file and what the line carries; it says the refund would be paid a second time only where that is so
+--     (a re-issue, the switch on: linked before its file is cancelled);
+--   * the refusal hints that said a downloaded file's transfers wait for their debits « read from the statement »
+--     (cancel_transfer_file, the four cancellation commands, cancel_remittance_run) say they wait for them to be booked
+--     from it — a refund's once linked, a payout's or the sweep's not yet (M2c-6b books them).
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -2251,7 +2265,7 @@ begin
   -- review round 5 (fail-closed): a file handed out is not cancelled while cancellation after download is off
   if f.status in ('downloaded', 'sent') and not private.switch_on('downloaded_file_cancellation') then
     raise exception 'transfer file refused: bank_booking_required' using errcode = 'check_violation',
-      hint = 'Fichier téléchargé : son annulation n''est pas encore disponible dans Collectoo. Gardez le fichier tel quel ; ses virements restent en cours jusqu''à ce que leurs débits soient lus sur le relevé. Vérifiez le relevé et voyez avec la banque.';
+      hint = 'Fichier téléchargé : son annulation n''est pas encore disponible dans Collectoo. Gardez le fichier tel quel ; ses virements restent en cours jusqu''à ce que leurs débits soient comptabilisés depuis le relevé (celui d''un remboursement l''est dès qu''il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l''être). Vérifiez le relevé et voyez avec la banque.';
   elsif f.status in ('downloaded', 'sent') then
     raise exception 'transfer file refused: cancellation_request_required' using errcode = 'check_violation',
       hint = 'Fichier téléchargé : demandez son annulation, relevé à l''appui ; une autre personne la confirme.';
@@ -2303,7 +2317,7 @@ begin
   -- review round 5 (fail-closed): off until M2c-6b books the debits from the statements
   if not private.switch_on('downloaded_file_cancellation') then
     raise exception 'transfer file refused: bank_booking_required' using errcode = 'check_violation',
-      hint = 'L''annulation d''un fichier téléchargé n''est pas encore disponible dans Collectoo. Gardez le fichier tel quel ; ses virements restent en cours jusqu''à ce que leurs débits soient lus sur le relevé. Vérifiez le relevé et voyez avec la banque.';
+      hint = 'L''annulation d''un fichier téléchargé n''est pas encore disponible dans Collectoo. Gardez le fichier tel quel ; ses virements restent en cours jusqu''à ce que leurs débits soient comptabilisés depuis le relevé (celui d''un remboursement l''est dès qu''il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l''être). Vérifiez le relevé et voyez avec la banque.';
   end if;
   if v_reason = '' or length(v_reason) > 2000 then
     raise exception 'a reason is required' using errcode = 'check_violation';
@@ -2378,7 +2392,7 @@ begin
   -- review round 5 (fail-closed): off until M2c-6b — a request opened while it was on is not confirmed
   if not private.switch_on('downloaded_file_cancellation') then
     raise exception 'transfer file refused: bank_booking_required' using errcode = 'check_violation',
-      hint = 'L''annulation d''un fichier téléchargé n''est pas encore disponible dans Collectoo : la demande en cours ne peut pas être confirmée. Gardez le fichier tel quel ; ses virements restent en cours jusqu''à ce que leurs débits soient lus sur le relevé. Vérifiez le relevé et voyez avec la banque.';
+      hint = 'L''annulation d''un fichier téléchargé n''est pas encore disponible dans Collectoo : la demande en cours ne peut pas être confirmée. Gardez le fichier tel quel ; ses virements restent en cours jusqu''à ce que leurs débits soient comptabilisés depuis le relevé (celui d''un remboursement l''est dès qu''il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l''être). Vérifiez le relevé et voyez avec la banque.';
   end if;
   perform private.transfer_file_lock_runs(f.id);
   perform private.remittance_command_locks(f.organization_id, true);
@@ -2456,7 +2470,7 @@ begin
   -- review round 5 (fail-closed): off until M2c-6b books the debits from the statements
   if not private.switch_on('downloaded_file_cancellation') then
     raise exception 'transfer refused: bank_booking_required' using errcode = 'check_violation',
-      hint = 'L''annulation d''un virement d''un fichier téléchargé n''est pas encore disponible dans Collectoo : il reste en cours jusqu''à ce que son débit, ou son rejet, soit lu sur le relevé. Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.';
+      hint = 'L''annulation d''un virement d''un fichier téléchargé n''est pas encore disponible dans Collectoo : il reste en cours jusqu''à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé (dès qu''il est rattaché pour un remboursement ; pas encore possible pour un reversement ni pour la quote-part du cabinet). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.';
   end if;
   if v_reason = '' or length(v_reason) > 2000 then
     raise exception 'a reason is required' using errcode = 'check_violation';
@@ -2521,7 +2535,7 @@ begin
   -- review round 5 (fail-closed): off until M2c-6b — a request opened while it was on is not confirmed
   if not private.switch_on('downloaded_file_cancellation') then
     raise exception 'transfer refused: bank_booking_required' using errcode = 'check_violation',
-      hint = 'L''annulation d''un virement d''un fichier téléchargé n''est pas encore disponible dans Collectoo : la demande en cours ne peut pas être confirmée, et le virement reste en cours jusqu''à ce que son débit, ou son rejet, soit lu sur le relevé. Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.';
+      hint = 'L''annulation d''un virement d''un fichier téléchargé n''est pas encore disponible dans Collectoo : la demande en cours ne peut pas être confirmée, et le virement reste en cours jusqu''à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé (dès qu''il est rattaché pour un remboursement ; pas encore possible pour un reversement ni pour la quote-part du cabinet). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.';
   end if;
   perform 1 from public.remittance_run r where r.id = t.run_id for update;
   perform private.remittance_command_locks(t.organization_id, true);
@@ -2863,7 +2877,12 @@ $$;
 -- (round 4's G2 rule, the prerequisite of switching it on, met now; round 5's verifier, p_link): while the transfer is
 -- in a downloaded or sent file, `executed` is accepted only by a debit carrying that transfer's own end-to-end id, or by
 -- a batch line (no end-to-end id) whose PmtInfId is that transfer's PmtInf in that file (its transfer_file_item) —
--- anything else, a predecessor file's batch line or another PmtInf's included, `reissue_in_downloaded_file`.
+-- anything else, a predecessor file's batch line or another PmtInf's included, `reissue_in_downloaded_file`. Review
+-- round 7 (the founder's decision on round 6's N1, option (b)): also by a line carrying neither an end-to-end id nor a
+-- PmtInfId while that transfer re-issues none (`replaces_transfer_id` null: always so while cancellation after download
+-- is off) — M2b's behaviour for a CSV feed without the reference column, which never carries a PmtInfId; such a line
+-- is refused for a re-issue (it may be the old file's execution). The hint names the file and says what the line
+-- carries, and « refunded a second time » only where that is so (a re-issue, the switch on).
 create or replace function private.refund_transfer_follow()
 returns trigger
 language plpgsql
@@ -2873,6 +2892,7 @@ as $$
 declare
   t public.bank_transfer;
   f public.transfer_file;
+  x public.bank_transaction;
 begin
   if new.transfer_id is null or new.status = old.status then
     return null;
@@ -2887,19 +2907,28 @@ begin
                         else 'Remboursement ' || new.end_to_end_id || ' annulé' end, null, null);
       select * into t from public.bank_transfer where id = t.id;
     -- review round 6 (round 4's G2 rule, now): executed only by a debit carrying this transfer's own end-to-end id, or
-    -- by a batch line (no end-to-end id) of its own PmtInf in this file — never another id, another file's PmtInf (a
-    -- predecessor's: the re-issue would be booked here, its bytes still to be uploaded), nor a line naming neither
+    -- by a batch line (no end-to-end id) of its own PmtInf in this file — never another id, another PmtInf (of this file,
+    -- or a predecessor's: the re-issue would be booked here, its bytes still to be uploaded); review round 7 (N1 (b)):
+    -- or by a line naming neither, while this transfer re-issues none (as in M2b: a CSV feed without the reference)
     elsif new.status = 'executed' and not exists (
-            select 1 from public.bank_transaction x where x.id = new.bank_transaction_id
-              and (x.end_to_end_id = t.end_to_end_id
-                   or (x.end_to_end_id is null and x.payment_info_id = (
+            select 1 from public.bank_transaction b where b.id = new.bank_transaction_id
+              and (b.end_to_end_id = t.end_to_end_id
+                   or (b.end_to_end_id is null and b.payment_info_id = (
                          select i.pmt_inf_id from public.transfer_file_item i
-                         where i.file_id = f.id and i.transfer_id = t.id)))) then
+                         where i.file_id = f.id and i.transfer_id = t.id))
+                   or (b.end_to_end_id is null and b.payment_info_id is null and t.replaces_transfer_id is null))) then
+      select * into x from public.bank_transaction where id = new.bank_transaction_id;
       raise exception 'refund refused: reissue_in_downloaded_file' using errcode = 'check_violation',
         detail = jsonb_build_object('file', f.number, 'transfer_id', t.id)::text,
-        hint = case when private.switch_on('downloaded_file_cancellation')
-                    then 'Ce débit ne porte ni la référence du virement de ce remboursement ni celle de son lot dans le fichier déjà téléchargé qui le contient : faites d''abord annuler ce fichier, relevé à l''appui, puis rattachez ce débit.'
-                    else 'Ce débit ne porte ni la référence du virement de ce remboursement ni celle de son lot dans le fichier déjà téléchargé qui le contient : ne le rattachez pas (ce fichier le rembourserait une seconde fois). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
+        hint = 'Ce débit '
+               || case when x.end_to_end_id is not null then 'porte la référence d''un autre virement'
+                       when x.payment_info_id is not null then 'porte la référence d''un autre lot'
+                       else 'ne porte aucune référence, et le virement de ce remboursement en remplace un autre' end
+               || ' : il ne peut pas exécuter ce remboursement, dont le virement est dans le fichier ' || f.number
+               || ', déjà téléchargé. '
+               || case when private.switch_on('downloaded_file_cancellation') and t.replaces_transfer_id is not null
+                       then 'S''il exécute, en retard, le virement que celui-ci remplace, faites d''abord annuler ce fichier, relevé à l''appui, puis rattachez ce débit : rattaché avant, le remboursement serait payé une seconde fois si la banque exécute ce fichier. Sinon, ne le rattachez pas à ce remboursement.'
+                       else 'Ne le rattachez pas à ce remboursement ; gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
     elsif new.status = 'cancelled' then
       raise exception 'refund refused: in_downloaded_file' using errcode = 'check_violation',
         detail = jsonb_build_object('file', f.number, 'transfer_id', t.id)::text,
@@ -3000,7 +3029,7 @@ begin
         detail = jsonb_build_object('file_id', f.id, 'file', f.number, 'transfer_id', t.id)::text,
         hint = case when private.switch_on('downloaded_file_cancellation')
                     then 'Le fichier a été téléchargé : faites d''abord annuler le virement, relevé à l''appui.'
-                    else 'Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu''à ce que son débit, ou son rejet, soit lu sur le relevé (l''annulation après téléchargement n''est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
+                    else 'Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu''à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé, ce qui n''est pas encore disponible pour un reversement, et le reversement ne peut pas être annulé d''ici là (l''annulation après téléchargement n''est pas encore disponible non plus). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
     end if;
   end if;
   if t.id is not null and t.status not in ('ordered', 'cancelled') then

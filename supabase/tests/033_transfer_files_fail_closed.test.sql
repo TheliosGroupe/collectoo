@@ -20,9 +20,13 @@
 -- file, whoever writes it (postgres, service_role); a file the bank executed, in full or in part, is not served again
 -- (`file_executed`, whatever the switch); a refund whose transfer is in a downloaded file is executed only by that
 -- transfer's own end-to-end id or a batch line of its own PmtInf in that file (round 4's G2 rule, now).
+-- Review round 7 (round 6's verifiers; the founder's decision on N1, option (b)): the run guard holds once the file is
+-- marked as sent too; a line naming neither an end-to-end id nor a PmtInf (a CSV feed without the reference column)
+-- executes such a refund again, as in M2b, while its transfer re-issues none; a batch line of another PmtInf of the
+-- same file (the sweep's) does not; the refusal names the file and says why, never « a second time » here.
 -- No ledger entry is posted by any of it but the refund's own debit.
 begin;
-select plan(37);
+select plan(43);
 
 
 -- Fixtures (as 028: Martin (a1), Lilas (a2), Cyprès (a3), Omega (a4: a RIB holder in Greek letters), Tunis Trading
@@ -669,6 +673,40 @@ select results_eq($$ select pg_temp.try('04', pg_temp.cancel_run('r5-run-0001', 
              'remittance run refused: payout_in_downloaded_file'::text,
              'refund refused: in_downloaded_file'::text, 'refund refused: in_downloaded_file'::text) $$,
   'a run or a refund whose transfer is in a downloaded or sent file is still not cancelled');
+-- review round 7 (round 6's verifier, N3): what those refusals say a downloaded file's transfers wait for — their
+-- debits booked from the statement, which a refund's is once linked and a payout's or the sweep's cannot be yet
+-- (M2c-6b books them); never « read from the statement » (a payout's debit read changes nothing today)
+create or replace function pg_temp.hint(p_user text, p_sql text) returns text language plpgsql as $$
+declare v_hint text;
+begin
+  perform pg_temp.as_user(p_user);
+  set local role authenticated;
+  begin
+    execute p_sql;
+  exception when others then
+    get stacked diagnostics v_hint = pg_exception_hint;
+    reset role;
+    return coalesce(v_hint, '');
+  end;
+  reset role;
+  return 'no refusal';
+end $$;
+create or replace function pg_temp.waits(p_hint text) returns text language sql as $$
+  select concat_ws(',',
+    case when p_hint ~ 'comptabilisés? depuis le relevé' then 'booked' end,
+    case when p_hint ~ 'ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l''être'
+           or p_hint ~ 'pas encore possible pour un reversement ni pour la quote-part du cabinet'
+           or p_hint ~ 'ce qui n''est pas encore disponible pour un reversement' then 'payout_not_yet' end,
+    case when p_hint ~ 'lus? sur le relevé' then 'read' end) $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(array[pg_temp.waits(pg_temp.hint('01', pg_temp.cancel_file('r7-cnf-0001', 'f1'))),
+                pg_temp.waits(pg_temp.hint('01', pg_temp.req_file('r7-rqf-0001', 'f1'))),
+                pg_temp.waits(pg_temp.hint('04', pg_temp.conf_file('r7-cff-0001', 'f1'))),
+                pg_temp.waits(pg_temp.hint('01', pg_temp.req_tr('r7-rqt-0001', pg_temp.v('m1')))),
+                pg_temp.waits(pg_temp.hint('04', pg_temp.conf_tr('r7-cft-0001', pg_temp.v('m1')))),
+                pg_temp.waits(pg_temp.hint('04', pg_temp.cancel_run('r7-run-0001', 'r1')))],
+  array_fill('booked,payout_not_yet'::text, array[6]),
+  'the refusals'' hints: a downloaded file''s transfers wait for their debits booked from the statement, not yet possible for a payout or the sweep');
 select is(pg_temp.snapshot(), (select v #>> '{}' from j where k = 'before'), 'and nothing changed');
 
 -- Whoever writes it: the guards --------------------------------------------------------------------------------------
@@ -793,6 +831,32 @@ select results_eq($$ select private.transfer_file_executed(pg_temp.v('f1')), pri
 select results_eq($$ select pg_temp.try('01', pg_temp.sent('r6-sent-0001', 'f1')), pg_temp.try('04', pg_temp.redl('f1', true)) $$,
   $$ values ('sent'::text, 'transfer file refused: file_executed'::text) $$,
   'it can still be marked as sent, and is not served once sent either');
+-- review round 7 (round 6's verifier): the run guard holds once the file is marked as sent too — it keys on a download
+-- recorded, not on the file's status (F1 sent, its payouts still in it: nothing books them before M2c-6b)
+create or replace function pg_temp.direct_cancel(p_run uuid, p_role text) returns text language plpgsql as $$
+begin
+  execute format('set local role %I', p_role);
+  begin
+    update public.remittance_run set status = 'cancelled', cancelled_at = clock_timestamp(), cancel_reason = 'test'
+    where id = p_run;
+  exception when others then
+    reset role;
+    return sqlstate || ' ' || sqlerrm;
+  end;
+  reset role;
+  return 'ok';
+end $$;
+create or replace function pg_temp.run_status(p_run uuid) returns text language sql as $$
+  select status from public.remittance_run where id = p_run $$;
+select results_eq($$ select (pg_temp.fl(pg_temp.v('f1'))).status, pg_temp.status(pg_temp.v('m1')),
+                            pg_temp.status(pg_temp.v('l1')),
+                            pg_temp.direct_cancel(pg_temp.v('r1'), 'postgres')
+                              ~ '^23514 .*its payout stays in its downloaded file: cancellation after download is switched off',
+                            pg_temp.direct_cancel(pg_temp.v('r2'), 'service_role')
+                              ~ '^23514 .*its payout stays in its downloaded file: cancellation after download is switched off',
+                            pg_temp.run_status(pg_temp.v('r1')), pg_temp.run_status(pg_temp.v('r2')) $$,
+  $$ values ('sent'::text, 'in_file'::text, 'in_file'::text, true, true, 'sent'::text, 'sent'::text) $$,
+  'the run guard: a run whose payout is in a file marked as sent is not cancelled either, by the owner nor by service_role');
 update private.feature_switch set enabled = true where key = 'downloaded_file_cancellation';
 select is(pg_temp.try('04', pg_temp.redl('f1', true)), 'transfer file refused: file_executed',
   'nor with cancellation after download switched on');
@@ -841,11 +905,90 @@ select results_eq($$ select pg_temp.rstatus('rl'), pg_temp.status(pg_temp.v('q4'
                              where bank_transaction_id in (pg_temp.line('b4', 1), pg_temp.line('b4', 2),
                                                            pg_temp.line('b4', 4))) $$,
   $$ values ('requested'::text, 'in_file'::text, 0) $$, 'the refund stays requested, its transfer in the file, nothing linked');
+-- review round 7: what the refusal says (the refund's trigger, as the debit posting meets it; written straight to the
+-- refund, rolled back either way): the line names another transfer or batch, the file it is in — never that the file
+-- would refund it a second time, never to cancel the file first (off)
+create or replace function pg_temp.follow(p_rf text, p_line uuid) returns text language plpgsql as $$
+declare v_msg text; v_hint text;
+begin
+  begin
+    update public.refund_request set status = 'executed', bank_transaction_id = p_line,
+      executed_on = private.paris_today(),
+      cash_out_entry_id = (select e.id from public.ledger_entry e
+                           where e.organization_id = '00000000-0000-0000-0000-0000000000aa'
+                             and not exists (select 1 from public.refund_request q where q.cash_out_entry_id = e.id)
+                           order by e.id limit 1)
+    where id = pg_temp.rq(p_rf);
+    raise exception 'executed' using errcode = 'TR002';
+  exception when sqlstate 'TR002' then
+    return 'ok';
+  when others then
+    get stacked diagnostics v_msg = message_text, v_hint = pg_exception_hint;
+    return v_msg || ' | ' || coalesce(v_hint, '');
+  end;
+end $$;
+create or replace function pg_temp.says(p_text text) returns text language sql as $$
+  select concat_ws(',',
+    case when p_text ~ '^refund refused: reissue_in_downloaded_file \| ' then 'refused' end,
+    case when p_text ~ 'porte la référence d''un autre virement' then 'other_transfer' end,
+    case when p_text ~ 'porte la référence d''un autre lot' then 'other_batch' end,
+    case when p_text ~ 'ne porte aucune référence' then 'no_reference' end,
+    case when p_text ~ 'il ne peut pas exécuter ce remboursement, dont le virement est dans le fichier TF-[0-9]{4}-[0-9]{6}, déjà téléchargé'
+         then 'its_file' end,
+    case when p_text ~ 'Ne le rattachez pas à ce remboursement' then 'do_not_link' end,
+    case when p_text ~ 'seconde fois' then 'twice' end,
+    case when p_text ~ 'annuler ce fichier' then 'cancel_file' end) $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select results_eq($$ select pg_temp.says(pg_temp.follow('rl', pg_temp.line('b4', 1))),
+                            pg_temp.says(pg_temp.follow('rl', pg_temp.line('b4', 2))),
+                            pg_temp.says(pg_temp.follow('rl', pg_temp.line('b4', 4))),
+                            pg_temp.follow('rl', pg_temp.line('b4', 1)) ~ (pg_temp.fl(pg_temp.v('f4'))).number,
+                            pg_temp.rstatus('rl') $$,
+  $$ values ('refused,other_transfer,its_file,do_not_link'::text, 'refused,other_batch,its_file,do_not_link'::text,
+             'refused,other_transfer,its_file,do_not_link'::text, true, 'requested'::text) $$,
+  'the refusal says the line names another transfer (or batch), so it cannot execute this refund whose transfer is in that file (its number), already downloaded; not to link it; never « a second time »');
 select results_eq($$ select pg_temp.try('01', pg_temp.link_refund('r6-link-0003', pg_temp.line('b4', 3), 'rl')),
                             pg_temp.rstatus('rl'),
                             pg_temp.status(pg_temp.v('q4')), (pg_temp.fl(pg_temp.v('f4'))).status $$,
   $$ values ('1'::text, 'executed'::text, 'booked'::text, 'downloaded'::text) $$,
   'a batch line of its own PmtInf in that file executes it: the refund executed, its transfer booked');
+
+-- Review round 7 (the founder's decision on round 6's N1, option (b)): a line naming neither an end-to-end id nor a
+-- PmtInf — every line of a CSV feed without the « référence de bout en bout » column — executes a refund whose transfer
+-- is in a downloaded or sent file, as in M2b, while that transfer re-issues none (always so with the switch off); a batch
+-- line of another PmtInf of the same file (the servicer's sweep, of the same amount) still does not (round 6's verifier,
+-- p_sibling). Omega's 60,00 €, all set off (N = 0), puts 60,00 € more of the servicer's on the dedicated account.
+select pg_temp.file('04', '20000000-0000-0000-0000-0000000000a4', 6000);
+select pg_temp.collect('04', 6000, private.paris_today() - 3);
+insert into t select 'r4', pg_temp.run('a4', '{"04": "6000"}', 6000, 1000, 10, 12);
+insert into j select 'rs', pg_temp.refund('37', 6000);
+select pg_temp.handed_out('f5', 'r7-gen-0005', 8);
+insert into t values ('q5', pg_temp.rft('rs'));
+select results_eq($$ select pg_temp.try('01', pg_temp.sent('r7-sent-0005', 'f5')),
+                            (select string_agg(x.kind || ' ' || x.amount_minor || ' ' || right(i.pmt_inf_id, 2), ', '
+                                               order by i.pmt_inf_id, x.kind)
+                             from public.transfer_file_item i join public.bank_transfer x on x.id = i.transfer_id
+                             where i.file_id = pg_temp.v('f5')),
+                            pg_temp.replaces(pg_temp.v('q5')) is null $$,
+  $$ values ('sent'::text, 'refund 6000 -1, sweep 6000 -2'::text, true) $$,
+  'fixture: F5 sent, a refund of 60,00 € in its first PmtInf, the servicer''s sweep of the same amount in its second; the refund''s transfer re-issues none');
+select pg_temp.statement('b5', private.paris_today(), null, jsonb_build_array(
+  jsonb_build_object('amount', 6000, 'pmt_inf', pg_temp.pmt('f5', 2), 'kind', 'other_debit'),
+  jsonb_build_object('amount', 6000, 'kind', 'other_debit')));
+select results_eq($$ select pg_temp.try('01', pg_temp.link_refund('r7-link-0001', pg_temp.line('b5', 1), 'rs'))
+                              ~ 'refund refused: reissue_in_downloaded_file',
+                            pg_temp.says(pg_temp.follow('rs', pg_temp.line('b5', 1))),
+                            pg_temp.rstatus('rs'), pg_temp.status(pg_temp.v('q5')),
+                            (select count(*)::int from public.bank_debit_link
+                             where bank_transaction_id = pg_temp.line('b5', 1)) $$,
+  $$ values (true, 'refused,other_batch,its_file,do_not_link'::text, 'requested'::text, 'in_file'::text, 0) $$,
+  'a batch line of another PmtInf of the same file (the sweep''s, the same amount) does not execute the refund');
+select results_eq($$ select pg_temp.follow('rs', pg_temp.line('b5', 2)),
+                            pg_temp.try('01', pg_temp.link_refund('r7-link-0002', pg_temp.line('b5', 2), 'rs')),
+                            pg_temp.rstatus('rs'), pg_temp.status(pg_temp.v('q5')), (pg_temp.fl(pg_temp.v('f5'))).status,
+                            pg_temp.status((pg_temp.sweep(pg_temp.v('f5'))).id) $$,
+  $$ values ('ok'::text, '1'::text, 'executed'::text, 'booked'::text, 'sent'::text, 'in_file'::text) $$,
+  'a line naming neither an end-to-end id nor a PmtInf (a CSV feed without the reference column) executes it, as in M2b: the refund executed, its transfer booked, the file and its sweep as they were');
 
 select results_eq($$ select count(*) filter (where entry_type in ('remittance', 'servicer_sweep'))::int
                      from public.ledger_entry where organization_id = '00000000-0000-0000-0000-0000000000aa' $$,

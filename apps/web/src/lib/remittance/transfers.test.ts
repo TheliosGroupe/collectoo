@@ -36,6 +36,7 @@ import {
   regenerationEffects,
   requestLine,
   runCancelPath,
+  runPayoutInDownloadedFileNote,
   sweepHoldLabel,
   transferErrorCode,
 } from "@/lib/remittance/transfers";
@@ -698,7 +699,7 @@ describe("M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is 
     ];
     for (const [code, text] of texts) {
       expect(text, code).not.toMatch(promisesCancellation);
-      expect(text, code).toMatch(/ne peut plus l'être et attend que son débit soit lu sur le relevé/);
+      expect(text, code).toMatch(/ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé/);
       expect(text, code).toMatch(/Tant que (son|ce) virement n'est dans aucun fichier téléchargé/);
     }
     // the pattern catches the round-5 wording it replaced
@@ -720,6 +721,51 @@ describe("M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is 
     ] as ErrorCode[])
       expect(errorText(code), code).not.toMatch(promisesCancellation);
     expect(errorText("refund_pending")).toContain("déjà téléchargé");
+  });
+
+  // review round 7 (round 6's verifier, N3): a payout's debit read from the statement changes nothing before M2c-6b
+  // books it — « attend que son débit soit lu sur le relevé » was not so for a run
+  it("never says a payout waits for its debit « read from the statement »: booked from it, not available yet", () => {
+    const read = /lus? sur (le|un) relevé/;
+    const payoutTexts: [string, string | null][] = [
+      ["run_already_sent", errorText("run_already_sent")],
+      ["run_payout_in_downloaded_file", errorText("run_payout_in_downloaded_file")],
+      ["credit_note_in_flight", errorText("credit_note_in_flight")],
+      ["credit_note_run_in_flight", errorText("credit_note_run_in_flight")],
+      ["refusal in_flight", creditNoteRefusalText("in_flight")],
+      ["refusal run_in_flight", creditNoteRefusalText("run_in_flight")],
+      ["the run's page", runPayoutInDownloadedFileNote("TF-2026-000142")],
+      ["payee mismatch", payeeMismatchFollowUp(false)],
+    ];
+    for (const [what, text] of payoutTexts) {
+      expect(text, what).not.toMatch(read);
+      expect(text, what).toMatch(/comptabilisé depuis le relevé/);
+      expect(text, what).toContain("ce qui n'est pas encore disponible pour un reversement");
+    }
+    // a file's transfers: a refund's debit is booked once linked, a payout's or the sweep's not yet
+    const fileTexts: [string, string][] = [
+      ["DOWNLOADED_FILE_NOTE", DOWNLOADED_FILE_NOTE],
+      ["transfer_bank_booking_required", errorText("transfer_bank_booking_required")],
+      ["transfer_cancellation_request_required", errorText("transfer_cancellation_request_required")],
+      ["file_not_marked_sent", checkLabel("file_not_marked_sent").help],
+    ];
+    for (const [what, text] of fileTexts) {
+      expect(text, what).not.toMatch(read);
+      expect(text, what).toMatch(/comptabilisés depuis le relevé/);
+      expect(text, what).toContain(
+        "celui d'un remboursement l'est dès qu'il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l'être",
+      );
+    }
+    // the run's page names its file, and still says the run is not cancelled after download
+    const note = runPayoutInDownloadedFileNote("TF-2026-000142");
+    expect(note).toContain("Le virement est dans le fichier TF-2026-000142, déjà téléchargé");
+    expect(note).toContain("ne peut pas être annulé d'ici là");
+    expect(note).toContain("voyez avec la banque");
+    // the pattern catches round 6's wording
+    expect("ensuite il ne peut plus l'être et attend que son débit soit lu sur le relevé.").toMatch(read);
+    expect("jusqu'à ce que leurs débits soient lus sur le relevé bancaire").toMatch(read);
+    // a refund's debit is linked today: its own texts keep « read from the statement », which is so
+    for (const code of ["refund_in_downloaded_file", "refund_pending"] as ErrorCode[]) expect(errorText(code), code).toMatch(read);
   });
 });
 

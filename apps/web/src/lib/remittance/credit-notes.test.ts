@@ -79,9 +79,14 @@ describe("the effect sheet (M2c-5b)", () => {
 describe("refusals and errors (M2c-5b)", () => {
   it("explains why an invoice cannot take a credit note", () => {
     expect(refusalText(null)).toBeNull();
-    expect(refusalText("in_flight")).toMatch(/attendez son débit avant d'émettre un avoir/);
-    // review round 6: a run whose transfer is in a downloaded file can no longer be cancelled (it waits for its debit)
-    expect(refusalText("in_flight")).toMatch(/une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit lu sur le relevé/);
+    expect(refusalText("in_flight")).toMatch(/dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là/);
+    // review round 6: a run whose transfer is in a downloaded file can no longer be cancelled (it waits for its debit);
+    // round 7 (N3): booked from the statement — not available yet for a payout (M2c-6b), so not « read from » it
+    expect(refusalText("in_flight")).toMatch(
+      /une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé, ce qui n'est pas encore disponible pour un reversement/,
+    );
+    expect(refusalText("run_in_flight")).toMatch(/le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là/);
+    expect(refusalText("in_flight")).not.toMatch(/attendez son débit|lu sur le relevé/);
     expect(refusalText("nothing_left")).toMatch(/entièrement rectifiée/);
     expect(refusalText("credit_note")).toMatch(/pas par un autre avoir/);
     expect(refusalText("something_new")).toBe("Avoir impossible pour l'instant.");
@@ -90,7 +95,7 @@ describe("refusals and errors (M2c-5b)", () => {
   it("maps the command's refusals to French, never the database's text", () => {
     const cases: [string, string][] = [
       ["credit note refused: credit_note", "Un avoir ne se rectifie pas par un autre avoir."],
-      ["credit note refused: in_flight", "pas encore débité"],
+      ["credit note refused: in_flight", "dont le débit n'est pas encore comptabilisé"],
       ["credit note refused: more_than_remaining", "dépasse ce qui reste facturé"],
       ["credit note refused: invoice_changed", "rechargez-la"],
       ["credit note refused: amount_required", "montant HT positif"],

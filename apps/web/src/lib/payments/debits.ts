@@ -429,7 +429,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   file_not_marked_sent: {
     label: "Fichier téléchargé, non marqué comme transmis",
-    help: "Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis ». Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : s'il ne doit pas partir, gardez-le tel quel, vérifiez le relevé et voyez avec la banque ; ses virements restent en cours jusqu'à ce que leurs débits soient lus sur le relevé.",
+    help: "Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis ». Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : s'il ne doit pas partir, gardez-le tel quel, vérifiez le relevé et voyez avec la banque ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé (celui d'un remboursement l'est dès qu'il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l'être).",
   },
   transfer_not_debited: {
     label: "Virements sans débit sur le relevé",
@@ -597,9 +597,14 @@ export function refundExecutionMode(value: string): "file" | "manual" | undefine
 /**
  * What the payment's page tells ops about its pending refund, after « demandé : » (integration of the M2c-6a review):
  * a refund in the transfer file is never executed by hand too (risk R4: paid twice); one by hand needs its RFD id as
- * the end-to-end reference. With the sheet's default the database chose, so this is where ops read which it is.
+ * the end-to-end reference. With the sheet's default the database chose, so this is where ops read which it is. Its
+ * transfer (review round 7): once in a downloaded or sent file, the page names that file instead of « the next one ».
  */
-export function pendingRefundInstruction(inFile: boolean): string {
+export function pendingRefundInstruction(inFile: boolean, transfer?: RefundTransfer | null): string {
+  // review round 7 (round 6's verifier, N2): its transfer already in a downloaded or sent file — not « the next file »
+  const file = inFile && refundInDownloadedFile(transfer) ? transfer?.file : null;
+  if (file)
+    return `il est dans le fichier de virements ${file.number}, déjà téléchargé, avec la référence ci-dessous comme référence de bout en bout ; ne l'exécutez pas dans la banque.`;
   if (inFile)
     return "il part dans le prochain fichier de virements (« Virements »), avec la référence ci-dessous comme référence de bout en bout ; ne l'exécutez pas dans la banque.";
   return "exécutez le virement dans la banque avec la référence ci-dessous saisie comme « référence de bout en bout ».";

@@ -147,7 +147,7 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
         <InfoNote>
           <span data-testid="refund-instruction">
             Remboursement de {money(pendingRefund.amount_minor, cur)} vers l&apos;IBAN …{pendingRefund.payee_iban_end}{" "}
-            demandé : {pendingRefundInstruction(inFile.has(pendingRefund.id))}
+            demandé : {pendingRefundInstruction(inFile.has(pendingRefund.id), refundTransfer.get(pendingRefund.id))}
           </span>{" "}
           Référence :{" "}
           <span className="font-mono font-medium" data-testid="refund-reference">
