@@ -702,10 +702,13 @@ select pg_temp.statement('b3', pg_temp.d(5), null, '[]', pg_temp.d(4), pg_temp.a
 select results_eq($$ select pg_temp.try('01', pg_temp.req_file('r3-rq-0004', 'f3')),
                             pg_temp.try('04', pg_temp.conf_file('r3-cf-0004', 'f3')) $$,
   $$ values ('requested'::text, 'superseded'::text) $$, 'N1: that file cancelled on proper evidence');
--- it executes late: its first PmtInf as one line of 4 288,40 € (Lilas, 70,00 €, 20,00 €), its sweep's as 120,00 €
+-- it executes late: its payouts' PmtInf as one line (Lilas), its refunds' as one line of 90,00 € (70,00 €, 20,00 €),
+-- its sweep's as 120,00 € (M2c-6b-1: one PmtInf per kind — payouts -1, refunds -2, the sweep -3 — where M2c-6a put
+-- Lilas and the refunds in one PmtInf of 4 288,40 €; the fixture's references follow, the assertions are unchanged)
 select pg_temp.statement('b4', pg_temp.d(6), null, jsonb_build_array(
-  jsonb_build_object('amount', 428840, 'pmt_inf', pg_temp.pmt('f3', 1)),
-  jsonb_build_object('amount', 12000, 'pmt_inf', pg_temp.pmt('f3', 2))), pg_temp.d(6), pg_temp.after(6));
+  jsonb_build_object('amount', 419840, 'pmt_inf', pg_temp.pmt('f3', 1)),
+  jsonb_build_object('amount', 9000, 'pmt_inf', pg_temp.pmt('f3', 2)),
+  jsonb_build_object('amount', 12000, 'pmt_inf', pg_temp.pmt('f3', 3))), pg_temp.d(6), pg_temp.after(6));
 select results_eq($$ select pg_temp.hold(pg_temp.trid('r2')), pg_temp.hold(pg_temp.rft('rb')), pg_temp.hold(pg_temp.rft('rc')),
                             pg_temp.hold(pg_temp.rft('rd')) $$,
   $$ values ('already_debited'::text, 'already_debited'::text, 'already_debited'::text, null::text) $$,
