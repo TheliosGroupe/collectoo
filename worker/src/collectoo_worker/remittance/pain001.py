@@ -91,6 +91,31 @@ _SPELLED = str.maketrans(
 )
 
 
+# The SEPA schemes' geographical scope by IBAN country code (EPC409-09 « EPC List of SEPA Scheme
+# Countries », v8.0 of 24/12/2025: the 27 EU, 3 other EEA and 11 non-EEA countries, and the
+# territories listed with them). An SCT file (SvcLvl SEPA) pays no other IBAN. The twin of the
+# database's private.sepa_scheme_country, which holds such a transfer out of the file first
+# (`iban_not_sepa`, review T3); parity tested.
+SEPA_COUNTRIES = frozenset(
+    {
+        # EU
+        "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
+        "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+        # other EEA
+        "IS", "LI", "NO",
+        # non-EEA
+        "CH", "GB", "MC", "SM", "VA", "AD", "AL", "ME", "MD", "MK", "RS",
+        # territories listed with their countries (their IBANs mostly carry the country's code)
+        "AX", "GF", "GP", "MQ", "YT", "RE", "BL", "MF", "PM", "GI", "GG", "JE", "IM",
+    }
+)  # fmt: skip
+
+
+def iban_in_sepa(iban: str) -> bool:
+    """The IBAN's country is in the SEPA schemes' geographical scope (EPC409-09)."""
+    return iban[:2].upper() in SEPA_COUNTRIES
+
+
 class Pain001Error(ValueError):
     """The file cannot be written or does not hold what it must (a data error: never retried)."""
 
@@ -193,6 +218,8 @@ def _bic(bic: str | None, what: str) -> str | None:
 def _iban(iban: str, what: str) -> str:
     if not _IBAN.fullmatch(iban) or not iban_valid(iban):
         raise Pain001Error(f"{what}: invalid IBAN")
+    if not iban_in_sepa(iban):
+        raise Pain001Error(f"{what}: IBAN outside the SEPA schemes' countries")
     return iban
 
 
@@ -451,8 +478,9 @@ def check(xml: bytes, version: str) -> dict[str, object]:  # noqa: PLR0912, PLR0
         except ValueError as exc:
             raise Pain001Error(f"{pid}: ReqdExctnDt is not a date") from exc
         _check_text(_text(pmt, "Dbtr/Nm", ns), MAX_NAME, f"{pid} Dbtr/Nm")
-        if not iban_valid(_text(pmt, "DbtrAcct/Id/IBAN", ns)):
-            raise Pain001Error(f"{pid}: DbtrAcct IBAN invalid")
+        debtor_iban = _text(pmt, "DbtrAcct/Id/IBAN", ns)
+        if not iban_valid(debtor_iban) or not iban_in_sepa(debtor_iban):
+            raise Pain001Error(f"{pid}: DbtrAcct IBAN invalid or outside SEPA")
         agent = pmt.find(f"{{{ns}}}DbtrAgt")
         assert agent is not None  # noqa: S101 - checked by _order
         _check_agent(agent, ns, version, f"{pid} DbtrAgt")
@@ -478,8 +506,9 @@ def check(xml: bytes, version: str) -> dict[str, object]:  # noqa: PLR0912, PLR0
             if cagent is not None:
                 _check_agent(cagent, ns, version, f"{e2e} CdtrAgt")
             _check_text(_text(tx, "Cdtr/Nm", ns), MAX_NAME, f"{e2e} Cdtr/Nm")
-            if not iban_valid(_text(tx, "CdtrAcct/Id/IBAN", ns)):
-                raise Pain001Error(f"{e2e}: CdtrAcct IBAN invalid")
+            creditor_iban = _text(tx, "CdtrAcct/Id/IBAN", ns)
+            if not iban_valid(creditor_iban) or not iban_in_sepa(creditor_iban):
+                raise Pain001Error(f"{e2e}: CdtrAcct IBAN invalid or outside SEPA")
             if tx.find(f"{{{ns}}}RmtInf") is not None:
                 _check_text(_text(tx, "RmtInf/Ustrd", ns), MAX_USTRD, f"{e2e} Ustrd")
         if _text(pmt, "NbOfTxs", ns) != str(n) or _text(pmt, "CtrlSum", ns) != amount_text(minor):

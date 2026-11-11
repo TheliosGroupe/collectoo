@@ -9,16 +9,17 @@
 --   * the job's functions (begin, record, failed), the guards (what was generated never changes, items append-only,
 --     in_file → ordered only with its file closed);
 --   * download (the hash checked, every download recorded, the second one only with the warning acknowledged; runs
---     sent), « Marquer comme transmis », cancel a file before download (superseded) and after (attestation, rejected,
---     never with a debit seen), cancel a run after download (attestation, a statement covering its date without its
---     debit);
+--     sent), « Marquer comme transmis », cancel a file before download (superseded) and after (review T1: asked with
+--     the attestation once statements cover its execution date and the next business day without its debit,
+--     confirmed by another person; rejected), a refused transfer of a downloaded file cancelled the same way, then its
+--     run (`payout_in_downloaded_file` before), a file never served again once it holds a cancelled transfer;
 --   * refunds in the file (execution_mode, the transfer following its refund: booked by its debit, a pending file
 --     superseded; cancelled with it);
 --   * verification of payee (four eyes to clear), RLS (staff, client A/B, a restricted viewer, a collector, another
 --     servicer) and the storage policy, the nightly alerts.
 -- No ledger entry is posted by any of it (client money leaves 5120 at the bank's debit, M2c-6b).
 begin;
-select plan(103);
+select plan(116);
 
 -- Fixtures (as 027: Martin (a1), Lilas (a2), Cyprès (a3) of the servicer aa; Bleu (b1) of another servicer bb) ------
 insert into public.organization (id, kind, legal_name, siren) values
@@ -34,7 +35,7 @@ insert into public.organization (id, kind, servicer_organization_id, legal_name,
   ('00000000-0000-0000-0000-0000000000b1', 'creditor_client', '00000000-0000-0000-0000-0000000000bb', 'Bleu SARL', null);
 insert into auth.users (id, email, aud, role)
 select ('10000000-0000-0000-0000-0000000000' || n)::uuid, 'u' || n || '@files.test', 'authenticated', 'authenticated'
-from unnest(array['01', '02', '03', '04', '05', '06', '07', '08']) n;
+from unnest(array['01', '02', '03', '04', '05', '06', '07', '08', '09']) n;
 update public.app_user set display_name = 'Léa' where id = '10000000-0000-0000-0000-000000000001';
 insert into public.membership (user_id, organization_id, role) values
   ('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000aa', 'ops_manager'),
@@ -44,7 +45,8 @@ insert into public.membership (user_id, organization_id, role) values
   ('10000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-0000000000bb', 'ops_manager'),
   ('10000000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-0000000000bb', 'admin'),
   ('10000000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-0000000000a1', 'client_viewer'),
-  ('10000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-0000000000a2', 'client_admin');
+  ('10000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-0000000000a2', 'client_admin'),
+  ('10000000-0000-0000-0000-000000000009', '00000000-0000-0000-0000-0000000000aa', 'admin');
 insert into public.portfolio (id, organization_id, client_organization_id, name)
 select ('20000000-0000-0000-0000-0000000000' || c)::uuid, '00000000-0000-0000-0000-0000000000aa',
        ('00000000-0000-0000-0000-0000000000' || c)::uuid, 'P' || c
@@ -178,9 +180,10 @@ begin
   values (pg_temp.pay(p_n), 1, pg_temp.it(p_n), 'principal', p_amount);
   perform private.post_allocations('00000000-0000-0000-0000-0000000000aa', 'ready', 'alloc-1');
 end $$;
--- An imported statement of the dedicated account (to p_to, closing p_closing) with debit lines [{e2e, amount, kind,
--- pmt_inf}] booked on p_to.
-create or replace function pg_temp.statement(p_n text, p_to date, p_closing bigint, p_debits jsonb default '[]')
+-- An imported statement of the dedicated account (p_from, default p_to, to p_to, closing p_closing) with debit lines
+-- [{e2e, amount, kind, pmt_inf}] booked on p_to.
+create or replace function pg_temp.statement(p_n text, p_to date, p_closing bigint, p_debits jsonb default '[]',
+                                             p_from date default null)
 returns uuid language plpgsql as $$
 declare s uuid := ('e2000000-0000-0000-0000-0000000000' || p_n)::uuid;
 begin
@@ -195,8 +198,8 @@ begin
          'debit', (d.v ->> 'amount')::bigint, 'EUR', p_to, coalesce(d.v ->> 'kind', 'transfer_out'), d.v ->> 'e2e',
          d.v ->> 'pmt_inf'
   from jsonb_array_elements(p_debits) with ordinality d (v, ord);
-  update public.bank_statement set status = 'imported', from_date = p_to, to_date = p_to, opening_booked_minor = 0,
-    closing_booked_minor = p_closing, counts = '{}', finished_at = now()
+  update public.bank_statement set status = 'imported', from_date = coalesce(p_from, p_to), to_date = p_to,
+    opening_booked_minor = 0, closing_booked_minor = p_closing, counts = '{}', finished_at = clock_timestamp()
   where id = s;
   return s;
 end $$;
@@ -374,8 +377,9 @@ select is((select -sum(lp.amount_minor) from public.ledger_posting lp join publi
 -- Schema and privileges --------------------------------------------------------------------------------------------
 select ok((select bool_and(relrowsecurity) from pg_class
            where oid in ('public.transfer_file'::regclass, 'public.transfer_file_item'::regclass,
-                         'public.transfer_file_download'::regclass, 'public.payee_name_check'::regclass)),
-  'RLS on the files, their items, their downloads and the payee checks');
+                         'public.transfer_file_download'::regclass, 'public.payee_name_check'::regclass,
+                         'public.transfer_cancellation_request'::regclass)),
+  'RLS on the files, their items, their downloads, the payee checks and the cancellation requests');
 select is((select pain_version from public.bank_account where id = '80000000-0000-0000-0000-0000000000cf'),
   'pain.001.001.09', 'a paying account writes pain.001.001.09 by default (design §11)');
 select ok(not has_function_privilege('anon', 'public.generate_transfer_file(text, uuid, text)', 'execute')
@@ -392,7 +396,11 @@ select is((select array_agg(p.proname::text order by p.proname) from pg_proc p
                                'set_bank_account_pain_version', 'transfer_overview', 'transfer_file_detail',
                                'transfer_file_begin', 'transfer_file_record', 'transfer_file_failed',
                                'transfer_file_release', 'transfer_hold_reason', 'run_transfer_checks',
-                               'request_refund', 'cancel_remittance_run', 'refund_transfer_follow')
+                               'request_refund', 'cancel_remittance_run', 'refund_transfer_follow',
+                               'request_transfer_file_cancellation', 'confirm_transfer_file_cancellation',
+                               'request_transfer_cancellation', 'confirm_transfer_cancellation',
+                               'transfer_cancel_evidence', 'transfer_cancellation_card', 'transfer_checks_due',
+                               'queue_remittance_schedule', 'can_read_transfer_file_object')
              and coalesce(array_to_string(p.proconfig, ','), '') !~ 'search_path=""'), null,
   'every definer function of the slice pins its search_path');
 
@@ -543,12 +551,18 @@ select pg_temp.as_user('01');
 set local role authenticated;
 select throws_ok($$ select public.clear_payee_name_mismatch('tf-vop-0002', (select (v ->> 'check_id')::uuid from j where k = 'pc'),
                                                             'vérifié') $$,
-  '23514', 'payee check refused: four_eyes', 'who recorded a payee check cannot clear it');
+  '23514', 'payee check refused: same_person', 'who recorded a payee check (here also the IBAN''s confirmer) cannot clear it');
 reset role;
 select pg_temp.as_user('04');
 set local role authenticated;
-select is(public.clear_payee_name_mismatch('tf-vop-0003', (select (v ->> 'check_id')::uuid from j where k = 'pc'),
-                                           'RIB vérifié avec le client') ->> 'cleared', 'true', 'another person clears it');
+select throws_ok($$ select public.clear_payee_name_mismatch('tf-vop-0003', (select (v ->> 'check_id')::uuid from j where k = 'pc'),
+                                                            'vérifié') $$,
+  '23514', 'payee check refused: same_person', 'nor who proposed the flagged IBAN (review T5)');
+reset role;
+select pg_temp.as_user('09');
+set local role authenticated;
+select is(public.clear_payee_name_mismatch('tf-vop-0004', (select (v ->> 'check_id')::uuid from j where k = 'pc'),
+                                           'RIB vérifié avec le client') ->> 'cleared', 'true', 'a third person clears it');
 reset role;
 insert into j select 'g4', pg_temp.gen('01', 'tf-gen-0004', 'Relevé importé tardivement');
 insert into t select 'f4', (v ->> 'file_id')::uuid from j where k = 'g4';
@@ -615,16 +629,61 @@ reset role;
 select ok((pg_temp.fl((select v from t where k = 'f4'))).sent_marked_by = '10000000-0000-0000-0000-000000000001',
   'who marked it');
 
--- Cancel a file after download: the attestation (rejected by the bank); then the run after download ---------------
+-- Cancel a file after download (review T1, risk R4): asked by one person, confirmed by another, on the statements'
+-- evidence (the execution date and the account's next business day imported, no debit of it) -------------------
+create or replace function pg_temp.e() returns date language sql as $$ select private.next_business_day(private.paris_today()) $$;
+create or replace function pg_temp.n() returns date language sql as $$ select private.next_business_day(pg_temp.e()) $$;
 select pg_temp.as_user('01');
 set local role authenticated;
 select throws_ok(format($$ select public.cancel_transfer_file('tf-cancel-0003', %L, %s, 'rejet') $$,
                         (select v from t where k = 'f4'), (pg_temp.fl((select v from t where k = 'f4'))).version),
-  '23514', 'transfer file refused: attestation_required', 'after download, only with an attestation');
-select is(public.cancel_transfer_file('tf-cancel-0004', (select v from t where k = 'f4'),
-                                      (pg_temp.fl((select v from t where k = 'f4'))).version,
-                                      'Fichier rejeté par la banque (format)', 'rejected_by_bank') ->> 'status',
-  'rejected', '« Rejeté par la banque »: rejected');
+  '23514', 'transfer file refused: cancellation_request_required',
+  'after download a file is never cancelled in one step (money#1: its transfers would be filed again)');
+select throws_ok(format($$ select public.request_transfer_file_cancellation('tf-cancel-0004', %L, %s, 'rejet', null) $$,
+                        (select v from t where k = 'f4'), (pg_temp.fl((select v from t where k = 'f4'))).version),
+  '23514', 'transfer file refused: attestation_required', 'its cancellation is asked with an attestation');
+select throws_ok(format($$ select public.request_transfer_file_cancellation('tf-cancel-0005', %L, %s, 'Fichier rejeté',
+                                                                            'rejected_by_bank') $$,
+                        (select v from t where k = 'f4'), (pg_temp.fl((select v from t where k = 'f4'))).version),
+  '23514', 'transfer file refused: no_statement_evidence', '… and only once statements cover its execution date');
+reset role;
+select pg_temp.statement('05', pg_temp.e(), 724000);
+select pg_temp.as_user('01');
+set local role authenticated;
+select throws_ok(format($$ select public.request_transfer_file_cancellation('tf-cancel-0006', %L, %s, 'Fichier rejeté',
+                                                                            'rejected_by_bank') $$,
+                        (select v from t where k = 'f4'), (pg_temp.fl((select v from t where k = 'f4'))).version),
+  '23514', 'transfer file refused: no_statement_evidence',
+  'the execution day alone is not enough: the debit may be booked the next business day');
+reset role;
+select pg_temp.statement('06', pg_temp.n(), 724000);
+select pg_temp.as_user('01');
+set local role authenticated;
+select is(public.request_transfer_file_cancellation('tf-cancel-0007', (select v from t where k = 'f4'),
+                                                    (pg_temp.fl((select v from t where k = 'f4'))).version,
+                                                    'Fichier rejeté par la banque (format)', 'rejected_by_bank') ->> 'status',
+  'requested', 'with both days imported and no debit of it: asked');
+reset role;
+select pg_temp.as_user('04');
+set local role authenticated;
+select throws_ok(format($$ select public.request_transfer_file_cancellation('tf-cancel-0008', %L, %s, 'rejet', 'not_uploaded') $$,
+                        (select v from t where k = 'f4'), (pg_temp.fl((select v from t where k = 'f4'))).version),
+  '23514', 'transfer file refused: already_requested', 'one request at a time');
+reset role;
+select pg_temp.as_user('01');
+set local role authenticated;
+select throws_ok(format($$ select public.confirm_transfer_file_cancellation('tf-cancel-0009', %L, %s) $$,
+                        (select v from t where k = 'f4'), (pg_temp.fl((select v from t where k = 'f4'))).version),
+  '23514', 'transfer file refused: same_person', 'who asked cannot confirm (four eyes)');
+reset role;
+select is((select count(*)::int from public.transfer_file_item i join public.bank_transfer t on t.id = i.transfer_id
+           where i.file_id = (select v from t where k = 'f4') and t.status = 'in_file'), 3,
+  'until confirmed nothing moves: its transfers stay in it');
+select pg_temp.as_user('04');
+set local role authenticated;
+select is(public.confirm_transfer_file_cancellation('tf-cancel-0010', (select v from t where k = 'f4'),
+                                                    (pg_temp.fl((select v from t where k = 'f4'))).version) ->> 'status',
+  'rejected', 'another person confirms: « Rejeté par la banque »');
 reset role;
 select results_eq($$ select array_agg(r.status order by r.number), array_agg(t.status order by r.number)
                      from public.remittance_run r join public.bank_transfer t on t.id = r.transfer_id
@@ -634,32 +693,42 @@ select results_eq($$ select array_agg(r.status order by r.number), array_agg(t.s
 insert into t select 'f5', (pg_temp.gen('01', 'tf-gen-0006') ->> 'file_id')::uuid;
 select pg_temp.write((select v from t where k = 'f5'));
 select pg_temp.download('01', (select v from t where k = 'f5'));
+select ok(private.can_read_transfer_file_object((pg_temp.fl((select v from t where k = 'f5'))).storage_path),
+  'the bucket: the bytes of a file its caller just downloaded (review T4)');
+reset role;
+-- A run whose payout is in a downloaded file (money#2): it waits for its transfer's cancellation
 select pg_temp.as_user('04');
 set local role authenticated;
 select throws_ok(format($$ select public.cancel_remittance_run('tf-run-0001', %L, %s, 'IBAN refusé') $$,
                         (select v from t where k = 'r1'),
                         (select version from public.remittance_run where id = (select v from t where k = 'r1'))),
-  '23514', 'remittance run refused: attestation_required', 'a run whose file was downloaded: only with the attestation');
-select throws_ok(format($$ select public.cancel_remittance_run('tf-run-0002', %L, %s, 'IBAN refusé', 'not_executed') $$,
-                        (select v from t where k = 'r1'),
-                        (select version from public.remittance_run where id = (select v from t where k = 'r1'))),
-  '23514', 'remittance run refused: statement_not_imported',
-  '… and once a statement covering its execution date is imported (§9.7)');
+  '23514', 'remittance run refused: payout_in_downloaded_file',
+  'a run whose payout is in a downloaded file is not cancelled while the file may be executed (money#2)');
 reset role;
--- the statement of the execution day: Lilas's payout debited, Martin's not
-select pg_temp.statement('04', private.next_business_day(private.paris_today()), 724000 - 419840,
+-- the statement of the next business day: Lilas's payout debited, Martin's not (the bank refused it)
+select pg_temp.statement('04', pg_temp.n(), 724000 - 419840,
   jsonb_build_array(jsonb_build_object('e2e', (pg_temp.tr((select v from t where k = 'r2'))).end_to_end_id,
                                        'amount', 419840)));
+select pg_temp.as_user('01');
+set local role authenticated;
+select is(public.request_transfer_cancellation('tf-tc-0001', (pg_temp.tr((select v from t where k = 'r1'))).id,
+                                               'La banque a refusé le virement (nom du bénéficiaire)') ->> 'status',
+  'requested', 'the refused transfer: its cancellation asked (statements without its debit, pain001#1)');
+select throws_ok(format($$ select public.confirm_transfer_cancellation('tf-tc-0002', %L) $$,
+                        (pg_temp.tr((select v from t where k = 'r1'))).id),
+  '23514', 'transfer refused: same_person', 'confirmed by another person');
+reset role;
 select pg_temp.as_user('04');
 set local role authenticated;
+select is(public.confirm_transfer_cancellation('tf-tc-0003', (pg_temp.tr((select v from t where k = 'r1'))).id) ->> 'status',
+  'cancelled', 'confirmed: the transfer is cancelled');
 select is(public.cancel_remittance_run('tf-run-0003', (select v from t where k = 'r1'),
                                        (select version from public.remittance_run where id = (select v from t where k = 'r1')),
-                                       'La banque a refusé le virement (nom du bénéficiaire)', 'not_executed') ->> 'status',
-  'cancelled', 'with the attestation and a statement without its debit: cancelled');
-select throws_ok(format($$ select public.cancel_remittance_run('tf-run-0004', %L, %s, 'x', 'not_executed') $$,
-                        (select v from t where k = 'r2'),
-                        (select version from public.remittance_run where id = (select v from t where k = 'r2'))),
-  '23514', 'remittance run refused: debit_seen', 'never a run whose debit is on a statement');
+                                       'La banque a refusé le virement (nom du bénéficiaire)') ->> 'status',
+  'cancelled', 'then its run is cancelled');
+select throws_ok(format($$ select public.request_transfer_cancellation('tf-tc-0004', %L, 'x') $$,
+                        (pg_temp.tr((select v from t where k = 'r2'))).id),
+  '23514', 'transfer refused: debit_seen', 'never a transfer whose debit is on a statement');
 reset role;
 select results_eq($$ select (pg_temp.tr((select v from t where k = 'r1'))).status, (pg_temp.fl((select v from t where k = 'f5'))).status,
                             (select count(*)::int from public.commission_invoice
@@ -668,14 +737,21 @@ select results_eq($$ select (pg_temp.tr((select v from t where k = 'r1'))).statu
   'its transfer cancelled (the file stays: the others were executed), its invoice credited');
 select pg_temp.as_user('01');
 set local role authenticated;
-select throws_ok(format($$ select public.cancel_transfer_file('tf-cancel-0005', %L, %s, 'x', 'not_uploaded') $$,
+select throws_ok(format($$ select public.request_transfer_file_cancellation('tf-cancel-0011', %L, %s, 'x', 'not_uploaded') $$,
                         (select v from t where k = 'f5'), (pg_temp.fl((select v from t where k = 'f5'))).version),
   '23514', 'transfer file refused: debit_seen', 'a file with a debit on a statement is never cancelled (risk R4)');
+reset role;
+select pg_temp.as_user('04');
+set local role authenticated;
+select throws_ok(format($$ select public.transfer_file_download(%L, %L, true) $$, (select v from t where k = 'f5'),
+                        pg_temp.sha((select v from t where k = 'f5'))),
+  '23514', 'transfer file refused: holds_cancelled_transfer',
+  'a file holding a transfer cancelled since is never served again (money#2)');
 reset role;
 select results_eq($$ select x ->> 'in_flight_minor', x ->> 'debits_since_minor'
                      from (select private.transfer_cash_position('80000000-0000-0000-0000-0000000000cf') as x) y $$,
   $$ values ('12000'::text, '0'::text) $$,
-  'a transfer whose debit a statement shows is no longer in flight (only the sweep is)');
+  'a transfer whose debit a statement shows is no longer in flight, nor one cancelled on its evidence (only the sweep is)');
 
 -- Refunds in the file ------------------------------------------------------------------------------------------------
 select pg_temp.collect('09', 5000, private.paris_today() - 1, false);
@@ -769,10 +845,15 @@ select is((public.transfer_overview() #>> '{accounts,0,bank_account_id}'), '8000
   'the « Virements » overview lists the paying account');
 select is((public.transfer_file_detail((select v from t where k = 'f5')) ->> 'download_count'), '1',
   'and a file''s detail');
-select ok(private.can_read_transfer_file_object((pg_temp.fl((select v from t where k = 'f5'))).storage_path)
+select ok(not private.can_read_transfer_file_object((pg_temp.fl((select v from t where k = 'f1'))).storage_path)
           and not private.can_read_transfer_file_object('x/../' || (pg_temp.fl((select v from t where k = 'f5'))).storage_path)
           and not private.can_read_transfer_file_object('not a path'),
-  'the bucket policy: the file''s own path only');
+  'the bucket policy: never a superseded file (money#3), the file''s own path only');
+reset role;
+select pg_temp.as_user('09');
+set local role authenticated;
+select ok(not private.can_read_transfer_file_object((pg_temp.fl((select v from t where k = 'f5'))).storage_path),
+  'nor a live file to money staff who did not just download it through the command (security#2)');
 select throws_ok($$ insert into public.transfer_file_download (file_id, organization_id, n, downloaded_by,
                                                                 warning_acknowledged, sha256)
                    values ((select v from t where k = 'f5'), '00000000-0000-0000-0000-0000000000aa', 9,
@@ -834,9 +915,11 @@ select is((select string_agg(distinct r.code, ' ' order by r.code) from public.p
 select is((select r.subject_id from public.payment_check_result r
            where r.run_id = (select v from t where k = 'c1') and r.code = 'file_not_marked_sent'),
   (select v from t where k = 'f5'), 'the alert names the file');
-select ok((select count(*) from public.payment_check_result r
-           where r.run_id = (select v from t where k = 'c1') and r.code like 'remittance_%') >= 0,
-  'the runs'' checks still run first (private.run_remittance_runs_checks)');
+select is((select string_agg(r.code, ' ' order by r.code) from public.payment_check_result r
+           where r.run_id = (select v from t where k = 'c1') and r.code like 'remittance_%'
+             and r.subject_id = (select v from t where k = 'r2')),
+  'remittance_payout_not_executed',
+  'the runs'' checks still run first (private.run_remittance_runs_checks): Lilas''s run sent, its debit not booked');
 select pg_temp.as_user('01');
 set local role authenticated;
 insert into j select 'pc2', public.record_payee_name_mismatch('tf-vop-0020', (pg_temp.tr((select v from t where k = 'r2'))).id,

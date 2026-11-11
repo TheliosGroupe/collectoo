@@ -14,8 +14,13 @@
   it (one live file per account);
 * download: the hash check, every download recorded, the second one only with the warning
   acknowledged; the runs sent;
-* a payee whose name has no EPC character: the job fails the file (a data error, not retried) and
-  its transfer waits for the next file.
+* review T3 (pain001#4, concurrency-perf#1): a payee whose name has no EPC character is held out of
+  the file at generation (`payee_name_not_epc`), never failing it for the others;
+* a data error the writer still meets (the servicer's own name has no EPC character) fails the file
+  at once (not retried) and its transfers wait for the next file; a job retried to the end
+  (dead-letter hook, review tests-ui#10) fails it the same way;
+* review tests-ui#6: `xsd_validated` says whether the vendored XSD validated the file (false until
+  the XSDs are vendored: docs/reference/iso20022/README.md).
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from remittance_helpers import (
     staff,
 )
 
+from collectoo_worker.jobs import remittances
 from collectoo_worker.remittance import pain001
 from collectoo_worker.synth.ids import iban_fr
 
@@ -164,7 +170,9 @@ def test_a_file_of_two_payouts_written_by_the_job(tmp_path: Path) -> None:
     assert int(res["ctrl_sum_minor"]) == nets
     drain()
     f = _file_row(res["file_id"])
-    assert f["status"] == "generated" and f["xsd_validated"] is False
+    # True once the XSDs are vendored (the strict xfail of test_pain001 flips then; README)
+    assert f["status"] == "generated"
+    assert f["xsd_validated"] is pain001.xsd_available("pain.001.001.09")
     assert f["renderer_version"] == pain001.RENDERER_VERSION
     data = _bytes(f["storage_path"], tmp_path)
     assert hashlib.sha256(data).hexdigest() == f["file_sha256"] and len(data) == f["size_bytes"]
@@ -284,10 +292,9 @@ def test_download_checks_the_hash_and_warns_the_second_time(tmp_path: Path) -> N
     assert rows == [(1, False), (2, True)]
 
 
-def test_a_payee_name_without_epc_characters_fails_the_file_not_the_queue() -> None:
-    tenant = remittance_tenant()
+def _greek_holder(tenant: dict[str, Any]) -> None:
+    """A RIB holder in Greek letters (the guard keeps a confirmed account fixed: set aside here)."""
     with psycopg.connect(DB) as conn, conn.transaction():
-        # a RIB holder in Greek letters (the guard keeps a confirmed account fixed: set aside here)
         conn.execute(
             "alter table public.client_payout_account disable trigger client_payout_account_guard"
         )
@@ -299,19 +306,72 @@ def test_a_payee_name_without_epc_characters_fails_the_file_not_the_queue() -> N
             "alter table public.client_payout_account enable always trigger"
             " client_payout_account_guard"
         )
-    f1 = _file(tenant, 100_000)
+
+
+def _one_run(tenant: dict[str, Any], amount: int = 100_000) -> str:
+    f1 = _file(tenant, amount)
     statement(
         tenant,
         storage(),
-        [bank_credit(100_000, rf=f1.rf)],
+        [bank_credit(amount, rf=f1.rf)],
         f"G{uuid.uuid4().hex[:6].upper()}",
         recent_business_day(),
     )
     run = request_run(tenant)
     approve(tenant, run)
     drain()
+    return run
+
+
+def test_a_payee_name_without_epc_characters_is_held_out_not_failing_the_file() -> None:
+    """Review T3: the database holds such a transfer out at generation (its twin of epc_text), so
+    the writer never meets it and every other transfer of the account still goes."""
+    tenant = remittance_tenant()
+    _greek_holder(tenant)
+    other = add_client(tenant, "Lilas Finance")
+    blocked, run = _one_run(tenant), _one_run(other, 50_000)
+    res = _generate(tenant)
+    assert res["nb_of_txs"] == 1
+    assert [(h["reason"], h["transfer_id"]) for h in res["held"]] == [
+        ("payee_name_not_epc", str(run_row(blocked)["transfer_id"]))
+    ]
+    drain()
+    assert _file_row(res["file_id"])["status"] == "generated"
+    t = _transfers(blocked, run)
+    assert t[blocked]["status"] == "ordered" and t[run]["status"] == "in_file"
+
+
+def test_a_data_error_of_the_writer_fails_the_file_not_the_queue() -> None:
+    tenant = remittance_tenant()
+    with psycopg.connect(DB) as conn, conn.transaction():
+        # the servicer's legal name (InitgPty/Nm, Dbtr/Nm) with no EPC character: the file fails
+        conn.execute(
+            "update public.organization set legal_name = 'Ωμέγα' where id = %s",
+            (tenant["servicer"],),
+        )
+    run = _one_run(tenant)
     res = _generate(tenant)
     drain()
     f = _file_row(res["file_id"])
     assert f["status"] == "failed" and "no EPC character" in (f["error"] or "")
     assert _transfers(run)[run]["status"] == "ordered"
+
+
+def test_a_job_retried_to_the_end_fails_the_file_and_its_transfers_wait() -> None:
+    """Review tests-ui#10: the dead-letter hook (remittances.record_dead_job) fails a pending file
+    through private.transfer_file_failed; its transfers go back for the next file."""
+    tenant = remittance_tenant()
+    run = _one_run(tenant)
+    res = _generate(tenant)
+    token = _file_row(res["file_id"])["job_token"]
+    with psycopg.connect(DB) as conn, conn.transaction():
+        remittances.record_dead_job(
+            {"type": "transfer_file", "file_id": res["file_id"], "token": str(token)},
+            "the writer timed out five times",
+            conn,
+        )
+    f = _file_row(res["file_id"])
+    assert f["status"] == "failed" and f["error"] == "the writer timed out five times"
+    assert _transfers(run)[run]["status"] == "ordered"
+    drain()  # the file's own message finds it failed: nothing written
+    assert _file_row(res["file_id"])["storage_path"] is None
