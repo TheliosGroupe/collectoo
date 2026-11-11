@@ -8,10 +8,12 @@ import { money } from "@/lib/payments/statements";
 import { frenchDate } from "@/lib/remittance/runs";
 import {
   ATTESTATION_LABEL,
+  DOWNLOADED_FILE_NOTE,
   TRANSFER_KIND,
   TRANSFER_STATUS,
   type FileDetail,
   type FileItem,
+  cancellationAfterDownload,
   cancellationOf,
   cashLines,
   downloadWarning,
@@ -62,7 +64,9 @@ function TransferCancellation({ t, fileId }: { t: FileItem; fileId: string }) {
  * second time past the warning), « Marquer comme transmis », cancel it before download, report a payee name the bank
  * did not match. Its transfers a page at a time. Review fixes: a refused download comes back here with what happened
  * and « Régénérer » (T2, tests-ui#9); once downloaded, the file — or one transfer the bank refused — is cancelled in two
- * steps, asked by one person and confirmed by another, with the statement's evidence shown (T1).
+ * steps, asked by one person and confirmed by another, with the statement's evidence shown (T1). Review round 5
+ * (fail-closed): only while the database says the cancellation after download is on (`cancellation_after_download`,
+ * off until M2c-6b); otherwise the page says the file stays as it is and its transfers « en cours ».
  */
 export default async function TransferFilePage({
   params,
@@ -96,6 +100,8 @@ export default async function TransferFilePage({
   const downloadable = ["generated", "downloaded", "sent"].includes(f.status) && !stale;
   const href = `/backoffice/reversements/virements/${f.id}/telecharger`;
   const executed = f.status === "downloaded" || f.status === "sent";
+  // review round 5 (fail-closed): no « Demander / Confirmer l'annulation », no « Virement refusé par la banque » while off
+  const cancellable = cancellationAfterDownload(f);
   const regenerate = stale || refusal?.code === "file_stale" || refusal?.code === "file_blocked";
   const itemOf = new Map(f.items.map((t) => [t.transfer_id, t]));
   return (
@@ -192,13 +198,14 @@ export default async function TransferFilePage({
           <CancelFile fileId={f.id} version={f.version} idempotencyKey={randomUUID()} />
         ) : null}
       </div>
-      {executed ? (
+      {executed && cancellable ? (
         <TwoStepCancellation
           target={{ kind: "file", fileId: f.id, version: f.version, sent: f.status === "sent" }}
           cancellation={cancellationOf(f.cancellation)}
           idempotencyKey={randomUUID()}
         />
       ) : null}
+      {executed && !cancellable ? <InfoNote testId="file-no-cancellation">{DOWNLOADED_FILE_NOTE}</InfoNote> : null}
 
       <Section title="Téléchargements" testId="file-downloads">
         {f.downloads.length === 0 ? (
@@ -247,9 +254,9 @@ export default async function TransferFilePage({
                   {t.payee_check_open ? <Badge tone="error">Nom non concordant signalé</Badge> : null}
                 </span>
                 {t.kind === "payout" && t.status === "in_file" && !t.payee_check_open && f.download_count > 0 ? (
-                  <PayeeMismatch transferId={t.transfer_id} fileId={f.id} idempotencyKey={randomUUID()} />
+                  <PayeeMismatch transferId={t.transfer_id} fileId={f.id} cancellable={cancellable} idempotencyKey={randomUUID()} />
                 ) : null}
-                {executed && t.status === "in_file" && !t.debit_seen ? (
+                {executed && cancellable && t.status === "in_file" && !t.debit_seen ? (
                   <TransferCancellation t={t} fileId={f.id} />
                 ) : null}
               </li>

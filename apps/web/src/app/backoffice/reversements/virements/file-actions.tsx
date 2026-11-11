@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ActionForm } from "@/components/action-form";
 import { buttonClass, dangerButtonClass, inlineButtonClass, inputClass } from "@/components/ui";
-import { ATTESTATION_LABEL, type Cancellation, evidenceStatus, requestLine } from "@/lib/remittance/transfers";
+import { ATTESTATION_LABEL, type Cancellation, evidenceStatus, payeeMismatchFollowUp, requestLine } from "@/lib/remittance/transfers";
 import { ConfirmSheet, secondaryClass } from "../../encaissements/a-traiter/queue-actions";
 import { cancelFile, confirmCancellation, generateFile, recordPayeeMismatch, requestCancellation } from "./actions";
 
@@ -287,7 +287,21 @@ function RequestForm({
   );
 }
 
-export function PayeeMismatch({ transferId, fileId, idempotencyKey }: { transferId: string; fileId: string; idempotencyKey: string }) {
+/**
+ * « Nom non concordant »: the bank's verification of payee on a payout of a downloaded file. What follows for that
+ * transfer depends on whether its cancellation after download is on (review round 5, fail-closed: off until M2c-6b).
+ */
+export function PayeeMismatch({
+  transferId,
+  fileId,
+  cancellable,
+  idempotencyKey,
+}: {
+  transferId: string;
+  fileId: string;
+  cancellable: boolean;
+  idempotencyKey: string;
+}) {
   return (
     <ConfirmSheet label="Nom non concordant" title="La banque signale un nom de bénéficiaire non concordant" buttonClassName={secondaryClass} testId="payee-mismatch">
       {(close) => (
@@ -295,8 +309,7 @@ export function PayeeMismatch({ transferId, fileId, idempotencyKey }: { transfer
           <p className="text-sm">
             La vérification du bénéficiaire de la banque a répondu « nom différent » ou « nom proche » pour ce virement. Le
             compte de reversement du client est bloqué jusqu&apos;à ce qu&apos;une autre personne vérifie le titulaire (ou
-            qu&apos;un nouvel IBAN soit confirmé). Si la banque n&apos;a pas exécuté ce virement, demandez son annulation
-            (une autre personne la confirme, relevé à l&apos;appui), puis annulez le reversement.
+            qu&apos;un nouvel IBAN soit confirmé). {payeeMismatchFollowUp(cancellable)}
           </p>
           <ActionForm onDone={close} action={recordPayeeMismatch} submitLabel="Enregistrer le signalement" buttonClassName={buttonClass}>
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />

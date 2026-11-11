@@ -223,6 +223,7 @@ export type ErrorCode =
   | "refund_already_debited"
   | "refund_reissue_in_downloaded_file"
   | "transfer_file_holds_debited"
+  | "transfer_bank_booking_required"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -382,8 +383,10 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   run_not_draft: "Ce reversement n'est plus un brouillon.",
   run_approval_in_progress: "La validation de ce reversement est en cours : attendez son résultat.",
   run_not_cancellable: "Seul un reversement validé, dont le virement n'est pas encore débité, peut être annulé.",
+  // M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is cancelled until its debits are read from the
+  // statement (M2c-6b)
   run_already_sent:
-    "Le fichier de virements a déjà été téléchargé : l'annulation demande l'attestation que la banque n'a pas exécuté le virement.",
+    "Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit soit lu sur le relevé bancaire, et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
   run_none_selected: "Cochez au moins un reversement à valider.",
   run_busy:
     "Un traitement est en cours sur ce reversement ou pour ce cabinet (préparation, validation, imputation ou établissement du relevé) : réessayez dans un instant.",
@@ -412,7 +415,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   transfer_not_ready: "Le fichier est en cours d'écriture : réessayez dans quelques secondes.",
   transfer_not_downloaded: "Ce fichier n'a pas été téléchargé : il est simplement remplacé, sans attestation.",
   transfer_attestation_required:
-    "Le fichier a été téléchargé : cochez l'attestation (non déposé, ou rejeté par la banque) pour l'annuler.",
+    "Le fichier a été téléchargé : son annulation demande l'attestation qu'il n'a pas été déposé, ou que la banque l'a rejeté en entier.",
   transfer_debit_seen:
     "Un relevé montre déjà le débit d'un virement de ce fichier (la banque l'a exécuté) : rien n'est annulé (risque de double paiement).",
   transfer_statement_not_imported:
@@ -433,7 +436,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Une demande d'annulation est déjà en cours : une autre personne doit la confirmer. Rechargez la page.",
   transfer_cancel_not_requested: "Aucune demande d'annulation n'est en cours (déjà confirmée ou retirée) : rechargez la page.",
   transfer_cancellation_request_required:
-    "Ce fichier a été téléchargé : son annulation se demande (« Demander l'annulation »), puis une autre personne la confirme, relevé à l'appui.",
+    "Ce fichier a été téléchargé : il ne se remplace plus d'un clic. Gardez-le tel quel ; ses virements restent en cours jusqu'à ce que leurs débits soient lus sur le relevé bancaire. Vérifiez le relevé et voyez avec la banque.",
   transfer_not_in_downloaded_file:
     "Ce virement n'est plus dans un fichier téléchargé (déjà annulé, débité, ou son fichier remplacé) : rechargez la page.",
   transfer_not_live: "Ce fichier n'est plus en cours (remplacé, rejeté ou en échec) : rechargez la page.",
@@ -445,33 +448,36 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   transfer_file_blocked:
     "Des virements de ce fichier ne passent plus les contrôles depuis sa génération (IBAN changé, nom non concordant, montant plus couvert…) : le fichier n'a pas été servi et il est remplacé. Régénérez-le.",
   transfer_file_holds_cancelled:
-    "Un virement de ce fichier a été annulé depuis son téléchargement : le fichier n'est plus servi et ne doit pas être déposé (ni marqué comme transmis). Si la banque n'en a rien exécuté, demandez l'annulation du fichier.",
+    "Un virement de ce fichier a été annulé depuis son téléchargement : le fichier n'est plus servi et ne doit pas être déposé (ni marqué comme transmis). Gardez-le tel quel, vérifiez le relevé et voyez avec la banque.",
   // M2c-6a review, round 2 (D2, D3): one transfer is cancelled only from an executed file, on a batch debit only when it
   // singles it out
   transfer_file_not_executed:
-    "Les relevés ne montrent aucun débit ni retour de ce fichier : la banque n'en a rien exécuté. N'annulez pas un virement seul (le fichier, toujours valable, le paierait encore) : demandez l'annulation du fichier entier.",
+    "Les relevés ne montrent aucun débit ni retour de ce fichier : la banque n'en a rien exécuté. N'annulez pas un virement seul (le fichier, toujours valable, le paierait encore) : gardez le fichier tel quel et voyez avec la banque.",
   transfer_batch_ambiguous:
     "La banque a débité ce lot en une seule ligne, sans le détail des virements, et d'autres virements du lot (un seul ou plusieurs ensemble) font le même montant que celui-ci : rien ne prouve lequel n'a pas été payé. Demandez à la banque le détail du lot avant d'annuler quoi que ce soit.",
   // M2c-6a review, round 3 (E2): what left the account already is never cancelled (it would be paid again)
   run_transfer_already_debited:
-    "Un relevé montre déjà le débit du virement de ce reversement (sous sa référence, ou celle du virement qu'il remplace : un fichier annulé exécuté plus tard malgré tout) : ne l'annulez pas, ses encaissements seraient reversés une seconde fois. Prévenez le support pour rattacher ce débit.",
+    "Un relevé montre déjà le débit du virement de ce reversement (sous sa référence, celle du virement qu'il remplace, ou dans une ligne groupée de son lot : la banque l'a exécuté plus tard malgré tout) : ne l'annulez pas, ses encaissements seraient reversés une seconde fois. Prévenez le support pour rattacher ce débit.",
   refund_already_debited:
-    "Un relevé montre déjà le débit de ce remboursement (sous sa référence, ou celle du virement qu'il remplace : un fichier annulé exécuté plus tard malgré tout) : ne l'annulez pas, il serait remboursé une seconde fois. Prévenez le support pour rattacher ce débit.",
+    "Un relevé montre déjà le débit de ce remboursement (sous sa référence, celle du virement qu'il remplace, ou dans une ligne groupée de son lot : la banque l'a exécuté plus tard malgré tout) : ne l'annulez pas, il serait remboursé une seconde fois. Prévenez le support pour rattacher ce débit.",
   // M2c-6a review, round 4 (G2): the debit of a re-issued refund's old reference, while the re-issue is in a downloaded
   // file — that file would refund it again; (G4) a downloaded file holding a transfer that left the account already
   refund_reissue_in_downloaded_file:
-    "Ce débit porte l'ancienne référence d'un remboursement réémis, et le virement réémis est dans un fichier déjà téléchargé : rattaché maintenant, ce fichier le rembourserait une seconde fois. Faites d'abord annuler ce fichier (« Virements » : une demande, puis la confirmation d'une autre personne, relevé à l'appui), puis rattachez ce débit.",
+    "Ce débit porte une autre référence que le virement de ce remboursement, qui est dans un fichier déjà téléchargé : rattaché maintenant, ce fichier le rembourserait une seconde fois. Ne le rattachez pas à ce remboursement ; gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque (prévenez le support).",
   transfer_file_holds_debited:
-    "Un virement de ce fichier a déjà été débité sous la référence du virement qu'il remplace (un fichier annulé exécuté plus tard malgré tout) : le fichier n'est plus servi — déposé, il le paierait une seconde fois. Ne le déposez pas ; demandez à la banque de ne pas exécuter ce fichier s'il a été déposé, et prévenez le support.",
+    "Un virement de ce fichier a déjà quitté le compte (débité sous la référence du virement qu'il remplace, ou dans une ligne groupée de son lot) : le fichier n'est plus servi — déposé, il le paierait une seconde fois. Ne le déposez pas ; demandez à la banque de ne pas exécuter ce fichier s'il a été déposé, et prévenez le support.",
   run_payout_in_downloaded_file:
-    "Le virement de ce reversement est dans un fichier déjà téléchargé : faites d'abord annuler ce virement (une demande, puis la confirmation d'une autre personne, relevé à l'appui), puis annulez le reversement.",
+    "Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire, et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
   // M2c-6a review (T3): a refund the transfer file cannot carry
   refund_payee_name_not_epc:
     "Le nom du bénéficiaire doit contenir au moins une lettre latine ou un chiffre (le format SEPA n'accepte que l'alphabet latin de base).",
   refund_iban_not_sepa:
     "Cet IBAN est hors de la zone SEPA : le remboursement ne peut pas partir dans un fichier de virements. Choisissez « Je l'exécute moi-même ».",
   refund_in_downloaded_file:
-    "Le virement de ce remboursement est dans un fichier déjà téléchargé : faites d'abord annuler ce virement depuis le fichier (« Virements » : une demande, puis la confirmation d'une autre personne, relevé à l'appui), puis le remboursement.",
+    "Le virement de ce remboursement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire, et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
+  // M2c-6a review, round 5 (fail-closed): the cancellation of a downloaded file, or of one of its transfers, is off
+  transfer_bank_booking_required:
+    "Un fichier téléchargé ne peut pas encore être annulé dans Collectoo, ni un de ses virements : ils restent en cours jusqu'à ce que leurs débits soient lus sur le relevé bancaire. Gardez le fichier tel quel ; si la banque n'a pas exécuté un virement, vérifiez le relevé et voyez avec la banque.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 

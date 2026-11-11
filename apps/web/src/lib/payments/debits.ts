@@ -429,7 +429,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   file_not_marked_sent: {
     label: "Fichier téléchargé, non marqué comme transmis",
-    help: "Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis » — ou, s'il n'a pas été déposé, demandez son annulation (une autre personne la confirme, relevé à l'appui).",
+    help: "Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis ». Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : s'il ne doit pas partir, gardez-le tel quel, vérifiez le relevé et voyez avec la banque ; ses virements restent en cours jusqu'à ce que leurs débits soient lus sur le relevé.",
   },
   transfer_not_debited: {
     label: "Virements sans débit sur le relevé",
@@ -456,7 +456,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   // M2c-6a review, round 2 (D4): a cancelled file executed late after all
   transfer_already_debited: {
     label: "Virement déjà débité malgré son annulation",
-    help: "Un relevé montre le débit d'un virement alors que son fichier a été annulé (exécuté plus tard malgré tout), sous sa référence de bout en bout, celle du virement qu'il remplace ou dans une ligne groupée du fichier annulé — ou alors qu'il avait été annulé seul, la banque l'ayant d'abord laissé hors de la ligne groupée de son lot : le reversement ou le remboursement reste hors des fichiers pour ne pas payer deux fois — s'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter —, et aucune quote-part du cabinet ne part tant qu'une quote-part annulée débitée n'est pas revenue. Ne refaites aucun virement ; prévenez le support pour rattacher ce débit.",
+    help: "Un relevé montre le débit d'un virement alors que son fichier a été annulé (exécuté plus tard malgré tout), sous sa référence de bout en bout, celle du virement qu'il remplace ou dans une ligne groupée du fichier annulé — ou alors qu'il avait été annulé seul, la banque l'ayant d'abord laissé hors de la ligne groupée de son lot : le reversement ou le remboursement reste hors des fichiers pour ne pas payer deux fois — s'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter —, et aucune nouvelle quote-part du cabinet n'est mise dans un fichier tant qu'une quote-part annulée débitée n'est pas revenue (une quote-part déjà dans un fichier téléchargé n'est pas arrêtée : demandez à la banque de ne pas l'exécuter). Ne refaites aucun virement ; prévenez le support pour rattacher ce débit.",
   },
   payee_name_mismatch: {
     label: "Nom de bénéficiaire non concordant",

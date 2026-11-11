@@ -14,7 +14,11 @@
 --     listed and alerted, and none of who vouched for that IBAN clears it (security#3, tests-ui#7).
 -- No ledger entry is posted by any of it.
 begin;
-select plan(71);
+select plan(72);
+-- Review round 5 (fail-closed; ADR-0014 « M2c-6a review fixes », round 5): cancellation after download is off until
+-- M2c-6b (private.feature_switch). This file exercises the machinery behind it, so it turns it on in its own
+-- transaction (rolled back with it); 033 tests it off.
+update private.feature_switch set enabled = true where key = 'downloaded_file_cancellation';
 
 
 -- Fixtures (as 028: Martin (a1), Lilas (a2), Cyprès (a3), Omega (a4: a RIB holder in Greek letters), Tunis Trading
@@ -846,6 +850,12 @@ select results_eq($$ select pg_temp.try('15', pg_temp.clr('r4-clr-0002')), pg_te
   'S1 (round 4): who proposed that IBAN for the client in another currency does not clear the check (nor is offered to)');
 select is(pg_temp.try('04', pg_temp.retire('r4-pa-0007', pg_temp.acc('pa6'))), 'retired',
   'S1 (round 4): the EUR account carrying it is retired');
+-- review round 5 (E5++): who proposed or confirmed the flagged IBAN on an account retired since stays a party (« on any
+-- of its accounts »: 14 proposed pa6, 01 proposed pa2, both retired now)
+select results_eq($$ select pg_temp.try('14', pg_temp.clr('r5-clr-0001')), pg_temp.can_clear('14'),
+                            pg_temp.try('01', pg_temp.clr('r5-clr-0002')) $$,
+  $$ values ('payee check refused: same_person'::text, 'false'::text, 'payee check refused: same_person'::text) $$,
+  'S1 (round 5): who proposed the flagged IBAN on an account retired since (14 on pa6, 01 on pa2) still does not clear it');
 insert into t select 'c8', pg_temp.chk(null);
 select results_eq($$ select pg_temp.shown('USD', 'c8') like '%payee_name_mismatch% listed=1 alerted=1 card=true' $$,
   $$ values (true) $$,

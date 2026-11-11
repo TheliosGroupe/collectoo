@@ -22,6 +22,10 @@
 -- No ledger entry is posted by any of it (client money leaves 5120 at the bank's debit, M2c-6b).
 begin;
 select plan(116);
+-- Review round 5 (fail-closed; ADR-0014 « M2c-6a review fixes », round 5): cancellation after download is off until
+-- M2c-6b (private.feature_switch). This file exercises the machinery behind it, so it turns it on in its own
+-- transaction (rolled back with it); 033 tests it off.
+update private.feature_switch set enabled = true where key = 'downloaded_file_cancellation';
 
 -- Fixtures (as 027: Martin (a1), Lilas (a2), Cyprès (a3) of the servicer aa; Bleu (b1) of another servicer bb) ------
 insert into public.organization (id, kind, legal_name, siren) values

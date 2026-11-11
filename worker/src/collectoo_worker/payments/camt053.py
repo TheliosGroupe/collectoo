@@ -10,9 +10,10 @@ later date than the start ending it the day before; the days it shows whole (cov
 covers_to, none when it shows part of a day only) start the day after FrDtTm unless that is at
 00:00:00 and end the day before ToDtTm unless that is at 23:59:59 or later. Without FrToDt the
 period starts at the closing balance's date — the day after the opening balance's when that one is
-a PRCD or dated before the closing — and ends at the closing balance's date. CreDtTm is kept, with
-its offset (Paris time when it has none): a day counts as covered only by a statement the bank
-produced after it. Per
+a PRCD or dated before the closing, but never after the closing balance's date (then it is that day
+alone, shown whole on no day: review round 5) — and ends at the closing balance's date. CreDtTm is
+kept, with its offset (Paris time when it has none): a day counts as covered only by a statement
+the bank produced after it. Per
 <Ntry> booked (Sts BOOK; PDNG and INFO are counted and skipped): Amt, CdtDbtInd, RvslInd,
 BookgDt, ValDt, AcctSvcrRef, BkTxCd, AddtlNtryInf. Per <TxDtls>: Refs (AcctSvcrRef, EndToEndId
 with NOTPROVIDED read as none, TxId, MndtId), the amount (TxDtls/Amt, or AmtDtls/TxAmt/Amt in .02),
@@ -245,7 +246,7 @@ class _Reader:
             start = from_at.date()
             whole_from = start if from_at.time() == MIDNIGHT else start + timedelta(days=1)
         else:
-            start = whole_from = _start_without_period(opening[1], closing[1], opening_code)
+            start, whole_from = _start_without_period(opening[1], closing[1], opening_code)
         end: date | None
         whole_to: date | None
         if to_at is not None:
@@ -623,15 +624,25 @@ def _bound(text: str | None, where: str) -> datetime | None:
     return _iso_datetime(text, where).astimezone(PARIS)
 
 
-def _start_without_period(opening: date | None, closing: date | None, code: str) -> date | None:
-    """Without FrToDt (review round 4, G3): the closing balance's date — the day after the opening
-    balance's when that one is a PRCD (the previous day's closing) or is dated before the closing
-    (it may be the previous evening's): the earliest day the statement can be said to show whole."""
+def _start_without_period(
+    opening: date | None, closing: date | None, code: str
+) -> tuple[date | None, date | None]:
+    """Without FrToDt (review round 4, G3): the period's first day and its first whole day — the
+    closing balance's date, or the day after the opening balance's when that one is a PRCD (the
+    previous day's closing) or is dated before the closing (it may be the previous evening's): the
+    earliest day the statement can be said to show whole. Review round 5 (the G3 reader regression):
+    never after the closing balance's date — an opening balance whose next day is after it (a PRCD
+    dated on the closing day, an OPBD dated after it) gives the closing day alone, shown whole on no
+    day: how the bank dates that balance is not known (COMPLIANCE OQ-80 (f))."""
     if opening is None:
-        return closing
-    if code == "PRCD" or (closing is not None and opening < closing):
-        return opening + timedelta(days=1)
-    return closing if closing is not None else opening
+        return closing, closing
+    after = code == "PRCD" or (closing is not None and opening < closing)
+    start = opening + timedelta(days=1) if after else opening
+    if closing is None:
+        return start, start
+    if start > closing:
+        return closing, None
+    return start, start
 
 
 def _read(path: Path, ns: str, reader: _Reader) -> None:

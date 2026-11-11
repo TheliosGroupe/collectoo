@@ -407,7 +407,10 @@ describe("the transfers' checks (M2c-6a and its review: T3, T6)", () => {
     expect(checkLabel("transfer_file_pending").help).toContain("En préparation");
     // review T6 (concurrency-perf#2): checked every hour at the account's cut-off, not only the night after
     expect(checkLabel("file_not_marked_sent").help).toContain("toutes les heures");
-    expect(checkLabel("file_not_marked_sent").help).toContain("une autre personne la confirme");
+    // review round 5 (fail-closed): no cancellation after download yet — keep the file, check the statement, the bank
+    expect(checkLabel("file_not_marked_sent").help).toContain("ne peut pas encore être annulé");
+    expect(checkLabel("file_not_marked_sent").help).toContain("voyez avec la banque");
+    expect(checkLabel("file_not_marked_sent").help).not.toContain("demandez son annulation");
     // review T3: a name without EPC characters no longer fails the file (it is held out)
     expect(checkLabel("transfer_file_failed").help).not.toContain("nom de bénéficiaire");
     expect(checkLabel("transfer_not_filed").help).toContain("IBAN hors de la zone SEPA");
@@ -478,7 +481,8 @@ describe("the refund's execution (M2c-6a review, tests-ui#8)", () => {
       expect(debitErrorCode(message), message).toBe(code);
       expect(errorText(debitErrorCode(message))).not.toBe(errorText("unknown"));
     }
-    expect(errorText("refund_in_downloaded_file")).toContain("confirmation d'une autre personne");
+    expect(errorText("refund_in_downloaded_file")).toContain("pas encore disponible");
+    expect(errorText("refund_in_downloaded_file")).toContain("voyez avec la banque");
     expect(errorText("refund_iban_not_sepa")).toContain("Je l'exécute moi-même");
   });
 });
@@ -498,11 +502,16 @@ describe("M2c-6a review, round 4 (G1, G2): what left the account late is never p
   it("refuses linking an old reference's debit while the refund's re-issue is in a downloaded file", () => {
     const message = "debit link refused: posting_failed (23514: refund refused: reissue_in_downloaded_file)";
     expect(debitErrorCode(message)).toBe("refund_reissue_in_downloaded_file");
-    expect(errorText("refund_reissue_in_downloaded_file")).toContain("annuler ce fichier");
-    expect(errorText("refund_reissue_in_downloaded_file")).toContain("puis rattachez");
+    // review round 5 (fail-closed): the file cannot be cancelled first any more — the debit is not linked
+    expect(errorText("refund_reissue_in_downloaded_file")).toContain("Ne le rattachez pas");
+    expect(errorText("refund_reissue_in_downloaded_file")).toContain("voyez avec la banque");
+    expect(errorText("refund_reissue_in_downloaded_file")).not.toContain("annuler ce fichier");
     expect(debitErrorCode("refund refused: in_downloaded_file")).toBe("refund_in_downloaded_file");
   });
   it("alerts a transfer cancelled alone and debited late after all", () => {
     expect(checkLabel("transfer_already_debited").help).toContain("annulé seul");
+    // round 4's verifier (SW2): a sweep already in a downloaded file is not stopped by it — said so
+    expect(checkLabel("transfer_already_debited").help).toContain("aucune nouvelle quote-part");
+    expect(checkLabel("transfer_already_debited").help).toContain("n'est pas arrêtée");
   });
 });

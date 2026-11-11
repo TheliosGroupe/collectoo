@@ -17,7 +17,8 @@ import { reviewShot } from "./screenshot";
  * is owed, the payout ordered, the statement) and « Factures » (the invoice, accepted electronically) in the client
  * space and downloads them. M2c-6a: the payout goes in a pain.001 file (« Virements »), downloaded once by a tap (the
  * page refreshes itself), the second time only past the warning (a refusal comes back to the file's page with it open:
- * review tests-ui#9), marked as sent. Phone-first. Synthetic data.
+ * review tests-ui#9), marked as sent; once downloaded it cannot be cancelled in Collectoo, the page says so (review
+ * round 5, fail-closed until M2c-6b). Phone-first. Synthetic data.
  */
 const BANK_IBAN = ibanFr(434343);
 const FIXTURE = {
@@ -308,8 +309,20 @@ test("ops prepare, read and approve a client's remittance run", async ({ page, b
   await expect(page.getByTestId("file-downloads").getByTestId("file-download-row")).toHaveCount(1);
   // review tests-ui#6: « vérifié » once the ISO 20022 schemas are vendored, « non vérifié » until then
   await expect(page.getByTestId("file-integrity")).toContainText(/schéma XSD ISO 20022 (non )?vérifié/);
+  // review round 5 (fail-closed): a downloaded file cannot be cancelled in Collectoo until M2c-6b books its debits —
+  // no « Demander l'annulation », no « Virement refusé par la banque »; the page says its transfers stay « en cours »
+  const note = page.getByTestId("file-no-cancellation");
+  await expect(note).toContainText("Un fichier téléchargé ne peut pas encore être annulé dans Collectoo");
+  await expect(note).toContainText("« en cours »");
+  await expect(page.getByTestId("file-cancellation")).toHaveCount(0);
+  await expect(page.getByTestId("request-cancellation")).toHaveCount(0);
+  await expect(page.getByTestId("confirm-cancellation")).toHaveCount(0);
+  await expect(page.getByTestId("transfer-refused")).toHaveCount(0);
+  await reviewShot(page, testInfo, "m2c-virement-telecharge");
   await page.getByTestId("file-mark-sent").getByRole("button", { name: "Marquer comme transmis" }).click();
   await expect(page.getByTestId("file-status")).toHaveText("Transmis à la banque");
+  await expect(page.getByTestId("file-no-cancellation")).toBeVisible();
+  await expect(page.getByTestId("file-cancellation")).toHaveCount(0);
   await reviewShot(page, testInfo, "m2c-virement-fichier");
   // the run: its payout in the file, sent (still not « payé »: M2c-6b books it from the statement)
   await page.getByTestId("file-item").getByRole("link", { name: /^RV-/ }).click();

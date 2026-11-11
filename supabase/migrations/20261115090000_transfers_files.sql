@@ -116,6 +116,57 @@
 --     reading FrToDt in Paris time; validated at the import) and never across a break in the sections' balances;
 --   * G4 a downloaded or sent file holding a payout or refund that left the account already is not served again
 --     (`holds_debited_transfer`).
+--
+-- M2c-6a review, round 5: fail-closed (founder-level decision; ADR-0014 « M2c-6a review fixes », round 5; design §9.7;
+-- COMPLIANCE SEPA-01, OQ-80, OQ-81). Four rounds kept finding ways a transfer cancelled out of a file the bank already
+-- has could be paid late and then paid again (round 4 still: a refund's predecessor-file batch line linked while its
+-- re-issue sits in a downloaded file; a second sweep after a cancelled one debited late; a refused transfer executed
+-- late as a batch line after its run or refund was cancelled), and the statements alone can never prove a transfer will
+-- not be executed later. So once a file is downloaded nothing in it is cancelled, re-issued or re-queued until M2c-6b
+-- books its debits from the statements: rounds 1–4's cancellation machinery stays, tested (pgTAP 028–032 switch it on
+-- in their own transaction), behind private.feature_switch 'downloaded_file_cancellation', seeded off here;
+-- private.switch_on reads it (false for an unknown key); no public function writes it — M2c-6b's migration switches it
+-- on once the three paths above are closed. A payout the bank refuses, or a file never uploaded, stays « en cours »
+-- until then: slower money, never double money (OQ-81). Every path that could move a payout, refund or sweep of a
+-- downloaded or sent file out of in_file, change such a file's status or put its item back in a queue, and why it is
+-- closed while the switch is off (pgTAP 033):
+--   * public.cancel_transfer_file: a downloaded or sent file is refused `bank_booking_required` (in place of
+--     `cancellation_request_required`); a pending or generated one is superseded as before (nothing was handed out);
+--   * public.request_transfer_file_cancellation, confirm_transfer_file_cancellation, request_transfer_cancellation,
+--     confirm_transfer_cancellation: refused `bank_booking_required` right after the permission check and the
+--     idempotency replay, before any lock or state change — a request opened while the switch was on is never
+--     confirmed once it is off;
+--   * private.transfer_file_release (the only re-issue and re-queue): its callers other than the gated confirmation
+--     release only a pending or generated file — generate_transfer_file (the account's pending and generated files),
+--     private.transfer_file_failed (pending), transfer_file_download (its generated branch: stale or blocked),
+--     cancel_transfer_file and cancel_remittance_run (their file pending or generated), private.refund_transfer_follow
+--     (pending or generated) —, and the two guards below refuse it for a downloaded file whoever calls it;
+--   * private.transfer_file_guard: downloaded or sent → superseded or rejected refused while the switch is off, whoever
+--     writes it; private.bank_transfer_guard: in_file → ordered or cancelled refused for a transfer of a file downloaded
+--     at least once (in_file → booked stays: a refund's own debit, M2b's link);
+--   * public.cancel_remittance_run: its payout in_file in a downloaded or sent file is refused
+--     `payout_in_downloaded_file` (that transfer can no longer be cancelled first); a payout ordered, or cancelled
+--     before download, as before. private.remittance_run_guard lets a sent run go back to approved only once its
+--     transfer is ordered again — unreachable for a downloaded file's payout;
+--   * every refund_request status write — public.cancel_refund, a payment's full return cancelling its pending refund
+--     and the M2b links executing or bouncing it (private.debit_post_rows, from link_debit and the process_debits
+--     job) — goes through
+--     private.refund_transfer_follow (trigger, enabled always): `cancelled` while its transfer is in a downloaded or
+--     sent file is refused (`in_downloaded_file`); `executed` books the transfer (its debit read from the statement, not
+--     a cancellation), refused by another end-to-end id (`reissue_in_downloaded_file`; with the switch off nothing is
+--     re-issued, so no other id belongs to a refund); `bounced` only from booked;
+--   * public.record_payee_name_mismatch, clear_payee_name_mismatch: write payee_name_check only; they hold or free
+--     transfers not filed yet (private.transfer_hold_reason at generation and at a generated file's first download), a
+--     downloaded file's transfers stay in_file;
+--   * public.generate_transfer_file files only ordered transfers (a downloaded file's are in_file; its sweep counts in
+--     the sweeps in a file); transfer_file_download changes no downloaded or sent file's status (served, or refused
+--     `holds_cancelled_transfer` / `holds_debited_transfer`); mark_transfer_file_sent moves downloaded → sent only;
+--   * private.run_transfer_checks, transfer_checks_due, queue_remittance_schedule and the evidence helpers only read
+--     (and alert); the worker's jobs write transfers only through these functions (private.transfer_file_begin, _record,
+--     _failed: a pending file; the approval: ordered payouts; the debit links: the refund trigger above; the bank-line
+--     bookings: an ordered top-up only), and public.cancel_top_up cancels only an ordered top-up (never in a file).
+-- The pages read the switch (`cancellation_after_download` in transfer_file_detail and transfer_overview; no
+-- cancellation card while it is off) and the refusal hints that sent ops to a cancellation say what to do now.
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -429,6 +480,37 @@ insert into private.sepa_scheme_country (code, name, area, note) values
 comment on table private.sepa_scheme_country is
   'The SEPA schemes'' geographical scope by IBAN country code (EPC409-09 v8.0, 24/12/2025; review T3).';
 
+-- Review round 5 (fail-closed): switches that keep a built path off in production until its prerequisites ship. Data,
+-- seeded here (production needs the row); no public function writes it — the migration that ships the prerequisites
+-- switches it on. 'downloaded_file_cancellation': cancelling a downloaded or sent file, or one of its transfers
+-- (rounds 1–4's two-step cancellation, its re-issue and re-queue), off until M2c-6b books the debits from the
+-- statements (ADR-0014 « M2c-6a review fixes », round 5).
+create table private.feature_switch (
+  key text primary key check (key ~ '^[a-z][a-z0-9_]{0,62}$'),
+  enabled boolean not null default false,
+  note text not null check (length(btrim(note)) between 1 and 500)
+);
+insert into private.feature_switch (key, enabled, note) values
+  ('downloaded_file_cancellation', false,
+   'Cancellation after download: off until M2c-6b books the debits from the statements (ADR-0014 M2c-6a review fixes, round 5).');
+comment on table private.feature_switch is
+  'Switches keeping a built path off until its prerequisites ship (review round 5: cancellation after download).';
+alter table private.feature_switch enable row level security;
+revoke all on private.feature_switch from public, anon, authenticated;
+create trigger feature_switch_change_log after insert or update or delete on private.feature_switch
+  for each row execute function private.log_change('key');
+
+-- Whether a switch is on (false for a key that is not there).
+create or replace function private.switch_on(p_key text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select coalesce((select s.enabled from private.feature_switch s where s.key = p_key), false);
+$$;
+
 ------------------------------------------------------------------------------------------
 -- Guards
 ------------------------------------------------------------------------------------------
@@ -442,7 +524,8 @@ create trigger transfer_file_download_append_only before update or delete or tru
 alter table public.transfer_file_download enable always trigger transfer_file_download_append_only;
 
 -- What was generated never changes; only the job's record (pending → generated or failed), the download and sent
--- stamps, and the close move forward (§6.2: « transfer_file: only the download and sent stamps may change »).
+-- stamps, and the close move forward (§6.2: « transfer_file: only the download and sent stamps may change »). Review
+-- round 5 (fail-closed): a downloaded or sent file is not closed while cancellation after download is off.
 create or replace function private.transfer_file_guard()
 returns trigger
 language plpgsql
@@ -489,6 +572,13 @@ begin
      or (new.status = old.status and old.status in ('superseded', 'rejected', 'failed')) then
     raise exception 'transfer file %: what was generated never changes, its status only moves forward', old.number
       using errcode = 'check_violation';
+  end if;
+  -- review round 5 (fail-closed): a file handed out to ops is not closed while cancellation after download is off,
+  -- whoever writes it (public.confirm_transfer_file_cancellation refuses first: `bank_booking_required`)
+  if old.status in ('downloaded', 'sent') and new.status in ('superseded', 'rejected')
+     and not private.switch_on('downloaded_file_cancellation') then
+    raise exception 'transfer file %: no cancellation of a downloaded file: cancellation after download is switched off until M2c-6b',
+      old.number using errcode = 'check_violation';
   end if;
   return new;
 end;
@@ -617,7 +707,8 @@ alter table public.refund_request enable always trigger refund_request_mode_guar
 -- that return; a sweep goes from an active client_funds account to the servicer's active own account in the same
 -- currency; a refund's transfer is its refund's (same end-to-end id, account and amount); a re-issue (review round 3,
 -- E1) orders again what the cancelled payout or refund of a file it replaces ordered, under a new end-to-end id, and
--- keeps that link. Same settings.
+-- keeps that link; review round 5 (fail-closed): a transfer of a file downloaded at least once leaves it only booked
+-- while cancellation after download is off (private.switch_on). Same settings.
 create or replace function private.bank_transfer_guard()
 returns trigger
 language plpgsql
@@ -698,6 +789,14 @@ begin
              and f.status in ('superseded', 'rejected', 'failed'))) then
     raise exception 'bank transfer %: what was ordered never changes, and its status only moves forward', old.id
       using errcode = 'check_violation';
+  end if;
+  -- review round 5 (fail-closed): a transfer of a file downloaded at least once does not leave it — cancelled, or back
+  -- to ordered — while cancellation after download is off, whoever writes it (booked by its debit, it does)
+  if old.status = 'in_file' and new.status in ('ordered', 'cancelled')
+     and exists (select 1 from public.transfer_file f where f.id = old.transfer_file_id and f.download_count > 0)
+     and not private.switch_on('downloaded_file_cancellation') then
+    raise exception 'bank transfer %: it stays in its downloaded file: cancellation after download is switched off until M2c-6b',
+      old.id using errcode = 'check_violation';
   end if;
   return new;
 end;
@@ -1985,7 +2084,7 @@ begin
                 where i.file_id = f.id and t.kind in ('payout', 'refund') and t.status = 'in_file'
                   and t.transfer_file_id = f.id and private.transfer_debited_before(t.id)) then
     raise exception 'transfer file refused: holds_debited_transfer' using errcode = 'check_violation',
-      hint = 'Un virement de ce fichier a déjà été débité sous la référence du virement qu''il remplace : ne déposez pas ce fichier.';
+      hint = 'Un virement de ce fichier a déjà quitté le compte (débité sous la référence du virement qu''il remplace, ou dans une ligne groupée de son lot) : ne déposez pas ce fichier ; s''il l''a été, demandez à la banque de ne pas l''exécuter.';
   end if;
   if f.download_count > 0 and not coalesce(p_acknowledged, false) then
     select coalesce(u.display_name, u.email, 'un utilisateur') into v_first from public.app_user u
@@ -2052,7 +2151,9 @@ begin
              where i.file_id = f.id and t.status = 'cancelled')
      and not private.transfer_file_executed(f.id) then
     raise exception 'transfer file refused: holds_cancelled_transfer' using errcode = 'check_violation',
-      hint = 'Un virement de ce fichier a été annulé et la banque n''en a exécuté aucun : ne le déposez pas ; demandez l''annulation du fichier.';
+      hint = case when private.switch_on('downloaded_file_cancellation')
+                  then 'Un virement de ce fichier a été annulé et la banque n''en a exécuté aucun : ne le déposez pas ; demandez l''annulation du fichier.'
+                  else 'Un virement de ce fichier a été annulé et la banque n''en a exécuté aucun : ne le déposez pas. Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
   end if;
   update public.transfer_file set status = 'sent', sent_marked_by = auth.uid(), sent_marked_at = clock_timestamp(),
     version = version + 1
@@ -2068,7 +2169,8 @@ $$;
 
 -- « Annuler le fichier » before download (§9.7, §11): the file is superseded, its transfers back to ordered for the next
 -- file (its sweep recomputed), its runs back to approved. After download (review T1: money#1, security#1) only by
--- request and confirmation with the statements' evidence (below): refused here (`cancellation_request_required`).
+-- request and confirmation with the statements' evidence (below): refused here (`cancellation_request_required`) —
+-- review round 5 (fail-closed): `bank_booking_required` while cancellation after download is off.
 -- Admins and ops managers at aal2.
 create or replace function public.cancel_transfer_file(p_idempotency_key text, p_file_id uuid,
                                                        p_expected_version integer, p_reason text,
@@ -2104,7 +2206,11 @@ begin
   if p_expected_version is distinct from f.version then
     raise exception 'transfer file refused: version_changed' using errcode = 'check_violation';
   end if;
-  if f.status in ('downloaded', 'sent') then
+  -- review round 5 (fail-closed): a file handed out is not cancelled while cancellation after download is off
+  if f.status in ('downloaded', 'sent') and not private.switch_on('downloaded_file_cancellation') then
+    raise exception 'transfer file refused: bank_booking_required' using errcode = 'check_violation',
+      hint = 'Fichier téléchargé : son annulation n''est pas encore disponible dans Collectoo. Gardez le fichier tel quel ; ses virements restent en cours jusqu''à ce que leurs débits soient lus sur le relevé. Vérifiez le relevé et voyez avec la banque.';
+  elsif f.status in ('downloaded', 'sent') then
     raise exception 'transfer file refused: cancellation_request_required' using errcode = 'check_violation',
       hint = 'Fichier téléchargé : demandez son annulation, relevé à l''appui ; une autre personne la confirme.';
   elsif f.status not in ('pending', 'generated') then
@@ -2125,6 +2231,7 @@ $$;
 -- business day from its execution date to the account's next business day imported, no debit of it (by our ids or its
 -- PmtInfIds) unless returned (private.transfer_cancel_evidence: `no_statement_evidence`, `debit_seen`). One open
 -- request per file version (`already_requested`); a different person confirms it. Admins and ops managers at aal2.
+-- Review round 5 (fail-closed): refused `bank_booking_required` while cancellation after download is off (M2c-6b).
 create or replace function public.request_transfer_file_cancellation(p_idempotency_key text, p_file_id uuid,
                                                                      p_expected_version integer, p_reason text,
                                                                      p_attestation text)
@@ -2150,6 +2257,11 @@ begin
   v_result := private.command_replay('request_transfer_file_cancellation', p_idempotency_key, v_request);
   if v_result is not null then
     return v_result;
+  end if;
+  -- review round 5 (fail-closed): off until M2c-6b books the debits from the statements
+  if not private.switch_on('downloaded_file_cancellation') then
+    raise exception 'transfer file refused: bank_booking_required' using errcode = 'check_violation',
+      hint = 'L''annulation d''un fichier téléchargé n''est pas encore disponible dans Collectoo. Gardez le fichier tel quel ; ses virements restent en cours jusqu''à ce que leurs débits soient lus sur le relevé. Vérifiez le relevé et voyez avec la banque.';
   end if;
   if v_reason = '' or length(v_reason) > 2000 then
     raise exception 'a reason is required' using errcode = 'check_violation';
@@ -2193,7 +2305,8 @@ $$;
 -- of the file at the version they saw, the statements showing it still. The file is superseded (`not_uploaded`) or
 -- rejected (`rejected_by_bank`): its payouts and refunds are re-issued for the next file under fresh end-to-end ids
 -- (review round 3, E1: private.transfer_file_release) — a transfer the bank debited then returned is cancelled instead —
--- its sweep is recomputed, its runs approved again.
+-- its sweep is recomputed, its runs approved again. Review round 5 (fail-closed): refused `bank_booking_required` while
+-- cancellation after download is off, a request opened while it was on included.
 create or replace function public.confirm_transfer_file_cancellation(p_idempotency_key text, p_file_id uuid,
                                                                      p_expected_version integer)
 returns jsonb
@@ -2219,6 +2332,11 @@ begin
   v_result := private.command_replay('confirm_transfer_file_cancellation', p_idempotency_key, v_request);
   if v_result is not null then
     return v_result;
+  end if;
+  -- review round 5 (fail-closed): off until M2c-6b — a request opened while it was on is not confirmed
+  if not private.switch_on('downloaded_file_cancellation') then
+    raise exception 'transfer file refused: bank_booking_required' using errcode = 'check_violation',
+      hint = 'L''annulation d''un fichier téléchargé n''est pas encore disponible dans Collectoo : la demande en cours ne peut pas être confirmée. Gardez le fichier tel quel ; ses virements restent en cours jusqu''à ce que leurs débits soient lus sur le relevé. Vérifiez le relevé et voyez avec la banque.';
   end if;
   perform private.transfer_file_lock_runs(f.id);
   perform private.remittance_command_locks(f.organization_id, true);
@@ -2267,6 +2385,7 @@ $$;
 -- cancelled whole (`file_not_executed`: cancelling one transfer would leave the rest live, the cancelled one still in its
 -- bytes). One open request per transfer and file version; another person confirms. A payout: its run is then cancelled
 -- by an admin (public.cancel_remittance_run); a refund: by public.cancel_refund; a sweep is recomputed.
+-- Review round 5 (fail-closed): refused `bank_booking_required` while cancellation after download is off (M2c-6b).
 create or replace function public.request_transfer_cancellation(p_idempotency_key text, p_transfer_id uuid,
                                                                 p_reason text)
 returns jsonb
@@ -2291,6 +2410,11 @@ begin
   v_result := private.command_replay('request_transfer_cancellation', p_idempotency_key, v_request);
   if v_result is not null then
     return v_result;
+  end if;
+  -- review round 5 (fail-closed): off until M2c-6b books the debits from the statements
+  if not private.switch_on('downloaded_file_cancellation') then
+    raise exception 'transfer refused: bank_booking_required' using errcode = 'check_violation',
+      hint = 'L''annulation d''un virement d''un fichier téléchargé n''est pas encore disponible dans Collectoo : il reste en cours jusqu''à ce que son débit, ou son rejet, soit lu sur le relevé. Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.';
   end if;
   if v_reason = '' or length(v_reason) > 2000 then
     raise exception 'a reason is required' using errcode = 'check_violation';
@@ -2327,7 +2451,8 @@ $$;
 -- re-download is refused); nothing else moves — the run, the refund are cancelled by their own commands next. It is
 -- never filed again (review round 3, E1: its id belongs to a cancelled transfer only; a new run or refund gets a new
 -- one), and its run or refund is no longer cancelled once a debit of it shows after all (E2: `transfer_already_debited`,
--- `already_debited`).
+-- `already_debited`). Review round 5 (fail-closed): refused `bank_booking_required` while cancellation after download
+-- is off, a request opened while it was on included.
 create or replace function public.confirm_transfer_cancellation(p_idempotency_key text, p_transfer_id uuid)
 returns jsonb
 language plpgsql
@@ -2350,6 +2475,11 @@ begin
   v_result := private.command_replay('confirm_transfer_cancellation', p_idempotency_key, v_request);
   if v_result is not null then
     return v_result;
+  end if;
+  -- review round 5 (fail-closed): off until M2c-6b — a request opened while it was on is not confirmed
+  if not private.switch_on('downloaded_file_cancellation') then
+    raise exception 'transfer refused: bank_booking_required' using errcode = 'check_violation',
+      hint = 'L''annulation d''un virement d''un fichier téléchargé n''est pas encore disponible dans Collectoo : la demande en cours ne peut pas être confirmée, et le virement reste en cours jusqu''à ce que son débit, ou son rejet, soit lu sur le relevé. Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.';
   end if;
   perform 1 from public.remittance_run r where r.id = t.run_id for update;
   perform private.remittance_command_locks(t.organization_id, true);
@@ -2686,7 +2816,10 @@ $$;
 -- this one re-issues: its cancelled file executed late) while its transfer sits in a downloaded or sent file — that file,
 -- uploaded, would refund it again; booked, the transfer would leave it un-cancellable (`reissue_in_downloaded_file`:
 -- cancel that file on the statements' evidence first, then link). A batch line (no end-to-end id) and its own id link
--- as before. M2c-6b's booking of a payout by an old RMT id follows the same rule (OQ-80 (n)).
+-- as before. M2c-6b's booking of a payout by an old RMT id follows the same rule (OQ-80 (n)). Review round 5
+-- (fail-closed): with cancellation after download off, nothing is re-issued and `cancelled` stays refused while a
+-- downloaded file holds the transfer; the hints say what to do now. Switching it on needs G2's batch-line rule first
+-- (ADR-0014 round 5: only the transfer's own end-to-end id, or a batch line of its PmtInf in its current file).
 create or replace function private.refund_transfer_follow()
 returns trigger
 language plpgsql
@@ -2714,11 +2847,15 @@ begin
               and x.end_to_end_id is not null and x.end_to_end_id <> t.end_to_end_id) then
       raise exception 'refund refused: reissue_in_downloaded_file' using errcode = 'check_violation',
         detail = jsonb_build_object('file', f.number, 'transfer_id', t.id)::text,
-        hint = 'Le virement réémis de ce remboursement est dans un fichier déjà téléchargé : faites d''abord annuler ce fichier, relevé à l''appui, puis rattachez ce débit.';
+        hint = case when private.switch_on('downloaded_file_cancellation')
+                    then 'Le virement réémis de ce remboursement est dans un fichier déjà téléchargé : faites d''abord annuler ce fichier, relevé à l''appui, puis rattachez ce débit.'
+                    else 'Ce débit porte une autre référence que le virement de ce remboursement, qui est dans un fichier déjà téléchargé : ne le rattachez pas (ce fichier le rembourserait une seconde fois). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
     elsif new.status = 'cancelled' then
       raise exception 'refund refused: in_downloaded_file' using errcode = 'check_violation',
         detail = jsonb_build_object('file', f.number, 'transfer_id', t.id)::text,
-        hint = 'Le fichier a été téléchargé : faites d''abord annuler son virement, relevé à l''appui.';
+        hint = case when private.switch_on('downloaded_file_cancellation')
+                    then 'Le fichier a été téléchargé : faites d''abord annuler son virement, relevé à l''appui.'
+                    else 'Le virement de ce remboursement est dans un fichier déjà téléchargé : il reste en cours jusqu''à ce que son débit, ou son rejet, soit lu sur le relevé (l''annulation après téléchargement n''est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
     end if;
   end if;
   if new.status = 'executed' then
@@ -2728,7 +2865,7 @@ begin
     if private.transfer_debited_before(t.id) then
       raise exception 'refund refused: already_debited' using errcode = 'check_violation',
         detail = jsonb_build_object('transfer_id', t.id, 'end_to_end_id', t.end_to_end_id)::text,
-        hint = 'Un relevé montre déjà le débit de ce remboursement (sous sa référence ou celle du virement qu''il remplace) : ne l''annulez pas ; le débit sera rattaché.';
+        hint = 'Un relevé montre déjà le débit de ce remboursement (sous sa référence, celle du virement qu''il remplace, ou dans une ligne groupée de son lot) : ne l''annulez pas ; le débit sera rattaché.';
     end if;
     update public.bank_transfer set status = 'cancelled', cancelled_at = clock_timestamp(), cancelled_by = auth.uid(),
       cancel_reason = left('Remboursement annulé : ' || coalesce(new.cancel_reason, ''), 2000)
@@ -2750,7 +2887,9 @@ alter table public.refund_request enable always trigger refund_request_transfer;
 -- that transfer to be cancelled on the statements' evidence and by four eyes (public.request_transfer_cancellation
 -- or the file's; review T1, money#2: a run cancellation removes nothing from a downloaded file —
 -- `payout_in_downloaded_file` until then). Review round 3 (E2, N2): never once its payout, or a transfer it re-issues,
--- has left the account (`transfer_already_debited`, private.transfer_debited_before). Everything after the payout is
+-- has left the account (`transfer_already_debited`, private.transfer_debited_before). Review round 5 (fail-closed):
+-- while cancellation after download is off that transfer cannot be cancelled, so a run whose payout is in a downloaded
+-- or sent file stays (`payout_in_downloaded_file`) until M2c-6b books its debit. Everything after the payout is
 -- M2c-5b's, unchanged. Same settings.
 ------------------------------------------------------------------------------------------
 
@@ -2809,7 +2948,9 @@ begin
     else
       raise exception 'remittance run refused: payout_in_downloaded_file' using errcode = 'check_violation',
         detail = jsonb_build_object('file_id', f.id, 'file', f.number, 'transfer_id', t.id)::text,
-        hint = 'Le fichier a été téléchargé : faites d''abord annuler le virement, relevé à l''appui.';
+        hint = case when private.switch_on('downloaded_file_cancellation')
+                    then 'Le fichier a été téléchargé : faites d''abord annuler le virement, relevé à l''appui.'
+                    else 'Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu''à ce que son débit, ou son rejet, soit lu sur le relevé (l''annulation après téléchargement n''est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
     end if;
   end if;
   if t.id is not null and t.status not in ('ordered', 'cancelled') then
@@ -2820,7 +2961,7 @@ begin
   if t.id is not null and private.transfer_debited_before(t.id) then
     raise exception 'remittance run refused: transfer_already_debited' using errcode = 'check_violation',
       detail = jsonb_build_object('transfer_id', t.id, 'end_to_end_id', t.end_to_end_id)::text,
-      hint = 'Un relevé montre déjà le débit de ce reversement (sous sa référence ou celle du virement qu''il remplace) : ne l''annulez pas ; le débit sera rattaché.';
+      hint = 'Un relevé montre déjà le débit de ce reversement (sous sa référence, celle du virement qu''il remplace, ou dans une ligne groupée de son lot) : ne l''annulez pas ; le débit sera rattaché.';
   end if;
   update public.bank_transfer set status = 'cancelled', cancelled_by = auth.uid(), cancelled_at = clock_timestamp(),
     cancel_reason = left('Reversement ' || r.number || ' annulé : ' || v_reason, 2000)
@@ -3043,8 +3184,10 @@ as $$
     'stale', case when f.status = 'generated'
                        and f.first_execution_date < private.transfer_earliest_execution_date(f.debtor_bank_account_id)
                   then 'execution_date_passed' end,
-    -- review T1: the open cancellation request of a downloaded or sent file (its evidence on the file's page)
-    'cancellation', private.transfer_cancellation_card(f.id, null, false));
+    -- review T1: the open cancellation request of a downloaded or sent file (its evidence on the file's page); review
+    -- round 5 (fail-closed): none while cancellation after download is off (nothing to ask nor confirm)
+    'cancellation', case when private.switch_on('downloaded_file_cancellation')
+                         then private.transfer_cancellation_card(f.id, null, false) end);
 $$;
 
 -- One transfer as the pages show it (the payee's IBAN masked to its last four characters).
@@ -3078,7 +3221,8 @@ as $$
 $$;
 
 -- « Virements »: per paying account (active, client_funds), the transfers to file (with why one would be held today),
--- the sweep a file would carry, the cash check, the files; the open payee checks.
+-- the sweep a file would carry, the cash check, the files; the open payee checks; whether cancellation after download
+-- is on (review round 5: `cancellation_after_download`, off until M2c-6b).
 create or replace function public.transfer_overview()
 returns jsonb
 language plpgsql
@@ -3165,12 +3309,16 @@ begin
   -- replacement with another IBAN confirmed), not when the same IBAN is confirmed again
   where c.organization_id = v_org and c.cleared_at is null and private.payee_check_open(c.payout_account_id);
   return jsonb_build_object('today', v_today, 'accounts', v_accounts, 'own_account', v_own, 'payee_checks', v_checks,
-                            'can_admin', private.has_role(v_org, array['admin']));
+                            'can_admin', private.has_role(v_org, array['admin']),
+                            -- review round 5 (fail-closed): whether a downloaded file can be cancelled (off until M2c-6b)
+                            'cancellation_after_download', private.switch_on('downloaded_file_cancellation'));
 end;
 $$;
 
 -- A file: its header, the cash check and what was held at generation, its downloads, and its transfers a page at a
--- time (seq > p_after_seq).
+-- time (seq > p_after_seq). Review round 5 (fail-closed): `cancellation_after_download` says whether a downloaded file,
+-- or one of its transfers, can be cancelled; while it is off no cancellation card is read (no request to confirm, no
+-- evidence computed) and the page shows what ops do instead.
 create or replace function public.transfer_file_detail(p_file_id uuid, p_after_seq integer default 0,
                                                        p_limit integer default 100)
 returns jsonb
@@ -3185,13 +3333,14 @@ declare
   v_items jsonb;
   v_last integer;
   v_executed boolean;
+  v_cancellable boolean := private.switch_on('downloaded_file_cancellation');
 begin
   select * into f from public.transfer_file where id = p_file_id;
   if not found or not (f.organization_id = any (private.money_staff_org_ids())) then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
   end if;
   -- review round 2 (D2): whether the bank executed something of the file, once for the page's items (not per item)
-  if f.status in ('downloaded', 'sent') then
+  if f.status in ('downloaded', 'sent') and v_cancellable then
     v_executed := private.transfer_file_executed(f.id);
   end if;
   -- a batch debit tested once per PmtInf of the page (review pain001#3), each item's own debit by key; a downloaded
@@ -3208,8 +3357,10 @@ begin
                                                   'debit_seen', private.transfer_own_debit_seen(t.debtor_bank_account_id,
                                                                                                 t.end_to_end_id)
                                                                 or (t.status <> 'cancelled' and b.seen),
-                                                  'cancellation', private.transfer_cancellation_card(f.id, i.transfer_id, true,
-                                                                                                     v_executed))
+                                                  'cancellation',
+                                                  case when v_cancellable
+                                                       then private.transfer_cancellation_card(f.id, i.transfer_id, true,
+                                                                                               v_executed) end)
                             order by i.seq), '[]'), max(i.seq)
   into v_items, v_last
   from page i
@@ -3217,7 +3368,8 @@ begin
                       where t.id = i.transfer_id offset 0) t
   join batch b on b.pmt_inf_id = i.pmt_inf_id;
   return private.transfer_file_card(f) || jsonb_build_object(
-    'cancellation', private.transfer_cancellation_card(f.id, null, true),
+    'cancellation', case when v_cancellable then private.transfer_cancellation_card(f.id, null, true) end,
+    'cancellation_after_download', v_cancellable,
     'file_executed', v_executed,
     'bank_account', (select jsonb_build_object('id', b.id, 'label', b.label, 'iban_last4', right(b.iban, 4))
                      from public.bank_account b where b.id = f.debtor_bank_account_id),
@@ -3596,7 +3748,8 @@ revoke execute on function private.transfer_file_guard(), private.payee_name_che
   private.transfer_file_failed(uuid, uuid, text), private.transfer_file_card(public.transfer_file),
   private.transfer_card(uuid, text), private.run_transfer_checks(uuid, uuid, date),
   private.run_remittance_checks(uuid, uuid, date), private.bank_transfer_guard(), private.remittance_run_guard(),
-  private.remittance_payout_blockers(uuid, char, date), private.can_read_transfer_file_object(text)
+  private.remittance_payout_blockers(uuid, char, date), private.can_read_transfer_file_object(text),
+  private.switch_on(text)
   from public, anon, authenticated;
 -- the storage policy runs as the caller
 grant execute on function private.can_read_transfer_file_object(text) to authenticated;
@@ -3606,7 +3759,7 @@ grant execute on function private.transfer_file_begin(uuid, uuid),
   private.transfer_file_record(uuid, uuid, text, bigint, text, boolean, text, integer, bigint),
   private.transfer_file_failed(uuid, uuid, text), private.remittance_payout_blockers(uuid, char, date),
   private.transfer_cash_position(uuid), private.transfer_earliest_execution_date(uuid, timestamptz),
-  private.epc_name_empty(text), private.iban_in_sepa(text)
+  private.epc_name_empty(text), private.iban_in_sepa(text), private.switch_on(text)
   to service_role;
 grant select on private.sepa_scheme_country to service_role;
 revoke execute on function public.generate_transfer_file(text, uuid, text),

@@ -123,6 +123,8 @@ export type PayeeCheck = {
 };
 
 export type TransferOverview = {
+  /** M2c-6a review, round 5: as `FileDetail.cancellation_after_download` */
+  cancellation_after_download?: boolean;
   today: string;
   accounts: PayingAccount[];
   own_account: { id: string; label: string; iban_last4: string } | null;
@@ -140,6 +142,11 @@ export type FileItem = TransferCard & {
 };
 
 export type FileDetail = FileCard & {
+  /**
+   * M2c-6a review, round 5 (fail-closed): whether a downloaded or sent file, or one of its transfers, can be cancelled
+   * in Collectoo (off until M2c-6b books the debits from the statements); absent reads as off
+   */
+  cancellation_after_download?: boolean;
   bank_account: { id: string; label: string; iban_last4: string };
   cash_check: CashPosition;
   held: (TransferCard & { reason: string })[];
@@ -380,6 +387,8 @@ export const ATTESTATION_LABEL: Record<string, string> = {
 
 const COMMAND_ERRORS: [string, ErrorCode][] = [
   ["not allowed", "not_allowed"],
+  // M2c-6a review, round 5 (fail-closed): no cancellation after download until M2c-6b books the debits
+  ["bank_booking_required", "transfer_bank_booking_required"],
   // M2c-6a review (T1): a downloaded file or one of its transfers is cancelled by two people, with the statement's evidence
   ["no_statement_evidence", "transfer_no_statement_evidence"],
   // review round 2 (D2, D3): one transfer only from an executed file; a batch debit that does not single it out
@@ -570,7 +579,7 @@ export function evidenceStatus(e: CancelEvidence | null, what: "file" | "transfe
   if (what === "transfer" && (e.file_executed === false || e.refusal === "file_not_executed"))
     return {
       ready: false,
-      text: "Les relevés ne montrent aucun débit ni retour de ce fichier : la banque n'en a rien exécuté. N'annulez pas ce virement seul — demandez l'annulation du fichier entier.",
+      text: "Les relevés ne montrent aucun débit ni retour de ce fichier : la banque n'en a rien exécuté. N'annulez pas ce virement seul (le fichier, toujours valable, le paierait encore) : seule l'annulation du fichier entier peut être demandée.",
     };
   const until = e.statement_to_date ?? e.needed_to_date;
   return {
@@ -672,6 +681,29 @@ export function runCancelPath(
   if (transfer.status !== "in_file") return "none";
   if (!file) return "direct";
   return file.download_count > 0 || file.status === "downloaded" || file.status === "sent" ? "transfer_first" : "direct";
+}
+
+// ------------------------------------------------------------------------------------------------------------------
+// M2c-6a review, round 5 (fail-closed; ADR-0014): once a file is downloaded nothing in it is cancelled, re-issued or
+// put back in a file until M2c-6b books its debits from the statements. The database says whether the cancellation
+// after download is on (`cancellation_after_download`, off in production); the pages then hide « Demander
+// l'annulation », « Confirmer l'annulation » and « Virement refusé par la banque » and say what ops do instead.
+// ------------------------------------------------------------------------------------------------------------------
+
+/** Whether a downloaded or sent file — or one of its transfers — can be cancelled (absent or anything else: no). */
+export function cancellationAfterDownload(x: { cancellation_after_download?: unknown } | null | undefined): boolean {
+  return x?.cancellation_after_download === true;
+}
+
+/** The file's page while the cancellation after download is off: what happens, and what ops do now. */
+export const DOWNLOADED_FILE_NOTE =
+  "Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : ses virements restent « en cours » jusqu'à ce que leurs débits soient lus sur le relevé bancaire. Gardez le fichier tel quel ; si la banque refuse un virement ou si le fichier n'a pas été déposé, vérifiez le relevé et voyez avec la banque.";
+
+/** « Nom non concordant » on a payout of a downloaded file: what follows for that transfer (round 5: off or on). */
+export function payeeMismatchFollowUp(cancellable: boolean): string {
+  return cancellable
+    ? "Si la banque n'a pas exécuté ce virement, demandez son annulation (une autre personne la confirme, relevé à l'appui), puis annulez le reversement."
+    : "Ce virement reste « en cours » dans le fichier téléchargé jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire (l'annulation après téléchargement n'est pas encore disponible) : gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.";
 }
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -797,7 +829,7 @@ export function refusalText(code: DownloadRefusal): string {
       return "Un virement de ce fichier a été annulé depuis son téléchargement : le fichier n'est plus servi et ne doit plus être déposé.";
     // review round 4 (G4)
     case "holds_debited_transfer":
-      return "Un virement de ce fichier a déjà été débité sous la référence du virement qu'il remplace (un fichier annulé exécuté plus tard malgré tout) : le fichier n'est plus servi, ne le déposez pas. Prévenez le support.";
+      return "Un virement de ce fichier a déjà quitté le compte (débité sous la référence du virement qu'il remplace, ou dans une ligne groupée de son lot) : le fichier n'est plus servi, ne le déposez pas. Prévenez le support.";
     case "hash_mismatch":
       return "Le fichier stocké ne correspond pas au fichier généré : il n'a pas été servi (le téléchargement est enregistré). Ne déposez rien et prévenez le support.";
     case "unavailable":

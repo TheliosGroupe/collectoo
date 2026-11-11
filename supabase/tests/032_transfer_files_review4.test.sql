@@ -15,6 +15,10 @@
 -- No ledger entry is posted by any of it.
 begin;
 select plan(25);
+-- Review round 5 (fail-closed; ADR-0014 « M2c-6a review fixes », round 5): cancellation after download is off until
+-- M2c-6b (private.feature_switch). This file exercises the machinery behind it, so it turns it on in its own
+-- transaction (rolled back with it); 033 tests it off.
+update private.feature_switch set enabled = true where key = 'downloaded_file_cancellation';
 
 -- Fixtures (as 028: Martin (a1), Lilas (a2), Cyprès (a3), Omega (a4: a RIB holder in Greek letters), Tunis Trading
 -- (a5: a Tunisian IBAN) of the servicer aa; Bleu (b1) of another servicer bb) --------------------------------------

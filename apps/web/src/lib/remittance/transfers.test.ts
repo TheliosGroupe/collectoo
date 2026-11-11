@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { errorText } from "@/lib/boarding/forms";
+import { type ErrorCode, errorText } from "@/lib/boarding/forms";
+import { checkLabel } from "@/lib/payments/debits";
 import { runErrorCode } from "@/lib/remittance/runs";
 import {
+  DOWNLOADED_FILE_NOTE,
   type FileCard,
   type PayingAccount,
   canGenerate,
+  cancellationAfterDownload,
   cancellationCall,
   cancellationOf,
   cancellationRpc,
@@ -25,6 +28,7 @@ import {
   parisTime,
   payeeCheckClearable,
   payeeCheckErrorCode,
+  payeeMismatchFollowUp,
   refusalFromSearch,
   refusalText,
   refusalUrl,
@@ -499,7 +503,9 @@ describe("M2c-6a review T1: a downloaded file or one transfer is cancelled with 
     expect(runCancelPath({ status: "cancelled" }, { status: "downloaded", download_count: 1 })).toBe("direct");
     expect(runCancelPath({ status: "booked" }, null)).toBe("none");
     expect(runErrorCode("remittance run refused: payout_in_downloaded_file")).toBe("run_payout_in_downloaded_file");
-    expect(errorText("run_payout_in_downloaded_file")).toContain("confirmation d'une autre personne");
+    // review round 5 (fail-closed): that transfer cannot be cancelled first any more — the run waits for its debit
+    expect(errorText("run_payout_in_downloaded_file")).toContain("pas encore disponible");
+    expect(errorText("run_payout_in_downloaded_file")).toContain("voyez avec la banque");
   });
 });
 
@@ -554,10 +560,10 @@ describe("M2c-6a review, round 2: the window over (D1), an executed file (D2), a
     const covered = { ...evidence, covered: true, window_over: true, file_executed: false, refusal: "file_not_executed" };
     const e = evidenceStatus(covered, "transfer");
     expect(e.ready).toBe(false);
-    expect(e.text).toContain("demandez l'annulation du fichier entier");
+    expect(e.text).toContain("seule l'annulation du fichier entier");
     expect(evidenceStatus({ ...covered, file_executed: true, refusal: null }, "transfer").ready).toBe(true);
     expect(transferErrorCode("transfer refused: file_not_executed")).toBe("transfer_file_not_executed");
-    expect(errorText("transfer_file_not_executed")).toContain("demandez l'annulation du fichier entier");
+    expect(errorText("transfer_file_not_executed")).toContain("N'annulez pas un virement seul");
     // a file holding a cancelled transfer and nothing executed is never marked as sent
     expect(errorText("transfer_file_holds_cancelled")).toContain("ni marqué comme transmis");
   });
@@ -607,12 +613,74 @@ describe("M2c-6a review, round 4 (G4): a file holding a transfer that left the a
       blocked: [],
     });
     expect(refusalFromSearch({ refus: "holds_debited_transfer" })?.code).toBe("holds_debited_transfer");
-    expect(refusalText("holds_debited_transfer")).toContain("déjà été débité");
+    expect(refusalText("holds_debited_transfer")).toContain("déjà quitté le compte");
+    // round 4's verifier (c): a batch line of its lot too
+    expect(refusalText("holds_debited_transfer")).toContain("ligne groupée de son lot");
+    expect(errorText("transfer_file_holds_debited")).toContain("ligne groupée de son lot");
     expect(refusalText("holds_debited_transfer")).toContain("ne le déposez pas");
     expect(refusalText("holds_debited_transfer")).not.toMatch(/refused|transfer file/);
     expect(transferErrorCode("transfer file refused: holds_debited_transfer")).toBe("transfer_file_holds_debited");
     expect(errorText("transfer_file_holds_debited")).toContain("paierait une seconde fois");
     // the cancelled-transfer refusal is still its own
     expect(transferErrorCode("transfer file refused: holds_cancelled_transfer")).toBe("transfer_file_holds_cancelled");
+  });
+});
+
+
+describe("M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is cancelled until M2c-6b", () => {
+  it("maps bank_booking_required, for a file and for one of its transfers, to French words", () => {
+    for (const message of ["transfer file refused: bank_booking_required", "transfer refused: bank_booking_required"]) {
+      expect(transferErrorCode(message), message).toBe("transfer_bank_booking_required");
+    }
+    const text = errorText("transfer_bank_booking_required");
+    expect(text).not.toBe(errorText("unknown"));
+    expect(text).toContain("ne peut pas encore être annulé");
+    expect(text).toContain("en cours");
+    expect(text).toContain("Gardez le fichier tel quel");
+    expect(text).toContain("voyez avec la banque");
+    expect(text).not.toMatch(/refused|bank_booking/);
+  });
+
+  it("reads the switch fail-closed: only an explicit true offers the cancellation after download", () => {
+    expect(cancellationAfterDownload({ cancellation_after_download: true })).toBe(true);
+    for (const x of [{ cancellation_after_download: false }, {}, null, undefined, { cancellation_after_download: "true" }]) {
+      expect(cancellationAfterDownload(x as { cancellation_after_download?: unknown } | null | undefined)).toBe(false);
+    }
+  });
+
+  it("says on the file's page that a downloaded file stays as it is, its transfers « en cours »", () => {
+    expect(DOWNLOADED_FILE_NOTE).toContain("ne peut pas encore être annulé dans Collectoo");
+    expect(DOWNLOADED_FILE_NOTE).toContain("« en cours »");
+    expect(DOWNLOADED_FILE_NOTE).toContain("relevé bancaire");
+    expect(DOWNLOADED_FILE_NOTE).toContain("Gardez le fichier tel quel");
+    expect(DOWNLOADED_FILE_NOTE).toContain("voyez avec la banque");
+    expect(payeeMismatchFollowUp(false)).toContain("pas encore disponible");
+    expect(payeeMismatchFollowUp(false)).not.toContain("demandez son annulation");
+    expect(payeeMismatchFollowUp(true)).toContain("demandez son annulation");
+  });
+
+  it("never sends ops to a cancellation after download while it is off (refusals and alerts)", () => {
+    const sendsToCancellation = /demandez (son |l')annulation|faites d'abord annuler|« Demander l'annulation »|cochez l'attestation/;
+    const refusals: ErrorCode[] = [
+      "transfer_bank_booking_required",
+      "transfer_cancellation_request_required",
+      "transfer_attestation_required",
+      "transfer_file_holds_cancelled",
+      "transfer_file_holds_debited",
+      "transfer_file_not_executed",
+      "run_already_sent",
+      "run_payout_in_downloaded_file",
+      "run_transfer_already_debited",
+      "refund_in_downloaded_file",
+      "refund_reissue_in_downloaded_file",
+      "refund_already_debited",
+    ];
+    for (const code of refusals) expect(errorText(code), code).not.toMatch(sendsToCancellation);
+    for (const code of ["file_not_marked_sent", "transfer_already_debited", "payee_name_mismatch", "transfer_not_debited"])
+      expect(checkLabel(code).help, code).not.toMatch(sendsToCancellation);
+    // what a run's or a refund's cancellation says about its transfer in a downloaded file
+    expect(errorText(runErrorCode("remittance run refused: payout_in_downloaded_file"))).toContain("pas encore disponible");
+    expect(errorText(runErrorCode("remittance run refused: already_sent"))).toContain("pas encore disponible");
+    expect(errorText("transfer_cancellation_request_required")).toContain("Gardez-le tel quel");
   });
 });

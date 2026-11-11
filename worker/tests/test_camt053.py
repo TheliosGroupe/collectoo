@@ -652,6 +652,31 @@ def test_without_a_period_a_statement_starts_after_its_opening_balance(
 
 
 @pytest.mark.parametrize(
+    ("code", "opening_date"),
+    [
+        # a bank that dates the previous closing (PRCD) with the statement's own day
+        ("PRCD", "2026-10-28"),
+        # an opening balance dated after the closing one
+        ("OPBD", "2026-10-29"),
+        ("PRCD", "2026-10-29"),
+    ],
+)
+def test_without_a_period_a_statement_never_starts_after_its_closing_balance(
+    tmp_path: Path, code: str, opening_date: str
+) -> None:
+    """M2c-6a review round 5 (the G3 reader regression): without FrToDt, an opening balance whose
+    next day is after the closing balance's date gave a period starting one day after the
+    closing (28 → 29 for a PRCD dated on the 28th), so consecutive statements never met (no
+    `statement_gap`, no `opening_differs`, an `overlap` on every import). The period is then the
+    closing balance's day alone, and no day is shown whole: how the bank dates that balance is not
+    known (COMPLIANCE OQ-80 (f): ask the bank how it dates PRCD/OPBD)."""
+    data = _xml("", opening_code=code, opening_date=opening_date, closing_date="2026-10-28")
+    section = _parse(tmp_path, data).sections[0]
+    assert (section.from_date, section.to_date) == (OCT[2], OCT[2])
+    assert (section.covers_from, section.covers_to) == (None, None)
+
+
+@pytest.mark.parametrize(
     ("stmt", "group", "kept"),
     [
         (
