@@ -17,6 +17,8 @@
 --     superseded; cancelled with it);
 --   * verification of payee (four eyes to clear), RLS (staff, client A/B, a restricted viewer, a collector, another
 --     servicer) and the storage policy, the nightly alerts.
+-- Since review round 2 (D1, 030) a cancellation needs its days over: the downloaded files whose cancellation is asked
+-- are set back to a past business day (pg_temp.backdate: « time moves on »), the evidence statements dated then.
 -- No ledger entry is posted by any of it (client money leaves 5120 at the bank's debit, M2c-6b).
 begin;
 select plan(116);
@@ -630,9 +632,26 @@ select ok((pg_temp.fl((select v from t where k = 'f4'))).sent_marked_by = '10000
   'who marked it');
 
 -- Cancel a file after download (review T1, risk R4): asked by one person, confirmed by another, on the statements'
--- evidence (the execution date and the account's next business day imported, no debit of it) -------------------
-create or replace function pg_temp.e() returns date language sql as $$ select private.next_business_day(private.paris_today()) $$;
+-- evidence (the execution date and the account's next business day imported, no debit of it), once those days are
+-- over (review round 2, D1): time moves on — here the file is set back to a past business day E, its next N ---------
+create or replace function pg_temp.e() returns date language sql as $$
+  select c.day from public.business_calendar c
+  where c.scope = 'FR-conservative' and not c.closed and c.day < private.paris_today()
+    and c.day > private.paris_today() - 60
+  order by c.day desc offset 9 limit 1 $$;
 create or replace function pg_temp.n() returns date language sql as $$ select private.next_business_day(pg_temp.e()) $$;
+create or replace function pg_temp.backdate(p_file uuid, p_day date) returns void language plpgsql as $$
+begin
+  set constraints public.transfer_file_superseded_by_fkey immediate;
+  alter table public.transfer_file disable trigger transfer_file_guard;
+  update public.transfer_file set first_execution_date = p_day, last_execution_date = p_day where id = p_file;
+  alter table public.transfer_file enable always trigger transfer_file_guard;
+  alter table public.transfer_file_item disable trigger transfer_file_item_append_only;
+  update public.transfer_file_item set execution_date = p_day where file_id = p_file;
+  alter table public.transfer_file_item enable always trigger transfer_file_item_append_only;
+  set constraints public.transfer_file_superseded_by_fkey deferred;
+end $$;
+select pg_temp.backdate((select v from t where k = 'f4'), pg_temp.e());
 select pg_temp.as_user('01');
 set local role authenticated;
 select throws_ok(format($$ select public.cancel_transfer_file('tf-cancel-0003', %L, %s, 'rejet') $$,
@@ -696,6 +715,7 @@ select pg_temp.download('01', (select v from t where k = 'f5'));
 select ok(private.can_read_transfer_file_object((pg_temp.fl((select v from t where k = 'f5'))).storage_path),
   'the bucket: the bytes of a file its caller just downloaded (review T4)');
 reset role;
+select pg_temp.backdate((select v from t where k = 'f5'), pg_temp.e());
 -- A run whose payout is in a downloaded file (money#2): it waits for its transfer's cancellation
 select pg_temp.as_user('04');
 set local role authenticated;

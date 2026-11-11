@@ -31,6 +31,7 @@ import {
   regenerationEffects,
   requestLine,
   runCancelPath,
+  sweepHoldLabel,
   transferErrorCode,
 } from "@/lib/remittance/transfers";
 
@@ -355,7 +356,18 @@ describe("M2c-6a review T3: transfers a SEPA file cannot carry are held out with
 });
 
 describe("M2c-6a review T1: a downloaded file or one transfer is cancelled with the statement's evidence and four eyes", () => {
-  const evidence = { statement_to_date: "2026-11-13", needed_to_date: "2026-11-13", covered: true, debit_seen: false, returned: false };
+  const evidence = {
+    statement_to_date: "2026-11-13",
+    needed_to_date: "2026-11-13",
+    covered: true,
+    debit_seen: false,
+    returned: false,
+    window_over: true,
+    available_from: "2026-11-14",
+    batch_ambiguous: false,
+    file_executed: null,
+    refusal: null,
+  };
   const request = { requested_at: "2026-11-13T08:41:00Z", requested_by: "Léa", requested_by_me: false, reason: "non déposé", attestation: "not_uploaded" };
 
   it("reads the cancellation the database gives, anything malformed as « not known »", () => {
@@ -369,6 +381,11 @@ describe("M2c-6a review T1: a downloaded file or one transfer is cancelled with 
       covered: false,
       debit_seen: false,
       returned: false,
+      window_over: null,
+      available_from: null,
+      batch_ambiguous: false,
+      file_executed: null,
+      refusal: null,
     });
   });
 
@@ -389,7 +406,7 @@ describe("M2c-6a review T1: a downloaded file or one transfer is cancelled with 
     const missing = evidenceStatus({ ...evidence, statement_to_date: "2026-11-09", covered: false }, "file");
     expect(missing.ready).toBe(false);
     expect(missing.text).toBe(
-      "Importez d'abord le relevé du compte jusqu'au 13/11/2026 (dernier relevé importé : jusqu'au 09/11/2026) : il doit montrer qu'aucun débit de ce fichier n'a eu lieu.",
+      "Importez d'abord le relevé du compte jusqu'au 13/11/2026, établi après la fin de cette journée (dernier relevé importé : jusqu'au 09/11/2026 ; un relevé importé le jour même, ou le dernier jour d'un CSV, ne compte pas) : il doit montrer qu'aucun débit de ce fichier n'a eu lieu.",
     );
     expect(evidenceStatus({ ...evidence, statement_to_date: null, covered: false }, "transfer").text).toContain("dernier relevé importé : aucun");
     const seen = evidenceStatus({ ...evidence, debit_seen: true }, "transfer");
@@ -504,5 +521,64 @@ describe("dates in Paris", () => {
     expect(parisDate(new Date("2026-11-11T22:30:00Z"))).toBe("2026-11-11");
     expect(parisDate(new Date("2026-11-11T23:30:00Z"))).toBe("2026-11-12");
     expect(parisDate(new Date("2026-07-01T22:30:00Z"))).toBe("2026-07-02");
+  });
+});
+
+describe("M2c-6a review, round 2: the window over (D1), an executed file (D2), a batch that singles one out (D3), what is already debited (D4)", () => {
+  const evidence = {
+    statement_to_date: "2026-11-13",
+    needed_to_date: "2026-11-13",
+    covered: false,
+    debit_seen: false,
+    returned: false,
+    window_over: false,
+    available_from: "2026-11-14",
+    batch_ambiguous: false,
+    file_executed: null,
+    refusal: "no_statement_evidence",
+  };
+
+  it("reads the new evidence fields, and says when the cancellation can be asked (D1)", () => {
+    expect(cancellationOf({ evidence }).evidence).toEqual(evidence);
+    const early = evidenceStatus(evidence, "file");
+    expect(early.ready).toBe(false);
+    expect(n(early.text)).toBe(
+      "La banque peut encore exécuter ce fichier jusqu'à la fin du 13/11/2026 : l'annulation se demande à partir du 14/11/2026, avec le relevé de ces journées importé après leur fin.",
+    );
+    // over, but no statement uploaded after those days
+    expect(evidenceStatus({ ...evidence, window_over: true }, "transfer").text).toContain("établi après la fin de cette journée");
+    expect(errorText("transfer_no_statement_evidence")).toContain("une fois ces journées terminées");
+  });
+
+  it("refuses one transfer of a file the bank executed nothing of, pointing to the file's cancellation (D2)", () => {
+    const covered = { ...evidence, covered: true, window_over: true, file_executed: false, refusal: "file_not_executed" };
+    const e = evidenceStatus(covered, "transfer");
+    expect(e.ready).toBe(false);
+    expect(e.text).toContain("demandez l'annulation du fichier entier");
+    expect(evidenceStatus({ ...covered, file_executed: true, refusal: null }, "transfer").ready).toBe(true);
+    expect(transferErrorCode("transfer refused: file_not_executed")).toBe("transfer_file_not_executed");
+    expect(errorText("transfer_file_not_executed")).toContain("demandez l'annulation du fichier entier");
+    // a file holding a cancelled transfer and nothing executed is never marked as sent
+    expect(errorText("transfer_file_holds_cancelled")).toContain("ni marqué comme transmis");
+  });
+
+  it("refuses a batch debit other transfers of the lot could make up (D3)", () => {
+    const e = evidenceStatus({ ...evidence, covered: true, window_over: true, batch_ambiguous: true, refusal: "batch_ambiguous" }, "transfer");
+    expect(e.ready).toBe(false);
+    expect(e.text).toContain("détail du lot");
+    expect(transferErrorCode("transfer refused: batch_ambiguous")).toBe("transfer_batch_ambiguous");
+    expect(errorText("transfer_batch_ambiguous")).toContain("font le même montant");
+    for (const code of ["transfer_file_not_executed", "transfer_batch_ambiguous"] as const)
+      expect(errorText(code)).not.toMatch(/refused|transfer|batch/);
+  });
+
+  it("names a transfer already debited and a sweep held back (D4)", () => {
+    expect(holdLabel("already_debited")).toContain("payer deux fois");
+    expect(sweepHoldLabel("cancelled_sweep_debited")).toContain("Quote-part du cabinet non proposée");
+    expect(sweepHoldLabel(null)).toBeNull();
+    expect(sweepHoldLabel(undefined)).toBeNull();
+    const held = generationEffects({ ...account, sweep_preview_minor: "0", sweep_hold: "cancelled_sweep_debited" }, null).map(n);
+    expect(held.some((x) => x.startsWith("Quote-part du cabinet non proposée"))).toBe(true);
+    expect(generationEffects(account, null).some((x) => x.includes("non proposée"))).toBe(false);
   });
 });

@@ -390,3 +390,11 @@ Same VM, `RECEIPT_FILES=5000`, right after `supabase db reset`, the two scale te
 | Nightly checks after the approval | 5.6 s | 4.3 s (3.5 s with the draft waiting) |
 | « Générer le fichier » of the run's payout | 0.05 s | 0.05 s |
 | Cancellation (its file, not downloaded, superseded) | 3.63 s | 3.81 s |
+
+### M2c-6a review fixes, round 2 (2026-11-11)
+
+Same VM, one run of `test_transfer_files_scale_integration.py` (5,000 transfers) after the integration suite on a
+reset stack: refunds asked 18.9 s; « Générer le fichier » **2.00 s** (each payout's and refund's hold reason now
+probes its own debit by end-to-end id, `already_debited`, review round 2 D4 — one keyed probe per transfer, as the
+cash check's); job 1.00 s; structural check 0.44 s; download 0.25 s; cash check 0.12 s in flight (0 bank lines
+read), 0.08 s once debited (5,000 read, one per transfer); « Virements » 0.12 s.

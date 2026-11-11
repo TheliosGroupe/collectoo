@@ -61,10 +61,27 @@
 --     (`file_stale`, `file_blocked`), and the next generation takes its transfers again;
 --   * T3 a payee name with no EPC character (`payee_name_not_epc`) or an IBAN outside the SEPA schemes' countries
 --     (`iban_not_sepa`, private.sepa_scheme_country: EPC409-09) is held out of the file, not failing it;
---   * T4 no storage policy reads the bucket: the web route fetches the bytes with the service role after the
---     download command; T5 a payee check is cleared by none of who recorded it, proposed or confirmed the IBAN, and
---     closes with its payout account; T6 `file_not_marked_sent` at the cut-off and `transfer_file_pending` through
---     the hourly schedule; T7 file numbers never truncate.
+--   * T4 the bucket's one policy (private.can_read_transfer_file_object) opens a file's bytes only to the member who
+--     recorded its download through the command in the last 60 seconds, while the file is downloaded or sent; T5 a
+--     payee check is cleared by none of who recorded it, proposed or confirmed the IBAN; T6 `file_not_marked_sent` at
+--     the cut-off and `transfer_file_pending` through the hourly schedule; T7 file numbers never truncate.
+--
+-- M2c-6a review, round 2 (the skeptics' scenarios A–D and s5; design §9.7, §11, §12; COMPLIANCE OQ-80):
+--   * D1 a day counts as covered by an imported statement only once it is over: the evidence window ends before
+--     today (Paris), and each of its business days is in a statement uploaded after that day — a CSV's last booking
+--     day never (its export time is unknown); at request and at confirmation, for a file and for one transfer;
+--   * D2 one transfer of a downloaded file is cancelled only when the bank executed something of the file (a debit of
+--     one of its end-to-end ids or PmtInfIds, or a return): otherwise `file_not_executed`, the file's own cancellation
+--     being the exit; a downloaded file holding a cancelled transfer and nothing of it executed is never marked as sent
+--     (`holds_cancelled_transfer`) nor alerted as not marked;
+--   * D3 a batch debit with no end-to-end id is evidence for one transfer only when no other open transfer of its
+--     PmtInf, alone or combined, makes up its amount (`batch_ambiguous`; private.amounts_make_up);
+--   * D4 a payout or refund whose end-to-end id a statement already shows debited is held (`already_debited`) at
+--     generation and at download, and alerted (`transfer_already_debited`); no sweep is issued while a cancelled sweep
+--     of a downloaded file has its debit seen and no return (`cancelled_sweep_debited`);
+--   * S1 an open payee check follows the client's IBAN, not the account row: it blocks every current payout account of
+--     the client with that IBAN, closes only once none carries it, and none of who recorded it, or proposed or
+--     confirmed that IBAN for the client, clears it.
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -189,7 +206,8 @@ create table public.payee_name_check (
                                              and (cleared_at is null) = (clear_reason is null)),
   constraint payee_name_check_four_eyes check (cleared_by is distinct from recorded_by)
 );
-create index payee_name_check_open_idx on public.payee_name_check (payout_account_id) where cleared_at is null;
+-- an open check is looked up by its client (review round 2, S1: it follows the client's IBAN)
+create index payee_name_check_open_idx on public.payee_name_check (client_organization_id) where cleared_at is null;
 create index payee_name_check_org_idx on public.payee_name_check (organization_id, recorded_at desc);
 comment on table public.payee_name_check is
   'A no-match or close-match of the bank''s verification of payee on a payout (blocks the payout account until cleared).';
@@ -556,8 +574,10 @@ end;
 $$;
 
 -- remittance_payout_blockers (redefined from 20261112090000): + payee_name_mismatch, the bank's verification of payee
--- reported a no-match or close-match on the client's payout account and nobody cleared it (Reg. 260/2012 art. 5 quater;
--- founder #15, OQ-50). Same settings.
+-- reported a no-match or close-match on the client's payout IBAN and nobody cleared it (Reg. 260/2012 art. 5 quater;
+-- founder #15, OQ-50). Review round 2 (S1, security#3): the check follows the IBAN, not the account row — a current
+-- account of the client carrying a flagged IBAN is blocked, whichever row the bank's answer was recorded on (the same
+-- IBAN proposed and confirmed again stays blocked). Same settings.
 create or replace function private.remittance_payout_blockers(p_client_organization_id uuid, p_currency char(3),
                                                               p_on date)
 returns text[]
@@ -576,7 +596,9 @@ as $$
                              where x.client_organization_id = o.id and x.currency = p_currency and x.status = 'proposed')
                 then 'payout_account_unconfirmed' else 'payout_account_missing' end
          when pa.status = 'returned' then 'payout_account_returned'
-         when exists (select 1 from public.payee_name_check c where c.payout_account_id = pa.id and c.cleared_at is null)
+         when exists (select 1 from public.payee_name_check c
+                      join public.client_payout_account x on x.id = c.payout_account_id
+                      where c.client_organization_id = o.id and c.cleared_at is null and x.iban = pa.iban)
            then 'payee_name_mismatch' end,
     (select 'client_status:' || e.kind from public.client_status_event e
      where e.client_organization_id = o.id and e.effective_date <= p_on and e.kind <> 'proceeding_opened'
@@ -711,8 +733,11 @@ as $$
 $$;
 
 -- Every business day from p_from to p_to is in an imported statement of the account (review T1: a statement that
--- covers the execution date and the next business day shows every debit the bank booked for it). Outside the seeded
--- calendar: refused (private.is_business_day raises).
+-- covers the execution date and the next business day shows every debit the bank booked for it). Review round 2 (D1,
+-- money#1, security#1): a day counts only once it is over — in a statement uploaded after that day (Paris), whose
+-- period holds it; a CSV's period ends with its last booking, whatever the time it was exported, so a CSV never covers
+-- its last booking day (a camt.053's period is the bank's own, FrToDt). Outside the seeded calendar: refused
+-- (private.is_business_day raises).
 create or replace function private.statement_covers(p_bank_account_id uuid, p_from date, p_to date)
 returns boolean
 language plpgsql
@@ -730,12 +755,117 @@ begin
     if private.is_business_day(d) and not exists (
          select 1 from public.bank_statement s
          where s.bank_account_id = p_bank_account_id and s.status = 'imported' and s.to_date >= d
-           and s.from_date <= d) then
+           and s.from_date <= d and (s.uploaded_at at time zone 'Europe/Paris')::date > d
+           and (s.format <> 'csv' or s.to_date > d)) then
       return false;
     end if;
   end loop;
   return true;
 end;
+$$;
+
+-- The bank executed something of this file (review round 2, D2): a debit carrying one of its PmtInfIds (a batch, whatever
+-- its amount), a debit carrying one of its transfers' end-to-end ids, or the return of one of them. Keyed probes: one per
+-- PmtInf by (account, PmtInfId), then each transfer's by its id (ARCHITECTURE §4); it stops at the first found.
+create or replace function private.transfer_file_executed(p_file_id uuid)
+returns boolean
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select exists (select 1 from (select distinct i.pmt_inf_id from public.transfer_file_item i where i.file_id = f.id) p
+                 where exists (select 1 from public.bank_transaction x
+                               where x.bank_account_id = f.debtor_bank_account_id and x.payment_info_id = p.pmt_inf_id
+                                 and x.direction = 'debit'))
+      or exists (select 1 from public.transfer_file_item i
+                 cross join lateral (select o.id, o.end_to_end_id from public.bank_transfer o
+                                     where o.id = i.transfer_id offset 0) o
+                 where i.file_id = f.id
+                   and (private.transfer_own_debit_seen(f.debtor_bank_account_id, o.end_to_end_id)
+                        or private.transfer_return_seen(o.id)))
+  from public.transfer_file f where f.id = p_file_id;
+$$;
+
+-- Whether some of p_amounts, one alone or several together, add up to exactly p_target (review round 2, D3: another
+-- open transfer of a batch-booked PmtInf could stand in for this one). The partial sums below the target, kept as a
+-- set; past 10,000 of them it answers true (« cannot be ruled out »: the caller refuses rather than guesses).
+create or replace function private.amounts_make_up(p_amounts bigint[], p_target bigint)
+returns boolean
+language plpgsql
+immutable
+parallel safe
+set search_path = ''
+as $$
+declare
+  v_sums bigint[] := array[0::bigint];
+  a bigint;
+begin
+  foreach a in array coalesce(p_amounts, '{}'::bigint[]) loop
+    continue when a is null or a <= 0 or a > p_target;
+    if p_target - a = any (v_sums) then
+      return true;
+    end if;
+    v_sums := array(select distinct s
+                    from unnest(v_sums || array(select x + a from unnest(v_sums) x where x + a < p_target)) s);
+    if cardinality(v_sums) > 10000 then
+      return true;
+    end if;
+  end loop;
+  return false;
+end;
+$$;
+
+-- The sweeps of this paying account that left it although cancelled (review round 2, D4): in a file downloaded at
+-- least once, cancelled since, their debit on a statement (by their SWP id) and no return of it. While one exists no
+-- new sweep is issued (the servicer's share would leave twice; M2c-6b links that debit). Keyed: the account's files.
+create or replace function private.debited_cancelled_sweeps(p_bank_account_id uuid)
+returns setof uuid
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select x.id from public.transfer_file f
+  cross join lateral (select t.id, t.end_to_end_id from public.bank_transfer t
+                      where t.transfer_file_id = f.id and t.kind = 'sweep' and t.status = 'cancelled' offset 0) x
+  where f.debtor_bank_account_id = p_bank_account_id and f.download_count > 0
+    and private.transfer_own_debit_seen(p_bank_account_id, x.end_to_end_id)
+    and not private.transfer_return_seen(x.id);
+$$;
+
+-- A payee check is open (review round 2, S1, tests-ui#7) while a current (active or returned) payout account of its
+-- client carries the IBAN the bank flagged — its own account or a replacement with the same IBAN; it closes only once
+-- none does (the IBAN replaced by another).
+create or replace function private.payee_check_open(p_payout_account_id uuid)
+returns boolean
+language sql
+stable
+set search_path = ''
+as $$
+  select exists (select 1 from public.client_payout_account x
+                 join public.client_payout_account y on y.client_organization_id = x.client_organization_id
+                   and y.iban = x.iban and y.status in ('active', 'returned')
+                 where x.id = p_payout_account_id);
+$$;
+
+-- Who may not clear a payee check (review T5, round 2 S1): who recorded it, and whoever proposed or confirmed the
+-- flagged IBAN for that client — on the account the check was recorded on or on any other with the same IBAN (a
+-- replacement re-proposing it), so the party whose IBAN the bank flagged never lifts the flag.
+create or replace function private.payee_check_parties(p_check_id uuid)
+returns uuid[]
+language sql
+stable
+set search_path = ''
+as $$
+  select coalesce(array_agg(distinct p) filter (where p is not null), '{}')
+  from (select c.recorded_by as p from public.payee_name_check c where c.id = p_check_id
+        union all
+        select unnest(array[y.proposed_by, y.confirmed_by])
+        from public.payee_name_check c
+        join public.client_payout_account x on x.id = c.payout_account_id
+        join public.client_payout_account y on y.client_organization_id = c.client_organization_id and y.iban = x.iban
+        where c.id = p_check_id) s;
 $$;
 
 -- The payee's name has no EPC basic Latin character once transliterated: the SQL twin of
@@ -845,9 +975,17 @@ $$;
 -- every business day of it in an imported statement (`no_statement_evidence` otherwise). A file: no debit carries one
 -- of its end-to-end ids — unless the bank returned it — nor one of its PmtInfIds, and none of its transfers is booked
 -- (`debit_seen`). A transfer: no debit carries its end-to-end id unless returned; a batch debit of its PmtInf is
--- evidence only when it is exactly the others' (it then left this one out), any other one is `debit_seen`. As the
--- sheets read it: {window_from, needed_to_date, statement_to_date, covered, debit_seen, returned, refusal}.
-create or replace function private.transfer_cancel_evidence(p_file_id uuid, p_transfer_id uuid)
+-- evidence only when it is exactly the others' (it then left this one out), any other one is `debit_seen`.
+-- Review round 2: (D1) the window must be over — its last day before today, each day in a statement uploaded after it
+-- (private.statement_covers); (D3) a batch debit that is exactly the others' still proves nothing when another open
+-- transfer of the PmtInf, alone or with others, makes up this one's amount — the bank may have left that one out
+-- (`batch_ambiguous`); (D2) one transfer is cancelled only from a file the bank executed in part (a debit of one of its
+-- ids or PmtInfIds, or a return; private.transfer_file_executed, given by p_file_executed when the caller computed it
+-- for the file once), else `file_not_executed` — the file's own cancellation is the exit. As the sheets read it:
+-- {window_from, needed_to_date, available_from, window_over, statement_to_date, covered, debit_seen, batch_ambiguous,
+-- returned, file_executed, refusal}.
+create or replace function private.transfer_cancel_evidence(p_file_id uuid, p_transfer_id uuid,
+                                                            p_file_executed boolean default null)
 returns jsonb
 language plpgsql
 stable
@@ -861,10 +999,14 @@ declare
   v_pmt_inf text;
   v_from date;
   v_to date;
+  v_over boolean;
   v_covered boolean;
   v_debit boolean := false;
   v_returned boolean := false;
+  v_ambiguous boolean := false;
+  v_executed boolean;
   v_others bigint;
+  v_amounts bigint[];
 begin
   select * into f from public.transfer_file where id = p_file_id;
   if p_transfer_id is null then
@@ -898,7 +1040,12 @@ begin
     elsif exists (select 1 from public.bank_transaction x
                   where x.bank_account_id = t.debtor_bank_account_id and x.payment_info_id = v_pmt_inf
                     and x.direction = 'debit' and x.end_to_end_id is null) then
-      select coalesce(sum(o.amount_minor), 0) into v_others
+      -- the PmtInf's other open transfers: their sum (the batch must be exactly it) and, of those not above this one's
+      -- amount, the amounts that could stand in for it (review round 2, D3)
+      select coalesce(sum(o.amount_minor), 0),
+             coalesce(array_agg(o.amount_minor order by o.amount_minor desc)
+                        filter (where o.amount_minor <= t.amount_minor), '{}')
+      into v_others, v_amounts
       from public.transfer_file_item i
       cross join lateral (select o.amount_minor, o.end_to_end_id, o.status from public.bank_transfer o
                           where o.id = i.transfer_id offset 0) o
@@ -912,32 +1059,45 @@ begin
                             where x.bank_account_id = t.debtor_bank_account_id and x.payment_info_id = v_pmt_inf
                               and x.direction = 'debit' and x.end_to_end_id is null
                               and x.amount_minor <> v_others);
-      if v_debit and private.transfer_return_seen(t.id) then
+      if private.transfer_return_seen(t.id) then
         v_debit := false;
         v_returned := true;
+      elsif not v_debit then
+        v_ambiguous := private.amounts_make_up(v_amounts, t.amount_minor);
       end if;
     elsif private.transfer_return_seen(t.id) then
       v_returned := true;
     end if;
   end if;
-  v_covered := private.statement_covers(f.debtor_bank_account_id, v_from, v_to);
+  -- review round 2 (D1): a day counts only once it is over
+  v_over := v_to < private.paris_today();
+  v_covered := v_over and private.statement_covers(f.debtor_bank_account_id, v_from, v_to);
+  -- review round 2 (D2): one transfer only from a file the bank executed in part (computed only when it decides)
+  if p_transfer_id is not null and not v_debit and not v_ambiguous and v_covered then
+    v_executed := v_returned or coalesce(p_file_executed, private.transfer_file_executed(f.id));
+  end if;
   return jsonb_build_object(
-    'window_from', v_from, 'needed_to_date', v_to, 'covered', v_covered, 'debit_seen', v_debit,
-    'returned', v_returned and v_covered,
+    'window_from', v_from, 'needed_to_date', v_to, 'available_from', v_to + 1, 'window_over', v_over,
+    'covered', v_covered, 'debit_seen', v_debit, 'batch_ambiguous', v_ambiguous,
+    'returned', v_returned and v_covered, 'file_executed', v_executed,
     'statement_to_date', (select max(s.to_date) from public.bank_statement s
                           where s.bank_account_id = f.debtor_bank_account_id and s.status = 'imported'),
     'statements', (select coalesce(jsonb_agg(s.id order by s.to_date, s.id), '[]') from public.bank_statement s
                    where s.bank_account_id = f.debtor_bank_account_id and s.status = 'imported'
                      and s.to_date >= v_from and s.from_date <= v_to),
-    'refusal', case when v_debit then 'debit_seen' when not v_covered then 'no_statement_evidence' end,
+    'refusal', case when v_debit then 'debit_seen' when v_ambiguous then 'batch_ambiguous'
+                    when not v_covered then 'no_statement_evidence'
+                    when p_transfer_id is not null and not v_executed then 'file_not_executed' end,
     'checked_at', clock_timestamp());
 end;
 $$;
 
 -- The open cancellation of a file (p_transfer_id null) or of one transfer of it at the file's current version, and
 -- what the statements show (null when the file is not downloaded): {request: {...} | null, evidence: {...} | null}.
+-- p_file_executed: private.transfer_file_executed of the file, when the caller computed it once for a page of items.
 create or replace function private.transfer_cancellation_card(p_file_id uuid, p_transfer_id uuid,
-                                                              p_with_evidence boolean)
+                                                              p_with_evidence boolean,
+                                                              p_file_executed boolean default null)
 returns jsonb
 language sql
 stable
@@ -956,7 +1116,7 @@ as $$
     'evidence', case when p_with_evidence and (p_transfer_id is null or exists (
                        select 1 from public.bank_transfer t where t.id = p_transfer_id and t.status = 'in_file'
                          and t.transfer_file_id = f.id))
-                     then private.transfer_cancel_evidence(f.id, p_transfer_id) end) end
+                     then private.transfer_cancel_evidence(f.id, p_transfer_id, p_file_executed) end) end
   from public.transfer_file f where f.id = p_file_id;
 $$;
 
@@ -967,7 +1127,9 @@ $$;
 -- critique #1: the client's money never pays another's payout); a date after the run's earliest latest execution date
 -- only with a late reason (on the run, or given with the file). A refund: still pending. Both (review T3): a payee name
 -- the EPC set cannot write (`payee_name_not_epc`), an IBAN outside the SEPA schemes (`iban_not_sepa`) — held out, so
--- they never fail the file for every other transfer.
+-- they never fail the file for every other transfer. Both, first (review round 2, D4): its end-to-end id already
+-- debited on the paying account (`already_debited`: a cancelled file executed late after all — filing it again pays
+-- twice; held until M2c-6b books that debit or ops link it).
 create or replace function private.transfer_hold_reason(p_transfer_id uuid, p_today date, p_execution_date date,
                                                         p_late_reason text)
 returns text
@@ -986,6 +1148,9 @@ begin
   select * into t from public.bank_transfer where id = p_transfer_id;
   if t.currency <> 'EUR' then
     return 'not_eur';
+  end if;
+  if t.kind in ('payout', 'refund') and private.transfer_own_debit_seen(t.debtor_bank_account_id, t.end_to_end_id) then
+    return 'already_debited';
   end if;
   if t.kind = 'refund' then
     if not exists (select 1 from public.refund_request q where q.transfer_id = t.id and q.status = 'requested') then
@@ -1111,6 +1276,7 @@ declare
   v_sweep bigint := 0;
   v_sweep_left bigint := 0;
   v_sweep_id uuid;
+  v_sweep_hold text;
   v_e2e text;
   v_offset integer;
   v_held jsonb;
@@ -1176,6 +1342,11 @@ begin
     where x.organization_id = b.organization_id and x.kind = 'sweep' and x.currency = b.currency
       and x.status in ('ordered', 'in_file');
     v_sweep := greatest(0, -v_owed_servicer - v_sweeps);
+    -- review round 2 (D4): a cancelled sweep left the account all the same (its debit seen, no return): none again
+    if v_sweep > 0 and exists (select 1 from private.debited_cancelled_sweeps(b.id)) then
+      v_sweep := 0;
+      v_sweep_hold := 'cancelled_sweep_debited';
+    end if;
   end if;
 
   -- the cash check (ops critique #5): what the account can still pay covers the file; the servicer's sweep goes first
@@ -1197,7 +1368,7 @@ begin
   end if;
   if v_n = 0 and v_sweep = 0 then
     raise exception 'transfer file refused: nothing_to_file' using errcode = 'check_violation',
-      detail = jsonb_build_object('held', v_held)::text;
+      detail = jsonb_build_object('held', v_held, 'sweep_hold', v_sweep_hold)::text;
   end if;
 
   select legal_name into v_name from public.organization where id = b.organization_id;
@@ -1227,7 +1398,7 @@ begin
          v_name, v_name, b.iban, b.bic, count(*), sum(x.amount_minor), min(x.execution_date), max(x.execution_date),
          case when bool_or(x.kind = 'payout' and x.execution_date > r.earliest_latest_execution_date) then v_late end,
          v_cash || jsonb_build_object('ctrl_sum_minor', sum(x.amount_minor)::text,
-                                      'sweep_left_minor', v_sweep_left::text),
+                                      'sweep_left_minor', v_sweep_left::text, 'sweep_hold', v_sweep_hold),
          v_held, v_token, auth.uid()
   from pg_temp._tf x left join public.remittance_run r on r.id = x.run_id
   where x.hold is null;
@@ -1247,6 +1418,7 @@ begin
   v_result := jsonb_build_object('file_id', v_file, 'number', v_number, 'status', 'pending',
                                  'nb_of_txs', v_n + (v_sweep > 0)::integer, 'ctrl_sum_minor', (v_sum + v_sweep)::text,
                                  'sweep_minor', v_sweep::text, 'sweep_left_minor', v_sweep_left::text,
+                                 'sweep_hold', v_sweep_hold,
                                  'first_execution_date', (select min(execution_date) from pg_temp._tf where hold is null),
                                  'held', v_held, 'superseded', to_jsonb(v_superseded));
   perform private.command_record('generate_transfer_file', p_idempotency_key, v_request, v_result);
@@ -1483,7 +1655,9 @@ begin
 end;
 $$;
 
--- « Marquer comme transmis » (§11): ops uploaded the file at the bank (the alert at the cut-off stops).
+-- « Marquer comme transmis » (§11): ops uploaded the file at the bank (the alert at the cut-off stops). Review round 2
+-- (D2, money#2): never a file holding a transfer cancelled since its download while the bank executed nothing of it —
+-- its bytes carry that transfer, so it must not be uploaded (`holds_cancelled_transfer`; its cancellation is the exit).
 create or replace function public.mark_transfer_file_sent(p_idempotency_key text, p_file_id uuid,
                                                           p_expected_version integer)
 returns jsonb
@@ -1517,6 +1691,13 @@ begin
                                                               when 'pending' then 'not_ready'
                                                               else 'not_live' end
       using errcode = 'check_violation';
+  end if;
+  if exists (select 1 from public.transfer_file_item i
+             cross join lateral (select t.status from public.bank_transfer t where t.id = i.transfer_id offset 0) t
+             where i.file_id = f.id and t.status = 'cancelled')
+     and not private.transfer_file_executed(f.id) then
+    raise exception 'transfer file refused: holds_cancelled_transfer' using errcode = 'check_violation',
+      hint = 'Un virement de ce fichier a été annulé et la banque n''en a exécuté aucun : ne le déposez pas ; demandez l''annulation du fichier.';
   end if;
   update public.transfer_file set status = 'sent', sent_marked_by = auth.uid(), sent_marked_at = clock_timestamp(),
     version = version + 1
@@ -1725,8 +1906,11 @@ $$;
 -- « Virement refusé par la banque » (review T1, pain001#1): one transfer of a downloaded or sent file the bank did not
 -- execute — a payee mismatch, a closed account — while the file was. The statements must show it (its execution date
 -- to the account's next business day imported, no debit of it unless returned; a batch debit of its PmtInf only when it
--- is exactly the others'). One open request per transfer and file version; another person confirms. A payout: its run
--- is then cancelled by an admin (public.cancel_remittance_run); a refund: by public.cancel_refund; a sweep is recomputed.
+-- is exactly the others' and nothing else of the PmtInf could make up this one, `batch_ambiguous` otherwise). Review
+-- round 2 (D1, D2): the window over, and something of the file executed — a file the bank executed nothing of is
+-- cancelled whole (`file_not_executed`: cancelling one transfer would leave the rest live, the cancelled one still in its
+-- bytes). One open request per transfer and file version; another person confirms. A payout: its run is then cancelled
+-- by an admin (public.cancel_remittance_run); a refund: by public.cancel_refund; a sweep is recomputed.
 create or replace function public.request_transfer_cancellation(p_idempotency_key text, p_transfer_id uuid,
                                                                 p_reason text)
 returns jsonb
@@ -1900,7 +2084,9 @@ $$;
 
 -- « Nom vérifié »: someone other than who recorded it checked the holder with the client (or the bank's suggestion was
 -- a formatting difference). The payout account is no longer blocked by this check. Review T5 (security#3): nor who
--- proposed or confirmed the flagged IBAN (`same_person`): the party whose IBAN the bank flagged never lifts the flag.
+-- proposed or confirmed the flagged IBAN (`same_person`): the party whose IBAN the bank flagged never lifts the flag —
+-- review round 2 (S1): on any payout account of the client carrying that IBAN (private.payee_check_parties), so
+-- re-proposing and re-confirming the same IBAN gives neither of them the right to clear it.
 create or replace function public.clear_payee_name_mismatch(p_idempotency_key text, p_check_id uuid, p_reason text)
 returns jsonb
 language plpgsql
@@ -1910,7 +2096,6 @@ set lock_timeout = '2s'
 as $$
 declare
   c public.payee_name_check;
-  pa public.client_payout_account;
   v_reason text := btrim(coalesce(p_reason, ''));
   v_request jsonb := jsonb_build_object('check_id', p_check_id, 'reason', btrim(coalesce(p_reason, '')));
   v_result jsonb;
@@ -1930,8 +2115,7 @@ begin
   if c.cleared_at is not null then
     raise exception 'payee check refused: already_cleared' using errcode = 'check_violation';
   end if;
-  select * into pa from public.client_payout_account where id = c.payout_account_id;
-  if auth.uid() = any (array_remove(array[c.recorded_by, pa.proposed_by, pa.confirmed_by], null)) then
+  if auth.uid() = any (private.payee_check_parties(c.id)) then
     raise exception 'payee check refused: same_person' using errcode = 'check_violation';
   end if;
   update public.payee_name_check set cleared_by = auth.uid(), cleared_at = clock_timestamp(), clear_reason = v_reason
@@ -2491,11 +2675,10 @@ as $$
     'run_id', t.run_id, 'run_number', r.number, 'run_status', r.status, 'run_version', r.version,
     'client_id', t.client_organization_id, 'client_name', c.legal_name,
     'refund_request_id', q.id, 'payment_id', q.payment_id, 'hold', p_hold,
-    -- review T5: a check on a payout account since replaced (retired) is closed with it
+    -- review T5, round 2 (S1): a check is open while a current payout account of the client carries the flagged IBAN
     'payee_check_open', exists (select 1 from public.payee_name_check k
-                                join public.client_payout_account pa on pa.id = k.payout_account_id
                                 where k.transfer_id = t.id and k.cleared_at is null
-                                  and pa.status in ('active', 'returned')))
+                                  and private.payee_check_open(k.payout_account_id)))
   from public.bank_transfer t
   left join public.remittance_run r on r.id = t.run_id
   left join public.organization c on c.id = t.client_organization_id
@@ -2538,7 +2721,11 @@ begin
     v_sweep := greatest(0, -v_owed_servicer - v_sweeps);
   end if;
   with acc as (
-    select b.*, private.transfer_earliest_execution_date(b.id) as earliest from public.bank_account b
+    select b.*, private.transfer_earliest_execution_date(b.id) as earliest,
+           -- review round 2 (D4): no sweep while a cancelled one of the account left it all the same
+           case when exists (select 1 from private.debited_cancelled_sweeps(b.id)) then 'cancelled_sweep_debited' end
+             as sweep_hold
+    from public.bank_account b
     where b.organization_id = v_org and b.purpose = 'client_funds' and b.status = 'active'),
   todo as materialized (
     select t.id, t.debtor_bank_account_id, t.amount_minor, t.created_at,
@@ -2550,7 +2737,8 @@ begin
            'bank_account_id', a.id, 'label', a.label, 'iban_last4', right(a.iban, 4), 'bic', a.bic,
            'currency', a.currency, 'pain_version', a.pain_version, 'earliest_execution_date', a.earliest,
            'cash', private.transfer_cash_position(a.id),
-           'sweep_preview_minor', case when a.currency = 'EUR' then v_sweep else 0 end::text,
+           'sweep_preview_minor', case when a.currency = 'EUR' and a.sweep_hold is null then v_sweep else 0 end::text,
+           'sweep_hold', case when v_sweep > 0 then a.sweep_hold end,
            'to_file_count', (select count(*) from todo x where x.debtor_bank_account_id = a.id),
            'eligible_count', (select count(*) from todo x where x.debtor_bank_account_id = a.id
                                 and (x.hold is null or x.hold = 'late_reason_required')),
@@ -2575,16 +2763,16 @@ begin
            'result', c.result, 'bank_name', c.bank_name, 'note', c.note, 'recorded_at', c.recorded_at,
            'recorded_by', (select coalesce(u.display_name, u.email) from public.app_user u where u.id = c.recorded_by),
            'recorded_by_me', c.recorded_by = auth.uid(), 'transfer_id', c.transfer_id,
-           -- review T5: none of who recorded it, proposed or confirmed the IBAN clears it
-           'can_clear', not (auth.uid() = any (array_remove(array[c.recorded_by, pa.proposed_by, pa.confirmed_by],
-                                                            null))))
+           -- review T5, round 2 (S1): none of who recorded it, or proposed or confirmed that IBAN for the client
+           'can_clear', not (auth.uid() = any (private.payee_check_parties(c.id))))
            order by c.recorded_at), '[]')
   into v_checks
   from public.payee_name_check c
   join public.organization o on o.id = c.client_organization_id
   join public.client_payout_account pa on pa.id = c.payout_account_id
-  -- review T5 (tests-ui#7): a check closes with its payout account (retired when a new one is confirmed)
-  where c.organization_id = v_org and c.cleared_at is null and pa.status in ('active', 'returned');
+  -- review T5 (tests-ui#7), round 2 (S1): a check closes once no current account of the client carries its IBAN (a
+  -- replacement with another IBAN confirmed), not when the same IBAN is confirmed again
+  where c.organization_id = v_org and c.cleared_at is null and private.payee_check_open(c.payout_account_id);
   return jsonb_build_object('today', v_today, 'accounts', v_accounts, 'own_account', v_own, 'payee_checks', v_checks,
                             'can_admin', private.has_role(v_org, array['admin']));
 end;
@@ -2605,10 +2793,15 @@ declare
   v_limit integer := least(greatest(coalesce(p_limit, 100), 1), 500);
   v_items jsonb;
   v_last integer;
+  v_executed boolean;
 begin
   select * into f from public.transfer_file where id = p_file_id;
   if not found or not (f.organization_id = any (private.money_staff_org_ids())) then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  -- review round 2 (D2): whether the bank executed something of the file, once for the page's items (not per item)
+  if f.status in ('downloaded', 'sent') then
+    v_executed := private.transfer_file_executed(f.id);
   end if;
   -- a batch debit tested once per PmtInf of the page (review pain001#3), each item's own debit by key; a downloaded
   -- file's items carry their cancellation (review T1: the open request and what the statements show)
@@ -2624,7 +2817,8 @@ begin
                                                   'debit_seen', private.transfer_own_debit_seen(t.debtor_bank_account_id,
                                                                                                 t.end_to_end_id)
                                                                 or (t.status <> 'cancelled' and b.seen),
-                                                  'cancellation', private.transfer_cancellation_card(f.id, i.transfer_id, true))
+                                                  'cancellation', private.transfer_cancellation_card(f.id, i.transfer_id, true,
+                                                                                                     v_executed))
                             order by i.seq), '[]'), max(i.seq)
   into v_items, v_last
   from page i
@@ -2633,6 +2827,7 @@ begin
   join batch b on b.pmt_inf_id = i.pmt_inf_id;
   return private.transfer_file_card(f) || jsonb_build_object(
     'cancellation', private.transfer_cancellation_card(f.id, null, true),
+    'file_executed', v_executed,
     'bank_account', (select jsonb_build_object('id', b.id, 'label', b.label, 'iban_last4', right(b.iban, 4))
                      from public.bank_account b where b.id = f.debtor_bank_account_id),
     'cash_check', f.cash_check,
@@ -2679,8 +2874,13 @@ $$;
 -- or sent file, no debit on a statement more than two business days after its execution date), transfer_file_failed
 -- (the job could not write it, its transfers still wait), transfer_file_pending (review T6: the job has not written it
 -- 15 minutes after its generation), payee_name_mismatch (a payout account blocked by a payee check nobody cleared; a
--- check closes with its account: review T5), payee_name_not_epc and iban_not_sepa (review T3: an ordered payout or
--- refund no file can carry, one row per transfer). p_today (tests): the checks as of the end of that Paris day.
+-- check closes once no current account of the client carries its IBAN: review T5, round 2 S1), payee_name_not_epc
+-- and iban_not_sepa (review T3: an ordered payout or refund no file can carry, one row per transfer),
+-- transfer_already_debited (review round 2, D4: an ordered payout or refund whose end-to-end id a statement shows
+-- debited — held out of every file —, and a cancelled sweep of a downloaded file debited and not returned — no sweep
+-- meanwhile; one row per transfer, until M2c-6b books or ops link the debit). file_not_marked_sent is not raised for a
+-- file holding a cancelled transfer while nothing of it is executed (review round 2, D2: it must not be uploaded; its
+-- cancellation is the exit). p_today (tests): the checks as of the end of that Paris day.
 create or replace function private.run_transfer_checks(p_check_run_id uuid, p_organization_id uuid,
                                                        p_today date default null)
 returns void
@@ -2735,6 +2935,11 @@ begin
     from public.transfer_file f
     where f.organization_id = p_organization_id and f.status = 'downloaded'
       and private.transfer_file_cutoff_at(f.id) <= v_now
+      and not (exists (select 1 from public.transfer_file_item i
+                       cross join lateral (select t.status from public.bank_transfer t where t.id = i.transfer_id
+                                           offset 0) t
+                       where i.file_id = f.id and t.status = 'cancelled')
+               and not private.transfer_file_executed(f.id))
     union all
     select 'transfer_not_debited', 'bank_account', x.bank_account_id, x.currency, sum(x.amount_minor)::bigint,
            count(*)::integer, max(v_today - x.execution_date),
@@ -2763,8 +2968,26 @@ begin
            jsonb_build_object('client_id', c.client_organization_id, 'result', c.result, 'check_id', c.id)
     from public.payee_name_check c
     where c.organization_id = p_organization_id and c.cleared_at is null
-      and exists (select 1 from public.client_payout_account pa where pa.id = c.payout_account_id
-                    and pa.status in ('active', 'returned'))
+      and private.payee_check_open(c.payout_account_id)
+    union all
+    select 'transfer_already_debited', 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('kind', t.kind, 'status', t.status, 'end_to_end_id', t.end_to_end_id, 'run_id', t.run_id,
+                              'bank_account_id', t.debtor_bank_account_id)
+    from public.bank_transfer t
+    where t.organization_id = p_organization_id and t.status = 'ordered' and t.kind in ('payout', 'refund')
+      and exists (select 1 from public.bank_account b where b.id = t.debtor_bank_account_id
+                    and b.purpose = 'client_funds')
+      and private.transfer_own_debit_seen(t.debtor_bank_account_id, t.end_to_end_id)
+    union all
+    select 'transfer_already_debited', 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('kind', t.kind, 'status', t.status, 'end_to_end_id', t.end_to_end_id, 'run_id', t.run_id,
+                              'bank_account_id', t.debtor_bank_account_id)
+    from public.bank_account b
+    cross join lateral private.debited_cancelled_sweeps(b.id) s (id)
+    cross join lateral (select x.* from public.bank_transfer x where x.id = s.id offset 0) t
+    where b.organization_id = p_organization_id and b.purpose = 'client_funds'
     union all
     select h.code, 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
            v_today - (t.created_at at time zone 'Europe/Paris')::date,
@@ -2947,7 +3170,9 @@ revoke execute on function private.transfer_file_guard(), private.payee_name_che
   private.transfer_own_debit_seen(uuid, text), private.pmt_inf_batch_seen(uuid, text),
   private.transfer_return_seen(uuid), private.statement_covers(uuid, date, date), private.epc_name_empty(text),
   private.iban_in_sepa(text), private.transfer_file_number(date, bigint), private.transfers_in_flight(uuid),
-  private.transfer_cancel_evidence(uuid, uuid), private.transfer_cancellation_card(uuid, uuid, boolean),
+  private.transfer_cancel_evidence(uuid, uuid, boolean), private.transfer_cancellation_card(uuid, uuid, boolean, boolean),
+  private.transfer_file_executed(uuid), private.amounts_make_up(bigint[], bigint),
+  private.debited_cancelled_sweeps(uuid), private.payee_check_open(uuid), private.payee_check_parties(uuid),
   private.transfer_file_cutoff_at(uuid), private.transfer_checks_due(uuid, timestamptz),
   private.queue_remittance_schedule(),
   private.transfer_cash_position(uuid), private.transfer_hold_reason(uuid, date, date, text),

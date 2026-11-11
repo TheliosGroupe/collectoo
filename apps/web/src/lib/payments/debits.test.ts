@@ -396,6 +396,8 @@ describe("the transfers' checks (M2c-6a and its review: T3, T6)", () => {
       // review T3: held out of every file until the data changes
       "payee_name_not_epc",
       "iban_not_sepa",
+      // review round 2 (D4): a cancelled file executed late after all
+      "transfer_already_debited",
     ]) {
       expect(CHECK_LABEL[code]?.label, code).toBeTruthy();
       expect(CHECK_LABEL[code]?.help, code).toBeTruthy();
@@ -409,6 +411,9 @@ describe("the transfers' checks (M2c-6a and its review: T3, T6)", () => {
     // review T3: a name without EPC characters no longer fails the file (it is held out)
     expect(checkLabel("transfer_file_failed").help).not.toContain("nom de bénéficiaire");
     expect(checkLabel("transfer_not_filed").help).toContain("IBAN hors de la zone SEPA");
+    // review round 2 (D4): never re-done by hand, the sweep held meanwhile
+    expect(checkLabel("transfer_already_debited").help).toContain("Ne refaites aucun virement");
+    expect(checkLabel("transfer_already_debited").help).toContain("quote-part");
   });
 
   it("leads a file's alert to the file, the others to « Virements »", () => {
@@ -424,6 +429,7 @@ describe("the transfers' checks (M2c-6a and its review: T3, T6)", () => {
       ["payee_name_mismatch", "client_payout_account"],
       ["iban_not_sepa", "bank_transfer"],
       ["payee_name_not_epc", "bank_transfer"],
+      ["transfer_already_debited", "bank_transfer"],
     ])
       expect(checkSubjectLink({ ...base, code, subject_type: subject, subject_id: "x" }), code).toBe("/backoffice/reversements/virements");
   });

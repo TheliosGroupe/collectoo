@@ -25,6 +25,7 @@ import {
   parisDateTime,
   payeeCheckClearable,
   requestLine,
+  sweepHoldLabel,
 } from "@/lib/remittance/transfers";
 import { clearPayeeMismatch, markSent, setPainVersion } from "./actions";
 import { DownloadLink, GenerateFile } from "./file-actions";
@@ -181,6 +182,11 @@ function Account({ a, overview }: { a: PayingAccount; overview: TransferOverview
             <p className="mt-2 text-sm" data-testid="sweep-preview">
               Quote-part du cabinet à virer au compte propre : {money(a.sweep_preview_minor, a.currency)}
               {overview.own_account ? ` (…${overview.own_account.iban_last4})` : " — aucun compte propre renseigné"}.
+            </p>
+          ) : null}
+          {sweepHoldLabel(a.sweep_hold) ? (
+            <p className="mt-2 text-sm text-red-800 dark:text-red-200" data-testid="sweep-hold">
+              {sweepHoldLabel(a.sweep_hold)}.
             </p>
           ) : null}
         </div>

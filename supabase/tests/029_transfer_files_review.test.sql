@@ -11,6 +11,8 @@
 --   * T6 file_not_marked_sent at the cut-off and through the hourly schedule, transfer_file_pending,
 --     file_not_downloaded; tests-ui#3 the per-client cap counts the client's other runs in flight;
 --   * tests-ui#0 no caller outside the servicer's money staff at aal2 runs any command; T4 the bucket.
+-- Since round 2 (D1, 030) a cancellation needs its days over: a file whose cancellation is asked is set back to a past
+-- business day once downloaded (pg_temp.backdate: « time moves on »), its evidence statements dated then.
 -- No ledger entry is posted by any of it.
 begin;
 select plan(96);
@@ -389,6 +391,25 @@ insert into t select 'r4', pg_temp.run('a4', '{"04": "100000"}', 18000, 3000);
 insert into t select 'r5', pg_temp.run('a5', '{"05": "50000"}', 9000, 1500);
 create or replace function pg_temp.e() returns date language sql as $$ select private.next_business_day(private.paris_today()) $$;
 create or replace function pg_temp.n() returns date language sql as $$ select private.next_business_day(pg_temp.e()) $$;
+-- review round 2 (D1): a cancellation needs its days over — time moves on: a file whose cancellation is asked is set
+-- back, after its download, to X, a past business day (its next business day Y), before the fixture's statements
+create or replace function pg_temp.x() returns date language sql as $$
+  select c.day from public.business_calendar c
+  where c.scope = 'FR-conservative' and not c.closed and c.day < private.paris_today()
+    and c.day > private.paris_today() - 60
+  order by c.day desc offset 9 limit 1 $$;
+create or replace function pg_temp.y() returns date language sql as $$ select private.next_business_day(pg_temp.x()) $$;
+create or replace function pg_temp.backdate(p_file uuid, p_day date) returns void language plpgsql as $$
+begin
+  set constraints public.transfer_file_superseded_by_fkey immediate;
+  alter table public.transfer_file disable trigger transfer_file_guard;
+  update public.transfer_file set first_execution_date = p_day, last_execution_date = p_day where id = p_file;
+  alter table public.transfer_file enable always trigger transfer_file_guard;
+  alter table public.transfer_file_item disable trigger transfer_file_item_append_only;
+  update public.transfer_file_item set execution_date = p_day where file_id = p_file;
+  alter table public.transfer_file_item enable always trigger transfer_file_item_append_only;
+  set constraints public.transfer_file_superseded_by_fkey deferred;
+end $$;
 create or replace function pg_temp.v(p_k text) returns uuid language sql as $$ select v from t where k = p_k $$;
 create or replace function pg_temp.trid(p_run text) returns uuid language sql as $$
   select transfer_id from public.remittance_run where id = pg_temp.v(p_run) $$;
@@ -603,7 +624,9 @@ select throws_ok(format($$ select public.request_transfer_file_cancellation('rv-
   '23514', 'transfer file refused: no_statement_evidence',
   'not on the same day: no statement covers its execution date and the next business day yet (security#1)');
 reset role;
-select pg_temp.statement('04', pg_temp.n(), 2000000, '[]', pg_temp.e());
+-- time moves on (round 2, D1): the file's execution day X and the next business day Y are over, a statement of them
+select pg_temp.backdate(pg_temp.v('f4'), pg_temp.x());
+select pg_temp.statement('04', pg_temp.y(), 2000000, '[]', pg_temp.x());
 select pg_temp.as_user('01');
 set local role authenticated;
 insert into j select 'q1', public.request_transfer_file_cancellation('rv-cancel-0003', pg_temp.v('f4'),
@@ -611,7 +634,7 @@ insert into j select 'q1', public.request_transfer_file_cancellation('rv-cancel-
                                                                      'Fichier non déposé : erreur de compte', 'not_uploaded');
 reset role;
 select results_eq($$ select v ->> 'status', v #>> '{evidence,covered}', v #>> '{evidence,debit_seen}',
-                            (v #>> '{evidence,needed_to_date}')::date = pg_temp.n()
+                            (v #>> '{evidence,needed_to_date}')::date = pg_temp.y()
                      from j where k = 'q1' $$,
   $$ values ('requested'::text, 'true'::text, 'false'::text, true) $$,
   'asked once a statement covers its execution date to the next business day and shows none of its debits');
@@ -662,6 +685,27 @@ select results_eq($$ select array_agg(r.status order by r.number), array_agg(x.s
 insert into t select 'f5', (pg_temp.gen('01', 'rv-gen-0006') ->> 'file_id')::uuid;
 select pg_temp.write(pg_temp.v('f5'));
 select pg_temp.download('01', pg_temp.v('f5'));
+-- T6 alerts (concurrency-perf#2, tests-ui#5), on this file for tomorrow, before time moves on below
+insert into t select 'c1', pg_temp.chk(pg_temp.e());
+insert into t select 'c2', pg_temp.chk(null);
+select results_eq($$ select r.run_id = pg_temp.v('c1'), r.subject_id from public.payment_check_result r
+                     where r.run_id in (pg_temp.v('c1'), pg_temp.v('c2')) and r.code = 'file_not_marked_sent'
+                     order by 1, 2 $$,
+  $$ values (true, pg_temp.v('f5')) $$,
+  'file_not_marked_sent from the cut-off of its execution day (none recorded: its start), not before');
+select is(private.transfer_checks_due('00000000-0000-0000-0000-0000000000aa',
+                                      (pg_temp.e() + time '12:00') at time zone 'Europe/Paris'), true,
+  'the hourly schedule runs the checks once that cut-off passed (not the night after)');
+insert into public.payment_check_run (organization_id, started_at)
+values ('00000000-0000-0000-0000-0000000000aa', (pg_temp.e() + time '13:00') at time zone 'Europe/Paris');
+select is(private.transfer_checks_due('00000000-0000-0000-0000-0000000000aa',
+                                      (pg_temp.e() + time '14:00') at time zone 'Europe/Paris'), false,
+  '… once: not after a run started since');
+select ok((select prosrc from pg_proc where oid = 'private.queue_remittance_schedule()'::regprocedure)
+          ~ 'transfer_checks_due',
+  'the hourly cron (remittances-schedule) asks it');
+-- time moves on (round 2, D1): the file was for X; the statements below are of X to Y, both over
+select pg_temp.backdate(pg_temp.v('f5'), pg_temp.x());
 select pg_temp.as_user('04');
 set local role authenticated;
 select throws_ok(format($$ select public.cancel_remittance_run('rv-run-0001', %L, %s, 'refusé') $$, pg_temp.v('r1'),
@@ -671,7 +715,7 @@ select throws_ok(format($$ select public.cancel_remittance_run('rv-run-0001', %L
 reset role;
 select is(pg_temp.cash('in_flight_minor'), '595840', 'the file stays in flight meanwhile (the cash check counts it)');
 -- the bank booked one debit for the PmtInf (it ignored BtchBookg): Lilas's 4 198,40 € only, Martin's refused
-select pg_temp.statement('05', pg_temp.n(), 2000000 - 419840,
+select pg_temp.statement('05', pg_temp.y(), 2000000 - 419840,
   jsonb_build_array(jsonb_build_object('amount', 419840, 'pmt_inf', (pg_temp.fl(pg_temp.v('f5'))).number || '-1')));
 select results_eq($$ select private.transfer_debit_seen(pg_temp.trid('r1')), private.transfer_debit_seen(pg_temp.trid('r2')),
                             pg_temp.cash('in_flight_minor') $$,
@@ -707,7 +751,7 @@ reset role;
 select throws_ok(format($$ select pg_temp.download('04', %L, true) $$, pg_temp.v('f5')),
   '23514', 'transfer file refused: holds_cancelled_transfer', 'nor is the file served again (it holds a cancelled transfer)');
 -- the sweep: debited, then returned by the bank
-select pg_temp.statement('06', pg_temp.n(), 2000000 - 419840 - 12000,
+select pg_temp.statement('06', pg_temp.y(), 2000000 - 419840 - 12000,
   jsonb_build_array(jsonb_build_object('amount', 12000, 'e2e', (pg_temp.sweep(pg_temp.v('f5'))).end_to_end_id)));
 select pg_temp.as_user('01');
 set local role authenticated;
@@ -715,7 +759,7 @@ select throws_ok(format($$ select public.request_transfer_cancellation('rv-tc-00
                         (pg_temp.sweep(pg_temp.v('f5'))).id),
   '23514', 'transfer refused: debit_seen', 'the sweep, debited: not cancelled');
 reset role;
-select pg_temp.statement('07', pg_temp.n(), 2000000 - 419840,
+select pg_temp.statement('07', pg_temp.y(), 2000000 - 419840,
   jsonb_build_array(jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 12000,
                                        'orig_e2e', (pg_temp.sweep(pg_temp.v('f5'))).end_to_end_id)));
 select pg_temp.as_user('01');
@@ -743,6 +787,10 @@ reset role;
 insert into t select 'f6', (pg_temp.gen('01', 'rv-gen-0007') ->> 'file_id')::uuid;
 select pg_temp.write(pg_temp.v('f6'));
 select pg_temp.download('01', pg_temp.v('f6'));
+-- time moves on: the file for X executed (its sweep debited on Y), the refund in it refused
+select pg_temp.backdate(pg_temp.v('f6'), pg_temp.x());
+select pg_temp.statement('08', pg_temp.y(), null,
+  jsonb_build_array(jsonb_build_object('amount', 12000, 'e2e', (pg_temp.sweep(pg_temp.v('f6'))).end_to_end_id)));
 select pg_temp.as_user('01');
 set local role authenticated;
 select throws_ok($$ select public.cancel_refund('rv-rfd-0011', (select (v ->> 'refund_request_id')::uuid from j where k = 'rf9'),
@@ -766,25 +814,7 @@ select results_eq($$ select q.status, p.status from public.refund_request q join
                      where q.id = (select (v ->> 'refund_request_id')::uuid from j where k = 'rf9') $$,
   $$ values ('cancelled'::text, 'unmatched'::text) $$, 'the payment is back as it was, to refund again or allocate');
 
--- T6 alerts (concurrency-perf#2, tests-ui#5) ----------------------------------------------------------------------
-insert into t select 'c1', pg_temp.chk(pg_temp.e());
-insert into t select 'c2', pg_temp.chk(null);
-select results_eq($$ select r.run_id = pg_temp.v('c1'), r.subject_id from public.payment_check_result r
-                     where r.run_id in (pg_temp.v('c1'), pg_temp.v('c2')) and r.code = 'file_not_marked_sent'
-                     order by 1, 2 $$,
-  $$ select true, x from unnest(array[pg_temp.v('f5'), pg_temp.v('f6')]) x order by 2 $$,
-  'file_not_marked_sent from the cut-off of its execution day (none recorded: its start), not before');
-select is(private.transfer_checks_due('00000000-0000-0000-0000-0000000000aa',
-                                      (pg_temp.e() + time '12:00') at time zone 'Europe/Paris'), true,
-  'the hourly schedule runs the checks once that cut-off passed (not the night after)');
-insert into public.payment_check_run (organization_id, started_at)
-values ('00000000-0000-0000-0000-0000000000aa', (pg_temp.e() + time '13:00') at time zone 'Europe/Paris');
-select is(private.transfer_checks_due('00000000-0000-0000-0000-0000000000aa',
-                                      (pg_temp.e() + time '14:00') at time zone 'Europe/Paris'), false,
-  '… once: not after a run started since');
-select ok((select prosrc from pg_proc where oid = 'private.queue_remittance_schedule()'::regprocedure)
-          ~ 'transfer_checks_due',
-  'the hourly cron (remittances-schedule) asks it');
+-- T6 (tests-ui#5): file_not_downloaded (file_not_marked_sent and the hourly schedule: above, on f5)
 select pg_temp.collect('10', 3000, private.paris_today() - 1, false);
 select pg_temp.as_user('01');
 set local role authenticated;
@@ -897,6 +927,8 @@ select is((select count(*)::int from storage.objects where bucket_id = 'transfer
   'no money-staff member reads a transfer file in the bucket directly: not a live one before its download');
 reset role;
 select is(pg_temp.download('10', pg_temp.v('f8')) ->> 'download', '1', 'the command records the download …');
+-- (time moves on: its cancellation below needs its execution day and the next one over, D1)
+select pg_temp.backdate(pg_temp.v('f8'), pg_temp.x());
 select pg_temp.as_user('10');
 set local role authenticated;
 select is((select array_agg(name) from storage.objects where bucket_id = 'transfer-files'),

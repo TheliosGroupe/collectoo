@@ -217,6 +217,8 @@ export type ErrorCode =
   | "transfer_not_live"
   | "transfer_late_reason_too_long"
   | "payee_check_not_a_payout"
+  | "transfer_file_not_executed"
+  | "transfer_batch_ambiguous"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -418,8 +420,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Le signalement doit être levé par une autre personne : ni celle qui l'a enregistré, ni celles qui ont proposé ou confirmé cet IBAN.",
   payee_check_cleared: "Ce signalement est déjà levé.",
   // M2c-6a review (T1): a downloaded file, or one of its transfers, is cancelled with the statement's evidence and four eyes
+  // review round 2 (D1): those days must be over — the statement imported after them (a CSV proves nothing of its last day)
   transfer_no_statement_evidence:
-    "Importez d'abord le relevé du compte couvrant le jour d'exécution demandé et le jour ouvré suivant : il doit montrer que la banque n'a rien débité (ou qu'elle a rejeté le virement).",
+    "Importez d'abord le relevé du compte couvrant le jour d'exécution demandé et le jour ouvré suivant, une fois ces journées terminées (un relevé importé le jour même ne prouve rien pour ce jour, un CSV rien pour son dernier jour) : il doit montrer que la banque n'a rien débité (ou qu'elle a rejeté le virement).",
   transfer_same_person:
     "L'annulation doit être confirmée par une autre personne que celle qui l'a demandée (deux personnes, chacune avec sa double authentification).",
   transfer_cancel_already_requested:
@@ -438,7 +441,13 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   transfer_file_blocked:
     "Des virements de ce fichier ne passent plus les contrôles depuis sa génération (IBAN changé, nom non concordant, montant plus couvert…) : le fichier n'a pas été servi et il est remplacé. Régénérez-le.",
   transfer_file_holds_cancelled:
-    "Un virement de ce fichier a été annulé depuis son téléchargement : le fichier n'est plus servi et ne doit plus être déposé.",
+    "Un virement de ce fichier a été annulé depuis son téléchargement : le fichier n'est plus servi et ne doit pas être déposé (ni marqué comme transmis). Si la banque n'en a rien exécuté, demandez l'annulation du fichier.",
+  // M2c-6a review, round 2 (D2, D3): one transfer is cancelled only from an executed file, on a batch debit only when it
+  // singles it out
+  transfer_file_not_executed:
+    "Les relevés ne montrent aucun débit ni retour de ce fichier : la banque n'en a rien exécuté. N'annulez pas un virement seul (le fichier, toujours valable, le paierait encore) : demandez l'annulation du fichier entier.",
+  transfer_batch_ambiguous:
+    "La banque a débité ce lot en une seule ligne, sans le détail des virements, et d'autres virements du lot (un seul ou plusieurs ensemble) font le même montant que celui-ci : rien ne prouve lequel n'a pas été payé. Demandez à la banque le détail du lot avant d'annuler quoi que ce soit.",
   run_payout_in_downloaded_file:
     "Le virement de ce reversement est dans un fichier déjà téléchargé : faites d'abord annuler ce virement (une demande, puis la confirmation d'une autre personne, relevé à l'appui), puis annulez le reversement.",
   // M2c-6a review (T3): a refund the transfer file cannot carry

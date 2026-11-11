@@ -453,6 +453,11 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "IBAN de bénéficiaire hors de la zone SEPA",
     help: "Un virement est retenu hors des fichiers : l'IBAN du bénéficiaire est d'un pays hors de la zone SEPA. Remboursement : annulez-le et redemandez-le « à exécuter vous-même » ; reversement : faites confirmer un IBAN de la zone SEPA.",
   },
+  // M2c-6a review, round 2 (D4): a cancelled file executed late after all
+  transfer_already_debited: {
+    label: "Virement déjà débité malgré son annulation",
+    help: "Un relevé montre le débit d'un virement sous sa référence de bout en bout alors que son fichier a été annulé (exécuté plus tard malgré tout) : le reversement ou le remboursement reste hors des fichiers pour ne pas payer deux fois, et aucune quote-part du cabinet ne part tant qu'une quote-part annulée débitée n'est pas revenue. Ne refaites aucun virement ; prévenez le support pour rattacher ce débit.",
+  },
   payee_name_mismatch: {
     label: "Nom de bénéficiaire non concordant",
     help: "La vérification du bénéficiaire de la banque a signalé un nom différent ou proche pour un compte de reversement : les virements vers ce compte sont bloqués jusqu'à ce qu'une autre personne vérifie le titulaire (« Virements »).",
@@ -556,6 +561,7 @@ const TRANSFER_CHECKS = new Set([
   "file_not_marked_sent",
   "transfer_file_failed",
   "transfer_file_pending",
+  "transfer_already_debited",
 ]);
 
 /**

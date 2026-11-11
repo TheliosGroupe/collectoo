@@ -91,6 +91,8 @@ export type PayingAccount = {
   earliest_execution_date: string;
   cash: CashPosition | null;
   sweep_preview_minor: string;
+  /** review round 2 (D4): why no sweep is proposed although the servicer's share is on the account */
+  sweep_hold?: string | null;
   to_file_count: number;
   eligible_count: number;
   eligible_total_minor: string;
@@ -201,7 +203,22 @@ const HOLD_LABEL: Record<string, string> = {
   cash_not_covered:
     "Le solde du compte dédié ne couvre plus le fichier (dernier relevé, moins ce qui est déjà en route) : importez le dernier relevé, puis régénérez",
   no_closing_balance: "Aucun relevé avec solde de clôture n'est importé pour le compte dédié : importez-en un, puis régénérez",
+  // M2c-6a review, round 2 (D4): a cancelled file executed late after all — filing it again would pay twice
+  already_debited:
+    "Un relevé montre déjà le débit de ce virement (sous la même référence de bout en bout, par un fichier annulé depuis) : il reste hors des fichiers pour ne pas payer deux fois. Ne le refaites pas ; le débit sera rattaché (prévenez le support)",
 };
+
+/** Why the sweep a file would carry is not proposed (review round 2, D4). */
+const SWEEP_HOLD_LABEL: Record<string, string> = {
+  cancelled_sweep_debited:
+    "Quote-part du cabinet non proposée : un virement de quote-part annulé a quand même été débité (relevé) sans être revenu. Aucune nouvelle quote-part ne part tant que ce débit n'est pas rattaché (prévenez le support)",
+};
+
+/** The words for a sweep held back, or null when none is. */
+export function sweepHoldLabel(code: string | null | undefined): string | null {
+  if (!code) return null;
+  return SWEEP_HOLD_LABEL[code] ?? code;
+}
 
 /** The same reasons under the names the review's findings used (pain001#2, pain001#4), should the database send them. */
 const HOLD_ALIAS: Record<string, string> = {
@@ -298,6 +315,8 @@ export function generationEffects(a: PayingAccount, ownAccount: TransferOverview
         : "La quote-part du cabinet reste sur le compte dédié : aucun compte propre n'est renseigné dans « Facturation ».",
     );
   }
+  const sweepHold = sweepHoldLabel(a.sweep_hold);
+  if (sweepHold) out.push(`${sweepHold}.`);
   const held = a.to_file_count - a.eligible_count;
   if (held > 0) out.push(`${held} virement${held > 1 ? "s restent" : " reste"} hors du fichier (motif affiché).`);
   if (a.late_count > 0) out.push(`${a.late_count} virement${a.late_count > 1 ? "s" : ""} après la date limite : le motif du retard est enregistré sur le fichier.`);
@@ -363,6 +382,9 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
   ["not allowed", "not_allowed"],
   // M2c-6a review (T1): a downloaded file or one of its transfers is cancelled by two people, with the statement's evidence
   ["no_statement_evidence", "transfer_no_statement_evidence"],
+  // review round 2 (D2, D3): one transfer only from an executed file; a batch debit that does not single it out
+  ["file_not_executed", "transfer_file_not_executed"],
+  ["batch_ambiguous", "transfer_batch_ambiguous"],
   ["same_person", "transfer_same_person"],
   ["already_requested", "transfer_cancel_already_requested"],
   ["not_requested", "transfer_cancel_not_requested"],
@@ -442,6 +464,15 @@ export type CancelEvidence = {
   covered: boolean;
   debit_seen: boolean;
   returned: boolean;
+  /** review round 2 (D1): the window's last day is over (before today); the first day the cancellation can be asked */
+  window_over: boolean | null;
+  available_from: string | null;
+  /** review round 2 (D3): a batch debit other transfers of the PmtInf could make up */
+  batch_ambiguous: boolean;
+  /** review round 2 (D2): for one transfer, whether the bank executed something of its file (null: not decided) */
+  file_executed: boolean | null;
+  /** the database's verdict, when it gives one */
+  refusal: string | null;
 };
 
 export type Cancellation = { request: CancelRequest | null; evidence: CancelEvidence | null };
@@ -482,6 +513,11 @@ export function cancellationOf(x: unknown): Cancellation {
         covered: e.covered === true,
         debit_seen: e.debit_seen === true,
         returned: e.returned === true,
+        window_over: typeof e.window_over === "boolean" ? e.window_over : null,
+        available_from: dateOrNull(e.available_from),
+        batch_ambiguous: e.batch_ambiguous === true,
+        file_executed: typeof e.file_executed === "boolean" ? e.file_executed : null,
+        refusal: typeof e.refusal === "string" ? e.refusal : null,
       }
     : null;
   return { request, evidence };
@@ -511,10 +547,28 @@ export function evidenceStatus(e: CancelEvidence | null, what: "file" | "transfe
       ready: false,
       text: `Un relevé montre un débit ${of} : la banque l'a exécuté, il ne peut pas être annulé (risque de double paiement).`,
     };
+  // review round 2 (D3): the bank debited the lot as one line, which other transfers of it could make up
+  if (e.batch_ambiguous || e.refusal === "batch_ambiguous")
+    return {
+      ready: false,
+      text: "La banque a débité ce lot en une seule ligne, sans le détail des virements, et d'autres virements du lot font le même montant que celui-ci : rien ne prouve lequel n'a pas été payé. Demandez à la banque le détail du lot.",
+    };
+  // review round 2 (D1): the days must be over before any statement proves them
+  if (e.window_over === false)
+    return {
+      ready: false,
+      text: `La banque peut encore exécuter ${what === "file" ? "ce fichier" : "ce virement"} jusqu'à la fin du ${e.needed_to_date ? frenchDate(e.needed_to_date) : "jour ouvré qui suit l'exécution demandée"} : l'annulation se demande${e.available_from ? ` à partir du ${frenchDate(e.available_from)}` : " ensuite"}, avec le relevé de ces journées importé après leur fin.`,
+    };
   if (!e.covered)
     return {
       ready: false,
-      text: `Importez d'abord le relevé du compte jusqu'au ${e.needed_to_date ? frenchDate(e.needed_to_date) : "jour ouvré qui suit l'exécution demandée"} (dernier relevé importé : ${e.statement_to_date ? `jusqu'au ${frenchDate(e.statement_to_date)}` : "aucun"}) : il doit montrer qu'aucun débit ${of} n'a eu lieu.`,
+      text: `Importez d'abord le relevé du compte jusqu'au ${e.needed_to_date ? frenchDate(e.needed_to_date) : "jour ouvré qui suit l'exécution demandée"}, établi après la fin de cette journée (dernier relevé importé : ${e.statement_to_date ? `jusqu'au ${frenchDate(e.statement_to_date)}` : "aucun"} ; un relevé importé le jour même, ou le dernier jour d'un CSV, ne compte pas) : il doit montrer qu'aucun débit ${of} n'a eu lieu.`,
+    };
+  // review round 2 (D2): one transfer only out of a file the bank executed in part
+  if (what === "transfer" && (e.file_executed === false || e.refusal === "file_not_executed"))
+    return {
+      ready: false,
+      text: "Les relevés ne montrent aucun débit ni retour de ce fichier : la banque n'en a rien exécuté. N'annulez pas ce virement seul — demandez l'annulation du fichier entier.",
     };
   const until = e.statement_to_date ?? e.needed_to_date;
   return {
