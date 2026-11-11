@@ -5,6 +5,7 @@ import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import {
   DEBIT_REVIEW,
+  debitReviewRank,
   clientRelayable,
   clientRelayedPaymentEffect,
   decisionLabel,
@@ -21,7 +22,15 @@ import {
   returnEffect,
 } from "@/lib/payments/debits";
 import { money, signedMoney } from "@/lib/payments/statements";
-import { BookLine, Explain, LinkLoss, LinkRefund, LinkReturn, ReleaseOwnCredit, ResolveDuplicate } from "./debit-actions";
+import {
+  BookLine,
+  Explain,
+  LinkLoss,
+  LinkRefund,
+  LinkReturn,
+  ReleaseOwnCredit,
+  ResolveDuplicate,
+} from "./debit-actions";
 
 const PAGE_SIZE = 20;
 const TABS: Record<string, string> = {
@@ -45,6 +54,8 @@ type Row = {
   remittance_text: string | null;
   end_to_end_id: string | null;
   original_end_to_end_id: string | null;
+  /** M2c-6b-1: a batch line's PmtInfId (one of our files' when it is ours), if the queue returns it */
+  payment_info_id?: string | null;
   return_reason: string | null;
   review_reason: string | null;
   candidates: Candidate[];
@@ -79,8 +90,21 @@ type Candidate = {
   refund_minor?: string;
 };
 type Options = {
-  payments: { payment_id: string; amount_minor: string; booking_date: string; payer_name: string | null; left_minor: string; file_reference: string | null }[];
-  refunds: { refund_request_id: string; amount_minor: string; end_to_end_id: string; status: string; payee_name: string }[];
+  payments: {
+    payment_id: string;
+    amount_minor: string;
+    booking_date: string;
+    payer_name: string | null;
+    left_minor: string;
+    file_reference: string | null;
+  }[];
+  refunds: {
+    refund_request_id: string;
+    amount_minor: string;
+    end_to_end_id: string;
+    status: string;
+    payee_name: string;
+  }[];
 };
 
 /**
@@ -89,25 +113,45 @@ type Options = {
  * choose; CSV lines held as suspected duplicates; fees and other debits (not booked in M2b: explained gaps, founder
  * #20); lines decided. Every action is a SQL command that checks again what this page showed. Admins and ops managers.
  */
-export default async function DebitsPage({ searchParams }: PageProps<"/backoffice/encaissements/debits">) {
+export default async function DebitsPage({
+  searchParams,
+}: PageProps<"/backoffice/encaissements/debits">) {
   const query = await searchParams;
-  const tab = typeof query.onglet === "string" && query.onglet in TABS ? query.onglet : "a-classer";
-  const page = Math.max(1, Number.parseInt(typeof query.page === "string" ? query.page : "1", 10) || 1);
+  const tab =
+    typeof query.onglet === "string" && query.onglet in TABS
+      ? query.onglet
+      : "a-classer";
+  const page = Math.max(
+    1,
+    Number.parseInt(typeof query.page === "string" ? query.page : "1", 10) || 1,
+  );
   const { supabase, claims } = await staffSession();
-  const back = { href: "/backoffice/encaissements", label: "Relevés bancaires" };
+  const back = {
+    href: "/backoffice/encaissements",
+    label: "Relevés bancaires",
+  };
   const { data: memberships } = await supabase
     .from("membership")
     .select("role, organization:organization_id(kind)")
     .eq("user_id", claims.sub ?? "");
-  const staff = (memberships ?? []).find((m) => m.organization?.kind === "servicer");
+  const staff = (memberships ?? []).find(
+    (m) => m.organization?.kind === "servicer",
+  );
   if (!(staff?.role === "admin" || staff?.role === "ops_manager")) {
     return (
       <WidePage title="Débits et retours" back={back}>
-        <InfoNote>Les lignes bancaires sont réservées aux administrateurs et aux responsables des opérations.</InfoNote>
+        <InfoNote>
+          Les lignes bancaires sont réservées aux administrateurs et aux
+          responsables des opérations.
+        </InfoNote>
       </WidePage>
     );
   }
-  const { data } = await supabase.rpc("debit_queue", { p_tab: tab, p_offset: (page - 1) * PAGE_SIZE, p_limit: PAGE_SIZE });
+  const { data } = await supabase.rpc("debit_queue", {
+    p_tab: tab,
+    p_offset: (page - 1) * PAGE_SIZE,
+    p_limit: PAGE_SIZE,
+  });
   const rows = (data ?? []) as unknown as Row[];
   const total = rows[0]?.total ?? 0;
   // what ops may link a line to when the job found nothing it could link (bounded: one keyed read per line shown that
@@ -117,26 +161,39 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
     const reads = await Promise.all(
       rows.map((r) =>
         offersPaymentLinks(r)
-          ? supabase.rpc("debit_link_options", { p_bank_transaction_id: r.bank_transaction_id })
+          ? supabase.rpc("debit_link_options", {
+              p_bank_transaction_id: r.bank_transaction_id,
+            })
           : Promise.resolve({ data: null }),
       ),
     );
-    rows.forEach((r, i) => options.set(r.bank_transaction_id, (reads[i].data ?? { payments: [], refunds: [] }) as unknown as Options));
+    rows.forEach((r, i) =>
+      options.set(
+        r.bank_transaction_id,
+        (reads[i].data ?? { payments: [], refunds: [] }) as unknown as Options,
+      ),
+    );
   }
-  const href = (t: string, p = 1) => `/backoffice/encaissements/debits?onglet=${t}${p > 1 ? `&page=${p}` : ""}`;
+  const href = (t: string, p = 1) =>
+    `/backoffice/encaissements/debits?onglet=${t}${p > 1 ? `&page=${p}` : ""}`;
 
   return (
     <WidePage title="Débits et retours" back={back}>
       <InfoNote>
-        Un retour de la banque annule les imputations et reversements du paiement à la date du retour (notification
-        enregistrée pour le client de son dossier) ; un remboursement n&apos;est comptabilisé qu&apos;une fois son débit
-        sur le relevé. Les frais bancaires du compte de fonds de tiers sont à la charge du cabinet : ceux que la banque code
-        comme tels sont comptabilisés automatiquement, les autres avec « Frais bancaires ». Un crédit venant du compte propre
-        n&apos;est jamais pris automatiquement pour le paiement d&apos;un débiteur : c&apos;est un approvisionnement du
-        cabinet, ou le paiement d&apos;un débiteur reçu par le cabinet et relayé sur le compte dédié, qui devient alors un
-        paiement à affecter (« Paiement d&apos;un débiteur relayé par le cabinet »). De même, un crédit venant du compte de
-        reversement d&apos;un client règle une facture du cabinet, ou relaie le paiement d&apos;un débiteur reçu par le client
-        (« Paiement d&apos;un débiteur relayé par le client »).
+        Un retour de la banque annule les imputations et reversements du
+        paiement à la date du retour (notification enregistrée pour le client de
+        son dossier) ; un remboursement n&apos;est comptabilisé qu&apos;une fois
+        son débit sur le relevé. Les frais bancaires du compte de fonds de tiers
+        sont à la charge du cabinet : ceux que la banque code comme tels sont
+        comptabilisés automatiquement, les autres avec « Frais bancaires ». Un
+        crédit venant du compte propre n&apos;est jamais pris automatiquement
+        pour le paiement d&apos;un débiteur : c&apos;est un approvisionnement du
+        cabinet, ou le paiement d&apos;un débiteur reçu par le cabinet et relayé
+        sur le compte dédié, qui devient alors un paiement à affecter («
+        Paiement d&apos;un débiteur relayé par le cabinet »). De même, un crédit
+        venant du compte de reversement d&apos;un client règle une facture du
+        cabinet, ou relaie le paiement d&apos;un débiteur reçu par le client («
+        Paiement d&apos;un débiteur relayé par le client »).
       </InfoNote>
       <nav className="flex flex-wrap gap-2 text-sm" aria-label="Onglets">
         {Object.entries(TABS).map(([key, label]) => (
@@ -158,18 +215,34 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
 
       <Section title={TABS[tab]} testId="debit-list">
         {rows.length === 0 ? (
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucune ligne.</p>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            Aucune ligne.
+          </p>
         ) : (
           <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
             {rows.map((r) => (
-              <li key={r.bank_transaction_id} className="flex flex-col gap-2 py-3" data-testid="debit-row">
+              <li
+                key={r.bank_transaction_id}
+                className="flex flex-col gap-2 py-3"
+                data-testid="debit-row"
+              >
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <span className="flex flex-wrap items-center gap-2">
                     <Badge tone="neutral">
-                      {tab === "doublons" ? lineKindLabel("suspected_duplicate", r.direction) : lineKindLabel(r.kind, r.direction)}
+                      {tab === "doublons"
+                        ? lineKindLabel("suspected_duplicate", r.direction)
+                        : lineKindLabel(r.kind, r.direction)}
                     </Badge>
-                    {tab !== "traites" ? <Badge tone={r.age_days >= 3 ? "action" : "neutral"}>J+{r.age_days}</Badge> : null}
-                    {r.decision ? <Badge tone="ok">{decisionLabel(r.decision, r.kind)}</Badge> : null}
+                    {tab !== "traites" ? (
+                      <Badge tone={r.age_days >= 3 ? "action" : "neutral"}>
+                        J+{r.age_days}
+                      </Badge>
+                    ) : null}
+                    {r.decision ? (
+                      <Badge tone="ok">
+                        {decisionLabel(r.decision, r.kind)}
+                      </Badge>
+                    ) : null}
                   </span>
                   <span
                     className={`font-medium tabular-nums ${r.direction === "debit" ? "text-red-800 dark:text-red-300" : ""}`}
@@ -179,11 +252,16 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
                   </span>
                 </div>
                 <p className="text-sm">
-                  {frenchDate(r.booking_date)} · {r.counterparty_name ?? "Contrepartie non indiquée"}
-                  {r.counterparty_iban_end ? ` · IBAN …${r.counterparty_iban_end}` : ""}
+                  {frenchDate(r.booking_date)} ·{" "}
+                  {r.counterparty_name ?? "Contrepartie non indiquée"}
+                  {r.counterparty_iban_end
+                    ? ` · IBAN …${r.counterparty_iban_end}`
+                    : ""}
                 </p>
                 {r.remittance_text ? (
-                  <p className="text-sm break-words text-zinc-600 dark:text-zinc-400">{r.remittance_text}</p>
+                  <p className="text-sm break-words text-zinc-600 dark:text-zinc-400">
+                    {r.remittance_text}
+                  </p>
                 ) : null}
                 <p className="text-xs text-zinc-600 dark:text-zinc-400">
                   <span className="font-mono break-all">
@@ -203,11 +281,24 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
                   </Link>
                 </p>
                 {r.review_reason ? (
-                  <p className="text-sm text-amber-900 dark:text-amber-200" data-testid="debit-review">
+                  <p
+                    className="text-sm text-amber-900 dark:text-amber-200"
+                    data-testid="debit-review"
+                  >
+                    {debitReviewRank(r.review_reason) === 0 ? (
+                      <Badge tone="error" testId="debit-review-p0">
+                        Prioritaire
+                      </Badge>
+                    ) : null}{" "}
                     {DEBIT_REVIEW[r.review_reason] ?? r.review_reason}
                   </p>
                 ) : null}
-                {tab === "a-classer" ? <LineActions row={r} options={options.get(r.bank_transaction_id)} /> : null}
+                {tab === "a-classer" ? (
+                  <LineActions
+                    row={r}
+                    options={options.get(r.bank_transaction_id)}
+                  />
+                ) : null}
                 {tab === "frais" && r.direction === "debit" ? (
                   <div className="flex flex-col gap-2">
                     <BookLine
@@ -217,7 +308,10 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
                       effect={feeEffect(money(r.amount_minor, r.currency))}
                       idempotencyKey={randomUUID()}
                     />
-                    <Explain lineId={r.bank_transaction_id} idempotencyKey={randomUUID()} />
+                    <Explain
+                      lineId={r.bank_transaction_id}
+                      idempotencyKey={randomUUID()}
+                    />
                   </div>
                 ) : null}
                 {tab === "doublons" ? (
@@ -232,7 +326,10 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
                   />
                 ) : null}
                 {tab === "traites" && r.decided_payment_id ? (
-                  <Link href={`/backoffice/encaissements/paiements/${r.decided_payment_id}`} className="text-sm underline underline-offset-4">
+                  <Link
+                    href={`/backoffice/encaissements/paiements/${r.decided_payment_id}`}
+                    className="text-sm underline underline-offset-4"
+                  >
                     Voir le paiement
                   </Link>
                 ) : null}
@@ -241,19 +338,33 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
           </ul>
         )}
         {total > PAGE_SIZE ? (
-          <nav className="mt-3 flex items-center justify-between gap-3 text-sm" aria-label="Pages">
-            {page > 1 ? <Link href={href(tab, page - 1)}>← Précédentes</Link> : <span />}
+          <nav
+            className="mt-3 flex items-center justify-between gap-3 text-sm"
+            aria-label="Pages"
+          >
+            {page > 1 ? (
+              <Link href={href(tab, page - 1)}>← Précédentes</Link>
+            ) : (
+              <span />
+            )}
             <span className="text-zinc-600 dark:text-zinc-400">
-              {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} sur {total}
+              {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)}{" "}
+              sur {total}
             </span>
-            {page * PAGE_SIZE < total ? <Link href={href(tab, page + 1)}>Suivantes →</Link> : <span />}
+            {page * PAGE_SIZE < total ? (
+              <Link href={href(tab, page + 1)}>Suivantes →</Link>
+            ) : (
+              <span />
+            )}
           </nav>
         ) : null}
         {tab === "frais" ? (
           <p className="mt-3 text-xs text-zinc-600 dark:text-zinc-400">
-            Les frais de la banque sont à la charge du cabinet : comptabilisez-les ici, ou demandez à la banque de les
-            imputer sur le compte propre. Un débit du montant d&apos;un remboursement demandé sur ce compte peut être ce
-            remboursement, exécuté sans sa référence RFD : il est aussi listé dans « À classer », où le lier.
+            Les frais de la banque sont à la charge du cabinet :
+            comptabilisez-les ici, ou demandez à la banque de les imputer sur le
+            compte propre. Un débit du montant d&apos;un remboursement demandé
+            sur ce compte peut être ce remboursement, exécuté sans sa référence
+            RFD : il est aussi listé dans « À classer », où le lier.
           </p>
         ) : null}
       </Section>
@@ -262,9 +373,17 @@ export default async function DebitsPage({ searchParams }: PageProps<"/backoffic
 }
 
 /** One line's actions: the payments and refunds the job found, those of the same amount on the account, explain. */
-function LineActions({ row, options }: { row: Row; options: Options | undefined }) {
+function LineActions({
+  row,
+  options,
+}: {
+  row: Row;
+  options: Options | undefined;
+}) {
   const cur = row.currency;
-  const fromReview = row.candidates.filter((c) => c.payment_id && !c.refund_request_id && c.left_minor);
+  const fromReview = row.candidates.filter(
+    (c) => c.payment_id && !c.refund_request_id && c.left_minor,
+  );
   const payments = new Map<
     string,
     {
@@ -287,15 +406,20 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
       left_minor: c.left_minor!,
       file_reference: c.file_reference ?? null,
     });
-  for (const p of options?.payments ?? []) if (!payments.has(p.payment_id)) payments.set(p.payment_id, p);
+  for (const p of options?.payments ?? [])
+    if (!payments.has(p.payment_id)) payments.set(p.payment_id, p);
   // review M2c-1: no return or refund link on our own transfers and credits (the database refuses them)
   const linkable = offersPaymentLinks(row);
   const refunds = linkable ? (options?.refunds ?? []) : [];
   const isReturn = row.direction === "debit" && row.kind !== "refund_out";
   // M2c-1 (OQ-34): a return naming a payment of which less is left than it takes back
-  const beyond = row.direction === "debit" && row.kind === "return"
-    ? [...payments.values()].filter((p) => p.named === true && BigInt(p.left_minor) < BigInt(row.amount_minor))
-    : [];
+  const beyond =
+    row.direction === "debit" && row.kind === "return"
+      ? [...payments.values()].filter(
+          (p) =>
+            p.named === true && BigInt(p.left_minor) < BigInt(row.amount_minor),
+        )
+      : [];
   return (
     <div className="flex flex-col gap-2">
       {row.direction === "credit" && row.kind === "own_transfer_in" ? (
@@ -310,7 +434,10 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
           {relayable(row) ? (
             <ReleaseOwnCredit
               lineId={row.bank_transaction_id}
-              effect={relayedPaymentEffect({ amount: money(row.amount_minor, cur), dateFr: frenchDate(row.booking_date) })}
+              effect={relayedPaymentEffect({
+                amount: money(row.amount_minor, cur),
+                dateFr: frenchDate(row.booking_date),
+              })}
               idempotencyKey={randomUUID()}
             />
           ) : null}
@@ -320,7 +447,10 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
         <ReleaseOwnCredit
           by="client"
           lineId={row.bank_transaction_id}
-          effect={clientRelayedPaymentEffect({ amount: money(row.amount_minor, cur), dateFr: frenchDate(row.booking_date) })}
+          effect={clientRelayedPaymentEffect({
+            amount: money(row.amount_minor, cur),
+            dateFr: frenchDate(row.booking_date),
+          })}
           idempotencyKey={randomUUID()}
         />
       ) : null}
@@ -334,7 +464,10 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
           effect={lossEffect({
             amount: money(row.amount_minor, cur),
             left: money(p.left_minor, cur),
-            excess: money((BigInt(row.amount_minor) - BigInt(p.left_minor)).toString(), cur),
+            excess: money(
+              (BigInt(row.amount_minor) - BigInt(p.left_minor)).toString(),
+              cur,
+            ),
             dateFr: frenchDate(row.booking_date),
             noneLeft: BigInt(p.left_minor) === BigInt(0),
           })}
@@ -357,7 +490,12 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
                   label={`Retour du paiement de ${money(p.amount_minor, cur)} du ${frenchDate(p.booking_date)}${p.file_reference ? ` · ${p.file_reference}` : ""}${full ? "" : " (partiel)"}`}
                   effect={returnEffect({
                     amount: money(row.amount_minor, cur),
-                    left: money((BigInt(p.left_minor) - BigInt(row.amount_minor)).toString(), cur),
+                    left: money(
+                      (
+                        BigInt(p.left_minor) - BigInt(row.amount_minor)
+                      ).toString(),
+                      cur,
+                    ),
                     full,
                     dateFr: frenchDate(row.booking_date),
                     hasFile: Boolean(p.file_reference),
@@ -383,8 +521,18 @@ function LineActions({ row, options }: { row: Row; options: Options | undefined 
           idempotencyKey={randomUUID()}
         />
       ))}
-      {explainable({ direction: row.direction, kind: row.kind, namesPayment: fromReview.length > 0 }) ? (
-        <Explain lineId={row.bank_transaction_id} idempotencyKey={randomUUID()} />
+      {explainable({
+        direction: row.direction,
+        kind: row.kind,
+        namesPayment: fromReview.length > 0,
+        endToEndId: row.end_to_end_id,
+        originalEndToEndId: row.original_end_to_end_id,
+        paymentInfoId: row.payment_info_id ?? null,
+      }) ? (
+        <Explain
+          lineId={row.bank_transaction_id}
+          idempotencyKey={randomUUID()}
+        />
       ) : null}
     </div>
   );

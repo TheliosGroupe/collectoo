@@ -150,7 +150,12 @@ export type FileDetail = FileCard & {
   bank_account: { id: string; label: string; iban_last4: string };
   cash_check: CashPosition;
   held: (TransferCard & { reason: string })[];
-  downloads: { n: number; at: string; warning_acknowledged: boolean; by: string | null }[];
+  downloads: {
+    n: number;
+    at: string;
+    warning_acknowledged: boolean;
+    by: string | null;
+  }[];
   items: FileItem[];
   next_after_seq: number | null;
   statuses: Record<string, number>;
@@ -169,7 +174,7 @@ export const TRANSFER_STATUS: Record<string, { label: string; tone: Tone }> = {
   ordered: { label: "À mettre dans un fichier", tone: "action" },
   in_file: { label: "Dans un fichier de virements", tone: "busy" },
   booked: { label: "Débité", tone: "ok" },
-  returned: { label: "Revenu", tone: "error" },
+  returned: { label: "Revenu impayé", tone: "error" },
   cancelled: { label: "Annulé", tone: "neutral" },
 };
 
@@ -196,8 +201,10 @@ export function fileLive(status: string): boolean {
 const HOLD_LABEL: Record<string, string> = {
   payout_not_covered:
     "Montant supérieur à ce qui reste dû au client (un encaissement a été annulé depuis la validation) : annulez le reversement et préparez-en un nouveau",
-  late_reason_required: "Exécution après la date limite du reversement : un motif du retard est demandé",
-  payout_account_changed: "L'IBAN de reversement a changé depuis la validation : annulez le reversement et préparez-en un nouveau",
+  late_reason_required:
+    "Exécution après la date limite du reversement : un motif du retard est demandé",
+  payout_account_changed:
+    "L'IBAN de reversement a changé depuis la validation : annulez le reversement et préparez-en un nouveau",
   run_not_in_flight: "Le reversement n'est plus en cours",
   refund_not_pending: "Le remboursement n'est plus en attente",
   not_eur: "Seuls les virements en euros passent par un fichier SEPA",
@@ -209,7 +216,8 @@ const HOLD_LABEL: Record<string, string> = {
   // M2c-6a review (T2): a file refused at download (its whole CtrlSum no longer covered by the dedicated account)
   cash_not_covered:
     "Le solde du compte dédié ne couvre plus le fichier (dernier relevé, moins ce qui est déjà en route) : importez le dernier relevé, puis régénérez",
-  no_closing_balance: "Aucun relevé avec solde de clôture n'est importé pour le compte dédié : importez-en un, puis régénérez",
+  no_closing_balance:
+    "Aucun relevé avec solde de clôture n'est importé pour le compte dédié : importez-en un, puis régénérez",
   // M2c-6a review, round 2 (D4): a cancelled file executed late after all — filing it again would pay twice
   already_debited:
     "Un relevé montre déjà le débit de ce virement — sous sa référence de bout en bout, celle du virement qu'il remplace, ou dans une ligne groupée d'un fichier annulé depuis (exécuté plus tard malgré tout) : il reste hors des fichiers pour ne pas payer deux fois. Ne le refaites pas ; le débit sera rattaché (prévenez le support)",
@@ -236,7 +244,8 @@ const HOLD_ALIAS: Record<string, string> = {
 /** Why a transfer is held out of a file generated today (null: it goes in). */
 export function holdLabel(code: string | null): string | null {
   if (code === null) return null;
-  if (code.startsWith("payout_blocked:")) return `Virement bloqué — ${payoutBlockerLabel(code.slice("payout_blocked:".length))}`;
+  if (code.startsWith("payout_blocked:"))
+    return `Virement bloqué — ${payoutBlockerLabel(code.slice("payout_blocked:".length))}`;
   return HOLD_LABEL[HOLD_ALIAS[code] ?? code] ?? code;
 }
 
@@ -248,7 +257,12 @@ export function payoutBlockerLabel(code: string): string {
 }
 
 /** « Déjà téléchargé par Léa le 02/11 à 09:41 — ne le déposez pas deux fois » (ops critique #33). */
-export function downloadWarning(file: Pick<FileCard, "download_count" | "first_downloaded_at" | "first_downloaded_by">): string | null {
+export function downloadWarning(
+  file: Pick<
+    FileCard,
+    "download_count" | "first_downloaded_at" | "first_downloaded_by"
+  >,
+): string | null {
   if (file.download_count === 0 || !file.first_downloaded_at) return null;
   return `Déjà téléchargé par ${file.first_downloaded_by ?? "un utilisateur"} le ${parisDayMonth(file.first_downloaded_at)} à ${parisTime(file.first_downloaded_at)} — ne le déposez pas deux fois`;
 }
@@ -285,22 +299,40 @@ export function parisDateTime(iso: string): string {
 }
 
 /** The cash check as the page says it (design §11: the last closing balance, less what already left or will). */
-export function cashLines(cash: CashPosition | null, currency: string): string[] {
-  if (!cash) return ["Aucun relevé avec solde de clôture importé : importez le dernier relevé du compte avant de générer un fichier."];
-  const lines = [`Solde au ${frenchDate(cash.closing_date)} : ${money(cash.closing_minor, currency)}`];
-  if (cash.debits_since_minor !== "0") lines.push(`débits importés depuis : − ${money(cash.debits_since_minor, currency)}`);
+export function cashLines(
+  cash: CashPosition | null,
+  currency: string,
+): string[] {
+  if (!cash)
+    return [
+      "Aucun relevé avec solde de clôture importé : importez le dernier relevé du compte avant de générer un fichier.",
+    ];
+  const lines = [
+    `Solde au ${frenchDate(cash.closing_date)} : ${money(cash.closing_minor, currency)}`,
+  ];
+  if (cash.debits_since_minor !== "0")
+    lines.push(
+      `débits importés depuis : − ${money(cash.debits_since_minor, currency)}`,
+    );
   if (cash.in_flight_minor !== "0")
     lines.push(
       `${cash.in_flight_count} virement${cash.in_flight_count > 1 ? "s" : ""} déjà en route (fichiers téléchargés, débit non encore vu) : − ${money(cash.in_flight_minor, currency)}`,
     );
   if (cash.manual_refunds_minor !== "0")
-    lines.push(`remboursements à exécuter dans la banque : − ${money(cash.manual_refunds_minor, currency)}`);
-  lines.push(`disponible pour un fichier : ${money(cash.available_minor, currency)}`);
+    lines.push(
+      `remboursements à exécuter dans la banque : − ${money(cash.manual_refunds_minor, currency)}`,
+    );
+  lines.push(
+    `disponible pour un fichier : ${money(cash.available_minor, currency)}`,
+  );
   return lines;
 }
 
 /** What « Générer le fichier » will do (the sheet states every effect, §17.1 style). */
-export function generationEffects(a: PayingAccount, ownAccount: TransferOverview["own_account"]): string[] {
+export function generationEffects(
+  a: PayingAccount,
+  ownAccount: TransferOverview["own_account"],
+): string[] {
   const out: string[] = [];
   const n = a.eligible_count;
   const replaced = replacedFiles(a);
@@ -325,8 +357,14 @@ export function generationEffects(a: PayingAccount, ownAccount: TransferOverview
   const sweepHold = sweepHoldLabel(a.sweep_hold);
   if (sweepHold) out.push(`${sweepHold}.`);
   const held = a.to_file_count - a.eligible_count;
-  if (held > 0) out.push(`${held} virement${held > 1 ? "s restent" : " reste"} hors du fichier (motif affiché).`);
-  if (a.late_count > 0) out.push(`${a.late_count} virement${a.late_count > 1 ? "s" : ""} après la date limite : le motif du retard est enregistré sur le fichier.`);
+  if (held > 0)
+    out.push(
+      `${held} virement${held > 1 ? "s restent" : " reste"} hors du fichier (motif affiché).`,
+    );
+  if (a.late_count > 0)
+    out.push(
+      `${a.late_count} virement${a.late_count > 1 ? "s" : ""} après la date limite : le motif du retard est enregistré sur le fichier.`,
+    );
   out.push(
     `Format ${a.pain_version}. Un fichier non encore téléchargé est remplacé par le nouveau (nouveau numéro). Rien n'est comptabilisé avant le débit sur le relevé.`,
   );
@@ -335,7 +373,9 @@ export function generationEffects(a: PayingAccount, ownAccount: TransferOverview
 
 /** The account's files a new generation replaces: those not downloaded yet (design §11; one live file per account). */
 export function replacedFiles(a: Pick<PayingAccount, "files">): FileCard[] {
-  return a.files.filter((f) => f.status === "pending" || f.status === "generated");
+  return a.files.filter(
+    (f) => f.status === "pending" || f.status === "generated",
+  );
 }
 
 /**
@@ -343,24 +383,40 @@ export function replacedFiles(a: Pick<PayingAccount, "files">): FileCard[] {
  * paying account's next execution day now (the cut-off passed), or the database flags it. The download would refuse it
  * (`file_stale`) and replace it: the page offers « Régénérer » instead of « Télécharger ».
  */
-export function fileStale(f: Pick<FileCard, "status" | "first_execution_date" | "stale">, earliestExecutionDate: string | null): boolean {
+export function fileStale(
+  f: Pick<FileCard, "status" | "first_execution_date" | "stale">,
+  earliestExecutionDate: string | null,
+): boolean {
   if (f.status !== "generated") return false;
-  if (f.stale === true || (typeof f.stale === "string" && f.stale !== "")) return true;
-  return earliestExecutionDate !== null && f.first_execution_date < earliestExecutionDate;
+  if (f.stale === true || (typeof f.stale === "string" && f.stale !== ""))
+    return true;
+  return (
+    earliestExecutionDate !== null &&
+    f.first_execution_date < earliestExecutionDate
+  );
 }
 
 /** Whether « Générer le fichier » has something to do: transfers to file, the sweep, or a file to replace. */
 export function canGenerate(a: PayingAccount): boolean {
-  return a.currency === "EUR" && (a.eligible_count > 0 || a.sweep_preview_minor !== "0" || replacedFiles(a).length > 0);
+  return (
+    a.currency === "EUR" &&
+    (a.eligible_count > 0 ||
+      a.sweep_preview_minor !== "0" ||
+      replacedFiles(a).length > 0)
+  );
 }
 
 /** « Régénérer le fichier » when it replaces a stale file (T2), « Générer le fichier » otherwise. */
 export function generateLabel(a: PayingAccount): string {
-  return replacedFiles(a).some((f) => fileStale(f, a.earliest_execution_date)) ? "Régénérer le fichier" : "Générer le fichier";
+  return replacedFiles(a).some((f) => fileStale(f, a.earliest_execution_date))
+    ? "Régénérer le fichier"
+    : "Générer le fichier";
 }
 
 /** What « Régénérer » does from a file's own page (its account's overview is not read there). */
-export function regenerationEffects(f: Pick<FileDetail, "bank_account" | "number">): string[] {
+export function regenerationEffects(
+  f: Pick<FileDetail, "bank_account" | "number">,
+): string[] {
   return [
     `Un nouveau fichier est généré pour ${f.bank_account.label} (…${f.bank_account.iban_last4}), avec un nouveau numéro et l'exécution au plus tôt au prochain jour ouvré du compte.`,
     `Il reprend les virements à mettre dans un fichier, dont ceux du fichier ${f.number} qui passent les contrôles d'aujourd'hui ; les autres restent hors du fichier, avec leur motif sur « Virements ».`,
@@ -371,7 +427,12 @@ export function regenerationEffects(f: Pick<FileDetail, "bank_account" | "number
 /** Paris's calendar day of an instant, as the database's dates (YYYY-MM-DD). */
 export function parisDate(now: Date): string {
   const p = Object.fromEntries(
-    new Intl.DateTimeFormat("fr-FR", { timeZone: "Europe/Paris", day: "2-digit", month: "2-digit", year: "numeric" })
+    new Intl.DateTimeFormat("fr-FR", {
+      timeZone: "Europe/Paris",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    })
       .formatToParts(now)
       .map((x) => [x.type, x.value]),
   );
@@ -436,18 +497,22 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
 
 /** Code for an error raised by a transfer-file command (never the database's text on the page). */
 export function transferErrorCode(message: string): ErrorCode {
-  for (const [needle, code] of COMMAND_ERRORS) if (message.includes(needle)) return code;
+  for (const [needle, code] of COMMAND_ERRORS)
+    if (message.includes(needle)) return code;
   return "unknown";
 }
 
 /** The payee check's own refusals: whoever recorded it, proposed or confirmed the flagged IBAN may not clear it (T5). */
 export function payeeCheckErrorCode(message: string): ErrorCode {
-  if (message.includes("same_person") || message.includes("four_eyes")) return "payee_check_four_eyes";
+  if (message.includes("same_person") || message.includes("four_eyes"))
+    return "payee_check_four_eyes";
   return transferErrorCode(message);
 }
 
 /** Whether the viewer may clear a payee check (the database decides; the page only hides what it would refuse). */
-export function payeeCheckClearable(c: Pick<PayeeCheck, "recorded_by_me" | "can_clear">): boolean {
+export function payeeCheckClearable(
+  c: Pick<PayeeCheck, "recorded_by_me" | "can_clear">,
+): boolean {
   return !c.recorded_by_me && c.can_clear !== false;
 }
 
@@ -488,7 +553,10 @@ export type CancelEvidence = {
   refusal: string | null;
 };
 
-export type Cancellation = { request: CancelRequest | null; evidence: CancelEvidence | null };
+export type Cancellation = {
+  request: CancelRequest | null;
+  evidence: CancelEvidence | null;
+};
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
@@ -497,7 +565,9 @@ function isRecord(x: unknown): x is Record<string, unknown> {
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function dateOrNull(x: unknown): string | null {
-  return typeof x === "string" && ISO_DATE.test(x.slice(0, 10)) ? x.slice(0, 10) : null;
+  return typeof x === "string" && ISO_DATE.test(x.slice(0, 10))
+    ? x.slice(0, 10)
+    : null;
 }
 
 /**
@@ -513,7 +583,8 @@ export function cancellationOf(x: unknown): Cancellation {
     r && typeof r.requested_at === "string"
       ? {
           requested_at: r.requested_at,
-          requested_by: typeof r.requested_by === "string" ? r.requested_by : null,
+          requested_by:
+            typeof r.requested_by === "string" ? r.requested_by : null,
           requested_by_me: r.requested_by_me === true,
           reason: typeof r.reason === "string" ? r.reason : "",
           attestation: typeof r.attestation === "string" ? r.attestation : null,
@@ -529,7 +600,8 @@ export function cancellationOf(x: unknown): Cancellation {
         window_over: typeof e.window_over === "boolean" ? e.window_over : null,
         available_from: dateOrNull(e.available_from),
         batch_ambiguous: e.batch_ambiguous === true,
-        file_executed: typeof e.file_executed === "boolean" ? e.file_executed : null,
+        file_executed:
+          typeof e.file_executed === "boolean" ? e.file_executed : null,
         refusal: typeof e.refusal === "string" ? e.refusal : null,
       }
     : null;
@@ -537,7 +609,9 @@ export function cancellationOf(x: unknown): Cancellation {
 }
 
 /** Which sheet the page offers: ask, confirm another's request, or wait for another person to confirm mine. */
-export function cancellationStep(c: Cancellation): "request" | "confirm" | "wait" {
+export function cancellationStep(
+  c: Cancellation,
+): "request" | "confirm" | "wait" {
   if (!c.request) return "request";
   return c.request.requested_by_me ? "wait" : "confirm";
 }
@@ -546,7 +620,10 @@ export function cancellationStep(c: Cancellation): "request" | "confirm" | "wait
  * The evidence as the sheets state it. `ready`: true when the statements allow the cancellation, false when they
  * refuse it, null when the page does not know (the command checks it).
  */
-export function evidenceStatus(e: CancelEvidence | null, what: "file" | "transfer"): { ready: boolean | null; text: string } {
+export function evidenceStatus(
+  e: CancelEvidence | null,
+  what: "file" | "transfer",
+): { ready: boolean | null; text: string } {
   const of = what === "file" ? "de ce fichier" : "de ce virement";
   if (!e)
     return {
@@ -554,7 +631,10 @@ export function evidenceStatus(e: CancelEvidence | null, what: "file" | "transfe
       text: `La commande vérifie les relevés : ceux du compte doivent être importés jusqu'au jour ouvré qui suit la date d'exécution demandée, sans aucun débit ${of} (ou avec son rejet par la banque).`,
     };
   if (e.returned)
-    return { ready: true, text: `Un relevé montre le rejet ou le retour ${of} par la banque : l'annulation peut être demandée.` };
+    return {
+      ready: true,
+      text: `Un relevé montre le rejet ou le retour ${of} par la banque : l'annulation peut être demandée.`,
+    };
   if (e.debit_seen)
     return {
       ready: false,
@@ -578,7 +658,10 @@ export function evidenceStatus(e: CancelEvidence | null, what: "file" | "transfe
       text: `Importez d'abord le relevé du compte jusqu'au ${e.needed_to_date ? frenchDate(e.needed_to_date) : "jour ouvré qui suit l'exécution demandée"}, établi après la fin de cette journée (dernier relevé importé : ${e.statement_to_date ? `jusqu'au ${frenchDate(e.statement_to_date)}` : "aucun"} ; un relevé importé le jour même, ou le dernier jour d'un CSV, ne compte pas) : il doit montrer qu'aucun débit ${of} n'a eu lieu.`,
     };
   // review round 2 (D2): one transfer only out of a file the bank executed in part
-  if (what === "transfer" && (e.file_executed === false || e.refusal === "file_not_executed"))
+  if (
+    what === "transfer" &&
+    (e.file_executed === false || e.refusal === "file_not_executed")
+  )
     return {
       ready: false,
       text: "Les relevés ne montrent aucun débit ni retour de ce fichier : la banque n'en a rien exécuté. N'annulez pas ce virement seul (le fichier, toujours valable, le paierait encore) : seule l'annulation du fichier entier peut être demandée.",
@@ -592,7 +675,9 @@ export function evidenceStatus(e: CancelEvidence | null, what: "file" | "transfe
 
 /** « Annulation demandée par Léa le 12/11/2026 à 09:41 : motif » (who asked, so the confirmer knows it is not them). */
 export function requestLine(r: CancelRequest): string {
-  const attest = r.attestation ? ` (${ATTESTATION_LABEL[r.attestation] ?? r.attestation})` : "";
+  const attest = r.attestation
+    ? ` (${ATTESTATION_LABEL[r.attestation] ?? r.attestation})`
+    : "";
   return `Annulation demandée par ${r.requested_by ?? "un utilisateur"} le ${parisDateTime(r.requested_at)} : ${r.reason}${attest}`;
 }
 
@@ -605,11 +690,34 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export type CancellationCall =
   | {
       fn: "request_transfer_file_cancellation";
-      args: { p_idempotency_key: string; p_file_id: string; p_expected_version: number; p_reason: string; p_attestation: string };
+      args: {
+        p_idempotency_key: string;
+        p_file_id: string;
+        p_expected_version: number;
+        p_reason: string;
+        p_attestation: string;
+      };
     }
-  | { fn: "confirm_transfer_file_cancellation"; args: { p_idempotency_key: string; p_file_id: string; p_expected_version: number } }
-  | { fn: "request_transfer_cancellation"; args: { p_idempotency_key: string; p_transfer_id: string; p_reason: string } }
-  | { fn: "confirm_transfer_cancellation"; args: { p_idempotency_key: string; p_transfer_id: string } };
+  | {
+      fn: "confirm_transfer_file_cancellation";
+      args: {
+        p_idempotency_key: string;
+        p_file_id: string;
+        p_expected_version: number;
+      };
+    }
+  | {
+      fn: "request_transfer_cancellation";
+      args: {
+        p_idempotency_key: string;
+        p_transfer_id: string;
+        p_reason: string;
+      };
+    }
+  | {
+      fn: "confirm_transfer_cancellation";
+      args: { p_idempotency_key: string; p_transfer_id: string };
+    };
 
 /**
  * The call a cancellation sheet's fields make, or why it is refused before the database is asked. A file's request
@@ -629,22 +737,43 @@ export function cancellationCall(
     const v = get("expected_version");
     if (!UUID.test(file) || !/^\d+$/.test(v)) return { error: "unknown" };
     if (step === "confirm")
-      return { fn: "confirm_transfer_file_cancellation", args: { p_idempotency_key: key, p_file_id: file, p_expected_version: Number(v) } };
+      return {
+        fn: "confirm_transfer_file_cancellation",
+        args: {
+          p_idempotency_key: key,
+          p_file_id: file,
+          p_expected_version: Number(v),
+        },
+      };
     const attestation = get("attestation");
-    if (attestation !== "not_uploaded" && attestation !== "rejected_by_bank") return { error: "transfer_attestation_required" };
+    if (attestation !== "not_uploaded" && attestation !== "rejected_by_bank")
+      return { error: "transfer_attestation_required" };
     const reason = get("reason");
     if (!reason) return { error: "reason_required" };
     return {
       fn: "request_transfer_file_cancellation",
-      args: { p_idempotency_key: key, p_file_id: file, p_expected_version: Number(v), p_reason: reason, p_attestation: attestation },
+      args: {
+        p_idempotency_key: key,
+        p_file_id: file,
+        p_expected_version: Number(v),
+        p_reason: reason,
+        p_attestation: attestation,
+      },
     };
   }
   const transfer = get("transfer_id");
   if (!UUID.test(transfer)) return { error: "unknown" };
-  if (step === "confirm") return { fn: "confirm_transfer_cancellation", args: { p_idempotency_key: key, p_transfer_id: transfer } };
+  if (step === "confirm")
+    return {
+      fn: "confirm_transfer_cancellation",
+      args: { p_idempotency_key: key, p_transfer_id: transfer },
+    };
   const reason = get("reason");
   if (!reason) return { error: "reason_required" };
-  return { fn: "request_transfer_cancellation", args: { p_idempotency_key: key, p_transfer_id: transfer, p_reason: reason } };
+  return {
+    fn: "request_transfer_cancellation",
+    args: { p_idempotency_key: key, p_transfer_id: transfer, p_reason: reason },
+  };
 }
 
 export type CancellationRpc = (
@@ -658,7 +787,10 @@ export function cancellationRpc(client: unknown): CancellationRpc {
 }
 
 type DbFunctions = Database["public"]["Functions"];
-type ExactArgs<C> = C extends { fn: infer F extends keyof DbFunctions; args: infer A }
+type ExactArgs<C> = C extends {
+  fn: infer F extends keyof DbFunctions;
+  args: infer A;
+}
   ? [A] extends [DbFunctions[F]["Args"]]
     ? [DbFunctions[F]["Args"]] extends [A]
       ? true
@@ -667,7 +799,9 @@ type ExactArgs<C> = C extends { fn: infer F extends keyof DbFunctions; args: inf
   : false;
 type IsTrue<T extends true> = T;
 /** Type-checks only: each `CancellationCall`'s arguments are exactly the database's signature (tsc fails on a drift). */
-export type CancellationArgsMatchDb = IsTrue<false extends ExactArgs<CancellationCall> ? false : true>;
+export type CancellationArgsMatchDb = IsTrue<
+  false extends ExactArgs<CancellationCall> ? false : true
+>;
 
 /**
  * How cancelling a run reaches its payout (T1, money#2): `direct` — nothing left the bank (no transfer, still to file,
@@ -679,10 +813,19 @@ export function runCancelPath(
   transfer: { status: string } | null,
   file: { status: string; download_count: number } | null,
 ): "direct" | "transfer_first" | "none" {
-  if (!transfer || transfer.status === "ordered" || transfer.status === "cancelled") return "direct";
+  if (
+    !transfer ||
+    transfer.status === "ordered" ||
+    transfer.status === "cancelled"
+  )
+    return "direct";
   if (transfer.status !== "in_file") return "none";
   if (!file) return "direct";
-  return file.download_count > 0 || file.status === "downloaded" || file.status === "sent" ? "transfer_first" : "direct";
+  return file.download_count > 0 ||
+    file.status === "downloaded" ||
+    file.status === "sent"
+    ? "transfer_first"
+    : "direct";
 }
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -693,28 +836,30 @@ export function runCancelPath(
 // ------------------------------------------------------------------------------------------------------------------
 
 /** Whether a downloaded or sent file — or one of its transfers — can be cancelled (absent or anything else: no). */
-export function cancellationAfterDownload(x: { cancellation_after_download?: unknown } | null | undefined): boolean {
+export function cancellationAfterDownload(
+  x: { cancellation_after_download?: unknown } | null | undefined,
+): boolean {
   return x?.cancellation_after_download === true;
 }
 
 /**
  * The file's page while the cancellation after download is off: what happens, and what ops do now. Review round 7
  * (round 6's verifier, N3): its transfers wait for their debits to be booked from the statement — a refund's is once
- * linked; a payout's or the sweep's cannot be yet (M2c-6b books them), so « read from the statement » would not be so.
+ * linked; M2c-6b-1: a payout's and the sweep's by the debit job when the statement is imported.
  */
 export const DOWNLOADED_FILE_NOTE =
-  "Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : ses virements restent « en cours » jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (celui d'un remboursement l'est dès qu'il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l'être). Gardez le fichier tel quel ; si la banque refuse un virement ou si le fichier n'a pas été déposé, vérifiez le relevé et voyez avec la banque.";
+  "Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : ses virements restent « en cours » jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (à l'import du relevé : automatiquement pour les reversements et la quote-part du cabinet, dès son rattachement pour un remboursement). Gardez le fichier tel quel ; si la banque refuse un virement ou si le fichier n'a pas été déposé, vérifiez le relevé et voyez avec la banque.";
 
 /** The run's page, a run whose payout is in a downloaded file (round 5: no cancellation after download; round 7, N3). */
 export function runPayoutInDownloadedFileNote(fileNumber: string): string {
-  return `Le virement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé bancaire, ce qui n'est pas encore disponible pour un reversement, et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible non plus). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.`;
+  return `Le virement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé bancaire (automatiquement, à l'import du relevé), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.`;
 }
 
 /** « Nom non concordant » on a payout of a downloaded file: what follows for that transfer (round 5: off or on). */
 export function payeeMismatchFollowUp(cancellable: boolean): string {
   return cancellable
     ? "Si la banque n'a pas exécuté ce virement, demandez son annulation (une autre personne la confirme, relevé à l'appui), puis annulez le reversement."
-    : "Ce virement reste « en cours » dans le fichier téléchargé jusqu'à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé bancaire, ce qui n'est pas encore disponible pour un reversement (l'annulation après téléchargement non plus) : gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.";
+    : "Ce virement reste « en cours » dans le fichier téléchargé jusqu'à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé bancaire (automatiquement, à l'import du relevé) ; l'annulation après téléchargement n'est pas encore disponible : gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.";
 }
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -765,16 +910,23 @@ function blockedList(x: unknown): BlockedTransfer[] {
   const out: BlockedTransfer[] = [];
   for (const b of Array.isArray(x) ? x : []) {
     if (!isRecord(b)) continue;
-    const reason = typeof b.reason === "string" && REASON.test(b.reason) ? b.reason : null;
+    const reason =
+      typeof b.reason === "string" && REASON.test(b.reason) ? b.reason : null;
     if (!reason) continue;
-    if (b.transfer_id === null || b.transfer_id === undefined) out.push({ transfer_id: null, reason });
-    else if (typeof b.transfer_id === "string" && UUID.test(b.transfer_id)) out.push({ transfer_id: b.transfer_id, reason });
+    if (b.transfer_id === null || b.transfer_id === undefined)
+      out.push({ transfer_id: null, reason });
+    else if (typeof b.transfer_id === "string" && UUID.test(b.transfer_id))
+      out.push({ transfer_id: b.transfer_id, reason });
   }
   return out;
 }
 
 function refusalCode(text: string): DownloadRefusal {
-  return REFUSALS.find((c) => c !== "unknown" && c !== "unavailable" && text.includes(c)) ?? "unknown";
+  return (
+    REFUSALS.find(
+      (c) => c !== "unknown" && c !== "unavailable" && text.includes(c),
+    ) ?? "unknown"
+  );
 }
 
 /**
@@ -783,7 +935,10 @@ function refusalCode(text: string): DownloadRefusal {
  * back as data (`{refused, blocked}`: a raise would undo the replacement); one that changed nothing as an error (its
  * detail may carry `{blocked}` too).
  */
-export function downloadOutcome(data: unknown, error: { message: string; details?: string | null } | null): DownloadOutcome {
+export function downloadOutcome(
+  data: unknown,
+  error: { message: string; details?: string | null } | null,
+): DownloadOutcome {
   if (error) {
     let detail: unknown = null;
     try {
@@ -791,17 +946,34 @@ export function downloadOutcome(data: unknown, error: { message: string; details
     } catch {
       detail = null;
     }
-    return { kind: "refused", code: refusalCode(error.message), blocked: blockedList(isRecord(detail) ? detail.blocked : null) };
+    return {
+      kind: "refused",
+      code: refusalCode(error.message),
+      blocked: blockedList(isRecord(detail) ? detail.blocked : null),
+    };
   }
   const d = isRecord(data) ? data : {};
-  if (typeof d.refused === "string") return { kind: "refused", code: refusalCode(d.refused), blocked: blockedList(d.blocked) };
-  return { kind: "ok", storagePath: typeof d.storage_path === "string" ? d.storage_path : null };
+  if (typeof d.refused === "string")
+    return {
+      kind: "refused",
+      code: refusalCode(d.refused),
+      blocked: blockedList(d.blocked),
+    };
+  return {
+    kind: "ok",
+    storagePath: typeof d.storage_path === "string" ? d.storage_path : null,
+  };
 }
 
 /** The file's page the browser is sent back to after a refusal (the blocked transfers in the query, at most 20). */
-export function refusalUrl(fileId: string, code: DownloadRefusal, blocked: BlockedTransfer[]): string {
+export function refusalUrl(
+  fileId: string,
+  code: DownloadRefusal,
+  blocked: BlockedTransfer[],
+): string {
   const q = new URLSearchParams({ refus: code });
-  for (const b of blocked.slice(0, MAX_BLOCKED)) q.append("b", `${b.transfer_id ?? ""}:${b.reason}`);
+  for (const b of blocked.slice(0, MAX_BLOCKED))
+    q.append("b", `${b.transfer_id ?? ""}:${b.reason}`);
   return `/backoffice/reversements/virements/${fileId}?${q.toString()}`;
 }
 
@@ -812,7 +984,12 @@ export function refusalFromSearch(
   const raw = Array.isArray(params.refus) ? params.refus[0] : params.refus;
   const code = REFUSALS.find((c) => c === raw);
   if (!code) return null;
-  const entries = params.b === undefined ? [] : Array.isArray(params.b) ? params.b : [params.b];
+  const entries =
+    params.b === undefined
+      ? []
+      : Array.isArray(params.b)
+        ? params.b
+        : [params.b];
   const blocked: BlockedTransfer[] = [];
   for (const entry of entries.slice(0, MAX_BLOCKED)) {
     const at = entry.indexOf(":");

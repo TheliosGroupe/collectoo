@@ -58,24 +58,51 @@ test("our own transfers offer no payment links; a debtor's payment relayed by th
   page,
 }, testInfo) => {
   test.setTimeout(240_000);
-  await loginAsStaff(page, await createMember(tenant.servicerId, "ops_manager"));
+  await loginAsStaff(
+    page,
+    await createMember(tenant.servicerId, "ops_manager"),
+  );
   const credits: Credit[] = [
     // a debtor's payment (no file yet): the amount the old page offered to link our transfer out to
-    { ref: "OC-1", amountMinor: BigInt(100000), name: "MARTIN JEAN", iban: ibanFr(41) },
+    {
+      ref: "OC-1",
+      amountMinor: BigInt(100000),
+      name: "MARTIN JEAN",
+      iban: ibanFr(41),
+    },
     // from the servicer's own account, no top-up ordered: a debtor's payment the servicer relays
-    { ref: "OC-2", amountMinor: BigInt(30000), name: "CABINET COLLECTOO", iban: OWN_IBAN, ustrd: ["VERSEMENT DEBITEUR"] },
+    {
+      ref: "OC-2",
+      amountMinor: BigInt(30000),
+      name: "CABINET COLLECTOO",
+      iban: OWN_IBAN,
+      ustrd: ["VERSEMENT DEBITEUR"],
+    },
   ];
   // our transfer out (RMT reference): rendered with its end-to-end id, as a transfer the bank executed
-  const debits: Debit[] = [{ ref: "OC-3", amountMinor: BigInt(50000), kind: "refund", e2e: "RMT0123456789AB", name: "CABINET" }];
+  const debits: Debit[] = [
+    {
+      ref: "OC-3",
+      amountMinor: BigInt(50000),
+      kind: "refund",
+      e2e: "RMT0123456789AB",
+      name: "CABINET",
+    },
+  ];
   await page.goto("/backoffice/encaissements");
   const form = page.getByTestId("statement-upload");
   await form.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({
     name: "releve-compte-propre.xml",
     mimeType: "application/xml",
-    buffer: Buffer.from(camt053Lines(BANK_IBAN, "2026-11-04", credits, debits, BigInt(0)), "utf-8"),
+    buffer: Buffer.from(
+      camt053Lines(BANK_IBAN, "2026-11-04", credits, debits, BigInt(0)),
+      "utf-8",
+    ),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
+    timeout: 60_000,
+  });
 
   await page.goto("/backoffice/encaissements/debits");
   const rows = page.getByTestId("debit-row");
@@ -88,16 +115,35 @@ test("our own transfers offer no payment links; a debtor's payment relayed by th
   for (const row of [transfer, own]) {
     await expect(row.getByTestId("link-return")).toHaveCount(0);
     await expect(row.getByTestId("link-refund")).toHaveCount(0);
-    await expect(row.getByTestId("explain")).toHaveCount(1);
   }
+  // M2c-6b-1: our RMT debit is booked from the statement, never « explained » away (not_explainable); it waits for
+  // ops as a P0 review (an RMT id no transfer of ours carries); our credit can still be explained
+  await expect(transfer.getByTestId("explain")).toHaveCount(0);
+  await expect(transfer.getByTestId("debit-review-p0")).toHaveCount(1);
+  await expect(own.getByTestId("explain")).toHaveCount(1);
   await expect(own.getByTestId("book-top-up")).toHaveCount(1);
 
   // the credit relays a debtor's payment: it becomes a payment, with ops' motif
-  await own.getByTestId("release-own-credit").getByRole("button", { name: "Paiement d'un débiteur relayé par le cabinet" }).click();
-  const sheet = page.getByRole("dialog", { name: "Paiement d'un débiteur relayé par le cabinet" });
-  await expect(sheet.getByTestId("sheet-effect")).toContainText("« Paiements à traiter »");
-  await expect(sheet.getByTestId("sheet-effect")).toContainText("au 04/11/2026");
-  await sheet.getByLabel("Motif (interne)").fill("Virement de M. Martin reçu par erreur sur le compte propre le 03/11");
+  await own
+    .getByTestId("release-own-credit")
+    .getByRole("button", {
+      name: "Paiement d'un débiteur relayé par le cabinet",
+    })
+    .click();
+  const sheet = page.getByRole("dialog", {
+    name: "Paiement d'un débiteur relayé par le cabinet",
+  });
+  await expect(sheet.getByTestId("sheet-effect")).toContainText(
+    "« Paiements à traiter »",
+  );
+  await expect(sheet.getByTestId("sheet-effect")).toContainText(
+    "au 04/11/2026",
+  );
+  await sheet
+    .getByLabel("Motif (interne)")
+    .fill(
+      "Virement de M. Martin reçu par erreur sur le compte propre le 03/11",
+    );
   await reviewShot(page, testInfo, "m2c-own-credit-relay");
   await sheet.getByRole("button", { name: "Créer le paiement" }).click();
   await expect(rows).toHaveCount(1);
@@ -105,12 +151,16 @@ test("our own transfers offer no payment links; a debtor's payment relayed by th
 
   // « Paiements à traiter »: the relayed payment waits to be assigned to the debtor's file
   await page.goto("/backoffice/encaissements/a-traiter");
-  const relayed = page.getByTestId("queue-card").filter({ hasText: "Versement relayé par le cabinet" });
+  const relayed = page
+    .getByTestId("queue-card")
+    .filter({ hasText: "Versement relayé par le cabinet" });
   await expect(relayed).toHaveCount(1);
   await expect(relayed.getByTestId("queue-amount")).toContainText("300,00");
 });
 
-test("a debtor's payment relayed by the client, from its confirmed payout IBAN, becomes a payment", async ({ page }, testInfo) => {
+test("a debtor's payment relayed by the client, from its confirmed payout IBAN, becomes a payment", async ({
+  page,
+}, testInfo) => {
   test.setTimeout(240_000);
   // a tenant of its own: its dedicated account receives one statement here
   const own = await createTenant();
@@ -128,41 +178,75 @@ test("a debtor's payment relayed by the client, from its confirmed payout IBAN, 
     opened_on: "2026-01-01",
   });
   if (error) throw error;
-  await createConfirmedPayoutAccount(own, clientIban, own.clientName.toUpperCase());
+  await createConfirmedPayoutAccount(
+    own,
+    clientIban,
+    own.clientName.toUpperCase(),
+  );
   await loginAsStaff(page, await createMember(own.servicerId, "ops_manager"));
 
   const credits: Credit[] = [
-    { ref: "CR-1", amountMinor: BigInt(12000), name: own.clientName.toUpperCase(), iban: clientIban, ustrd: ["REGLEMENT CLIENT DUPONT"] },
+    {
+      ref: "CR-1",
+      amountMinor: BigInt(12000),
+      name: own.clientName.toUpperCase(),
+      iban: clientIban,
+      ustrd: ["REGLEMENT CLIENT DUPONT"],
+    },
   ];
   await page.goto("/backoffice/encaissements");
   const form = page.getByTestId("statement-upload");
   await form.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({
     name: "releve-client.xml",
     mimeType: "application/xml",
-    buffer: Buffer.from(camt053Lines(bankIban, "2026-11-06", credits, [], BigInt(0)), "utf-8"),
+    buffer: Buffer.from(
+      camt053Lines(bankIban, "2026-11-06", credits, [], BigInt(0)),
+      "utf-8",
+    ),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
+    timeout: 60_000,
+  });
 
   // never taken for a debtor's payment automatically: the line waits in « À classer »
   await page.goto("/backoffice/encaissements/debits");
-  const row = page.getByTestId("debit-row").filter({ hasText: "Virement reçu d'un client" });
+  const row = page
+    .getByTestId("debit-row")
+    .filter({ hasText: "Virement reçu d'un client" });
   await expect(row).toHaveCount(1, { timeout: 60_000 });
   await expect(row).toContainText("120,00");
   await expect(row.getByTestId("link-return")).toHaveCount(0);
   await expect(row.getByTestId("release-own-credit")).toHaveCount(0);
-  await row.getByTestId("release-client-credit").getByRole("button", { name: "Paiement d'un débiteur relayé par le client" }).click();
-  const sheet = page.getByRole("dialog", { name: "Paiement d'un débiteur relayé par le client" });
-  await expect(sheet.getByTestId("sheet-effect")).toContainText("venant du compte de reversement d'un client");
-  await expect(sheet.getByTestId("sheet-effect")).toContainText("au 06/11/2026");
-  await sheet.getByLabel("Motif (interne)").fill("Le client relaie le virement de M. Dupont reçu sur son compte le 05/11");
+  await row
+    .getByTestId("release-client-credit")
+    .getByRole("button", {
+      name: "Paiement d'un débiteur relayé par le client",
+    })
+    .click();
+  const sheet = page.getByRole("dialog", {
+    name: "Paiement d'un débiteur relayé par le client",
+  });
+  await expect(sheet.getByTestId("sheet-effect")).toContainText(
+    "venant du compte de reversement d'un client",
+  );
+  await expect(sheet.getByTestId("sheet-effect")).toContainText(
+    "au 06/11/2026",
+  );
+  await sheet
+    .getByLabel("Motif (interne)")
+    .fill(
+      "Le client relaie le virement de M. Dupont reçu sur son compte le 05/11",
+    );
   await reviewShot(page, testInfo, "m2c-client-credit-relay");
   await sheet.getByRole("button", { name: "Créer le paiement" }).click();
   await expect(page.getByTestId("debit-row")).toHaveCount(0);
 
   // « Paiements à traiter »: the relayed payment waits to be assigned to the debtor's file
   await page.goto("/backoffice/encaissements/a-traiter");
-  const relayed = page.getByTestId("queue-card").filter({ hasText: "Versement relayé par le client" });
+  const relayed = page
+    .getByTestId("queue-card")
+    .filter({ hasText: "Versement relayé par le client" });
   await expect(relayed).toHaveCount(1);
   await expect(relayed.getByTestId("queue-amount")).toContainText("120,00");
 });

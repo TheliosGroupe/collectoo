@@ -17,18 +17,24 @@ export type Credit = {
   e2e?: string;
 };
 
-/** M2b-6: a debit of the statement — a payment's return (reversal, RtrInf reason), our refund (RFD…), a fee. */
+/**
+ * M2b-6: a debit of the statement — a payment's return (reversal, RtrInf reason), our refund (RFD…), a fee; M2c-6b-1:
+ * our transfer (a payout's RMT…, the sweep's SWP…) as the bank debits it.
+ */
 export type Debit = {
   ref: string;
   amountMinor: bigint;
-  kind: "return" | "refund" | "fee" | "other";
-  /** return: the end-to-end id of the credit it takes back; refund: our RFD reference. */
+  kind: "return" | "refund" | "fee" | "other" | "transfer";
+  /** return: the end-to-end id of the credit it takes back; refund: our RFD reference; transfer: its RMT or SWP id. */
   e2e?: string;
   name?: string;
 };
 
 function esc(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function amount(minor: bigint): string {
@@ -37,7 +43,9 @@ function amount(minor: bigint): string {
 }
 
 function mod97(text: string): bigint {
-  const digits = [...text].map((c) => (/[A-Z]/.test(c) ? String(c.charCodeAt(0) - 55) : c)).join("");
+  const digits = [...text]
+    .map((c) => (/[A-Z]/.test(c) ? String(c.charCodeAt(0) - 55) : c))
+    .join("");
   return BigInt(digits) % BigInt(97);
 }
 
@@ -53,16 +61,26 @@ export function camt053(iban: string, day: string, credits: Credit[]): string {
 }
 
 /** A one-day statement of credits and debits, from an opening balance (the previous statement's closing). */
-export function camt053Lines(iban: string, day: string, credits: Credit[], debits: Debit[], opening: bigint): string {
+export function camt053Lines(
+  iban: string,
+  day: string,
+  credits: Credit[],
+  debits: Debit[],
+  opening: bigint,
+): string {
   const total =
-    opening + credits.reduce((s, c) => s + c.amountMinor, BigInt(0)) - debits.reduce((s, d) => s + d.amountMinor, BigInt(0));
+    opening +
+    credits.reduce((s, c) => s + c.amountMinor, BigInt(0)) -
+    debits.reduce((s, d) => s + d.amountMinor, BigInt(0));
   const bal = (code: string, minor: bigint) =>
     `<Bal><Tp><CdOrPrtry><Cd>${code}</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">${amount(minor < BigInt(0) ? -minor : minor)}</Amt>` +
     `<CdtDbtInd>${minor < BigInt(0) ? "DBIT" : "CRDT"}</CdtDbtInd><Dt><Dt>${day}</Dt></Dt></Bal>`;
   const entries = credits.map((c) => {
     const remittance =
       (c.ustrd ?? []).map((u) => `<Ustrd>${esc(u)}</Ustrd>`).join("") +
-      (c.rf ? `<Strd><CdtrRefInf><Tp><CdOrPrtry><Cd>SCOR</Cd></CdOrPrtry></Tp><Ref>${esc(c.rf)}</Ref></CdtrRefInf></Strd>` : "");
+      (c.rf
+        ? `<Strd><CdtrRefInf><Tp><CdOrPrtry><Cd>SCOR</Cd></CdOrPrtry></Tp><Ref>${esc(c.rf)}</Ref></CdtrRefInf></Strd>`
+        : "");
     return (
       `<Ntry><Amt Ccy="EUR">${amount(c.amountMinor)}</Amt><CdtDbtInd>CRDT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>` +
       `<BookgDt><Dt>${day}</Dt></BookgDt><ValDt><Dt>${day}</Dt></ValDt><AcctSvcrRef>N${esc(c.ref)}</AcctSvcrRef>` +
@@ -95,7 +113,7 @@ function debitEntry(day: string): (d: Debit) => string {
     const code =
       d.kind === "return"
         ? ["PMNT", "RCDT", "RRTN"]
-        : d.kind === "refund" || d.kind === "other"
+        : d.kind === "refund" || d.kind === "other" || d.kind === "transfer"
           ? ["PMNT", "ICDT", "ESCT"]
           : ["PMNT", "MDOP", "FEES"];
     const head =
@@ -104,15 +122,19 @@ function debitEntry(day: string): (d: Debit) => string {
       `<Sts><Cd>BOOK</Cd></Sts><BookgDt><Dt>${day}</Dt></BookgDt><ValDt><Dt>${day}</Dt></ValDt>` +
       `<AcctSvcrRef>N${esc(d.ref)}</AcctSvcrRef>` +
       `<BkTxCd><Domn><Cd>${code[0]}</Cd><Fmly><Cd>${code[1]}</Cd><SubFmlyCd>${code[2]}</SubFmlyCd></Fmly></Domn></BkTxCd>`;
-    if (d.kind === "fee") return `${head}<AddtlNtryInf>FRAIS DE TENUE DE COMPTE</AddtlNtryInf></Ntry>`;
+    if (d.kind === "fee")
+      return `${head}<AddtlNtryInf>FRAIS DE TENUE DE COMPTE</AddtlNtryInf></Ntry>`;
     // M2c-1: a debit the bank does not code as a charge (ops book it as a fee, or explain it)
-    if (d.kind === "other") return `${head}<AddtlNtryInf>PRELEVEMENT ABONNEMENT BANQUE EN LIGNE</AddtlNtryInf></Ntry>`;
+    if (d.kind === "other")
+      return `${head}<AddtlNtryInf>PRELEVEMENT ABONNEMENT BANQUE EN LIGNE</AddtlNtryInf></Ntry>`;
     return (
       head +
       `<NtryDtls><TxDtls><Refs><AcctSvcrRef>${esc(d.ref)}</AcctSvcrRef><EndToEndId>${esc(d.e2e ?? "NOTPROVIDED")}</EndToEndId></Refs>` +
       `<Amt Ccy="EUR">${amount(d.amountMinor)}</Amt><CdtDbtInd>DBIT</CdtDbtInd>` +
-      (d.name ? `<RltdPties><Cdtr><Pty><Nm>${esc(d.name)}</Nm></Pty></Cdtr></RltdPties>` : "") +
-      `<RmtInf><Ustrd>${d.kind === "return" ? "RETOUR MD06" : "REMBOURSEMENT"}</Ustrd></RmtInf>` +
+      (d.name
+        ? `<RltdPties><Cdtr><Pty><Nm>${esc(d.name)}</Nm></Pty></Cdtr></RltdPties>`
+        : "") +
+      `<RmtInf><Ustrd>${d.kind === "return" ? "RETOUR MD06" : d.kind === "transfer" ? "VIREMENT SEPA" : "REMBOURSEMENT"}</Ustrd></RmtInf>` +
       (d.kind === "return" ? "<RtrInf><Rsn><Cd>MD06</Cd></Rsn></RtrInf>" : "") +
       `</TxDtls></NtryDtls></Ntry>`
     );

@@ -699,6 +699,74 @@ isOneToOne: false
                   Relationships: [
                     
                   ]
+                },"client_advance": {
+                  Row: {
+                    "amount_minor": number,"bank_transaction_id": string | null,"cause": string,"cause_entry_id": string,"client_organization_id": string,"created_at": string,"currency": string,"entry_id": string,"id": string,"mandate_id": string | null,"organization_id": string,"top_up_transfer_id": string | null,"transfer_id": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "amount_minor": number,"bank_transaction_id"?: string | null,"cause": string,"cause_entry_id": string,"client_organization_id": string,"created_at"?: string,"currency": string,"entry_id": string,"id"?: string,"mandate_id"?: string | null,"organization_id": string,"top_up_transfer_id"?: string | null,"transfer_id"?: string | null
+                  }
+                  Update: {
+                    "amount_minor"?: number,"bank_transaction_id"?: string | null,"cause"?: string,"cause_entry_id"?: string,"client_organization_id"?: string,"created_at"?: string,"currency"?: string,"entry_id"?: string,"id"?: string,"mandate_id"?: string | null,"organization_id"?: string,"top_up_transfer_id"?: string | null,"transfer_id"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "client_advance_bank_transaction_id_fkey"
+      columns: ["bank_transaction_id"]
+isOneToOne: false
+      referencedRelation: "bank_transaction"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_cause_entry_id_fkey"
+      columns: ["cause_entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "client_advance_entry_id_fkey"
+      columns: ["entry_id"]
+isOneToOne: true
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_mandate_id_fkey"
+      columns: ["mandate_id"]
+isOneToOne: false
+      referencedRelation: "mandate"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_top_up_transfer_id_fkey"
+      columns: ["top_up_transfer_id"]
+isOneToOne: false
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_transfer_id_fkey"
+      columns: ["transfer_id"]
+isOneToOne: false
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"client_notification": {
                   Row: {
                     "account_id": string | null,"client_organization_id": string,"created_at": string,"delivered_at": string | null,"id": string,"kind": string,"ledger_entry_id": string | null,"organization_id": string,"payment_id": string,"portfolio_id": string | null,"reason": string | null
