@@ -92,9 +92,15 @@ and a file undone in full is back to 0.
   credit that fell on invoices at two rates, gives each reversal its own share: the same lines
   at the same VAT rate give the documents of the run never approved. At another rate (or with
   new lines) what the run credits changes, and what is left of a link comes off where the
-  cancelled run took last, as in the run never approved: not exact, bounded — the residual of V,
-  measured, stays within the reserve's n + 1 cents plus the moved credit times the spread of the
-  key's VAT rates, the split between open and waived can differ more (CALCULATION_RULES §7).
+  cancelled run took last, as in the run never approved (beyond the chain LIFO, so a smaller
+  credit comes off the oldest invoice it took from): not exact, bounded — measured, |ΔV| stays
+  within n + 1 + ⌈D·s⌉ cents and |ΔW| within D + |ΔV|, n the key's open invoices, s the spread
+  of its VAT rates, D the credit moved between its lines summed over every step: Σ over the
+  lines of Σᵢ |tookᵢ - tookᵢ₊₁|, took₁ … took_k what each cancelled approval took back for the
+  line, took_k₊₁ what the run again takes (after repeated cancellations the latest step alone
+  does not bound V: review round 3). The measured maxima are a generator's, not bounds
+  (CALCULATION_RULES §7). A manual credit note issued between the cancellation and the run
+  again on an invoice the cancelled run took from keeps its waiver there (OQ-78 (f)).
   (With no corrective invoice at a rate, the same history without manual credit notes has one
   more open invoice than this one: its reserve, and under mixed VAT rates its LIFO order, can
   then differ — review math#1.)

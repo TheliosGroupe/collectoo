@@ -683,7 +683,8 @@ $$;
 -- assumed, so a draft prepared before one — or while one committed: the prepare reads the history's position before
 -- anything else (review security-concurrency#0) — is sent back (`history_changed`). A draft the engine could not price
 -- (`commission_input_error`) is not refused: a race is caught above, and a persistent data error keeps M2c-4's rule —
--- the commission pending, the run remitted gross within R124-6's month, I22 flagging the key (review round 2).
+-- the commission pending, the run remitted gross (it can leave within R124-6's month: nothing here refuses it, though
+-- its approval by then is not guaranteed), I22 flagging the key (review round 2).
 create or replace function private.remittance_approval_refusal(p_run public.remittance_run,
                                                                p_draft private.remittance_draft, p_today date)
 returns text

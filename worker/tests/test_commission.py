@@ -37,8 +37,9 @@ Hypothesis properties and the input errors.
   its waiver, every earlier invoice's charge and waiver, each corrective invoice credited in full
   (review math#0); at another VAT rate it stays within the reserve of the run never approved where
   each key has at most two invoices and one reversal, a reversal's links coming in the order the
-  cancelled run took them (`retake_links`, review round 2); a manual credit is spread over the
-  invoice's keys in proportion to what each still charges.
+  cancelled run took them (`retake_links`, review round 2) — beyond its chain LIFO, so a smaller
+  credit run again comes off the oldest invoice the cancelled run took from (round 3); a manual
+  credit is spread over the invoice's keys in proportion to what each still charges.
 """
 
 from __future__ import annotations
@@ -1929,6 +1930,104 @@ def test_retake_links_come_in_the_order_the_cancelled_run_took() -> None:
         Retake("FC-2026-000011", ((k, 400),)),
         Retake("FC-2026-000012", ((k, 100),)),
     )
+
+
+def _credited(d: MandateDocuments | None) -> list[tuple[str, int]]:
+    """A run's credit note, in the order it credits: (invoice credited, HT > 0)."""
+    cn = d.credit_note if d else None
+    return [(a.original_invoice_id, -a.ht_minor) for a in cn.allocations] if cn else []
+
+
+def _left_by_rate(sim: Simulator) -> dict[Decimal, tuple[int, int]]:
+    """Per VAT rate: the HT its invoices still charge and the VAT still billed on them."""
+    out: dict[Decimal, list[int]] = defaultdict(lambda: [0, 0])
+    for number, inv in sim.invoices.items():
+        left = out[inv.vat_rate]
+        left[0] += inv.ht_minor - inv.credited_ht_minor
+        left[1] += sim.invoice_vat[number] - sim.vat_credited.get(number, 0)
+    return {rate: (ht, vat) for rate, (ht, vat) in out.items() if ht or vat}
+
+
+def test_a_smaller_credit_run_again_comes_off_the_oldest_invoice_the_cancelled_run_took_from() -> (
+    None
+):
+    """LIFO among a reversal's links beyond its chain (review M2c-5b round 3, gen5 seed 9967: the
+    rate down, the LIFO order pinned by no test). A small file under a 5 000,00 € minimum (the TTC
+    cap binds): 1 000,00 € collected at 0 % VAT (FC-1), 80,00 € at 5,5 % (FC-2, 23,67 €), 200,00 €
+    at 2,1 % (FC-3, 230,00 €). Undone at 20 %, the third takes its own invoice's 230,00 €, then
+    LIFO FC-2's 23,67 € and 100,01 € of FC-1, the oldest. Cancelled: FC-5 100,01 € at 0 %, FC-6
+    230,00 € at 2,1 %, FC-7 23,67 € at 5,5 %. Run again at 10 %, the cap leaves room for more
+    commission and the reversal credits 81,81 € less: the run never approved takes that shortfall
+    off FC-1 — the last invoice its LIFO reaches — so the run again takes it off FC-5, FC-1's
+    corrective invoice, its links in the order the cancelled run took (FC-6, FC-7, FC-5). With the
+    links beyond the chain oldest first (FC-6, FC-5, FC-7: the mutant the round-3 review ran) FC-5
+    takes the whole credit left and FC-7 is never credited: 23,67 € HT and 1,30 € of VAT still
+    billed at 5,5 %, which the run never approved credits, and V a cent lower."""
+    schedule = CommissionSchedule.model_validate(
+        {
+            "schema": "commission-1",
+            "basis": BASIS,
+            "rules": [
+                {
+                    "id": "r",
+                    "tier_key": "k",
+                    "label_fr": "Règle",
+                    "match": {},
+                    "rate": {"kind": "flat", "rate": "0.1"},
+                    "min_per_file_minor": "500000",
+                }
+            ],
+        }
+    )
+    key = ("F", "k")
+    first, second, third = _line(1, 100_000, D0), _line(2, 8_000, D0), _line(3, 20_000, D0)
+    sim = Simulator({"F": _file()}, _one_version(schedule), NO_VAT)
+    for rate, line in ((NO_VAT, first), (Decimal("0.055"), second), (Decimal("0.021"), third)):
+        sim.vat_rate = rate
+        sim.run([line])
+    assert {c.invoice_id: c.open_minor for c in sim.charges[key]} == {
+        "FC-2026-000001": 100_000,
+        "FC-2026-000002": 2_367,
+        "FC-2026-000003": 23_000,
+    }
+    never = copy.deepcopy(sim)
+    undo = [_undo(9, third)]
+    sim.vat_rate = TAU
+    _, cancelled = sim.run(undo)
+    assert _credited(cancelled.get("M")) == [
+        ("FC-2026-000003", 23_000),  # its own invoice
+        ("FC-2026-000002", 2_367),  # then LIFO: the newer invoice, at 5,5 %
+        ("FC-2026-000001", 10_001),  # and the older one, at 0 %
+    ]
+    corrective = sim.cancel_last()
+    assert {n: (inv.ht_minor, inv.vat_rate) for n, inv in corrective.items()} == {
+        "FC-2026-000005": (10_001, NO_VAT),
+        "FC-2026-000006": (23_000, Decimal("0.021")),
+        "FC-2026-000007": (2_367, Decimal("0.055")),
+    }
+    assert sim.line_invoices[third.entry_id] == (
+        Retake("FC-2026-000006", ((key, 23_000),)),
+        Retake("FC-2026-000007", ((key, 2_367),)),
+        Retake("FC-2026-000005", ((key, 10_001),)),
+        "FC-2026-000003",
+    )
+    sim.vat_rate = never.vat_rate = Decimal("0.1")
+    _, again = sim.run(undo)
+    _, once = never.run(undo)
+    _invariants(sim)
+    assert _credited(once.get("M")) == [
+        ("FC-2026-000003", 23_000),
+        ("FC-2026-000002", 2_367),
+        ("FC-2026-000001", 1_820),  # 81,81 € less than the cancelled run: off the oldest
+    ]
+    assert _credited(again.get("M")) == [
+        ("FC-2026-000006", 23_000),
+        ("FC-2026-000007", 2_367),
+        ("FC-2026-000005", 1_820),  # the shortfall off FC-1's corrective invoice
+    ]
+    assert _state_of(sim.history) == _state_of(never.history)
+    assert sim.history[key].commission_minor == 98_180
+    assert _left_by_rate(sim) == _left_by_rate(never) == {NO_VAT: (98_180, 0)}
 
 
 # -- manual credit notes: the allocation over the invoice's keys ----------------------------------

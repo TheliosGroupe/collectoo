@@ -14,7 +14,7 @@ the run's draft; the approval freezes it.
   keep state `pending` and a later run prices them with its own lines (their pricing is that run's).
   The approval takes such a draft (M2c-5b review round 2: no refusal of its own); one prepared while
   a manual credit note committed is sent back by `history_changed` (the history's position is read
-  first), so only a persistent data error — a key I22 flags — remits gross this way.
+  first), so only a persistent data error — e.g. a key I22 flags — remits gross this way.
 * **Lines of earlier runs left pending** are priced with the run's own lines (posting order) and
   their pricing is returned apart (`Draft.repricing`): their money was remitted already.
 * **Deadlines**: one per distinct (E, delay), for the positive collections (allocations and
