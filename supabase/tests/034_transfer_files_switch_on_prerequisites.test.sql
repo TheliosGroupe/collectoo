@@ -1,7 +1,7 @@
 -- M2c-6b's prerequisites to switching cancellation after download on (ADR-0014 « M2c-6a review fixes », rounds 5 and
 -- 6; ROADMAP M2c-6b; design §9.7; COMPLIANCE OQ-80 (n), OQ-81). M2c-6a ships fail-closed: once a file is downloaded
 -- nothing in it is cancelled, re-issued or re-queued (private.feature_switch 'downloaded_file_cancellation', off;
--- pgTAP 033). Round 4's verifiers left three ways a transfer cancelled out of a file the bank already has could still be
+-- pgTAP 033). Round 4's verifiers (and round 7's) left ways a transfer cancelled out of a file the bank already has could still be
 -- paid twice once the switch is on. This file runs each of them with the switch ON, each scenario in its own
 -- subtransaction (pg_temp.isolated: rolled back at its end, its outcomes kept), and asserts the safe outcome:
 --   * G2, the batch-line variant (met in round 6, passes): a refund-only file cancelled whole, its refund re-issued in a
@@ -16,11 +16,14 @@
 --   * G1c, a refused payout executed late (todo: fails today): a payout cancelled alone out of a live downloaded file,
 --     its run cancelled, then a later batch line of its PmtInf that can be it — alerted although its run is cancelled
 --     (the G1 alert not keyed on live runs) and raised `cancelled_transfer_debited` (M2c-6b's P0, covering batch lines).
+--   * H-PAY, a second refund of the same payment (todo: fails today; round 7's verifier): the first refund's file
+--     cancelled whole and that refund cancelled, a second refund of the payment (re-issuing none) in a downloaded file —
+--     the old file's late line with no reference does not execute it (`reissue_in_downloaded_file`).
 -- Definition of done for switching it on (M2c-6b): every test of this file passes with its todo() lines removed — the
 -- scenarios may gain the debit bookings M2c-6b adds, never lose an assertion — and 033 turned into the switch-on test.
 -- pgTAP's TODO failures do not fail `supabase test db`.
 begin;
-select plan(16);
+select plan(18);
 
 
 -- Fixtures (as 028: Martin (a1), Lilas (a2), Cyprès (a3), Omega (a4: a RIB holder in Greek letters), Tunis Trading
@@ -812,6 +815,51 @@ select ok((select v -> 'alerts' from j where k = 'g1c') @> '["payout 164000 canc
   'G1c: alerted although its run is cancelled (the G1 alert not keyed on live runs and refunds)');
 select ok((select v -> 'cancelled_transfer_debited' from j where k = 'g1c') @> '[164000]'::jsonb,
   'G1c: cancelled_transfer_debited raised for the batch line that can contain it (not only an RMT or RFD id)');
+
+-- H-PAY, a second refund of the same payment after its first one's file was cancelled (round 7's verifier, h_pay) ----
+-- Round 7 lets a line with no reference execute a refund in a downloaded file while its transfer re-issues none (033).
+-- With the switch on that is not enough: the first refund's file cancelled whole, that refund cancelled, a new refund of
+-- the same payment (no predecessor) in a downloaded file — the old file executed late as a line with no reference must
+-- not execute the new refund (else the new file, executed too, refunds the payer twice and can no longer be cancelled).
+create or replace function pg_temp.sc_hpay() returns jsonb language plpgsql as $$
+declare v jsonb := '{}';
+begin
+  perform pg_temp.handed_out('f0', 'hp-gen-0000', 0);
+  insert into j select 'rq', pg_temp.refund('71', 5000);
+  perform pg_temp.handed_out('f1', 'hp-gen-0001', 0);
+  perform pg_temp.statement('b1', pg_temp.d(1), null, '[]', pg_temp.d(0), pg_temp.after(1));
+  v := v || jsonb_build_object('request', pg_temp.try('01', pg_temp.req_file('hp-rq-0001', 'f1')),
+                               'confirm', pg_temp.try('04', pg_temp.conf_file('hp-cf-0001', 'f1')),
+                               'cancel_refund', pg_temp.try('01', pg_temp.cancel_refund('hp-crf-0001', 'rq')));
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  insert into j select 'r2', public.request_refund('hp-rfd-0002', pg_temp.pay('71'), '5000',
+    'FR7630004000031234567890143', 'Payeur Nouveau', 'other', null, '5000', 'second remboursement');
+  reset role;
+  perform pg_temp.handed_out('f2', 'hp-gen-0002', 2);
+  v := v || jsonb_build_object('r2_replaces', pg_temp.replaces(pg_temp.rft('r2')),
+                               'f2', (pg_temp.fl(pg_temp.v('f2'))).status,
+                               'r2_in_f2', pg_temp.file_of(pg_temp.rft('r2')) = pg_temp.v('f2'));
+  -- F1's bytes executed late after all; the feed gives no reference
+  perform pg_temp.statement('b2', private.paris_today(), null, jsonb_build_array(
+    jsonb_build_object('amount', 5000, 'kind', 'other_debit')));
+  v := v || jsonb_build_object('link', pg_temp.try('01', format(
+    $q$ select public.link_debit('hp-link-0001', %L, 'refund', null, %L, null, 'ligne sans référence') -> 'result' ->> 'refunds' $q$,
+    pg_temp.line('b2', 1), pg_temp.rq('r2'))));
+  v := v || jsonb_build_object('r2', (select status from public.refund_request where id = pg_temp.rq('r2')),
+                               'r2_transfer', pg_temp.status(pg_temp.rft('r2')));
+  return v;
+end $$;
+insert into j select 'hpay', pg_temp.isolated('sc_hpay');
+select results_eq($$ select v ->> 'request', v ->> 'confirm', v ->> 'r2_replaces', v ->> 'f2', (v ->> 'r2_in_f2')::boolean
+                     from j where k = 'hpay' $$,
+  $$ values ('requested'::text, 'superseded'::text, null::text, 'downloaded'::text, true) $$,
+  'H-PAY: the first refund''s file cancelled whole; a second refund of the same payment, re-issuing none, in a downloaded file');
+select todo('M2c-6b prerequisite (ADR-0014 M2c-6a review fixes, round 7: H-PAY)', 1);
+select results_eq($$ select v ->> 'link' ~ 'refund refused: reissue_in_downloaded_file', v ->> 'r2', v ->> 'r2_transfer'
+                     from j where k = 'hpay' $$,
+  $$ values (true, 'requested'::text, 'in_file'::text) $$,
+  'H-PAY: the old file''s late line with no reference does not execute the second refund (an earlier refund of the payment was in a cancelled downloaded file)');
 
 select * from finish();
 rollback;

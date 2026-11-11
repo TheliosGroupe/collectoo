@@ -26,7 +26,7 @@
 -- same file (the sweep's) does not; the refusal names the file and says why, never « a second time » here.
 -- No ledger entry is posted by any of it but the refund's own debit.
 begin;
-select plan(43);
+select plan(44);
 
 
 -- Fixtures (as 028: Martin (a1), Lilas (a2), Cyprès (a3), Omega (a4: a RIB holder in Greek letters), Tunis Trading
@@ -989,6 +989,26 @@ select results_eq($$ select pg_temp.follow('rs', pg_temp.line('b5', 2)),
                             pg_temp.status((pg_temp.sweep(pg_temp.v('f5'))).id) $$,
   $$ values ('ok'::text, '1'::text, 'executed'::text, 'booked'::text, 'sent'::text, 'in_file'::text) $$,
   'a line naming neither an end-to-end id nor a PmtInf (a CSV feed without the reference column) executes it, as in M2b: the refund executed, its transfer booked, the file and its sweep as they were');
+-- Review round 7's verifier (N5, p_redl_refless): F6 holds a refund alone; the bank's statement (a CSV feed) shows its
+-- debit with no reference, which books it — no debit of F6 can be read, yet its refund left the account: F6 is not
+-- served again either, warning acknowledged or not
+insert into j select 'ru', pg_temp.refund('38', 7500);
+select pg_temp.handed_out('f6', 'r7-gen-0006', 9);
+insert into t values ('q6', pg_temp.rft('ru'));
+select pg_temp.statement('b6', private.paris_today(), null, jsonb_build_array(
+  jsonb_build_object('amount', 7500, 'kind', 'other_debit')));
+select results_eq($$ select pg_temp.try('01', pg_temp.sent('r7-sent-0006', 'f6')),
+                            (select string_agg(x.kind || ' ' || x.amount_minor, ', ')
+                             from public.transfer_file_item i join public.bank_transfer x on x.id = i.transfer_id
+                             where i.file_id = pg_temp.v('f6')),
+                            pg_temp.try('01', pg_temp.link_refund('r7-link-0006', pg_temp.line('b6', 1), 'ru')),
+                            pg_temp.rstatus('ru'), pg_temp.status(pg_temp.v('q6')),
+                            private.transfer_file_executed(pg_temp.v('f6')), private.transfer_debit_seen(pg_temp.v('q6')),
+                            pg_temp.try('01', pg_temp.redl('f6', true)), pg_temp.try('04', pg_temp.redl('f6', false)),
+                            (select count(*)::int from public.transfer_file_download where file_id = pg_temp.v('f6')) $$,
+  $$ values ('sent'::text, 'refund 7500'::text, '1'::text, 'executed'::text, 'booked'::text, false, false,
+             'transfer file refused: file_executed'::text, 'transfer file refused: file_executed'::text, 1) $$,
+  'a file whose refund was booked by a reference-less line is not served again (file_executed), though no debit of it can be read');
 
 select results_eq($$ select count(*) filter (where entry_type in ('remittance', 'servicer_sweep'))::int
                      from public.ledger_entry where organization_id = '00000000-0000-0000-0000-0000000000aa' $$,

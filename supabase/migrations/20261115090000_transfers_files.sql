@@ -177,8 +177,9 @@
 --     downloaded at least once and the switch is off, whoever writes it (postgres, service_role) — defence in depth
 --     behind cancel_remittance_run's `payout_in_downloaded_file`;
 --   * public.transfer_file_download: a downloaded or sent file the bank executed, in full or in part
---     (private.transfer_file_executed, or one of its payouts, refunds or sweeps with its own debit seen), is not served
---     again (`file_executed`), whatever the switch and the acknowledgement — uploaded again it would pay it all twice;
+--     (private.transfer_file_executed, or one of its payouts, refunds or sweeps with its own debit seen, or — round 7,
+--     N5 — booked or returned already, e.g. a refund booked by a reference-less CSV line), is not served again
+--     (`file_executed`), whatever the switch and the acknowledgement — uploaded again it would pay it all twice;
 --   * private.refund_transfer_follow: round 4's G2 rule now — while the refund's transfer is in a downloaded or sent
 --     file, `executed` only by that transfer's own end-to-end id or a batch line (no end-to-end id) whose PmtInfId is its
 --     transfer_file_item.pmt_inf_id in that file; anything else `reissue_in_downloaded_file` (the first of M2c-6b's
@@ -2132,13 +2133,15 @@ begin
   -- review round 6 (round 5's verifier, p_redl): the bank executed the file, in full or in part — a debit of one of its
   -- PmtInfIds or its transfers' end-to-end ids, or a return (private.transfer_file_executed), or one of its payouts,
   -- refunds or sweeps shows its own debit (private.transfer_debit_seen: its id, or a batch line of its PmtInf) —:
-  -- uploaded again, it would pay it all a second time. Whatever the switch; acknowledged or not.
+  -- uploaded again, it would pay it all a second time. Whatever the switch; acknowledged or not. Review round 7 (N5):
+  -- also when one of them is booked or returned already — a refund booked by a line with no reference (a CSV feed)
+  -- leaves no debit of the file to read, yet it left the account.
   elsif private.transfer_file_executed(f.id)
         or exists (select 1 from public.transfer_file_item i
-                   cross join lateral (select t.id, t.kind, t.transfer_file_id from public.bank_transfer t
+                   cross join lateral (select t.id, t.kind, t.status, t.transfer_file_id from public.bank_transfer t
                                        where t.id = i.transfer_id offset 0) t
                    where i.file_id = f.id and t.kind in ('payout', 'refund', 'sweep') and t.transfer_file_id = f.id
-                     and private.transfer_debit_seen(t.id)) then
+                     and (t.status in ('booked', 'returned') or private.transfer_debit_seen(t.id))) then
     raise exception 'transfer file refused: file_executed' using errcode = 'check_violation',
       hint = 'La banque a déjà exécuté ce fichier, en tout ou partie : ne le déposez plus.';
   end if;
@@ -3040,7 +3043,7 @@ begin
   if t.id is not null and private.transfer_debited_before(t.id) then
     raise exception 'remittance run refused: transfer_already_debited' using errcode = 'check_violation',
       detail = jsonb_build_object('transfer_id', t.id, 'end_to_end_id', t.end_to_end_id)::text,
-      hint = 'Un relevé montre déjà le débit de ce reversement (sous sa référence, celle du virement qu''il remplace, ou dans une ligne groupée de son lot) : ne l''annulez pas ; le débit sera rattaché.';
+      hint = 'Un relevé montre déjà le débit de ce reversement (sous sa référence, celle du virement qu''il remplace, ou dans une ligne groupée de son lot) : ne l''annulez pas ; son débit sera comptabilisé depuis le relevé (pas encore disponible pour un reversement).';
   end if;
   update public.bank_transfer set status = 'cancelled', cancelled_by = auth.uid(), cancelled_at = clock_timestamp(),
     cancel_reason = left('Reversement ' || r.number || ' annulé : ' || v_reason, 2000)
