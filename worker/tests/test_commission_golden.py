@@ -9,7 +9,8 @@ marginal; forwards; items that earn nothing; a change of the VAT rate between ru
 worked example (RV-2026-000001 … 000003); a descending grid re-tiered down by a late-booked earlier
 collection (a credit note whose cause is the re-tiering, not a collection undone); manual credit
 notes (M2c-5b): the waiver a later collection never re-charges and a reversal's credit meets first,
-held per invoice, spread over two files, and a run cancelled with waivers present. Each run's
+held per invoice, spread over two files, and a run cancelled with waivers present; a reversal's own
+band and regularisation sharing its cap on a pooled corrective invoice. Each run's
 lines, then its invoice and credit note per mandate (§8.4) — a credit's cause per corrected invoice,
 what a waiver absorbs — with the history carried to the next run. Every case is marked TO VALIDATE
 until the founder's anonymised clauses replace the synthetic ones."""
@@ -52,6 +53,7 @@ def test_the_golden_set() -> None:
         "manual-credit-cancel-all-absorbed",
         "cancel-credit-across-rates",
         "manual-credit-rate-fall",
+        "cancel-retiering-two-credits",
     } <= names
     for p in CASES:
         case = load_case(p)

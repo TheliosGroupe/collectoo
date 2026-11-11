@@ -18,11 +18,12 @@ from collectoo_worker.remittance.commission import (
     KeyState,
     Line,
     LineKind,
-    Retake,
     RunCommission,
+    Taken,
     TermsVersion,
     chain,
     compute,
+    retake_links,
 )
 from collectoo_worker.remittance.documents import (
     EarlierCharge,
@@ -267,19 +268,18 @@ class Simulator:
                 ]
         # the lines go back to pending: their invoices are the state's before the run, except that
         # a reversal the run took something for is credited first where the cancellation put it
-        # back, up to what it took there for each key, then on its original's own invoice
-        held: dict[str, dict[str, dict[Key, int]]] = {}
+        # back, up to what it took there for each key, in the order the cancelled run took it
+        # (`retake_links`, review round 2), then on its original's own invoice
+        taken: dict[str, list[Taken]] = {}
         for entry, where, taken_on, key, amount, _ in takes:
-            share = held.setdefault(entry, {}).setdefault(number_of.get(where, taken_on), {})
-            share[key] = share.get(key, 0) + amount
+            at = number_of.get(where, taken_on)
+            taken.setdefault(entry, []).append((at, taken_on, self._order(taken_on), key, amount))
         self.line_invoices = dict(line_invoices0)
         for reversal, original in originals.items():
-            if reversal in held:
-                links: list[ChainLink] = [
-                    Retake(at, tuple(sorted(caps.items())))
-                    for at, caps in sorted(held[reversal].items(), key=lambda x: self._order(x[0]))
-                ]
-                links += [x for x in chain(line_invoices0.get(original)) if isinstance(x, str)]
+            if reversal in taken:
+                prior = chain(line_invoices0.get(original))
+                links: list[ChainLink] = list(retake_links(prior, taken[reversal]))
+                links += [x for x in prior if isinstance(x, str)]
                 self.line_invoices[original] = tuple(links)
         for key in touched:
             state = history0.get(key, KeyState())

@@ -47,7 +47,8 @@ from collectoo_worker.remittance.commission import (
     KeyState,
     LineKind,
     Part,
-    Retake,
+    Taken,
+    retake_links,
 )
 from collectoo_worker.remittance.documents import EarlierCharge, EarlierInvoice
 from collectoo_worker.remittance.run import (
@@ -301,8 +302,9 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
     # commits after this read and before a later one raises the client's key-state seq, and the
     # approval sends the draft back (`history_changed`); one committed before it is seen by every
     # later read. Read after the key states, it could miss a credit note the charges then saw: the
-    # engine refused the inputs (`commission_input_error`) and the approval would not notice
-    # (it now refuses such a draft too: `engine_error`).
+    # engine refused the inputs (`commission_input_error`) and the approval would not notice. Read
+    # first, it covers every such draft, so the approval needs no refusal of the engine's error: a
+    # persistent one keeps M2c-4's rule, the commission pending (review round 2).
     seq_row = conn.execute("select private.remittance_history_seq(%s)", (client,)).fetchone()
 
     raw = conn.execute(
@@ -586,8 +588,12 @@ def _line_invoices(
     waiver its credit absorbed was restored (that corrective invoice, or the absorbing invoice when
     none was issued at its rate), each with the share the run took for this reversal — a `Retake`:
     the reversal takes exactly that there first, whatever the other reversals of the run take on
-    the same pooled corrective invoice. The latest cancelled run that took something for it counts
-    (a run cancelled twice: the second's corrective invoices). Keyed reads per reversal."""
+    the same pooled corrective invoice. The links come in the order the cancelled run took what
+    they hold (`retake_links`, review round 2): each take carries the invoice it was taken from,
+    ranked against the chain that run had — its original's own invoice; for a run cancelled
+    again, the earlier cancellation's links first — so every cancelled run that took something
+    for the reversal is replayed in approval order, the latest giving the links. Keyed reads per
+    reversal."""
     undone = sorted(
         {(i.entry_id, i.original_entry_id) for i in items if i.original_entry_id}
         | {
@@ -613,27 +619,28 @@ def _line_invoices(
         args,
     ).fetchall():
         own[str(e)] = None if inv is None else str(inv)
-    held: dict[str, dict[tuple[int, int, str], dict[tuple[str, str], int]]] = defaultdict(dict)
-    for rev, inv, year, seq, account, tier, amount in conn.execute(
+    # per reversal, per cancelled run (approval order): what it took, where it went back
+    runs: dict[str, dict[tuple[Any, str], list[Taken]]] = defaultdict(dict)
+    for rev, run, approved_at, inv, taken_on, year, seq, account, tier, amount in conn.execute(
         """with u as (select * from unnest(%s::uuid[], %s::uuid[]) u (reversal, original)),
            cr as (
-             select u.reversal, c.run_id
+             select distinct u.reversal, x.run_id, r.approved_at
              from u
              cross join lateral (
-               select x.run_id
-               from (select cn.run_id from public.commission_credit_alloc a
-                     cross join lateral (select q.run_id from public.commission_invoice q
-                                         where q.id = a.credit_note_id and q.kind = 'credit_note'
-                                           and q.reason = 'commission' offset 0) cn
-                     where a.entry_id = u.reversal
-                     union
-                     select w.run_id from public.commission_waiver w
-                     where w.entry_id = u.reversal and w.cause = 'absorbed') x
-               cross join lateral (select r.approved_at from public.remittance_run r
-                                   where r.id = x.run_id and r.status = 'cancelled' offset 0) r
-               order by r.approved_at desc, x.run_id desc limit 1) c),
+               select cn.run_id from public.commission_credit_alloc a
+               cross join lateral (select q.run_id from public.commission_invoice q
+                                   where q.id = a.credit_note_id and q.kind = 'credit_note'
+                                     and q.reason = 'commission' offset 0) cn
+               where a.entry_id = u.reversal
+               union
+               select w.run_id from public.commission_waiver w
+               where w.entry_id = u.reversal and w.cause = 'absorbed') x
+             cross join lateral (select r.approved_at from public.remittance_run r
+                                 where r.id = x.run_id and r.status = 'cancelled' offset 0) r),
            takes as (
-             select cr.reversal, j.id as invoice_id, a.account_id, a.tier_key,
+             -- credited: charged again by the corrective invoice of the original's VAT rate
+             select cr.reversal, cr.run_id, cr.approved_at, j.id as invoice_id,
+                    a.original_invoice_id as taken_on, a.account_id, a.tier_key,
                     -a.ht_minor as amount
              from cr
              join public.commission_credit_alloc a on a.entry_id = cr.reversal
@@ -649,33 +656,45 @@ def _line_invoices(
                                    and q.mandate_id = cn.mandate_id and q.vat_rate = o.vat_rate
                                  offset 0) j
              union all
-             select cr.reversal, w.invoice_id, w.account_id, w.tier_key, w.amount_minor
+             -- absorbed: restored where the cancellation put it ('restored', one row per
+             -- absorption: the corrective invoice of the absorbing invoice's rate, else that one)
+             select cr.reversal, cr.run_id, cr.approved_at, coalesce(j.id, w.invoice_id),
+                    w.invoice_id, w.account_id, w.tier_key, -w.amount_minor
              from cr
              join public.commission_waiver w on w.entry_id = cr.reversal
-               and w.run_id = cr.run_id and w.cause = 'restored')
-           select t.reversal, t.invoice_id, i.year, i.seq, t.account_id, t.tier_key,
-                  sum(t.amount)
+               and w.run_id = cr.run_id and w.cause = 'absorbed'
+             cross join lateral (select q.mandate_id, q.vat_rate from public.commission_invoice q
+                                 where q.id = w.invoice_id offset 0) o
+             left join lateral (select q.id from public.commission_invoice q
+                                where q.run_id = cr.run_id and q.kind = 'invoice'
+                                  and q.reason = 'run_cancelled'
+                                  and q.mandate_id = o.mandate_id and q.vat_rate = o.vat_rate
+                                offset 0) j on true)
+           select t.reversal, t.run_id, t.approved_at, t.invoice_id, t.taken_on, i.year, i.seq,
+                  t.account_id, t.tier_key, sum(t.amount)
            from takes t
            cross join lateral (select q.year, q.seq from public.commission_invoice q
-                               where q.id = t.invoice_id offset 0) i
-           group by t.reversal, t.invoice_id, i.year, i.seq, t.account_id, t.tier_key""",
+                               where q.id = t.taken_on offset 0) i
+           group by t.reversal, t.run_id, t.approved_at, t.invoice_id, t.taken_on, i.year, i.seq,
+                    t.account_id, t.tier_key""",
         args,
     ).fetchall():
-        caps = held[str(rev)].setdefault((int(year), int(seq), str(inv)), {})
-        caps[(str(account), tier)] = caps.get((str(account), tier), 0) + int(amount)
+        runs[str(rev)].setdefault((approved_at, str(run)), []).append(
+            (str(inv), str(taken_on), (int(year), int(seq)), (str(account), tier), int(amount))
+        )
     out: dict[str, str | tuple[ChainLink, ...]] = {}
     for rev, original in undone:
         if original not in own:
             continue
-        links: list[ChainLink] = [
-            Retake(inv, tuple(sorted(caps.items())))
-            for (_, _, inv), caps in sorted(held.get(rev, {}).items())
-        ]
         found = own[original]
-        if found is not None:
-            links.append(found)
+        base: tuple[ChainLink, ...] = () if found is None else (found,)
+        links: tuple[ChainLink, ...] = ()
+        for _, taken in sorted(runs.get(rev, {}).items()):
+            links = retake_links((*links, *base), sorted(taken))
         if links:
-            out[original] = found if len(links) == 1 and found is not None else tuple(links)
+            out[original] = (*links, *base)
+        elif found is not None:
+            out[original] = found
     return out
 
 

@@ -35,8 +35,10 @@ Hypothesis properties and the input errors.
   a full reversal leaves every invoice credited in full, its VAT exactly; a cancelled run restores
   the state before it, and running it again is the run never cancelled — every key's state with
   its waiver, every earlier invoice's charge and waiver, each corrective invoice credited in full
-  (review math#0); a manual credit is spread over the invoice's keys in proportion to what each
-  still charges.
+  (review math#0); at another VAT rate it stays within the reserve of the run never approved where
+  each key has at most two invoices and one reversal, a reversal's links coming in the order the
+  cancelled run took them (`retake_links`, review round 2); a manual credit is spread over the
+  invoice's keys in proportion to what each still charges.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ from typing import Any
 
 import pytest
 from commission_cases import Simulator
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from collectoo_worker.remittance.commission import (
@@ -70,6 +72,7 @@ from collectoo_worker.remittance.commission import (
     compute,
     cumulative,
     inputs_hash,
+    retake_links,
     schedule_commission,
 )
 from collectoo_worker.remittance.documents import (
@@ -1736,6 +1739,196 @@ def test_with_waivers_a_cancellation_then_the_run_again_is_the_run_never_approve
     assert not any(i in corrective for i, _ in again)  # each corrective invoice credited in full
     for number in corrective:
         assert sim.vat_credited.get(number, 0) == sim.invoice_vat[number], number
+
+
+def _taken_per_line(docs: dict[str, MandateDocuments]) -> dict[tuple[Key, str], int]:
+    """Per (key, line): what a run takes back from earlier invoices, credited or absorbed."""
+    out: dict[tuple[Key, str], int] = defaultdict(int)
+    for d in docs.values():
+        for a in d.credit_note.allocations if d.credit_note else ():
+            out[((a.account_id, a.tier_key), a.entry_id)] -= a.ht_minor
+        for w in d.absorbed:
+            out[((w.account_id, w.tier_key), w.entry_id)] += w.amount_minor
+    return out
+
+
+Recancel = tuple[
+    dict[str, list[TermsVersion]], list[Decimal], list[list[Line]], list[Line], Decimal, Plan
+]
+
+
+@st.composite
+def rerun_cases(draw: st.DrawFn) -> Recancel:
+    """Files F, G, H on one tier key (any rates, a minimum half the time), each with at most two
+    collections, spread over one to four runs at their own VAT rates (manual credit notes between
+    them); then a run R undoing at most one collection per file, and the VAT rate τ of R again.
+    So each key has at most two invoices and one reversal: what R takes back for it is its own
+    invoice's, then the other's — at their own rates, never interleaved with another reversal."""
+    minimum = draw(st.none() | st.integers(0, 50_000))  # small files: where the cap binds
+    rule = {"id": "r", "tier_key": "k", "label_fr": "Règle", "match": {}, "rate": draw(rate_docs())}
+    if minimum is not None:
+        rule["min_per_file_minor"] = str(minimum)
+    schedule = {"schema": "commission-1", "basis": BASIS, "rules": [rule]}
+    versions = _one_version(CommissionSchedule.model_validate(schedule))
+    rates = draw(st.lists(RATES, min_size=1, max_size=4))
+    runs: list[list[Line]] = [[] for _ in rates]
+    undo: list[Line] = []
+    n = 0
+    for account in ("F", "G", "H"):
+        mine = []
+        for _ in range(draw(st.integers(0, 2))):
+            amount = draw(st.integers(1, 400) | st.integers(1, 5_000) | st.integers(1, 10**6))
+            e = D0 + timedelta(days=draw(st.integers(0, 300)))
+            ln = _line(n, amount, e, account=account)
+            n += 1
+            runs[draw(st.integers(0, len(rates) - 1))].append(ln)
+            mine.append(ln)
+        undone = draw(st.booleans())
+        if mine and undone:
+            undo.append(_undo(9000 + n, mine[draw(st.integers(0, len(mine) - 1))]))
+    tau = draw(RATES.filter(lambda t: t != rates[-1]))  # the same rate: the property above
+    return versions, rates, runs, undo, tau, draw(credit_plans(runs=len(rates)))
+
+
+# a small file under a 5 000,00 € minimum (the TTC cap binds): 92,00 € collected at 0 % VAT, then
+# 33,00 € at 20 %; the run undoing the second takes 12,15 € back from its own invoice and 15,35 € by
+# LIFO from the first, is cancelled, and runs again at 0 % for 12,16 €: taken from where the
+# cancelled run took first (its own invoice's share, at 20 %), V is that of the run never approved
+# within a cent; taken from the 0 % corrective invoice first (the integrated fix's number order),
+# 89,54 € instead of 91,99 € (review round 2, math#0)
+_FIRST, _SECOND = _line(1, 9_200, D0, account="H"), _line(2, 3_300, D0, account="H")
+_RATE_BACK: Recancel = (
+    _one_version(
+        CommissionSchedule.model_validate(
+            {
+                "schema": "commission-1",
+                "basis": BASIS,
+                "rules": [
+                    {
+                        "id": "r",
+                        "tier_key": "k",
+                        "label_fr": "Règle",
+                        "match": {},
+                        "rate": {"kind": "flat", "rate": "0.1"},
+                        "min_per_file_minor": "500000",
+                    }
+                ],
+            }
+        )
+    ),
+    [NO_VAT, TAU],
+    [[_FIRST], [_SECOND]],
+    [_undo(9, _SECOND)],
+    NO_VAT,
+    [],
+)
+
+
+@settings(max_examples=1500, deadline=None)
+@given(case=rerun_cases())
+@example(case=_RATE_BACK)
+def test_with_waivers_a_cancellation_then_another_vat_rate_stays_within_the_reserve_of_the_run_never_approved(  # noqa: E501
+    case: Recancel,
+) -> None:
+    """A run R, cancelled, the VAT rate set to τ and R again, against R never approved (the same
+    history and manual credit notes, τ, then R once; review round 2). At the same rate R again is
+    that run exactly. At another rate the cap and the reserve change what R credits, and R again
+    takes each reversal's credit back where the cancelled run took it, in the order it took it
+    (`retake_links`: its own invoice's share first) — so whatever share the new rate leaves, it
+    comes off the invoices R never approved takes it from, at their VAT rates. Per (file, tier key):
+
+        |ΔV| ≤ n + 1        |ΔW| ≤ |ΔV| (+ D when two of its invoices share a VAT rate)
+
+    n the invoices still charging the key before R again: the cancellation leaves its charge on
+    the corrective invoice as well as on the invoices it credited in part, and the reserve holds
+    one cent per open invoice (plus the run's own); W moves with V's cent; and where both invoices
+    the cancelled run took from bear one rate, its corrective invoice pools them — the charge one
+    held and the waiver the other held — so of D (Σ |what the cancelled run took back for the
+    reversal - what R again takes back|) the waiver absorbs first what the never-approved run
+    credits. Taken in another order (the corrective invoices by number), the share left falls on
+    the other rate: the TTC the mixed-rate cap weighs moves by its amount times the gap in rates,
+    far beyond n + 1 (the integrated M2c-5b fix: gen2 seed 1896, 0,45 €)."""
+    versions, rates, runs, undo, tau, plan = case
+    if not undo:
+        return
+    files = {"F": _file(), "G": _file(2_000_000, "G"), "H": _file(1_000, "H")}
+    sim = Simulator(files, versions, rates[0])
+    for n, run in enumerate(runs):
+        sim.vat_rate = rates[n]
+        if run:
+            sim.run(run)
+        for at, pick, share, one_file in plan:
+            if at == n:
+                _credit(sim, pick, share, one_file)
+    never = copy.deepcopy(sim)
+    _, cancelled = sim.run(undo)
+    sim.cancel_last()
+    sim.vat_rate = never.vat_rate = tau
+    still = {
+        k: sum(1 for c in cs if c.open_minor + c.waived_minor) for k, cs in sim.charges.items()
+    }
+    _, again = sim.run(undo)
+    never.run(undo)
+    _invariants(sim)
+    took, takes = _taken_per_line(cancelled), _taken_per_line(again)
+    for key in set(sim.history) | set(never.history):
+        a, b = sim.history.get(key, KeyState()), never.history.get(key, KeyState())
+        dv, dw = a.commission_minor - b.commission_minor, a.waived_minor - b.waived_minor
+        assert abs(dv) <= still.get(key, 0) + 1, (key, dv)
+        moved = sum(abs(took[x] - takes[x]) for x in set(took) | set(takes) if x[0] == key)
+        taken_on = {i for (i, k) in _takes(cancelled.get("M")) if k == key}
+        shared = len({never.invoices[i].vat_rate for i in taken_on}) < len(taken_on)
+        assert abs(dw) <= abs(dv) + (moved if shared else 0), (key, dw, dv, moved)
+
+
+def test_retake_links_come_in_the_order_the_cancelled_run_took() -> None:
+    """Review round 2 (math#0): a reversal's links after its run was cancelled follow the order
+    that run took what they hold — its chain's invoices first, in the chain's order, then LIFO —
+    never the corrective invoices' numbers; a link pooling several takes comes where its first
+    came, and holds their sum per (file, tier key)."""
+    k, kp = ("F", "k"), ("F", "kp")
+    # own invoice FC-2 (20 %) first, then LIFO FC-1 (0 %): the cancellation issued the 0 %
+    # corrective FC-4 before the 20 % one, FC-5 — by number, the reverse
+    assert retake_links(
+        ("FC-2026-000002",),
+        [
+            ("FC-2026-000004", "FC-2026-000001", (2026, 1), k, 1_600),
+            ("FC-2026-000005", "FC-2026-000002", (2026, 2), k, 1_100),
+        ],
+    ) == (
+        Retake("FC-2026-000005", ((k, 1_100),)),
+        Retake("FC-2026-000004", ((k, 1_600),)),
+    )
+    # LIFO newest first; FC-7 pools the own invoice's take (first) and FC-2's (last)
+    assert retake_links(
+        ("FC-2026-000001",),
+        [
+            ("FC-2026-000007", "FC-2026-000002", (2026, 2), k, 500),
+            ("FC-2026-000006", "FC-2026-000003", (2026, 3), k, 700),
+            ("FC-2026-000007", "FC-2026-000001", (2026, 1), kp, 900),
+        ],
+    ) == (
+        Retake("FC-2026-000007", ((k, 500), (kp, 900))),
+        Retake("FC-2026-000006", ((k, 700),)),
+    )
+    # cancelled again: the run had the first cancellation's links, then the own invoice
+    prior = (
+        Retake("FC-2026-000006", ((k, 300),)),
+        Retake("FC-2026-000005", ((k, 400),)),
+        "FC-2026-000001",
+    )
+    assert retake_links(
+        prior,
+        [
+            ("FC-2026-000012", "FC-2026-000009", (2026, 9), k, 100),
+            ("FC-2026-000011", "FC-2026-000005", (2026, 5), k, 400),
+            ("FC-2026-000010", "FC-2026-000006", (2026, 6), k, 300),
+        ],
+    ) == (
+        Retake("FC-2026-000010", ((k, 300),)),
+        Retake("FC-2026-000011", ((k, 400),)),
+        Retake("FC-2026-000012", ((k, 100),)),
+    )
 
 
 # -- manual credit notes: the allocation over the invoice's keys ----------------------------------

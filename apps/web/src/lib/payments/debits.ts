@@ -331,7 +331,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   commission_key_state: {
     label: "Historique de commission ≠ factures d'un dossier",
-    help: "Pour un dossier, ce que ses factures facturent encore plus ce que des avoirs manuels ont rectifié ne vaut pas la commission facturée de son historique (I22) : le prochain reversement de ce client laissera sa commission en attente.",
+    help: "Pour un dossier, ce que ses factures facturent encore plus ce que des avoirs manuels ont rectifié ne vaut pas la commission facturée de son historique (I22) : le prochain reversement de ce client laissera sa commission en attente (reversement brut).",
   },
   // review M2c-5b (legal#0, F2): what a credit note owes the client beyond what its invoice still owed, still unsettled
   credit_refund_owed: {

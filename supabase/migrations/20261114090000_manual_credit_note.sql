@@ -26,9 +26,11 @@
 -- (math#0); issue_credit_note refuses the invoice of a run still in flight (`run_in_flight`, ledger-vat#0); every credit
 -- note freezes each rectified invoice's HT and VAT after it (`ht_after`, `vat_after`: private.issue_commission_documents
 -- redefined, legal#1); the nightly alert `credit_refund_owed` (legal#0); the statement names the manual credit notes a
--- run's credits met (private.absorbed_credit_notes, legal#4); a draft the engine could not price is refused
--- (`engine_error`, security-concurrency#0); public.commission_invoice_files pages an invoice's files and a credit note's
--- page names what it rectifies (tests-ui#2, #3).
+-- run's credits met (private.absorbed_credit_notes, legal#4); public.commission_invoice_files pages an invoice's files
+-- and a credit note's page names what it rectifies (tests-ui#2, #3). A draft prepared across a manual credit note's
+-- commit is sent back by `history_changed` (security-concurrency#0: the prepare reads the history's position first); a
+-- draft the engine could not price for good (`commission_input_error`, e.g. a key I22 flags) is approved as in M2c-4:
+-- its commission pending, the run remitted gross (review round 2: no `engine_error` refusal).
 --
 -- Redefined with their settings and grants restated: private.remittance_key_state_insert_guard (a credit note's key
 -- state), private.remittance_key_states (+ waived_minor: dropped and created, its return type changes),
@@ -678,10 +680,10 @@ as $$
 $$;
 
 -- Redefined from 20261112090000 (M2c-5b): a manual credit note's key state (no run) counts in the history the draft
--- assumed, so a draft prepared before one is sent back (`history_changed`); a draft the engine could not price because
--- its inputs disagreed (`commission_input_error`: a key's waivers or open charges not its state's — a credit note
--- committed while the prepare read the history, or a data error) is never approved as is (`engine_error`: « Actualiser »
--- prices it again from one consistent read; review security-concurrency#0).
+-- assumed, so a draft prepared before one — or while one committed: the prepare reads the history's position before
+-- anything else (review security-concurrency#0) — is sent back (`history_changed`). A draft the engine could not price
+-- (`commission_input_error`) is not refused: a race is caught above, and a persistent data error keeps M2c-4's rule —
+-- the commission pending, the run remitted gross within R124-6's month, I22 flagging the key (review round 2).
 create or replace function private.remittance_approval_refusal(p_run public.remittance_run,
                                                                p_draft private.remittance_draft, p_today date)
 returns text
@@ -701,9 +703,6 @@ begin
   end if;
   if (select count(*) from private.remittance_pending q where q.draft_run_id = p_run.id) <> p_run.item_count then
     return 'items_changed';
-  end if;
-  if exists (select 1 from unnest(p_run.commission_blockers) b where b like 'commission_input_error%') then
-    return 'engine_error';
   end if;
   if jsonb_array_length(p_draft.documents) > 0 and private.vat_rate_on(p_today) <> p_draft.vat_rate then
     return 'vat_rate_changed';

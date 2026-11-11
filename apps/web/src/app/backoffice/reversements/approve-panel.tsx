@@ -11,7 +11,6 @@ import {
   type RunCard,
   TRIGGER_LABEL,
   blockerLabel,
-  commissionNotComputed,
   confirmedAgo,
   deadlineChip,
   failureNote,
@@ -30,13 +29,9 @@ const SUMMARY_CLASS: Record<ReturnType<typeof summaryTone>, string> = {
   error: "bg-red-50 text-red-800 dark:bg-red-950 dark:text-red-200",
 };
 
-/**
- * A run whose draft can be approved now (prepared, nothing in flight, nothing blocking its payout, its commission
- * computed: the database refuses a draft whose engine failed, `engine_error`, review M2c-5b F5).
- */
+/** A run whose draft can be approved now (prepared, nothing in flight, nothing blocking its payout). */
 function approvable(r: RunCard): boolean {
   if (r.status !== "draft" || r.job !== null || r.prepared_at === null || r.inputs_hash === null) return false;
-  if (commissionNotComputed(r)) return false;
   if (r.net_minor !== null && BigInt(r.net_minor) < BigInt(0)) return false;
   return !(r.net_minor !== null && BigInt(r.net_minor) > BigInt(0) && r.blockers.length > 0);
 }
@@ -167,11 +162,7 @@ export function ApprovePanel({
                       ))}
                     </ul>
                   ) : null}
-                  {commissionNotComputed(r) ? (
-                    <p className="text-sm text-amber-800 dark:text-amber-300" data-testid="run-engine-error">
-                      {blockerLabel("commission_input_error")} : actualisez ce brouillon avant de le valider.
-                    </p>
-                  ) : r.commission_blockers.length > 0 ? (
+                  {r.commission_blockers.length > 0 ? (
                     <p className="text-sm text-amber-800 dark:text-amber-300">
                       Commission en attente : {blockerLabel(r.commission_blockers[0])} (reversement brut)
                     </p>

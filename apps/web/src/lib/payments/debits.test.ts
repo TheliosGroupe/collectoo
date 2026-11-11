@@ -345,6 +345,13 @@ describe("the remittances' nightly checks (M2c-4 and its review)", () => {
     }
   });
 
+  it("says a key I22 flags keeps the next run's commission pending, the client's money remitted gross (M2c-5b review round 2)", () => {
+    const help = checkLabel("commission_key_state").help;
+    expect(help).toMatch(/commission en attente/);
+    expect(help).toMatch(/reversement brut/);
+    expect(help).not.toMatch(/bloqu/);
+  });
+
   it("says a credit note's refund is still owed, never that it was refunded (review M2c-5b legal#0, F2)", () => {
     const l = checkLabel("credit_refund_owed");
     expect(l.label).toMatch(/à rembourser/i);

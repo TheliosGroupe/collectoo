@@ -1,0 +1,119 @@
+# A reversal with two credits on one key — its own band and the regularisation of the later tiers — whose share of a
+# pooled corrective invoice is capped once for the line, not per credit (M2c-4 C7; M2c-5b review round 2, no manual
+# credit note). 10 % flat until 16/11, then marginal from 16/11: 5 % up to 5 000,00 €, 20 % beyond (the second
+# version's tiers continue where the first's net basis ends). A 6 000,00 € under the first (FC-1, 600,00 € at 20 % VAT);
+# C 2 000,00 € and D 1 000,00 € under the second, past its first band (FC-2, 600,00 € at 20 %); E 5 000,00 € (FC-3,
+# 1 000,00 € at 10 %). A and C undone in one run: A gives back its own 600,00 € (on FC-1) and 750,00 € of the later
+# collections moved down into the 5 % band (FC-1 is empty: LIFO on FC-3); C 400,00 € on FC-2, which still charges D's
+# 200,00 €. Cancelled: FC-5 750,00 € at 10 % (A's) and FC-6 1 000,00 € at 20 % (A's 600,00 € and C's 400,00 € pooled).
+# The run again: A takes 600,00 € on FC-6 with its first credit and its regularisation goes on to FC-5 — FC-6's cap is
+# A's 600,00 € for both its credits — and C takes its own 400,00 € on FC-6: both corrective invoices credited in full,
+# FC-2 keeps D's 200,00 € (with a cap per credit, A's regularisation would take C's 400,00 € of FC-6 too, C would be
+# credited on FC-2 though D was never undone, and FC-5 left open). TO VALIDATE.
+case: cancel-retiering-two-credits
+status: TO VALIDATE
+vat_rate: "0.2000"
+schedules:
+  dix:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - {id: tout, tier_key: tout, label_fr: "Toutes créances", match: {}, rate: {kind: flat, rate: "0.10"}}
+  paliers:
+    schema: commission-1
+    basis: {families: all, forwards: {file_recalled: false, before_servicing_start: false, client_ratification: false}, on_reversal: credit}
+    rules:
+      - id: tout
+        tier_key: tout
+        label_fr: "Toutes créances"
+        match: {}
+        rate: {kind: marginal, tiers: [{up_to_minor: "500000", rate: "0.05"}, {up_to_minor: null, rate: "0.20"}]}
+mandates:
+  MAND-R:
+    - {id: r1, from: "2026-01-01", to: "2026-11-16", schedule: dix}
+    - {id: r2, from: "2026-11-16", to: null, schedule: paliers}
+files:
+  F-R: {mandate: MAND-R, claim_type: b2b_invoice, portfolio: P1}
+runs:
+  - name: run 1 — A under the first terms
+    lines:
+      - {entry: A, kind: allocation, file: F-R, e: "2026-11-03", eff: "2026-11-03", amount: "600000", basis: {principal: "600000"}}
+    expect:
+      lines: {A: {commission: "60000", terms: r1}}
+      documents:
+        MAND-R: {invoice: {number: FC-2026-000001, ht: "60000", vat: "12000", ttc: "72000"}}
+  - name: run 2 — C and D under the second, from 6 000,00 € (20 %)
+    lines:
+      - {entry: C, kind: allocation, file: F-R, e: "2026-11-21", eff: "2026-11-21", amount: "200000", basis: {principal: "200000"}}
+      - {entry: D, kind: allocation, file: F-R, e: "2026-11-27", eff: "2026-11-27", amount: "100000", basis: {principal: "100000"}}
+    expect:
+      lines: {C: {commission: "40000", terms: r2}, D: {commission: "20000", terms: r2}}
+      documents:
+        MAND-R: {invoice: {number: FC-2026-000002, ht: "60000", vat: "12000", ttc: "72000"}}
+  - name: run 3 — E at 10 % VAT
+    vat_rate: "0.1000"
+    lines:
+      - {entry: E, kind: allocation, file: F-R, e: "2026-11-28", eff: "2026-11-28", amount: "500000", basis: {principal: "500000"}}
+    expect:
+      lines: {E: {commission: "100000", terms: r2}}
+      documents:
+        MAND-R: {invoice: {number: FC-2026-000003, ht: "100000", vat: "10000", ttc: "110000"}}
+  - name: run 4 — A and C undone (to be cancelled)
+    vat_rate: "0.2000"
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-R, e: "2026-11-03", eff: "2026-12-01", amount: "-600000", basis: {principal: "-600000"}}
+      - {entry: R-C, kind: allocation_reversal, original: C, file: F-R, e: "2026-11-21", eff: "2026-12-01", at: "2026-12-01T12:00:01+00:00", amount: "-200000", basis: {principal: "-200000"}}
+    expect:
+      lines:
+        R-A: {commission: "-135000", terms: r1}   # its own −600,00 and the later tiers' −750,00
+        R-C: {commission: "-40000", terms: r2}
+      documents:
+        MAND-R:
+          credit_note:
+            number: FC-2026-000004
+            ht: "-175000"
+            vat: "-27500"
+            ttc: "-202500"
+            corrected:
+              FC-2026-000001: {ht: "-60000", vat: "-12000"}
+              FC-2026-000002: {ht: "-40000", vat: "-8000"}
+              FC-2026-000003: {ht: "-75000", vat: "-7500"}
+      state:
+        F-R/tout:
+          commission: "45000"
+          invoices: {FC-2026-000002: ["20000", "0"], FC-2026-000003: ["25000", "0"]}
+  - name: run 4 cancelled — a corrective invoice per VAT rate, A and C pooled at 20 %
+    cancel_previous:
+      FC-2026-000005: {ht: "75000", vat: "7500"}
+      FC-2026-000006: {ht: "100000", vat: "20000"}
+    expect:
+      state:
+        F-R/tout:
+          commission: "220000"
+          invoices:
+            FC-2026-000002: ["20000", "0"]
+            FC-2026-000003: ["25000", "0"]
+            FC-2026-000005: ["75000", "0"]
+            FC-2026-000006: ["100000", "0"]
+  - name: run 5 — the same lines again
+    lines:
+      - {entry: R-A, kind: allocation_reversal, original: A, file: F-R, e: "2026-11-03", eff: "2026-12-01", amount: "-600000", basis: {principal: "-600000"}}
+      - {entry: R-C, kind: allocation_reversal, original: C, file: F-R, e: "2026-11-21", eff: "2026-12-01", at: "2026-12-01T12:00:01+00:00", amount: "-200000", basis: {principal: "-200000"}}
+    expect:
+      lines:
+        R-A: {commission: "-135000", terms: r1}
+        R-C: {commission: "-40000", terms: r2}
+      documents:
+        MAND-R:
+          credit_note:
+            number: FC-2026-000007
+            ht: "-175000"
+            vat: "-27500"
+            ttc: "-202500"
+            corrected:
+              FC-2026-000005: {ht: "-75000", vat: "-7500"}
+              FC-2026-000006: {ht: "-100000", vat: "-20000"}
+      state:
+        F-R/tout:
+          commission: "45000"
+          invoices: {FC-2026-000002: ["20000", "0"], FC-2026-000003: ["25000", "0"]}

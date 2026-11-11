@@ -84,13 +84,19 @@ and a file undone in full is back to 0.
   (mandate, VAT rate) charges again what the run credited at that rate and holds, as its waiver,
   what the run's credits absorbed there (where no corrective invoice was issued at a rate, the
   waiver goes back on the invoice it was absorbed from: the file is then exactly as before the
-  run). Running a reversal again takes first, on each of those invoices, exactly what the
-  cancelled run took for it there per (file, tier key) (`Retake`, a capped link of its chain),
-  then its original's own invoice — so a corrective invoice pooling several reversals, or a credit
-  that fell on invoices at two rates, gives each reversal its own share in any order: the run
-  again gives the documents of the run never approved. (With no corrective invoice at a rate,
-  the same history without manual credit notes has one more open invoice than this one: its
-  reserve, and under mixed VAT rates its LIFO order, can then differ — review math#1.)
+  run). Running a reversal again takes first, on each of those invoices, at most what the
+  cancelled run took for it there per (file, tier key) (`Retake`, a capped link of its chain,
+  the cap shared by the line's credits on the key), then its original's own invoice — the links
+  in the order the cancelled run took what they hold (`retake_links`, review round 2: its
+  chain's invoices first, then LIFO). So a corrective invoice pooling several reversals, or a
+  credit that fell on invoices at two rates, gives each reversal its own share: the same lines
+  at the same VAT rate give the documents of the run never approved. At another rate (or with
+  new lines) what the run credits changes, and what is left of a link comes off where the
+  cancelled run took last, as in the run never approved; the residual, measured, stays within
+  the reserve's n + 1 cents plus the moved credit times the spread of the key's VAT rates
+  (CALCULATION_RULES §7). (With no corrective invoice at a rate, the same history without
+  manual credit notes has one more open invoice than this one: its reserve, and under mixed VAT
+  rates its LIFO order, can then differ — review math#1.)
 
 Basis (founder #4): an allocation's 1100 credits per component family, filtered by the schedule's
 families; a forward's amount only when the schedule lists its reason; a reversal minus its
@@ -259,9 +265,9 @@ class Retake:
     cancelled run took for one reversal — its corrective invoice at the VAT rate of the invoices
     the run credited, the credited part as its charge and the absorbed part as its waiver (or,
     where the cancellation issued no corrective invoice at that rate, the invoice whose waiver it
-    restored) — and how much per (file, tier key). Running the reversal again takes exactly that
-    from it, whatever the other reversals of the run take there: the pooled corrective invoice
-    gives each its own share."""
+    restored) — and how much per (file, tier key). Running the reversal again takes at most that
+    from it, its credits on a key sharing the cap, whatever the other reversals of the run take
+    there: the pooled corrective invoice gives each its own share (`retake_links` orders them)."""
 
     invoice_id: str
     caps: tuple[tuple[Key, int], ...]  # per (file, tier key), > 0
@@ -298,6 +304,38 @@ def preferred_for(found: str | tuple[ChainLink, ...] | None, key: Key) -> Prefer
             if k == key and cap > 0:
                 out.append((link.invoice_id, cap))
     return tuple(out)
+
+
+# what a cancelled run took for one reversal: (the invoice that holds it again since the
+# cancellation, the invoice it was taken from, that one's (year, seq), the (file, tier key), HT > 0)
+Taken = tuple[str, str, tuple[int, int], Key, int]
+
+
+def retake_links(prior: Sequence[ChainLink], takes: Iterable[Taken]) -> tuple[Retake, ...]:
+    """A reversal's `Retake` links after its run was cancelled (M2c-4 C7; M2c-5b review math#0,
+    round 2): one per invoice that holds again what the run took for it, with that share per
+    (file, tier key), in the order the cancelled run took it — first what it took from the invoices
+    of the chain it ran with (`prior`: its original's own invoice; after an earlier cancellation,
+    that one's links first), in the chain's order, then the rest LIFO, newest invoice first. A link
+    comes where the first of its takes came. The same lines at the same VAT rate take every link
+    in full, in any order; when the run again credits the reversal less (another VAT rate, new
+    lines), it takes it where the cancelled run took first, as the run never approved would."""
+    position: dict[str, int] = {}
+    for i, link in enumerate(prior):
+        position.setdefault(link if isinstance(link, str) else link.invoice_id, i)
+    held: dict[str, dict[Key, int]] = {}
+    rank: dict[str, tuple[int, int, int]] = {}
+    for at, taken_on, (year, seq), key, amount in takes:
+        caps = held.setdefault(at, {})
+        caps[key] = caps.get(key, 0) + amount
+        p = position.get(taken_on)
+        r = (0, p, 0) if p is not None else (1, -year, -seq)
+        if at not in rank or r < rank[at]:
+            rank[at] = r
+    return tuple(
+        Retake(at, tuple(sorted(caps.items())))
+        for at, caps in sorted(held.items(), key=lambda x: (rank[x[0]], x[0]))
+    )
 
 
 @dataclass(frozen=True, slots=True)

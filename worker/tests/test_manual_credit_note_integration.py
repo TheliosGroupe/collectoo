@@ -16,9 +16,13 @@
   run cancelled and run again gives each reversal its own share of the pooled corrective invoice,
   the live invoice is never credited and no waiver is left behind (review math#0);
 * a manual credit note issued between a draft's prepare and its approval sends the draft back
-  (`history_changed`, review tests-ui#0), and one committing while the prepare reads the history
-  never yields an approvable draft (review security-concurrency#0: `history_changed` or
-  `engine_error`);
+  (`history_changed`, review tests-ui#0), and so does one committing while the prepare reads the
+  history, whatever the engine made of its mixed reads (review security-concurrency#0); a draft the
+  engine cannot price for good (a key I22 flags) is approved, its commission pending and the run
+  remitted gross — M2c-4's rule (review round 2: no `engine_error` refusal);
+* a reversal whose run took from its own invoice at 20 % and LIFO from one at 10 %, cancelled: its
+  chain takes first the corrective invoice holding its own invoice's share, though the 10 % one
+  bears the lower number (review round 2, math#0);
 * parity: the spread `private.manual_credit_plan` computes over an invoice's files is the worker's
   `documents.manual_credit`, to the cent, for random amounts, on the whole invoice or one file.
 """
@@ -29,6 +33,7 @@ import random
 import uuid
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
@@ -47,8 +52,10 @@ from remittance_helpers import (
     request_run,
     run_row,
     staff,
+    vat_rate_from_today,
 )
 
+from collectoo_worker.remittance.commission import Retake
 from collectoo_worker.remittance.documents import EarlierInvoice, manual_credit
 
 pytestmark = pytest.mark.integration
@@ -521,19 +528,19 @@ class _CommitsMidway:
 
 
 @pytest.mark.parametrize(
-    ("marker", "refusal"),
-    [("remittance_history_seq", "history_changed"), ("remittance_key_states", "engine_error")],
+    ("marker", "mixed"),
+    [("remittance_history_seq", False), ("remittance_key_states", True)],
 )
 def test_a_credit_note_committing_mid_prepare_never_gives_an_approvable_draft(
-    marker: str, refusal: str
+    marker: str, mixed: bool
 ) -> None:
     """Review security-concurrency#0: a manual credit note commits while the prepare reads its
-    facts, each statement in its own snapshot. Right after the history's position is read (now
-    first): the later reads see the waiver, the inputs agree, but the draft's history is stale —
-    the approval sends it back (`history_changed`). Right after the key states: the charges read
-    later carry the waiver the states lack, the engine refuses the inputs (`commission_input_error`)
-    and the approval never takes such a draft (`engine_error`). Before the fix both drafts were
-    approved with every line's commission left pending."""
+    facts, each statement in its own snapshot. The history's position is read first: whatever
+    commits after it raises it, so the approval sends the draft back (`history_changed`) — right
+    after that read (the later reads see the waiver, the inputs agree) as right after the key
+    states (the charges read later carry the waiver the states lack: the engine refused the inputs,
+    `commission_input_error`). No refusal of its own is needed for the engine's error (review round
+    2). Before the fix the second draft was approved with every line's commission left pending."""
     from collectoo_worker.jobs.remittances import run_prepare  # noqa: PLC0415
 
     tenant = remittance_tenant()
@@ -556,11 +563,148 @@ def test_a_credit_note_committing_mid_prepare_never_gives_an_approvable_draft(
         assert run_prepare(proxy, {"run_id": run, "token": token}) == "prepared"  # type: ignore[arg-type]
         assert proxy.done
     drain()  # the queued prepare finds its run prepared: a no-op
+    blockers = run_row(run)["commission_blockers"]
+    assert any(b.startswith("commission_input_error") for b in blockers) == mixed, blockers
     approve(tenant, run)
     drain()
     row = run_row(run)
-    assert (row["status"], row["last_failure"]["code"]) == ("draft", refusal)
+    assert (row["status"], row["last_failure"]["code"]) == ("draft", "history_changed")
     assert _value("select count(*) from public.remittance_key_state where run_id = %s", run) == 0
+
+
+def test_a_draft_the_engine_cannot_price_for_good_is_approved_gross() -> None:
+    """Review round 2 (security-concurrency#0, option a): a key whose state disagrees with its
+    invoices (I22: its commission one cent above what they charge, as pgTAP 027 builds) — every
+    prepare reads the same data and the engine refuses it every time (`commission_input_error`).
+    M2c-4's rule holds: the draft is approvable, its lines' commission pending, and the run remits
+    the gross (R124-6's month); the nightly check flags the key. Under the integrated fix's
+    `engine_error` refusal no gross payout could leave."""
+    tenant = remittance_tenant()
+    store = storage()
+    f, _ = _file_paid(tenant, store, 200_000, 6)
+    rv1 = _approved(tenant)
+    book_payout(rv1)
+    with psycopg.connect(DB) as conn:
+        conn.execute(
+            """insert into public.remittance_key_state (organization_id, client_organization_id,
+                 account_id, tier_key, run_id, cause, basis, kept_basis_minor, kept_minor,
+                 commission_minor, waived_minor)
+               select organization_id, client_organization_id, account_id, tier_key, run_id,
+                      'approved', basis, kept_basis_minor, kept_minor, commission_minor + 1,
+                      waived_minor
+               from public.remittance_key_state where account_id = %s order by seq desc limit 1""",
+            (f.id,),
+        )
+    _pay_again(tenant, store, f, 100_000, 4)
+    run = request_run(tenant)
+    draft = run_row(run)
+    assert any(b.startswith("commission_input_error") for b in draft["commission_blockers"])
+    approve(tenant, run)
+    drain()
+    row = run_row(run)
+    assert row["status"] == "approved", row["last_failure"]
+    assert row["net_minor"] == row["gross_minor"] == 100_000  # remitted gross
+    assert row["invoice_ht_minor"] == 0 and documents(run) == []
+    with psycopg.connect(DB) as conn:
+        states = conn.execute(
+            "select commission_state, commission_minor from public.remittance_line"
+            " where run_id = %s",
+            (run,),
+        ).fetchall()
+    assert states == [("pending", 0)]
+    assert "commission_key_state" in _violations(tenant)
+
+
+def test_a_reversal_cancelled_again_takes_back_its_own_invoices_share_first() -> None:
+    """Review round 2 (math#0) through the database: marginal 5 % up to 1 000,00 €, 20 % beyond. A
+    1 000,00 € at 20 % VAT (FC-1, 50,00 €), B 500,00 € at 10 % (FC-2, 100,00 €). Undoing A gives
+    back 125,00 € (B moves down into the 5 % band): 50,00 € on FC-1, its own, then 75,00 € LIFO on
+    FC-2. Cancelled: the 10 % corrective invoice (75,00 €) is issued before the 20 % one (50,00 €).
+    The chain the next prepare builds for A takes first the one holding FC-1's share — the order the
+    cancelled run took it, never the numbers' (when another rate shrinks the credit, it comes off
+    where the run never approved takes it) — and the run again credits both in full."""
+    from collectoo_worker.jobs.remittances import _line_invoices  # noqa: PLC0415
+
+    schedule = {
+        "schema": "commission-1",
+        "basis": {
+            "families": "all",
+            "forwards": {
+                "file_recalled": False,
+                "before_servicing_start": False,
+                "client_ratification": False,
+            },
+            "on_reversal": "credit",
+        },
+        "rules": [
+            {
+                "id": "tout",
+                "tier_key": "tout",
+                "label_fr": "Toutes créances",
+                "match": {},
+                "rate": {
+                    "kind": "marginal",
+                    "tiers": [
+                        {"up_to_minor": "100000", "rate": "0.05"},
+                        {"up_to_minor": None, "rate": "0.20"},
+                    ],
+                },
+            }
+        ],
+    }
+    tenant = remittance_tenant(schedule=schedule)
+    store = storage()
+    f, pa = _file_paid(tenant, store, 100_000, 9)
+    rv1 = _approved(tenant)
+    book_payout(rv1)
+    fc1_id, _ = _invoice_of(rv1)
+    with vat_rate_from_today("0.1000"):
+        _pay_again(tenant, store, f, 50_000, 7)
+        rv2 = _approved(tenant)
+        book_payout(rv2)
+    fc2_id, _ = _invoice_of(rv2)
+    _file_paid(tenant, store, 500_000, 5)  # client money to cover the reversal (another file)
+    ra = _undo(tenant, pa, f.id)
+    rv3 = _approved(tenant)
+    assert {c[0]: c[1] for c in _credits(rv3)} == {
+        _invoice_of(rv1)[1]: -5_000,
+        _invoice_of(rv2)[1]: -7_500,
+    }
+    staff(
+        tenant,
+        "select public.cancel_remittance_run(%s, %s, %s, %s)",
+        str(uuid.uuid4()),
+        rv3,
+        run_row(rv3)["version"],
+        "à vérifier",
+        user=tenant["admin"],
+    )
+    with psycopg.connect(DB) as conn:
+        correctives = conn.execute(
+            """select vat_rate::text, id::text, seq, ht_minor from public.commission_invoice
+               where run_id = %s and kind = 'invoice' and reason = 'run_cancelled'""",
+            (rv3,),
+        ).fetchall()
+        by_rate = {r[0]: (r[1], int(r[2]), int(r[3])) for r in correctives}
+        assert by_rate["0.1000"][2] == 7_500 and by_rate["0.2000"][2] == 5_000
+        assert by_rate["0.1000"][1] < by_rate["0.2000"][1]  # the 10 % one numbered first
+        original = str(
+            _value("select reverses_entry_id from public.ledger_entry where id = %s", ra)
+        )
+        item = SimpleNamespace(entry_id=ra, original_entry_id=original)
+        chain = _line_invoices(conn, [item], [])  # type: ignore[list-item]
+    key = (f.id, "tout")
+    assert chain == {
+        original: (
+            Retake(by_rate["0.2000"][0], ((key, 5_000),)),
+            Retake(by_rate["0.1000"][0], ((key, 7_500),)),
+            fc1_id,
+        )
+    }
+    rv4 = _approved(tenant)
+    assert sorted(c[1] for c in _credits(rv4)) == [-7_500, -5_000]  # both correctives, in full
+    assert _open_and_waived(fc2_id, f.id) == (2_500, 0)  # B's 25,00 € at 5 %
+    assert _state(f.id) == (2_500, 0, "approved")
 
 
 def test_the_spread_in_sql_is_the_workers() -> None:

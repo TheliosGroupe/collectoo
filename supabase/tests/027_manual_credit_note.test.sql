@@ -17,10 +17,12 @@
 --     owed still unpaid 30 days on is alerted (`credit_refund_owed`, legal#0); the invoice page's files a page at a
 --     time (`commission_invoice_files`, tests-ui#2) and a credit note's own page names what it rectifies (tests-ui#3);
 --     a manual credit note issued between a draft's prepare and its approval sends it back (`history_changed`,
---     tests-ui#0); a draft the engine could not price is never approved (`engine_error`, security-concurrency#0).
+--     tests-ui#0), and so is one prepared while a credit note committed, whatever the engine made of its mixed reads
+--     (security-concurrency#0); a draft the engine could not price for good (`commission_input_error`) is approvable,
+--     its commission pending (M2c-4's rule, review round 2: no `engine_error`).
 -- Design docs/design/m2c-remittances.md §4, §14.1, §16, §20 R2; ADR-0014 M2c-5b.
 begin;
-select plan(77);
+select plan(78);
 
 -- Fixtures (as 026: Martin (a1), Lilas (a2) and Cyprès (a3) of the servicer aa; Bleu (b1) of another servicer bb) ----
 insert into public.organization (id, kind, legal_name, siren) values
@@ -759,17 +761,28 @@ select results_eq($$ select (select v ->> 'status' from j where k = 'a5'), (sele
                      from public.remittance_run r where r.id = (select v from t where k = 'r5') $$,
   $$ values ('back_to_draft'::text, 'history_changed'::text, 'draft'::text, 'history_changed'::text, 0, 0) $$,
   'the approval sends it back (history_changed): no key state, no document — « Actualiser » prices it again');
--- a draft whose commission the engine refused (`commission_input_error`) is never approved as is (engine_error)
-create or replace function pg_temp.refusal_with_input_error(p_run uuid) returns text language plpgsql as $$
+-- a draft the engine could not price (`commission_input_error`): prepared across the credit note (its mixed reads),
+-- sent back by the history it assumed; prepared after it, for good (a key I22 flags), approvable as in M2c-4 — the
+-- commission pending, the run remitted gross (review round 2: no `engine_error` refusal)
+create or replace function pg_temp.refusal_with_input_error(p_run uuid, p_fresh boolean) returns text
+language plpgsql as $$
 declare r public.remittance_run; d private.remittance_draft;
 begin
   select * into r from public.remittance_run where id = p_run;
   select * into d from private.remittance_draft where run_id = p_run;
-  r.commission_blockers := array['commission_input_error: file F, tout: its invoices'' waivers do not add up'];
+  -- (sent back to draft: the date its approval asks for, as approve_remittance_runs sets it)
+  r.requested_execution_date := private.next_business_day(private.paris_today());
+  r.commission_blockers := array['commission_input_error: file F, tout: its invoices'' open charges and waivers are not'
+                                 || ' the key''s commission'];
+  if p_fresh then
+    d.history_seq := private.remittance_history_seq(r.client_organization_id);
+  end if;
   return private.remittance_approval_refusal(r, d, private.paris_today());
 end $$;
-select is(pg_temp.refusal_with_input_error((select v from t where k = 'r5')), 'engine_error',
-  'a draft the engine could not price: refused (engine_error)');
+select is(pg_temp.refusal_with_input_error((select v from t where k = 'r5'), false), 'history_changed',
+  'a draft the engine could not price, prepared across a credit note: sent back (history_changed)');
+select is(pg_temp.refusal_with_input_error((select v from t where k = 'r5'), true), null,
+  'a draft the engine could not price for good: approvable, its commission pending (M2c-4), no engine_error');
 
 select * from finish();
 rollback;
