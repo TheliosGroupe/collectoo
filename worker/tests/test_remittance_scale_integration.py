@@ -154,6 +154,25 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
         ).fetchall()
     assert found == [], found
 
+    # M2c-6a: its payout in a transfer file (the command: the checks, the cash check on the 50k-line
+    # statement; the job writes it), then the cancellation before download supersedes the file
+    filing = time.monotonic()
+    filed = staff(
+        tenant,
+        "select public.generate_transfer_file(%s, %s, null)",
+        str(uuid.uuid4()),
+        tenant["bank"],
+    )
+    file_s = time.monotonic() - filing
+    assert filed["nb_of_txs"] == 1 and int(filed["ctrl_sum_minor"]) == done["net_minor"], filed
+    drain()  # the transfer_file job
+    with psycopg.connect(DB) as conn:
+        assert (
+            one(conn, "select status from public.transfer_file where id = %s", (filed["file_id"],))
+            == "generated"
+        )
+    done = run_row(run)
+
     # the cancellation (§9.7): one synchronous command, within the API's 8 s statement timeout
     cancelling = time.monotonic()
     cancelled = staff(
@@ -177,6 +196,11 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
             (tenant["client"], run),
         ).fetchone() or (0, 0)
     assert (back, credit) == (items, len(files))
+    with psycopg.connect(DB) as conn:
+        assert (
+            one(conn, "select status from public.transfer_file where id = %s", (filed["file_id"],))
+            == "superseded"
+        )
     after = checks(tenant)
     with psycopg.connect(DB) as conn:
         found = conn.execute(
@@ -193,7 +217,8 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
         f" {commanded - approving:.2f}s, job and documents {approved - commanded:.1f}s"
         f" ({'; '.join(docs)}); nightly checks"
         f" {checked - approved:.1f}s (with the draft waiting {draft_checks_s:.1f}s); overview"
-        f" with the draft {overview_s:.2f}s; cancellation (command) {cancel_s:.2f}s"
+        f" with the draft {overview_s:.2f}s; transfer file (command) {file_s:.2f}s;"
+        f" cancellation (command, the file superseded) {cancel_s:.2f}s"
     )
     # design §19 targets, with room for a shared CI runner (the commands: the API's 8 s)
     assert requested - started < 8

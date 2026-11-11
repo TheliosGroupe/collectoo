@@ -407,7 +407,7 @@ flowchart LR
 - **RLS everywhere** in `public`; `private`, `eba` and `pgmq` are not exposed. Ledger, payments, communications and boarding tables are written only by the worker or `SECURITY DEFINER` functions (ADR-0011).
 - **`SECURITY DEFINER` functions:** `search_path = ''`, fully qualified names, explicit role checks at the top, revoked from `public` and granted only to the intended role.
 - **Staff MFA:** TOTP via Supabase Auth, `aal2` required by RLS helpers for internal roles.
-- **Storage:** private buckets, paths prefixed by `client_org_id/`, RLS on `storage.objects`, short-lived signed URLs.
+- **Storage:** private buckets, paths prefixed by `client_org_id/`, RLS on `storage.objects`, short-lived signed URLs. The bucket `transfer-files` (pain.001 files, risk R4) is narrower (M2c-6a review T4): its one policy, `private.can_read_transfer_file_object`, opens a file's object only to the money-staff member who recorded its download (`transfer_file_download`, the command that re-runs the generation's checks) in the last 60 seconds, and only while the file is downloaded or sent; the web route calls the command first, then reads the bytes with the user's session and serves them only if their SHA-256 is the one recorded. A superseded, rejected or failed file is never readable.
 - **Webhooks:** signature verification per provider, replay protection by event id.
 - **Secrets:** Vercel env (anon key + worker URL only), Scaleway Secret Manager (service role, provider keys), GitHub Actions secrets (none for production). `.env.example` only in the repo.
 - **Encryption:** Supabase TLS and encryption at rest. No extra column encryption in the MVP (decision recorded; revisit for bank clients).

@@ -1,0 +1,86 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.03">
+  <CstmrCdtTrfInitn>
+    <GrpHdr>
+      <MsgId>TF-2026-000001</MsgId>
+      <CreDtTm>2026-11-02T09:30:12+01:00</CreDtTm>
+      <NbOfTxs>2</NbOfTxs>
+      <CtrlSum>6151.36</CtrlSum>
+      <InitgPty>
+        <Nm>Collectoo SAS</Nm>
+      </InitgPty>
+    </GrpHdr>
+    <PmtInf>
+      <PmtInfId>TF-2026-000001-1</PmtInfId>
+      <PmtMtd>TRF</PmtMtd>
+      <BtchBookg>false</BtchBookg>
+      <NbOfTxs>2</NbOfTxs>
+      <CtrlSum>6151.36</CtrlSum>
+      <PmtTpInf>
+        <SvcLvl>
+          <Cd>SEPA</Cd>
+        </SvcLvl>
+      </PmtTpInf>
+      <ReqdExctnDt>2026-11-03</ReqdExctnDt>
+      <Dbtr>
+        <Nm>Collectoo SAS</Nm>
+      </Dbtr>
+      <DbtrAcct>
+        <Id>
+          <IBAN>FR3430001007940000000001001</IBAN>
+        </Id>
+      </DbtrAcct>
+      <DbtrAgt>
+        <FinInstnId>
+          <BIC>TESTFRPPXXX</BIC>
+        </FinInstnId>
+      </DbtrAgt>
+      <ChrgBr>SLEV</ChrgBr>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>RV-2026-000001</InstrId>
+          <EndToEndId>RMT0A1B2C3D4E5F</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="EUR">1640.00</InstdAmt>
+        </Amt>
+        <Cdtr>
+          <Nm>MARTIN SAS</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <IBAN>FR7630004000031234567890143</IBAN>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>REVERSEMENT RV-2026-000001 FACTURE FC-2026-000001</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+      <CdtTrfTxInf>
+        <PmtId>
+          <InstrId>RV-2026-000002</InstrId>
+          <EndToEndId>RMT1B2C3D4E5F60</EndToEndId>
+        </PmtId>
+        <Amt>
+          <InstdAmt Ccy="EUR">4511.36</InstdAmt>
+        </Amt>
+        <CdtrAgt>
+          <FinInstnId>
+            <BIC>TESTFRPP</BIC>
+          </FinInstnId>
+        </CdtrAgt>
+        <Cdtr>
+          <Nm>LILAS FINANCE</Nm>
+        </Cdtr>
+        <CdtrAcct>
+          <Id>
+            <IBAN>FR1420041010050500013M02606</IBAN>
+          </Id>
+        </CdtrAcct>
+        <RmtInf>
+          <Ustrd>REVERSEMENT RV-2026-000002 FACTURE FC-2026-000002</Ustrd>
+        </RmtInf>
+      </CdtTrfTxInf>
+    </PmtInf>
+  </CstmrCdtTrfInitn>
+</Document>

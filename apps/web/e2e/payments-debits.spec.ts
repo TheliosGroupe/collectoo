@@ -126,8 +126,35 @@ test("refund, bank return, lines to classify, direct payment and the checks", as
   await expect(page.getByTestId("payment-status")).toHaveText("Remboursement demandé");
   const reference = (await page.getByTestId("refund-reference").textContent())?.trim() ?? "";
   expect(reference).toMatch(/^RFD[0-9A-F]{12}$/);
-  await expect(page.getByTestId("refund-row")).toContainText("À exécuter dans la banque");
+  // M2c-6a (founder #15): the refund goes in the next transfer file by default (its RFD debit books it all the same)
+  await expect(page.getByTestId("refund-row")).toContainText("Dans le fichier de virements");
+  // the page says so too: a refund the file pays is never executed in the bank as well (risk R4: paid twice)
+  await expect(page.getByTestId("refund-instruction")).toContainText("prochain fichier de virements");
+  await expect(page.getByTestId("refund-instruction")).toContainText("ne l'exécutez pas dans la banque");
   await reviewShot(page, testInfo, "m2-payment-refund");
+
+  // M2c-6a review round 6: the refund goes in a transfer file, downloaded and marked as sent — the bank may pay it
+  // now, so « Annuler » is no longer offered (with the cancellation after download off, it waits for its debit)
+  await page.goto("/backoffice/reversements/virements");
+  const account = page.getByTestId("paying-account").filter({ hasText: "Fonds de tiers – Banque D" });
+  await account.getByTestId("generate-file").getByRole("button", { name: "Générer le fichier" }).click();
+  await page.getByRole("dialog", { name: "Générer le fichier de virements" }).getByRole("button", { name: "Générer", exact: true }).click();
+  const fileRow = account.getByTestId("file-row").first();
+  await expect(fileRow.getByTestId("file-status")).toHaveText("Prêt à télécharger", { timeout: 60_000 });
+  await Promise.all([page.waitForEvent("download"), fileRow.getByTestId("file-download").click()]);
+  await expect(fileRow.getByTestId("file-mark-sent")).toBeVisible({ timeout: 15_000 });
+  await fileRow.getByTestId("file-mark-sent").getByRole("button", { name: "Marquer comme transmis" }).click();
+  await expect(fileRow.getByTestId("file-status")).toHaveText("Transmis à la banque", { timeout: 15_000 });
+  await page.goto(`/backoffice/encaissements/paiements/${diallo}`);
+  const inFile = page.getByTestId("refund-in-downloaded-file");
+  await expect(inFile).toContainText("déjà téléchargé");
+  await expect(inFile).toContainText("« en cours »");
+  await expect(inFile).toContainText("ne peut pas être annulé d'ici là");
+  await expect(page.getByTestId("cancel-refund")).toHaveCount(0);
+  // review round 7 (N2): the banner names that file, not « the next file »
+  await expect(page.getByTestId("refund-instruction")).toContainText(/il est dans le fichier de virements TF-\d{4}-\d{6}, déjà téléchargé/);
+  await expect(page.getByTestId("refund-instruction")).not.toContainText("prochain fichier");
+  await reviewShot(page, testInfo, "m2-payment-refund-file");
 
   // The next statement: the refund executed, Rivière's payment returned, a fee, a return nobody can name
   const debits: Debit[] = [

@@ -25,7 +25,13 @@ import {
   REFUND_REASON,
   REFUND_STATUS,
   minorToInput,
+  type RefundTransfer,
+  pendingRefundInstruction,
+  refundCancellable,
+  refundInDownloadedFile,
+  refundInDownloadedFileNote,
   refundReasons,
+  refundTransfers,
   refundable,
   returnedNote,
 } from "@/lib/payments/debits";
@@ -88,6 +94,30 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   const lastAssign = [...d.matches].reverse().find((m) => m.action === "assign");
   // M2b-6: refunds (one pending at a time) and the bank lines linked to this payment (returns, refunds)
   const refunds = d.refunds ?? [];
+  // M2c-6a: which refunds go in the transfer file (their execution mode is not in payment_detail)
+  const { data: modes } =
+    refunds.length > 0
+      ? await supabase.from("refund_request").select("id, execution_mode, transfer_id").in("id", refunds.map((r) => r.id))
+      : { data: [] as { id: string; execution_mode: string; transfer_id: string | null }[] };
+  const inFile = new Set((modes ?? []).filter((m) => m.execution_mode === "file").map((m) => m.id));
+  // review round 6: a refund whose transfer is in a downloaded file is not cancelled (« Annuler » hidden, a note instead)
+  const transferIds = (modes ?? []).map((m) => m.transfer_id).filter((x): x is string => typeof x === "string");
+  const { data: transferRows } =
+    transferIds.length > 0
+      ? await supabase
+          .from("bank_transfer")
+          .select("id, status, transfer_file:transfer_file_id(id, number, status, download_count)")
+          .in("id", transferIds)
+      : { data: [] as { id: string; status: string; transfer_file: unknown }[] };
+  const refundTransfer = refundTransfers(
+    modes ?? [],
+    (transferRows ?? []).map((t) => ({
+      id: t.id,
+      status: t.status,
+      transfer_file: (t.transfer_file ?? null) as unknown as RefundTransfer["file"],
+    })),
+  );
+  const refundState = (r: { id: string; status: string }) => (r.status === "requested" && inFile.has(r.id) ? "requested_file" : r.status);
   const pendingRefund = refunds.find((r) => r.status === "requested") ?? null;
   const bankLines = d.bank_lines ?? [];
   const canRefund = refundable(p, d.position.unallocated_minor);
@@ -115,13 +145,16 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
       {reason?.help ? <InfoNote>{reason.help}</InfoNote> : null}
       {pendingRefund ? (
         <InfoNote>
-          Remboursement de {money(pendingRefund.amount_minor, cur)} demandé : exécutez le virement dans la banque vers
-          l&apos;IBAN …{pendingRefund.payee_iban_end} avec la référence{" "}
+          <span data-testid="refund-instruction">
+            Remboursement de {money(pendingRefund.amount_minor, cur)} vers l&apos;IBAN …{pendingRefund.payee_iban_end}{" "}
+            demandé : {pendingRefundInstruction(inFile.has(pendingRefund.id), refundTransfer.get(pendingRefund.id))}
+          </span>{" "}
+          Référence :{" "}
           <span className="font-mono font-medium" data-testid="refund-reference">
             {pendingRefund.end_to_end_id}
-          </span>{" "}
-          saisie comme « référence de bout en bout ». Il sera comptabilisé quand son débit apparaîtra sur le relevé ; un
-          débit sans cette référence se lie depuis « Débits et retours ».
+          </span>
+          . Il sera comptabilisé quand son débit apparaîtra sur le relevé ; un débit sans cette référence se lie depuis «
+          Débits et retours ».
         </InfoNote>
       ) : null}
       {p.status === "returned" ? (
@@ -302,8 +335,8 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
               >
                 <span className="min-w-0">
                   <span className="font-medium">Remboursement {money(r.amount_minor, cur)}</span>{" "}
-                  <Badge tone={(REFUND_STATUS[r.status] ?? REFUND_STATUS.requested).tone}>
-                    {(REFUND_STATUS[r.status] ?? { label: r.status }).label}
+                  <Badge tone={(REFUND_STATUS[refundState(r)] ?? REFUND_STATUS.requested).tone}>
+                    {(REFUND_STATUS[refundState(r)] ?? { label: r.status }).label}
                   </Badge>
                   <span className="block text-xs text-zinc-600 dark:text-zinc-400">
                     {REFUND_REASON[r.reason_code]?.label ?? r.reason_code} · à {r.payee_name} (IBAN …{r.payee_iban_end}
@@ -317,8 +350,21 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
                   </span>
                   <span className="block text-xs text-zinc-600 dark:text-zinc-400">Motif interne : {r.reason}</span>
                 </span>
-                {r.status === "requested" ? (
+                {refundCancellable(r.status, refundTransfer.get(r.id)) ? (
                   <CancelRefund paymentId={p.id} refundId={r.id} reference={r.end_to_end_id} idempotencyKey={randomUUID()} />
+                ) : r.status === "requested" && refundInDownloadedFile(refundTransfer.get(r.id)) ? (
+                  <span
+                    className="flex max-w-md flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400"
+                    data-testid="refund-in-downloaded-file"
+                  >
+                    <span>{refundInDownloadedFileNote(refundTransfer.get(r.id)?.file?.number ?? "")}</span>
+                    <Link
+                      href={`/backoffice/reversements/virements/${refundTransfer.get(r.id)?.file?.id ?? ""}`}
+                      className="underline underline-offset-4"
+                    >
+                      Voir le fichier {refundTransfer.get(r.id)?.file?.number}
+                    </Link>
+                  </span>
                 ) : null}
               </li>
             ))}

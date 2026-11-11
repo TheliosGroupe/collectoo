@@ -21,6 +21,9 @@
   (`jobs.remittance_documents`), each under its own savepoint: one that cannot be drawn is recorded
   and retried, the others go on; the nightly alerts are `remittance_document_failed` and
   `remittance_document_missing` (still due after 24 hours).
+- `transfer_file {file_id, token}` (M2c-6a): the pain.001 file `generate_transfer_file` reserved,
+  written, checked, uploaded and recorded (`jobs.transfer_files`); a data error fails the file and
+  its transfers wait for the next one.
 
 No model, no LLM: every amount comes from the ledger and the engines (CLAUDE.md).
 """
@@ -39,6 +42,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Jsonb
 
+from collectoo_worker.jobs import transfer_files
 from collectoo_worker.jobs.remittance_documents import run_documents
 from collectoo_worker.remittance.calendar import Calendar, CalendarHorizonError, conservative
 from collectoo_worker.remittance.commission import (
@@ -116,6 +120,10 @@ def make_handler(storage: Storage | None = None) -> Any:
             run_prepare(conn, payload)
         elif kind == "approve":
             run_approve(conn, payload)
+        elif kind == "transfer_file":
+            if storage is None:
+                raise RuntimeError("the transfer file job needs the storage")
+            transfer_files.run_transfer_file(conn, storage, payload)
         else:
             raise ValueError(f"unknown remittances job type: {kind!r}")
 
@@ -129,6 +137,9 @@ def record_dead_job(payload: dict[str, Any], error: str, conn: Conn) -> None:
         org = payload.get("organization_id")
         if org:
             _schedule_failed(conn, str(org), None, "dead", error)
+        return
+    if payload.get("type") == "transfer_file":
+        transfer_files.record_dead_job(payload, error, conn)
         return
     run, token = payload.get("run_id"), payload.get("token")
     if not run or not token:

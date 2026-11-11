@@ -187,14 +187,14 @@ isOneToOne: false
                   ]
                 },"bank_account": {
                   Row: {
-                    "bic": string | null,"closed_on": string | null,"closed_reason": string | null,"created_at": string,"created_by": string | null,"csv_profile": Json | null,"currency": string,"feed": string | null,"iban": string,"id": string,"label": string,"opened_on": string,"organization_id": string,"purpose": string,"status": string,"updated_at": string
+                    "bic": string | null,"closed_on": string | null,"closed_reason": string | null,"created_at": string,"created_by": string | null,"csv_profile": Json | null,"currency": string,"feed": string | null,"iban": string,"id": string,"label": string,"opened_on": string,"organization_id": string,"pain_version": string,"purpose": string,"status": string,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "bic"?: string | null,"closed_on"?: string | null,"closed_reason"?: string | null,"created_at"?: string,"created_by"?: string | null,"csv_profile"?: Json | null,"currency": string,"feed"?: string | null,"iban": string,"id"?: string,"label": string,"opened_on": string,"organization_id": string,"purpose"?: string,"status"?: string,"updated_at"?: string
+                    "bic"?: string | null,"closed_on"?: string | null,"closed_reason"?: string | null,"created_at"?: string,"created_by"?: string | null,"csv_profile"?: Json | null,"currency": string,"feed"?: string | null,"iban": string,"id"?: string,"label": string,"opened_on": string,"organization_id": string,"pain_version"?: string,"purpose"?: string,"status"?: string,"updated_at"?: string
                   }
                   Update: {
-                    "bic"?: string | null,"closed_on"?: string | null,"closed_reason"?: string | null,"created_at"?: string,"created_by"?: string | null,"csv_profile"?: Json | null,"currency"?: string,"feed"?: string | null,"iban"?: string,"id"?: string,"label"?: string,"opened_on"?: string,"organization_id"?: string,"purpose"?: string,"status"?: string,"updated_at"?: string
+                    "bic"?: string | null,"closed_on"?: string | null,"closed_reason"?: string | null,"created_at"?: string,"created_by"?: string | null,"csv_profile"?: Json | null,"currency"?: string,"feed"?: string | null,"iban"?: string,"id"?: string,"label"?: string,"opened_on"?: string,"organization_id"?: string,"pain_version"?: string,"purpose"?: string,"status"?: string,"updated_at"?: string
                   }
                   Relationships: [
                     {
@@ -379,14 +379,14 @@ isOneToOne: false
                   ]
                 },"bank_statement": {
                   Row: {
-                    "bank_account_id": string,"bank_check": Json | null,"closing_booked_minor": number | null,"counts": Json | null,"created_at": string,"created_by": string | null,"currency": string,"electronic_seq_no": number | null,"error": string | null,"error_code": string | null,"file_name": string,"file_sha256": string,"finished_at": string | null,"format": string,"format_version": string | null,"from_date": string | null,"id": string,"idempotency_key": string | null,"opening_booked_minor": number | null,"organization_id": string,"sections": Json | null,"size_bytes": number,"status": string,"stmt_id": string | null,"storage_bucket": string,"storage_path": string,"to_date": string | null,"updated_at": string,"uploaded_at": string | null,"warnings": NonNullable<Json>
+                    "bank_account_id": string,"bank_check": Json | null,"bank_created_at": string | null,"closing_booked_minor": number | null,"counts": Json | null,"created_at": string,"created_by": string | null,"currency": string,"electronic_seq_no": number | null,"error": string | null,"error_code": string | null,"file_name": string,"file_sha256": string,"finished_at": string | null,"format": string,"format_version": string | null,"from_date": string | null,"id": string,"idempotency_key": string | null,"opening_booked_minor": number | null,"organization_id": string,"sections": Json | null,"size_bytes": number,"status": string,"stmt_id": string | null,"storage_bucket": string,"storage_path": string,"to_date": string | null,"updated_at": string,"uploaded_at": string | null,"warnings": NonNullable<Json>
                   }
                   ComputedFields: never
                   Insert: {
-                    "bank_account_id": string,"bank_check"?: Json | null,"closing_booked_minor"?: number | null,"counts"?: Json | null,"created_at"?: string,"created_by"?: string | null,"currency": string,"electronic_seq_no"?: number | null,"error"?: string | null,"error_code"?: string | null,"file_name": string,"file_sha256": string,"finished_at"?: string | null,"format": string,"format_version"?: string | null,"from_date"?: string | null,"id"?: string,"idempotency_key"?: string | null,"opening_booked_minor"?: number | null,"organization_id": string,"sections"?: Json | null,"size_bytes": number,"status"?: string,"stmt_id"?: string | null,"storage_bucket"?: string,"storage_path": string,"to_date"?: string | null,"updated_at"?: string,"uploaded_at"?: string | null,"warnings"?: NonNullable<Json>
+                    "bank_account_id": string,"bank_check"?: Json | null,"bank_created_at"?: string | null,"closing_booked_minor"?: number | null,"counts"?: Json | null,"created_at"?: string,"created_by"?: string | null,"currency": string,"electronic_seq_no"?: number | null,"error"?: string | null,"error_code"?: string | null,"file_name": string,"file_sha256": string,"finished_at"?: string | null,"format": string,"format_version"?: string | null,"from_date"?: string | null,"id"?: string,"idempotency_key"?: string | null,"opening_booked_minor"?: number | null,"organization_id": string,"sections"?: Json | null,"size_bytes": number,"status"?: string,"stmt_id"?: string | null,"storage_bucket"?: string,"storage_path": string,"to_date"?: string | null,"updated_at"?: string,"uploaded_at"?: string | null,"warnings"?: NonNullable<Json>
                   }
                   Update: {
-                    "bank_account_id"?: string,"bank_check"?: Json | null,"closing_booked_minor"?: number | null,"counts"?: Json | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"electronic_seq_no"?: number | null,"error"?: string | null,"error_code"?: string | null,"file_name"?: string,"file_sha256"?: string,"finished_at"?: string | null,"format"?: string,"format_version"?: string | null,"from_date"?: string | null,"id"?: string,"idempotency_key"?: string | null,"opening_booked_minor"?: number | null,"organization_id"?: string,"sections"?: Json | null,"size_bytes"?: number,"status"?: string,"stmt_id"?: string | null,"storage_bucket"?: string,"storage_path"?: string,"to_date"?: string | null,"updated_at"?: string,"uploaded_at"?: string | null,"warnings"?: NonNullable<Json>
+                    "bank_account_id"?: string,"bank_check"?: Json | null,"bank_created_at"?: string | null,"closing_booked_minor"?: number | null,"counts"?: Json | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"electronic_seq_no"?: number | null,"error"?: string | null,"error_code"?: string | null,"file_name"?: string,"file_sha256"?: string,"finished_at"?: string | null,"format"?: string,"format_version"?: string | null,"from_date"?: string | null,"id"?: string,"idempotency_key"?: string | null,"opening_booked_minor"?: number | null,"organization_id"?: string,"sections"?: Json | null,"size_bytes"?: number,"status"?: string,"stmt_id"?: string | null,"storage_bucket"?: string,"storage_path"?: string,"to_date"?: string | null,"updated_at"?: string,"uploaded_at"?: string | null,"warnings"?: NonNullable<Json>
                   }
                   Relationships: [
                     {
@@ -431,14 +431,14 @@ isOneToOne: false
                   ]
                 },"bank_transfer": {
                   Row: {
-                    "amount_minor": number,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"client_organization_id": string | null,"created_at": string,"creditor_bank_account_id": string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id": string | null,"id": string,"kind": string,"ordered_by": string | null,"organization_id": string,"payee_bic": string | null,"payee_iban": string,"payee_name": string,"reason": string | null,"remittance_info": string | null,"requested_execution_date": string,"return_entry_id": string | null,"run_id": string | null,"status": string,"updated_at": string
+                    "amount_minor": number,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"client_organization_id": string | null,"created_at": string,"creditor_bank_account_id": string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id": string | null,"id": string,"kind": string,"ordered_by": string | null,"organization_id": string,"payee_bic": string | null,"payee_iban": string,"payee_name": string,"reason": string | null,"remittance_info": string | null,"replaces_transfer_id": string | null,"requested_execution_date": string,"return_entry_id": string | null,"run_id": string | null,"status": string,"transfer_file_id": string | null,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "amount_minor": number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id"?: string | null,"id"?: string,"kind": string,"ordered_by"?: string | null,"organization_id": string,"payee_bic"?: string | null,"payee_iban": string,"payee_name": string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date": string,"return_entry_id"?: string | null,"run_id"?: string | null,"status"?: string,"updated_at"?: string
+                    "amount_minor": number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency": string,"debtor_bank_account_id": string,"end_to_end_id": string,"entry_id"?: string | null,"id"?: string,"kind": string,"ordered_by"?: string | null,"organization_id": string,"payee_bic"?: string | null,"payee_iban": string,"payee_name": string,"reason"?: string | null,"remittance_info"?: string | null,"replaces_transfer_id"?: string | null,"requested_execution_date": string,"return_entry_id"?: string | null,"run_id"?: string | null,"status"?: string,"transfer_file_id"?: string | null,"updated_at"?: string
                   }
                   Update: {
-                    "amount_minor"?: number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency"?: string,"debtor_bank_account_id"?: string,"end_to_end_id"?: string,"entry_id"?: string | null,"id"?: string,"kind"?: string,"ordered_by"?: string | null,"organization_id"?: string,"payee_bic"?: string | null,"payee_iban"?: string,"payee_name"?: string,"reason"?: string | null,"remittance_info"?: string | null,"requested_execution_date"?: string,"return_entry_id"?: string | null,"run_id"?: string | null,"status"?: string,"updated_at"?: string
+                    "amount_minor"?: number,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"client_organization_id"?: string | null,"created_at"?: string,"creditor_bank_account_id"?: string | null,"currency"?: string,"debtor_bank_account_id"?: string,"end_to_end_id"?: string,"entry_id"?: string | null,"id"?: string,"kind"?: string,"ordered_by"?: string | null,"organization_id"?: string,"payee_bic"?: string | null,"payee_iban"?: string,"payee_name"?: string,"reason"?: string | null,"remittance_info"?: string | null,"replaces_transfer_id"?: string | null,"requested_execution_date"?: string,"return_entry_id"?: string | null,"run_id"?: string | null,"status"?: string,"transfer_file_id"?: string | null,"updated_at"?: string
                   }
                   Relationships: [
                     {
@@ -472,6 +472,12 @@ isOneToOne: false
       referencedRelation: "organization"
       referencedColumns: ["id"]
     },{
+      foreignKeyName: "bank_transfer_replaces_transfer_id_fkey"
+      columns: ["replaces_transfer_id"]
+isOneToOne: true
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    },{
       foreignKeyName: "bank_transfer_return_entry_id_fkey"
       columns: ["return_entry_id"]
 isOneToOne: true
@@ -482,6 +488,12 @@ isOneToOne: true
       columns: ["run_id"]
 isOneToOne: false
       referencedRelation: "remittance_run"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "bank_transfer_transfer_file_id_fkey"
+      columns: ["transfer_file_id"]
+isOneToOne: false
+      referencedRelation: "transfer_file"
       referencedColumns: ["id"]
     }
                   ]
@@ -1637,6 +1649,56 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"payee_name_check": {
+                  Row: {
+                    "bank_name": string | null,"clear_reason": string | null,"cleared_at": string | null,"cleared_by": string | null,"client_organization_id": string,"id": string,"note": string,"organization_id": string,"payout_account_id": string,"recorded_at": string,"recorded_by": string,"result": string,"transfer_id": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "bank_name"?: string | null,"clear_reason"?: string | null,"cleared_at"?: string | null,"cleared_by"?: string | null,"client_organization_id": string,"id"?: string,"note": string,"organization_id": string,"payout_account_id": string,"recorded_at"?: string,"recorded_by": string,"result": string,"transfer_id"?: string | null
+                  }
+                  Update: {
+                    "bank_name"?: string | null,"clear_reason"?: string | null,"cleared_at"?: string | null,"cleared_by"?: string | null,"client_organization_id"?: string,"id"?: string,"note"?: string,"organization_id"?: string,"payout_account_id"?: string,"recorded_at"?: string,"recorded_by"?: string,"result"?: string,"transfer_id"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "payee_name_check_cleared_by_fkey"
+      columns: ["cleared_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "payee_name_check_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "payee_name_check_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "payee_name_check_payout_account_id_fkey"
+      columns: ["payout_account_id"]
+isOneToOne: false
+      referencedRelation: "client_payout_account"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "payee_name_check_recorded_by_fkey"
+      columns: ["recorded_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "payee_name_check_transfer_id_fkey"
+      columns: ["transfer_id"]
+isOneToOne: false
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"payment": {
                   Row: {
                     "account_id": string | null,"allocation_instruction": Json | null,"amount_minor": number,"bank_account_id": string | null,"bank_transaction_id": string | null,"booking_date": string,"candidate_account_id": string | null,"channel": string,"client_organization_id": string | null,"created_at": string,"creditor_reference": string | null,"currency": string,"designation": Json | null,"end_to_end_id": string | null,"id": string,"match_method": string | null,"matched_at": string | null,"method": string,"organization_id": string,"payer_iban": string | null,"payer_name": string | null,"portfolio_id": string | null,"remittance_text": string | null,"review_reason": string | null,"status": string,"updated_at": string,"value_date": string | null
@@ -1909,14 +1971,14 @@ isOneToOne: false
                   ]
                 },"refund_request": {
                   Row: {
-                    "amount_minor": number,"bank_account_id": string,"bank_transaction_id": string | null,"bounce_entry_id": string | null,"bounce_transaction_id": string | null,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"cash_out_entry_id": string | null,"currency": string,"end_to_end_id": string,"executed_on": string | null,"id": string,"organization_id": string,"payee_iban": string,"payee_is_payer": boolean,"payee_name": string,"payment_id": string,"prior_review_reason": string | null,"prior_status": string,"reason": string,"reason_code": string,"requested_at": string,"requested_by": string,"status": string,"updated_at": string
+                    "amount_minor": number,"bank_account_id": string,"bank_transaction_id": string | null,"bounce_entry_id": string | null,"bounce_transaction_id": string | null,"cancel_reason": string | null,"cancelled_at": string | null,"cancelled_by": string | null,"cash_out_entry_id": string | null,"currency": string,"end_to_end_id": string,"executed_on": string | null,"execution_mode": string,"id": string,"organization_id": string,"payee_iban": string,"payee_is_payer": boolean,"payee_name": string,"payment_id": string,"prior_review_reason": string | null,"prior_status": string,"reason": string,"reason_code": string,"requested_at": string,"requested_by": string,"status": string,"transfer_id": string | null,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "amount_minor": number,"bank_account_id": string,"bank_transaction_id"?: string | null,"bounce_entry_id"?: string | null,"bounce_transaction_id"?: string | null,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"cash_out_entry_id"?: string | null,"currency": string,"end_to_end_id": string,"executed_on"?: string | null,"id"?: string,"organization_id": string,"payee_iban": string,"payee_is_payer": boolean,"payee_name": string,"payment_id": string,"prior_review_reason"?: string | null,"prior_status": string,"reason": string,"reason_code": string,"requested_at"?: string,"requested_by": string,"status"?: string,"updated_at"?: string
+                    "amount_minor": number,"bank_account_id": string,"bank_transaction_id"?: string | null,"bounce_entry_id"?: string | null,"bounce_transaction_id"?: string | null,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"cash_out_entry_id"?: string | null,"currency": string,"end_to_end_id": string,"executed_on"?: string | null,"execution_mode"?: string,"id"?: string,"organization_id": string,"payee_iban": string,"payee_is_payer": boolean,"payee_name": string,"payment_id": string,"prior_review_reason"?: string | null,"prior_status": string,"reason": string,"reason_code": string,"requested_at"?: string,"requested_by": string,"status"?: string,"transfer_id"?: string | null,"updated_at"?: string
                   }
                   Update: {
-                    "amount_minor"?: number,"bank_account_id"?: string,"bank_transaction_id"?: string | null,"bounce_entry_id"?: string | null,"bounce_transaction_id"?: string | null,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"cash_out_entry_id"?: string | null,"currency"?: string,"end_to_end_id"?: string,"executed_on"?: string | null,"id"?: string,"organization_id"?: string,"payee_iban"?: string,"payee_is_payer"?: boolean,"payee_name"?: string,"payment_id"?: string,"prior_review_reason"?: string | null,"prior_status"?: string,"reason"?: string,"reason_code"?: string,"requested_at"?: string,"requested_by"?: string,"status"?: string,"updated_at"?: string
+                    "amount_minor"?: number,"bank_account_id"?: string,"bank_transaction_id"?: string | null,"bounce_entry_id"?: string | null,"bounce_transaction_id"?: string | null,"cancel_reason"?: string | null,"cancelled_at"?: string | null,"cancelled_by"?: string | null,"cash_out_entry_id"?: string | null,"currency"?: string,"end_to_end_id"?: string,"executed_on"?: string | null,"execution_mode"?: string,"id"?: string,"organization_id"?: string,"payee_iban"?: string,"payee_is_payer"?: boolean,"payee_name"?: string,"payment_id"?: string,"prior_review_reason"?: string | null,"prior_status"?: string,"reason"?: string,"reason_code"?: string,"requested_at"?: string,"requested_by"?: string,"status"?: string,"transfer_id"?: string | null,"updated_at"?: string
                   }
                   Relationships: [
                     {
@@ -1961,6 +2023,12 @@ isOneToOne: false
 isOneToOne: false
       referencedRelation: "payment"
       referencedColumns: ["id","organization_id"]
+    },{
+      foreignKeyName: "refund_request_transfer_id_fkey"
+      columns: ["transfer_id"]
+isOneToOne: true
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
     }
                   ]
                 },"remittance_deadline_breach": {
@@ -2345,6 +2413,164 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"transfer_cancellation_request": {
+                  Row: {
+                    "attestation": string | null,"confirm_evidence": Json | null,"confirmed_at": string | null,"confirmed_by": string | null,"evidence": NonNullable<Json>,"file_id": string,"file_version": number,"id": string,"kind": string,"organization_id": string,"reason": string,"requested_at": string,"requested_by": string,"transfer_id": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "attestation"?: string | null,"confirm_evidence"?: Json | null,"confirmed_at"?: string | null,"confirmed_by"?: string | null,"evidence": NonNullable<Json>,"file_id": string,"file_version": number,"id"?: string,"kind": string,"organization_id": string,"reason": string,"requested_at"?: string,"requested_by": string,"transfer_id"?: string | null
+                  }
+                  Update: {
+                    "attestation"?: string | null,"confirm_evidence"?: Json | null,"confirmed_at"?: string | null,"confirmed_by"?: string | null,"evidence"?: NonNullable<Json>,"file_id"?: string,"file_version"?: number,"id"?: string,"kind"?: string,"organization_id"?: string,"reason"?: string,"requested_at"?: string,"requested_by"?: string,"transfer_id"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "transfer_cancellation_request_confirmed_by_fkey"
+      columns: ["confirmed_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_cancellation_request_file_id_fkey"
+      columns: ["file_id"]
+isOneToOne: false
+      referencedRelation: "transfer_file"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_cancellation_request_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_cancellation_request_requested_by_fkey"
+      columns: ["requested_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_cancellation_request_transfer_id_fkey"
+      columns: ["transfer_id"]
+isOneToOne: false
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"transfer_file": {
+                  Row: {
+                    "cash_check": NonNullable<Json>,"close_attestation": string | null,"close_reason": string | null,"closed_at": string | null,"closed_by": string | null,"created_at": string,"created_at_iso": string,"created_by": string | null,"ctrl_sum_minor": number,"currency": string,"debtor_bank_account_id": string,"debtor_bic": string | null,"debtor_iban": string,"debtor_name": string,"download_count": number,"error": string | null,"file_sha256": string | null,"first_downloaded_at": string | null,"first_downloaded_by": string | null,"first_execution_date": string,"generated_at": string | null,"held": NonNullable<Json>,"id": string,"initiating_party": string,"job_token": string,"last_execution_date": string,"late_reason": string | null,"msg_id": string,"nb_of_txs": number,"number": string,"organization_id": string,"pain_version": string,"renderer_version": string | null,"sent_marked_at": string | null,"sent_marked_by": string | null,"size_bytes": number | null,"status": string,"storage_path": string | null,"superseded_by": string | null,"updated_at": string,"version": number,"xsd_validated": boolean | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "cash_check": NonNullable<Json>,"close_attestation"?: string | null,"close_reason"?: string | null,"closed_at"?: string | null,"closed_by"?: string | null,"created_at"?: string,"created_at_iso": string,"created_by"?: string | null,"ctrl_sum_minor": number,"currency"?: string,"debtor_bank_account_id": string,"debtor_bic"?: string | null,"debtor_iban": string,"debtor_name": string,"download_count"?: number,"error"?: string | null,"file_sha256"?: string | null,"first_downloaded_at"?: string | null,"first_downloaded_by"?: string | null,"first_execution_date": string,"generated_at"?: string | null,"held"?: NonNullable<Json>,"id"?: string,"initiating_party": string,"job_token"?: string,"last_execution_date": string,"late_reason"?: string | null,"msg_id": string,"nb_of_txs": number,"number": string,"organization_id": string,"pain_version": string,"renderer_version"?: string | null,"sent_marked_at"?: string | null,"sent_marked_by"?: string | null,"size_bytes"?: number | null,"status"?: string,"storage_path"?: string | null,"superseded_by"?: string | null,"updated_at"?: string,"version"?: number,"xsd_validated"?: boolean | null
+                  }
+                  Update: {
+                    "cash_check"?: NonNullable<Json>,"close_attestation"?: string | null,"close_reason"?: string | null,"closed_at"?: string | null,"closed_by"?: string | null,"created_at"?: string,"created_at_iso"?: string,"created_by"?: string | null,"ctrl_sum_minor"?: number,"currency"?: string,"debtor_bank_account_id"?: string,"debtor_bic"?: string | null,"debtor_iban"?: string,"debtor_name"?: string,"download_count"?: number,"error"?: string | null,"file_sha256"?: string | null,"first_downloaded_at"?: string | null,"first_downloaded_by"?: string | null,"first_execution_date"?: string,"generated_at"?: string | null,"held"?: NonNullable<Json>,"id"?: string,"initiating_party"?: string,"job_token"?: string,"last_execution_date"?: string,"late_reason"?: string | null,"msg_id"?: string,"nb_of_txs"?: number,"number"?: string,"organization_id"?: string,"pain_version"?: string,"renderer_version"?: string | null,"sent_marked_at"?: string | null,"sent_marked_by"?: string | null,"size_bytes"?: number | null,"status"?: string,"storage_path"?: string | null,"superseded_by"?: string | null,"updated_at"?: string,"version"?: number,"xsd_validated"?: boolean | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "transfer_file_bank_fk"
+      columns: ["debtor_bank_account_id","organization_id","currency"]
+isOneToOne: false
+      referencedRelation: "bank_account"
+      referencedColumns: ["id","organization_id","currency"]
+    },{
+      foreignKeyName: "transfer_file_created_by_fkey"
+      columns: ["created_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_file_first_downloaded_by_fkey"
+      columns: ["first_downloaded_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_file_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_file_sent_marked_by_fkey"
+      columns: ["sent_marked_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_file_superseded_by_fkey"
+      columns: ["superseded_by"]
+isOneToOne: false
+      referencedRelation: "transfer_file"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"transfer_file_download": {
+                  Row: {
+                    "downloaded_at": string,"downloaded_by": string,"file_id": string,"id": string,"n": number,"organization_id": string,"sha256": string,"warning_acknowledged": boolean
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "downloaded_at"?: string,"downloaded_by": string,"file_id": string,"id"?: string,"n": number,"organization_id": string,"sha256": string,"warning_acknowledged": boolean
+                  }
+                  Update: {
+                    "downloaded_at"?: string,"downloaded_by"?: string,"file_id"?: string,"id"?: string,"n"?: number,"organization_id"?: string,"sha256"?: string,"warning_acknowledged"?: boolean
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "transfer_file_download_downloaded_by_fkey"
+      columns: ["downloaded_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_file_download_file_id_fkey"
+      columns: ["file_id"]
+isOneToOne: false
+      referencedRelation: "transfer_file"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_file_download_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"transfer_file_item": {
+                  Row: {
+                    "execution_date": string,"file_id": string,"late": boolean,"organization_id": string,"pmt_inf_id": string,"seq": number,"transfer_id": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "execution_date": string,"file_id": string,"late"?: boolean,"organization_id": string,"pmt_inf_id": string,"seq": number,"transfer_id": string
+                  }
+                  Update: {
+                    "execution_date"?: string,"file_id"?: string,"late"?: boolean,"organization_id"?: string,"pmt_inf_id"?: string,"seq"?: number,"transfer_id"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "transfer_file_item_file_id_fkey"
+      columns: ["file_id"]
+isOneToOne: false
+      referencedRelation: "transfer_file"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_file_item_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_file_item_transfer_id_fkey"
+      columns: ["transfer_id"]
+isOneToOne: false
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"validation_issue": {
                   Row: {
                     "batch_id": string,"code": string,"created_at": string,"file_id": string,"id": number,"message": string,"raw_value": string | null,"row_number": number | null,"severity": string,"source_column": string | null,"target": string | null
@@ -2448,6 +2674,12 @@ isOneToOne: false
 "cancel_top_up":
 { Args: { "p_idempotency_key": string,"p_reason": string,"p_transfer_id": string }; Returns: Json
                            },
+"cancel_transfer_file":
+{ Args: { "p_attestation"?: string,"p_expected_version": number,"p_file_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
+                           },
+"clear_payee_name_mismatch":
+{ Args: { "p_check_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
+                           },
 "client_money_balances":
 { Args: { "p_as_of"?: string,"p_client_organization_id": string,"p_known_at"?: string }; Returns: {
               "currency": string,"held_minor": number,"payable_minor": number,"unallocated_minor": number
@@ -2486,6 +2718,12 @@ isOneToOne: false
 "confirm_payout_account":
 { Args: { "p_iban_typed": string,"p_idempotency_key": string,"p_payout_account_id": string }; Returns: Json
                            },
+"confirm_transfer_cancellation":
+{ Args: { "p_idempotency_key": string,"p_transfer_id": string }; Returns: Json
+                           },
+"confirm_transfer_file_cancellation":
+{ Args: { "p_expected_version": number,"p_file_id": string,"p_idempotency_key": string }; Returns: Json
+                           },
 "create_boarding_batch":
 { Args: { "p_conformance"?: string,"p_cut_off_date"?: string,"p_idempotency_key": string,"p_portfolio_id": string }; Returns: string
                            },
@@ -2515,6 +2753,9 @@ isOneToOne: false
 "forward_payment":
 { Args: { "p_client_organization_id": string,"p_evidence_document_id": string,"p_expected_minor": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
                            },
+"generate_transfer_file":
+{ Args: { "p_bank_account_id": string,"p_idempotency_key": string,"p_late_reason"?: string }; Returns: Json
+                           },
 "issue_credit_note":
 { Args: { "p_account_id"?: string,"p_amount_ht_text": string,"p_expected_remaining_text": string,"p_idempotency_key": string,"p_invoice_id": string,"p_reason": string,"p_reason_code": string }; Returns: Json
                            },
@@ -2526,6 +2767,9 @@ isOneToOne: false
                            },
 "link_debit":
 { Args: { "p_bank_transaction_id": string,"p_expected_left_minor": string,"p_idempotency_key": string,"p_kind": string,"p_payment_id": string,"p_reason": string,"p_refund_request_id": string }; Returns: Json
+                           },
+"mark_transfer_file_sent":
+{ Args: { "p_expected_version": number,"p_file_id": string,"p_idempotency_key": string }; Returns: Json
                            },
 "match_queue_accounts":
 { Args: { "p_account_ids": (string)[] }; Returns: {
@@ -2560,6 +2804,9 @@ isOneToOne: false
 "record_direct_payment":
 { Args: { "p_account_id": string,"p_amount_minor": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_item_ids": (string)[],"p_paid_on": string,"p_reason": string }; Returns: Json
                            },
+"record_payee_name_mismatch":
+{ Args: { "p_bank_name": string,"p_idempotency_key": string,"p_note": string,"p_result": string,"p_transfer_id": string }; Returns: Json
+                           },
 "refresh_remittance_run":
 { Args: { "p_expected_version": number,"p_idempotency_key": string,"p_run_id": string }; Returns: Json
                            },
@@ -2588,13 +2835,19 @@ isOneToOne: false
 { Args: { "p_organization_id": string }; Returns: Json
                            },
 "request_refund":
-{ Args: { "p_amount_minor": string,"p_expected_left_minor": string,"p_expected_review_reason": string,"p_idempotency_key": string,"p_payee_iban": string,"p_payee_name": string,"p_payment_id": string,"p_reason": string,"p_reason_code": string }; Returns: Json
+{ Args: { "p_amount_minor": string,"p_execution_mode"?: string,"p_expected_left_minor": string,"p_expected_review_reason": string,"p_idempotency_key": string,"p_payee_iban": string,"p_payee_name": string,"p_payment_id": string,"p_reason": string,"p_reason_code": string }; Returns: Json
                            },
 "request_remittance_run":
 { Args: { "p_client_organization_id": string,"p_currency"?: string,"p_idempotency_key": string }; Returns: Json
                            },
 "request_top_up":
 { Args: { "p_amount_minor": string,"p_client_funds_bank_account_id": string,"p_idempotency_key": string,"p_own_bank_account_id": string,"p_reason": string,"p_requested_execution_date"?: string }; Returns: Json
+                           },
+"request_transfer_cancellation":
+{ Args: { "p_idempotency_key": string,"p_reason": string,"p_transfer_id": string }; Returns: Json
+                           },
+"request_transfer_file_cancellation":
+{ Args: { "p_attestation": string,"p_expected_version": number,"p_file_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
                            },
 "resolve_duplicate":
 { Args: { "p_bank_transaction_id": string,"p_idempotency_key": string,"p_is_duplicate": boolean,"p_reason": string }; Returns: Json
@@ -2618,6 +2871,9 @@ isOneToOne: false
                            },
 "set_allocation_policy":
 { Args: { "p_accessory_rank": string,"p_client_organization_id": string,"p_effective_from": string,"p_idempotency_key": string,"p_organization_id": string,"p_portfolio_id": string,"p_reason": string,"p_unclassified": string }; Returns: string
+                           },
+"set_bank_account_pain_version":
+{ Args: { "p_bank_account_id": string,"p_idempotency_key": string,"p_version": string }; Returns: Json
                            },
 "set_billing_identity":
 { Args: { "p_expected_version": number,"p_idempotency_key": string,"p_identity": Json,"p_organization_id": string }; Returns: Json
@@ -2644,6 +2900,15 @@ isOneToOne: false
                            },
 "submit_statement_import":
 { Args: { "p_idempotency_key": string,"p_statement_id": string }; Returns: string
+                           },
+"transfer_file_detail":
+{ Args: { "p_after_seq"?: number,"p_file_id": string,"p_limit"?: number }; Returns: Json
+                           },
+"transfer_file_download":
+{ Args: { "p_acknowledged"?: boolean,"p_file_id": string,"p_sha256": string }; Returns: Json
+                           },
+"transfer_overview":
+{ Args: Record<PropertyKey, never>; Returns: Json
                            },
 "unassign_payment":
 { Args: { "p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json

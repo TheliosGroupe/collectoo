@@ -225,7 +225,8 @@ select ok(not has_function_privilege('authenticated', 'private.post_debit_links(
           and has_function_privilege('service_role', 'private.run_payment_checks(uuid)', 'execute')
           and not has_function_privilege('authenticated', 'private.post_direct_payment(uuid, jsonb, text, text)', 'execute'),
   'only the worker posts debits, direct payments and runs the checks');
-select ok(not has_function_privilege('anon', 'public.request_refund(text, uuid, text, text, text, text, text, text, text)', 'execute')
+-- (M2c-6a: request_refund gained its execution mode, the last argument)
+select ok(not has_function_privilege('anon', 'public.request_refund(text, uuid, text, text, text, text, text, text, text, text)', 'execute')
           and not has_function_privilege('anon', 'public.link_debit(text, uuid, text, uuid, uuid, text, text)', 'execute')
           and not has_function_privilege('anon', 'public.resolve_duplicate(text, uuid, boolean, text)', 'execute')
           and not has_function_privilege('anon', 'public.record_direct_payment(text, uuid, uuid[], text, date, uuid, text)', 'execute')
@@ -810,13 +811,18 @@ select pg_temp.as_user('01');
 select lives_ok($$select public.request_refund('k-refund-0070', pg_temp.pay('07'), '1000', 'FR7630006000011234567890189',
   'PAYEUR 07', 'partial_return', 'partial_return', '6000', 'reste remboursé')$$, 'a refund of what is left');
 reset role;
+-- (a fixture shortcut: a real RFD id is made at the request, so no bank can debit it on a day before the refund was
+-- asked; the line is dated 2026-11-01 only to reach the before_previous_return refusal — M2c-6a review round 4)
 select pg_temp.line('r7', 'debit', 'refund_out', 1000, '2026-11-01', pg_temp.rfd_of('07'));
 set local role authenticated;
 select pg_temp.as_user('01');
 select throws_ok($$select public.link_debit('k-link-0072', pg_temp.ln('r7'), 'refund', null, pg_temp.refund_of('07'), null,
   'virement fait avant la saisie')$$, '23514', 'debit link refused: before_previous_return',
   'a refund the bank booked before that date neither');
-select lives_ok($$select public.cancel_refund('k-cancel-0070', pg_temp.refund_of('07'), 'date à vérifier')$$, 'cancelled');
+-- M2c-6a review round 3 (E2): the statement shows a debit carrying its RFD id — the bank paid it: cancelling the refund
+-- would let a new one pay again, so it is refused until ops link that debit (was: cancelled)
+select throws_ok($$select public.cancel_refund('k-cancel-0070', pg_temp.refund_of('07'), 'date à vérifier')$$, '23514',
+  'refund refused: already_debited', 'a refund whose RFD debit is on a statement is not cancelled (it was paid)');
 reset role;
 
 -- A line the posting itself refuses (a planted ledger refusal) goes to ops; the other lines of the run are booked

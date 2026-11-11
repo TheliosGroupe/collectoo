@@ -311,3 +311,90 @@ new I22 over the 50,000 keys the approval wrote:
 - `issue_credit_note` itself is keyed by the invoice: its charges by the primary key, each key's credits and waivers
   and latest state by their indexes; a credit note on an invoice charging 50,000 files is one plan and two inserts of
   50,000 rows (not measured at that size: an invoice that size is a scale artefact, not a correction ops make by hand).
+
+## Transfers and files (M2c-6a, migration `20261115090000`)
+
+`worker/tests/test_transfer_files_scale_integration.py` (2026-11-11, cloud session VM: 4 vCPU, 16 GB RAM, local stack,
+`TRANSFER_FILE_SIZE=5000`): 5,000 unidentified credits on one statement, each refunded in the file (5,000 `RFD`
+transfers ordered), the statistics of `bank_transfer`, `refund_request`, `transfer_file` and `transfer_file_item`
+forgotten first (the state CI meets).
+
+| Step (5,000 transfers) | Time |
+|---|---|
+| 5,000 `request_refund` in file mode (one statement, the transfers created) | 16.9 s (3.4 ms each) |
+| « Générer le fichier » (command: a hold reason per transfer, the cash check, the sweep, 5,000 items, the transfers `in_file`, the job queued) | **1.69 s** |
+| `transfer_file` job: write 0.69 s (lxml), structural check, upload 0.06 s, record | **0.90 s** (2.6 MB) |
+| `pain001.check` of the 5,000-transaction file alone | 0.46 s |
+| Download (command: the runs locked, the download recorded) | 0.06 s |
+| Cash check with the 5,000 in flight (each one's debit probed by its RFD id, then by PmtInfId) | **0.13 s** |
+| Cash check once a statement shows their 5,000 debits | 0.09 s |
+| « Virements » (`transfer_overview`) with the file and its 5,000 transfers | 0.14 s |
+
+- Design §19's target « pain.001 ≤ 200 transfers < 0.2 s »: 500 transfers take 0.22 s for the command and 0.10 s for
+  the job (writing 0.06 s); the writer is linear (≈ 0.14 ms a transaction).
+- The command reads each candidate's hold reason by keyed lookups (its run, the client's running balance, the payout
+  blockers): ≈ 0.3 ms a transfer; payouts cost a little more than refunds (one more read of the payout account and of
+  the client's other runs in flight).
+- The cash check probes each transfer in flight by `(bank_account_id, end_to_end_id)` on the new partial index of
+  debits, then its item by `(file_id, transfer_id)` and the batch debits by `(bank_account_id, payment_info_id)`:
+  keyed whatever the statistics (`enable_seqscan = off`).
+
+### The CI scale job after the migration (`RECEIPT_FILES=5000`, `tests/*scale_integration.py` in one run, right after `supabase db reset`)
+
+7 passed in 948 s (15 min 48 s). The 5,000-transfer file in that run: generation 1.80 s, job 0.89 s (write 0.60 s),
+check 0.41 s, download 0.04 s, cash check 0.13 s (0.09 s once debited), « Virements » 0.14 s.
+
+| Step (50,000 lines, `test_remittance_scale_integration.py`) | M2c-5b review fixes (run alone) | M2c-6a (CI order) |
+|---|---|---|
+| « Préparer maintenant » (the reserve) | 1.22 s | 1.30 s |
+| Prepare job | 9.9 s | 12.1 s (3.71, 5.86, 2.35) |
+| Approval job then documents job | 16.0 s | 16.4 s |
+| Nightly checks after the approval | 3.6 s | 5.6 s (5.2 s with the draft waiting) |
+| « Générer le fichier » of the run's payout (command; the 50,000-line statement's closing balance) | — | **0.05 s** |
+| Cancellation (command; its file, not downloaded, superseded) | 3.84 s | 3.63 s |
+
+- The nightly figure is the whole `run_payment_checks` in CI order (the earlier scale tests' rows in the same
+  database); the transfers' checks alone (`private.run_transfer_checks`, keyed) take 7 ms on that data, the runs'
+  checks (`private.run_remittance_runs_checks`, unchanged) 3.1 s.
+
+### M2c-6a review fixes (integration, 2026-11-11)
+
+Same VM, `RECEIPT_FILES=5000`, right after `supabase db reset`, the two scale tests in one run
+(`test_transfer_files_scale_integration.py` then `test_remittance_scale_integration.py`: 2 passed in 283 s).
+
+| Step (5,000 transfers) | M2c-6a | Review fixes |
+|---|---|---|
+| 5,000 `request_refund` in file mode | 16.9 s | 18.2 s (also the SEPA and EPC tests, review T3) |
+| « Générer le fichier » (command) | 1.69 s | **1.80 s** (1.93–2.52 s over three more cold runs; the EPC and SEPA holds, `private.transfers_in_flight`) |
+| `transfer_file` job (write) | 0.90 s (0.69 s) | 0.87 s (0.65 s) |
+| `pain001.check` of the file | 0.46 s | 0.51 s (one tamper check more per field) |
+| Download (command) | 0.06 s | **0.21 s** (0.23–0.29 s): the first download now re-runs, under the generation's locks, every transfer's hold reason, the date rule and the cash check (review T2) |
+| Cash check, 5,000 in flight | 0.13 s | **0.12 s** — 0 bank lines read |
+| Cash check once their 5,000 debits are on a statement | 0.09 s | **0.11 s** (0.08–0.13 s) — 5,000 lines read, one per transfer |
+| « Virements » (`transfer_overview`) | 0.14 s | 0.12 s |
+
+- The cash check once the debits are seen first measured **1.8–2.2 s** after the review fixes, in three of five
+  cold runs (0.07 s once the statistics caught up): each transfer's own-debit probe stated `direction = 'debit'`,
+  which made the account's unposted-lines index (partial on the direction) usable with no condition, and with the
+  statistics lagging the import the planner scanned it in full for every transfer — 12,502,500 lines read
+  (auto_explain: a full scan of `bank_transaction_unposted_idx` per probe, up to 5,000 lines removed by its filter). The probes now hold
+  only the end-to-end id, in a subquery that cannot be pulled up, on indexes led by the id and not partial on the
+  direction or kind (ADR-0014 « M2c-6a review fixes », Integration); the scale test asserts the lines read (at most
+  one per transfer).
+
+| Step (50,000 lines, `test_remittance_scale_integration.py`, after the transfer file test) | M2c-6a (CI order) | Review fixes |
+|---|---|---|
+| « Préparer maintenant » (the reserve) | 1.30 s | 1.53 s |
+| Prepare job | 12.1 s | 11.4 s (3.38, 5.32, 2.45) |
+| Approval job then documents job | 16.4 s | 17.5 s |
+| Nightly checks after the approval | 5.6 s | 4.3 s (3.5 s with the draft waiting) |
+| « Générer le fichier » of the run's payout | 0.05 s | 0.05 s |
+| Cancellation (its file, not downloaded, superseded) | 3.63 s | 3.81 s |
+
+### M2c-6a review fixes, round 2 (2026-11-11)
+
+Same VM, one run of `test_transfer_files_scale_integration.py` (5,000 transfers) after the integration suite on a
+reset stack: refunds asked 18.9 s; « Générer le fichier » **2.00 s** (each payout's and refund's hold reason now
+probes its own debit by end-to-end id, `already_debited`, review round 2 D4 — one keyed probe per transfer, as the
+cash check's); job 1.00 s; structural check 0.44 s; download 0.25 s; cash check 0.12 s in flight (0 bank lines
+read), 0.08 s once debited (5,000 read, one per transfer); « Virements » 0.12 s.

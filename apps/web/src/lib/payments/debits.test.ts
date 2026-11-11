@@ -13,7 +13,14 @@ import {
   linkRefundEffect,
   minorToInput,
   normaliseIban,
+  pendingRefundInstruction,
+  refundCancellable,
+  refundExecutionMode,
+  refundInDownloadedFile,
+  refundInDownloadedFileNote,
+  refundModeEffect,
   refundReasons,
+  refundTransfers,
   refundable,
   releaseEffect,
   returnEffect,
@@ -374,5 +381,213 @@ describe("the remittances' nightly checks (M2c-4 and its review)", () => {
       "/backoffice/encaissements/paiements/p1",
     );
     expect(checkSubjectLink({ ...base, code: "receivable_negative", subject_type: "account", subject_id: "a1" })).toBeNull();
+  });
+});
+
+describe("the transfers' checks (M2c-6a and its review: T3, T6)", () => {
+  const base = { currency: "EUR", amount: "583840", count: 2, oldest_days: 0, id: "r", severity: "alert" };
+
+  it("has French words for every code the transfer checks write, the stuck file and the held transfers included", () => {
+    for (const code of [
+      "transfer_not_filed",
+      "file_not_downloaded",
+      "file_not_marked_sent",
+      "transfer_not_debited",
+      "transfer_file_failed",
+      "payee_name_mismatch",
+      // review T6 (tests-ui#10): a file the job has not finished writing after 15 minutes
+      "transfer_file_pending",
+      // review T3: held out of every file until the data changes
+      "payee_name_not_epc",
+      "iban_not_sepa",
+      // review round 2 (D4): a cancelled file executed late after all
+      "transfer_already_debited",
+    ]) {
+      expect(CHECK_LABEL[code]?.label, code).toBeTruthy();
+      expect(CHECK_LABEL[code]?.help, code).toBeTruthy();
+      expect(`${CHECK_LABEL[code]?.label} ${CHECK_LABEL[code]?.help}`.toLowerCase(), code).not.toMatch(/payé|débité le/);
+    }
+    expect(checkLabel("transfer_file_pending").label).toContain("15 minutes");
+    expect(checkLabel("transfer_file_pending").help).toContain("En préparation");
+    // review T6 (concurrency-perf#2): checked every hour at the account's cut-off, not only the night after
+    expect(checkLabel("file_not_marked_sent").help).toContain("toutes les heures");
+    // review round 5 (fail-closed): no cancellation after download yet — keep the file, check the statement, the bank
+    expect(checkLabel("file_not_marked_sent").help).toContain("ne peut pas encore être annulé");
+    expect(checkLabel("file_not_marked_sent").help).toContain("voyez avec la banque");
+    expect(checkLabel("file_not_marked_sent").help).not.toContain("demandez son annulation");
+    // review T3: a name without EPC characters no longer fails the file (it is held out)
+    expect(checkLabel("transfer_file_failed").help).not.toContain("nom de bénéficiaire");
+    expect(checkLabel("transfer_not_filed").help).toContain("IBAN hors de la zone SEPA");
+    // review round 2 (D4): never re-done by hand, the sweep held meanwhile
+    expect(checkLabel("transfer_already_debited").help).toContain("Ne refaites aucun virement");
+    expect(checkLabel("transfer_already_debited").help).toContain("quote-part");
+  });
+
+  it("leads a file's alert to the file, the others to « Virements »", () => {
+    expect(checkSubjectLink({ ...base, code: "file_not_marked_sent", subject_type: "transfer_file", subject_id: "f1" })).toBe(
+      "/backoffice/reversements/virements/f1",
+    );
+    expect(checkSubjectLink({ ...base, code: "transfer_file_pending", subject_type: "transfer_file", subject_id: "f2" })).toBe(
+      "/backoffice/reversements/virements/f2",
+    );
+    for (const [code, subject] of [
+      ["transfer_not_filed", "bank_account"],
+      ["transfer_not_debited", "bank_account"],
+      ["payee_name_mismatch", "client_payout_account"],
+      ["iban_not_sepa", "bank_transfer"],
+      ["payee_name_not_epc", "bank_transfer"],
+      ["transfer_already_debited", "bank_transfer"],
+    ])
+      expect(checkSubjectLink({ ...base, code, subject_type: subject, subject_id: "x" }), code).toBe("/backoffice/reversements/virements");
+  });
+});
+
+describe("the refund's execution (M2c-6a review, tests-ui#8)", () => {
+  it("sends only an explicit choice: without one the database defaults (file when the account and the IBAN allow it)", () => {
+    expect(refundExecutionMode("file")).toBe("file");
+    expect(refundExecutionMode("manual")).toBe("manual");
+    expect(refundExecutionMode("auto")).toBeUndefined();
+    expect(refundExecutionMode("")).toBeUndefined();
+    expect(refundExecutionMode("FILE")).toBeUndefined();
+  });
+
+  it("says what the RFD reference becomes, the default naming both outcomes", () => {
+    expect(refundModeEffect("file")).toContain("prochain fichier de virements");
+    expect(refundModeEffect("file")).toContain("ne l'exécutez pas aussi à la main");
+    expect(refundModeEffect("manual")).toContain("référence de bout en bout");
+    const auto = refundModeEffect("auto");
+    expect(auto).toContain("si le compte de fonds de tiers peut le payer");
+    expect(auto).toContain("zone SEPA");
+    expect(auto).toContain("sinon il est à exécuter dans la banque");
+  });
+
+  it("tells ops to execute a pending refund by hand only when it is not in the transfer file (risk R4)", () => {
+    // integration: with the sheet's default the database chooses; the page must say which, never « exécutez » for a
+    // refund the file pays (paid twice)
+    const file = pendingRefundInstruction(true);
+    expect(file).toContain("prochain fichier de virements");
+    expect(file).toContain("ne l'exécutez pas dans la banque");
+    expect(file).not.toContain("exécutez le virement");
+    const manual = pendingRefundInstruction(false);
+    expect(manual).toContain("exécutez le virement dans la banque");
+    expect(manual).toContain("référence de bout en bout");
+  });
+
+  it("words the refusals a transfer file gives a refund", () => {
+    const cases: [string, string][] = [
+      ["refund: its transfer is in file TF-2026-000086, already downloaded: cancel the file first", "refund_in_downloaded_file"],
+      ["refund refused: in_downloaded_file", "refund_in_downloaded_file"],
+      ["refund refused: payee_name_not_epc", "refund_payee_name_not_epc"],
+      ["refund refused: iban_not_sepa", "refund_iban_not_sepa"],
+      ["refund: this account pays no transfer file", "transfer_not_paying_account"],
+    ];
+    for (const [message, code] of cases) {
+      expect(debitErrorCode(message), message).toBe(code);
+      expect(errorText(debitErrorCode(message))).not.toBe(errorText("unknown"));
+    }
+    expect(errorText("refund_in_downloaded_file")).toContain("pas encore disponible");
+    expect(errorText("refund_in_downloaded_file")).toContain("voyez avec la banque");
+    expect(errorText("refund_iban_not_sepa")).toContain("Je l'exécute moi-même");
+  });
+});
+
+describe("M2c-6a review, round 3 (E2): a refund whose transfer was debited already is not cancelled", () => {
+  it("maps the refusal and words it, and the alert names the replaced reference", () => {
+    expect(debitErrorCode("refund refused: already_debited")).toBe("refund_already_debited");
+    expect(debitErrorCode("refund refused: in_downloaded_file")).toBe("refund_in_downloaded_file");
+    expect(errorText("refund_already_debited")).toContain("remboursé une seconde fois");
+    expect(errorText("refund_already_debited")).not.toBe(errorText("unknown"));
+    expect(checkLabel("transfer_already_debited").help).toContain("celle du virement qu'il remplace");
+    expect(checkLabel("transfer_already_debited").help).toContain("demandez à la banque de ne pas l'exécuter");
+  });
+});
+
+describe("M2c-6a review, round 4 (G1, G2): what left the account late is never paid twice", () => {
+  it("refuses linking an old reference's debit while the refund's re-issue is in a downloaded file", () => {
+    const message = "debit link refused: posting_failed (23514: refund refused: reissue_in_downloaded_file)";
+    expect(debitErrorCode(message)).toBe("refund_reissue_in_downloaded_file");
+    // review round 5 (fail-closed): the file cannot be cancelled first any more — the debit is not linked
+    expect(errorText("refund_reissue_in_downloaded_file")).toContain("Ne le rattachez pas");
+    expect(errorText("refund_reissue_in_downloaded_file")).toContain("voyez avec la banque");
+    expect(errorText("refund_reissue_in_downloaded_file")).not.toContain("annuler ce fichier");
+    expect(debitErrorCode("refund refused: in_downloaded_file")).toBe("refund_in_downloaded_file");
+  });
+  it("alerts a transfer cancelled alone and debited late after all", () => {
+    expect(checkLabel("transfer_already_debited").help).toContain("annulé seul");
+    // round 4's verifier (SW2): a sweep already in a downloaded file is not stopped by it — said so
+    expect(checkLabel("transfer_already_debited").help).toContain("aucune nouvelle quote-part");
+    expect(checkLabel("transfer_already_debited").help).toContain("n'est pas arrêtée");
+  });
+});
+
+describe("M2c-6a review, round 6: a refund whose transfer is in a downloaded file", () => {
+  const file = (status: string, download_count: number) => ({ id: "f1", number: "TF-2026-000142", status, download_count });
+  it("reads each refund's transfer and file", () => {
+    const map = refundTransfers(
+      [
+        { id: "r1", transfer_id: "t1" },
+        { id: "r2", transfer_id: null },
+        { id: "r3", transfer_id: "t9" },
+      ],
+      [{ id: "t1", status: "in_file", transfer_file: file("downloaded", 1) }],
+    );
+    expect(map.get("r1")).toEqual({ status: "in_file", file: file("downloaded", 1) });
+    expect(map.has("r2")).toBe(false);
+    expect(map.has("r3")).toBe(false);
+  });
+
+  it("offers « Annuler » only while its transfer is in no downloaded file (the database refuses: in_downloaded_file)", () => {
+    expect(refundCancellable("requested", undefined)).toBe(true);
+    expect(refundCancellable("requested", { status: "ordered", file: null })).toBe(true);
+    expect(refundCancellable("requested", { status: "in_file", file: file("generated", 0) })).toBe(true);
+    expect(refundCancellable("requested", { status: "in_file", file: file("downloaded", 1) })).toBe(false);
+    expect(refundCancellable("requested", { status: "in_file", file: file("sent", 2) })).toBe(false);
+    expect(refundCancellable("executed", { status: "booked", file: file("sent", 2) })).toBe(false);
+    expect(refundCancellable("cancelled", undefined)).toBe(false);
+    expect(refundInDownloadedFile({ status: "in_file", file: file("downloaded", 1) })).toBe(true);
+    expect(refundInDownloadedFile({ status: "booked", file: file("downloaded", 1) })).toBe(false);
+    expect(refundInDownloadedFile({ status: "in_file", file: file("generated", 0) })).toBe(false);
+  });
+
+  it("says why instead, as the run's page: « en cours » until its debit is read, no cancellation after download", () => {
+    const note = refundInDownloadedFileNote("TF-2026-000142");
+    expect(note).toContain("dans le fichier TF-2026-000142, déjà téléchargé");
+    expect(note).toContain("« en cours »");
+    expect(note).toContain("ne peut pas être annulé d'ici là");
+    expect(note).toContain("pas encore disponible");
+    expect(note).toContain("voyez avec la banque");
+    expect(note).not.toMatch(/annulez-le|demandez (son |l')annulation|faites d'abord annuler/);
+  });
+
+  it("refuses a debit that carries another transfer's or lot's reference in that file (G2's rule, now)", () => {
+    expect(errorText("refund_reissue_in_downloaded_file")).toContain("porte la référence d'un autre virement ou d'un autre lot");
+  });
+});
+
+describe("M2c-6a review, round 7 (round 6's verifiers)", () => {
+  const file = (status: string, download_count: number) => ({ id: "f1", number: "TF-2026-000142", status, download_count });
+  it("names the downloaded file a pending refund's transfer is in, not « the next file » (N2)", () => {
+    const downloaded = pendingRefundInstruction(true, { status: "in_file", file: file("downloaded", 1) });
+    expect(downloaded).toContain("il est dans le fichier de virements TF-2026-000142, déjà téléchargé");
+    expect(downloaded).toContain("ne l'exécutez pas dans la banque");
+    expect(downloaded).not.toContain("prochain fichier");
+    expect(pendingRefundInstruction(true, { status: "in_file", file: file("sent", 2) })).toContain(
+      "dans le fichier de virements TF-2026-000142, déjà téléchargé",
+    );
+    // not in a file yet, or in one not downloaded: the next file, as before
+    for (const t of [undefined, null, { status: "ordered", file: null }, { status: "in_file", file: file("generated", 0) }])
+      expect(pendingRefundInstruction(true, t)).toContain("il part dans le prochain fichier de virements");
+    // booked: not « in » the file any more (the refund is executed then, the banner gone)
+    expect(pendingRefundInstruction(true, { status: "booked", file: file("sent", 2) })).not.toContain("TF-2026-000142");
+  });
+
+  it("says what a refused line carries and why, never « refunded a second time » (N1, the founder's option (b))", () => {
+    const text = errorText("refund_reissue_in_downloaded_file");
+    expect(text).toContain("porte la référence d'un autre virement ou d'un autre lot");
+    expect(text).toContain("(ou, pour un remboursement réémis, ne porte aucune référence)");
+    expect(text).toContain("il ne peut pas exécuter ce remboursement, dont le virement est dans un fichier déjà téléchargé");
+    expect(text).toContain("Ne le rattachez pas à ce remboursement");
+    expect(text).not.toContain("seconde fois");
+    expect(text).not.toContain("annuler ce fichier");
   });
 });

@@ -659,9 +659,10 @@ select throws_ok(format($$ select public.link_debit('link-fee-0005', %L, 'fee', 
   (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 7)),
   '23514', 'bank booking refused: already_linked', 'a line explained is not booked as well');
 -- A pending refund of the charge's amount: the charge the job booked is not listed to classify as maybe that refund.
+-- (ops execute it by hand, as in M2b-6: M2c-6a's default puts a refund in the next transfer file)
 insert into t select 'rfd150', (public.request_refund('refund-150-0001',
   (select id from public.payment where end_to_end_id = 'E2E-B1'), '150', 'FR1420041010050500013M02606', 'PAYEUR B1',
-  'other', null, '10000', 'trop-perçu (test)') ->> 'refund_request_id')::uuid;
+  'other', null, '10000', 'trop-perçu (test)', 'manual') ->> 'refund_request_id')::uuid;
 select is((select count(*)::int from public.debit_queue('a-classer', 0, 100) q
            where q.bank_transaction_id = (select x.id from public.bank_transaction x
                                           where x.statement_id = 'b0000000-0000-0000-0000-000000000001'

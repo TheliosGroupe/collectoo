@@ -4,8 +4,9 @@ its new lines; refused files write nothing; one cash_in per statement day (desig
 
 from collections import Counter
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import psycopg
 import pytest
@@ -98,6 +99,10 @@ def test_a_camt053_statement_is_imported_and_its_days_booked() -> None:
     assert s["bank_check"]["difference_minor"] == "0"
     assert s["bank_check"]["unposted_lines"] == s["counts"]["unposted"]["lines"]
     assert s["warnings"] == [] and s["format_version"] == "08"
+    # M2c-6a review round 3 (E4): the import keeps when the bank produced it (Stmt/CreDtTm, written
+    # without an offset: Paris time), as the parser read it
+    created = datetime.fromisoformat(doc.created).replace(tzinfo=ZoneInfo("Europe/Paris"))
+    assert s["bank_created_at"] == created
     with psycopg.connect(DB) as conn:
         statuses = conn.execute(
             "select status, count(*) from public.payment where bank_account_id = %s"
@@ -205,6 +210,7 @@ def test_csv_reimports_and_lines_already_imported_under_another_label() -> None:
     parsed = expected_csv(lines)
     assert s["counts"]["payments"]["count"] == sum(1 for x in parsed if x.kind == "debtor_credit")
     assert s["bank_check"] is None and s["format_version"] is None  # a CSV proves no balance
+    assert s["bank_created_at"] is None  # nor when it was exported (review round 3, E4)
     before = money_state(tenant["bank"])
     # a re-export without the bank's ids and with reworded labels: same days and amounts, similar
     # labels -> suspected duplicates, no payment, no cash

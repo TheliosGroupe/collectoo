@@ -12,6 +12,7 @@ Package registries (npm, PyPI, …) are allowed by default. Extra hosts:
 | `www.eba.europa.eu` | EBA Excel annexes of the NPL ITS |
 | `ec.europa.eu` | Commission documents register (fallback only; timed out on 2026-11-07) |
 | `api-adresse.data.gouv.fr` | BAN address normalisation (M1 boarding) |
+| `www.iso20022.org` | **Not allowed yet** (refused in the M2c-6a session): the pain.001.001.09 and .03 XSDs to vendor in `docs/reference/iso20022/` (its README says which files) |
 
 Already reachable without listing them (checked 2026-11-07): `github.com` release downloads (Supabase CLI), Docker Hub (`registry-1.docker.io`).
 **Blocked, and worked around:** image blobs on `public.ecr.aws` (CloudFront) and `ghcr.io` (`pkg-containers.githubusercontent.com`). The Supabase CLI falls back to Docker Hub; we force Docker Hub with `SUPABASE_INTERNAL_IMAGE_REGISTRY=docker.io` so no time is lost on retries.
