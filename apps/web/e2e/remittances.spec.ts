@@ -298,7 +298,8 @@ test("ops prepare, read and approve a client's remittance run", async ({ page, b
   const twice = await page.request.get(href, { maxRedirects: 0 });
   expect(twice.status()).toBe(303);
   const back = twice.headers()["location"];
-  expect(back).toContain("refus=already_downloaded");
+  // a path, resolved by the browser against its own origin (an absolute URL from `request.url` names `localhost`)
+  expect(back).toMatch(/^\/backoffice\/reversements\/virements\/[0-9a-f-]{36}\?refus=already_downloaded$/);
   await page.goto(back);
   await expect(page.getByTestId("download-again-warning")).toBeVisible();
   await expect(page.getByTestId("download-again-warning")).toContainText("ne le déposez pas deux fois");

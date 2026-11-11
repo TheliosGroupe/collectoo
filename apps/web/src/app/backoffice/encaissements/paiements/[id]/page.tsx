@@ -25,6 +25,7 @@ import {
   REFUND_REASON,
   REFUND_STATUS,
   minorToInput,
+  pendingRefundInstruction,
   refundReasons,
   refundable,
   returnedNote,
@@ -122,13 +123,16 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
       {reason?.help ? <InfoNote>{reason.help}</InfoNote> : null}
       {pendingRefund ? (
         <InfoNote>
-          Remboursement de {money(pendingRefund.amount_minor, cur)} demandé : exécutez le virement dans la banque vers
-          l&apos;IBAN …{pendingRefund.payee_iban_end} avec la référence{" "}
+          <span data-testid="refund-instruction">
+            Remboursement de {money(pendingRefund.amount_minor, cur)} vers l&apos;IBAN …{pendingRefund.payee_iban_end}{" "}
+            demandé : {pendingRefundInstruction(inFile.has(pendingRefund.id))}
+          </span>{" "}
+          Référence :{" "}
           <span className="font-mono font-medium" data-testid="refund-reference">
             {pendingRefund.end_to_end_id}
-          </span>{" "}
-          saisie comme « référence de bout en bout ». Il sera comptabilisé quand son débit apparaîtra sur le relevé ; un
-          débit sans cette référence se lie depuis « Débits et retours ».
+          </span>
+          . Il sera comptabilisé quand son débit apparaîtra sur le relevé ; un débit sans cette référence se lie depuis «
+          Débits et retours ».
         </InfoNote>
       ) : null}
       {p.status === "returned" ? (

@@ -588,6 +588,17 @@ export function refundExecutionMode(value: string): "file" | "manual" | undefine
   return value === "file" || value === "manual" ? value : undefined;
 }
 
+/**
+ * What the payment's page tells ops about its pending refund, after « demandé : » (integration of the M2c-6a review):
+ * a refund in the transfer file is never executed by hand too (risk R4: paid twice); one by hand needs its RFD id as
+ * the end-to-end reference. With the sheet's default the database chose, so this is where ops read which it is.
+ */
+export function pendingRefundInstruction(inFile: boolean): string {
+  if (inFile)
+    return "il part dans le prochain fichier de virements (« Virements »), avec la référence ci-dessous comme référence de bout en bout ; ne l'exécutez pas dans la banque.";
+  return "exécutez le virement dans la banque avec la référence ci-dessous saisie comme « référence de bout en bout ».";
+}
+
 /** What the refund sheet says the RFD reference becomes, by the execution chosen (« auto »: the database's default). */
 export function refundModeEffect(mode: string): string {
   if (mode === "file")

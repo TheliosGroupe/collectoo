@@ -2407,6 +2407,50 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"transfer_cancellation_request": {
+                  Row: {
+                    "attestation": string | null,"confirm_evidence": Json | null,"confirmed_at": string | null,"confirmed_by": string | null,"evidence": NonNullable<Json>,"file_id": string,"file_version": number,"id": string,"kind": string,"organization_id": string,"reason": string,"requested_at": string,"requested_by": string,"transfer_id": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "attestation"?: string | null,"confirm_evidence"?: Json | null,"confirmed_at"?: string | null,"confirmed_by"?: string | null,"evidence": NonNullable<Json>,"file_id": string,"file_version": number,"id"?: string,"kind": string,"organization_id": string,"reason": string,"requested_at"?: string,"requested_by": string,"transfer_id"?: string | null
+                  }
+                  Update: {
+                    "attestation"?: string | null,"confirm_evidence"?: Json | null,"confirmed_at"?: string | null,"confirmed_by"?: string | null,"evidence"?: NonNullable<Json>,"file_id"?: string,"file_version"?: number,"id"?: string,"kind"?: string,"organization_id"?: string,"reason"?: string,"requested_at"?: string,"requested_by"?: string,"transfer_id"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "transfer_cancellation_request_confirmed_by_fkey"
+      columns: ["confirmed_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_cancellation_request_file_id_fkey"
+      columns: ["file_id"]
+isOneToOne: false
+      referencedRelation: "transfer_file"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_cancellation_request_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_cancellation_request_requested_by_fkey"
+      columns: ["requested_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "transfer_cancellation_request_transfer_id_fkey"
+      columns: ["transfer_id"]
+isOneToOne: false
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"transfer_file": {
                   Row: {
                     "cash_check": NonNullable<Json>,"close_attestation": string | null,"close_reason": string | null,"closed_at": string | null,"closed_by": string | null,"created_at": string,"created_at_iso": string,"created_by": string | null,"ctrl_sum_minor": number,"currency": string,"debtor_bank_account_id": string,"debtor_bic": string | null,"debtor_iban": string,"debtor_name": string,"download_count": number,"error": string | null,"file_sha256": string | null,"first_downloaded_at": string | null,"first_downloaded_by": string | null,"first_execution_date": string,"generated_at": string | null,"held": NonNullable<Json>,"id": string,"initiating_party": string,"job_token": string,"last_execution_date": string,"late_reason": string | null,"msg_id": string,"nb_of_txs": number,"number": string,"organization_id": string,"pain_version": string,"renderer_version": string | null,"sent_marked_at": string | null,"sent_marked_by": string | null,"size_bytes": number | null,"status": string,"storage_path": string | null,"superseded_by": string | null,"updated_at": string,"version": number,"xsd_validated": boolean | null
@@ -2619,7 +2663,7 @@ isOneToOne: false
 { Args: { "p_idempotency_key": string,"p_reason": string,"p_refund_request_id": string }; Returns: Json
                            },
 "cancel_remittance_run":
-{ Args: { "p_attestation"?: string,"p_expected_version": number,"p_idempotency_key": string,"p_reason": string,"p_run_id": string }; Returns: Json
+{ Args: { "p_expected_version": number,"p_idempotency_key": string,"p_reason": string,"p_run_id": string }; Returns: Json
                            },
 "cancel_top_up":
 { Args: { "p_idempotency_key": string,"p_reason": string,"p_transfer_id": string }; Returns: Json
@@ -2667,6 +2711,12 @@ isOneToOne: false
                            },
 "confirm_payout_account":
 { Args: { "p_iban_typed": string,"p_idempotency_key": string,"p_payout_account_id": string }; Returns: Json
+                           },
+"confirm_transfer_cancellation":
+{ Args: { "p_idempotency_key": string,"p_transfer_id": string }; Returns: Json
+                           },
+"confirm_transfer_file_cancellation":
+{ Args: { "p_expected_version": number,"p_file_id": string,"p_idempotency_key": string }; Returns: Json
                            },
 "create_boarding_batch":
 { Args: { "p_conformance"?: string,"p_cut_off_date"?: string,"p_idempotency_key": string,"p_portfolio_id": string }; Returns: string
@@ -2786,6 +2836,12 @@ isOneToOne: false
                            },
 "request_top_up":
 { Args: { "p_amount_minor": string,"p_client_funds_bank_account_id": string,"p_idempotency_key": string,"p_own_bank_account_id": string,"p_reason": string,"p_requested_execution_date"?: string }; Returns: Json
+                           },
+"request_transfer_cancellation":
+{ Args: { "p_idempotency_key": string,"p_reason": string,"p_transfer_id": string }; Returns: Json
+                           },
+"request_transfer_file_cancellation":
+{ Args: { "p_attestation": string,"p_expected_version": number,"p_file_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
                            },
 "resolve_duplicate":
 { Args: { "p_bank_transaction_id": string,"p_idempotency_key": string,"p_is_duplicate": boolean,"p_reason": string }; Returns: Json

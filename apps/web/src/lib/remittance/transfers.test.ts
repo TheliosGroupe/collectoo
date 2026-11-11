@@ -223,12 +223,9 @@ describe("M2c-6a review T2: a file no longer downloadable is regenerated, never 
     expect(downloadOutcome({ file_id: FILE, download: 1, storage_path: "org/f.xml" }, null)).toEqual({
       kind: "ok",
       storagePath: "org/f.xml",
-      signedUrl: null,
     });
-    expect(downloadOutcome({ storage_path: "p", signed_url: "http://127.0.0.1:54321/storage/v1/object/sign/x" }, null)).toMatchObject({
-      kind: "ok",
-      signedUrl: "http://127.0.0.1:54321/storage/v1/object/sign/x",
-    });
+    // T4: the bytes are read with the caller's session from the file's path; a URL in the answer is never fetched
+    expect(downloadOutcome({ storage_path: "p", signed_url: "https://elsewhere.example/x" }, null)).toEqual({ kind: "ok", storagePath: "p" });
     // a refusal that replaced the file comes back as data (a raise would undo the replacement)
     expect(downloadOutcome({ refused: "file_stale", status: "superseded" }, null)).toEqual({ kind: "refused", code: "file_stale", blocked: [] });
     expect(

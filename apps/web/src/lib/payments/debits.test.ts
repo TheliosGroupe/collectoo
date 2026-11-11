@@ -13,6 +13,7 @@ import {
   linkRefundEffect,
   minorToInput,
   normaliseIban,
+  pendingRefundInstruction,
   refundExecutionMode,
   refundModeEffect,
   refundReasons,
@@ -445,6 +446,18 @@ describe("the refund's execution (M2c-6a review, tests-ui#8)", () => {
     expect(auto).toContain("si le compte de fonds de tiers peut le payer");
     expect(auto).toContain("zone SEPA");
     expect(auto).toContain("sinon il est à exécuter dans la banque");
+  });
+
+  it("tells ops to execute a pending refund by hand only when it is not in the transfer file (risk R4)", () => {
+    // integration: with the sheet's default the database chooses; the page must say which, never « exécutez » for a
+    // refund the file pays (paid twice)
+    const file = pendingRefundInstruction(true);
+    expect(file).toContain("prochain fichier de virements");
+    expect(file).toContain("ne l'exécutez pas dans la banque");
+    expect(file).not.toContain("exécutez le virement");
+    const manual = pendingRefundInstruction(false);
+    expect(manual).toContain("exécutez le virement dans la banque");
+    expect(manual).toContain("référence de bout en bout");
   });
 
   it("words the refusals a transfer file gives a refund", () => {

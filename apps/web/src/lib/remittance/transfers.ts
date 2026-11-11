@@ -1,4 +1,5 @@
 import type { ErrorCode } from "@/lib/boarding/forms";
+import type { Database } from "@/lib/database.types";
 import { money } from "@/lib/payments/statements";
 import { blockerLabel, frenchDate } from "@/lib/remittance/runs";
 
@@ -530,7 +531,10 @@ export function requestLine(r: CancelRequest): string {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** The four commands of T1 (new in this slice's migration: called through a narrow type until the types are regenerated). */
+/**
+ * The four commands of T1, called through the narrow `CancellationRpc` (one call site for four functions); their
+ * arguments are checked against the generated `database.types.ts` by `CancellationArgsMatchDb` below.
+ */
 export type CancellationCall =
   | {
       fn: "request_transfer_file_cancellation";
@@ -586,6 +590,18 @@ export function cancellationRpc(client: unknown): CancellationRpc {
   return (fn, args) => (client as { rpc: CancellationRpc }).rpc(fn, args);
 }
 
+type DbFunctions = Database["public"]["Functions"];
+type ExactArgs<C> = C extends { fn: infer F extends keyof DbFunctions; args: infer A }
+  ? [A] extends [DbFunctions[F]["Args"]]
+    ? [DbFunctions[F]["Args"]] extends [A]
+      ? true
+      : false
+    : false
+  : false;
+type IsTrue<T extends true> = T;
+/** Type-checks only: each `CancellationCall`'s arguments are exactly the database's signature (tsc fails on a drift). */
+export type CancellationArgsMatchDb = IsTrue<false extends ExactArgs<CancellationCall> ? false : true>;
+
 /**
  * How cancelling a run reaches its payout (T1, money#2): `direct` — nothing left the bank (no transfer, still to file,
  * in a file not downloaded, or already cancelled under T1); `transfer_first` — the transfer is in a downloaded or sent
@@ -623,7 +639,7 @@ export type DownloadRefusal =
 export type BlockedTransfer = { transfer_id: string | null; reason: string };
 
 export type DownloadOutcome =
-  | { kind: "ok"; storagePath: string | null; signedUrl: string | null }
+  | { kind: "ok"; storagePath: string | null }
   | { kind: "refused"; code: DownloadRefusal; blocked: BlockedTransfer[] };
 
 const REASON = /^[a-z0-9_:]{1,80}$/;
@@ -659,7 +675,7 @@ function refusalCode(text: string): DownloadRefusal {
 }
 
 /**
- * The command's answer: the bytes may be served (with the storage path, or a signed URL the command minted), or a
+ * The command's answer: the bytes may be served (with the file's storage path, read with the caller's session), or a
  * refusal with its code and, for `file_blocked`, the transfers and their reasons. A refusal that replaced the file comes
  * back as data (`{refused, blocked}`: a raise would undo the replacement); one that changed nothing as an error (its
  * detail may carry `{blocked}` too).
@@ -676,11 +692,7 @@ export function downloadOutcome(data: unknown, error: { message: string; details
   }
   const d = isRecord(data) ? data : {};
   if (typeof d.refused === "string") return { kind: "refused", code: refusalCode(d.refused), blocked: blockedList(d.blocked) };
-  return {
-    kind: "ok",
-    storagePath: typeof d.storage_path === "string" ? d.storage_path : null,
-    signedUrl: typeof d.signed_url === "string" ? d.signed_url : null,
-  };
+  return { kind: "ok", storagePath: typeof d.storage_path === "string" ? d.storage_path : null };
 }
 
 /** The file's page the browser is sent back to after a refusal (the blocked transfers in the query, at most 20). */

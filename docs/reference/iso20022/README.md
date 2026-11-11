@@ -36,16 +36,16 @@ to a usage guideline); record the download date and the SHA-256 of each file in 
 
 Then (M2c-6a review tests-ui#6: three tests read whether the schemas are here, not one):
 
-1. `worker/tests/test_pain001.py::test_the_goldens_validate_against_the_iso20022_xsd`: remove its
-   `xfail` marker; run `cd worker && uv run pytest tests/test_pain001.py`.
-2. `worker/tests/test_transfer_files_integration.py` (the job's file, `f["xsd_validated"]`): it must
-   assert what `pain001.xsd_available("pain.001.001.09")` says, not `is False` — the job and CI find
-   this directory from the source tree, so the file is validated as soon as the schemas are
-   committed; if it still reads `is False`, change it then (`make test-integration`).
-   <!-- integrator: check against the merged m6a-fix-db branch -->
+1. `worker/tests/test_pain001.py::test_the_goldens_validate_against_the_iso20022_xsd` (one case per
+   version and golden, strict xfail): remove its `xfail` marker; run
+   `cd worker && uv run pytest tests/test_pain001.py`.
+2. `worker/tests/test_transfer_files_integration.py::test_a_file_of_two_payouts_written_by_the_job`
+   (the job's file): it asserts `f["xsd_validated"] is pain001.xsd_available("pain.001.001.09")`, so
+   it follows the schemas; nothing to change. The job and CI find this directory from the source
+   tree, so the file is validated as soon as the schemas are committed (`make test-integration`).
 3. `apps/web/e2e/remittances.spec.ts` (the file's page): it accepts « schéma XSD ISO 20022 vérifié »
-   and « … non vérifié » alike since the review; nothing to change. Check a generated file on the
-   « Virements » page now shows « Schéma XSD vérifié » (`make e2e`).
+   and « … non vérifié » alike; nothing to change. Check a generated file's page now shows
+   « schéma XSD ISO 20022 vérifié » (`make e2e`).
 
 The worker finds this directory from its source tree, or from `PAIN001_XSD_DIR` when it is
 deployed without the repository.
