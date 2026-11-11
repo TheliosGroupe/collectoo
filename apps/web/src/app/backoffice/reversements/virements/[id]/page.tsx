@@ -11,23 +11,58 @@ import {
   TRANSFER_KIND,
   TRANSFER_STATUS,
   type FileDetail,
+  type FileItem,
+  cancellationOf,
   cashLines,
   downloadWarning,
-  fileLive,
+  fileStale,
   fileStatus,
   holdLabel,
+  parisDate,
   parisDateTime,
+  refusalFromSearch,
+  refusalText,
+  regenerationEffects,
 } from "@/lib/remittance/transfers";
 import { markSent } from "../actions";
-import { CancelFile, PayeeMismatch } from "../file-actions";
+import { CancelFile, DownloadLink, PayeeMismatch, RegenerateFile, TwoStepCancellation } from "../file-actions";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
+ * One transfer the bank refused inside an executed file (review T1, pain001#1): asked by one person, confirmed by
+ * another, with the statement's evidence. Folded while nobody asked (most transfers of a file are simply executed).
+ */
+function TransferCancellation({ t, fileId }: { t: FileItem; fileId: string }) {
+  const cancellation = cancellationOf(t.cancellation);
+  const sheet = (
+    <TwoStepCancellation
+      target={{
+        kind: "transfer",
+        transferId: t.transfer_id,
+        fileId,
+        label: `${TRANSFER_KIND[t.kind] ?? t.kind}${t.client_name ? ` — ${t.client_name}` : ""}, ${money(t.amount_minor, t.currency)}`,
+      }}
+      cancellation={cancellation}
+      idempotencyKey={randomUUID()}
+    />
+  );
+  if (cancellation.request) return sheet;
+  return (
+    <details data-testid="transfer-refused">
+      <summary className="cursor-pointer text-sm underline underline-offset-4">Virement refusé par la banque ?</summary>
+      <div className="mt-2">{sheet}</div>
+    </details>
+  );
+}
+
+/**
  * M2c-6a one transfer file (design §11, §17.3): what it holds (its PmtInf, our ids, the payees as on the RIB), the cash
  * check and the transfers held out when it was generated, every download, and its actions — « Télécharger » (the
- * second time past the warning), « Marquer comme transmis », cancel it (an attestation once downloaded), report a payee
- * name the bank did not match. Its transfers a page at a time.
+ * second time past the warning), « Marquer comme transmis », cancel it before download, report a payee name the bank
+ * did not match. Its transfers a page at a time. Review fixes: a refused download comes back here with what happened
+ * and « Régénérer » (T2, tests-ui#9); once downloaded, the file — or one transfer the bank refused — is cancelled in two
+ * steps, asked by one person and confirmed by another, with the statement's evidence shown (T1).
  */
 export default async function TransferFilePage({
   params,
@@ -37,7 +72,9 @@ export default async function TransferFilePage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const after = Number((await searchParams).apres ?? 0);
+  const query = await searchParams;
+  const after = Number(query.apres ?? 0);
+  const refusal = refusalFromSearch(query);
   const { supabase } = await staffSession();
   const back = { href: "/backoffice/reversements/virements", label: "Virements" };
   const { data } = UUID.test(id)
@@ -53,8 +90,14 @@ export default async function TransferFilePage({
   const f = data as unknown as FileDetail;
   const status = fileStatus(f.status);
   const warning = downloadWarning(f);
-  const downloadable = ["generated", "downloaded", "sent"].includes(f.status);
+  // a generated file dated before today can no longer go (the download would refuse and replace it); one dated today
+  // past the account's cut-off is refused at download and comes back here with `file_stale`
+  const stale = fileStale(f, parisDate(new Date()));
+  const downloadable = ["generated", "downloaded", "sent"].includes(f.status) && !stale;
   const href = `/backoffice/reversements/virements/${f.id}/telecharger`;
+  const executed = f.status === "downloaded" || f.status === "sent";
+  const regenerate = stale || refusal?.code === "file_stale" || refusal?.code === "file_blocked";
+  const itemOf = new Map(f.items.map((t) => [t.transfer_id, t]));
   return (
     <WidePage title={`Fichier ${f.number}`} back={back}>
       <AutoRefresh active={f.status === "pending"} abandonable={false} everyMs={2000} maxMs={120_000} />
@@ -95,24 +138,47 @@ export default async function TransferFilePage({
         </p>
       ) : null}
 
+      {refusal && refusal.code !== "already_downloaded" ? (
+        <div className="flex flex-col gap-2 rounded-md border border-red-200 p-3 text-sm dark:border-red-900" data-testid="download-refused">
+          <p className="font-medium text-red-800 dark:text-red-200">{refusalText(refusal.code)}</p>
+          {refusal.blocked.length > 0 ? (
+            <ul className="flex list-disc flex-col gap-1 pl-5" data-testid="download-blocked">
+              {refusal.blocked.map((b) => {
+                const t = b.transfer_id ? itemOf.get(b.transfer_id) : undefined;
+                return (
+                  <li key={`${b.transfer_id ?? "fichier"}:${b.reason}`}>
+                    {t ? `${TRANSFER_KIND[t.kind] ?? t.kind}${t.client_name ? ` — ${t.client_name}` : ""} (${money(t.amount_minor, t.currency)}) : ` : ""}
+                    {holdLabel(b.reason)}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+      {stale && !refusal ? (
+        <InfoNote>Sa date d&apos;exécution est passée : ce fichier ne peut plus être téléchargé. Régénérez-le (nouveau numéro, nouvelle date).</InfoNote>
+      ) : null}
       {warning && downloadable ? (
         <p className="text-sm font-medium text-red-800 dark:text-red-200" data-testid="download-warning">
           {warning}
         </p>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
-        {downloadable && f.download_count === 0 ? (
-          <a href={href} className={inlineButtonClass} data-testid="file-download">
-            Télécharger
-          </a>
-        ) : null}
+        {regenerate ? <RegenerateFile accountId={f.bank_account.id} effects={regenerationEffects(f)} idempotencyKey={randomUUID()} /> : null}
+        {downloadable && f.download_count === 0 ? <DownloadLink href={href} label="Télécharger" testId="file-download" /> : null}
         {downloadable && f.download_count > 0 ? (
-          <details data-testid="file-download-again">
+          <details data-testid="file-download-again" open={refusal?.code === "already_downloaded"}>
             <summary className="cursor-pointer text-sm underline underline-offset-4">Télécharger de nouveau</summary>
-            <p className="mt-2 text-sm">{warning}.</p>
-            <a href={`${href}?confirme=1`} className={`${inlineButtonClass} mt-2 inline-block`} data-testid="file-download-confirm">
-              J&apos;ai compris : télécharger de nouveau
-            </a>
+            <p className="mt-2 text-sm" data-testid="download-again-warning">
+              {warning}.
+            </p>
+            <DownloadLink
+              href={`${href}?confirme=1`}
+              label="J'ai compris : télécharger de nouveau"
+              testId="file-download-confirm"
+              className={`${inlineButtonClass} mt-2 inline-block`}
+            />
           </details>
         ) : null}
         {f.status === "downloaded" ? (
@@ -122,10 +188,17 @@ export default async function TransferFilePage({
             <input type="hidden" name="expected_version" value={f.version} />
           </ActionForm>
         ) : null}
-        {fileLive(f.status) ? (
-          <CancelFile fileId={f.id} version={f.version} downloaded={f.download_count > 0} idempotencyKey={randomUUID()} />
+        {f.status === "pending" || f.status === "generated" ? (
+          <CancelFile fileId={f.id} version={f.version} idempotencyKey={randomUUID()} />
         ) : null}
       </div>
+      {executed ? (
+        <TwoStepCancellation
+          target={{ kind: "file", fileId: f.id, version: f.version, sent: f.status === "sent" }}
+          cancellation={cancellationOf(f.cancellation)}
+          idempotencyKey={randomUUID()}
+        />
+      ) : null}
 
       <Section title="Téléchargements" testId="file-downloads">
         {f.downloads.length === 0 ? (
@@ -175,6 +248,9 @@ export default async function TransferFilePage({
                 </span>
                 {t.kind === "payout" && t.status === "in_file" && !t.payee_check_open && f.download_count > 0 ? (
                   <PayeeMismatch transferId={t.transfer_id} fileId={f.id} idempotencyKey={randomUUID()} />
+                ) : null}
+                {executed && t.status === "in_file" && !t.debit_seen ? (
+                  <TransferCancellation t={t} fileId={f.id} />
                 ) : null}
               </li>
             );
