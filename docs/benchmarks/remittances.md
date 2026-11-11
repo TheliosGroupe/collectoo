@@ -338,3 +338,21 @@ forgotten first (the state CI meets).
 - The cash check probes each transfer in flight by `(bank_account_id, end_to_end_id)` on the new partial index of
   debits, then its item by `(file_id, transfer_id)` and the batch debits by `(bank_account_id, payment_info_id)`:
   keyed whatever the statistics (`enable_seqscan = off`).
+
+### The CI scale job after the migration (`RECEIPT_FILES=5000`, `tests/*scale_integration.py` in one run, right after `supabase db reset`)
+
+7 passed in 948 s (15 min 48 s). The 5,000-transfer file in that run: generation 1.80 s, job 0.89 s (write 0.60 s),
+check 0.41 s, download 0.04 s, cash check 0.13 s (0.09 s once debited), « Virements » 0.14 s.
+
+| Step (50,000 lines, `test_remittance_scale_integration.py`) | M2c-5b review fixes (run alone) | M2c-6a (CI order) |
+|---|---|---|
+| « Préparer maintenant » (the reserve) | 1.22 s | 1.30 s |
+| Prepare job | 9.9 s | 12.1 s (3.71, 5.86, 2.35) |
+| Approval job then documents job | 16.0 s | 16.4 s |
+| Nightly checks after the approval | 3.6 s | 5.6 s (5.2 s with the draft waiting) |
+| « Générer le fichier » of the run's payout (command; the 50,000-line statement's closing balance) | — | **0.05 s** |
+| Cancellation (command; its file, not downloaded, superseded) | 3.84 s | 3.63 s |
+
+- The nightly figure is the whole `run_payment_checks` in CI order (the earlier scale tests' rows in the same
+  database); the transfers' checks alone (`private.run_transfer_checks`, keyed) take 7 ms on that data, the runs'
+  checks (`private.run_remittance_runs_checks`, unchanged) 3.1 s.
