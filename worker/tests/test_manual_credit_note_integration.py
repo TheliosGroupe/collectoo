@@ -20,9 +20,9 @@
   history, whatever the engine made of its mixed reads (review security-concurrency#0); a draft the
   engine cannot price for good (a key I22 flags) is approved, its commission pending and the run
   remitted gross — M2c-4's rule (review round 2: no `engine_error` refusal);
-* a reversal whose run took from its own invoice at 20 % and LIFO from one at 10 %, cancelled: its
-  chain takes first the corrective invoice holding its own invoice's share, though the 10 % one
-  bears the lower number (review round 2, math#0);
+* a reversal whose run took from its own invoice and LIFO from one at another VAT rate, cancelled:
+  its chain takes first the corrective invoice holding its own invoice's share, though the 10 % one
+  bears the lower number; cancelled again, both cancelled runs replayed (review round 2, math#0);
 * parity: the spread `private.manual_credit_plan` computes over an invoice's files is the worker's
   `documents.manual_credit`, to the cent, for random amounts, on the whole invoice or one file.
 """
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import random
 import uuid
+from contextlib import AbstractContextManager, nullcontext
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -615,14 +616,50 @@ def test_a_draft_the_engine_cannot_price_for_good_is_approved_gross() -> None:
     assert "commission_key_state" in _violations(tenant)
 
 
-def test_a_reversal_cancelled_again_takes_back_its_own_invoices_share_first() -> None:
+def _at_rate(rate: str) -> AbstractContextManager[None]:
+    """The standard VAT rate `rate` from today (20 % is the reference data's own)."""
+    return nullcontext() if rate == "0.2000" else vat_rate_from_today(rate)
+
+
+def _cancel(tenant: dict[str, Any], run: str) -> None:
+    staff(
+        tenant,
+        "select public.cancel_remittance_run(%s, %s, %s, %s)",
+        str(uuid.uuid4()),
+        run,
+        run_row(run)["version"],
+        "à vérifier",
+        user=tenant["admin"],
+    )
+
+
+def _correctives(run: str) -> dict[str, tuple[str, str, int, int]]:
+    """A cancelled run's corrective invoices per VAT rate: (id, number, seq, HT)."""
+    with psycopg.connect(DB) as conn:
+        rows = conn.execute(
+            """select vat_rate::text, id::text, number, seq, ht_minor from public.commission_invoice
+               where run_id = %s and kind = 'invoice' and reason = 'run_cancelled'""",
+            (run,),
+        ).fetchall()
+    return {r[0]: (r[1], r[2], int(r[3]), int(r[4])) for r in rows}
+
+
+@pytest.mark.parametrize("own_rate", ["0.2000", "0.1000"], ids=["own-at-20", "own-at-10"])
+def test_a_reversal_run_again_after_its_cancellation_takes_back_its_own_invoices_share_first(
+    own_rate: str,
+) -> None:
     """Review round 2 (math#0) through the database: marginal 5 % up to 1 000,00 €, 20 % beyond. A
-    1 000,00 € at 20 % VAT (FC-1, 50,00 €), B 500,00 € at 10 % (FC-2, 100,00 €). Undoing A gives
-    back 125,00 € (B moves down into the 5 % band): 50,00 € on FC-1, its own, then 75,00 € LIFO on
-    FC-2. Cancelled: the 10 % corrective invoice (75,00 €) is issued before the 20 % one (50,00 €).
-    The chain the next prepare builds for A takes first the one holding FC-1's share — the order the
-    cancelled run took it, never the numbers' (when another rate shrinks the credit, it comes off
-    where the run never approved takes it) — and the run again credits both in full."""
+    1 000,00 € (FC-1, 50,00 €) and B 500,00 € (FC-2, 100,00 €), one at 20 % VAT and the other at
+    10 %. Undoing A gives back 125,00 € (B moves down into the 5 % band): 50,00 € on FC-1, its own,
+    then 75,00 € LIFO on FC-2. Cancelled, the 10 % corrective invoice is numbered before the 20 %
+    one. The chain the next prepare builds for A takes first the corrective invoice holding FC-1's
+    share — the order the cancelled run took it, never the numbers' (own-at-20: the integrated
+    build put the 10 % one first) — and the run again credits both in full. Cancelled again, every
+    cancelled run is replayed: the second took the first's links in their chain order, so its own
+    corrective invoices come in that order too, not LIFO (own-at-10: the first link is the older
+    invoice; taken from the latest run alone, the 20 % one came first). When another VAT rate
+    shrinks the credit, the shortfall then comes off where the cancelled run took last, as in the
+    run never approved."""
     from collectoo_worker.jobs.remittances import _line_invoices  # noqa: PLC0415
 
     schedule = {
@@ -652,57 +689,44 @@ def test_a_reversal_cancelled_again_takes_back_its_own_invoices_share_first() ->
             }
         ],
     }
+    other_rate = "0.1000" if own_rate == "0.2000" else "0.2000"
     tenant = remittance_tenant(schedule=schedule)
     store = storage()
-    f, pa = _file_paid(tenant, store, 100_000, 9)
-    rv1 = _approved(tenant)
-    book_payout(rv1)
-    fc1_id, _ = _invoice_of(rv1)
-    with vat_rate_from_today("0.1000"):
+    with _at_rate(own_rate):
+        f, pa = _file_paid(tenant, store, 100_000, 9)
+        rv1 = _approved(tenant)
+        book_payout(rv1)
+    with _at_rate(other_rate):
         _pay_again(tenant, store, f, 50_000, 7)
         rv2 = _approved(tenant)
         book_payout(rv2)
-    fc2_id, _ = _invoice_of(rv2)
+    (fc1_id, fc1), (fc2_id, fc2) = _invoice_of(rv1), _invoice_of(rv2)
     _file_paid(tenant, store, 500_000, 5)  # client money to cover the reversal (another file)
     ra = _undo(tenant, pa, f.id)
-    rv3 = _approved(tenant)
-    assert {c[0]: c[1] for c in _credits(rv3)} == {
-        _invoice_of(rv1)[1]: -5_000,
-        _invoice_of(rv2)[1]: -7_500,
-    }
-    staff(
-        tenant,
-        "select public.cancel_remittance_run(%s, %s, %s, %s)",
-        str(uuid.uuid4()),
-        rv3,
-        run_row(rv3)["version"],
-        "à vérifier",
-        user=tenant["admin"],
-    )
-    with psycopg.connect(DB) as conn:
-        correctives = conn.execute(
-            """select vat_rate::text, id::text, seq, ht_minor from public.commission_invoice
-               where run_id = %s and kind = 'invoice' and reason = 'run_cancelled'""",
-            (rv3,),
-        ).fetchall()
-        by_rate = {r[0]: (r[1], int(r[2]), int(r[3])) for r in correctives}
-        assert by_rate["0.1000"][2] == 7_500 and by_rate["0.2000"][2] == 5_000
-        assert by_rate["0.1000"][1] < by_rate["0.2000"][1]  # the 10 % one numbered first
-        original = str(
-            _value("select reverses_entry_id from public.ledger_entry where id = %s", ra)
-        )
-        item = SimpleNamespace(entry_id=ra, original_entry_id=original)
-        chain = _line_invoices(conn, [item], [])  # type: ignore[list-item]
+    original = str(_value("select reverses_entry_id from public.ledger_entry where id = %s", ra))
+    item = SimpleNamespace(entry_id=ra, original_entry_id=original)
     key = (f.id, "tout")
-    assert chain == {
-        original: (
-            Retake(by_rate["0.2000"][0], ((key, 5_000),)),
-            Retake(by_rate["0.1000"][0], ((key, 7_500),)),
-            fc1_id,
-        )
-    }
-    rv4 = _approved(tenant)
-    assert sorted(c[1] for c in _credits(rv4)) == [-7_500, -5_000]  # both correctives, in full
+    run = _approved(tenant)
+    assert {c[0]: c[1] for c in _credits(run)} == {fc1: -5_000, fc2: -7_500}
+    for _ in range(2):  # cancelled and run again, twice
+        _cancel(tenant, run)
+        by_rate = _correctives(run)
+        assert (by_rate[own_rate][3], by_rate[other_rate][3]) == (5_000, 7_500)
+        assert by_rate["0.1000"][2] < by_rate["0.2000"][2]  # the 10 % one numbered first
+        with psycopg.connect(DB) as conn:
+            chain = _line_invoices(conn, [item], [])  # type: ignore[list-item]
+        assert chain == {
+            original: (
+                Retake(by_rate[own_rate][0], ((key, 5_000),)),
+                Retake(by_rate[other_rate][0], ((key, 7_500),)),
+                fc1_id,
+            )
+        }
+        run = _approved(tenant)
+        assert {c[0]: c[1] for c in _credits(run)} == {  # both corrective invoices, in full
+            by_rate[own_rate][1]: -5_000,
+            by_rate[other_rate][1]: -7_500,
+        }
     assert _open_and_waived(fc2_id, f.id) == (2_500, 0)  # B's 25,00 € at 5 %
     assert _state(f.id) == (2_500, 0, "approved")
 

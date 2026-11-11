@@ -299,11 +299,15 @@ new I22 over the 50,000 keys the approval wrote:
 - Review fixes (integrated branch `m5b-integrated`, run alone right after `supabase db reset`, same VM): the prepare
   reads `private.remittance_history_seq` first (one keyed read, F5) and loads each reversal's `Retake` caps only from
   cancelled runs that credited or absorbed something for it (none here); the approval's refusal reads the run's
-  `commission_blockers` (`engine_error`); `credit_refund_owed` reads the servicer's credit notes by
-  `commission_invoice_credit_note_idx` (none here); the cancellation's waiver restore reads the run's absorbed rows by
-  `commission_waiver_run_idx` and each absorbing invoice and corrective invoice by key (none absorbed here); every
-  credit note's `ht_after` / `vat_after` read its corrected invoices' credit notes by `original_invoice_id` (the run has
-  none). No step moved beyond run-to-run noise.
+  `commission_blockers` (`engine_error`; removed by the review's round 2, ADR-0014); `credit_refund_owed` reads the
+  servicer's credit notes by `commission_invoice_credit_note_idx` (none here); the cancellation's waiver restore reads
+  the run's absorbed rows by `commission_waiver_run_idx` and each absorbing invoice and corrective invoice by key (none
+  absorbed here); every credit note's `ht_after` / `vat_after` read its corrected invoices' credit notes by
+  `original_invoice_id` (the run has none). No step moved beyond run-to-run noise.
+- Review round 2 (`m5b-fix2`): the approval no longer reads `commission_blockers` for a refusal; the prepare reads each
+  reversal's takes from every cancelled run that credited or absorbed something for it (its credit allocations and
+  `absorbed` waiver rows by `entry_id`, each run's corrective invoices by key) — none here, so the timings above stand
+  (not re-measured).
 - `issue_credit_note` itself is keyed by the invoice: its charges by the primary key, each key's credits and waivers
   and latest state by their indexes; a credit note on an invoice charging 50,000 files is one plan and two inserts of
   50,000 rows (not measured at that size: an invoice that size is a scale artefact, not a correction ops make by hand).

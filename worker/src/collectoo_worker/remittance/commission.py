@@ -92,11 +92,12 @@ and a file undone in full is back to 0.
   credit that fell on invoices at two rates, gives each reversal its own share: the same lines
   at the same VAT rate give the documents of the run never approved. At another rate (or with
   new lines) what the run credits changes, and what is left of a link comes off where the
-  cancelled run took last, as in the run never approved; the residual, measured, stays within
-  the reserve's n + 1 cents plus the moved credit times the spread of the key's VAT rates
-  (CALCULATION_RULES §7). (With no corrective invoice at a rate, the same history without
-  manual credit notes has one more open invoice than this one: its reserve, and under mixed VAT
-  rates its LIFO order, can then differ — review math#1.)
+  cancelled run took last, as in the run never approved: not exact, bounded — the residual of V,
+  measured, stays within the reserve's n + 1 cents plus the moved credit times the spread of the
+  key's VAT rates, the split between open and waived can differ more (CALCULATION_RULES §7).
+  (With no corrective invoice at a rate, the same history without manual credit notes has one
+  more open invoice than this one: its reserve, and under mixed VAT rates its LIFO order, can
+  then differ — review math#1.)
 
 Basis (founder #4): an allocation's 1100 credits per component family, filtered by the schedule's
 families; a forward's amount only when the schedule lists its reason; a reversal minus its
