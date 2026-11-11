@@ -207,7 +207,9 @@ begin
          coalesce(d.v ->> 'kind', 'transfer_out'), d.v ->> 'e2e', d.v ->> 'pmt_inf', d.v ->> 'orig_e2e'
   from jsonb_array_elements(p_debits) with ordinality d (v, ord);
   update public.bank_statement set status = 'imported', from_date = coalesce(p_from, p_to), to_date = p_to,
-    opening_booked_minor = 0, closing_booked_minor = p_closing, counts = '{}', finished_at = clock_timestamp()
+    opening_booked_minor = 0, closing_booked_minor = p_closing, counts = '{}', finished_at = clock_timestamp(),
+    -- the bank's creation time the import keeps (review round 3, E4): here its upload's
+    sections = jsonb_build_array(jsonb_build_object('created_at', now()))
   where id = s;
   return s;
 end $$;

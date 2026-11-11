@@ -582,3 +582,19 @@ describe("M2c-6a review, round 2: the window over (D1), an executed file (D2), a
     expect(generationEffects(account, null).some((x) => x.includes("non proposée"))).toBe(false);
   });
 });
+
+describe("M2c-6a review, round 3: what left the account already is never filed again nor cancelled (E1, E2)", () => {
+  it("says why a transfer is held: its id, the one it replaces, or a grouped line of a cancelled file", () => {
+    const text = holdLabel("already_debited");
+    expect(text).toContain("payer deux fois");
+    expect(text).toContain("celle du virement qu'il remplace");
+    expect(text).toContain("ligne groupée");
+  });
+
+  it("refuses cancelling a run whose payout was debited already, in French", () => {
+    expect(runErrorCode("remittance run refused: transfer_already_debited")).toBe("run_transfer_already_debited");
+    expect(runErrorCode("remittance run refused: payout_in_downloaded_file")).toBe("run_payout_in_downloaded_file");
+    expect(errorText("run_transfer_already_debited")).toContain("ne l'annulez pas");
+    expect(errorText("run_transfer_already_debited")).toContain("une seconde fois");
+  });
+});

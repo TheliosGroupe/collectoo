@@ -14,7 +14,7 @@
 --     listed and alerted, and none of who vouched for that IBAN clears it (security#3, tests-ui#7).
 -- No ledger entry is posted by any of it.
 begin;
-select plan(54);
+select plan(60);
 
 
 -- Fixtures (as 028: Martin (a1), Lilas (a2), Cyprès (a3), Omega (a4: a RIB holder in Greek letters), Tunis Trading
@@ -36,7 +36,7 @@ insert into public.organization (id, kind, servicer_organization_id, legal_name,
   ('00000000-0000-0000-0000-0000000000b1', 'creditor_client', '00000000-0000-0000-0000-0000000000bb', 'Bleu SARL', null);
 insert into auth.users (id, email, aud, role)
 select ('10000000-0000-0000-0000-0000000000' || n)::uuid, 'u' || n || '@files.test', 'authenticated', 'authenticated'
-from unnest(array['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11']) n;
+from unnest(array['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13']) n;
 update public.app_user set display_name = 'Léa' where id = '10000000-0000-0000-0000-000000000001';
 insert into public.membership (user_id, organization_id, role) values
   ('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000aa', 'ops_manager'),
@@ -49,7 +49,9 @@ insert into public.membership (user_id, organization_id, role) values
   ('10000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-0000000000a2', 'client_admin'),
   ('10000000-0000-0000-0000-000000000009', '00000000-0000-0000-0000-0000000000aa', 'admin'),
   ('10000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-0000000000aa', 'admin'),
-  ('10000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-0000000000aa', 'admin');
+  ('10000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-0000000000aa', 'admin'),
+  ('10000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-0000000000aa', 'admin'),
+  ('10000000-0000-0000-0000-000000000013', '00000000-0000-0000-0000-0000000000aa', 'ops_manager');
 insert into public.portfolio (id, organization_id, client_organization_id, name)
 select ('20000000-0000-0000-0000-0000000000' || c)::uuid, '00000000-0000-0000-0000-0000000000aa',
        ('00000000-0000-0000-0000-0000000000' || c)::uuid, 'P' || c
@@ -211,7 +213,10 @@ begin
          coalesce(d.v ->> 'kind', 'transfer_out'), d.v ->> 'e2e', d.v ->> 'pmt_inf', d.v ->> 'orig_e2e'
   from jsonb_array_elements(p_debits) with ordinality d (v, ord);
   update public.bank_statement set status = 'imported', from_date = coalesce(p_from, p_to), to_date = p_to,
-    opening_booked_minor = 0, closing_booked_minor = p_closing, counts = '{}', finished_at = clock_timestamp()
+    opening_booked_minor = 0, closing_booked_minor = p_closing, counts = '{}', finished_at = clock_timestamp(),
+    -- the bank's creation time the import keeps (review round 3, E4): here its upload's
+    sections = case when p_format = 'camt053'
+                    then jsonb_build_array(jsonb_build_object('created_at', coalesce(p_uploaded_at, now()))) end
   where id = s;
   return s;
 end $$;
@@ -571,9 +576,12 @@ select is(pg_temp.try('01', pg_temp.req_file('r2-rq-0006', 'f3')), 'requested', 
 select is(pg_temp.try('04', pg_temp.conf_file('r2-cf-0007', 'f3')), 'superseded', '… by two people');
 insert into t select 'f4', (pg_temp.gen('01', 'r2-gen-0004') ->> 'file_id')::uuid;
 select pg_temp.write(pg_temp.v('f4'));
--- the old file executed after all (a colleague uploaded it, or the bank held it): Lilas's payout and its sweep debited
+-- the old file executed after all (a colleague uploaded it, or the bank held it): Lilas's payout and its sweep debited,
+-- by the ids that file carried (review round 3: its payouts were re-issued under new ones, E1)
 select pg_temp.statement('a1', pg_temp.z(), null, jsonb_build_array(
-  jsonb_build_object('amount', 419840, 'e2e', (select end_to_end_id from public.bank_transfer where id = pg_temp.trid('r2'))),
+  jsonb_build_object('amount', 419840, 'e2e', (select x.end_to_end_id from public.transfer_file_item i
+                                               join public.bank_transfer x on x.id = i.transfer_id
+                                               where i.file_id = pg_temp.v('f3') and x.run_id = pg_temp.v('r2'))),
   jsonb_build_object('amount', 12000, 'e2e', (pg_temp.sweep(pg_temp.v('f3'))).end_to_end_id)));
 select results_eq($$ select private.transfer_hold_reason(pg_temp.trid('r2'), private.paris_today(), pg_temp.e(), null),
                             private.transfer_hold_reason(pg_temp.trid('r1'), private.paris_today(), pg_temp.e(), null) $$,
@@ -753,6 +761,34 @@ select is(pg_temp.try('03', pg_temp.confirm('r2-pa-0004', (select v #>> '{}' fro
 select results_eq($$ select pg_temp.try('01', pg_temp.clr('r2-clr-0005')), pg_temp.can_clear('01'), pg_temp.can_clear('11') $$,
   $$ values ('payee check refused: same_person'::text, 'false'::text, 'true'::text) $$,
   'S1: who proposed that IBAN this time cannot clear it either; a third person can (the page says which)');
+-- review round 3 (E5): who proposed that IBAN, even rejected since, is a party (the documented « proposed »)
+insert into j select 'pa3', to_jsonb(pg_temp.try('13', pg_temp.propose('r2-pa-0005')));
+select is(pg_temp.try('04', format($q$ select public.reject_payout_account('r2-pa-0006', %L, 'RIB illisible') ->> 'status' $q$,
+                                   (select v #>> '{}' from j where k = 'pa3'))), 'rejected',
+  'S1 (round 3): ops (13) propose the flagged IBAN once more; the proposal is rejected');
+select is(pg_temp.try('13', pg_temp.clr('r2-clr-0007')), 'payee check refused: same_person',
+  'S1 (round 3): who proposed it, though rejected since, does not clear the check');
+-- a new admin (12), who never recorded the check nor touched the flagged row, confirms a same-IBAN replacement 13 proposed
+insert into j select 'pa4', to_jsonb(pg_temp.try('13', pg_temp.propose('r2-pa-0007')));
+select is(pg_temp.try('12', pg_temp.confirm('r2-pa-0008', (select v #>> '{}' from j where k = 'pa4'))), 'active',
+  'S1 (round 3): a new admin confirms the same IBAN proposed again');
+select results_eq($$ select pg_temp.try('12', pg_temp.clr('r2-clr-0008')), pg_temp.can_clear('12') $$,
+  $$ values ('payee check refused: same_person'::text, 'false'::text) $$,
+  'S1 (round 3): who only confirmed a same-IBAN replacement cannot clear the check (nor is offered to)');
+-- the account carrying the flagged IBAN comes back « returned » (a payout returned, M2c-7): the check stays open
+update public.client_payout_account set status = 'returned' where id = (select (v #>> '{}')::uuid from j where k = 'pa4');
+insert into t select 'c5', pg_temp.chk(null);
+select results_eq($$ select private.remittance_payout_blockers('00000000-0000-0000-0000-0000000000a1', 'EUR', private.paris_today()),
+                            pg_temp.checks_listed('11'),
+                            (select count(*)::int from public.payment_check_result r
+                             where r.run_id = pg_temp.v('c5') and r.code = 'payee_name_mismatch'),
+                            private.transfer_card(pg_temp.trid('r1'), null) ->> 'payee_check_open' $$,
+  $$ values ('{payout_account_returned}'::text[], 1, 1, 'true'::text) $$,
+  'S1 (round 3): a returned account carrying the flagged IBAN keeps the check open — listed, alerted, on the transfer');
+-- that IBAN confirmed once more replaces the returned account: still flagged (the check follows the IBAN)
+insert into j select 'pa5', to_jsonb(pg_temp.try('13', pg_temp.propose('r2-pa-0009')));
+select is(pg_temp.try('04', pg_temp.confirm('r2-pa-0010', (select v #>> '{}' from j where k = 'pa5'))), 'active',
+  'S1 (round 3): the same IBAN confirmed again replaces the returned account');
 select is(pg_temp.try('11', pg_temp.clr('r2-clr-0006')), 'true', 'S1: a third person clears it …');
 insert into t select 'c4', pg_temp.chk(null);
 select results_eq($$ select private.remittance_payout_blockers('00000000-0000-0000-0000-0000000000a1', 'EUR', private.paris_today()),

@@ -456,7 +456,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   // M2c-6a review, round 2 (D4): a cancelled file executed late after all
   transfer_already_debited: {
     label: "Virement déjà débité malgré son annulation",
-    help: "Un relevé montre le débit d'un virement sous sa référence de bout en bout alors que son fichier a été annulé (exécuté plus tard malgré tout) : le reversement ou le remboursement reste hors des fichiers pour ne pas payer deux fois, et aucune quote-part du cabinet ne part tant qu'une quote-part annulée débitée n'est pas revenue. Ne refaites aucun virement ; prévenez le support pour rattacher ce débit.",
+    help: "Un relevé montre le débit d'un virement alors que son fichier a été annulé (exécuté plus tard malgré tout), sous sa référence de bout en bout, celle du virement qu'il remplace ou dans une ligne groupée du fichier annulé : le reversement ou le remboursement reste hors des fichiers pour ne pas payer deux fois — s'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter —, et aucune quote-part du cabinet ne part tant qu'une quote-part annulée débitée n'est pas revenue. Ne refaites aucun virement ; prévenez le support pour rattacher ce débit.",
   },
   payee_name_mismatch: {
     label: "Nom de bénéficiaire non concordant",
@@ -658,6 +658,8 @@ export function debitErrorCode(message: string): ErrorCode {
   // M2c-6a: a refund in a file already downloaded is cancelled once its transfer is (review T1: two people, the
   // statement's evidence); a file mode the account cannot pay
   if (message.includes("already downloaded") || message.includes("in_downloaded_file")) return "refund_in_downloaded_file";
+  // M2c-6a review, round 3 (E2): its transfer, or one it re-issues, was debited already: cancelling it refunds twice
+  if (message.includes("refund refused: already_debited")) return "refund_already_debited";
   if (message.includes("pays no transfer file")) return "transfer_not_paying_account";
   // M2c-6a review (T3): what a SEPA transfer file cannot carry
   if (message.includes("payee_name_not_epc")) return "refund_payee_name_not_epc";

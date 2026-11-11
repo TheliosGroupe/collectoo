@@ -817,7 +817,10 @@ select pg_temp.as_user('01');
 select throws_ok($$select public.link_debit('k-link-0072', pg_temp.ln('r7'), 'refund', null, pg_temp.refund_of('07'), null,
   'virement fait avant la saisie')$$, '23514', 'debit link refused: before_previous_return',
   'a refund the bank booked before that date neither');
-select lives_ok($$select public.cancel_refund('k-cancel-0070', pg_temp.refund_of('07'), 'date à vérifier')$$, 'cancelled');
+-- M2c-6a review round 3 (E2): the statement shows a debit carrying its RFD id — the bank paid it: cancelling the refund
+-- would let a new one pay again, so it is refused until ops link that debit (was: cancelled)
+select throws_ok($$select public.cancel_refund('k-cancel-0070', pg_temp.refund_of('07'), 'date à vérifier')$$, '23514',
+  'refund refused: already_debited', 'a refund whose RFD debit is on a statement is not cancelled (it was paid)');
 reset role;
 
 -- A line the posting itself refuses (a planted ledger refusal) goes to ops; the other lines of the run are booked

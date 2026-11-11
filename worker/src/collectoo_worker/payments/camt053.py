@@ -1,8 +1,12 @@
 """camt.053 bank statements (ISO 20022 BankToCustomerStatement), versions .001.02 to .001.13 read
 by local name (M2-07, design §8.3).
 
-What is read, per <Stmt>: Id, ElctrncSeqNb, FrToDt, Acct/Id/IBAN and Ccy (must be the selected
-client-funds account), the opening (OPBD, else PRCD) and closing (CLBD) booked balances. Per
+What is read, per <Stmt>: Id, ElctrncSeqNb, CreDtTm (GrpHdr/CreDtTm when a <Stmt> has none), FrToDt,
+Acct/Id/IBAN and Ccy (must be the selected client-funds account), the opening (OPBD, else PRCD) and
+closing (CLBD) booked balances. FrToDt is read conservatively (M2c-6a review round 3, E4): a
+ToDtTm at midnight (T00:00:00) on a later date than the period's start ends the period the day
+before — the statement shows nothing of that day. CreDtTm is kept, with its offset (Paris time
+when it has none): a day counts as covered only by a statement the bank produced after it. Per
 <Ntry> booked (Sts BOOK; PDNG and INFO are counted and skipped): Amt, CdtDbtInd, RvslInd,
 BookgDt, ValDt, AcctSvcrRef, BkTxCd, AddtlNtryInf. Per <TxDtls>: Refs (AcctSvcrRef, EndToEndId
 with NOTPROVIDED read as none, TxId, MndtId), the amount (TxDtls/Amt, or AmtDtls/TxAmt/Amt in .02),
@@ -32,8 +36,9 @@ from __future__ import annotations
 import codecs
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from lxml import etree
 
@@ -59,6 +64,16 @@ NS_RE = re.compile(rb"urn:iso:std:iso:20022:tech:xsd:camt\.053\.001\.([0-9]{2})"
 ISO_DATE_RE = re.compile(
     r"([0-9]{4}-[0-9]{2}-[0-9]{2})(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?"
 )
+# xs:dateTime: a date, a time (optional fraction), then an optional time zone
+ISO_DATETIME_RE = re.compile(
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?"
+    r"(Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?"
+)
+# a ToDtTm at the start of its day: the period ended with the day before (review round 3, E4)
+MIDNIGHT_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T00:00:00(?:\.0+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
+)
+PARIS = ZoneInfo("Europe/Paris")  # a bank's local time when a date-time has no offset
 HEAD_BYTES = 64 * 1024
 MAX_LINES = 250_000  # the same cap as the CSV reader: a longer statement is exported in parts
 NOT_PROVIDED = "NOTPROVIDED"
@@ -182,6 +197,12 @@ class _Reader:
         self.section_open: Element | None = None  # the <Stmt> whose header was read
         self.header: _Header | None = None
         self.entry_no = 0
+        self.group_created: datetime | None = None  # GrpHdr/CreDtTm (a <Stmt> without its own)
+
+    # -- <GrpHdr> ----------------------------------------------------------------------------
+
+    def group_header(self, header: Element) -> None:
+        self.group_created = self.datetime(self.q.text(header, "CreDtTm"), "the group header")
 
     # -- <Stmt> ------------------------------------------------------------------------------
 
@@ -210,13 +231,26 @@ class _Reader:
                 "missing_balance", f"{where} has no opening (OPBD) or closing (CLBD) balance"
             )
         seq_text = q.text(stmt, "ElctrncSeqNb")
+        start = self.datetime_date(q.text(stmt, "FrToDt/FrDtTm"), where) or opening[1]
+        to_text = q.text(stmt, "FrToDt/ToDtTm")
+        end = self.datetime_date(to_text, where) or closing[1]
+        # a period up to the next midnight is the days before it
+        if (
+            to_text is not None
+            and end is not None
+            and start is not None
+            and end > start
+            and MIDNIGHT_RE.fullmatch(to_text)
+        ):
+            end -= timedelta(days=1)
         self.header = _Header(
             stmt_id=q.text(stmt, "Id"),
             seq=int(seq_text) if seq_text and seq_text.isdigit() else None,
-            start=self.datetime_date(q.text(stmt, "FrToDt/FrDtTm"), where) or opening[1],
-            end=self.datetime_date(q.text(stmt, "FrToDt/ToDtTm"), where) or closing[1],
+            start=start,
+            end=end,
             opening=opening[0],
             closing=closing[0],
+            created_at=self.datetime(q.text(stmt, "CreDtTm"), where) or self.group_created,
         )
         self.section_open = stmt
         self.entry_no = 0
@@ -242,6 +276,7 @@ class _Reader:
             to_date=max(start, end),
             opening_minor=h.opening,
             closing_minor=h.closing,
+            created_at=h.created_at,
         )
         check_balanced(section, self.out.lines, section_no)
         self.out.sections.append(section)
@@ -450,6 +485,11 @@ class _Reader:
         """The date as written (a bank's business date; no time zone conversion)."""
         return None if text is None else _iso_date(text[:10], where)
 
+    @staticmethod
+    def datetime(text: str | None, where: str) -> datetime | None:
+        """An xs:dateTime as an aware datetime: its own offset, else Paris time (the bank's)."""
+        return None if text is None else _iso_datetime(text, where)
+
 
 @dataclass(frozen=True, slots=True)
 class _Header:
@@ -459,6 +499,7 @@ class _Header:
     end: date | None
     opening: int
     closing: int
+    created_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -526,13 +567,28 @@ def _iso_date(text: str, where: str) -> date:
         raise StatementRejected("date_invalid", f"{where}: {text!r} is not a date") from exc
 
 
+def _iso_datetime(text: str, where: str) -> datetime:
+    """ISODateTime is xs:dateTime: YYYY-MM-DDThh:mm:ss, an optional fraction, an optional time zone
+    (Z, +hh:mm, -hh:mm). Without one, the bank's local time (Paris)."""
+    found = ISO_DATETIME_RE.fullmatch(text)
+    try:
+        if found is None:
+            raise ValueError(text)
+        base, fraction, zone = found.group(1), found.group(2) or "", found.group(3)
+        offset = "" if zone is None else "+00:00" if zone == "Z" else zone
+        value = datetime.fromisoformat(base + fraction[:7] + offset)  # microseconds at most
+    except ValueError as exc:
+        raise StatementRejected("date_invalid", f"{where}: {text!r} is not a date-time") from exc
+    return value if value.tzinfo is not None else value.replace(tzinfo=PARIS)
+
+
 def _read(path: Path, ns: str, reader: _Reader) -> None:
-    """Stream the file: only <Ntry> and <Stmt> reach Python, each freed once read."""
+    """Stream the file: only <GrpHdr>, <Ntry> and <Stmt> reach Python, each freed once read."""
     checked = False
     for _event, elem in etree.iterparse(
         str(path),
         events=("end",),
-        tag=(f"{{{ns}}}Ntry", f"{{{ns}}}Stmt"),
+        tag=(f"{{{ns}}}GrpHdr", f"{{{ns}}}Ntry", f"{{{ns}}}Stmt"),
         resolve_entities=False,
         load_dtd=False,
         no_network=True,
@@ -546,9 +602,13 @@ def _read(path: Path, ns: str, reader: _Reader) -> None:
                 raise StatementRejected("not_camt053", "the root is not a camt.053 Document")
             checked = True
         parent = elem.getparent()
-        if parent is None:  # pragma: no cover - Ntry and Stmt always have a parent
+        if parent is None:  # pragma: no cover - GrpHdr, Ntry and Stmt always have a parent
             continue
-        if etree.QName(elem).localname == "Ntry":
+        local = etree.QName(elem).localname
+        if local == "GrpHdr":
+            if parent.tag == f"{{{ns}}}BkToCstmrStmt":
+                reader.group_header(elem)
+        elif local == "Ntry":
             if parent.tag != f"{{{ns}}}Stmt":
                 raise StatementRejected("not_camt053", "an entry (<Ntry>) outside a statement")
             if reader.section_open is not parent:

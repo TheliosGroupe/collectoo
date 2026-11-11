@@ -205,7 +205,7 @@ const HOLD_LABEL: Record<string, string> = {
   no_closing_balance: "Aucun relevé avec solde de clôture n'est importé pour le compte dédié : importez-en un, puis régénérez",
   // M2c-6a review, round 2 (D4): a cancelled file executed late after all — filing it again would pay twice
   already_debited:
-    "Un relevé montre déjà le débit de ce virement (sous la même référence de bout en bout, par un fichier annulé depuis) : il reste hors des fichiers pour ne pas payer deux fois. Ne le refaites pas ; le débit sera rattaché (prévenez le support)",
+    "Un relevé montre déjà le débit de ce virement — sous sa référence de bout en bout, celle du virement qu'il remplace, ou dans une ligne groupée d'un fichier annulé depuis (exécuté plus tard malgré tout) : il reste hors des fichiers pour ne pas payer deux fois. Ne le refaites pas ; le débit sera rattaché (prévenez le support)",
 };
 
 /** Why the sweep a file would carry is not proposed (review round 2, D4). */

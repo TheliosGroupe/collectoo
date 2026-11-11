@@ -219,6 +219,8 @@ export type ErrorCode =
   | "payee_check_not_a_payout"
   | "transfer_file_not_executed"
   | "transfer_batch_ambiguous"
+  | "run_transfer_already_debited"
+  | "refund_already_debited"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -448,6 +450,11 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Les relevés ne montrent aucun débit ni retour de ce fichier : la banque n'en a rien exécuté. N'annulez pas un virement seul (le fichier, toujours valable, le paierait encore) : demandez l'annulation du fichier entier.",
   transfer_batch_ambiguous:
     "La banque a débité ce lot en une seule ligne, sans le détail des virements, et d'autres virements du lot (un seul ou plusieurs ensemble) font le même montant que celui-ci : rien ne prouve lequel n'a pas été payé. Demandez à la banque le détail du lot avant d'annuler quoi que ce soit.",
+  // M2c-6a review, round 3 (E2): what left the account already is never cancelled (it would be paid again)
+  run_transfer_already_debited:
+    "Un relevé montre déjà le débit du virement de ce reversement (sous sa référence, ou celle du virement qu'il remplace : un fichier annulé exécuté plus tard malgré tout) : ne l'annulez pas, ses encaissements seraient reversés une seconde fois. Prévenez le support pour rattacher ce débit.",
+  refund_already_debited:
+    "Un relevé montre déjà le débit de ce remboursement (sous sa référence, ou celle du virement qu'il remplace : un fichier annulé exécuté plus tard malgré tout) : ne l'annulez pas, il serait remboursé une seconde fois. Prévenez le support pour rattacher ce débit.",
   run_payout_in_downloaded_file:
     "Le virement de ce reversement est dans un fichier déjà téléchargé : faites d'abord annuler ce virement (une demande, puis la confirmation d'une autre personne, relevé à l'appui), puis annulez le reversement.",
   // M2c-6a review (T3): a refund the transfer file cannot carry

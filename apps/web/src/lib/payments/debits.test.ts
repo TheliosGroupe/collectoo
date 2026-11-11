@@ -482,3 +482,14 @@ describe("the refund's execution (M2c-6a review, tests-ui#8)", () => {
     expect(errorText("refund_iban_not_sepa")).toContain("Je l'exécute moi-même");
   });
 });
+
+describe("M2c-6a review, round 3 (E2): a refund whose transfer was debited already is not cancelled", () => {
+  it("maps the refusal and words it, and the alert names the replaced reference", () => {
+    expect(debitErrorCode("refund refused: already_debited")).toBe("refund_already_debited");
+    expect(debitErrorCode("refund refused: in_downloaded_file")).toBe("refund_in_downloaded_file");
+    expect(errorText("refund_already_debited")).toContain("remboursé une seconde fois");
+    expect(errorText("refund_already_debited")).not.toBe(errorText("unknown"));
+    expect(checkLabel("transfer_already_debited").help).toContain("celle du virement qu'il remplace");
+    expect(checkLabel("transfer_already_debited").help).toContain("demandez à la banque de ne pas l'exécuter");
+  });
+});

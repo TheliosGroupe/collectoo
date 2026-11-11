@@ -4,7 +4,7 @@ free text, twins); hand-written files pin the edge cases; unsafe or inexact file
 a stable code and nothing is returned."""
 
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -254,11 +254,16 @@ def _xml(  # noqa: PLR0913 - one keyword per part of the file a test changes
     ccy: str = "<Ccy>EUR</Ccy>",
     iban: str = IBAN,
     ns: str = NS2,
+    created: str | None = "2026-10-01T20:00:00",
+    group_created: str | None = "2026-10-01T20:00:00",
+    period: str = "",
 ) -> bytes:
+    stmt_created = "" if created is None else f"<CreDtTm>{created}</CreDtTm>"
+    grp_created = "" if group_created is None else f"<CreDtTm>{group_created}</CreDtTm>"
     return (
         f'<?xml version="1.0" encoding="UTF-8"?>{head}<Document xmlns="{ns}"><BkToCstmrStmt>'
-        "<GrpHdr><MsgId>M</MsgId><CreDtTm>2026-10-01T20:00:00</CreDtTm></GrpHdr>"
-        f"<Stmt><Id>S</Id><CreDtTm>2026-10-01T20:00:00</CreDtTm><Acct><Id><IBAN>{iban}</IBAN></Id>{ccy}</Acct>"
+        f"<GrpHdr><MsgId>M</MsgId>{grp_created}</GrpHdr>"
+        f"<Stmt><Id>S</Id>{stmt_created}{period}<Acct><Id><IBAN>{iban}</IBAN></Id>{ccy}</Acct>"
         f"<Bal><Tp><CdOrPrtry><Cd>{opening_code}</Cd></CdOrPrtry></Tp>{opening}<Dt><Dt>2026-09-30</Dt></Dt></Bal>"
         f"<Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp>{closing}<Dt><Dt>2026-10-01</Dt></Dt></Bal>"
         f"{entries}</Stmt></BkToCstmrStmt></Document>"
@@ -518,6 +523,85 @@ def test_an_xs_date_with_a_time_zone_keeps_the_date_as_written(
     parsed = _parse(tmp_path, data)
     assert parsed.lines[0].booking_date == date(2026, 10, 1)
     assert parsed.sections[0].to_date == date(2026, 10, 1)
+
+
+@pytest.mark.parametrize(
+    ("from_written", "to_written", "period"),
+    [
+        # N6: X's statement up to the next midnight is X's alone (nothing of Y is on it)
+        ("2026-10-28T00:00:00+01:00", "2026-10-29T00:00:00+01:00", (date(2026, 10, 28),) * 2),
+        ("2026-10-28T00:00:00", "2026-10-29T00:00:00.000Z", (date(2026, 10, 28),) * 2),
+        (
+            "2026-10-27T00:00:00+01:00",
+            "2026-10-29T00:00:00+01:00",
+            (date(2026, 10, 27), date(2026, 10, 28)),
+        ),
+        # a period ending within its last day keeps it; a midnight on its first day is that day
+        ("2026-10-28T00:00:00+01:00", "2026-10-28T23:59:59+01:00", (date(2026, 10, 28),) * 2),
+        (
+            "2026-10-28T00:00:00+01:00",
+            "2026-10-29T00:00:01+01:00",
+            (date(2026, 10, 28), date(2026, 10, 29)),
+        ),
+        ("2026-10-28T00:00:00+01:00", "2026-10-28T00:00:00+01:00", (date(2026, 10, 28),) * 2),
+    ],
+)
+def test_a_to_date_time_at_midnight_ends_the_period_the_day_before(
+    tmp_path: Path, from_written: str, to_written: str, period: tuple[date, date]
+) -> None:
+    """M2c-6a review round 3 (E4, N6): ToDtTm is read conservatively — a ToDtTm at T00:00:00 on a
+    later date than the period's start ends it the day before, so the statement is never taken
+    for one of a day it shows nothing of (the evidence before re-issuing a transfer, OQ-80 (f))."""
+    data = _xml(
+        "",
+        period=f"<FrToDt><FrDtTm>{from_written}</FrDtTm><ToDtTm>{to_written}</ToDtTm></FrToDt>",
+    )
+    section = _parse(tmp_path, data).sections[0]
+    assert (section.from_date, section.to_date) == period
+
+
+@pytest.mark.parametrize(
+    ("stmt", "group", "kept"),
+    [
+        (
+            "2026-10-29T06:10:00+01:00",
+            "2026-10-30T00:00:00Z",
+            datetime(2026, 10, 29, 5, 10, tzinfo=UTC),
+        ),
+        ("2026-10-29T06:10:00Z", None, datetime(2026, 10, 29, 6, 10, tzinfo=UTC)),
+        # no offset: the bank's local time, Paris (CET in late October, CEST before)
+        (
+            "2026-10-29T06:10:00.123456789",
+            None,
+            datetime(2026, 10, 29, 5, 10, 0, 123456, tzinfo=UTC),
+        ),
+        ("2026-10-01T20:00:00", None, datetime(2026, 10, 1, 18, 0, tzinfo=UTC)),
+        # a <Stmt> without its own: the group header's
+        (None, "2026-10-29T06:10:00+01:00", datetime(2026, 10, 29, 5, 10, tzinfo=UTC)),
+        (None, None, None),
+    ],
+)
+def test_the_creation_time_of_the_statement_is_kept(
+    tmp_path: Path, stmt: str | None, group: str | None, kept: datetime | None
+) -> None:
+    """M2c-6a review round 3 (E4): Stmt/CreDtTm, GrpHdr/CreDtTm as its fallback, is kept with its
+    offset; the import stores it (`bank_statement.bank_created_at`) and a statement covers a day
+    only once the bank produced it after that day, whenever it is uploaded."""
+    section = _parse(tmp_path, _xml("", created=stmt, group_created=group)).sections[0]
+    assert section.created_at == kept
+    if kept is not None:
+        assert section.created_at is not None and section.created_at.utcoffset() is not None
+        assert datetime.fromisoformat(section.as_json()["created_at"]) == kept
+    else:
+        assert section.as_json()["created_at"] is None
+
+
+@pytest.mark.parametrize(
+    "written", ["29/10/2026 06:10", "2026-10-29", "2026-10-29T06:10", "2026-10-29T06:10:00+1:00"]
+)
+def test_a_creation_time_that_is_not_a_date_time_is_refused(tmp_path: Path, written: str) -> None:
+    assert _refused(tmp_path, _xml("", created=written)) == "date_invalid"
+    assert _refused(tmp_path, _xml("", created=None, group_created=written)) == "date_invalid"
 
 
 @pytest.mark.parametrize(

@@ -217,6 +217,8 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
   // M2c-6a review (T1, money#2): a payout in a downloaded file is cancelled first (two people, the statement's
   // evidence), then its run
   ["payout_in_downloaded_file", "run_payout_in_downloaded_file"],
+  // M2c-6a review, round 3 (E2): its payout, or one it re-issues, was debited already (a cancelled file executed late)
+  ["transfer_already_debited", "run_transfer_already_debited"],
   ["no_statement_evidence", "transfer_no_statement_evidence"],
   // M2c-6a: a run whose file was downloaded is cancelled only with the attestation and a statement without its debit
   ["attestation_required", "transfer_attestation_required"],

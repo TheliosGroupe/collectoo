@@ -97,7 +97,7 @@ def statement(statement_id: str) -> dict[str, Any]:
     with psycopg.connect(DB) as conn:
         row = conn.execute(
             """select status, error_code, error, counts, warnings, bank_check, from_date, to_date,
-                      format_version
+                      format_version, bank_created_at
                from public.bank_statement where id = %s""",
             (statement_id,),
         ).fetchone()
@@ -112,6 +112,7 @@ def statement(statement_id: str) -> dict[str, Any]:
         "from",
         "to",
         "format_version",
+        "bank_created_at",
     )
     return dict(zip(keys, row, strict=True))
 

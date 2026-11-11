@@ -197,7 +197,7 @@ export function TwoStepCancellation({
             <>
               <p className="text-sm" data-testid="cancel-effect">
                 {what === "file"
-                  ? "Vous confirmez, en seconde personne, que la banque n'a exécuté aucun virement de ce fichier. Ses virements reviennent « à mettre dans un fichier » et partiront dans le prochain (nouveau numéro) ; la quote-part du cabinet est recalculée."
+                  ? "Vous confirmez, en seconde personne, que la banque n'a exécuté aucun virement de ce fichier. Ses reversements et remboursements sont réémis sous de nouvelles références et partiront dans le prochain fichier (nouveau numéro) ; les anciennes références ne seront plus jamais envoyées, et la quote-part du cabinet est recalculée."
                   : `Vous confirmez, en seconde personne, que la banque n'a pas exécuté ce virement (${target.kind === "transfer" ? target.label : ""}). Il est annulé ; le reste du fichier est inchangé. Le reversement ou le remboursement peut ensuite être annulé.`}
               </p>
               <Evidence cancellation={cancellation} what={what} />
@@ -245,7 +245,7 @@ function RequestForm({
     <>
       <p className="text-sm" data-testid="cancel-effect">
         {what === "file"
-          ? "Le fichier a été téléchargé : il n'est annulé que si la banque n'a rien exécuté, relevé à l'appui, et une fois qu'une autre personne a confirmé. Ses virements reviennent alors « à mettre dans un fichier » et partiront dans le prochain. Jusque-là, rien ne change et il reste compté dans le contrôle de trésorerie."
+          ? "Le fichier a été téléchargé : il n'est annulé que si la banque n'a rien exécuté, relevé à l'appui, et une fois qu'une autre personne a confirmé. Ses reversements et remboursements sont alors réémis sous de nouvelles références et partiront dans le prochain fichier. Jusque-là, rien ne change et il reste compté dans le contrôle de trésorerie."
           : "La banque a refusé ce virement seul (par exemple un nom de bénéficiaire non concordant) : il n'est annulé que si le relevé ne montre pas son débit (ou montre son rejet), et une fois qu'une autre personne a confirmé. Le reste du fichier est inchangé."}
       </p>
       <Evidence cancellation={cancellation} what={what} />
