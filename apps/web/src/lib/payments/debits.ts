@@ -605,6 +605,46 @@ export function pendingRefundInstruction(inFile: boolean): string {
   return "exécutez le virement dans la banque avec la référence ci-dessous saisie comme « référence de bout en bout ».";
 }
 
+/** A refund's transfer as the payment's page reads it: its status and the file it is in (none before a file). */
+export type RefundTransfer = {
+  status: string;
+  file: { id: string; number: string; status: string; download_count: number } | null;
+};
+
+/** The refunds' transfers by refund id, from the refund rows (their transfer) and the transfers read with their file. */
+export function refundTransfers(
+  refunds: { id: string; transfer_id: string | null }[],
+  transfers: { id: string; status: string; transfer_file: RefundTransfer["file"] }[],
+): Map<string, RefundTransfer> {
+  const byId = new Map(transfers.map((t) => [t.id, { status: t.status, file: t.transfer_file ?? null }]));
+  const out = new Map<string, RefundTransfer>();
+  for (const r of refunds) {
+    const t = r.transfer_id ? byId.get(r.transfer_id) : undefined;
+    if (t) out.set(r.id, t);
+  }
+  return out;
+}
+
+/**
+ * Review round 6 (round 5's verifier): the refund's transfer is in a file already downloaded (or sent) — that file may
+ * still pay it, so the refund is not cancelled until its debit, or its rejection, is read from the statement (the
+ * database refuses: `in_downloaded_file`). « Annuler » is not offered then; the page says why (as the run's page).
+ */
+export function refundInDownloadedFile(transfer: RefundTransfer | null | undefined): boolean {
+  if (!transfer || transfer.status !== "in_file" || !transfer.file) return false;
+  return transfer.file.download_count > 0 || transfer.file.status === "downloaded" || transfer.file.status === "sent";
+}
+
+/** Whether « Annuler » is offered on a refund: requested, and its transfer (if any) not in a downloaded file. */
+export function refundCancellable(status: string, transfer: RefundTransfer | null | undefined): boolean {
+  return status === "requested" && !refundInDownloadedFile(transfer);
+}
+
+/** What the payment's page says in place of « Annuler » for a refund whose transfer is in a downloaded file. */
+export function refundInDownloadedFileNote(fileNumber: string): string {
+  return `Le virement de ce remboursement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire, et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.`;
+}
+
 /** What the refund sheet says the RFD reference becomes, by the execution chosen (« auto »: the database's default). */
 export function refundModeEffect(mode: string): string {
   if (mode === "file")

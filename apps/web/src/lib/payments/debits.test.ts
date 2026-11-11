@@ -14,9 +14,13 @@ import {
   minorToInput,
   normaliseIban,
   pendingRefundInstruction,
+  refundCancellable,
   refundExecutionMode,
+  refundInDownloadedFile,
+  refundInDownloadedFileNote,
   refundModeEffect,
   refundReasons,
+  refundTransfers,
   refundable,
   releaseEffect,
   returnEffect,
@@ -513,5 +517,51 @@ describe("M2c-6a review, round 4 (G1, G2): what left the account late is never p
     // round 4's verifier (SW2): a sweep already in a downloaded file is not stopped by it — said so
     expect(checkLabel("transfer_already_debited").help).toContain("aucune nouvelle quote-part");
     expect(checkLabel("transfer_already_debited").help).toContain("n'est pas arrêtée");
+  });
+});
+
+describe("M2c-6a review, round 6: a refund whose transfer is in a downloaded file", () => {
+  const file = (status: string, download_count: number) => ({ id: "f1", number: "TF-2026-000142", status, download_count });
+  it("reads each refund's transfer and file", () => {
+    const map = refundTransfers(
+      [
+        { id: "r1", transfer_id: "t1" },
+        { id: "r2", transfer_id: null },
+        { id: "r3", transfer_id: "t9" },
+      ],
+      [{ id: "t1", status: "in_file", transfer_file: file("downloaded", 1) }],
+    );
+    expect(map.get("r1")).toEqual({ status: "in_file", file: file("downloaded", 1) });
+    expect(map.has("r2")).toBe(false);
+    expect(map.has("r3")).toBe(false);
+  });
+
+  it("offers « Annuler » only while its transfer is in no downloaded file (the database refuses: in_downloaded_file)", () => {
+    expect(refundCancellable("requested", undefined)).toBe(true);
+    expect(refundCancellable("requested", { status: "ordered", file: null })).toBe(true);
+    expect(refundCancellable("requested", { status: "in_file", file: file("generated", 0) })).toBe(true);
+    expect(refundCancellable("requested", { status: "in_file", file: file("downloaded", 1) })).toBe(false);
+    expect(refundCancellable("requested", { status: "in_file", file: file("sent", 2) })).toBe(false);
+    expect(refundCancellable("executed", { status: "booked", file: file("sent", 2) })).toBe(false);
+    expect(refundCancellable("cancelled", undefined)).toBe(false);
+    expect(refundInDownloadedFile({ status: "in_file", file: file("downloaded", 1) })).toBe(true);
+    expect(refundInDownloadedFile({ status: "booked", file: file("downloaded", 1) })).toBe(false);
+    expect(refundInDownloadedFile({ status: "in_file", file: file("generated", 0) })).toBe(false);
+  });
+
+  it("says why instead, as the run's page: « en cours » until its debit is read, no cancellation after download", () => {
+    const note = refundInDownloadedFileNote("TF-2026-000142");
+    expect(note).toContain("dans le fichier TF-2026-000142, déjà téléchargé");
+    expect(note).toContain("« en cours »");
+    expect(note).toContain("ne peut pas être annulé d'ici là");
+    expect(note).toContain("pas encore disponible");
+    expect(note).toContain("voyez avec la banque");
+    expect(note).not.toMatch(/annulez-le|demandez (son |l')annulation|faites d'abord annuler/);
+  });
+
+  it("refuses a debit that carries neither the refund's reference nor its lot's in that file (G2's rule, now)", () => {
+    expect(errorText("refund_reissue_in_downloaded_file")).toContain(
+      "ni la référence du virement de ce remboursement ni celle de son lot",
+    );
   });
 });

@@ -133,6 +133,26 @@ test("refund, bank return, lines to classify, direct payment and the checks", as
   await expect(page.getByTestId("refund-instruction")).toContainText("ne l'exécutez pas dans la banque");
   await reviewShot(page, testInfo, "m2-payment-refund");
 
+  // M2c-6a review round 6: the refund goes in a transfer file, downloaded and marked as sent — the bank may pay it
+  // now, so « Annuler » is no longer offered (with the cancellation after download off, it waits for its debit)
+  await page.goto("/backoffice/reversements/virements");
+  const account = page.getByTestId("paying-account").filter({ hasText: "Fonds de tiers – Banque D" });
+  await account.getByTestId("generate-file").getByRole("button", { name: "Générer le fichier" }).click();
+  await page.getByRole("dialog", { name: "Générer le fichier de virements" }).getByRole("button", { name: "Générer", exact: true }).click();
+  const fileRow = account.getByTestId("file-row").first();
+  await expect(fileRow.getByTestId("file-status")).toHaveText("Prêt à télécharger", { timeout: 60_000 });
+  await Promise.all([page.waitForEvent("download"), fileRow.getByTestId("file-download").click()]);
+  await expect(fileRow.getByTestId("file-mark-sent")).toBeVisible({ timeout: 15_000 });
+  await fileRow.getByTestId("file-mark-sent").getByRole("button", { name: "Marquer comme transmis" }).click();
+  await expect(fileRow.getByTestId("file-status")).toHaveText("Transmis à la banque", { timeout: 15_000 });
+  await page.goto(`/backoffice/encaissements/paiements/${diallo}`);
+  const inFile = page.getByTestId("refund-in-downloaded-file");
+  await expect(inFile).toContainText("déjà téléchargé");
+  await expect(inFile).toContainText("« en cours »");
+  await expect(inFile).toContainText("ne peut pas être annulé d'ici là");
+  await expect(page.getByTestId("cancel-refund")).toHaveCount(0);
+  await reviewShot(page, testInfo, "m2-payment-refund-file");
+
   // The next statement: the refund executed, Rivière's payment returned, a fee, a return nobody can name
   const debits: Debit[] = [
     { ref: "DB-3", amountMinor: BigInt(20000), kind: "refund", e2e: reference, name: "DIALLO" },

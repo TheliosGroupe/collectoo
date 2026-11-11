@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { type ErrorCode, errorText } from "@/lib/boarding/forms";
 import { checkLabel } from "@/lib/payments/debits";
+import { refusalText as creditNoteRefusalText } from "@/lib/remittance/credit-notes";
 import { runErrorCode } from "@/lib/remittance/runs";
 import {
   DOWNLOADED_FILE_NOTE,
@@ -682,5 +683,63 @@ describe("M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is 
     expect(errorText(runErrorCode("remittance run refused: payout_in_downloaded_file"))).toContain("pas encore disponible");
     expect(errorText(runErrorCode("remittance run refused: already_sent"))).toContain("pas encore disponible");
     expect(errorText("transfer_cancellation_request_required")).toContain("Gardez-le tel quel");
+  });
+
+  // review round 6 (round 5's verifier): the credit-note refusals promised a run cancellation the database refuses once
+  // its transfer is in a downloaded file (« il peut encore être annulé … annulez-le »)
+  it("never promises a cancellation after download: the credit-note refusals (run_in_flight, in_flight) too", () => {
+    const promisesCancellation =
+      /annulez-le|annulez ce reversement|peut encore être annulé|demandez (son |l')annulation|faites d'abord annuler|« Demander l'annulation »|cochez l'attestation/;
+    const texts: [string, string | null][] = [
+      ["credit_note_run_in_flight", errorText("credit_note_run_in_flight")],
+      ["credit_note_in_flight", errorText("credit_note_in_flight")],
+      ["refusal run_in_flight", creditNoteRefusalText("run_in_flight")],
+      ["refusal in_flight", creditNoteRefusalText("in_flight")],
+    ];
+    for (const [code, text] of texts) {
+      expect(text, code).not.toMatch(promisesCancellation);
+      expect(text, code).toMatch(/ne peut plus l'être et attend que son débit soit lu sur le relevé/);
+      expect(text, code).toMatch(/Tant que (son|ce) virement n'est dans aucun fichier téléchargé/);
+    }
+    // the pattern catches the round-5 wording it replaced
+    expect("il peut encore être annulé, ce qui rectifierait toute la facture. Attendez son débit, ou annulez-le").toMatch(
+      promisesCancellation,
+    );
+    // and the round-5 list still holds under it
+    for (const code of [
+      "transfer_bank_booking_required",
+      "transfer_cancellation_request_required",
+      "transfer_file_holds_cancelled",
+      "transfer_file_holds_debited",
+      "transfer_file_not_executed",
+      "transfer_file_executed",
+      "run_payout_in_downloaded_file",
+      "refund_in_downloaded_file",
+      "refund_reissue_in_downloaded_file",
+      "refund_pending",
+    ] as ErrorCode[])
+      expect(errorText(code), code).not.toMatch(promisesCancellation);
+    expect(errorText("refund_pending")).toContain("déjà téléchargé");
+  });
+});
+
+describe("M2c-6a review, round 6: a file the bank executed is not served again (file_executed)", () => {
+  it("maps the refusal, from the command and from the route, to French words", () => {
+    expect(transferErrorCode("transfer file refused: file_executed")).toBe("transfer_file_executed");
+    // never confused with the cancellation's « nothing of it executed »
+    expect(transferErrorCode("transfer refused: file_not_executed")).toBe("transfer_file_not_executed");
+    const text = errorText("transfer_file_executed");
+    expect(text).not.toBe(errorText("unknown"));
+    expect(text).toContain("La banque a déjà exécuté ce fichier, en tout ou partie");
+    expect(text).toContain("Ne le déposez plus");
+    expect(text).not.toMatch(/refused|file_executed/);
+    const outcome = downloadOutcome(null, { message: "transfer file refused: file_executed" });
+    expect(outcome).toEqual({ kind: "refused", code: "file_executed", blocked: [] });
+    expect(refusalText("file_executed")).toContain("La banque a déjà exécuté ce fichier, en tout ou partie");
+    expect(refusalText("file_executed")).toContain("il n'est plus servi");
+    expect(refusalText("file_executed")).toContain("Ne le déposez plus");
+    const url = refusalUrl("f0000000-0000-0000-0000-000000000001", "file_executed", []);
+    expect(url).toBe("/backoffice/reversements/virements/f0000000-0000-0000-0000-000000000001?refus=file_executed");
+    expect(refusalFromSearch({ refus: "file_executed" })).toEqual({ code: "file_executed", blocked: [] });
   });
 });

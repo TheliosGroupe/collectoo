@@ -147,26 +147,41 @@
 --   * public.cancel_remittance_run: its payout in_file in a downloaded or sent file is refused
 --     `payout_in_downloaded_file` (that transfer can no longer be cancelled first); a payout ordered, or cancelled
 --     before download, as before. private.remittance_run_guard lets a sent run go back to approved only once its
---     transfer is ordered again — unreachable for a downloaded file's payout;
+--     transfer is ordered again — unreachable for a downloaded file's payout — and (round 6) refuses its cancellation
+--     while that payout is in_file in a downloaded file, whoever writes it;
 --   * every refund_request status write — public.cancel_refund, a payment's full return cancelling its pending refund
 --     and the M2b links executing or bouncing it (private.debit_post_rows, from link_debit and the process_debits
 --     job) — goes through
 --     private.refund_transfer_follow (trigger, enabled always): `cancelled` while its transfer is in a downloaded or
 --     sent file is refused (`in_downloaded_file`); `executed` books the transfer (its debit read from the statement, not
---     a cancellation), refused by another end-to-end id (`reissue_in_downloaded_file`; with the switch off nothing is
---     re-issued, so no other id belongs to a refund); `bounced` only from booked;
+--     a cancellation) — since round 6 only by its own end-to-end id or a batch line of its own PmtInf in that file,
+--     anything else `reissue_in_downloaded_file`; `bounced` only from booked;
 --   * public.record_payee_name_mismatch, clear_payee_name_mismatch: write payee_name_check only; they hold or free
 --     transfers not filed yet (private.transfer_hold_reason at generation and at a generated file's first download), a
 --     downloaded file's transfers stay in_file;
 --   * public.generate_transfer_file files only ordered transfers (a downloaded file's are in_file; its sweep counts in
 --     the sweeps in a file); transfer_file_download changes no downloaded or sent file's status (served, or refused
---     `holds_cancelled_transfer` / `holds_debited_transfer`); mark_transfer_file_sent moves downloaded → sent only;
+--     `holds_cancelled_transfer` / `holds_debited_transfer` / `file_executed`); mark_transfer_file_sent moves
+--     downloaded → sent only;
 --   * private.run_transfer_checks, transfer_checks_due, queue_remittance_schedule and the evidence helpers only read
 --     (and alert); the worker's jobs write transfers only through these functions (private.transfer_file_begin, _record,
 --     _failed: a pending file; the approval: ordered payouts; the debit links: the refund trigger above; the bank-line
 --     bookings: an ordered top-up only), and public.cancel_top_up cancels only an ordered top-up (never in a file).
 -- The pages read the switch (`cancellation_after_download` in transfer_file_detail and transfer_overview; no
 -- cancellation card while it is off) and the refusal hints that sent ops to a cancellation say what to do now.
+--
+-- M2c-6a review, round 6 (round 5's verifiers; ADR-0014 « M2c-6a review fixes », round 6; COMPLIANCE OQ-80 (n), OQ-81
+-- (c)):
+--   * private.remittance_run_guard: an approved or sent run is not cancelled while its payout is in_file in a file
+--     downloaded at least once and the switch is off, whoever writes it (postgres, service_role) — defence in depth
+--     behind cancel_remittance_run's `payout_in_downloaded_file`;
+--   * public.transfer_file_download: a downloaded or sent file the bank executed, in full or in part
+--     (private.transfer_file_executed, or one of its payouts, refunds or sweeps with its own debit seen), is not served
+--     again (`file_executed`), whatever the switch and the acknowledgement — uploaded again it would pay it all twice;
+--   * private.refund_transfer_follow: round 4's G2 rule now — while the refund's transfer is in a downloaded or sent
+--     file, `executed` only by that transfer's own end-to-end id or a batch line (no end-to-end id) whose PmtInfId is its
+--     transfer_file_item.pmt_inf_id in that file; anything else `reissue_in_downloaded_file` (the first of M2c-6b's
+--     three prerequisites to switching cancellation after download on; the other two are pgTAP 034's todo() cases).
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -804,7 +819,10 @@ $$;
 
 -- remittance_run_guard (redefined from 20261112090000): a sent run goes back to approved when the file holding its
 -- transfer is cancelled (not uploaded, or rejected by the bank: its transfer is ordered again); its transfer, once set,
--- changes only to the one re-issuing it (review round 3, E1: a new end-to-end id). Same settings.
+-- changes only to the one re-issuing it (review round 3, E1: a new end-to-end id). Review round 6 (defence in depth,
+-- round 5's verifier): an approved or sent run is not cancelled while its payout is in_file in a file downloaded at least
+-- once and cancellation after download is off, whoever writes it (public.cancel_remittance_run refuses first:
+-- `payout_in_downloaded_file`). Same settings.
 create or replace function private.remittance_run_guard()
 returns trigger
 language plpgsql
@@ -844,6 +862,16 @@ begin
             old.approved_by, old.approved_at, old.known_at, old.line_count))) then
     raise exception 'remittance run %: what was asked never changes, its status only moves forward', old.id
       using errcode = 'check_violation';
+  end if;
+  -- review round 6 (defence in depth): its payout stays in its downloaded file while cancellation after download is
+  -- off, so the run stays too, whoever writes it
+  if old.status in ('approved', 'sent') and new.status = 'cancelled'
+     and exists (select 1 from public.bank_transfer t
+                 join public.transfer_file f on f.id = t.transfer_file_id
+                 where t.id in (old.transfer_id, new.transfer_id) and t.status = 'in_file' and f.download_count > 0)
+     and not private.switch_on('downloaded_file_cancellation') then
+    raise exception 'remittance run %: its payout stays in its downloaded file: cancellation after download is switched off until M2c-6b',
+      old.id using errcode = 'check_violation';
   end if;
   return new;
 end;
@@ -2006,6 +2034,8 @@ $$;
 -- bank refused, review T1) is never served again (`holds_cancelled_transfer`). Review round 4 (G4): nor one holding a
 -- payout or refund that left the account already (private.transfer_debited_before: a transfer it re-issues was
 -- debited, its cancelled file executed late) — uploaded again, it would pay it twice (`holds_debited_transfer`).
+-- Review round 6: nor one the bank executed, in full or in part (`file_executed`, whatever the switch: a copy for the
+-- records is M2c-6b's question, COMPLIANCE OQ-81 (c)).
 create or replace function public.transfer_file_download(p_file_id uuid, p_sha256 text,
                                                          p_acknowledged boolean default false)
 returns jsonb
@@ -2085,6 +2115,18 @@ begin
                   and t.transfer_file_id = f.id and private.transfer_debited_before(t.id)) then
     raise exception 'transfer file refused: holds_debited_transfer' using errcode = 'check_violation',
       hint = 'Un virement de ce fichier a déjà quitté le compte (débité sous la référence du virement qu''il remplace, ou dans une ligne groupée de son lot) : ne déposez pas ce fichier ; s''il l''a été, demandez à la banque de ne pas l''exécuter.';
+  -- review round 6 (round 5's verifier, p_redl): the bank executed the file, in full or in part — a debit of one of its
+  -- PmtInfIds or its transfers' end-to-end ids, or a return (private.transfer_file_executed), or one of its payouts,
+  -- refunds or sweeps shows its own debit (private.transfer_debit_seen: its id, or a batch line of its PmtInf) —:
+  -- uploaded again, it would pay it all a second time. Whatever the switch; acknowledged or not.
+  elsif private.transfer_file_executed(f.id)
+        or exists (select 1 from public.transfer_file_item i
+                   cross join lateral (select t.id, t.kind, t.transfer_file_id from public.bank_transfer t
+                                       where t.id = i.transfer_id offset 0) t
+                   where i.file_id = f.id and t.kind in ('payout', 'refund', 'sweep') and t.transfer_file_id = f.id
+                     and private.transfer_debit_seen(t.id)) then
+    raise exception 'transfer file refused: file_executed' using errcode = 'check_violation',
+      hint = 'La banque a déjà exécuté ce fichier, en tout ou partie : ne le déposez plus.';
   end if;
   if f.download_count > 0 and not coalesce(p_acknowledged, false) then
     select coalesce(u.display_name, u.email, 'un utilisateur') into v_first from public.app_user u
@@ -2815,11 +2857,13 @@ $$;
 -- Review round 4 (G2, H16): nor executed by a debit carrying another end-to-end id than its transfer's own (a transfer
 -- this one re-issues: its cancelled file executed late) while its transfer sits in a downloaded or sent file — that file,
 -- uploaded, would refund it again; booked, the transfer would leave it un-cancellable (`reissue_in_downloaded_file`:
--- cancel that file on the statements' evidence first, then link). A batch line (no end-to-end id) and its own id link
--- as before. M2c-6b's booking of a payout by an old RMT id follows the same rule (OQ-80 (n)). Review round 5
--- (fail-closed): with cancellation after download off, nothing is re-issued and `cancelled` stays refused while a
--- downloaded file holds the transfer; the hints say what to do now. Switching it on needs G2's batch-line rule first
--- (ADR-0014 round 5: only the transfer's own end-to-end id, or a batch line of its PmtInf in its current file).
+-- cancel that file on the statements' evidence first, then link). M2c-6b's booking of a payout by an old RMT id follows
+-- the same rule (OQ-80 (n)). Review round 5 (fail-closed): with cancellation after download off, nothing is re-issued
+-- and `cancelled` stays refused while a downloaded file holds the transfer; the hints say what to do now. Review round 6
+-- (round 4's G2 rule, the prerequisite of switching it on, met now; round 5's verifier, p_link): while the transfer is
+-- in a downloaded or sent file, `executed` is accepted only by a debit carrying that transfer's own end-to-end id, or by
+-- a batch line (no end-to-end id) whose PmtInfId is that transfer's PmtInf in that file (its transfer_file_item) —
+-- anything else, a predecessor file's batch line or another PmtInf's included, `reissue_in_downloaded_file`.
 create or replace function private.refund_transfer_follow()
 returns trigger
 language plpgsql
@@ -2842,14 +2886,20 @@ begin
         case new.status when 'executed' then 'Remboursement ' || new.end_to_end_id || ' exécuté hors du fichier'
                         else 'Remboursement ' || new.end_to_end_id || ' annulé' end, null, null);
       select * into t from public.bank_transfer where id = t.id;
-    elsif new.status = 'executed' and exists (
+    -- review round 6 (round 4's G2 rule, now): executed only by a debit carrying this transfer's own end-to-end id, or
+    -- by a batch line (no end-to-end id) of its own PmtInf in this file — never another id, another file's PmtInf (a
+    -- predecessor's: the re-issue would be booked here, its bytes still to be uploaded), nor a line naming neither
+    elsif new.status = 'executed' and not exists (
             select 1 from public.bank_transaction x where x.id = new.bank_transaction_id
-              and x.end_to_end_id is not null and x.end_to_end_id <> t.end_to_end_id) then
+              and (x.end_to_end_id = t.end_to_end_id
+                   or (x.end_to_end_id is null and x.payment_info_id = (
+                         select i.pmt_inf_id from public.transfer_file_item i
+                         where i.file_id = f.id and i.transfer_id = t.id)))) then
       raise exception 'refund refused: reissue_in_downloaded_file' using errcode = 'check_violation',
         detail = jsonb_build_object('file', f.number, 'transfer_id', t.id)::text,
         hint = case when private.switch_on('downloaded_file_cancellation')
-                    then 'Le virement réémis de ce remboursement est dans un fichier déjà téléchargé : faites d''abord annuler ce fichier, relevé à l''appui, puis rattachez ce débit.'
-                    else 'Ce débit porte une autre référence que le virement de ce remboursement, qui est dans un fichier déjà téléchargé : ne le rattachez pas (ce fichier le rembourserait une seconde fois). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
+                    then 'Ce débit ne porte ni la référence du virement de ce remboursement ni celle de son lot dans le fichier déjà téléchargé qui le contient : faites d''abord annuler ce fichier, relevé à l''appui, puis rattachez ce débit.'
+                    else 'Ce débit ne porte ni la référence du virement de ce remboursement ni celle de son lot dans le fichier déjà téléchargé qui le contient : ne le rattachez pas (ce fichier le rembourserait une seconde fois). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.' end;
     elsif new.status = 'cancelled' then
       raise exception 'refund refused: in_downloaded_file' using errcode = 'check_violation',
         detail = jsonb_build_object('file', f.number, 'transfer_id', t.id)::text,

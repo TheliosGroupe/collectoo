@@ -16,9 +16,13 @@
 --   * a generated file is still superseded by cancel_transfer_file (its transfers back to « à mettre dans un fichier »);
 --   * a request opened while the switch was on is not confirmed once it is off;
 --   * the pages' reads say the switch is off (`cancellation_after_download`) and carry no cancellation card.
--- No ledger entry is posted by any of it.
+-- Review round 6 (round 5's verifiers): the run guard refuses a run's cancellation while its payout is in a downloaded
+-- file, whoever writes it (postgres, service_role); a file the bank executed, in full or in part, is not served again
+-- (`file_executed`, whatever the switch); a refund whose transfer is in a downloaded file is executed only by that
+-- transfer's own end-to-end id or a batch line of its own PmtInf in that file (round 4's G2 rule, now).
+-- No ledger entry is posted by any of it but the refund's own debit.
 begin;
-select plan(26);
+select plan(37);
 
 
 -- Fixtures (as 028: Martin (a1), Lilas (a2), Cyprès (a3), Omega (a4: a RIB holder in Greek letters), Tunis Trading
@@ -681,6 +685,29 @@ select throws_like($$ update public.bank_transfer set status = 'cancelled', canc
   'the transfer guard: a payout of a downloaded file does not leave it cancelled');
 select throws_like($$ select private.transfer_file_release(pg_temp.v('f2'), 'superseded', 'test', 'not_uploaded', null) $$,
   '%cancellation after download is switched off%', 'nor through the release of its file (a re-issue, a re-queue)');
+-- review round 6 (defence in depth): nor the run whose payout is in a downloaded file, written straight to its table —
+-- by the owner, and by the worker's role (service_role), which can write runs
+select throws_like($$ update public.remittance_run set status = 'cancelled', cancelled_at = clock_timestamp(),
+                        cancel_reason = 'test' where id = pg_temp.v('r1') $$,
+  '%cancellation after download is switched off%',
+  'the run guard: a sent run whose payout is in a downloaded file is not cancelled (as the owner)');
+create or replace function pg_temp.as_service(p_sql text) returns text language plpgsql as $$
+begin
+  set local role service_role;
+  begin
+    execute p_sql;
+  exception when others then
+    reset role;
+    return sqlstate || ' ' || sqlerrm;
+  end;
+  reset role;
+  return 'ok';
+end $$;
+select matches(pg_temp.as_service(format($q$ update public.remittance_run set status = 'cancelled',
+                                               cancelled_at = clock_timestamp(), cancel_reason = 'test' where id = %L $q$,
+                                             pg_temp.v('r2'))),
+  '^23514 .*cancellation after download is switched off',
+  'nor by the worker''s role (service_role)');
 select is(pg_temp.snapshot(), (select v #>> '{}' from j where k = 'before'), 'nothing changed');
 
 -- A generated file is still superseded -------------------------------------------------------------------------------
@@ -737,6 +764,88 @@ select results_eq($$ select x ->> 'cancellation_after_download',
                              where jsonb_typeof(f -> 'cancellation') <> 'null')
                      from (select pg_temp.read('select public.transfer_overview()') x) d $$,
   $$ values ('false'::text, 0) $$, '« Virements »: the switch off, no cancellation card on the files');
+
+-- Review round 6: a file the bank executed, in full or in part, is not served again, whatever the switch ----------------
+-- (round 5's verifier, p_redl: served past the warning, it could be uploaded again and pay everything twice)
+create or replace function pg_temp.redl(p_file text, p_ack boolean) returns text language sql as $$
+  select format($q$ select public.transfer_file_download(%L, %L, %L) ->> 'download' $q$, pg_temp.v(p_file),
+                pg_temp.sha(pg_temp.v(p_file)), p_ack) $$;
+grant execute on all functions in schema pg_temp to authenticated;
+-- F2: the bank booked its PmtInf as one batch line of 90,00 € (above)
+select results_eq($$ select private.transfer_file_executed(pg_temp.v('f2')), pg_temp.try('01', pg_temp.redl('f2', true)),
+                            pg_temp.try('04', pg_temp.redl('f2', false)) $$,
+  $$ values (true, 'transfer file refused: file_executed'::text, 'transfer file refused: file_executed'::text) $$,
+  'a sent file the bank executed in part (a batch line of its PmtInf) is not served again, warning acknowledged or not');
+-- F1: nothing of it on a statement yet — served again past the warning, as before …
+select results_eq($$ select private.transfer_file_executed(pg_temp.v('f1')), pg_temp.try('01', pg_temp.redl('f1', false)),
+                            pg_temp.try('01', pg_temp.redl('f1', true)) $$,
+  $$ values (false, 'transfer file refused: already_downloaded'::text, '2'::text) $$,
+  'a downloaded file the bank executed nothing of is still served again once the warning is acknowledged');
+-- … until a statement shows its payouts and its sweep debited under their own end-to-end ids
+select pg_temp.statement('b3', pg_temp.d(3), null, jsonb_build_array(
+  jsonb_build_object('amount', 164000, 'e2e', pg_temp.e2e(pg_temp.v('m1'))),
+  jsonb_build_object('amount', 419840, 'e2e', pg_temp.e2e(pg_temp.v('l1'))),
+  jsonb_build_object('amount', 12000, 'e2e', pg_temp.e2e(pg_temp.v('s1')))), pg_temp.d(2), pg_temp.after(3));
+select results_eq($$ select private.transfer_file_executed(pg_temp.v('f1')), private.transfer_debited_before(pg_temp.v('m1')),
+                            pg_temp.try('01', pg_temp.redl('f1', true)), pg_temp.try('04', pg_temp.redl('f1', false)) $$,
+  $$ values (true, false, 'transfer file refused: file_executed'::text, 'transfer file refused: file_executed'::text) $$,
+  'executed in full by its own debits (none of its transfers debited before): not served again, acknowledged or not');
+select results_eq($$ select pg_temp.try('01', pg_temp.sent('r6-sent-0001', 'f1')), pg_temp.try('04', pg_temp.redl('f1', true)) $$,
+  $$ values ('sent'::text, 'transfer file refused: file_executed'::text) $$,
+  'it can still be marked as sent, and is not served once sent either');
+update private.feature_switch set enabled = true where key = 'downloaded_file_cancellation';
+select is(pg_temp.try('04', pg_temp.redl('f1', true)), 'transfer file refused: file_executed',
+  'nor with cancellation after download switched on');
+update private.feature_switch set enabled = false where key = 'downloaded_file_cancellation';
+select results_eq($$ select (pg_temp.fl(pg_temp.v('f1'))).download_count,
+                            (select count(*)::int from public.transfer_file_download where file_id = pg_temp.v('f1')),
+                            (pg_temp.fl(pg_temp.v('f2'))).download_count $$,
+  $$ values (2, 2, 1) $$, 'the refusals record no download (F1: the first and the one served past the warning)');
+
+-- Review round 6 (round 4's G2 rule, now): a refund whose transfer is in a downloaded file is executed only by a debit
+-- carrying that transfer's own end-to-end id, or by a batch line of its own PmtInf in that file (round 5's verifier,
+-- p_link: a batch line of another PmtInf booked it while the file still carried it)
+insert into j select 'rl', pg_temp.refund('36', 6000);
+select pg_temp.handed_out('f4', 'r6-gen-0004', 6);
+insert into t values ('q4', pg_temp.rft('rl'));
+-- lines: another end-to-end id; a batch line of another PmtInf; a batch line of its own; the other refund of its PmtInf
+-- (its own end-to-end id, the PmtInf's id)
+select pg_temp.statement('b4', private.paris_today(), null, jsonb_build_array(
+  jsonb_build_object('amount', 6000, 'e2e', 'RFDOTHER00000001', 'kind', 'refund_out'),
+  jsonb_build_object('amount', 6000, 'pmt_inf', 'TF-2099-999999-1', 'kind', 'other_debit'),
+  jsonb_build_object('amount', 6000, 'pmt_inf', pg_temp.pmt('f4', 1), 'kind', 'other_debit'),
+  jsonb_build_object('amount', 6000, 'e2e', pg_temp.e2e(pg_temp.rft('rz')), 'pmt_inf', pg_temp.pmt('f4', 1),
+                     'kind', 'refund_out')));
+create or replace function pg_temp.line(p_statement text, p_no integer) returns uuid language sql as $$
+  select id from public.bank_transaction
+  where statement_id = ('e2000000-0000-0000-0000-0000000000' || p_statement)::uuid and line_no = p_no $$;
+create or replace function pg_temp.link_refund(p_key text, p_line uuid, p_rf text) returns text language sql as $$
+  select format($q$ select public.link_debit(%L, %L, 'refund', null, %L, null, 'lien (test)') -> 'result' ->> 'refunds' $q$,
+                p_key, p_line, pg_temp.rq(p_rf)) $$;
+-- the refund's status now (a function: read after the link in the same statement)
+create or replace function pg_temp.rstatus(p_rf text) returns text language sql as $$
+  select status from public.refund_request where id = pg_temp.rq(p_rf) $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select results_eq($$ select (pg_temp.fl(pg_temp.v('f4'))).status, pg_temp.file_of(pg_temp.v('q4')) = pg_temp.v('f4'),
+                            pg_temp.try('01', pg_temp.link_refund('r6-link-0001', pg_temp.line('b4', 1), 'rl'))
+                              ~ 'refund refused: reissue_in_downloaded_file',
+                            pg_temp.try('01', pg_temp.link_refund('r6-link-0002', pg_temp.line('b4', 2), 'rl'))
+                              ~ 'refund refused: reissue_in_downloaded_file',
+                            pg_temp.try('01', pg_temp.link_refund('r6-link-0004', pg_temp.line('b4', 4), 'rl'))
+                              ~ 'refund refused: reissue_in_downloaded_file',
+                            pg_temp.file_of(pg_temp.rft('rz')) = pg_temp.v('f4') $$,
+  $$ values ('downloaded'::text, true, true, true, true, true) $$,
+  'a refund in a downloaded file: neither a debit of another end-to-end id, a batch line of another PmtInf, nor the other refund''s debit of its PmtInf executes it');
+select results_eq($$ select pg_temp.rstatus('rl'), pg_temp.status(pg_temp.v('q4')),
+                            (select count(*)::int from public.bank_debit_link
+                             where bank_transaction_id in (pg_temp.line('b4', 1), pg_temp.line('b4', 2),
+                                                           pg_temp.line('b4', 4))) $$,
+  $$ values ('requested'::text, 'in_file'::text, 0) $$, 'the refund stays requested, its transfer in the file, nothing linked');
+select results_eq($$ select pg_temp.try('01', pg_temp.link_refund('r6-link-0003', pg_temp.line('b4', 3), 'rl')),
+                            pg_temp.rstatus('rl'),
+                            pg_temp.status(pg_temp.v('q4')), (pg_temp.fl(pg_temp.v('f4'))).status $$,
+  $$ values ('1'::text, 'executed'::text, 'booked'::text, 'downloaded'::text) $$,
+  'a batch line of its own PmtInf in that file executes it: the refund executed, its transfer booked');
 
 select results_eq($$ select count(*) filter (where entry_type in ('remittance', 'servicer_sweep'))::int
                      from public.ledger_entry where organization_id = '00000000-0000-0000-0000-0000000000aa' $$,

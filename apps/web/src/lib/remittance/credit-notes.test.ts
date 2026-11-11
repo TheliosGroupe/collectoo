@@ -79,7 +79,9 @@ describe("the effect sheet (M2c-5b)", () => {
 describe("refusals and errors (M2c-5b)", () => {
   it("explains why an invoice cannot take a credit note", () => {
     expect(refusalText(null)).toBeNull();
-    expect(refusalText("in_flight")).toMatch(/attendez son débit, ou annulez ce reversement/);
+    expect(refusalText("in_flight")).toMatch(/attendez son débit avant d'émettre un avoir/);
+    // review round 6: a run whose transfer is in a downloaded file can no longer be cancelled (it waits for its debit)
+    expect(refusalText("in_flight")).toMatch(/une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit lu sur le relevé/);
     expect(refusalText("nothing_left")).toMatch(/entièrement rectifiée/);
     expect(refusalText("credit_note")).toMatch(/pas par un autre avoir/);
     expect(refusalText("something_new")).toBe("Avoir impossible pour l'instant.");

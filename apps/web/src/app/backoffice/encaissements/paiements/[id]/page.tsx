@@ -25,8 +25,13 @@ import {
   REFUND_REASON,
   REFUND_STATUS,
   minorToInput,
+  type RefundTransfer,
   pendingRefundInstruction,
+  refundCancellable,
+  refundInDownloadedFile,
+  refundInDownloadedFileNote,
   refundReasons,
+  refundTransfers,
   refundable,
   returnedNote,
 } from "@/lib/payments/debits";
@@ -92,9 +97,26 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   // M2c-6a: which refunds go in the transfer file (their execution mode is not in payment_detail)
   const { data: modes } =
     refunds.length > 0
-      ? await supabase.from("refund_request").select("id, execution_mode").in("id", refunds.map((r) => r.id))
-      : { data: [] as { id: string; execution_mode: string }[] };
+      ? await supabase.from("refund_request").select("id, execution_mode, transfer_id").in("id", refunds.map((r) => r.id))
+      : { data: [] as { id: string; execution_mode: string; transfer_id: string | null }[] };
   const inFile = new Set((modes ?? []).filter((m) => m.execution_mode === "file").map((m) => m.id));
+  // review round 6: a refund whose transfer is in a downloaded file is not cancelled (« Annuler » hidden, a note instead)
+  const transferIds = (modes ?? []).map((m) => m.transfer_id).filter((x): x is string => typeof x === "string");
+  const { data: transferRows } =
+    transferIds.length > 0
+      ? await supabase
+          .from("bank_transfer")
+          .select("id, status, transfer_file:transfer_file_id(id, number, status, download_count)")
+          .in("id", transferIds)
+      : { data: [] as { id: string; status: string; transfer_file: unknown }[] };
+  const refundTransfer = refundTransfers(
+    modes ?? [],
+    (transferRows ?? []).map((t) => ({
+      id: t.id,
+      status: t.status,
+      transfer_file: (t.transfer_file ?? null) as unknown as RefundTransfer["file"],
+    })),
+  );
   const refundState = (r: { id: string; status: string }) => (r.status === "requested" && inFile.has(r.id) ? "requested_file" : r.status);
   const pendingRefund = refunds.find((r) => r.status === "requested") ?? null;
   const bankLines = d.bank_lines ?? [];
@@ -328,8 +350,21 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
                   </span>
                   <span className="block text-xs text-zinc-600 dark:text-zinc-400">Motif interne : {r.reason}</span>
                 </span>
-                {r.status === "requested" ? (
+                {refundCancellable(r.status, refundTransfer.get(r.id)) ? (
                   <CancelRefund paymentId={p.id} refundId={r.id} reference={r.end_to_end_id} idempotencyKey={randomUUID()} />
+                ) : r.status === "requested" && refundInDownloadedFile(refundTransfer.get(r.id)) ? (
+                  <span
+                    className="flex max-w-md flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400"
+                    data-testid="refund-in-downloaded-file"
+                  >
+                    <span>{refundInDownloadedFileNote(refundTransfer.get(r.id)?.file?.number ?? "")}</span>
+                    <Link
+                      href={`/backoffice/reversements/virements/${refundTransfer.get(r.id)?.file?.id ?? ""}`}
+                      className="underline underline-offset-4"
+                    >
+                      Voir le fichier {refundTransfer.get(r.id)?.file?.number}
+                    </Link>
+                  </span>
                 ) : null}
               </li>
             ))}
