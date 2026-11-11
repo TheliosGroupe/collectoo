@@ -235,9 +235,11 @@ STAGE_COLUMNS = (
 
 @dataclass(frozen=True, slots=True)
 class Section:
-    """One <Stmt> of a camt.053 file: the bank's own proof (opening + lines = closing), and when the
-    bank produced it (Stmt/CreDtTm, else GrpHdr/CreDtTm; M2c-6a review round 3, E4: a statement
-    covers a day only once produced after it)."""
+    """One <Stmt> of a camt.053 file: the bank's own proof (opening + lines = closing), its period
+    (from_date … to_date), the days it shows whole (covers_from … covers_to, both None when it shows
+    part of a day only; M2c-6a review round 4, G3: the only days it can prove nothing was debited
+    on), and when the bank produced it (Stmt/CreDtTm, else GrpHdr/CreDtTm; review round 3, E4: a
+    statement covers a day only once produced after it)."""
 
     stmt_id: str | None
     seq: int | None
@@ -248,10 +250,13 @@ class Section:
     opening_minor: int  # signed (DBIT balance = negative)
     closing_minor: int
     created_at: datetime | None = None  # time-zone aware
+    covers_from: date | None = None
+    covers_to: date | None = None
 
     def as_json(self) -> dict[str, Any]:
         """Amounts as text (no JSON number for money); the creation time in ISO 8601 with its offset
-        (`private.ingest_statement` keeps the earliest on `bank_statement.bank_created_at`)."""
+        (the trigger `private.bank_statement_created_at` keeps the earliest on
+        `bank_statement.bank_created_at` at the import); the whole days as dates or null."""
         return {
             "stmt_id": self.stmt_id,
             "seq": self.seq,
@@ -260,6 +265,8 @@ class Section:
             "opening_minor": str(self.opening_minor),
             "closing_minor": str(self.closing_minor),
             "created_at": None if self.created_at is None else self.created_at.isoformat(),
+            "covers_from": None if self.covers_from is None else self.covers_from.isoformat(),
+            "covers_to": None if self.covers_to is None else self.covers_to.isoformat(),
         }
 
 

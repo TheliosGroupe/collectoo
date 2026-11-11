@@ -598,3 +598,21 @@ describe("M2c-6a review, round 3: what left the account already is never filed a
     expect(errorText("run_transfer_already_debited")).toContain("une seconde fois");
   });
 });
+
+describe("M2c-6a review, round 4 (G4): a file holding a transfer that left the account already is not served again", () => {
+  it("maps the download's refusal, keeps it through the page's URL and words it", () => {
+    expect(downloadOutcome(null, { message: "transfer file refused: holds_debited_transfer" })).toEqual({
+      kind: "refused",
+      code: "holds_debited_transfer",
+      blocked: [],
+    });
+    expect(refusalFromSearch({ refus: "holds_debited_transfer" })?.code).toBe("holds_debited_transfer");
+    expect(refusalText("holds_debited_transfer")).toContain("déjà été débité");
+    expect(refusalText("holds_debited_transfer")).toContain("ne le déposez pas");
+    expect(refusalText("holds_debited_transfer")).not.toMatch(/refused|transfer file/);
+    expect(transferErrorCode("transfer file refused: holds_debited_transfer")).toBe("transfer_file_holds_debited");
+    expect(errorText("transfer_file_holds_debited")).toContain("paierait une seconde fois");
+    // the cancelled-transfer refusal is still its own
+    expect(transferErrorCode("transfer file refused: holds_cancelled_transfer")).toBe("transfer_file_holds_cancelled");
+  });
+});

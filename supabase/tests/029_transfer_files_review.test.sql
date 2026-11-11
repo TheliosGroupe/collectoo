@@ -208,8 +208,17 @@ begin
   from jsonb_array_elements(p_debits) with ordinality d (v, ord);
   update public.bank_statement set status = 'imported', from_date = coalesce(p_from, p_to), to_date = p_to,
     opening_booked_minor = 0, closing_booked_minor = p_closing, counts = '{}', finished_at = clock_timestamp(),
-    -- the bank's creation time the import keeps (review round 3, E4): here its upload's
-    sections = jsonb_build_array(jsonb_build_object('created_at', now()))
+    -- the bank's creation time the import keeps (review round 3, E4): here its upload's; the section's period, the
+    -- whole days it shows and its balances, as the parser gives them (review round 4, G3: its opening, the previous
+    -- statement's closing — the balances follow, no « relevé manquant »)
+    sections = jsonb_build_array(jsonb_build_object(
+      'from_date', coalesce(p_from, p_to), 'to_date', p_to, 'covers_from', coalesce(p_from, p_to), 'covers_to', p_to,
+      'opening_minor', coalesce((select p.closing_booked_minor from public.bank_statement p
+                                 where p.bank_account_id = '80000000-0000-0000-0000-0000000000cf'
+                                   and p.status = 'imported' and p.format = 'camt053'
+                                   and p.to_date < coalesce(p_from, p_to)
+                                 order by p.to_date desc, p.finished_at desc limit 1), 0)::text,
+      'closing_minor', p_closing::text, 'created_at', now()))
   where id = s;
   return s;
 end $$;

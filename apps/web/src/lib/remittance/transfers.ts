@@ -398,6 +398,8 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
   ["file_stale", "transfer_file_stale"],
   ["file_blocked", "transfer_file_blocked"],
   ["holds_cancelled_transfer", "transfer_file_holds_cancelled"],
+  // review round 4 (G4): a transfer of the file left the account already (a predecessor's debit)
+  ["holds_debited_transfer", "transfer_file_holds_debited"],
   ["nothing_to_file", "transfer_nothing_to_file"],
   ["cash_not_covered", "transfer_cash_not_covered"],
   ["no_closing_balance", "transfer_no_closing_balance"],
@@ -685,6 +687,7 @@ export type DownloadRefusal =
   | "not_ready"
   | "not_downloadable"
   | "holds_cancelled_transfer"
+  | "holds_debited_transfer"
   | "hash_mismatch"
   | "unavailable"
   | "unknown";
@@ -706,6 +709,7 @@ const REFUSALS: readonly DownloadRefusal[] = [
   "not_ready",
   "not_downloadable",
   "holds_cancelled_transfer",
+  "holds_debited_transfer",
   "hash_mismatch",
   "unavailable",
   "unknown",
@@ -791,6 +795,9 @@ export function refusalText(code: DownloadRefusal): string {
       return "Ce fichier ne peut plus être téléchargé (remplacé, rejeté ou en échec) : utilisez le fichier en cours sur « Virements ».";
     case "holds_cancelled_transfer":
       return "Un virement de ce fichier a été annulé depuis son téléchargement : le fichier n'est plus servi et ne doit plus être déposé.";
+    // review round 4 (G4)
+    case "holds_debited_transfer":
+      return "Un virement de ce fichier a déjà été débité sous la référence du virement qu'il remplace (un fichier annulé exécuté plus tard malgré tout) : le fichier n'est plus servi, ne le déposez pas. Prévenez le support.";
     case "hash_mismatch":
       return "Le fichier stocké ne correspond pas au fichier généré : il n'a pas été servi (le téléchargement est enregistré). Ne déposez rien et prévenez le support.";
     case "unavailable":

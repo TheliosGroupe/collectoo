@@ -14,7 +14,7 @@
 --     listed and alerted, and none of who vouched for that IBAN clears it (security#3, tests-ui#7).
 -- No ledger entry is posted by any of it.
 begin;
-select plan(60);
+select plan(71);
 
 
 -- Fixtures (as 028: Martin (a1), Lilas (a2), Cyprès (a3), Omega (a4: a RIB holder in Greek letters), Tunis Trading
@@ -214,9 +214,14 @@ begin
   from jsonb_array_elements(p_debits) with ordinality d (v, ord);
   update public.bank_statement set status = 'imported', from_date = coalesce(p_from, p_to), to_date = p_to,
     opening_booked_minor = 0, closing_booked_minor = p_closing, counts = '{}', finished_at = clock_timestamp(),
-    -- the bank's creation time the import keeps (review round 3, E4): here its upload's
+    -- the bank's creation time the import keeps (review round 3, E4): here its upload's; the section's period, the
+    -- whole days it shows and its balances, as the parser gives them (review round 4, G3)
     sections = case when p_format = 'camt053'
-                    then jsonb_build_array(jsonb_build_object('created_at', coalesce(p_uploaded_at, now()))) end
+                    then jsonb_build_array(jsonb_build_object(
+                           'from_date', coalesce(p_from, p_to), 'to_date', p_to,
+                           'covers_from', coalesce(p_from, p_to), 'covers_to', p_to,
+                           'opening_minor', '0', 'closing_minor', p_closing::text,
+                           'created_at', coalesce(p_uploaded_at, now()))) end
   where id = s;
   return s;
 end $$;
@@ -789,6 +794,71 @@ select results_eq($$ select private.remittance_payout_blockers('00000000-0000-00
 insert into j select 'pa5', to_jsonb(pg_temp.try('13', pg_temp.propose('r2-pa-0009')));
 select is(pg_temp.try('04', pg_temp.confirm('r2-pa-0010', (select v #>> '{}' from j where k = 'pa5'))), 'active',
   'S1 (round 3): the same IBAN confirmed again replaces the returned account');
+-- review round 4 (E5+): the check closes once another IBAN replaces the flagged one and reopens when the flagged IBAN
+-- is current again (A → B → A); who proposed that IBAN for the client in another currency is a party, and that
+-- account keeps the check open; a proposal not yet confirmed is not current
+insert into auth.users (id, email, aud, role)
+select ('10000000-0000-0000-0000-0000000000' || n)::uuid, 'u' || n || '@files.test', 'authenticated', 'authenticated'
+from unnest(array['14', '15']) n;
+insert into public.membership (user_id, organization_id, role) values
+  ('10000000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-0000000000aa', 'admin'),
+  ('10000000-0000-0000-0000-000000000015', '00000000-0000-0000-0000-0000000000aa', 'ops_manager');
+create or replace function pg_temp.propose_iban(p_key text, p_currency text, p_iban text) returns text language sql as $$
+  select format($q$ select public.propose_payout_account(%L, '00000000-0000-0000-0000-0000000000a1', %L, %L, 'MARTIN SAS',
+                     null, 'd0000000-0000-0000-0000-000000000003') ->> 'payout_account_id' $q$, p_key, p_currency, p_iban) $$;
+create or replace function pg_temp.confirm_iban(p_key text, p_account text, p_iban text) returns text language sql as $$
+  select format($q$ select public.confirm_payout_account(%L, %L, %L) ->> 'status' $q$, p_key, p_account, p_iban) $$;
+create or replace function pg_temp.retire(p_key text, p_account text) returns text language sql as $$
+  select format($q$ select public.retire_payout_account(%L, %L, 'compte clos') ->> 'status' $q$, p_key, p_account) $$;
+create or replace function pg_temp.acc(p_k text) returns text language sql as $$
+  select v #>> '{}' from j where k = p_k $$;
+-- the open check as the pages and the nightly checks show it: the payout blockers in p_currency, listed on « Virements »,
+-- alerted by the check run p_run, shown on Martin's transfer
+create or replace function pg_temp.shown(p_currency text, p_run text) returns text language sql as $$
+  select format('%s listed=%s alerted=%s card=%s',
+                private.remittance_payout_blockers('00000000-0000-0000-0000-0000000000a1', p_currency, private.paris_today()),
+                pg_temp.checks_listed('11'),
+                (select count(*) from public.payment_check_result r
+                 where r.run_id = pg_temp.v(p_run) and r.code = 'payee_name_mismatch'),
+                private.transfer_card(pg_temp.trid('r1'), null) ->> 'payee_check_open') $$;
+grant execute on all functions in schema pg_temp to authenticated;
+-- (a) A → B: another IBAN replaces the flagged one (ops 13 propose, admin 04 confirms)
+insert into j select 'pb1', to_jsonb(pg_temp.try('13', pg_temp.propose_iban('r4-pa-0001', 'EUR', 'FR7730004000039876543210982')));
+select is(pg_temp.try('04', pg_temp.confirm_iban('r4-pa-0002', pg_temp.acc('pb1'), 'FR7730004000039876543210982')), 'active',
+  'S1 (round 4): another IBAN replaces the flagged one');
+insert into t select 'c6', pg_temp.chk(null);
+select is(pg_temp.shown('EUR', 'c6'), '{} listed=0 alerted=0 card=false',
+  'S1 (round 4): no current account carries the flagged IBAN: the check closes (not listed, not alerted, payouts free)');
+-- … → A: the flagged IBAN again, proposed by a new admin (14), confirmed by Martin's administrator (client space)
+insert into j select 'pa6', to_jsonb(pg_temp.try('14', pg_temp.propose('r4-pa-0003')));
+select is(pg_temp.try('03', pg_temp.confirm('r4-pa-0004', pg_temp.acc('pa6'))), 'active',
+  'S1 (round 4): the flagged IBAN is confirmed again (A → B → A)');
+insert into t select 'c7', pg_temp.chk(null);
+select results_eq($$ select pg_temp.shown('EUR', 'c7'), pg_temp.try('14', pg_temp.clr('r4-clr-0001')) $$,
+  $$ values ('{payee_name_mismatch} listed=1 alerted=1 card=true'::text, 'payee check refused: same_person'::text) $$,
+  'S1 (round 4): the check reopens — listed, alerted, on the transfer, the payouts blocked — and its new proposer does not clear it');
+-- (b) a USD account of Martin carrying the flagged IBAN, proposed by ops 15, confirmed by the client
+insert into j select 'pu1', to_jsonb(pg_temp.try('15', pg_temp.propose_iban('r4-pa-0005', 'USD', 'FR7630004000031234567890143')));
+select is(pg_temp.try('03', pg_temp.confirm_iban('r4-pa-0006', pg_temp.acc('pu1'), 'FR7630004000031234567890143')), 'active',
+  'S1 (round 4): a USD payout account carries the flagged IBAN too');
+select results_eq($$ select pg_temp.try('15', pg_temp.clr('r4-clr-0002')), pg_temp.can_clear('15') $$,
+  $$ values ('payee check refused: same_person'::text, 'false'::text) $$,
+  'S1 (round 4): who proposed that IBAN for the client in another currency does not clear the check (nor is offered to)');
+select is(pg_temp.try('04', pg_temp.retire('r4-pa-0007', pg_temp.acc('pa6'))), 'retired',
+  'S1 (round 4): the EUR account carrying it is retired');
+insert into t select 'c8', pg_temp.chk(null);
+select results_eq($$ select pg_temp.shown('USD', 'c8') like '%payee_name_mismatch% listed=1 alerted=1 card=true' $$,
+  $$ values (true) $$,
+  'S1 (round 4): the USD account still carries the flagged IBAN: the check stays open — listed, alerted, on the transfer — and USD payouts blocked');
+-- (c) no current account carries it; a proposal of it is pending
+select is(pg_temp.try('04', pg_temp.retire('r4-pa-0008', pg_temp.acc('pu1'))), 'retired',
+  'S1 (round 4): the USD account is retired too');
+insert into j select 'pa7', to_jsonb(pg_temp.try('13', pg_temp.propose('r4-pa-0009')));
+insert into t select 'c9', pg_temp.chk(null);
+select is(pg_temp.shown('EUR', 'c9'), '{payout_account_unconfirmed} listed=0 alerted=0 card=false',
+  'S1 (round 4): a proposal of the flagged IBAN not yet confirmed is not current: the check is not listed nor alerted; the payout waits for its confirmation');
+select is(pg_temp.try('03', pg_temp.confirm('r4-pa-0010', pg_temp.acc('pa7'))), 'active',
+  'S1 (round 4): once confirmed, the flagged IBAN is current again');
 select is(pg_temp.try('11', pg_temp.clr('r2-clr-0006')), 'true', 'S1: a third person clears it …');
 insert into t select 'c4', pg_temp.chk(null);
 select results_eq($$ select private.remittance_payout_blockers('00000000-0000-0000-0000-0000000000a1', 'EUR', private.paris_today()),

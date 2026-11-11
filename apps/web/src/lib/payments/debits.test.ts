@@ -493,3 +493,16 @@ describe("M2c-6a review, round 3 (E2): a refund whose transfer was debited alrea
     expect(checkLabel("transfer_already_debited").help).toContain("demandez à la banque de ne pas l'exécuter");
   });
 });
+
+describe("M2c-6a review, round 4 (G1, G2): what left the account late is never paid twice", () => {
+  it("refuses linking an old reference's debit while the refund's re-issue is in a downloaded file", () => {
+    const message = "debit link refused: posting_failed (23514: refund refused: reissue_in_downloaded_file)";
+    expect(debitErrorCode(message)).toBe("refund_reissue_in_downloaded_file");
+    expect(errorText("refund_reissue_in_downloaded_file")).toContain("annuler ce fichier");
+    expect(errorText("refund_reissue_in_downloaded_file")).toContain("puis rattachez");
+    expect(debitErrorCode("refund refused: in_downloaded_file")).toBe("refund_in_downloaded_file");
+  });
+  it("alerts a transfer cancelled alone and debited late after all", () => {
+    expect(checkLabel("transfer_already_debited").help).toContain("annulé seul");
+  });
+});

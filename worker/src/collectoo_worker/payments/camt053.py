@@ -3,10 +3,16 @@ by local name (M2-07, design §8.3).
 
 What is read, per <Stmt>: Id, ElctrncSeqNb, CreDtTm (GrpHdr/CreDtTm when a <Stmt> has none), FrToDt,
 Acct/Id/IBAN and Ccy (must be the selected client-funds account), the opening (OPBD, else PRCD) and
-closing (CLBD) booked balances. FrToDt is read conservatively (M2c-6a review round 3, E4): a
-ToDtTm at midnight (T00:00:00) on a later date than the period's start ends the period the day
-before — the statement shows nothing of that day. CreDtTm is kept, with its offset (Paris time
-when it has none): a day counts as covered only by a statement the bank produced after it. Per
+closing (CLBD) booked balances. FrToDt is read in Paris time (its offset, else Paris; a bound
+written as a date only is its midnight) and conservatively (M2c-6a review rounds 3 and 4, E4, G3):
+the period (from_date … to_date) runs from FrDtTm's day to ToDtTm's, a ToDtTm at midnight on a
+later date than the start ending it the day before; the days it shows whole (covers_from …
+covers_to, none when it shows part of a day only) start the day after FrDtTm unless that is at
+00:00:00 and end the day before ToDtTm unless that is at 23:59:59 or later. Without FrToDt the
+period starts at the closing balance's date — the day after the opening balance's when that one is
+a PRCD or dated before the closing — and ends at the closing balance's date. CreDtTm is kept, with
+its offset (Paris time when it has none): a day counts as covered only by a statement the bank
+produced after it. Per
 <Ntry> booked (Sts BOOK; PDNG and INFO are counted and skipped): Amt, CdtDbtInd, RvslInd,
 BookgDt, ValDt, AcctSvcrRef, BkTxCd, AddtlNtryInf. Per <TxDtls>: Refs (AcctSvcrRef, EndToEndId
 with NOTPROVIDED read as none, TxId, MndtId), the amount (TxDtls/Amt, or AmtDtls/TxAmt/Amt in .02),
@@ -36,7 +42,7 @@ from __future__ import annotations
 import codecs
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -69,10 +75,8 @@ ISO_DATETIME_RE = re.compile(
     r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?"
     r"(Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?"
 )
-# a ToDtTm at the start of its day: the period ended with the day before (review round 3, E4)
-MIDNIGHT_RE = re.compile(
-    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T00:00:00(?:\.0+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
-)
+MIDNIGHT = time(0)  # a period bound at the start of its day
+END_OF_DAY = time(23, 59, 59)  # a period bound at the end of its day (or later)
 PARIS = ZoneInfo("Europe/Paris")  # a bank's local time when a date-time has no offset
 HEAD_BYTES = 64 * 1024
 MAX_LINES = 250_000  # the same cap as the CSV reader: a longer statement is exported in parts
@@ -224,6 +228,7 @@ class _Reader:
             amount = self.amount(f, "Amt", f"{where}, balance {code}")
             sign = -1 if first(f, "CdtDbtInd") == "DBIT" else 1
             balances.setdefault(code, (sign * amount, self.day(f, "Dt", where)))
+        opening_code = "OPBD" if "OPBD" in balances else "PRCD"
         opening = balances.get("OPBD") or balances.get("PRCD")
         closing = balances.get("CLBD")
         if opening is None or closing is None:
@@ -231,18 +236,26 @@ class _Reader:
                 "missing_balance", f"{where} has no opening (OPBD) or closing (CLBD) balance"
             )
         seq_text = q.text(stmt, "ElctrncSeqNb")
-        start = self.datetime_date(q.text(stmt, "FrToDt/FrDtTm"), where) or opening[1]
-        to_text = q.text(stmt, "FrToDt/ToDtTm")
-        end = self.datetime_date(to_text, where) or closing[1]
-        # a period up to the next midnight is the days before it
-        if (
-            to_text is not None
-            and end is not None
-            and start is not None
-            and end > start
-            and MIDNIGHT_RE.fullmatch(to_text)
-        ):
-            end -= timedelta(days=1)
+        # review round 4 (G3): the bounds in Paris time, and the days the period shows whole
+        from_at = _bound(q.text(stmt, "FrToDt/FrDtTm"), where)
+        to_at = _bound(q.text(stmt, "FrToDt/ToDtTm"), where)
+        start: date | None
+        whole_from: date | None
+        if from_at is not None:
+            start = from_at.date()
+            whole_from = start if from_at.time() == MIDNIGHT else start + timedelta(days=1)
+        else:
+            start = whole_from = _start_without_period(opening[1], closing[1], opening_code)
+        end: date | None
+        whole_to: date | None
+        if to_at is not None:
+            end = to_at.date()
+            # a period up to the next midnight is the days before it (review round 3, E4)
+            if to_at.time() == MIDNIGHT and start is not None and end > start:
+                end -= timedelta(days=1)
+            whole_to = to_at.date() - timedelta(days=0 if to_at.time() >= END_OF_DAY else 1)
+        else:
+            end = whole_to = closing[1]
         self.header = _Header(
             stmt_id=q.text(stmt, "Id"),
             seq=int(seq_text) if seq_text and seq_text.isdigit() else None,
@@ -251,6 +264,8 @@ class _Reader:
             opening=opening[0],
             closing=closing[0],
             created_at=self.datetime(q.text(stmt, "CreDtTm"), where) or self.group_created,
+            whole_from=whole_from,
+            whole_to=whole_to,
         )
         self.section_open = stmt
         self.entry_no = 0
@@ -267,6 +282,11 @@ class _Reader:
         end = h.end or (max(booked) if booked else None)
         if start is None or end is None:
             raise StatementRejected("date_invalid", f"statement {section_no} has no dates")
+        # the whole days (review round 4, G3): none known when the dates came from the lines, or
+        # when the period shows part of a day only
+        whole_from, whole_to = h.whole_from, h.whole_to
+        if whole_from is None or whole_to is None or whole_from > whole_to:
+            whole_from = whole_to = None
         section = Section(
             stmt_id=h.stmt_id,
             seq=h.seq,
@@ -277,6 +297,8 @@ class _Reader:
             opening_minor=h.opening,
             closing_minor=h.closing,
             created_at=h.created_at,
+            covers_from=whole_from,
+            covers_to=whole_to,
         )
         check_balanced(section, self.out.lines, section_no)
         self.out.sections.append(section)
@@ -500,6 +522,8 @@ class _Header:
     opening: int
     closing: int
     created_at: datetime | None
+    whole_from: date | None
+    whole_to: date | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -569,17 +593,45 @@ def _iso_date(text: str, where: str) -> date:
 
 def _iso_datetime(text: str, where: str) -> datetime:
     """ISODateTime is xs:dateTime: YYYY-MM-DDThh:mm:ss, an optional fraction, an optional time zone
-    (Z, +hh:mm, -hh:mm). Without one, the bank's local time (Paris)."""
+    (Z, +hh:mm, -hh:mm). Without one, the bank's local time (Paris). 24:00:00 is the end of its
+    day: the next day's midnight."""
     found = ISO_DATETIME_RE.fullmatch(text)
+    end_of_day = False
     try:
         if found is None:
             raise ValueError(text)
         base, fraction, zone = found.group(1), found.group(2) or "", found.group(3)
         offset = "" if zone is None else "+00:00" if zone == "Z" else zone
+        end_of_day = base.endswith("T24:00:00") and fraction.strip(".0") == ""
+        if end_of_day:
+            base, fraction = base[:11] + "00:00:00", ""
         value = datetime.fromisoformat(base + fraction[:7] + offset)  # microseconds at most
     except ValueError as exc:
         raise StatementRejected("date_invalid", f"{where}: {text!r} is not a date-time") from exc
+    if end_of_day:
+        value += timedelta(days=1)
     return value if value.tzinfo is not None else value.replace(tzinfo=PARIS)
+
+
+def _bound(text: str | None, where: str) -> datetime | None:
+    """A FrToDt bound in Paris time (review round 4, G3): an xs:dateTime with its offset, else
+    Paris; one written as a date only (not the schema's type, read as before) is its midnight."""
+    if text is None:
+        return None
+    if ISO_DATE_RE.fullmatch(text):
+        return datetime.combine(_iso_date(text, where), MIDNIGHT, tzinfo=PARIS)
+    return _iso_datetime(text, where).astimezone(PARIS)
+
+
+def _start_without_period(opening: date | None, closing: date | None, code: str) -> date | None:
+    """Without FrToDt (review round 4, G3): the closing balance's date — the day after the opening
+    balance's when that one is a PRCD (the previous day's closing) or is dated before the closing
+    (it may be the previous evening's): the earliest day the statement can be said to show whole."""
+    if opening is None:
+        return closing
+    if code == "PRCD" or (closing is not None and opening < closing):
+        return opening + timedelta(days=1)
+    return closing if closing is not None else opening
 
 
 def _read(path: Path, ns: str, reader: _Reader) -> None:

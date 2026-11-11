@@ -221,6 +221,8 @@ export type ErrorCode =
   | "transfer_batch_ambiguous"
   | "run_transfer_already_debited"
   | "refund_already_debited"
+  | "refund_reissue_in_downloaded_file"
+  | "transfer_file_holds_debited"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -455,6 +457,12 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Un relevé montre déjà le débit du virement de ce reversement (sous sa référence, ou celle du virement qu'il remplace : un fichier annulé exécuté plus tard malgré tout) : ne l'annulez pas, ses encaissements seraient reversés une seconde fois. Prévenez le support pour rattacher ce débit.",
   refund_already_debited:
     "Un relevé montre déjà le débit de ce remboursement (sous sa référence, ou celle du virement qu'il remplace : un fichier annulé exécuté plus tard malgré tout) : ne l'annulez pas, il serait remboursé une seconde fois. Prévenez le support pour rattacher ce débit.",
+  // M2c-6a review, round 4 (G2): the debit of a re-issued refund's old reference, while the re-issue is in a downloaded
+  // file — that file would refund it again; (G4) a downloaded file holding a transfer that left the account already
+  refund_reissue_in_downloaded_file:
+    "Ce débit porte l'ancienne référence d'un remboursement réémis, et le virement réémis est dans un fichier déjà téléchargé : rattaché maintenant, ce fichier le rembourserait une seconde fois. Faites d'abord annuler ce fichier (« Virements » : une demande, puis la confirmation d'une autre personne, relevé à l'appui), puis rattachez ce débit.",
+  transfer_file_holds_debited:
+    "Un virement de ce fichier a déjà été débité sous la référence du virement qu'il remplace (un fichier annulé exécuté plus tard malgré tout) : le fichier n'est plus servi — déposé, il le paierait une seconde fois. Ne le déposez pas ; demandez à la banque de ne pas exécuter ce fichier s'il a été déposé, et prévenez le support.",
   run_payout_in_downloaded_file:
     "Le virement de ce reversement est dans un fichier déjà téléchargé : faites d'abord annuler ce virement (une demande, puis la confirmation d'une autre personne, relevé à l'appui), puis annulez le reversement.",
   // M2c-6a review (T3): a refund the transfer file cannot carry

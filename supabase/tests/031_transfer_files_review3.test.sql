@@ -214,11 +214,15 @@ begin
          coalesce(d.v ->> 'dir', 'debit'), (d.v ->> 'amount')::bigint, 'EUR', p_to,
          coalesce(d.v ->> 'kind', 'transfer_out'), d.v ->> 'e2e', d.v ->> 'pmt_inf', d.v ->> 'orig_e2e'
   from jsonb_array_elements(p_debits) with ordinality d (v, ord);
-  -- a camt.053's sections as the parser gives them: the bank's creation time (Stmt/CreDtTm), by default its upload's
+  -- a camt.053's sections as the parser gives them: the bank's creation time (Stmt/CreDtTm), by default its upload's;
+  -- its period, the whole days it shows and its balances (review round 4, G3)
   update public.bank_statement set status = 'imported', from_date = coalesce(p_from, p_to), to_date = p_to,
     opening_booked_minor = 0, closing_booked_minor = p_closing, counts = '{}', finished_at = clock_timestamp(),
     sections = case when p_format = 'camt053'
                     then coalesce(p_sections, jsonb_build_array(jsonb_build_object(
+                           'from_date', coalesce(p_from, p_to), 'to_date', p_to,
+                           'covers_from', coalesce(p_from, p_to), 'covers_to', p_to,
+                           'opening_minor', '0', 'closing_minor', p_closing::text,
                            'created_at', coalesce(p_created_at, p_uploaded_at, now())))) end
   where id = s;
   return s;
@@ -549,7 +553,9 @@ select results_eq($$ select pg_temp.covers(0, 0), pg_temp.covers(1, 1),
                      from public.bank_statement s where s.id = 'e2000000-0000-0000-0000-000000000041' $$,
   $$ values (true, false, true) $$,
   'E4 (N6): a camt.053 produced on Y (its CreDtTm kept) covers X, never Y, whenever it is uploaded');
-select pg_temp.statement('42', pg_temp.d(2), null, '[]', pg_temp.d(2), pg_temp.after(2), 'camt053', null, '[{}]');
+select pg_temp.statement('42', pg_temp.d(2), null, '[]', pg_temp.d(2), pg_temp.after(2), 'camt053', null,
+                         jsonb_build_array(jsonb_build_object('from_date', pg_temp.d(2), 'to_date', pg_temp.d(2),
+                                                              'covers_from', pg_temp.d(2), 'covers_to', pg_temp.d(2))));
 select is(pg_temp.covers(2, 2), false, 'E4: a camt.053 whose creation time is not known covers no day');
 select throws_ok($$ select pg_temp.statement('44', pg_temp.d(2), null, '[]', null, null, 'camt053', null,
                                              '[{"created_at": "29/10/2026 06:10"}]') $$, '22023',

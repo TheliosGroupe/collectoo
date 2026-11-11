@@ -811,6 +811,8 @@ select pg_temp.as_user('01');
 select lives_ok($$select public.request_refund('k-refund-0070', pg_temp.pay('07'), '1000', 'FR7630006000011234567890189',
   'PAYEUR 07', 'partial_return', 'partial_return', '6000', 'reste remboursé')$$, 'a refund of what is left');
 reset role;
+-- (a fixture shortcut: a real RFD id is made at the request, so no bank can debit it on a day before the refund was
+-- asked; the line is dated 2026-11-01 only to reach the before_previous_return refusal — M2c-6a review round 4)
 select pg_temp.line('r7', 'debit', 'refund_out', 1000, '2026-11-01', pg_temp.rfd_of('07'));
 set local role authenticated;
 select pg_temp.as_user('01');
