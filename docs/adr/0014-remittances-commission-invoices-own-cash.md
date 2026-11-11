@@ -486,5 +486,55 @@ Confirmed findings of the five-lens review (pain.001, money, security, concurren
   - **Docs**: « off until M2c-6b (ADR-0014 M2c-6a round 5; OQ-81): `bank_booking_required` » on the design's command-table transfer-file rows, §9.7's earlier bullets, §9.8's `sent --> cancelled` edge and states, §9.9's Transfers row, the pages' « Annuler » and « Rejeté par la banque », and the risk table's « cancel after download »; COMPLIANCE OQ-50's T1 sentence, OQ-80's opening and CPCE-07's refund clause (the reference-less line); DOMAIN « Virement ordonné », « Virement », « Fichier de virements », « Attestation », « Annulation à deux », « Reversement annulé après téléchargement », the two-step cancellations and « Re-issue »; this ADR's M2c-6a body (cancellations), T1 and E1. OQ-80 (n), design §9.7 (round 7) and ROADMAP record the reference-less rule.
   - **Round 7's verifier, closed at integration.** (1) **N5**: a refund booked by a reference-less line leaves no debit of its file to read (`transfer_file_executed` and `transfer_debit_seen` false), so its file was still served past the warning — uploaded again it would pay it all twice. `transfer_file_download` now also refuses `file_executed` while one of the file's payouts, refunds or sweeps is booked or returned (`033`: a refund-only file booked by a reference-less line, refused acknowledged or not; fails on round 7's body). (2) **H-PAY** (switch on only): a first refund's file cancelled whole, that refund cancelled, a second refund of the same payment (re-issuing none) in a downloaded file — the old file's late reference-less line executes the second refund, which its own file then refunds again. Unreachable with the switch off (no file downloaded is ever cancelled); recorded as a fourth M2c-6b prerequisite, a `034` TODO (the round-7 verifier's candidate: a reference-less line executes such a refund only while no earlier transfer of the payment, or of the account, sat in a downloaded file cancelled since). (3) The `transfer_already_debited` hint of `cancel_remittance_run` no longer says the debit « sera rattaché » (a payout's is not booked before M2c-6b).
 
+## M2c-6b-1: bookings core — our payouts' and sweeps' debits booked from the statement (plan docs/design/m2c-6b-plan.md §1.2, §2.1–§2.5, §4; design §5, §7, §12, §13, §15)
+
+Migration `20261116090000_debit_bookings.sql` (forward-only; it redefines what it changes), pgTAP `035`, worker
+`decide_bookings` and the debit job's funds pass, `synth camt053 --debits-of`. The cancellation after download stays
+**off** (`downloaded_file_cancellation`); it is 6b-3's. Decisions:
+
+- **What the job books by itself** (plan §2.3): a debit carrying a payout's RMT id or the sweep's SWP id, of the
+  transfer's paying account and amount, whose transfer is `in_file` in a file downloaded or sent (or its batch line:
+  no end-to-end id, the PmtInfId of the transfer in its current file, Σ of the PmtInf's `in_file` members = the line,
+  one kind, no cancelled member); its return (a credit with the RMT/SWP id as original id, line ≤ amount: the booked
+  entry reversed in full, the difference a `bank_fee` booked on the line, the payout account `returned`, the run's
+  items back in `remittance_pending` as `payout_returned`); each booked payout's run settlement
+  (`private.post_run_settlements`, the set twin of `post_run_settlement`); a cover advance (`client_advance`, cause
+  `payout_overrun`) when the remittance would put the client's 4670 in debit (I13). Batch lines stay `batch_unsplit` /
+  `other_debit` as the import read them; the PmtInf decides.
+- **Never automatically** (P0 reviews, alerts): a debit of a cancelled transfer (`cancelled_transfer_debited`), a second
+  debit of a booked one (`transfer_debited_twice`), a transfer never handed out (`transfer_not_handed_out`), an RMT/SWP
+  id or a PmtInf we do not know (`transfer_unknown`); and to ops with why: `transfer_differs`, `run_not_in_flight`,
+  `batch_partial`, `batch_mixed`, `return_differs`, `return_before_debit` (a return whose debit the same chunk books is
+  decided again by a follow-up pass). Our RMT/SWP debits, our batch lines and their returns are refused « explained »
+  (`not_explainable`) and are never fees (`not_a_fee`). 6b-2 adds ops' `book_transfer_line`.
+- **One PmtInf per kind** (plan §2.1): `generate_transfer_file` groups payouts, refunds, then the sweep, so a batch line
+  is one kind. A PmtInf holding one refund alone is that refund's debit, linked by the M2b pass (`debit_candidates`).
+- **The funds pass runs in its own transaction** (plan §2.5 [critic]): the debit job's first message runs the M2b pass
+  and queues `{"funds_after": null}`; the funds pass takes runs FOR UPDATE → payout accounts → bank accounts → the
+  allocation lock → lines → the remit lock → files → transfers, so it never deadlocks with a run's cancellation or a
+  file's download (integration test on two connections). The import queues the job for a batch line naming a PmtInf.
+- **Signed checks**: I19 `bank_cash_identity` sums the bookings' and links' 5120 postings; `bank_line_booking_check`
+  checks a line against its signed movement once its last booking is in; I20 `transfer_booked_once` (a booked payout,
+  sweep or top-up has exactly one debit booking, a returned one one return; a booked run its transfer); new alerts
+  (`payout_returned`, `sweep_returned`, `payout_overrun`, `bank_line_unbooked`, `servicer_funds_unswept`,
+  `top_up_pending`, the P0 ones). The accounting export names the debits' documents (the end-to-end id, the bank's
+  reference, the advance's cause) and reads them by key under `enable_seqscan = off`.
+- **R124-6** (Q7's default, OQ-36): a returned payout's items keep their lines' deadline; a breach of one is recorded
+  `blocked_reason = 'payout_returned'`; an in-flight line counts as paid when its transfer is proven not to have left
+  (never handed out, or the statement covers its date without its debit).
+
+**Deviations from the plan, recorded:**
+- **Round-7 SQL hints and 033 kept** (plan §4.2 rewords six SQL hints and updates 033's hint assertion): this slice must
+  leave 033 and 034 as they are, so the SQL hints that say a payout's debit « ne peut pas encore être comptabilisé »
+  keep their wording until 6b-3 (which inverts 033); the web texts are reworded now (« automatiquement, à l'import du
+  relevé »). The pages never show the hints' raw text. Founder question.
+- **Tests changed and why** (each assertion kept unless named): 017 — an RMT debit can no longer be « explained »
+  (`not_explainable`) nor booked as a fee (`not_a_fee`): plan §2.3; 031 — the N1 fixture's batch line split per
+  PmtInf (one PmtInf per kind: payouts, refund, sweep), assertions unchanged; 026 — unchanged, the export now reads by
+  key whatever the statistics (it failed once autovacuum had marked `remittance_run` empty); worker `test_funds_integration`
+  — an unknown RMT id is `transfer_unknown`, and is refused « explained »; the M2c-4/5 integration tests' emulated payout
+  booking (`book_payout`) now goes through the real path (file, download, a statement of its debit, the job), because I20
+  flags a payout booked without its debit. 034's TODO 16 (G1c alert) passes now; its TODO markers stay (6b-3).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

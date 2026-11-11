@@ -965,6 +965,8 @@ The statement is built in SQL from the frozen lines, the entries and the identit
 
 ## 12. Reconciliation: booking from the statement
 
+> **Built in M2c-6b-1** (ADR-0014 « M2c-6b-1 »; plan `docs/design/m2c-6b-plan.md` §2.3): the debit job books our payouts and sweeps from their debits (own id, or a batch line of their PmtInf — one kind per PmtInf), their returns (charge as a fee), each payout's settlement and the cover advance; the rest goes to ops with why (P0 for a cancelled transfer debited, a second debit, a transfer never handed out). Ops' bookings are 6b-2's.
+
 **Classification at import** (Python `payments.statement.classify` and SQL ingest, kept in parity):
 - a debit whose end-to-end id starts with `RMT` or `SWP`, or a debit to a registered own IBAN → `transfer_out`;
 - a credit from a registered own IBAN, or carrying our `TOP` id → `own_transfer_in`, **never automatically a debtor payment** (ops may release one as a debtor payment the servicer relays, below);

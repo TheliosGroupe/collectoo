@@ -6,9 +6,11 @@ file of 5,000 transfers and the cash check under load).
 (one command: the per-transfer checks, the cash check, the items, the transfers in the file), the
 `transfer_file` job (5,000 transactions written, checked, uploaded), the download, the cash check
 and « Virements » with the 5,000 in flight, then a statement showing their 5,000 debits (each seen
-by its RFD id: none in flight any more). The new tables' statistics are forgotten first (the state
-CI meets). Prints the timings (docs/benchmarks/remittances.md). TRANSFER_FILE_SIZE changes the
-size."""
+by its RFD id: none in flight any more). M2c-6b-1: the debit job books those 5,000 debits (the
+M2b pass links each to its refund; the funds pass, in its own message, reads the account's lines
+of ours), each transfer read by key; then the nightly checks with I19 and I20 over them. The new
+tables' statistics are forgotten first (the state CI meets). Prints the timings
+(docs/benchmarks/remittances.md). TRANSFER_FILE_SIZE changes the size."""
 
 import hashlib
 import logging
@@ -20,10 +22,13 @@ from typing import Any
 
 import psycopg
 import pytest
+from debit_helpers import checks, violations
 from integration_helpers import DB, one, storage
+from psycopg.types.json import Jsonb
 from reconciliation_helpers import pay
 from remittance_helpers import drain, recent_business_day, staff
 from statement_helpers import bank_tenant
+from statement_helpers import drain as drain_payments
 from stats_helpers import forget_statistics
 
 from collectoo_worker.remittance import pain001
@@ -44,6 +49,18 @@ _FETCHED = (
     "select coalesce(sum(idx_tup_fetch + seq_tup_read), 0) from pg_stat_xact_user_tables"
     " where relid = 'public.bank_transaction'::regclass"
 )
+
+
+def _transfer_reads() -> int:
+    """Rows of bank_transfer read since the statistics were last reset, by every backend (the
+    job's own connections included): the M2b and funds passes read each transfer by key."""
+    with psycopg.connect(DB) as conn:
+        conn.execute("select pg_stat_force_next_flush()")
+        row = conn.execute(
+            "select coalesce(idx_tup_fetch, 0) + coalesce(seq_tup_read, 0) from pg_stat_user_tables"
+            " where relid = 'public.bank_transfer'::regclass"
+        ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def _cash(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, int]:
@@ -187,6 +204,35 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
     assert cash_read <= 2 * SIZE, cash_read
     assert seen_read <= 2 * SIZE, seen_read
 
+    # M2c-6b-1: the debit job books them (as the import queues it), then the nightly checks
+    forget_statistics("public.bank_line_booking")
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute(
+            "select pgmq.send('payments', %s)",
+            (Jsonb({"type": "process_debits", "organization_id": str(tenant["servicer"])}),),
+        )
+    transfers_before = _transfer_reads()
+    booking = time.monotonic()
+    drain_payments(storage())
+    book_s = time.monotonic() - booking
+    transfer_reads = _transfer_reads() - transfers_before
+    with psycopg.connect(DB) as conn:
+        executed = one(
+            conn,
+            """select count(*) from public.refund_request r
+               join public.bank_transfer t on t.id = r.transfer_id
+               where t.transfer_file_id = %s and r.status = 'executed'
+                 and r.cash_out_entry_id is not null""",
+            (generated["file_id"],),
+        )
+    assert executed == SIZE
+    # each transfer read by key, a bounded number of times over the passes (10,000 for 5,000)
+    assert transfer_reads <= 3 * SIZE, transfer_reads
+    nightly = time.monotonic()
+    run = checks(tenant)
+    nightly_s = time.monotonic() - nightly
+    assert violations(str(run["run_id"])) == []
+
     logs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("transfer file ")]
     print(
         f"\n{SIZE} transfers: refunds asked in {asked_s:.1f}s; generation (command)"
@@ -194,10 +240,13 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
         f" {check_s:.2f}s; {len(data)} bytes; download (command) {download_s:.2f}s; cash check with"
         f" {SIZE} in flight {cash_s:.2f}s ({cash_read} bank lines read), once their debits are seen"
         f" {seen_s:.2f}s ({seen_read} read); « Virements »"
-        f" {overview_s:.2f}s"
+        f" {overview_s:.2f}s; the debit job booking the {SIZE} debits {book_s:.1f}s"
+        f" ({transfer_reads} transfer rows read, all passes); nightly checks {nightly_s:.1f}s"
     )
     # the commands within the API's 8 s; the job well within the queue's visibility timeout
     assert generate_s < 8
     assert download_s < 8
     assert overview_s < 8
     assert write_s < 60
+    assert book_s < 120
+    assert nightly_s < 30

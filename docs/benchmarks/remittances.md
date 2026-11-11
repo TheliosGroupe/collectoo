@@ -398,3 +398,30 @@ reset stack: refunds asked 18.9 s; « Générer le fichier » **2.00 s** (each p
 probes its own debit by end-to-end id, `already_debited`, review round 2 D4 — one keyed probe per transfer, as the
 cash check's); job 1.00 s; structural check 0.44 s; download 0.25 s; cash check 0.12 s in flight (0 bank lines
 read), 0.08 s once debited (5,000 read, one per transfer); « Virements » 0.12 s.
+
+## Debit bookings (M2c-6b-1, migration `20261116090000`)
+
+What M2c-6b-1 adds to the debit job: the M2b pass (refunds' RFD links, now also a single-refund PmtInf's batch line)
+is followed by the funds pass in its own message and transaction, which reads the account's lines of ours
+(`private.bank_booking_candidates`: per-branch limited unions, each transfer read once as a composite row) and books
+payouts, sweeps, returns, fees, top-ups and each payout's run settlement (one `ledger_post_set` call, the set
+settlement, the cover advances); the nightly checks add I19 signed by the 5120 postings, I20 `transfer_booked_once`
+and the bookings' alerts. Plan targets (§1.4): the job within the queue's visibility timeout, each transfer read by
+key a bounded number of times, the nightly checks well under 30 s.
+
+### Result (2026-11-11, cloud session VM: 4 vCPU, 16 GB RAM, local stack right after `supabase db reset`; the scale
+job's `test_transfer_files_scale_integration.py`, the new tables' statistics forgotten first)
+
+| Step | Size | Time |
+|---|---|---|
+| The debit job over a statement of the file's debits (M2b pass in chunks, then the funds pass) | 5,000 RFD debits | **9.8 s**; 10,000 `bank_transfer` rows read over both passes (2 per transfer: keyed) |
+| Nightly checks with I19, I20 and the bookings' alerts over them | 5,000 booked | **1.7 s**, 0 violations |
+| Generation (command) / job / download (command) of the 5,000-transfer file (unchanged from M2c-6a) | 5,000 transfers | 2.36 s / 0.95 s / 0.75 s |
+| Cash check with 5,000 in flight / once their debits are seen | 5,000 | 0.11 s (0 lines read) / 0.08 s (5,000 read) |
+
+- The scale test asserts the job under 120 s, the checks under 30 s, and at most 3 reads of `bank_transfer` per
+  transfer over all passes; every refund executed with its `cash_out`.
+- Payouts and sweeps booked by the funds pass are timed in the integration tests only (a run per client: a 5,000-payout
+  scale fixture needs 5,000 clients' runs; one run's debit with its settlement is a single `ledger_post_set` call plus
+  the set settlement, measured at under 0.1 s a chunk in `test_debit_bookings_integration.py`'s job logs).
+
