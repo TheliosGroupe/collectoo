@@ -225,7 +225,8 @@ select ok(not has_function_privilege('authenticated', 'private.post_debit_links(
           and has_function_privilege('service_role', 'private.run_payment_checks(uuid)', 'execute')
           and not has_function_privilege('authenticated', 'private.post_direct_payment(uuid, jsonb, text, text)', 'execute'),
   'only the worker posts debits, direct payments and runs the checks');
-select ok(not has_function_privilege('anon', 'public.request_refund(text, uuid, text, text, text, text, text, text, text)', 'execute')
+-- (M2c-6a: request_refund gained its execution mode, the last argument)
+select ok(not has_function_privilege('anon', 'public.request_refund(text, uuid, text, text, text, text, text, text, text, text)', 'execute')
           and not has_function_privilege('anon', 'public.link_debit(text, uuid, text, uuid, uuid, text, text)', 'execute')
           and not has_function_privilege('anon', 'public.resolve_duplicate(text, uuid, boolean, text)', 'execute')
           and not has_function_privilege('anon', 'public.record_direct_payment(text, uuid, uuid[], text, date, uuid, text)', 'execute')
