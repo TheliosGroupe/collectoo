@@ -176,6 +176,15 @@ export type ErrorCode =
   | "run_busy"
   | "run_retry"
   | "execution_date_invalid"
+  | "credit_note_on_credit_note"
+  | "credit_note_nothing_left"
+  | "credit_note_in_flight"
+  | "credit_note_run_in_flight"
+  | "credit_note_file"
+  | "credit_note_amount"
+  | "credit_note_too_much"
+  | "credit_note_changed"
+  | "credit_note_category"
   | "unknown";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -342,6 +351,17 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Un traitement est en cours sur ce reversement ou pour ce cabinet (préparation, validation, imputation ou établissement du relevé) : réessayez dans un instant.",
   run_retry: "La date a changé (minuit) pendant l'opération : rien n'a été enregistré. Réessayez.",
   execution_date_invalid: "La date d'exécution demandée doit être un jour ouvré, à partir d'aujourd'hui.",
+  credit_note_on_credit_note: "Un avoir ne se rectifie pas par un autre avoir.",
+  credit_note_nothing_left: "Cette facture est déjà entièrement rectifiée : il ne reste rien à créditer.",
+  credit_note_in_flight:
+    "Un reversement validé compense cette facture sur son virement, pas encore débité : attendez son débit, ou annulez ce reversement.",
+  credit_note_run_in_flight:
+    "Le reversement qui a émis cette facture est validé mais pas encore débité : il peut encore être annulé. Attendez son débit, ou annulez-le, avant d'émettre un avoir.",
+  credit_note_file: "Ce dossier n'a plus rien de facturé sur cette facture.",
+  credit_note_amount: "Indiquez un montant HT positif, au centime près (par exemple 30,00).",
+  credit_note_too_much: "Le montant dépasse ce qui reste facturé (sur la facture, ou sur le dossier choisi).",
+  credit_note_changed: "La facture a changé depuis l'affichage de la page (un autre avoir ?) : rechargez-la puis recommencez.",
+  credit_note_category: "Choisissez le motif de l'avoir dans la liste.",
   unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 

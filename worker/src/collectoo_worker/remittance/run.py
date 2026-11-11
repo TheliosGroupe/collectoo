@@ -12,6 +12,9 @@ the run's draft; the approval freezes it.
   or when the engine cannot price the lines (`CommissionInputError`, e.g. a same-run reversal that
   does not mirror its collection; ADR-0014 M2c-3 « For M2c-4 »): the run remits gross, its lines
   keep state `pending` and a later run prices them with its own lines (their pricing is that run's).
+  The approval takes such a draft (M2c-5b review round 2: no refusal of its own); one prepared while
+  a manual credit note committed is sent back by `history_changed` (the history's position is read
+  first), so only a persistent data error — e.g. a key I22 flags — remits gross this way.
 * **Lines of earlier runs left pending** are priced with the run's own lines (posting order) and
   their pricing is returned apart (`Draft.repricing`): their money was remitted already.
 * **Deadlines**: one per distinct (E, delay), for the positive collections (allocations and
@@ -42,6 +45,7 @@ from collectoo_worker.remittance.commission import (
     KeyState,
     Line,
     LineCommission,
+    LineInvoices,
     LineKind,
     Part,
     TermsVersion,
@@ -161,7 +165,7 @@ class Facts:
     charges: Mapping[tuple[str, str], Sequence[EarlierCharge]]
     invoices: Mapping[str, EarlierInvoice]
     invoice_numbers: Mapping[str, tuple[str, date]]  # earlier invoice → (number, issue date)
-    line_invoices: Mapping[str, str]
+    line_invoices: LineInvoices  # an earlier line → the invoice(s) charging it (corrective first)
     open_documents: Sequence[OpenInvoiceRow]
     payout_blockers: Sequence[str]
     commission_blockers: Sequence[str]
@@ -352,6 +356,14 @@ def prepare_run(facts: Facts, cal: Calendar | None = None) -> Draft:
     check(the_plan)
     _apply_plan(facts, documents, the_plan)
     touched = {(p.account_id, p.tier_key) for lc in results.values() for p in lc.parts}
+    # what the waivers of manual credit notes absorb of the run's credits, per key (M2c-5b): written
+    # with the key's state at approval (no document carries it)
+    absorbed: dict[tuple[str, str], list[list[str]]] = {}
+    for d in docs.values():
+        for w in d.absorbed:
+            absorbed.setdefault((w.account_id, w.tier_key), []).append(
+                [w.invoice_id, str(w.amount_minor), w.entry_id]
+            )
     key_states = tuple(
         {
             "account_id": k[0],
@@ -360,6 +372,8 @@ def prepare_run(facts: Facts, cal: Calendar | None = None) -> Draft:
             "kept_basis": str(history_after[k].kept_basis_minor),
             "kept": str(history_after[k].kept_minor),
             "commission": str(history_after[k].commission_minor),
+            "waived": str(history_after[k].waived_minor),
+            "absorbed": absorbed.get(k, []),
         }
         for k in sorted(touched)
         if k in history_after

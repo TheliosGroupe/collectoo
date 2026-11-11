@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import random
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, timedelta
 from typing import Any
 
@@ -291,6 +293,34 @@ def book_payout(run: str) -> None:
             " where id = %s",
             (run,),
         )
+
+
+@contextmanager
+def vat_rate_from_today(rate: str) -> Iterator[None]:
+    """Another standard rate from today (a change of the reference data), restored afterwards."""
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute("alter table public.vat_rate disable trigger vat_rate_guard")
+        conn.execute(
+            "update public.vat_rate set valid_to = private.paris_today()"
+            " where valid_from = '2014-01-01'"
+        )
+        conn.execute(
+            """insert into public.vat_rate (code, territory, rate, valid_from, valid_to, legal_ref,
+                 legal_url) values ('standard', 'FR-metro', %s, private.paris_today(), '2027-01-01',
+                 'test', 'https://librejustice.fr/norm/fr/code-general-des-impots/278')""",
+            (rate,),
+        )
+        conn.execute("alter table public.vat_rate enable always trigger vat_rate_guard")
+    try:
+        yield
+    finally:
+        with psycopg.connect(DB) as conn, conn.transaction():
+            conn.execute("alter table public.vat_rate disable trigger vat_rate_guard")
+            conn.execute("delete from public.vat_rate where legal_ref = 'test'")
+            conn.execute(
+                "update public.vat_rate set valid_to = '2027-01-01' where valid_from = '2014-01-01'"
+            )
+            conn.execute("alter table public.vat_rate enable always trigger vat_rate_guard")
 
 
 __all__ = ["SCHEDULE", "TERMS", "timedelta"]

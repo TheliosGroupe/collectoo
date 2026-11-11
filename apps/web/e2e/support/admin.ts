@@ -107,9 +107,13 @@ export async function createClientDocument(tenant: Tenant, kind: string, fileNam
  * A signed amicable-collection mandate covering the tenant's portfolio (CPCE R124-3), ready for confirmation (M2c-2,
  * design §9.1): its money terms (commission-1, remittance-1) with their clause references and the signed document, the
  * insurance clause, and both billing identities (the client a professional established in mainland France).
- * `complete: false` writes a version as before M2c-2 (a rate only): the portfolio is then not ready.
+ * `complete: false` writes a version as before M2c-2 (a rate only): the portfolio is then not ready. `netting: false`
+ * writes no netting clause (M2c-5b's spec: an invoice no payout sets off, so a manual credit note can rectify it).
  */
-export async function createMandate(tenant: Tenant, { complete = true }: { complete?: boolean } = {}): Promise<string> {
+export async function createMandate(
+  tenant: Tenant,
+  { complete = true, netting = true }: { complete?: boolean; netting?: boolean } = {},
+): Promise<string> {
   const admin = adminClient();
   const { data: mandate, error } = await admin
     .from("mandate")
@@ -139,7 +143,8 @@ export async function createMandate(tenant: Tenant, { complete = true }: { compl
         remittance_terms: {
           schema: "remittance-1",
           frequency: "twice_monthly",
-          netting: { clause_ref: "art. 7.2" },
+          // without a netting clause the invoices are due to the own account (none is set off on a payout)
+          netting: netting ? { clause_ref: "art. 7.2" } : null,
           clawback: null,
           invoice_payment_days: 30,
         },

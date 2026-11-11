@@ -37,12 +37,16 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from collectoo_worker.remittance.invoice import (
+    TEMPLATE_V2 as INVOICE_TEMPLATE_V2,
+)
+from collectoo_worker.remittance.invoice import (
     TEMPLATE_VERSION as INVOICE_TEMPLATE,
 )
 from collectoo_worker.remittance.invoice import (
     InvoiceDocument,
     invoice_text,
     invoice_view,
+    mention_list,
 )
 from collectoo_worker.remittance.invoice_pdf import render_invoice_pdf
 from collectoo_worker.remittance.pdf import RENDERER_VERSION
@@ -74,6 +78,12 @@ GOLDEN_INVOICE_PDF = "761e0660114a9be9c5493c9451202da80c073f81eb4391952462af68fb
 GOLDEN_DUE_PDF = "3a30df814d203fe06b4ff76b6bd19d36ddb600527187047679595be07c0a05f6"
 GOLDEN_CREDIT_PDF = "90ec403c678cd214db38d282f30250fa2a93b3fcf2369cc1c5ee64fc2630ed39"
 GOLDEN_PROCEEDING_PDF = "73161dc76f51dd97fbf8b89fd5621f941d732814619423e8436494efb4e7bc83"
+# M2c-5b review legal#1, template fr-3: a credit note states each rectified invoice's HT and VAT
+# after it; the documents drawn before keep fr-2 and their bytes (the hashes above, rendered fr-2)
+GOLDEN_INVOICE_PDF_FR3 = "cb4a86772af528bcbb4c3119d725311475efc880b1fe0e9d569a3c80717d89b5"
+GOLDEN_DUE_PDF_FR3 = "858f7d94f50f16461b5441c9810df018b619f694d9285a46ac4159465c7db784"
+GOLDEN_CREDIT_PDF_FR3 = "dbccde6504fce451d210c9eb81cb0663f001c3b1506e54119a752d620df596e2"
+GOLDEN_PROCEEDING_PDF_FR3 = "b16181954e27134959625d56048455628805621cfdfd79e2499cf6676b23f0ae"
 GOLDEN_HOSTILE_CSV = "722a4fcc0ce509606b63795a3b722050a560ebbdcba75fe9f2f3a1adf3392b8c"
 
 
@@ -82,9 +92,13 @@ def _sha(b: bytes) -> str:
 
 
 def _doc(
-    payload: dict[str, object], refs: dict[str, dict[str, str]] | None = None
+    payload: dict[str, object],
+    refs: dict[str, dict[str, str]] | None = None,
+    template: str = INVOICE_TEMPLATE,
 ) -> InvoiceDocument:
-    return InvoiceDocument(str(payload["number"]), str(payload["kind"]), ISSUE, payload, refs or {})
+    return InvoiceDocument(
+        str(payload["number"]), str(payload["kind"]), ISSUE, payload, refs or {}, template
+    )
 
 
 # -- the CSV --------------------------------------------------------------------------------------
@@ -359,6 +373,33 @@ def test_the_credit_note_names_the_invoice_it_rectifies() -> None:
     assert "Aucun rabais" not in text and "Indemnité" not in text and "escompte" not in text
 
 
+def test_a_credit_note_states_each_invoice_after_it() -> None:
+    """Review legal#1: « le montant du total hors taxes et de la TVA due après application de la
+    réduction de prix » (BOI-TVA-DECLA-30-20-20-20 §260, BOI-TVA-DED-40-10-20 §80), per invoice
+    it rectifies, from the payload (`ht_after`, `vat_after`, frozen at issue); the excess owed to
+    the client never reads as paid. The mentions of the credit note, in full (fr-3); fr-2 renders
+    what it rendered."""
+    assert mention_list(_doc(credit_note_payload(), CREDIT_REFS)) == (
+        "Avoir n° FC-2026-000004 rectifiant la facture FC-2026-000001 du 20/10/2026 : HT "
+        "-30,00\u00a0€, TVA -6,00\u00a0€.",
+        "Après cet avoir, la facture FC-2026-000001 du 20/10/2026 s'élève à 70,00\u00a0€ HT, TVA "
+        "14,00\u00a0€ (20\u00a0%).",
+        "Le montant de cet avoir est déduit des factures qu'il rectifie ; l'excédent éventuel vous "
+        "est dû : il vous sera versé avec un prochain reversement, ou par virement s'il n'y en a "
+        "pas.",
+    )
+    assert mention_list(_doc(credit_note_payload(), CREDIT_REFS, INVOICE_TEMPLATE_V2)) == (
+        "Avoir n° FC-2026-000004 rectifiant la facture FC-2026-000001 du 20/10/2026 : HT "
+        "-30,00\u00a0€, TVA -6,00\u00a0€.",
+        "Le montant de cet avoir est déduit des factures qu'il rectifie ; l'excédent éventuel vous "
+        "est remboursé avec un prochain reversement.",
+    )
+    old = credit_note_payload()  # a payload frozen before fr-3: nothing invented
+    for c in old["corrections"]:
+        del c["ht_after"], c["vat_after"]
+    assert not any("Après cet avoir" in m for m in mention_list(_doc(old, CREDIT_REFS)))
+
+
 def test_a_credit_note_on_invoices_of_two_rates_states_each() -> None:
     p = credit_note_payload()
     p["corrections"].append(
@@ -387,7 +428,7 @@ def test_the_golden_hashes() -> None:
     assert RENDERER_VERSION == GOLDEN_RENDERER
     assert (TEMPLATE_VERSION, INVOICE_TEMPLATE) == (
         "releve-reversement-fr-2",
-        "facture-commission-fr-2",
+        "facture-commission-fr-3",
     )
     p = statement_payload()
     data = render_statement_csv(p)
@@ -395,10 +436,31 @@ def test_the_golden_hashes() -> None:
     pdf = render_statement_pdf(p, _sha(data))
     assert pdf == render_statement_pdf(p, _sha(data))
     assert _sha(pdf) == GOLDEN_STATEMENT_PDF
-    assert _sha(render_invoice_pdf(_doc(invoice_payload()))) == GOLDEN_INVOICE_PDF
-    assert _sha(render_invoice_pdf(_doc(due_invoice_payload()))) == GOLDEN_DUE_PDF
-    assert _sha(render_invoice_pdf(_doc(credit_note_payload(), CREDIT_REFS))) == GOLDEN_CREDIT_PDF
-    assert _sha(render_invoice_pdf(_doc(proceeding_invoice_payload()))) == GOLDEN_PROCEEDING_PDF
+    for template, hashes in (
+        (
+            INVOICE_TEMPLATE_V2,
+            (GOLDEN_INVOICE_PDF, GOLDEN_DUE_PDF, GOLDEN_CREDIT_PDF, GOLDEN_PROCEEDING_PDF),
+        ),
+        (
+            INVOICE_TEMPLATE,
+            (
+                GOLDEN_INVOICE_PDF_FR3,
+                GOLDEN_DUE_PDF_FR3,
+                GOLDEN_CREDIT_PDF_FR3,
+                GOLDEN_PROCEEDING_PDF_FR3,
+            ),
+        ),
+    ):
+        got = tuple(
+            _sha(render_invoice_pdf(_doc(payload, refs, template)))
+            for payload, refs in (
+                (invoice_payload(), None),
+                (due_invoice_payload(), None),
+                (credit_note_payload(), CREDIT_REFS),
+                (proceeding_invoice_payload(), None),
+            )
+        )
+        assert got == hashes, template
     assert _sha(render_statement_csv(hostile_statement_payload())) == GOLDEN_HOSTILE_CSV
 
 
@@ -631,6 +693,42 @@ def test_files_with_earlier_lines_only_are_named_apart() -> None:
     assert (
         "1 dossier(s) du tableau n'ont pas d'encaissement dans ce relevé : seule la commission "
         "d'encaissements précédents y est calculée."
+    ) in statement_text(p, "0" * 64)
+
+
+def test_what_a_manual_credit_notes_waiver_absorbed_is_named() -> None:
+    """M2c-5b: a reversal whose credit a manual credit note's waiver absorbed has a commission line
+    with no credit note for that part; the statement says so, naming the manual credit note(s) and
+    the invoice each rectifies (review legal#4: « déjà crédités », never « rendus » — a refund the
+    note leaves is only ordered with the payout), so the period's commission and the documents
+    agree in words. Absent from a payload without it (the bytes of statements drawn before are
+    unchanged: the golden hashes)."""
+    p = statement_payload()
+    assert "avoir manuel" not in statement_text(p, "0" * 64)
+    p["totals"]["waived_absorbed_minor"] = "9000"
+    p["totals"]["waived_absorbed_invoices"] = ["FC-2026-000001"]
+    p["totals"]["waived_absorbed_credit_notes"] = [
+        {"number": "FC-2026-000002", "invoice": "FC-2026-000001"}
+    ]
+    text = statement_text(p, "0" * 64)
+    assert (
+        "Dont -90,00\u00a0€ de commission sur des encaissements annulés, déjà crédités par avoir "
+        "manuel (avoir n° FC-2026-000002 rectifiant la facture FC-2026-000001) : aucun nouvel "
+        "avoir pour ce montant."
+    ) in text
+    assert "rendu" not in text
+    p["totals"]["waived_absorbed_credit_notes"].append(
+        {"number": "FC-2026-000005", "invoice": "FC-2026-000003"}
+    )
+    assert (
+        "déjà crédités par avoir manuel (avoirs n° FC-2026-000002 rectifiant la facture "
+        "FC-2026-000001, n° FC-2026-000005 rectifiant la facture FC-2026-000003)"
+    ) in statement_text(p, "0" * 64)
+    del p["totals"]["waived_absorbed_credit_notes"]  # a payload frozen without them
+    p["totals"]["waived_absorbed_invoices"] = ["FC-2026-000001", "FC-2026-000003"]
+    assert (
+        "déjà crédités par avoir manuel sur les factures FC-2026-000001, FC-2026-000003 : aucun "
+        "nouvel avoir pour ce montant."
     ) in statement_text(p, "0" * 64)
 
 

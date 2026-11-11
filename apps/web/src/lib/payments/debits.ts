@@ -327,7 +327,16 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   remittance_run_totals: {
     label: "Totaux d'un reversement incohérents",
-    help: "Brut ≠ somme des lignes, net + compensation ≠ brut, virement ≠ net, ou commission des factures ≠ commission des lignes (I16).",
+    help: "Brut ≠ somme des lignes, net + compensation ≠ brut, virement ≠ net, ou commission des factures (et de ce qu'ont absorbé les avoirs manuels) ≠ commission des lignes (I16).",
+  },
+  commission_key_state: {
+    label: "Historique de commission ≠ factures d'un dossier",
+    help: "Pour un dossier, ce que ses factures facturent encore plus ce que des avoirs manuels ont rectifié ne vaut pas la commission facturée de son historique (I22) : le prochain reversement de ce client laissera sa commission en attente (reversement brut).",
+  },
+  // review M2c-5b (legal#0, F2): what a credit note owes the client beyond what its invoice still owed, still unsettled
+  credit_refund_owed: {
+    label: "Avoir à rembourser au client depuis plus de 30 jours",
+    help: "Un avoir (le plus souvent manuel) dépasse ce que sa facture devait encore : le surplus est dû au client. Un reversement suivant le règle avec son virement, mais aucun ne l'a réglé depuis 30 jours. Préparez le reversement du client si des encaissements l'attendent ; sinon, le remboursement par virement depuis le compte propre n'est pas encore disponible dans l'outil : prévenez le support.",
   },
   invoice_numbering: {
     label: "Numérotation des factures discontinue",
@@ -493,6 +502,23 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
 
 export function checkLabel(code: string): { label: string; help: string } {
   return CHECK_LABEL[code] ?? { label: code, help: "" };
+}
+
+/**
+ * Where a check result leads (« Contrôles »): the payment, the statement, the queue that holds what ages, the run, and
+ * (review M2c-5b F2) the invoice or credit note it is about — `invoice_overdue`, `credit_refund_owed`.
+ */
+export function checkSubjectLink(r: { code: string; subject_type: string; subject_id: string | null }): string | null {
+  if (r.subject_type === "payment" && r.subject_id) return `/backoffice/encaissements/paiements/${r.subject_id}`;
+  if (r.subject_type === "bank_statement" && r.subject_id) return `/backoffice/encaissements/releves/${r.subject_id}`;
+  if (r.code === "debit_unclassified") return "/backoffice/encaissements/debits";
+  if (r.code === "duplicate_unresolved") return "/backoffice/encaissements/debits?onglet=doublons";
+  if (r.code === "unmatched_ageing" || r.code === "unallocated_ageing") return "/backoffice/encaissements/a-traiter";
+  // M2c-4: a run's checks lead to the run, a client's deadlines to « Reversements »
+  if (r.subject_type === "remittance_run" && r.subject_id) return `/backoffice/reversements/${r.subject_id}`;
+  if (r.subject_type === "commission_invoice" && r.subject_id) return `/backoffice/reversements/factures/${r.subject_id}`;
+  if (r.code.startsWith("remittance_")) return "/backoffice/reversements";
+  return null;
 }
 
 /** Why a payment made to the client directly was refused (direct_payment.refusal_code). */

@@ -238,7 +238,16 @@ export default async function RemittanceRunPage({
               <li key={doc.id ?? `${doc.kind}-${i}`} className="flex flex-col gap-1 py-3" data-testid="run-document">
                 <span className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-medium">
-                    {doc.kind === "invoice" ? "Facture" : "Avoir"} {doc.number ?? "(numérotée à la validation)"}
+                    {doc.id && doc.number ? (
+                      // M2c-5b: the invoice's page (what it still charges, its credit notes, « Émettre un avoir »)
+                      <Link href={`/backoffice/reversements/factures/${doc.id}`} className="underline underline-offset-4" data-testid="run-document-link">
+                        {doc.kind === "invoice" ? "Facture" : "Avoir"} {doc.number}
+                      </Link>
+                    ) : (
+                      <>
+                        {doc.kind === "invoice" ? "Facture" : "Avoir"} {doc.number ?? "(numérotée à la validation)"}
+                      </>
+                    )}
                     {doc.mandate_reference ? ` · mandat ${doc.mandate_reference}` : ""}
                   </span>
                   <span className="tabular-nums">{money(doc.ttc_minor, r.currency)} TTC</span>

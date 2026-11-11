@@ -68,6 +68,43 @@ and a file undone in full is back to 0.
   earlier invoice carries its own rate (`OpenCharge.vat_rate`, M2c-4): the reserve weighs what it
   still charges at that rate, so after a fall of the rate the TTC billed stays within the basis.
 
+* **A manual credit note's waiver** (M2c-5b): a manual credit note (`issue_credit_note`, design
+  §14.1, risk R2) takes back part of what an invoice charges a (file, tier key) while no line
+  changes, so the schedule's commission K is unchanged: that part of the invoice's open charge
+  becomes a waiver held on the same (invoice, file, tier key) (`OpenCharge.waived_minor`; the key's
+  total `KeyState.waived_minor`). For every key, Σ open charges + Σ waivers = V, the commission
+  charged. The waiver is invisible to what the engine charges: V, the cap, the rounding reserve
+  and the allocation of credits all read each invoice's charge before the manual credit (its
+  capacity: open + waived), so a later collection never re-charges a waived amount and V is what
+  it would have been without the manual credit. Only the documents differ: a credit the engine
+  allocates to an invoice (its original's first, then LIFO) is absorbed by that invoice's waiver
+  for the key first (no credit note for that part: the client already has it), and only the rest
+  is credited, so no invoice is credited beyond its remaining HT.
+* **After a cancelled run** (M2c-4 C7; M2c-5b review math#0): its corrective invoice of each
+  (mandate, VAT rate) charges again what the run credited at that rate and holds, as its waiver,
+  what the run's credits absorbed there (where no corrective invoice was issued at a rate, the
+  waiver goes back on the invoice it was absorbed from: the file is then exactly as before the
+  run). Running a reversal again takes first, on each of those invoices, at most what the
+  cancelled run took for it there per (file, tier key) (`Retake`, a capped link of its chain,
+  the cap shared by the line's credits on the key), then its original's own invoice — the links
+  in the order the cancelled run took what they hold (`retake_links`, review round 2: its
+  chain's invoices first, then LIFO). So a corrective invoice pooling several reversals, or a
+  credit that fell on invoices at two rates, gives each reversal its own share: the same lines
+  at the same VAT rate give the documents of the run never approved. At another rate (or with
+  new lines) what the run credits changes, and what is left of a link comes off where the
+  cancelled run took last, as in the run never approved (beyond the chain LIFO, so a smaller
+  credit comes off the oldest invoice it took from): not exact, bounded — measured, |ΔV| stays
+  within n + 1 + ⌈D·s⌉ cents and |ΔW| within D + |ΔV|, n the key's open invoices, s the spread
+  of its VAT rates, D the credit moved between its lines summed over every step: Σ over the
+  lines of Σᵢ |tookᵢ - tookᵢ₊₁|, took₁ … took_k what each cancelled approval took back for the
+  line, took_k₊₁ what the run again takes (after repeated cancellations the latest step alone
+  does not bound V: review round 3). The measured maxima are a generator's, not bounds
+  (CALCULATION_RULES §7). A manual credit note issued between the cancellation and the run
+  again on an invoice the cancelled run took from keeps its waiver there (OQ-78 (f)).
+  (With no corrective invoice at a rate, the same history without manual credit notes has one
+  more open invoice than this one: its reserve, and under mixed VAT rates its LIFO order, can
+  then differ — review math#1.)
+
 Basis (founder #4): an allocation's 1100 credits per component family, filtered by the schedule's
 families; a forward's amount only when the schedule lists its reason; a reversal minus its
 original's; advances, returned and unplanned payouts never earn commission. A rule is chosen per
@@ -191,7 +228,9 @@ class KeyState:
     basis: tuple[tuple[str, int], ...] = ()  # (terms version id, net basis), by version id
     kept_basis_minor: int = 0
     kept_minor: int = 0  # κ
-    commission_minor: int = 0  # V: charged, net of credits
+    commission_minor: int = 0  # V: charged, net of credits (Σ open charges + the waiver)
+    # W: what manual credit notes took back from its invoices and no later credit absorbed yet
+    waived_minor: int = 0
 
     @property
     def basis_minor(self) -> int:
@@ -216,6 +255,94 @@ class OpenCharge(Protocol):
 
     @property
     def vat_rate(self) -> Decimal | None: ...  # the invoice's own rate (None: the run's)
+
+    @property
+    def waived_minor(self) -> int: ...  # taken back by manual credit notes, not yet absorbed
+
+
+def capacity(charge: OpenCharge) -> int:
+    """What an earlier invoice charges a key as the engine sees it: its open charge plus what
+    manual credit notes waived on it (its charge net of the engine's own credits only)."""
+    return charge.open_minor + charge.waived_minor
+
+
+@dataclass(frozen=True, slots=True)
+class Retake:
+    """After a cancelled run (M2c-4 C7; M2c-5b review math#0): an invoice that holds again what the
+    cancelled run took for one reversal — its corrective invoice at the VAT rate of the invoices
+    the run credited, the credited part as its charge and the absorbed part as its waiver (or,
+    where the cancellation issued no corrective invoice at that rate, the invoice whose waiver it
+    restored) — and how much per (file, tier key). Running the reversal again takes at most that
+    from it, its credits on a key sharing the cap, whatever the other reversals of the run take
+    there: the pooled corrective invoice gives each its own share (`retake_links` orders them)."""
+
+    invoice_id: str
+    caps: tuple[tuple[Key, int], ...]  # per (file, tier key), > 0
+
+
+ChainLink = str | Retake
+# an earlier line → the invoices its reversal is credited on first: its own invoice, or (after a
+# cancellation) the invoices holding again what the cancelled run took, then the line's own
+LineInvoices = Mapping[str, "str | tuple[ChainLink, ...]"]
+Preferred = tuple[tuple[str, int | None], ...]  # (invoice, at most that much: None, what it holds)
+
+
+def chain(found: str | tuple[ChainLink, ...] | None) -> tuple[ChainLink, ...]:
+    """The invoices a reversal is credited on first, in order (`line_invoices`' value: one invoice,
+    or the invoices a cancellation restored what the run took on, then the original line's own)."""
+    if found is None:
+        return ()
+    return (found,) if isinstance(found, str) else tuple(found)
+
+
+def preferred_for(found: str | tuple[ChainLink, ...] | None, key: Key) -> Preferred:
+    """The chain for one (file, tier key): each invoice with the most the reversal takes there
+    first (a `Retake`'s amount for the key; None: what the invoice still holds)."""
+    if found is None:
+        return ()
+    if isinstance(found, str):
+        return ((found, None),)
+    out: list[tuple[str, int | None]] = []
+    for link in found:
+        if isinstance(link, str):
+            out.append((link, None))
+            continue
+        for k, cap in link.caps:
+            if k == key and cap > 0:
+                out.append((link.invoice_id, cap))
+    return tuple(out)
+
+
+# what a cancelled run took for one reversal: (the invoice that holds it again since the
+# cancellation, the invoice it was taken from, that one's (year, seq), the (file, tier key), HT > 0)
+Taken = tuple[str, str, tuple[int, int], Key, int]
+
+
+def retake_links(prior: Sequence[ChainLink], takes: Iterable[Taken]) -> tuple[Retake, ...]:
+    """A reversal's `Retake` links after its run was cancelled (M2c-4 C7; M2c-5b review math#0,
+    round 2): one per invoice that holds again what the run took for it, with that share per
+    (file, tier key), in the order the cancelled run took it — first what it took from the invoices
+    of the chain it ran with (`prior`: its original's own invoice; after an earlier cancellation,
+    that one's links first), in the chain's order, then the rest LIFO, newest invoice first. A link
+    comes where the first of its takes came. The same lines at the same VAT rate take every link
+    in full, in any order; when the run again credits the reversal less (another VAT rate, new
+    lines), it takes it where the cancelled run took first, as the run never approved would."""
+    position: dict[str, int] = {}
+    for i, link in enumerate(prior):
+        position.setdefault(link if isinstance(link, str) else link.invoice_id, i)
+    held: dict[str, dict[Key, int]] = {}
+    rank: dict[str, tuple[int, int, int]] = {}
+    for at, taken_on, (year, seq), key, amount in takes:
+        caps = held.setdefault(at, {})
+        caps[key] = caps.get(key, 0) + amount
+        p = position.get(taken_on)
+        r = (0, p, 0) if p is not None else (1, -year, -seq)
+        if at not in rank or r < rank[at]:
+            rank[at] = r
+    return tuple(
+        Retake(at, tuple(sorted(caps.items())))
+        for at, caps in sorted(held.items(), key=lambda x: (rank[x[0]], x[0]))
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,7 +596,9 @@ class SidePart:
     part: Part
     commission_minor: int
     same_run: bool = False
-    preferred: str | None = None
+    # the invoices credited first, in order, each up to what it holds or to its cap (what a
+    # cancellation restored there for this reversal; then the original line's own invoice)
+    preferred: Preferred = ()
 
 
 @dataclass(slots=True)
@@ -487,10 +616,19 @@ class KeySide:
     regularisation_minor: int = 0
     regularisation_entries: list[str] = field(default_factory=list)
     allocations: list[tuple[str, int, str]] = field(default_factory=list)
+    # what the waivers of the invoices credited absorb (invoice id, HT > 0, the line): no document
+    absorbed: list[tuple[str, int, str]] = field(default_factory=list)
 
     @property
     def invoiced_minor(self) -> int:
         return self.commission_minor + self.regularisation_minor
+
+    def taken(self) -> dict[str, int]:
+        """Per earlier invoice, what the run takes from its capacity (credited or absorbed)."""
+        out: dict[str, int] = {}
+        for inv, take, _ in (*self.allocations, *self.absorbed):
+            out[inv] = out.get(inv, 0) + take
+        return out
 
 
 def _components(p: Part, commission: int) -> tuple[int, int]:
@@ -531,6 +669,7 @@ def key_side(parts: Sequence[SidePart], earlier: Sequence[OpenCharge]) -> KeySid
     side, credits = _place(parts)
     if credits:
         rest = _allocate(side, credits, earlier)
+        _absorb(side, earlier)
         if rest:
             take = min(rest, side.regularisation_minor)
             side.regularisation_minor -= take
@@ -545,11 +684,14 @@ def key_side(parts: Sequence[SidePart], earlier: Sequence[OpenCharge]) -> KeySid
     return side
 
 
-def _place(parts: Sequence[SidePart]) -> tuple[KeySide, list[tuple[int, str | None, str]]]:
+Credit = tuple[int, Preferred, str]  # (HT > 0, the invoices to credit first, the line)
+
+
+def _place(parts: Sequence[SidePart]) -> tuple[KeySide, list[Credit]]:
     """Each part's own band and regularisation on the invoice side (raising, or undoing a same-run
-    line) or as a credit (amount > 0, the invoice to credit first, the line)."""
+    line) or as a credit (amount > 0, the invoices to credit first, the line)."""
     side = KeySide()
-    credits: list[tuple[int, str | None, str]] = []
+    credits: list[Credit] = []
     last = ""  # the last line on the regularisation side
     for sp in parts:
         if not sp.commission_minor:
@@ -574,28 +716,39 @@ def _place(parts: Sequence[SidePart]) -> tuple[KeySide, list[tuple[int, str | No
             side.families.update(p.families)
             side.rule_id, side.label_fr = p.rule_id, p.label_fr
     if side.regularisation_minor < 0:
-        credits.append((-side.regularisation_minor, None, last))
+        credits.append((-side.regularisation_minor, (), last))
         side.regularisation_minor = 0
     return side, credits
 
 
-def _allocate(
-    side: KeySide, credits: Sequence[tuple[int, str | None, str]], earlier: Sequence[OpenCharge]
-) -> int:
-    """Allocate the credits on the earlier invoices (each up to what it still charges the key):
-    first every reversal on the invoice that charged its original, then what is left of each
-    credit LIFO, in the engine's order (so a credit with no original's invoice never takes the
-    one another reversal's original was charged on). Returns what the invoices cannot take."""
+def _allocate(side: KeySide, credits: Sequence[Credit], earlier: Sequence[OpenCharge]) -> int:
+    """Allocate the credits on the earlier invoices (each up to what it still charges the key, its
+    capacity: a manual credit note's waiver included): first every reversal on the invoices that
+    charge its original (the one that charges it now first), then what is left of each credit
+    LIFO, in the engine's order (so a credit with no original's invoice never takes the one
+    another reversal's original was charged on). A capped invoice of the chain (what a cancellation
+    restored there for that reversal) gives the line at most its cap, over all its credits on the
+    key, so a pooled corrective invoice gives each reversal its own share in any order. Returns
+    what the invoices cannot take."""
     lifo = sorted(earlier, key=lambda c: c.order, reverse=True)
-    open_ = {c.invoice_id: c.open_minor for c in earlier}
+    open_ = {c.invoice_id: capacity(c) for c in earlier}
     left = [amount for amount, _, _ in credits]
+    caps: dict[tuple[str, str], int] = {}  # (line, invoice) → what its cap still allows
     for n, (_, preferred, entry) in enumerate(credits):
-        available = open_.get(preferred, 0) if preferred is not None else 0
-        take = left[n] if left[n] < available else available
-        if take > 0 and preferred is not None:
-            side.allocations.append((preferred, take, entry))
-            open_[preferred] = available - take
-            left[n] -= take
+        for inv, cap in preferred:
+            if not left[n]:
+                break
+            available = open_.get(inv, 0)
+            if cap is not None:
+                allowed = caps.setdefault((entry, inv), cap)
+                available = allowed if allowed < available else available
+            take = left[n] if left[n] < available else available
+            if take > 0:
+                side.allocations.append((inv, take, entry))
+                open_[inv] -= take
+                left[n] -= take
+                if cap is not None:
+                    caps[(entry, inv)] -= take
     for n, (_, _, entry) in enumerate(credits):
         for ch in lifo:
             if not left[n]:
@@ -609,12 +762,31 @@ def _allocate(
     return sum(left)
 
 
+def _absorb(side: KeySide, earlier: Sequence[OpenCharge]) -> None:
+    """Each invoice's waiver for the key absorbs the takes on it first, in the order they were
+    allocated (M2c-5b): what a manual credit note already gave back on that invoice is not credited
+    again; only the rest of each take is credited — never beyond the invoice's remaining HT, a take
+    never exceeding its capacity."""
+    waived = {c.invoice_id: c.waived_minor for c in earlier if c.waived_minor}
+    if not waived:
+        return
+    credited: list[tuple[str, int, str]] = []
+    for inv, take, entry in side.allocations:
+        w = waived.get(inv, 0)
+        a = take if take < w else w
+        if a:
+            waived[inv] = w - a
+            side.absorbed.append((inv, a, entry))
+        if take - a:
+            credited.append((inv, take - a, entry))
+    side.allocations = credited
+
+
 def open_after(side: KeySide, earlier: Sequence[OpenCharge]) -> int:
-    """How many invoices still charge the key once the side is issued (the reserve's n)."""
-    credited: dict[str, int] = {}
-    for inv, take, _ in side.allocations:
-        credited[inv] = credited.get(inv, 0) + take
-    n = sum(1 for c in earlier if c.open_minor - credited.get(c.invoice_id, 0) > 0)
+    """How many invoices still charge the key once the side is issued (the reserve's n), by
+    capacity: a manual credit note's waiver changes nothing the engine charges."""
+    taken = side.taken()
+    n = sum(1 for c in earlier if capacity(c) - taken.get(c.invoice_id, 0) > 0)
     return n + (1 if side.invoiced_minor > 0 else 0)
 
 
@@ -683,11 +855,12 @@ class _Key:
     kept: int
     charged_before: int
     earlier: Sequence[OpenCharge]
+    waived: int = 0  # W before the run: Σ of its earlier invoices' waivers
     sched_before: int = 0  # the schedule's K of the history's state, at this run's τ
     sched: int = 0  # the schedule's K of the current state
     # its parts in the run: (line index, part index, a collection's, undoes a same-run line,
-    # the invoice that charged the line a reversal undoes)
-    where: list[tuple[int, int, bool, bool, str | None]] = field(default_factory=list)
+    # the invoices charging the line a reversal undoes, for this key)
+    where: list[tuple[int, int, bool, bool, Preferred]] = field(default_factory=list)
     # the collections of this run undone in it under `credit` (never priced): (event index of the
     # collection, of its reversal, terms version, basis) — live between the two for `keep`
     transient: list[tuple[int, int, str, int]] = field(default_factory=list)
@@ -754,12 +927,19 @@ def _key_of(
             raise CommissionInputError(f"file {file.account_id}: a negative cumulative basis ({b})")
     if state.kept_basis_minor < 0 or state.kept_minor < 0 or state.commission_minor < 0:
         raise CommissionInputError(f"file {file.account_id}: a negative kept basis or fee")
+    if state.waived_minor < 0 or any(c.waived_minor < 0 for c in earlier):
+        raise CommissionInputError(f"file {file.account_id}, {tier_key}: a negative waiver")
+    if sum(c.waived_minor for c in earlier) != state.waived_minor:
+        raise CommissionInputError(
+            f"file {file.account_id}, {tier_key}: its invoices' waivers do not add up to the"
+            f" key's ({state.waived_minor})"
+        )
     if any(c.open_minor < 0 for c in earlier) or (
-        sum(c.open_minor for c in earlier) != state.commission_minor
+        sum(capacity(c) for c in earlier) != state.commission_minor
     ):
         raise CommissionInputError(
-            f"file {file.account_id}, {tier_key}: its invoices' open charges do not add up to"
-            f" the commission charged ({state.commission_minor})"
+            f"file {file.account_id}, {tier_key}: its invoices' open charges and waivers do not add"
+            f" up to the commission charged ({state.commission_minor})"
         )
     key = _Key(
         file=file,
@@ -771,6 +951,7 @@ def _key_of(
         kept=state.kept_minor,
         charged_before=state.commission_minor,
         earlier=earlier,
+        waived=state.waived_minor,
     )
     if key.net or key.kept:
         key.sched = key.sched_before = _evaluate(key, pricer).sched
@@ -812,7 +993,7 @@ def compute(  # noqa: PLR0913 - the run's lines, its world and its documents' hi
     vat_rate: Decimal,
     *,
     charges: Mapping[Key, Sequence[OpenCharge]] | None = None,
-    line_invoices: Mapping[str, str] | None = None,
+    line_invoices: LineInvoices | None = None,
 ) -> RunCommission:
     """Commission of one run's lines. `versions` per mandate (every version the history names);
     `history` per (file, tier key) from earlier runs; `vat_rate` the rate the run's invoices will
@@ -840,12 +1021,12 @@ def compute(  # noqa: PLR0913 - the run's lines, its world and its documents' hi
             continue
         reversal = ln.kind in REVERSALS
         same_run = reversal and ln.original_entry_id in in_run
-        preferred = (
+        found = (
             line_invoices.get(ln.original_entry_id)
             if reversal and ln.original_entry_id and not same_run
             else None
         )
-        mark = (len(heads), not reversal, same_run, preferred)
+        mark = (len(heads), not reversal, same_run, found)
         head, line_parts = _line(ln, files, history, keys, pricer, charges, mark, transient)
         heads.append(head)
         parts.append(line_parts)
@@ -858,6 +1039,7 @@ def compute(  # noqa: PLR0913 - the run's lines, its world and its documents' hi
             kept_basis_minor=key.kept_basis,
             kept_minor=key.kept,
             commission_minor=charged,
+            waived_minor=key.waived - _absorbed(key, parts, heads),
         )
     out = []
     for (ln, mandate, terms, reason), ps in zip(heads, parts, strict=True):
@@ -1043,8 +1225,8 @@ def _reserved(  # noqa: PLR0913, PLR0917 - the key, its run, its bounds, its par
     base, collection = spread
     cb, where = key.charged_before, key.where
     c = sum(key.net.values()) + key.kept_basis
-    open_before = sum(1 for ch in key.earlier if ch.open_minor > 0)
-    rates = {ch.invoice_id: _rate_scaled(ch, pricer.tau) for ch in key.earlier if ch.open_minor}
+    open_before = sum(1 for ch in key.earlier if capacity(ch) > 0)
+    rates = {ch.invoice_id: _rate_scaled(ch, pricer.tau) for ch in key.earlier if capacity(ch)}
     top = max(pricer.tau, *rates.values()) if rates else pricer.tau
     mixed = top > pricer.tau
     # V within it holds whatever the rates of the key's invoices: at most one more invoice
@@ -1066,13 +1248,11 @@ def _reserved(  # noqa: PLR0913, PLR0917 - the key, its run, its bounds, its par
         n = open_after(side, key.earlier)
         if not mixed:
             return v <= (c - n) * RATE_SCALE // pricer.cap_den if c > n else v <= 0
-        credited: dict[str, int] = {}
-        for inv, take, _ in side.allocations:
-            credited[inv] = credited.get(inv, 0) + take
+        credited = side.taken()
         ttc = side.invoiced_minor * pricer.cap_den + sum(
-            (ch.open_minor - credited.get(ch.invoice_id, 0)) * (RATE_SCALE + rates[ch.invoice_id])
+            (capacity(ch) - credited.get(ch.invoice_id, 0)) * (RATE_SCALE + rates[ch.invoice_id])
             for ch in key.earlier
-            if ch.open_minor
+            if capacity(ch)
         )
         return ttc + n * RATE_SCALE <= c * RATE_SCALE
 
@@ -1092,6 +1272,22 @@ def _reserved(  # noqa: PLR0913, PLR0917 - the key, its run, its bounds, its par
     return low
 
 
+def _absorbed(key: _Key, parts: list[list[Part]], heads: Sequence[Head]) -> int:
+    """What the waivers of the key's earlier invoices absorb of its credits in the run, once its
+    parts are final: the run's documents for the key (`key_side`, the code documents.py runs on the
+    same parts), so the state's waiver and the documents agree."""
+    if not key.waived:
+        return 0
+    side = key_side(
+        [
+            SidePart(heads[i][0].entry_id, parts[i][j], parts[i][j].commission_minor, same, pref)
+            for i, j, _, same, pref in key.where
+        ],
+        key.earlier,
+    )
+    return sum(a for _, a, _ in side.absorbed)
+
+
 def _rate_scaled(charge: OpenCharge, tau: int) -> int:
     """The VAT rate an earlier invoice bears, x RATE_SCALE (None: the run's)."""
     rate = charge.vat_rate
@@ -1105,12 +1301,12 @@ def _line(  # noqa: PLR0913, PLR0917 - a line and the run it is priced in
     keys: dict[tuple[str, str], _Key],
     pricer: _Pricer,
     charges: Mapping[Key, Sequence[OpenCharge]],
-    mark: tuple[int, bool, bool, str | None],
+    mark: tuple[int, bool, bool, str | tuple[ChainLink, ...] | None],
     transient: Transient,
 ) -> tuple[Head, list[Part]]:
     """(the line, its mandate, its terms version, why it earns nothing), and its parts; each key
     it reaches records where its part is (`mark`: the line's event index, a collection's, undoes a
-    same-run line, the invoice of the line it undoes)."""
+    same-run line, the invoices charging the line it undoes — resolved per key)."""
     if line.kind in NEVER_COMMISSIONED:
         known = files.get(line.account_id) if line.account_id is not None else None
         return (line, known.mandate_id if known else None, None, "not_commissionable"), []
@@ -1139,7 +1335,7 @@ def _line(  # noqa: PLR0913, PLR0917 - a line and the run it is priced in
                 history.get(k, KeyState()), file, rule.tier_key, pricer, charges.get(k, ())
             )
             key.transient = transient.get(k, [])
-        key.where.append((mark[0], len(parts), mark[1], mark[2], mark[3]))
+        key.where.append((mark[0], len(parts), mark[1], mark[2], preferred_for(mark[3], k)))
         parts.append(_part(key, version.id, rule, fams, amount, keep, pricer, mark[0]))
     return (line, file.mandate_id, version.id, None), parts
 
@@ -1320,11 +1516,12 @@ def inputs_hash(  # noqa: PLR0913, PLR0917 - every input of `compute`
     history: Mapping[tuple[str, str], KeyState],
     vat_rate: Decimal,
     charges: Mapping[Key, Sequence[OpenCharge]] | None = None,
-    line_invoices: Mapping[str, str] | None = None,
+    line_invoices: LineInvoices | None = None,
 ) -> str:
     """SHA-256 of everything the result depends on (§9.4 `inputs_hash`): the same inputs, in any
     order, give the same hash; amounts as text (no float). Of `line_invoices`, the invoices of the
-    lines the run's reversals undo."""
+    lines the run's reversals undo. A waiver (M2c-5b) is named only when there is one, so a history
+    without manual credit notes hashes as before."""
     h = hashlib.sha256()
     _put(h, "engine", ENGINE_VERSION, scaled(vat_rate))
     for ln in sorted(lines, key=lambda x: x.entry_id):
@@ -1363,6 +1560,7 @@ def inputs_hash(  # noqa: PLR0913, PLR0917 - every input of `compute`
             to = None if v.valid_to is None else v.valid_to.isoformat()
             _put(h, "version", m, v.id, v.valid_from.isoformat(), to, text)
     for (account, tier), s in sorted(history.items()):
+        waiver = ("waived", s.waived_minor) if s.waived_minor else ()
         _put(
             h,
             "history",
@@ -1372,12 +1570,25 @@ def inputs_hash(  # noqa: PLR0913, PLR0917 - every input of `compute`
             s.kept_basis_minor,
             s.kept_minor,
             s.commission_minor,
+            *waiver,
         )
     for (account, tier), earlier in sorted((charges or {}).items()):
         for ch in sorted(earlier, key=lambda c: c.invoice_id):
             rate = None if ch.vat_rate is None else scaled(ch.vat_rate)
-            _put(h, "charge", account, tier, ch.invoice_id, *ch.order, ch.open_minor, rate)
+            waiver = ("waived", ch.waived_minor) if ch.waived_minor else ()
+            _put(h, "charge", account, tier, ch.invoice_id, *ch.order, ch.open_minor, rate, *waiver)
     invoices = line_invoices or {}
     for original in sorted({ln.original_entry_id for ln in lines if ln.original_entry_id}):
-        _put(h, "line invoice", original, invoices.get(original))
+        found = invoices.get(original)
+        _put(h, "line invoice", original, None if found is None else _chain_text(found))
     return h.hexdigest()
+
+
+def _chain_text(found: str | tuple[ChainLink, ...]) -> str:
+    """A chain as text: invoice ids, a `Retake` with its caps per key (« inv[file/tier=cap;…] »)."""
+    return ",".join(
+        link
+        if isinstance(link, str)
+        else link.invoice_id + "[" + ";".join(f"{a}/{t}={c}" for (a, t), c in link.caps) + "]"
+        for link in chain(found)
+    )
