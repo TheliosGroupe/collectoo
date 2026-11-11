@@ -24,28 +24,47 @@
 --   * download (public.transfer_file_download): the web route checks the stored bytes against the SHA-256 before it
 --     serves them; every download is recorded; a second one needs the warning acknowledged (« Déjà téléchargé par … —
 --     ne le déposez pas deux fois »); the file's runs become `sent`; « Marquer comme transmis »
---     (public.mark_transfer_file_sent); public.cancel_transfer_file (before download: superseded; after: only with
---     ops' attestation that it was not uploaded or was rejected by the bank, and no debit of it seen);
---   * public.cancel_remittance_run redefined: before download its file is superseded; after download only with the
---     attestation that the transfer was not executed, once a statement covering its execution date is imported and
---     shows no debit of it (§9.7);
+--     (public.mark_transfer_file_sent); public.cancel_transfer_file before download (superseded); after download
+--     the file, or one transfer of it, by request and confirmation on the statements' evidence (review T1 below);
+--   * public.cancel_remittance_run redefined (same signature): before download its file is superseded; a payout in a
+--     downloaded file is cancelled first (review T1), then its run (§9.7);
 --   * refunds in the file: public.request_refund redefined (execution_mode 'file' by default when the payment's
 --     account is the servicer's paying account in EUR; 'manual' as in M2b-6), the refund's transfer kept in step with
 --     it (booked by the M2b-6 RFD link only, cancelled with it);
 --   * verification of payee (Reg. 260/2012 art. 5 quater; founder #15, OQ-50): public.payee_name_check, recorded by ops
 --     on the bank's no-match or close-match, blocks that payout account (`payee_name_mismatch`) until another person
 --     clears it, or a new payout account is confirmed;
---   * nightly alerts (§15): transfer_not_filed, file_not_downloaded, file_not_marked_sent, transfer_not_debited,
---     transfer_file_failed, payee_name_mismatch.
+--   * alerts (§15): transfer_not_filed, file_not_downloaded, file_not_marked_sent, transfer_not_debited,
+--     transfer_file_failed, transfer_file_pending, payee_name_mismatch, payee_name_not_epc, iban_not_sepa (nightly,
+--     and from the hourly schedule once a cut-off passed or a file stays pending).
 --
 -- Redefined with their settings and grants restated: private.bank_transfer_guard (in_file → ordered when its file is
 -- superseded; the file's id; a sweep goes to the servicer's own account), private.remittance_run_guard (sent →
 -- approved when its file is cancelled), private.remittance_payout_blockers (+ payee_name_mismatch),
--- public.request_refund (+ p_execution_mode: dropped and created), public.cancel_remittance_run (+ p_attestation:
--- dropped and created). private.run_remittance_checks is renamed private.run_remittance_runs_checks (its body
--- unchanged) and a new private.run_remittance_checks calls it, then the transfer checks.
+-- public.request_refund (+ p_execution_mode: dropped and created), public.cancel_remittance_run (same signature),
+-- private.queue_remittance_schedule (+ the transfer checks due). private.run_remittance_checks is renamed
+-- private.run_remittance_runs_checks (its body unchanged) and a new private.run_remittance_checks calls it, then the
+-- transfer checks.
 -- Lock order (ADR-0014): run rows → allocation lock → remit lock → file rows → transfer rows; every writer of a
 -- transfer's or a file's status holds the remit lock.
+--
+-- M2c-6a review (risk R4, design §9.7, §11, §12, §15):
+--   * T1 a downloaded or sent file is cancelled (its transfers re-queued), and one transfer of it refused by the bank
+--     is cancelled, only on evidence and by four eyes: public.request_transfer_file_cancellation /
+--     confirm_transfer_file_cancellation and public.request_transfer_cancellation / confirm_transfer_cancellation
+--     (public.transfer_cancellation_request): the imported statements of the paying account cover every business day
+--     from its execution date to the next business day and show no debit of it (by end-to-end id, or a batch debit by
+--     PmtInfId — design §12's rule), or its return; a different money-staff member confirms. A run whose payout is
+--     in a downloaded file is cancelled only once that transfer is (`payout_in_downloaded_file`);
+--   * T2 the first download re-runs the generation checks under the same locks (the date against the account's
+--     next execution day, every transfer's hold reason, the cash check): a stale file is superseded, not served
+--     (`file_stale`, `file_blocked`), and the next generation takes its transfers again;
+--   * T3 a payee name with no EPC character (`payee_name_not_epc`) or an IBAN outside the SEPA schemes' countries
+--     (`iban_not_sepa`, private.sepa_scheme_country: EPC409-09) is held out of the file, not failing it;
+--   * T4 no storage policy reads the bucket: the web route fetches the bytes with the service role after the
+--     download command; T5 a payee check is cleared by none of who recorded it, proposed or confirmed the IBAN, and
+--     closes with its payout account; T6 `file_not_marked_sent` at the cut-off and `transfer_file_pending` through
+--     the hourly schedule; T7 file numbers never truncate.
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -195,6 +214,93 @@ comment on column public.refund_request.execution_mode is
 -- Our debits on a statement, looked up by our end-to-end id (the cash check, cancellations; M2c-6b's bookings).
 create index bank_transaction_debit_e2e_idx on public.bank_transaction (bank_account_id, end_to_end_id)
   where direction = 'debit' and end_to_end_id is not null;
+-- The bank's return of one of our transfers (a credit carrying its end-to-end id): evidence it was not paid (review T1).
+create index bank_transaction_return_e2e_idx
+  on public.bank_transaction (bank_account_id, (coalesce(original_end_to_end_id, end_to_end_id)))
+  where direction = 'credit' and kind = 'return';
+
+-- A downloaded file cancelled (its transfers re-queued), or one of its transfers the bank refused cancelled, on
+-- evidence and by four eyes (review T1; design §9.7, risk R4): one money-staff member asks with what the statements
+-- show (evidence), a different one confirms when they still show it. A request is for the file's version it was
+-- made on (a download since makes it stale: confirmed never, asked again).
+create table public.transfer_cancellation_request (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organization (id),
+  kind text not null check (kind in ('file', 'transfer')),
+  file_id uuid not null references public.transfer_file (id),
+  transfer_id uuid references public.bank_transfer (id),
+  file_version integer not null check (file_version >= 1),
+  attestation text check (attestation in ('not_uploaded', 'rejected_by_bank')),
+  reason text not null check (length(btrim(reason)) between 1 and 2000),
+  evidence jsonb not null check (jsonb_typeof(evidence) = 'object'),
+  requested_by uuid not null references public.app_user (id),
+  requested_at timestamptz not null default clock_timestamp(),
+  confirmed_by uuid references public.app_user (id),
+  confirmed_at timestamptz,
+  confirm_evidence jsonb check (jsonb_typeof(confirm_evidence) = 'object'),
+  constraint transfer_cancellation_request_kind check ((kind = 'file') = (transfer_id is null)
+                                                       and (kind = 'file') = (attestation is not null)),
+  constraint transfer_cancellation_request_confirmed check ((confirmed_at is null) = (confirmed_by is null)
+                                                            and (confirmed_at is null) = (confirm_evidence is null)),
+  constraint transfer_cancellation_request_four_eyes check (confirmed_by is distinct from requested_by)
+);
+create unique index transfer_cancellation_request_open_uq
+  on public.transfer_cancellation_request (file_id, transfer_id, file_version) nulls not distinct
+  where confirmed_at is null;
+create index transfer_cancellation_request_transfer_idx on public.transfer_cancellation_request (transfer_id)
+  where transfer_id is not null and confirmed_at is null;
+create index transfer_cancellation_request_org_idx on public.transfer_cancellation_request (organization_id,
+                                                                                            requested_at desc);
+comment on table public.transfer_cancellation_request is
+  'A cancellation of a downloaded transfer file, or of one of its transfers, asked with the statements'' evidence and '
+  'confirmed by another person (risk R4, design §9.7).';
+
+-- The countries and territories of the SEPA schemes' geographical scope (EPC409-09 « EPC List of SEPA Scheme
+-- Countries », v8.0 of 24/12/2025: the 27 EU, 3 other EEA and 11 non-EEA countries, and the territories listed
+-- with them), by the two letters an IBAN starts with (review T3). The territories' IBANs mostly carry their
+-- country's code (FR for the French overseas departments, Saint-Barthélemy, Saint-Martin and Saint-Pierre-et-Miquelon;
+-- FI for Åland; GB for Guernsey, Jersey and the Isle of Man): their own codes are listed too. Not in the scope:
+-- New Caledonia, French Polynesia, Wallis-et-Futuna (their IBANs also start with FR: OQ in COMPLIANCE). Data, not
+-- code: a change of the EPC list is a new row.
+create table private.sepa_scheme_country (
+  code char(2) primary key check (code ~ '^[A-Z]{2}$'),
+  name text not null,
+  area text not null check (area in ('eu', 'eea', 'non_eea', 'territory')),
+  note text
+);
+insert into private.sepa_scheme_country (code, name, area, note) values
+  ('AT', 'Austria', 'eu', null), ('BE', 'Belgium', 'eu', null), ('BG', 'Bulgaria', 'eu', null),
+  ('HR', 'Croatia', 'eu', null), ('CY', 'Cyprus', 'eu', null), ('CZ', 'Czech Republic', 'eu', null),
+  ('DK', 'Denmark', 'eu', null), ('EE', 'Estonia', 'eu', null), ('FI', 'Finland', 'eu', null),
+  ('FR', 'France', 'eu', null), ('DE', 'Germany', 'eu', null), ('GR', 'Greece', 'eu', null),
+  ('HU', 'Hungary', 'eu', null), ('IE', 'Ireland', 'eu', null), ('IT', 'Italy', 'eu', null),
+  ('LV', 'Latvia', 'eu', null), ('LT', 'Lithuania', 'eu', null), ('LU', 'Luxembourg', 'eu', null),
+  ('MT', 'Malta', 'eu', null), ('NL', 'Netherlands', 'eu', null), ('PL', 'Poland', 'eu', null),
+  ('PT', 'Portugal', 'eu', 'with the Azores and Madeira'), ('RO', 'Romania', 'eu', null),
+  ('SK', 'Slovakia', 'eu', null), ('SI', 'Slovenia', 'eu', null),
+  ('ES', 'Spain', 'eu', 'with the Canary Islands, Ceuta and Melilla'), ('SE', 'Sweden', 'eu', null),
+  ('IS', 'Iceland', 'eea', null), ('LI', 'Liechtenstein', 'eea', null), ('NO', 'Norway', 'eea', null),
+  ('CH', 'Switzerland', 'non_eea', null), ('GB', 'United Kingdom', 'non_eea', null),
+  ('MC', 'Monaco', 'non_eea', null), ('SM', 'San Marino', 'non_eea', null),
+  ('VA', 'Vatican City State', 'non_eea', null), ('AD', 'Andorra', 'non_eea', null),
+  ('AL', 'Albania', 'non_eea', null), ('ME', 'Montenegro', 'non_eea', null),
+  ('MD', 'Moldova', 'non_eea', 'in the scope since 2025'), ('MK', 'North Macedonia', 'non_eea', 'in the scope since 2025'),
+  ('RS', 'Serbia', 'non_eea', 'in the scope since 2025'),
+  ('AX', 'Åland Islands', 'territory', 'part of Finland (FI IBANs)'),
+  ('GF', 'French Guiana', 'territory', 'part of France (FR IBANs)'),
+  ('GP', 'Guadeloupe', 'territory', 'part of France (FR IBANs)'),
+  ('MQ', 'Martinique', 'territory', 'part of France (FR IBANs)'),
+  ('YT', 'Mayotte', 'territory', 'part of France (FR IBANs)'),
+  ('RE', 'Réunion', 'territory', 'part of France (FR IBANs)'),
+  ('BL', 'Saint-Barthélemy', 'territory', 'with France (FR IBANs)'),
+  ('MF', 'Saint-Martin (French part)', 'territory', 'with France (FR IBANs)'),
+  ('PM', 'Saint-Pierre-et-Miquelon', 'territory', 'with France (FR IBANs)'),
+  ('GI', 'Gibraltar', 'territory', 'with the United Kingdom (GI IBANs)'),
+  ('GG', 'Guernsey', 'territory', 'with the United Kingdom (GB IBANs)'),
+  ('JE', 'Jersey', 'territory', 'with the United Kingdom (GB IBANs)'),
+  ('IM', 'Isle of Man', 'territory', 'with the United Kingdom (GB IBANs)');
+comment on table private.sepa_scheme_country is
+  'The SEPA schemes'' geographical scope by IBAN country code (EPC409-09 v8.0, 24/12/2025; review T3).';
 
 ------------------------------------------------------------------------------------------
 -- Guards
@@ -506,8 +612,54 @@ begin
 end;
 $$;
 
--- A debit of this transfer is on an imported statement of its account: its end-to-end id, or (the bank ignored
--- BtchBookg) the PmtInfId of the file it is in (M2c-6b books them; here it only stops counting it as in flight).
+-- Our own debit of a transfer on an imported statement of its account: a line carrying its end-to-end id.
+create or replace function private.transfer_own_debit_seen(p_bank_account_id uuid, p_end_to_end_id text)
+returns boolean
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select exists (select 1 from public.bank_transaction x
+                 where x.bank_account_id = p_bank_account_id and x.end_to_end_id = p_end_to_end_id
+                   and x.direction = 'debit');
+$$;
+
+-- The bank ignored BtchBookg and debited a PmtInf of our file as one line (camt.053 Btch/PmtInfId, no end-to-end id):
+-- it books that PmtInf's transfers only when its amount equals the sum of those not cancelled and not debited on
+-- their own (design §12's batch rule; review pain001#3). Any other batch debit explains none of them (M2c-6b, ops).
+-- One sum per PmtInf, and only when such a line exists (keyed probes: (account, PmtInfId), then the PmtInf's items).
+create or replace function private.pmt_inf_batch_seen(p_file_id uuid, p_pmt_inf_id text)
+returns boolean
+language plpgsql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  v_account uuid;
+  v_sum bigint;
+begin
+  select f.debtor_bank_account_id into v_account from public.transfer_file f where f.id = p_file_id;
+  if not exists (select 1 from public.bank_transaction x
+                 where x.bank_account_id = v_account and x.payment_info_id = p_pmt_inf_id and x.direction = 'debit'
+                   and x.end_to_end_id is null) then
+    return false;
+  end if;
+  select coalesce(sum(t.amount_minor), 0) into v_sum
+  from public.transfer_file_item i
+  cross join lateral (select t.amount_minor, t.end_to_end_id, t.status from public.bank_transfer t
+                      where t.id = i.transfer_id offset 0) t
+  where i.pmt_inf_id = p_pmt_inf_id and i.file_id = p_file_id and t.status <> 'cancelled'
+    and not private.transfer_own_debit_seen(v_account, t.end_to_end_id);
+  return exists (select 1 from public.bank_transaction x
+                 where x.bank_account_id = v_account and x.payment_info_id = p_pmt_inf_id and x.direction = 'debit'
+                   and x.end_to_end_id is null and x.amount_minor = v_sum);
+end;
+$$;
+
+-- A debit of this transfer is on an imported statement of its account: its end-to-end id, or a batch debit of its
+-- PmtInf that books it (private.pmt_inf_batch_seen; M2c-6b books them; here it only stops counting it as in flight).
 create or replace function private.transfer_debit_seen(p_transfer_id uuid)
 returns boolean
 language plpgsql
@@ -522,17 +674,125 @@ begin
   -- keyed probes (ARCHITECTURE §4): the transfer by its key, then its account's debits by (account, our id) and, for a
   -- batch, by (account, PmtInfId)
   select * into t from public.bank_transfer where id = p_transfer_id;
-  if exists (select 1 from public.bank_transaction x
-             where x.bank_account_id = t.debtor_bank_account_id and x.end_to_end_id = t.end_to_end_id
-               and x.direction = 'debit') then
+  if private.transfer_own_debit_seen(t.debtor_bank_account_id, t.end_to_end_id) then
     return true;
+  end if;
+  if t.status = 'cancelled' or t.transfer_file_id is null then
+    return false;
   end if;
   select i.pmt_inf_id into v_pmt_inf from public.transfer_file_item i
   where i.file_id = t.transfer_file_id and i.transfer_id = t.id;
-  return v_pmt_inf is not null and exists (
-    select 1 from public.bank_transaction x
-    where x.bank_account_id = t.debtor_bank_account_id and x.payment_info_id = v_pmt_inf and x.direction = 'debit');
+  return v_pmt_inf is not null and private.pmt_inf_batch_seen(t.transfer_file_id, v_pmt_inf);
 end;
+$$;
+
+-- The bank returned this transfer: a credit `return` on its account carrying its end-to-end id (review T1: evidence it
+-- was not paid, with or without its debit).
+create or replace function private.transfer_return_seen(p_transfer_id uuid)
+returns boolean
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select exists (select 1 from public.bank_transfer t
+                 cross join lateral (select 1 from public.bank_transaction x
+                                     where x.bank_account_id = t.debtor_bank_account_id
+                                       and coalesce(x.original_end_to_end_id, x.end_to_end_id) = t.end_to_end_id
+                                       and x.direction = 'credit' and x.kind = 'return' limit 1) x
+                 where t.id = p_transfer_id);
+$$;
+
+-- Every business day from p_from to p_to is in an imported statement of the account (review T1: a statement that
+-- covers the execution date and the next business day shows every debit the bank booked for it). Outside the seeded
+-- calendar: refused (private.is_business_day raises).
+create or replace function private.statement_covers(p_bank_account_id uuid, p_from date, p_to date)
+returns boolean
+language plpgsql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  d date;
+begin
+  if p_from is null or p_to is null or p_to < p_from then
+    return false;
+  end if;
+  for d in select g::date from generate_series(p_from, p_to, interval '1 day') g loop
+    if private.is_business_day(d) and not exists (
+         select 1 from public.bank_statement s
+         where s.bank_account_id = p_bank_account_id and s.status = 'imported' and s.to_date >= d
+           and s.from_date <= d) then
+      return false;
+    end if;
+  end loop;
+  return true;
+end;
+$$;
+
+-- The payee's name has no EPC basic Latin character once transliterated: the SQL twin of
+-- `pain001.epc_text(name, n) == ''` (letters NFKD does not decompose spelled as the writer's _SPELLED map does, one
+-- letter for the emptiness test; parity tested on the same strings, review T3). Such a transfer is held out of the file
+-- (`payee_name_not_epc`) instead of failing it for every other transfer.
+create or replace function private.epc_name_empty(p_name text)
+returns boolean
+language sql
+immutable
+parallel safe
+set search_path = ''
+as $$
+  select coalesce(translate(normalize(translate(p_name, x.f, x.t), nfkd), x.f, x.t), '')
+         !~ '[A-Za-z0-9/?:().,''+-]'
+  from (select 'œŒæÆßẞøØđĐðÐłŁþÞı' || U&'\2019\2018\02BC\00B4\2013\2014\2010\2011\00A0\202F' as f,
+               'oOaAsSoOdDdDlLtTi' || repeat(chr(39), 4) || '----' || '  ' as t) x;
+$$;
+
+-- An IBAN of a country or territory of the SEPA schemes (private.sepa_scheme_country; review T3): only those can be
+-- paid by an SCT file (SvcLvl SEPA). Others: held out (`iban_not_sepa`), refunds by hand.
+create or replace function private.iban_in_sepa(p_iban text)
+returns boolean
+language sql
+stable
+set search_path = ''
+as $$
+  select exists (select 1 from private.sepa_scheme_country c where c.code = upper(left(coalesce(p_iban, ''), 2)));
+$$;
+
+-- The file number from the sequence: TF-AAAA-NNNNNN, wider past 999 999 (never cut: review T7).
+create or replace function private.transfer_file_number(p_today date, p_seq bigint)
+returns text
+language sql
+immutable
+set search_path = ''
+as $$
+  select 'TF-' || to_char(p_today, 'YYYY') || '-' || lpad(p_seq::text, greatest(6, length(p_seq::text)), '0');
+$$;
+
+-- The transfers in flight from an account: in a downloaded or sent file and seen on no statement yet (by their own
+-- end-to-end id, or a batch debit of their PmtInf: one test per PmtInf). One pass, keyed (ARCHITECTURE §4).
+create or replace function private.transfers_in_flight(p_bank_account_id uuid)
+returns table (transfer_id uuid, amount_minor bigint, execution_date date)
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  with tr as materialized (
+    select t.id, t.amount_minor, t.end_to_end_id, t.transfer_file_id, i.pmt_inf_id, i.execution_date
+    from public.bank_transfer t
+    cross join lateral (select f.status from public.transfer_file f where f.id = t.transfer_file_id offset 0) f
+    cross join lateral (select x.pmt_inf_id, x.execution_date from public.transfer_file_item x
+                        where x.file_id = t.transfer_file_id and x.transfer_id = t.id offset 0) i
+    where t.debtor_bank_account_id = p_bank_account_id and t.status = 'in_file' and f.status in ('downloaded', 'sent')),
+  batch as materialized (
+    select p.transfer_file_id, p.pmt_inf_id
+    from (select distinct tr.transfer_file_id, tr.pmt_inf_id from tr) p
+    where private.pmt_inf_batch_seen(p.transfer_file_id, p.pmt_inf_id))
+  select tr.id, tr.amount_minor, tr.execution_date from tr
+  where not private.transfer_own_debit_seen(p_bank_account_id, tr.end_to_end_id)
+    and not exists (select 1 from batch b where b.transfer_file_id = tr.transfer_file_id
+                      and b.pmt_inf_id = tr.pmt_inf_id);
 $$;
 
 -- What the paying account can still pay (§11 cash check, ops critique #5): the closing balance of its last imported
@@ -561,11 +821,8 @@ begin
   end if;
   select coalesce(sum(t.amount_minor), 0) into v_since from public.bank_transaction t
   where t.bank_account_id = p_bank_account_id and t.booking_date > s.to_date and t.direction = 'debit';
-  select coalesce(sum(t.amount_minor), 0), count(*) into v_flight, v_flight_n
-  from public.bank_transfer t
-  cross join lateral (select f.status from public.transfer_file f where f.id = t.transfer_file_id offset 0) f
-  where t.debtor_bank_account_id = p_bank_account_id and t.status = 'in_file' and f.status in ('downloaded', 'sent')
-    and not private.transfer_debit_seen(t.id);
+  select coalesce(sum(x.amount_minor), 0), count(*) into v_flight, v_flight_n
+  from private.transfers_in_flight(p_bank_account_id) x;
   select coalesce(sum(q.amount_minor), 0) into v_refunds from public.refund_request q
   where q.bank_account_id = p_bank_account_id and q.status = 'requested' and q.execution_mode = 'manual';
   return jsonb_build_object(
@@ -576,12 +833,134 @@ begin
 end;
 $$;
 
+-- What the statements show for cancelling a downloaded file (p_transfer_id null) or one transfer of it (review T1;
+-- design §9.7, risk R4). The window: its requested execution date(s) to the account's next business day after the last;
+-- every business day of it in an imported statement (`no_statement_evidence` otherwise). A file: no debit carries one
+-- of its end-to-end ids — unless the bank returned it — nor one of its PmtInfIds, and none of its transfers is booked
+-- (`debit_seen`). A transfer: no debit carries its end-to-end id unless returned; a batch debit of its PmtInf is
+-- evidence only when it is exactly the others' (it then left this one out), any other one is `debit_seen`. As the
+-- sheets read it: {window_from, needed_to_date, statement_to_date, covered, debit_seen, returned, refusal}.
+create or replace function private.transfer_cancel_evidence(p_file_id uuid, p_transfer_id uuid)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  f public.transfer_file;
+  t public.bank_transfer;
+  v_pmt_inf text;
+  v_from date;
+  v_to date;
+  v_covered boolean;
+  v_debit boolean := false;
+  v_returned boolean := false;
+  v_others bigint;
+begin
+  select * into f from public.transfer_file where id = p_file_id;
+  if p_transfer_id is null then
+    v_from := f.first_execution_date;
+    v_to := private.next_business_day(f.last_execution_date);
+    v_debit := exists (select 1 from (select distinct i.pmt_inf_id from public.transfer_file_item i
+                                      where i.file_id = f.id) p
+                       where exists (select 1 from public.bank_transaction x
+                                     where x.bank_account_id = f.debtor_bank_account_id
+                                       and x.payment_info_id = p.pmt_inf_id and x.direction = 'debit'))
+               or exists (select 1 from public.transfer_file_item i
+                          cross join lateral (select x.id, x.status, x.end_to_end_id from public.bank_transfer x
+                                              where x.id = i.transfer_id offset 0) bt
+                          where i.file_id = f.id
+                            and (bt.status = 'booked'
+                                 or (bt.status = 'in_file'
+                                     and private.transfer_own_debit_seen(f.debtor_bank_account_id, bt.end_to_end_id)
+                                     and not private.transfer_return_seen(bt.id))));
+    v_returned := not v_debit and exists (
+      select 1 from public.transfer_file_item i
+      cross join lateral (select x.id, x.status from public.bank_transfer x where x.id = i.transfer_id offset 0) bt
+      where i.file_id = f.id and bt.status = 'in_file' and private.transfer_return_seen(bt.id));
+  else
+    select * into t from public.bank_transfer where id = p_transfer_id;
+    select i.pmt_inf_id, i.execution_date, private.next_business_day(i.execution_date)
+    into v_pmt_inf, v_from, v_to
+    from public.transfer_file_item i where i.file_id = f.id and i.transfer_id = t.id;
+    if private.transfer_own_debit_seen(t.debtor_bank_account_id, t.end_to_end_id) then
+      v_returned := private.transfer_return_seen(t.id);
+      v_debit := not v_returned;
+    elsif exists (select 1 from public.bank_transaction x
+                  where x.bank_account_id = t.debtor_bank_account_id and x.payment_info_id = v_pmt_inf
+                    and x.direction = 'debit' and x.end_to_end_id is null) then
+      select coalesce(sum(o.amount_minor), 0) into v_others
+      from public.transfer_file_item i
+      cross join lateral (select o.amount_minor, o.end_to_end_id, o.status from public.bank_transfer o
+                          where o.id = i.transfer_id offset 0) o
+      where i.pmt_inf_id = v_pmt_inf and i.file_id = f.id and i.transfer_id <> t.id and o.status <> 'cancelled'
+        and not private.transfer_own_debit_seen(t.debtor_bank_account_id, o.end_to_end_id);
+      v_debit := not exists (select 1 from public.bank_transaction x
+                             where x.bank_account_id = t.debtor_bank_account_id and x.payment_info_id = v_pmt_inf
+                               and x.direction = 'debit' and x.end_to_end_id is null
+                               and x.amount_minor = v_others)
+                 or exists (select 1 from public.bank_transaction x
+                            where x.bank_account_id = t.debtor_bank_account_id and x.payment_info_id = v_pmt_inf
+                              and x.direction = 'debit' and x.end_to_end_id is null
+                              and x.amount_minor <> v_others);
+      if v_debit and private.transfer_return_seen(t.id) then
+        v_debit := false;
+        v_returned := true;
+      end if;
+    elsif private.transfer_return_seen(t.id) then
+      v_returned := true;
+    end if;
+  end if;
+  v_covered := private.statement_covers(f.debtor_bank_account_id, v_from, v_to);
+  return jsonb_build_object(
+    'window_from', v_from, 'needed_to_date', v_to, 'covered', v_covered, 'debit_seen', v_debit,
+    'returned', v_returned and v_covered,
+    'statement_to_date', (select max(s.to_date) from public.bank_statement s
+                          where s.bank_account_id = f.debtor_bank_account_id and s.status = 'imported'),
+    'statements', (select coalesce(jsonb_agg(s.id order by s.to_date, s.id), '[]') from public.bank_statement s
+                   where s.bank_account_id = f.debtor_bank_account_id and s.status = 'imported'
+                     and s.to_date >= v_from and s.from_date <= v_to),
+    'refusal', case when v_debit then 'debit_seen' when not v_covered then 'no_statement_evidence' end,
+    'checked_at', clock_timestamp());
+end;
+$$;
+
+-- The open cancellation of a file (p_transfer_id null) or of one transfer of it at the file's current version, and
+-- what the statements show (null when the file is not downloaded): {request: {...} | null, evidence: {...} | null}.
+create or replace function private.transfer_cancellation_card(p_file_id uuid, p_transfer_id uuid,
+                                                              p_with_evidence boolean)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select case when f.status in ('downloaded', 'sent') then jsonb_build_object(
+    'request', (select jsonb_build_object(
+                  'request_id', q.id, 'kind', q.kind, 'attestation', q.attestation, 'reason', q.reason,
+                  'requested_at', q.requested_at, 'requested_by_me', q.requested_by = auth.uid(),
+                  'requested_by', (select coalesce(u.display_name, u.email) from public.app_user u
+                                   where u.id = q.requested_by))
+                from public.transfer_cancellation_request q
+                where q.file_id = f.id and q.transfer_id is not distinct from p_transfer_id
+                  and q.file_version = f.version and q.confirmed_at is null),
+    'evidence', case when p_with_evidence and (p_transfer_id is null or exists (
+                       select 1 from public.bank_transfer t where t.id = p_transfer_id and t.status = 'in_file'
+                         and t.transfer_file_id = f.id))
+                     then private.transfer_cancel_evidence(f.id, p_transfer_id) end) end
+  from public.transfer_file f where f.id = p_file_id;
+$$;
+
 -- Why an ordered transfer is held out of a file generated today with this execution date (null: it goes in). A payout
 -- (§11): its run still in flight; the payout blockers of today (the payout account come back or no longer confirmed,
 -- a payee check not cleared, the client's events, the dedicated account); the payout account unchanged since the
 -- approval froze it; the per-client cap N + D ≤ −4670[c] − c's other runs in flight (`payout_not_covered`, ledger
 -- critique #1: the client's money never pays another's payout); a date after the run's earliest latest execution date
--- only with a late reason (on the run, or given with the file). A refund: still pending.
+-- only with a late reason (on the run, or given with the file). A refund: still pending. Both (review T3): a payee name
+-- the EPC set cannot write (`payee_name_not_epc`), an IBAN outside the SEPA schemes (`iban_not_sepa`) — held out, so
+-- they never fail the file for every other transfer.
 create or replace function private.transfer_hold_reason(p_transfer_id uuid, p_today date, p_execution_date date,
                                                         p_late_reason text)
 returns text
@@ -604,6 +983,12 @@ begin
   if t.kind = 'refund' then
     if not exists (select 1 from public.refund_request q where q.transfer_id = t.id and q.status = 'requested') then
       return 'refund_not_pending';
+    end if;
+    if private.epc_name_empty(t.payee_name) then
+      return 'payee_name_not_epc';
+    end if;
+    if not private.iban_in_sepa(t.payee_iban) then
+      return 'iban_not_sepa';
     end if;
     return null;
   end if;
@@ -631,6 +1016,12 @@ begin
     and x.status in ('approved', 'sent') and x.id <> r.id;
   if r.gross_minor > coalesce(v_owed, 0) - v_inflight then
     return 'payout_not_covered';
+  end if;
+  if private.epc_name_empty(t.payee_name) then
+    return 'payee_name_not_epc';
+  end if;
+  if not private.iban_in_sepa(t.payee_iban) then
+    return 'iban_not_sepa';
   end if;
   if r.earliest_latest_execution_date is not null and p_execution_date > r.earliest_latest_execution_date
      and r.late_reason is null and p_late_reason is null then
@@ -803,7 +1194,7 @@ begin
   end if;
 
   select legal_name into v_name from public.organization where id = b.organization_id;
-  v_number := 'TF-' || to_char(v_today, 'YYYY') || '-' || lpad(nextval('private.transfer_file_number_seq')::text, 6, '0');
+  v_number := private.transfer_file_number(v_today, nextval('private.transfer_file_number_seq'));
   if v_sweep > 0 then
     v_e2e := 'SWP' || upper(substr(md5(gen_random_uuid()::text), 1, 12));
     insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id, creditor_bank_account_id, currency,
@@ -977,10 +1368,18 @@ begin
 end;
 $$;
 
--- « Télécharger » (ops critique #33): the web route has read the stored bytes and checked them against the SHA-256
--- (p_sha256 is what it computed; it serves the bytes only when this returns). Every download is recorded; a second one
+-- « Télécharger » (ops critique #33): the web route serves the stored bytes only when this returns a download, and only
+-- if they hash to the SHA-256 the job recorded (p_sha256: what it compared). Every download is recorded; a second one
 -- needs the warning acknowledged, the page naming who downloaded it first and when (« ne le déposez pas deux fois »).
 -- The file's runs become `sent` (§9.8: approved → sent at the download). No idempotency key: each download is a fact.
+-- Review T2 (pain001#0, money#0, security#0; design §11 « a generated file whose date has passed before download is
+-- superseded and regenerated »): the first download re-runs the generation's checks under the same locks — the
+-- requested date against the account's next execution day now (its cut-off), every payout's and refund's hold reason
+-- today (the payout blockers, a payee check, the payout account changed or retired, the per-client cap, a name or
+-- IBAN no file can carry), the cash check against the file's CtrlSum. A file that fails is superseded (its transfers
+-- go in the next one) and NOT served: {refused: 'file_stale' | 'file_blocked', blocked: [{transfer_id, reason}], …}
+-- returned, not raised, so that the supersession stays. A file holding a transfer cancelled since its download (one the
+-- bank refused, review T1) is never served again (`holds_cancelled_transfer`).
 create or replace function public.transfer_file_download(p_file_id uuid, p_sha256 text,
                                                          p_acknowledged boolean default false)
 returns jsonb
@@ -993,12 +1392,19 @@ declare
   f public.transfer_file;
   v_n integer;
   v_first text;
+  v_now timestamptz;
+  v_earliest date;
+  v_blocked jsonb;
+  v_cash jsonb;
+  v_refused text;
 begin
   select * into f from public.transfer_file where id = p_file_id;
   if not found or not private.has_role(f.organization_id, array['admin', 'ops_manager']) then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
   end if;
+  -- the generation's locks (the account row, the allocation then remit locks), the file's runs first (ADR-0014 order)
   perform private.transfer_file_lock_runs(f.id);
+  perform 1 from public.bank_account x where x.id = f.debtor_bank_account_id for share;
   perform private.remittance_command_locks(f.organization_id, true);
   select * into f from public.transfer_file where id = p_file_id for update;
   if f.status = 'pending' then
@@ -1009,6 +1415,43 @@ begin
   end if;
   if p_sha256 is distinct from f.file_sha256 then
     raise exception 'transfer file refused: hash_mismatch' using errcode = 'check_violation';
+  end if;
+  if f.status = 'generated' then
+    v_now := clock_timestamp();
+    v_earliest := private.transfer_earliest_execution_date(f.debtor_bank_account_id, v_now);
+    select coalesce(jsonb_agg(jsonb_build_object('transfer_id', x.id, 'kind', x.kind, 'end_to_end_id', x.end_to_end_id,
+                                                 'amount_minor', x.amount_minor::text, 'reason', x.hold)
+                              order by x.seq), '[]')
+    into v_blocked
+    from (select i.seq, t.id, t.kind, t.end_to_end_id, t.amount_minor,
+                 private.transfer_hold_reason(t.id, (v_now at time zone 'Europe/Paris')::date, i.execution_date,
+                                              f.late_reason) as hold
+          from public.transfer_file_item i
+          cross join lateral (select t.id, t.kind, t.end_to_end_id, t.amount_minor from public.bank_transfer t
+                              where t.id = i.transfer_id offset 0) t
+          where i.file_id = f.id and t.kind in ('payout', 'refund')) x
+    where x.hold is not null;
+    v_cash := private.transfer_cash_position(f.debtor_bank_account_id);
+    if v_cash is null or (v_cash ->> 'available_minor')::bigint < f.ctrl_sum_minor then
+      v_blocked := v_blocked || jsonb_build_array(jsonb_build_object(
+        'transfer_id', null, 'reason', case when v_cash is null then 'no_closing_balance' else 'cash_not_covered' end,
+        'available_minor', v_cash ->> 'available_minor', 'needed_minor', f.ctrl_sum_minor::text));
+    end if;
+    v_refused := case when f.first_execution_date < v_earliest then 'file_stale'
+                      when jsonb_array_length(v_blocked) > 0 then 'file_blocked' end;
+    if v_refused is not null then
+      perform private.transfer_file_release(f.id, 'superseded',
+        case v_refused when 'file_stale' then 'Date d''exécution dépassée avant le téléchargement : fichier à régénérer'
+                       else 'Contrôles changés depuis la génération : fichier à régénérer' end, null, null);
+      return jsonb_build_object('file_id', f.id, 'number', f.number, 'refused', v_refused, 'status', 'superseded',
+                                'first_execution_date', f.first_execution_date,
+                                'earliest_execution_date', v_earliest, 'blocked', v_blocked, 'cash', v_cash);
+    end if;
+  elsif exists (select 1 from public.transfer_file_item i
+                cross join lateral (select t.status from public.bank_transfer t where t.id = i.transfer_id offset 0) t
+                where i.file_id = f.id and t.status = 'cancelled') then
+    raise exception 'transfer file refused: holds_cancelled_transfer' using errcode = 'check_violation',
+      hint = 'Un virement de ce fichier a été annulé depuis son téléchargement : ne le déposez plus.';
   end if;
   if f.download_count > 0 and not coalesce(p_acknowledged, false) then
     select coalesce(u.display_name, u.email, 'un utilisateur') into v_first from public.app_user u
@@ -1027,7 +1470,8 @@ begin
   update public.remittance_run r set status = 'sent', version = version + 1
   from public.bank_transfer t
   where t.transfer_file_id = f.id and t.status = 'in_file' and t.run_id = r.id and r.status = 'approved';
-  return jsonb_build_object('file_id', f.id, 'number', f.number, 'download', v_n,
+  return jsonb_build_object('file_id', f.id, 'number', f.number, 'download', v_n, 'status',
+                            case when f.status = 'generated' then 'downloaded' else f.status end,
                             'storage_path', f.storage_path, 'file_name', f.number || '.xml');
 end;
 $$;
@@ -1079,10 +1523,10 @@ begin
 end;
 $$;
 
--- « Annuler le fichier » / « Rejeté par la banque » (§9.7, §11; risk R4): before download the file is superseded; after
--- download only with ops' attestation that it was not uploaded (`not_uploaded`) or that the bank rejected it whole
--- (`rejected_by_bank`), and while no statement shows a debit of any of its transfers. Its transfers go back to ordered
--- for the next file (its sweep is recomputed), its runs back to approved. Admins and ops managers at aal2.
+-- « Annuler le fichier » before download (§9.7, §11): the file is superseded, its transfers back to ordered for the next
+-- file (its sweep recomputed), its runs back to approved. After download (review T1: money#1, security#1) only by
+-- request and confirmation with the statements' evidence (below): refused here (`cancellation_request_required`).
+-- Admins and ops managers at aal2.
 create or replace function public.cancel_transfer_file(p_idempotency_key text, p_file_id uuid,
                                                        p_expected_version integer, p_reason text,
                                                        p_attestation text default null)
@@ -1098,7 +1542,6 @@ declare
   v_request jsonb := jsonb_build_object('file_id', p_file_id, 'expected_version', p_expected_version,
                                         'reason', btrim(coalesce(p_reason, '')), 'attestation', p_attestation);
   v_result jsonb;
-  v_status text;
   v_n integer;
 begin
   select * into f from public.transfer_file where id = p_file_id;
@@ -1118,26 +1561,278 @@ begin
   if p_expected_version is distinct from f.version then
     raise exception 'transfer file refused: version_changed' using errcode = 'check_violation';
   end if;
-  if f.status in ('pending', 'generated') then
-    if p_attestation is not null then
-      raise exception 'transfer file refused: not_downloaded' using errcode = 'check_violation';
-    end if;
-    v_status := 'superseded';
-  elsif f.status in ('downloaded', 'sent') then
-    if p_attestation is null or p_attestation not in ('not_uploaded', 'rejected_by_bank') then
-      raise exception 'transfer file refused: attestation_required' using errcode = 'check_violation';
-    end if;
-    if exists (select 1 from public.bank_transfer t where t.transfer_file_id = f.id
-                 and (t.status in ('booked', 'returned') or private.transfer_debit_seen(t.id))) then
-      raise exception 'transfer file refused: debit_seen' using errcode = 'check_violation';
-    end if;
-    v_status := case p_attestation when 'rejected_by_bank' then 'rejected' else 'superseded' end;
-  else
+  if f.status in ('downloaded', 'sent') then
+    raise exception 'transfer file refused: cancellation_request_required' using errcode = 'check_violation',
+      hint = 'Fichier téléchargé : demandez son annulation, relevé à l''appui ; une autre personne la confirme.';
+  elsif f.status not in ('pending', 'generated') then
     raise exception 'transfer file refused: not_live' using errcode = 'check_violation';
   end if;
-  v_n := private.transfer_file_release(f.id, v_status, v_reason, p_attestation, null);
-  v_result := jsonb_build_object('file_id', f.id, 'number', f.number, 'status', v_status, 'transfers_back', v_n);
+  if p_attestation is not null then
+    raise exception 'transfer file refused: not_downloaded' using errcode = 'check_violation';
+  end if;
+  v_n := private.transfer_file_release(f.id, 'superseded', v_reason, null, null);
+  v_result := jsonb_build_object('file_id', f.id, 'number', f.number, 'status', 'superseded', 'transfers_back', v_n);
   perform private.command_record('cancel_transfer_file', p_idempotency_key, v_request, v_result);
+  return v_result;
+end;
+$$;
+
+-- « Demander l'annulation » of a downloaded or sent file (review T1; §9.7, risk R4): ops attest it was not uploaded
+-- (`not_uploaded`) or that the bank rejected it whole (`rejected_by_bank`), and the statements must show it: every
+-- business day from its execution date to the account's next business day imported, no debit of it (by our ids or its
+-- PmtInfIds) unless returned (private.transfer_cancel_evidence: `no_statement_evidence`, `debit_seen`). One open
+-- request per file version (`already_requested`); a different person confirms it. Admins and ops managers at aal2.
+create or replace function public.request_transfer_file_cancellation(p_idempotency_key text, p_file_id uuid,
+                                                                     p_expected_version integer, p_reason text,
+                                                                     p_attestation text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+set lock_timeout = '5s'
+as $$
+declare
+  f public.transfer_file;
+  v_reason text := btrim(coalesce(p_reason, ''));
+  v_request jsonb := jsonb_build_object('file_id', p_file_id, 'expected_version', p_expected_version,
+                                        'reason', btrim(coalesce(p_reason, '')), 'attestation', p_attestation);
+  v_result jsonb;
+  v_evidence jsonb;
+  v_id uuid;
+begin
+  select * into f from public.transfer_file where id = p_file_id;
+  if not found or not private.has_role(f.organization_id, array['admin', 'ops_manager']) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  v_result := private.command_replay('request_transfer_file_cancellation', p_idempotency_key, v_request);
+  if v_result is not null then
+    return v_result;
+  end if;
+  if v_reason = '' or length(v_reason) > 2000 then
+    raise exception 'a reason is required' using errcode = 'check_violation';
+  end if;
+  if p_attestation is null or p_attestation not in ('not_uploaded', 'rejected_by_bank') then
+    raise exception 'transfer file refused: attestation_required' using errcode = 'check_violation';
+  end if;
+  perform private.transfer_file_lock_runs(f.id);
+  perform private.remittance_command_locks(f.organization_id, true);
+  select * into f from public.transfer_file where id = p_file_id for update;
+  if p_expected_version is distinct from f.version then
+    raise exception 'transfer file refused: version_changed' using errcode = 'check_violation';
+  end if;
+  if f.status in ('pending', 'generated') then
+    raise exception 'transfer file refused: not_downloaded' using errcode = 'check_violation';
+  elsif f.status not in ('downloaded', 'sent') then
+    raise exception 'transfer file refused: not_live' using errcode = 'check_violation';
+  end if;
+  if exists (select 1 from public.transfer_cancellation_request q
+             where q.file_id = f.id and q.transfer_id is null and q.file_version = f.version
+               and q.confirmed_at is null) then
+    raise exception 'transfer file refused: already_requested' using errcode = 'check_violation';
+  end if;
+  v_evidence := private.transfer_cancel_evidence(f.id, null);
+  if v_evidence ->> 'refusal' is not null then
+    raise exception 'transfer file refused: %', v_evidence ->> 'refusal' using errcode = 'check_violation',
+      detail = v_evidence::text;
+  end if;
+  insert into public.transfer_cancellation_request (organization_id, kind, file_id, file_version, attestation, reason,
+                                                    evidence, requested_by)
+  values (f.organization_id, 'file', f.id, f.version, p_attestation, v_reason, v_evidence, auth.uid())
+  returning id into v_id;
+  v_result := jsonb_build_object('request_id', v_id, 'file_id', f.id, 'number', f.number, 'status', 'requested',
+                                 'evidence', v_evidence);
+  perform private.command_record('request_transfer_file_cancellation', p_idempotency_key, v_request, v_result);
+  return v_result;
+end;
+$$;
+
+-- « Confirmer l'annulation » (review T1): another money-staff member (`same_person` otherwise) confirms the open request
+-- of the file at the version they saw, the statements showing it still. The file is superseded (`not_uploaded`) or
+-- rejected (`rejected_by_bank`): its transfers go back to ordered for the next file — a transfer the bank debited then
+-- returned is cancelled instead (never re-issued with the same id) — its sweep is recomputed, its runs approved again.
+create or replace function public.confirm_transfer_file_cancellation(p_idempotency_key text, p_file_id uuid,
+                                                                     p_expected_version integer)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+set lock_timeout = '5s'
+as $$
+declare
+  f public.transfer_file;
+  q public.transfer_cancellation_request;
+  v_request jsonb := jsonb_build_object('file_id', p_file_id, 'expected_version', p_expected_version);
+  v_result jsonb;
+  v_evidence jsonb;
+  v_status text;
+  v_n integer;
+  v_returned integer;
+begin
+  select * into f from public.transfer_file where id = p_file_id;
+  if not found or not private.has_role(f.organization_id, array['admin', 'ops_manager']) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  v_result := private.command_replay('confirm_transfer_file_cancellation', p_idempotency_key, v_request);
+  if v_result is not null then
+    return v_result;
+  end if;
+  perform private.transfer_file_lock_runs(f.id);
+  perform private.remittance_command_locks(f.organization_id, true);
+  select * into f from public.transfer_file where id = p_file_id for update;
+  if p_expected_version is distinct from f.version then
+    raise exception 'transfer file refused: version_changed' using errcode = 'check_violation';
+  end if;
+  if f.status not in ('downloaded', 'sent') then
+    raise exception 'transfer file refused: not_live' using errcode = 'check_violation';
+  end if;
+  select * into q from public.transfer_cancellation_request x
+  where x.file_id = f.id and x.transfer_id is null and x.file_version = f.version and x.confirmed_at is null
+  for update;
+  if not found then
+    raise exception 'transfer file refused: not_requested' using errcode = 'check_violation';
+  end if;
+  if q.requested_by = auth.uid() then
+    raise exception 'transfer file refused: same_person' using errcode = 'check_violation';
+  end if;
+  v_evidence := private.transfer_cancel_evidence(f.id, null);
+  if v_evidence ->> 'refusal' is not null then
+    raise exception 'transfer file refused: %', v_evidence ->> 'refusal' using errcode = 'check_violation',
+      detail = v_evidence::text;
+  end if;
+  update public.bank_transfer t set status = 'cancelled', cancelled_at = clock_timestamp(), cancelled_by = auth.uid(),
+    cancel_reason = 'Fichier ' || f.number || ' annulé : virement retourné par la banque'
+  where t.transfer_file_id = f.id and t.status = 'in_file' and private.transfer_return_seen(t.id);
+  get diagnostics v_returned = row_count;
+  v_status := case q.attestation when 'rejected_by_bank' then 'rejected' else 'superseded' end;
+  v_n := private.transfer_file_release(f.id, v_status, q.reason, q.attestation, null);
+  update public.transfer_cancellation_request set confirmed_by = auth.uid(), confirmed_at = clock_timestamp(),
+    confirm_evidence = v_evidence
+  where id = q.id;
+  v_result := jsonb_build_object('request_id', q.id, 'file_id', f.id, 'number', f.number, 'status', v_status,
+                                 'transfers_back', v_n, 'transfers_returned', v_returned);
+  perform private.command_record('confirm_transfer_file_cancellation', p_idempotency_key, v_request, v_result);
+  return v_result;
+end;
+$$;
+
+-- « Virement refusé par la banque » (review T1, pain001#1): one transfer of a downloaded or sent file the bank did not
+-- execute — a payee mismatch, a closed account — while the file was. The statements must show it (its execution date
+-- to the account's next business day imported, no debit of it unless returned; a batch debit of its PmtInf only when it
+-- is exactly the others'). One open request per transfer and file version; another person confirms. A payout: its run
+-- is then cancelled by an admin (public.cancel_remittance_run); a refund: by public.cancel_refund; a sweep is recomputed.
+create or replace function public.request_transfer_cancellation(p_idempotency_key text, p_transfer_id uuid,
+                                                                p_reason text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+set lock_timeout = '5s'
+as $$
+declare
+  t public.bank_transfer;
+  f public.transfer_file;
+  v_reason text := btrim(coalesce(p_reason, ''));
+  v_request jsonb := jsonb_build_object('transfer_id', p_transfer_id, 'reason', btrim(coalesce(p_reason, '')));
+  v_result jsonb;
+  v_evidence jsonb;
+  v_id uuid;
+begin
+  select * into t from public.bank_transfer where id = p_transfer_id;
+  if not found or not private.has_role(t.organization_id, array['admin', 'ops_manager']) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  v_result := private.command_replay('request_transfer_cancellation', p_idempotency_key, v_request);
+  if v_result is not null then
+    return v_result;
+  end if;
+  if v_reason = '' or length(v_reason) > 2000 then
+    raise exception 'a reason is required' using errcode = 'check_violation';
+  end if;
+  perform 1 from public.remittance_run r where r.id = t.run_id for update;
+  perform private.remittance_command_locks(t.organization_id, true);
+  select * into f from public.transfer_file where id = t.transfer_file_id for update;
+  select * into t from public.bank_transfer where id = p_transfer_id for update;
+  if t.status <> 'in_file' or f.status is null or f.status not in ('downloaded', 'sent') then
+    raise exception 'transfer refused: not_in_downloaded_file' using errcode = 'check_violation';
+  end if;
+  if exists (select 1 from public.transfer_cancellation_request q
+             where q.transfer_id = t.id and q.file_version = f.version and q.confirmed_at is null) then
+    raise exception 'transfer refused: already_requested' using errcode = 'check_violation';
+  end if;
+  v_evidence := private.transfer_cancel_evidence(f.id, t.id);
+  if v_evidence ->> 'refusal' is not null then
+    raise exception 'transfer refused: %', v_evidence ->> 'refusal' using errcode = 'check_violation',
+      detail = v_evidence::text;
+  end if;
+  insert into public.transfer_cancellation_request (organization_id, kind, file_id, transfer_id, file_version, reason,
+                                                    evidence, requested_by)
+  values (t.organization_id, 'transfer', f.id, t.id, f.version, v_reason, v_evidence, auth.uid())
+  returning id into v_id;
+  v_result := jsonb_build_object('request_id', v_id, 'transfer_id', t.id, 'file_id', f.id, 'number', f.number,
+                                 'status', 'requested', 'evidence', v_evidence);
+  perform private.command_record('request_transfer_cancellation', p_idempotency_key, v_request, v_result);
+  return v_result;
+end;
+$$;
+
+-- « Confirmer » (review T1): another money-staff member confirms the open request of the transfer at its file's current
+-- version, the statements showing it still. The transfer is cancelled (the file stays: the others were executed, its
+-- re-download is refused); nothing else moves — the run, the refund are cancelled by their own commands next.
+create or replace function public.confirm_transfer_cancellation(p_idempotency_key text, p_transfer_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+set lock_timeout = '5s'
+as $$
+declare
+  t public.bank_transfer;
+  f public.transfer_file;
+  q public.transfer_cancellation_request;
+  v_request jsonb := jsonb_build_object('transfer_id', p_transfer_id);
+  v_result jsonb;
+  v_evidence jsonb;
+begin
+  select * into t from public.bank_transfer where id = p_transfer_id;
+  if not found or not private.has_role(t.organization_id, array['admin', 'ops_manager']) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  v_result := private.command_replay('confirm_transfer_cancellation', p_idempotency_key, v_request);
+  if v_result is not null then
+    return v_result;
+  end if;
+  perform 1 from public.remittance_run r where r.id = t.run_id for update;
+  perform private.remittance_command_locks(t.organization_id, true);
+  select * into f from public.transfer_file where id = t.transfer_file_id for update;
+  select * into t from public.bank_transfer where id = p_transfer_id for update;
+  if t.status <> 'in_file' or f.status is null or f.status not in ('downloaded', 'sent') then
+    raise exception 'transfer refused: not_in_downloaded_file' using errcode = 'check_violation';
+  end if;
+  select * into q from public.transfer_cancellation_request x
+  where x.transfer_id = t.id and x.file_version = f.version and x.confirmed_at is null
+  for update;
+  if not found then
+    raise exception 'transfer refused: not_requested' using errcode = 'check_violation';
+  end if;
+  if q.requested_by = auth.uid() then
+    raise exception 'transfer refused: same_person' using errcode = 'check_violation';
+  end if;
+  v_evidence := private.transfer_cancel_evidence(f.id, t.id);
+  if v_evidence ->> 'refusal' is not null then
+    raise exception 'transfer refused: %', v_evidence ->> 'refusal' using errcode = 'check_violation',
+      detail = v_evidence::text;
+  end if;
+  update public.bank_transfer set status = 'cancelled', cancelled_at = clock_timestamp(), cancelled_by = auth.uid(),
+    cancel_reason = left('Non exécuté par la banque (fichier ' || f.number || ') : ' || q.reason, 2000)
+  where id = t.id;
+  update public.transfer_cancellation_request set confirmed_by = auth.uid(), confirmed_at = clock_timestamp(),
+    confirm_evidence = v_evidence
+  where id = q.id;
+  v_result := jsonb_build_object('request_id', q.id, 'transfer_id', t.id, 'kind', t.kind, 'status', 'cancelled',
+                                 'file_id', f.id, 'number', f.number, 'run_id', t.run_id,
+                                 'refund_request_id', (select r.id from public.refund_request r
+                                                       where r.transfer_id = t.id));
+  perform private.command_record('confirm_transfer_cancellation', p_idempotency_key, v_request, v_result);
   return v_result;
 end;
 $$;
@@ -1197,7 +1892,8 @@ end;
 $$;
 
 -- « Nom vérifié »: someone other than who recorded it checked the holder with the client (or the bank's suggestion was
--- a formatting difference). The payout account is no longer blocked by this check.
+-- a formatting difference). The payout account is no longer blocked by this check. Review T5 (security#3): nor who
+-- proposed or confirmed the flagged IBAN (`same_person`): the party whose IBAN the bank flagged never lifts the flag.
 create or replace function public.clear_payee_name_mismatch(p_idempotency_key text, p_check_id uuid, p_reason text)
 returns jsonb
 language plpgsql
@@ -1207,6 +1903,7 @@ set lock_timeout = '2s'
 as $$
 declare
   c public.payee_name_check;
+  pa public.client_payout_account;
   v_reason text := btrim(coalesce(p_reason, ''));
   v_request jsonb := jsonb_build_object('check_id', p_check_id, 'reason', btrim(coalesce(p_reason, '')));
   v_result jsonb;
@@ -1226,8 +1923,9 @@ begin
   if c.cleared_at is not null then
     raise exception 'payee check refused: already_cleared' using errcode = 'check_violation';
   end if;
-  if c.recorded_by = auth.uid() then
-    raise exception 'payee check refused: four_eyes' using errcode = 'check_violation';
+  select * into pa from public.client_payout_account where id = c.payout_account_id;
+  if auth.uid() = any (array_remove(array[c.recorded_by, pa.proposed_by, pa.confirmed_by], null)) then
+    raise exception 'payee check refused: same_person' using errcode = 'check_violation';
   end if;
   update public.payee_name_check set cleared_by = auth.uid(), cleared_at = clock_timestamp(), clear_reason = v_reason
   where id = c.id;
@@ -1305,6 +2003,8 @@ declare
   v_id uuid;
   v_fits boolean;
   v_filable boolean;
+  v_sepa boolean;
+  v_epc boolean;
   v_mode text;
   v_transfer uuid;
 begin
@@ -1373,15 +2073,25 @@ begin
   -- dedicated account in EUR (the default then); by hand in the bank otherwise, or when ops say so ('manual': e.g.
   -- already executed). A refund in a file is never executed by hand: its RFD debit books it (the M2b link), and its
   -- transfer follows it (private.refund_transfer_follow).
+  -- Review T3: by hand too when no SCT file can carry it — an IBAN outside the SEPA schemes, a name with no EPC
+  -- character (the default then; asked in a file: refused).
   v_filable := p.currency = 'EUR' and exists (select 1 from public.bank_account b where b.id = p.bank_account_id
                                                 and b.purpose = 'client_funds' and b.status = 'active');
-  v_mode := coalesce(p_execution_mode, case when v_filable then 'file' else 'manual' end);
+  v_sepa := private.iban_in_sepa(v_iban);
+  v_epc := not private.epc_name_empty(btrim(left(v_name, 70)));
+  v_mode := coalesce(p_execution_mode, case when v_filable and v_sepa and v_epc then 'file' else 'manual' end);
   if v_mode not in ('manual', 'file') then
     raise exception 'refund: unknown execution mode' using errcode = 'check_violation';
   end if;
   if v_mode = 'file' and not v_filable then
     raise exception 'refund: this account pays no transfer file (an active dedicated account in EUR)'
       using errcode = 'check_violation';
+  end if;
+  if v_mode = 'file' and not v_sepa then
+    raise exception 'refund refused: iban_not_sepa' using errcode = 'check_violation';
+  end if;
+  if v_mode = 'file' and not v_epc then
+    raise exception 'refund refused: payee_name_not_epc' using errcode = 'check_violation';
   end if;
   v_e2e := 'RFD' || upper(substr(md5(gen_random_uuid()::text), 1, 12));
   if v_mode = 'file' then
@@ -1415,8 +2125,9 @@ $$;
 
 -- The refund's transfer follows it: executed by its debit (the M2b link) → booked (a file not downloaded yet that holds
 -- it is superseded first: it must never be uploaded with a refund already paid); cancelled → cancelled (refused while
--- a downloaded file holds it: cancel the file first, attesting it was not uploaded or was rejected); bounced →
--- returned. Under the allocation and remit locks (the refund and payment rows are held by the caller).
+-- a downloaded file holds it: its transfer is cancelled first, on the statements' evidence and by four eyes —
+-- public.request_transfer_cancellation, or the file's; review T1, pain001#1); bounced → returned. Under the allocation
+-- and remit locks (the refund and payment rows are held by the caller).
 create or replace function private.refund_transfer_follow()
 returns trigger
 language plpgsql
@@ -1440,8 +2151,9 @@ begin
                         else 'Remboursement ' || new.end_to_end_id || ' annulé' end, null, null);
       select * into t from public.bank_transfer where id = t.id;
     elsif new.status = 'cancelled' then
-      raise exception 'refund: its transfer is in file %, already downloaded: cancel the file first', f.number
-        using errcode = 'check_violation';
+      raise exception 'refund refused: in_downloaded_file' using errcode = 'check_violation',
+        detail = jsonb_build_object('file', f.number, 'transfer_id', t.id)::text,
+        hint = 'Le fichier a été téléchargé : faites d''abord annuler son virement, relevé à l''appui.';
     end if;
   end if;
   if new.status = 'executed' then
@@ -1463,15 +2175,15 @@ create trigger refund_request_transfer after update of status on public.refund_r
 alter table public.refund_request enable always trigger refund_request_transfer;
 
 ------------------------------------------------------------------------------------------
--- Cancellation of a run (redefined from 20261114090000; design §9.7): before download its file is superseded; after
--- download with the attestation and a statement without its debit. + p_attestation (last, defaulted: the old signature
--- is dropped). Everything after the payout is M2c-5b's, unchanged. Same settings; grants restated below.
+-- Cancellation of a run (redefined from 20261114090000, same signature; design §9.7): its transfer still ordered is
+-- cancelled; in a file not downloaded, that file is superseded first; in a downloaded or sent file, the run waits for
+-- that transfer to be cancelled on the statements' evidence and by four eyes (public.request_transfer_cancellation
+-- or the file's; review T1, money#2: a run cancellation removes nothing from a downloaded file —
+-- `payout_in_downloaded_file` until then). Everything after the payout is M2c-5b's, unchanged. Same settings.
 ------------------------------------------------------------------------------------------
 
-drop function public.cancel_remittance_run(text, uuid, integer, text);
-create function public.cancel_remittance_run(p_idempotency_key text, p_run_id uuid,
-                                             p_expected_version integer, p_reason text,
-                                             p_attestation text default null)
+create or replace function public.cancel_remittance_run(p_idempotency_key text, p_run_id uuid,
+                                                        p_expected_version integer, p_reason text)
 returns jsonb
 language plpgsql
 security definer
@@ -1481,8 +2193,7 @@ as $$
 declare
   r public.remittance_run;
   v_reason text := btrim(coalesce(p_reason, ''));
-  v_request jsonb := jsonb_build_object('run_id', p_run_id, 'expected_version', p_expected_version, 'reason', v_reason,
-                                        'attestation', p_attestation);
+  v_request jsonb := jsonb_build_object('run_id', p_run_id, 'expected_version', p_expected_version, 'reason', v_reason);
   v_result jsonb;
   v_docs jsonb;
   v_restore jsonb;
@@ -1491,7 +2202,6 @@ declare
   v_today date := private.paris_today();
   t public.bank_transfer;
   f public.transfer_file;
-  v_executes date;
 begin
   select * into r from public.remittance_run where id = p_run_id;
   if not found or not private.has_role(r.organization_id, array['admin']) then
@@ -1514,11 +2224,10 @@ begin
   if p_expected_version is distinct from r.version then
     raise exception 'remittance run refused: version_changed' using errcode = 'check_violation';
   end if;
-  -- M2c-6a (§9.7; compliance critique D7, ops critique #6): the payout, under the remit lock. Before any file holding
-  -- it is downloaded it is cancelled (its file, not downloaded, is superseded: the other transfers go in the next one).
-  -- After download only with ops' attestation that the bank did not execute it (`not_executed`: the file was not
-  -- uploaded, was rejected, or the bank refused this transfer — a payee name mismatch), once a statement of the paying
-  -- account covering its execution date is imported and shows no debit of it.
+  -- M2c-6a (§9.7; compliance critique D7, ops critique #6; review T1): the payout, under the remit lock. Before any file
+  -- holding it is downloaded it is cancelled (its file, not downloaded, is superseded: the other transfers go in the
+  -- next one). After download the file stays as it was handed out — counted by the cash check, the run by the
+  -- per-client cap — until that transfer is cancelled on the statements' evidence by two people (then: `cancelled`).
   select * into t from public.bank_transfer x where x.id = r.transfer_id for update;
   if t.status = 'in_file' then
     select * into f from public.transfer_file x where x.id = t.transfer_file_id for update;
@@ -1526,29 +2235,17 @@ begin
       perform private.transfer_file_release(f.id, 'superseded', 'Reversement ' || r.number || ' annulé', null, null);
       select * into t from public.bank_transfer x where x.id = t.id;
     else
-      if p_attestation is distinct from 'not_executed' then
-        raise exception 'remittance run refused: attestation_required' using errcode = 'check_violation';
-      end if;
-      if private.transfer_debit_seen(t.id) then
-        raise exception 'remittance run refused: debit_seen' using errcode = 'check_violation';
-      end if;
-      select i.execution_date into v_executes from public.transfer_file_item i
-      where i.file_id = f.id and i.transfer_id = t.id;
-      if not exists (select 1 from public.bank_statement s where s.bank_account_id = t.debtor_bank_account_id
-                       and s.status = 'imported' and s.to_date >= v_executes) then
-        raise exception 'remittance run refused: statement_not_imported' using errcode = 'check_violation',
-          detail = jsonb_build_object('execution_date', v_executes)::text;
-      end if;
+      raise exception 'remittance run refused: payout_in_downloaded_file' using errcode = 'check_violation',
+        detail = jsonb_build_object('file_id', f.id, 'file', f.number, 'transfer_id', t.id)::text,
+        hint = 'Le fichier a été téléchargé : faites d''abord annuler le virement, relevé à l''appui.';
     end if;
-  elsif p_attestation is not null then
-    raise exception 'remittance run refused: not_downloaded' using errcode = 'check_violation';
   end if;
-  if t.id is not null and t.status not in ('ordered', 'in_file') then
+  if t.id is not null and t.status not in ('ordered', 'cancelled') then
     raise exception 'remittance run refused: transfer_%', t.status using errcode = 'check_violation';
   end if;
   update public.bank_transfer set status = 'cancelled', cancelled_by = auth.uid(), cancelled_at = clock_timestamp(),
     cancel_reason = left('Reversement ' || r.number || ' annulé : ' || v_reason, 2000)
-  where id = t.id and status in ('ordered', 'in_file');
+  where id = t.id and status = 'ordered';
 
   -- 1. one full credit note per invoice of the run: what each still charges each key, its VAT by cumulative
   -- difference at the invoice's own rate, off its pending VAT first
@@ -1761,7 +2458,14 @@ as $$
     'sent_marked_at', f.sent_marked_at,
     'sent_marked_by', (select coalesce(u.display_name, u.email) from public.app_user u where u.id = f.sent_marked_by),
     'closed_at', f.closed_at, 'close_reason', f.close_reason, 'close_attestation', f.close_attestation,
-    'error', f.error, 'late_reason', f.late_reason, 'held_count', jsonb_array_length(f.held));
+    'error', f.error, 'late_reason', f.late_reason, 'held_count', jsonb_array_length(f.held),
+    -- review T2: a generated file whose requested date is before the account's next execution day now: its download
+    -- supersedes it (« Régénérer »)
+    'stale', case when f.status = 'generated'
+                       and f.first_execution_date < private.transfer_earliest_execution_date(f.debtor_bank_account_id)
+                  then 'execution_date_passed' end,
+    -- review T1: the open cancellation request of a downloaded or sent file (its evidence on the file's page)
+    'cancellation', private.transfer_cancellation_card(f.id, null, false));
 $$;
 
 -- One transfer as the pages show it (the payee's IBAN masked to its last four characters).
@@ -1780,8 +2484,11 @@ as $$
     'run_id', t.run_id, 'run_number', r.number, 'run_status', r.status, 'run_version', r.version,
     'client_id', t.client_organization_id, 'client_name', c.legal_name,
     'refund_request_id', q.id, 'payment_id', q.payment_id, 'hold', p_hold,
-    'payee_check_open', exists (select 1 from public.payee_name_check k where k.transfer_id = t.id
-                                  and k.cleared_at is null))
+    -- review T5: a check on a payout account since replaced (retired) is closed with it
+    'payee_check_open', exists (select 1 from public.payee_name_check k
+                                join public.client_payout_account pa on pa.id = k.payout_account_id
+                                where k.transfer_id = t.id and k.cleared_at is null
+                                  and pa.status in ('active', 'returned')))
   from public.bank_transfer t
   left join public.remittance_run r on r.id = t.run_id
   left join public.organization c on c.id = t.client_organization_id
@@ -1860,13 +2567,17 @@ begin
            'payout_account_id', c.payout_account_id, 'iban_last4', right(pa.iban, 4), 'holder_name', pa.holder_name,
            'result', c.result, 'bank_name', c.bank_name, 'note', c.note, 'recorded_at', c.recorded_at,
            'recorded_by', (select coalesce(u.display_name, u.email) from public.app_user u where u.id = c.recorded_by),
-           'recorded_by_me', c.recorded_by = auth.uid(), 'transfer_id', c.transfer_id)
+           'recorded_by_me', c.recorded_by = auth.uid(), 'transfer_id', c.transfer_id,
+           -- review T5: none of who recorded it, proposed or confirmed the IBAN clears it
+           'can_clear', not (auth.uid() = any (array_remove(array[c.recorded_by, pa.proposed_by, pa.confirmed_by],
+                                                            null))))
            order by c.recorded_at), '[]')
   into v_checks
   from public.payee_name_check c
   join public.organization o on o.id = c.client_organization_id
   join public.client_payout_account pa on pa.id = c.payout_account_id
-  where c.organization_id = v_org and c.cleared_at is null;
+  -- review T5 (tests-ui#7): a check closes with its payout account (retired when a new one is confirmed)
+  where c.organization_id = v_org and c.cleared_at is null and pa.status in ('active', 'returned');
   return jsonb_build_object('today', v_today, 'accounts', v_accounts, 'own_account', v_own, 'payee_checks', v_checks,
                             'can_admin', private.has_role(v_org, array['admin']));
 end;
@@ -1892,15 +2603,29 @@ begin
   if not found or not (f.organization_id = any (private.money_staff_org_ids())) then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
   end if;
+  -- a batch debit tested once per PmtInf of the page (review pain001#3), each item's own debit by key; a downloaded
+  -- file's items carry their cancellation (review T1: the open request and what the statements show)
+  with page as materialized (
+    select x.* from public.transfer_file_item x where x.file_id = f.id and x.seq > coalesce(p_after_seq, 0)
+    order by x.seq limit v_limit),
+  batch as materialized (
+    select p.pmt_inf_id, private.pmt_inf_batch_seen(f.id, p.pmt_inf_id) as seen
+    from (select distinct page.pmt_inf_id from page) p)
   select coalesce(jsonb_agg(private.transfer_card(i.transfer_id, null)
                             || jsonb_build_object('seq', i.seq, 'pmt_inf_id', i.pmt_inf_id,
                                                   'execution_date', i.execution_date, 'late', i.late,
-                                                  'debit_seen', private.transfer_debit_seen(i.transfer_id))
+                                                  'debit_seen', private.transfer_own_debit_seen(t.debtor_bank_account_id,
+                                                                                                t.end_to_end_id)
+                                                                or (t.status <> 'cancelled' and b.seen),
+                                                  'cancellation', private.transfer_cancellation_card(f.id, i.transfer_id, true))
                             order by i.seq), '[]'), max(i.seq)
   into v_items, v_last
-  from (select * from public.transfer_file_item x where x.file_id = f.id and x.seq > coalesce(p_after_seq, 0)
-        order by x.seq limit v_limit) i;
+  from page i
+  cross join lateral (select t.debtor_bank_account_id, t.end_to_end_id, t.status from public.bank_transfer t
+                      where t.id = i.transfer_id offset 0) t
+  join batch b on b.pmt_inf_id = i.pmt_inf_id;
   return private.transfer_file_card(f) || jsonb_build_object(
+    'cancellation', private.transfer_cancellation_card(f.id, null, true),
     'bank_account', (select jsonb_build_object('id', b.id, 'label', b.label, 'iban_last4', right(b.iban, 4))
                      from public.bank_account b where b.id = f.debtor_bank_account_id),
     'cash_check', f.cash_check,
@@ -1926,11 +2651,29 @@ $$;
 -- Nightly alerts (§15) and the checks' wiring
 ------------------------------------------------------------------------------------------
 
+-- The instant a file's first execution day's cut-off passes (Paris time, « Facturation »; no cut-off recorded: the
+-- start of that day, as private.transfer_earliest_execution_date never asks for today then).
+create or replace function private.transfer_file_cutoff_at(p_file_id uuid)
+returns timestamptz
+language sql
+stable
+set search_path = ''
+as $$
+  select (f.first_execution_date
+          + coalesce((select (s.bank_cutoff ->> f.debtor_bank_account_id::text)::time
+                      from public.servicer_billing_settings s where s.organization_id = f.organization_id),
+                     time '00:00')) at time zone 'Europe/Paris'
+  from public.transfer_file f where f.id = p_file_id;
+$$;
+
 -- transfer_not_filed (an ordered payout or refund more than one business day old), file_not_downloaded (generated more
 -- than one business day ago), file_not_marked_sent (downloaded, not marked as sent once its first execution day's
--- cut-off passed), transfer_not_debited (in a downloaded or sent file, no debit on a statement more than two business
--- days after its execution date), transfer_file_failed (the job could not write it, its transfers still wait),
--- payee_name_mismatch (a payout account blocked by a payee check nobody cleared).
+-- cut-off passed — review T6: evaluated hourly too, private.transfer_checks_due), transfer_not_debited (in a downloaded
+-- or sent file, no debit on a statement more than two business days after its execution date), transfer_file_failed
+-- (the job could not write it, its transfers still wait), transfer_file_pending (review T6: the job has not written it
+-- 15 minutes after its generation), payee_name_mismatch (a payout account blocked by a payee check nobody cleared; a
+-- check closes with its account: review T5), payee_name_not_epc and iban_not_sepa (review T3: an ordered payout or
+-- refund no file can carry, one row per transfer). p_today (tests): the checks as of the end of that Paris day.
 create or replace function private.run_transfer_checks(p_check_run_id uuid, p_organization_id uuid,
                                                        p_today date default null)
 returns void
@@ -1941,6 +2684,8 @@ set enable_seqscan = off
 as $$
 declare
   v_today date := coalesce(p_today, private.paris_today());
+  v_now timestamptz := case when p_today is null or p_today = private.paris_today() then clock_timestamp()
+                            else (p_today + time '23:59:59') at time zone 'Europe/Paris' end;
   v_bd2 date;   -- the second business day on or before today: a day before it is more than 1 business day ago
   v_bd3 date;
 begin
@@ -1952,6 +2697,11 @@ begin
   order by c.day desc offset 2 limit 1;
   insert into public.payment_check_result (run_id, organization_id, code, severity, subject_type, subject_id, currency,
                                            amount_minor, count, oldest_days, details)
+  with flight as materialized (   -- the transfers in flight, per paying account (one pass each, keyed)
+    select b.id as bank_account_id, b.currency, x.transfer_id, x.amount_minor, x.execution_date
+    from public.bank_account b
+    cross join lateral private.transfers_in_flight(b.id) x
+    where b.organization_id = p_organization_id and b.purpose = 'client_funds')
   select p_check_run_id, p_organization_id, u.code, 'alert', u.subject_type, u.subject_id, u.currency, u.amount_minor,
          u.count, u.oldest_days, coalesce(u.details, '{}')
   from (
@@ -1977,22 +2727,14 @@ begin
                                                                 'first_execution_date', f.first_execution_date)
     from public.transfer_file f
     where f.organization_id = p_organization_id and f.status = 'downloaded'
-      and (f.first_execution_date < v_today
-           or (f.first_execution_date = v_today and v_today = private.paris_today()
-               and (clock_timestamp() at time zone 'Europe/Paris')::time
-                   >= coalesce((select (s.bank_cutoff ->> f.debtor_bank_account_id::text)::time
-                                from public.servicer_billing_settings s
-                                where s.organization_id = f.organization_id), time '00:00')))
+      and private.transfer_file_cutoff_at(f.id) <= v_now
     union all
-    select 'transfer_not_debited', 'bank_account', t.debtor_bank_account_id, t.currency, sum(t.amount_minor)::bigint,
-           count(*)::integer, max(v_today - i.execution_date),
-           jsonb_build_object('ids', (array_agg(t.id order by i.execution_date, t.id))[1:50])
-    from public.bank_transfer t
-    join public.transfer_file_item i on i.file_id = t.transfer_file_id and i.transfer_id = t.id
-    cross join lateral (select x.status from public.transfer_file x where x.id = t.transfer_file_id offset 0) f
-    where t.organization_id = p_organization_id and t.status = 'in_file' and f.status in ('downloaded', 'sent')
-      and i.execution_date < v_bd3 and not private.transfer_debit_seen(t.id)
-    group by t.debtor_bank_account_id, t.currency
+    select 'transfer_not_debited', 'bank_account', x.bank_account_id, x.currency, sum(x.amount_minor)::bigint,
+           count(*)::integer, max(v_today - x.execution_date),
+           jsonb_build_object('ids', (array_agg(x.transfer_id order by x.execution_date, x.transfer_id))[1:50])
+    from flight x
+    where x.execution_date < v_bd3
+    group by x.bank_account_id, x.currency
     union all
     select 'transfer_file_failed', 'transfer_file', f.id, f.currency, f.ctrl_sum_minor, f.nb_of_txs,
            v_today - (f.closed_at at time zone 'Europe/Paris')::date,
@@ -2002,12 +2744,88 @@ begin
       and exists (select 1 from public.transfer_file_item i join public.bank_transfer t on t.id = i.transfer_id
                   where i.file_id = f.id and t.status = 'ordered')
     union all
+    select 'transfer_file_pending', 'transfer_file', f.id, f.currency, f.ctrl_sum_minor, f.nb_of_txs,
+           v_today - (f.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('number', f.number, 'created_at', f.created_at)
+    from public.transfer_file f
+    where f.organization_id = p_organization_id and f.status = 'pending'
+      and f.created_at + interval '15 minutes' <= v_now
+    union all
     select 'payee_name_mismatch', 'client_payout_account', c.payout_account_id, null, null, 1,
            v_today - (c.recorded_at at time zone 'Europe/Paris')::date,
            jsonb_build_object('client_id', c.client_organization_id, 'result', c.result, 'check_id', c.id)
     from public.payee_name_check c
-    where c.organization_id = p_organization_id and c.cleared_at is null) u;
+    where c.organization_id = p_organization_id and c.cleared_at is null
+      and exists (select 1 from public.client_payout_account pa where pa.id = c.payout_account_id
+                    and pa.status in ('active', 'returned'))
+    union all
+    select h.code, 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('kind', t.kind, 'end_to_end_id', t.end_to_end_id, 'run_id', t.run_id,
+                              'bank_account_id', t.debtor_bank_account_id)
+    from public.bank_transfer t
+    cross join lateral (select 'payee_name_not_epc' as code where private.epc_name_empty(t.payee_name)
+                        union all
+                        select 'iban_not_sepa' where not private.iban_in_sepa(t.payee_iban)) h
+    where t.organization_id = p_organization_id and t.status = 'ordered' and t.kind in ('payout', 'refund')
+      and exists (select 1 from public.bank_account b where b.id = t.debtor_bank_account_id
+                    and b.purpose = 'client_funds')) u;
 end;
+$$;
+
+-- Review T6 (concurrency-perf#2, tests-ui#10): a servicer's checks are due now, between the nightly runs, when a
+-- downloaded file's first execution day's cut-off has passed, or a file is still pending 15 minutes after its
+-- generation, and no check run started since (`file_not_marked_sent`, `transfer_file_pending` then raised once, at
+-- the cut-off rather than the next night). Keyed: the live files of the servicer, its check runs by start.
+create or replace function private.transfer_checks_due(p_organization_id uuid,
+                                                       p_now timestamptz default clock_timestamp())
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select exists (
+           select 1 from public.transfer_file f
+           cross join lateral (select private.transfer_file_cutoff_at(f.id) as at offset 0) c
+           where f.organization_id = p_organization_id and f.status = 'downloaded' and c.at <= p_now
+             and not exists (select 1 from public.payment_check_run r
+                             where r.organization_id = p_organization_id and r.started_at >= c.at))
+      or exists (
+           select 1 from public.transfer_file f
+           where f.organization_id = p_organization_id and f.status = 'pending'
+             and f.created_at + interval '15 minutes' <= p_now
+             and not exists (select 1 from public.payment_check_run r
+                             where r.organization_id = p_organization_id
+                               and r.started_at >= f.created_at + interval '15 minutes'));
+$$;
+
+-- The hourly cron (redefined from 20261113090000): the schedule of each servicer with work and the documents job of
+-- each servicer with documents due, as before; and — review T6 — the payments checks (`payments.invariants`, the
+-- nightly run's job) of each servicer whose transfer checks are due now. Returns the number of messages queued.
+create or replace function private.queue_remittance_schedule()
+returns integer
+language sql
+security definer
+set search_path = ''
+as $$
+  with orgs as (
+    select o.id from public.organization o
+    where o.kind = 'servicer'
+      and (exists (select 1 from private.remittance_pending q where q.organization_id = o.id)
+           or exists (select 1 from public.remittance_run r where r.organization_id = o.id and r.job is not null))),
+  sent as (select pgmq.send('remittances', jsonb_build_object('type', 'schedule', 'organization_id', id)) as m
+           from orgs),
+  docs as (select o.id from public.organization o
+           where o.kind = 'servicer' and private.remittance_documents_due(o.id)),
+  sent_docs as (select pgmq.send('remittances', jsonb_build_object('type', 'documents', 'organization_id', id)) as m
+                from docs),
+  checks as (select o.id from public.organization o
+             where o.kind = 'servicer' and private.transfer_checks_due(o.id, clock_timestamp())),
+  sent_checks as (select pgmq.send('payments', jsonb_build_object('type', 'invariants', 'organization_id', id)) as m
+                  from checks)
+  select ((select count(*) from sent) + (select count(*) from sent_docs) + (select count(*) from sent_checks))::integer;
 $$;
 
 -- The runs' checks keep their M2c-5b body under a new name; run_remittance_checks (what run_payment_checks calls) runs
@@ -2033,9 +2851,12 @@ alter table public.transfer_file enable row level security;
 alter table public.transfer_file_item enable row level security;
 alter table public.transfer_file_download enable row level security;
 alter table public.payee_name_check enable row level security;
-revoke all on public.transfer_file, public.transfer_file_item, public.transfer_file_download, public.payee_name_check
+alter table public.transfer_cancellation_request enable row level security;
+revoke all on public.transfer_file, public.transfer_file_item, public.transfer_file_download, public.payee_name_check,
+  public.transfer_cancellation_request
   from public, anon, authenticated;
-grant select on public.transfer_file, public.transfer_file_item, public.transfer_file_download, public.payee_name_check
+grant select on public.transfer_file, public.transfer_file_item, public.transfer_file_download, public.payee_name_check,
+  public.transfer_cancellation_request
   to authenticated;
 create policy transfer_file_read on public.transfer_file for select to authenticated using (
   organization_id = any ((select private.money_staff_org_ids())::uuid[]));
@@ -2045,11 +2866,52 @@ create policy transfer_file_download_read on public.transfer_file_download for s
   organization_id = any ((select private.money_staff_org_ids())::uuid[]));
 create policy payee_name_check_read on public.payee_name_check for select to authenticated using (
   organization_id = any ((select private.money_staff_org_ids())::uuid[]));
+create policy transfer_cancellation_request_read on public.transfer_cancellation_request for select to authenticated
+  using (organization_id = any ((select private.money_staff_org_ids())::uuid[]));
 revoke all on sequence private.transfer_file_number_seq from public, anon, authenticated;
+revoke all on private.sepa_scheme_country from public, anon, authenticated;
+
+-- A cancellation request: what was asked never changes; it is confirmed once (by another person: the constraint).
+create or replace function private.transfer_cancellation_request_guard()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if tg_op = 'INSERT' then
+    if new.confirmed_at is not null then
+      raise exception 'cancellation request: starts unconfirmed' using errcode = 'check_violation';
+    end if;
+    return new;
+  end if;
+  if (new.id, new.organization_id, new.kind, new.file_id, new.transfer_id, new.file_version, new.attestation,
+      new.reason, new.evidence, new.requested_by, new.requested_at)
+     is distinct from
+     (old.id, old.organization_id, old.kind, old.file_id, old.transfer_id, old.file_version, old.attestation,
+      old.reason, old.evidence, old.requested_by, old.requested_at)
+     or old.confirmed_at is not null then
+    raise exception 'cancellation request %: what was asked never changes; it is confirmed once', old.id
+      using errcode = 'check_violation';
+  end if;
+  return new;
+end;
+$$;
+create trigger transfer_cancellation_request_guard before insert or update on public.transfer_cancellation_request
+  for each row execute function private.transfer_cancellation_request_guard();
+alter table public.transfer_cancellation_request enable always trigger transfer_cancellation_request_guard;
+create trigger transfer_cancellation_request_no_delete before delete or truncate
+  on public.transfer_cancellation_request for each statement execute function private.refuse_delete();
+alter table public.transfer_cancellation_request enable always trigger transfer_cancellation_request_no_delete;
+create trigger transfer_cancellation_request_change_log after insert or update or delete
+  on public.transfer_cancellation_request for each row execute function private.log_change();
 
 -- The private bucket `transfer-files` (supabase/config.toml; hosted: `supabase config push`, migrations create no
--- bucket): <servicer>/<file>/<number>.xml, read by the servicer's money staff at aal2 (the web route serves it after
--- the hash check); written by the worker only (service key).
+-- bucket): <servicer>/<file>/<number>.xml, written by the worker only (service key). Review T4 (money#3, security#2):
+-- no one reads it directly. An object is readable only by the money-staff member whose download of that file the
+-- command recorded in the last 60 seconds, and only while the file is downloaded or sent — so the download log, the
+-- second-download warning and the generation checks of public.transfer_file_download can never be skipped, and a
+-- superseded, rejected or failed file is never served (the service key never reaches the web app: the route reads the
+-- bytes with the caller's session right after the command, and serves them only if they hash to the recorded SHA-256).
 create or replace function private.can_read_transfer_file_object(p_name text)
 returns boolean
 language sql
@@ -2059,8 +2921,13 @@ set search_path = ''
 as $$
   select case when p_name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/TF-[0-9]{4}-[0-9]{6,}\.xml$'
               then split_part(p_name, '/', 1)::uuid = any (private.money_staff_org_ids())
-                   and exists (select 1 from public.transfer_file f where f.id = split_part(p_name, '/', 2)::uuid
-                                 and f.organization_id = split_part(p_name, '/', 1)::uuid and f.storage_path = p_name)
+                   and exists (select 1 from public.transfer_file f
+                               where f.id = split_part(p_name, '/', 2)::uuid
+                                 and f.organization_id = split_part(p_name, '/', 1)::uuid and f.storage_path = p_name
+                                 and f.status in ('downloaded', 'sent')
+                                 and exists (select 1 from public.transfer_file_download d
+                                             where d.file_id = f.id and d.downloaded_by = (select auth.uid())
+                                               and d.downloaded_at > clock_timestamp() - interval '60 seconds'))
               else false end;
 $$;
 create policy transfer_file_object_read on storage.objects for select to authenticated
@@ -2068,7 +2935,14 @@ create policy transfer_file_object_read on storage.objects for select to authent
 
 revoke execute on function private.transfer_file_guard(), private.payee_name_check_guard(),
   private.refund_request_mode_guard(), private.refund_transfer_follow(),
+  private.transfer_cancellation_request_guard(),
   private.transfer_earliest_execution_date(uuid, timestamptz), private.transfer_debit_seen(uuid),
+  private.transfer_own_debit_seen(uuid, text), private.pmt_inf_batch_seen(uuid, text),
+  private.transfer_return_seen(uuid), private.statement_covers(uuid, date, date), private.epc_name_empty(text),
+  private.iban_in_sepa(text), private.transfer_file_number(date, bigint), private.transfers_in_flight(uuid),
+  private.transfer_cancel_evidence(uuid, uuid), private.transfer_cancellation_card(uuid, uuid, boolean),
+  private.transfer_file_cutoff_at(uuid), private.transfer_checks_due(uuid, timestamptz),
+  private.queue_remittance_schedule(),
   private.transfer_cash_position(uuid), private.transfer_hold_reason(uuid, date, date, text),
   private.transfer_file_release(uuid, text, text, text, uuid), private.transfer_file_lock_runs(uuid),
   private.transfer_file_begin(uuid, uuid),
@@ -2080,27 +2954,36 @@ revoke execute on function private.transfer_file_guard(), private.payee_name_che
   from public, anon, authenticated;
 -- the storage policy runs as the caller
 grant execute on function private.can_read_transfer_file_object(text) to authenticated;
--- the worker (service role): the transfer file job; the payout blockers as M2c-4 granted them
+-- the worker (service role): the transfer file job; the payout blockers as M2c-4 granted them; the SQL twins its
+-- parity tests compare with the writer
 grant execute on function private.transfer_file_begin(uuid, uuid),
   private.transfer_file_record(uuid, uuid, text, bigint, text, boolean, text, integer, bigint),
   private.transfer_file_failed(uuid, uuid, text), private.remittance_payout_blockers(uuid, char, date),
-  private.transfer_cash_position(uuid), private.transfer_earliest_execution_date(uuid, timestamptz)
+  private.transfer_cash_position(uuid), private.transfer_earliest_execution_date(uuid, timestamptz),
+  private.epc_name_empty(text), private.iban_in_sepa(text)
   to service_role;
+grant select on private.sepa_scheme_country to service_role;
 revoke execute on function public.generate_transfer_file(text, uuid, text),
   public.transfer_file_download(uuid, text, boolean), public.mark_transfer_file_sent(text, uuid, integer),
   public.cancel_transfer_file(text, uuid, integer, text, text),
+  public.request_transfer_file_cancellation(text, uuid, integer, text, text),
+  public.confirm_transfer_file_cancellation(text, uuid, integer),
+  public.request_transfer_cancellation(text, uuid, text), public.confirm_transfer_cancellation(text, uuid),
   public.record_payee_name_mismatch(text, uuid, text, text, text), public.clear_payee_name_mismatch(text, uuid, text),
   public.set_bank_account_pain_version(text, uuid, text), public.transfer_overview(),
   public.transfer_file_detail(uuid, integer, integer),
   public.request_refund(text, uuid, text, text, text, text, text, text, text, text),
-  public.cancel_remittance_run(text, uuid, integer, text, text)
+  public.cancel_remittance_run(text, uuid, integer, text)
   from public, anon;
 grant execute on function public.generate_transfer_file(text, uuid, text),
   public.transfer_file_download(uuid, text, boolean), public.mark_transfer_file_sent(text, uuid, integer),
   public.cancel_transfer_file(text, uuid, integer, text, text),
+  public.request_transfer_file_cancellation(text, uuid, integer, text, text),
+  public.confirm_transfer_file_cancellation(text, uuid, integer),
+  public.request_transfer_cancellation(text, uuid, text), public.confirm_transfer_cancellation(text, uuid),
   public.record_payee_name_mismatch(text, uuid, text, text, text), public.clear_payee_name_mismatch(text, uuid, text),
   public.set_bank_account_pain_version(text, uuid, text), public.transfer_overview(),
   public.transfer_file_detail(uuid, integer, integer),
   public.request_refund(text, uuid, text, text, text, text, text, text, text, text),
-  public.cancel_remittance_run(text, uuid, integer, text, text)
+  public.cancel_remittance_run(text, uuid, integer, text)
   to authenticated;

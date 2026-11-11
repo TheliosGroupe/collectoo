@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -235,6 +236,8 @@ def test_names_are_transliterated_and_cut_and_the_bic_falls_back_to_notprovided(
         ("Ωμέγα", ""),
         ('A&B <C> "D" ; E', "A B C D E"),
         ("  plein   d'espaces  ", "plein d'espaces"),
+        # NFKD gives a letter the map spells (ǿ → ø + accent → o)
+        ("\u01feRSTED \u01ff", "ORSTED o"),
     ],
 )
 def test_epc_transliteration_examples(raw: str, out: str) -> None:
@@ -372,6 +375,8 @@ def _one(*txs: Transaction, version: str = "pain.001.001.09") -> TransferFile:
         (_tx(amount_minor=pain001.MAX_AMOUNT_MINOR + 1), "out of range"),
         (_tx(creditor_name="Ωμέγα"), "no EPC character"),
         (_tx(creditor_iban="FR7630004000031234567890144"), "invalid IBAN"),
+        # review T3 (pain001#2): an SCT file pays only the SEPA schemes' countries (EPC409-09)
+        (_tx(creditor_iban="TN5910006035183598478831"), "outside the SEPA"),
         (_tx(creditor_bic="bad"), "invalid BIC"),
         (_tx(end_to_end_id="RMT//1"), "no leading"),
         (_tx(end_to_end_id="RMT" + "0" * 33), "1 to 35"),
@@ -386,6 +391,20 @@ def test_refused_inputs(tx: Transaction, match: str) -> None:
 def test_an_end_to_end_id_twice_is_refused() -> None:
     with pytest.raises(Pain001Error, match="twice"):
         render(_one(_tx(), _tx(instr_id="RV-2026-000002")))
+
+
+def test_the_writer_refuses_a_file_it_cannot_identify() -> None:
+    """The writer's own input checks (before the structural check of its bytes)."""
+    one = _one(_tx())
+    p = one.payment_infos[0]
+    with pytest.raises(Pain001Error, match="PmtInfId TF-2026-000003-1 twice"):
+        render(TransferFile(one.version, one.msg_id, one.created_at, one.initiating_party, (p, p)))
+    with pytest.raises(Pain001Error, match="identifier 'TF 3'"):
+        render(TransferFile(one.version, "TF 3", one.created_at, one.initiating_party, (p,)))
+    with pytest.raises(Pain001Error, match="holds no transaction"):
+        render(_one())
+    with pytest.raises(Pain001Error, match="at least one PmtInf"):
+        render(TransferFile(one.version, one.msg_id, one.created_at, one.initiating_party, ()))
 
 
 def test_an_unknown_version_is_refused() -> None:
@@ -428,6 +447,227 @@ def test_the_check_catches_a_tampered_file(
     assert old in data, old
     with pytest.raises(Pain001Error, match=match):
         check(data.replace(old, new, 1), version)
+
+
+def _nth(data: bytes, old: bytes, new: bytes, n: int = 1) -> bytes:
+    """`data` with the n-th occurrence of `old` replaced (asserted present)."""
+    at = -1
+    for _ in range(n):
+        at = data.index(old, at + 1)
+    return data[:at] + new + data[at + len(old) :]
+
+
+def _bic_tag(version: str) -> bytes:
+    return b"BICFI" if version == "pain.001.001.09" else b"BIC"
+
+
+def _other_bic_tag(version: str) -> bytes:
+    return b"BIC" if version == "pain.001.001.09" else b"BICFI"
+
+
+def _dt(version: str, day: str) -> bytes:
+    return (
+        f"<Dt>{day}</Dt>" if version == "pain.001.001.09" else f"<ReqdExctnDt>{day}</ReqdExctnDt>"
+    ).encode()
+
+
+# Review tests-ui#2: every check `check()` makes is pinned by a tamper only it catches (its
+# message), so disabling any one of them fails a test — on the worked example (BICs, one PmtInf)
+# or the mixed one (NOTPROVIDED, two PmtInfs).
+_TAMPERS: list[tuple[str, str, Callable[[bytes, str], bytes], str]] = [
+    (
+        "svclvl",
+        "worked",
+        lambda d, v: d.replace(b"<Cd>SEPA</Cd>", b"<Cd>NURG</Cd>", 1),
+        "SvcLvl SEPA",
+    ),
+    (
+        "debtor_iban",
+        "worked",
+        lambda d, v: _nth(d, CF_IBAN.encode(), CF_IBAN[:-1].encode() + b"2"),
+        "DbtrAcct IBAN",
+    ),
+    (
+        "creditor_iban",
+        "worked",
+        lambda d, v: _nth(d, MARTIN_IBAN.encode(), MARTIN_IBAN[:-1].encode() + b"4"),
+        "CdtrAcct IBAN",
+    ),
+    (
+        "creditor_not_sepa",
+        "worked",
+        lambda d, v: _nth(d, MARTIN_IBAN.encode(), b"TN5910006035183598478831"),
+        "CdtrAcct IBAN",
+    ),
+    (
+        "name_length",
+        "worked",
+        lambda d, v: _nth(d, b"<Nm>MARTIN SAS</Nm>", b"<Nm>" + b"M" * 71 + b"</Nm>"),
+        "Cdtr/Nm: 1 to 70",
+    ),
+    (
+        "ustrd",
+        "worked",
+        lambda d, v: _nth(
+            d, b"<Ustrd>REVERSEMENT RV-2026-000001", b"<Ustrd>" + b"R" * 141 + b" RV-2026-000001"
+        ),
+        "Ustrd: 1 to 140",
+    ),
+    (
+        "ustrd_charset",
+        "worked",
+        lambda d, v: _nth(
+            d, b"<Ustrd>REVERSEMENT RV-2026-000001", b"<Ustrd>REVERSEMENT &#8364; RV-2026-000001"
+        ),
+        "Ustrd",
+    ),
+    (
+        "agent_tag",
+        "worked",
+        lambda d, v: d.replace(
+            b"<" + _bic_tag(v) + b">", b"<" + _other_bic_tag(v) + b">", 1
+        ).replace(b"</" + _bic_tag(v) + b">", b"</" + _other_bic_tag(v) + b">", 1),
+        "FinInstnId holds",
+    ),
+    (
+        "bic_format",
+        "worked",
+        lambda d, v: d.replace(b">TESTFRPPXXX<", b">TESTFRPPXX<", 1),
+        "invalid BIC",
+    ),
+    (
+        "notprovided",
+        "mixed",
+        lambda d, v: d.replace(b">NOTPROVIDED<", b">PROVIDED<", 1),
+        "NOTPROVIDED",
+    ),
+    (
+        "reqd_date",
+        "worked",
+        lambda d, v: d.replace(_dt(v, "2026-11-03"), _dt(v, "2026-13-03"), 1),
+        "ReqdExctnDt",
+    ),
+    (
+        "credttm",
+        "worked",
+        lambda d, v: d.replace(b"2026-11-02T09:30:12+01:00", b"2026-11-02 09:30:12", 1),
+        "CreDtTm",
+    ),
+    (
+        "initgpty",
+        "worked",
+        lambda d, v: _nth(d, b"<Nm>Collectoo SAS</Nm>", b"<Nm>Collectoo  SAS</Nm>", 1),
+        "InitgPty/Nm",
+    ),
+    (
+        "dbtr_nm",
+        "worked",
+        lambda d, v: _nth(d, b"<Nm>Collectoo SAS</Nm>", b"<Nm>Collectoo  SAS</Nm>", 2),
+        "Dbtr/Nm",
+    ),
+    (
+        "msgid",
+        "worked",
+        lambda d, v: d.replace(b"<MsgId>TF-2026-000001</MsgId>", b"<MsgId>TF 2026</MsgId>", 1),
+        "identifier 'TF 2026'",
+    ),
+    (
+        "pmtinfid",
+        "worked",
+        lambda d, v: d.replace(
+            b"<PmtInfId>TF-2026-000001-1</PmtInfId>", b"<PmtInfId>" + b"P" * 36 + b"</PmtInfId>", 1
+        ),
+        "identifier 'PPP",
+    ),
+    (
+        "instrid",
+        "worked",
+        lambda d, v: d.replace(b"<InstrId>RV-2026-000001</InstrId>", b"<InstrId>RV 1</InstrId>", 1),
+        "identifier 'RV 1'",
+    ),
+    (
+        "e2e",
+        "worked",
+        lambda d, v: d.replace(
+            b"<EndToEndId>RMT0A1B2C3D4E5F</EndToEndId>",
+            b"<EndToEndId>RMT" + b"0" * 33 + b"</EndToEndId>",
+            1,
+        ),
+        "identifier 'RMT000",
+    ),
+    (
+        "pmt_ctrlsum",
+        "worked",
+        lambda d, v: _nth(d, b"<CtrlSum>6151.36</CtrlSum>", b"<CtrlSum>6151.37</CtrlSum>", 2),
+        "TF-2026-000001-1: NbOfTxs / CtrlSum",
+    ),
+    (
+        "pmt_twice",
+        "mixed",
+        lambda d, v: d.replace(b"TF-2026-000002-2</PmtInfId>", b"TF-2026-000002-1</PmtInfId>", 1),
+        "PmtInfId TF-2026-000002-1 twice",
+    ),
+    (
+        "zero_amount",
+        "mixed",
+        lambda d, v: d.replace(
+            b'<InstdAmt Ccy="EUR">80.00</InstdAmt>', b'<InstdAmt Ccy="EUR">0.00</InstdAmt>', 1
+        ),
+        "InstdAmt '0.00'",
+    ),
+    (
+        "foreign_namespace",
+        "worked",
+        lambda d, v: _nth(d, b"<Nm>MARTIN SAS</Nm>", b'<Nm xmlns="urn:other">MARTIN SAS</Nm>'),
+        "namespace",
+    ),
+    (
+        "repeated",
+        "worked",
+        lambda d, v: d.replace(
+            b"<MsgId>TF-2026-000001</MsgId>",
+            b"<MsgId>TF-2026-000001</MsgId>\n    <MsgId>TF-2026-000001</MsgId>",
+            1,
+        ),
+        "MsgId repeated",
+    ),
+    ("declaration", "worked", lambda d, v: d.split(b"\n", 1)[1], "XML declaration"),
+]
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize(
+    ("name", "example", "tamper", "match"), _TAMPERS, ids=[t[0] for t in _TAMPERS]
+)
+def test_each_check_catches_its_tamper(
+    version: str, name: str, example: str, tamper: Callable[[bytes, str], bytes], match: str
+) -> None:
+    data = render(worked_example(version) if example == "worked" else mixed_example(version))
+    check(data, version)  # the untouched file passes
+    tampered = tamper(data, version)
+    assert tampered != data, name
+    with pytest.raises(Pain001Error, match=re.escape(match)):
+        check(tampered, version)
+
+
+def test_remittance_info_is_cut_at_140_characters() -> None:
+    """Review tests-ui#2: the Ustrd cut pinned (the property draws up to 200 characters, so a
+    broken cut was caught by chance only)."""
+    doc = etree.fromstring(render(_one(_tx(remittance_info="A" * 200))))
+    assert _find(doc, "pain.001.001.09", "CdtTrfTxInf/RmtInf/Ustrd") == ["A" * 140]
+    doc = etree.fromstring(render(_one(_tx(creditor_name="B" * 90))))
+    assert _find(doc, "pain.001.001.09", "CdtTrfTxInf/Cdtr/Nm") == ["B" * 70]
+
+
+def test_the_sepa_countries_are_the_epc_list() -> None:
+    """EPC409-09 v8.0: 27 EU + 3 other EEA + 11 non-EEA countries, and 13 territories."""
+    assert len(pain001.SEPA_COUNTRIES) == 41 + 13
+    assert pain001.iban_in_sepa("FR7630004000031234567890143")
+    assert pain001.iban_in_sepa("CH9300762011623852957") and pain001.iban_in_sepa(
+        "gb29NWBK60161331926819"
+    )
+    assert not pain001.iban_in_sepa("TN5910006035183598478831")
+    assert not pain001.iban_in_sepa("TR330006100519786457841326")
 
 
 @pytest.mark.parametrize("version", VERSIONS)
