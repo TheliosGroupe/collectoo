@@ -214,6 +214,10 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
   ["not_draft", "run_not_draft"],
   ["approval_in_progress", "run_approval_in_progress"],
   ["already_sent", "run_already_sent"],
+  // M2c-6a review (T1, money#2): a payout in a downloaded file is cancelled first (two people, the statement's
+  // evidence), then its run
+  ["payout_in_downloaded_file", "run_payout_in_downloaded_file"],
+  ["no_statement_evidence", "transfer_no_statement_evidence"],
   // M2c-6a: a run whose file was downloaded is cancelled only with the attestation and a statement without its debit
   ["attestation_required", "transfer_attestation_required"],
   ["statement_not_imported", "transfer_statement_not_imported"],

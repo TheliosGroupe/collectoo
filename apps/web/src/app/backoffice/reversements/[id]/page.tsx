@@ -18,7 +18,7 @@ import {
   runStatus,
 } from "@/lib/remittance/runs";
 import { runStatementState } from "@/lib/remittance/documents";
-import { fileStatus } from "@/lib/remittance/transfers";
+import { fileStatus, runCancelPath } from "@/lib/remittance/transfers";
 import { cancelRun, discardRun, refreshRun } from "../actions";
 import { ApprovePanel } from "../approve-panel";
 
@@ -145,8 +145,8 @@ export default async function RemittanceRunPage({
   const r = d.run;
   // M2c-5: the statement and the invoices' PDFs, once the documents job has drawn them
   const docIds = d.documents.map((x) => x.id).filter((x): x is string => Boolean(x));
-  // M2c-6a: the file holding the payout (« Virements »), and whether it was downloaded (cancelling then needs the
-  // attestation)
+  // M2c-6a: the file holding the payout (« Virements »), and whether it was downloaded (its transfer is then cancelled
+  // first, in two steps: review T1)
   const [{ data: statement }, { data: pdfs }, { data: inFile }] = await Promise.all([
     supabase
       .from("remittance_statement")
@@ -166,7 +166,8 @@ export default async function RemittanceRunPage({
   const transferFile = inFile?.transfer_file_id
     ? { id: inFile.transfer_file_id, ...(inFile.transfer_file as unknown as { number: string; status: string; download_count: number }) }
     : null;
-  const afterDownload = d.transfer?.status === "in_file" && (transferFile?.download_count ?? 0) > 0;
+  // review T1 (money#2): a payout in a downloaded file is cancelled first (two people, the statement's evidence), then the run
+  const cancelPath = runCancelPath(d.transfer ?? null, transferFile);
   const pdfOf = new Map((pdfs ?? []).map((x) => [x.invoice_id, x]));
   const status = runStatus(r);
   const chip = deadlineChip(r.earliest_latest_execution_date, r.deadline_state);
@@ -229,24 +230,29 @@ export default async function RemittanceRunPage({
           </ActionForm>
         </div>
       ) : null}
-      {(r.status === "approved" || r.status === "sent") && d.can_cancel && d.transfer?.status !== "booked" ? (
+      {(r.status === "approved" || r.status === "sent") && d.can_cancel && cancelPath === "transfer_first" && transferFile ? (
+        <div className="flex flex-col gap-2 text-sm" data-testid="run-cancel-transfer-first">
+          <p>
+            Le virement est dans le fichier {transferFile.number}, déjà téléchargé : faites d&apos;abord annuler ce virement — une
+            demande, puis la confirmation d&apos;une autre personne, une fois importé le relevé du jour d&apos;exécution et du jour
+            ouvré suivant, sans son débit. Le reversement pourra ensuite être annulé (un avoir pour chaque facture, les
+            encaissements de nouveau en attente).
+          </p>
+          <Link href={`/backoffice/reversements/virements/${transferFile.id}`} className="underline underline-offset-4" data-testid="run-cancel-transfer-link">
+            Annuler le virement dans le fichier {transferFile.number}
+          </Link>
+        </div>
+      ) : null}
+      {(r.status === "approved" || r.status === "sent") && d.can_cancel && cancelPath === "direct" ? (
         <ActionForm action={cancelRun} submitLabel="Annuler le reversement" buttonClassName={dangerButtonClass} testId="run-cancel" className="flex flex-col gap-2">
           <p className="text-sm">
-            {afterDownload
-              ? `Le fichier ${transferFile?.number ?? ""} a été téléchargé : le reversement n'est annulé que si la banque n'a pas exécuté le virement, et une fois importé le relevé du jour d'exécution, sans ce débit. Un avoir est alors émis pour chaque facture et les encaissements reviennent en attente.`
+            {d.transfer?.status === "cancelled"
+              ? "Son virement a été annulé (la banque ne l'a pas exécuté, relevé à l'appui, confirmé par une autre personne) : le reversement est annulé, un avoir est émis pour chaque facture, et les encaissements reviennent en attente pour un prochain reversement."
               : "Le virement n'est pas encore parti : il est annulé (son fichier, s'il n'a pas été téléchargé, est remplacé), un avoir est émis pour chaque facture, et les encaissements reviennent en attente pour un prochain reversement."}
           </p>
           <input type="hidden" name="idempotency_key" value={crypto.randomUUID()} />
           <input type="hidden" name="run_id" value={r.id} />
           <input type="hidden" name="expected_version" value={r.version} />
-          <input type="hidden" name="attestation_required" value={afterDownload ? "1" : "0"} />
-          {afterDownload ? (
-            <label className="flex items-start gap-2 text-sm">
-              <input type="checkbox" name="attestation" value="not_executed" required data-testid="run-cancel-attestation" />
-              J&apos;atteste que la banque n&apos;a pas exécuté ce virement (fichier non déposé, rejeté, ou virement refusé — nom du
-              bénéficiaire non concordant).
-            </label>
-          ) : null}
           <input name="reason" className={inputClass} placeholder="Motif (interne)" aria-label="Motif de l'annulation" required />
         </ActionForm>
       ) : null}

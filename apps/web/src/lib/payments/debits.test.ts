@@ -13,6 +13,8 @@ import {
   linkRefundEffect,
   minorToInput,
   normaliseIban,
+  refundExecutionMode,
+  refundModeEffect,
   refundReasons,
   refundable,
   releaseEffect,
@@ -374,5 +376,90 @@ describe("the remittances' nightly checks (M2c-4 and its review)", () => {
       "/backoffice/encaissements/paiements/p1",
     );
     expect(checkSubjectLink({ ...base, code: "receivable_negative", subject_type: "account", subject_id: "a1" })).toBeNull();
+  });
+});
+
+describe("the transfers' checks (M2c-6a and its review: T3, T6)", () => {
+  const base = { currency: "EUR", amount: "583840", count: 2, oldest_days: 0, id: "r", severity: "alert" };
+
+  it("has French words for every code the transfer checks write, the stuck file and the held transfers included", () => {
+    for (const code of [
+      "transfer_not_filed",
+      "file_not_downloaded",
+      "file_not_marked_sent",
+      "transfer_not_debited",
+      "transfer_file_failed",
+      "payee_name_mismatch",
+      // review T6 (tests-ui#10): a file the job has not finished writing after 15 minutes
+      "transfer_file_pending",
+      // review T3: held out of every file until the data changes
+      "payee_name_not_epc",
+      "iban_not_sepa",
+    ]) {
+      expect(CHECK_LABEL[code]?.label, code).toBeTruthy();
+      expect(CHECK_LABEL[code]?.help, code).toBeTruthy();
+      expect(`${CHECK_LABEL[code]?.label} ${CHECK_LABEL[code]?.help}`.toLowerCase(), code).not.toMatch(/payé|débité le/);
+    }
+    expect(checkLabel("transfer_file_pending").label).toContain("15 minutes");
+    expect(checkLabel("transfer_file_pending").help).toContain("En préparation");
+    // review T6 (concurrency-perf#2): checked every hour at the account's cut-off, not only the night after
+    expect(checkLabel("file_not_marked_sent").help).toContain("toutes les heures");
+    expect(checkLabel("file_not_marked_sent").help).toContain("une autre personne la confirme");
+    // review T3: a name without EPC characters no longer fails the file (it is held out)
+    expect(checkLabel("transfer_file_failed").help).not.toContain("nom de bénéficiaire");
+    expect(checkLabel("transfer_not_filed").help).toContain("IBAN hors de la zone SEPA");
+  });
+
+  it("leads a file's alert to the file, the others to « Virements »", () => {
+    expect(checkSubjectLink({ ...base, code: "file_not_marked_sent", subject_type: "transfer_file", subject_id: "f1" })).toBe(
+      "/backoffice/reversements/virements/f1",
+    );
+    expect(checkSubjectLink({ ...base, code: "transfer_file_pending", subject_type: "transfer_file", subject_id: "f2" })).toBe(
+      "/backoffice/reversements/virements/f2",
+    );
+    for (const [code, subject] of [
+      ["transfer_not_filed", "bank_account"],
+      ["transfer_not_debited", "bank_account"],
+      ["payee_name_mismatch", "client_payout_account"],
+      ["iban_not_sepa", "bank_transfer"],
+      ["payee_name_not_epc", "bank_transfer"],
+    ])
+      expect(checkSubjectLink({ ...base, code, subject_type: subject, subject_id: "x" }), code).toBe("/backoffice/reversements/virements");
+  });
+});
+
+describe("the refund's execution (M2c-6a review, tests-ui#8)", () => {
+  it("sends only an explicit choice: without one the database defaults (file when the account and the IBAN allow it)", () => {
+    expect(refundExecutionMode("file")).toBe("file");
+    expect(refundExecutionMode("manual")).toBe("manual");
+    expect(refundExecutionMode("auto")).toBeUndefined();
+    expect(refundExecutionMode("")).toBeUndefined();
+    expect(refundExecutionMode("FILE")).toBeUndefined();
+  });
+
+  it("says what the RFD reference becomes, the default naming both outcomes", () => {
+    expect(refundModeEffect("file")).toContain("prochain fichier de virements");
+    expect(refundModeEffect("file")).toContain("ne l'exécutez pas aussi à la main");
+    expect(refundModeEffect("manual")).toContain("référence de bout en bout");
+    const auto = refundModeEffect("auto");
+    expect(auto).toContain("si le compte de fonds de tiers peut le payer");
+    expect(auto).toContain("zone SEPA");
+    expect(auto).toContain("sinon il est à exécuter dans la banque");
+  });
+
+  it("words the refusals a transfer file gives a refund", () => {
+    const cases: [string, string][] = [
+      ["refund: its transfer is in file TF-2026-000086, already downloaded: cancel the file first", "refund_in_downloaded_file"],
+      ["refund refused: in_downloaded_file", "refund_in_downloaded_file"],
+      ["refund refused: payee_name_not_epc", "refund_payee_name_not_epc"],
+      ["refund refused: iban_not_sepa", "refund_iban_not_sepa"],
+      ["refund: this account pays no transfer file", "transfer_not_paying_account"],
+    ];
+    for (const [message, code] of cases) {
+      expect(debitErrorCode(message), message).toBe(code);
+      expect(errorText(debitErrorCode(message))).not.toBe(errorText("unknown"));
+    }
+    expect(errorText("refund_in_downloaded_file")).toContain("confirmation d'une autre personne");
+    expect(errorText("refund_iban_not_sepa")).toContain("Je l'exécute moi-même");
   });
 });

@@ -72,7 +72,7 @@ flowchart TB
 
 | Container | Runs | Talks to |
 |---|---|---|
-| `apps/web` | UI for the three surfaces; server components and route handlers use the **user's** session (anon key + JWT). Never holds the service-role key. | Supabase (RLS applies), worker-api (forwards the user JWT). |
+| `apps/web` | UI for the three surfaces; server components and route handlers use the **user's** session (anon key + JWT). Never holds the service-role key — one exception to confirm (M2c-6a review T4, §13): the transfer file download reads the private bucket with it, server-side, after its command. | Supabase (RLS applies), worker-api (forwards the user JWT). |
 | Supabase | Data, auth, files, queues, cron, realtime. Business invariants that must never be bypassed live here (constraints, triggers, `SECURITY DEFINER` RPCs). | — |
 | `worker-api` | Python 3.12 HTTP service (`collectoo_worker.api`): provider webhooks, flow-step executor (`/v1/drain`), privileged commands (boarding commit, payment allocation, sends), AI gateway. Scale-to-zero. | Postgres (service role), pgmq, providers. |
 | `worker-jobs` | Same image, batch entrypoints: large tape ingestion (Polars/DuckDB, streaming), bulk document OCR, retention purge of files, 1M-row benchmark. | Postgres, Storage. |
@@ -403,13 +403,13 @@ flowchart LR
 
 ## 13. Security
 
-- **Service-role key** only in the worker (Scaleway Secret Manager) and in CI for the local stack. Never in `apps/web`, never in the browser. The web app forwards the user JWT to the worker, which verifies it (Supabase JWKS) and re-checks the role before any privileged command.
+- **Service-role key** only in the worker (Scaleway Secret Manager) and in CI for the local stack. Never in the browser; never in `apps/web` except one server-side read to confirm by the founder (M2c-6a review T4, ADR-0014 « M2c-6a review fixes »): no storage policy reads the bucket `transfer-files`, so the download route reads a file's bytes with it (`apps/web/src/lib/supabase/transfer-file-bytes.ts`, `SUPABASE_SECRET_KEY`, never `NEXT_PUBLIC_…`) only after `transfer_file_download` accepted the download with the user's session; the alternative is a storage policy reading a live file only just after the caller's recorded download, which keeps the key out of `apps/web`. The web app forwards the user JWT to the worker, which verifies it (Supabase JWKS) and re-checks the role before any privileged command.
 - **RLS everywhere** in `public`; `private`, `eba` and `pgmq` are not exposed. Ledger, payments, communications and boarding tables are written only by the worker or `SECURITY DEFINER` functions (ADR-0011).
 - **`SECURITY DEFINER` functions:** `search_path = ''`, fully qualified names, explicit role checks at the top, revoked from `public` and granted only to the intended role.
 - **Staff MFA:** TOTP via Supabase Auth, `aal2` required by RLS helpers for internal roles.
 - **Storage:** private buckets, paths prefixed by `client_org_id/`, RLS on `storage.objects`, short-lived signed URLs.
 - **Webhooks:** signature verification per provider, replay protection by event id.
-- **Secrets:** Vercel env (anon key + worker URL only), Scaleway Secret Manager (service role, provider keys), GitHub Actions secrets (none for production). `.env.example` only in the repo.
+- **Secrets:** Vercel env (anon key + worker URL; the service role server-side only if T4's exception above is confirmed), Scaleway Secret Manager (service role, provider keys), GitHub Actions secrets (none for production). `.env.example` only in the repo.
 - **Encryption:** Supabase TLS and encryption at rest. No extra column encryption in the MVP (decision recorded; revisit for bank clients).
 
 ## 14. Observability (minimal)

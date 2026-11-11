@@ -13,15 +13,21 @@ import {
   type PayingAccount,
   type TransferCard,
   type TransferOverview,
+  canGenerate,
+  cancellationOf,
   cashLines,
   downloadWarning,
+  fileStale,
   fileStatus,
+  generateLabel,
   generationEffects,
   holdLabel,
   parisDateTime,
+  payeeCheckClearable,
+  requestLine,
 } from "@/lib/remittance/transfers";
 import { clearPayeeMismatch, markSent, setPainVersion } from "./actions";
-import { GenerateFile } from "./file-actions";
+import { DownloadLink, GenerateFile } from "./file-actions";
 
 /** One transfer waiting for a file: what, to whom, and why it would be held out today. */
 function TransferRow({ t, currency }: { t: TransferCard; currency: string }) {
@@ -64,20 +70,26 @@ function TransferRow({ t, currency }: { t: TransferCard; currency: string }) {
   );
 }
 
-/** A file of the account: status, totals, its download (with the second-download warning) and « transmis ». */
-function FileRow({ f }: { f: FileCard }) {
+/**
+ * A file of the account: status, totals, its download (with the second-download warning) and « transmis ». A generated
+ * file whose execution date has passed is not offered for download (review T2: the download would refuse and replace
+ * it): « Régénérer le fichier » below does it. A cancellation asked after download says who asked (review T1).
+ */
+function FileRow({ f, earliest }: { f: FileCard; earliest: string }) {
   const status = fileStatus(f.status);
   const warning = downloadWarning(f);
-  const downloadable = ["generated", "downloaded", "sent"].includes(f.status);
+  const stale = fileStale(f, earliest);
+  const downloadable = ["generated", "downloaded", "sent"].includes(f.status) && !stale;
   const href = `/backoffice/reversements/virements/${f.id}/telecharger`;
+  const request = cancellationOf(f.cancellation).request;
   return (
     <li className="flex flex-col gap-2 py-3" data-testid="file-row">
       <span className="flex flex-wrap items-center justify-between gap-2">
         <Link href={`/backoffice/reversements/virements/${f.id}`} className="font-medium underline underline-offset-4">
           {f.number}
         </Link>
-        <Badge tone={status.tone} testId="file-status">
-          {status.label}
+        <Badge tone={stale ? "error" : status.tone} testId="file-status">
+          {stale ? "Date d'exécution dépassée — à régénérer" : status.label}
         </Badge>
       </span>
       <span className="text-sm">
@@ -91,24 +103,33 @@ function FileRow({ f }: { f: FileCard }) {
         {f.sent_marked_at ? ` · transmis le ${parisDateTime(f.sent_marked_at)}${f.sent_marked_by ? ` par ${f.sent_marked_by}` : ""}` : ""}
         {f.status === "failed" && f.error ? ` · ${f.error}` : ""}
       </span>
+      {stale ? (
+        <p className="text-sm text-red-800 dark:text-red-200" data-testid="file-stale">
+          Sa date d&apos;exécution est passée : il ne peut plus être téléchargé. Régénérez-le (nouveau numéro, nouvelle date).
+        </p>
+      ) : null}
       {warning && downloadable ? (
         <p className="text-sm font-medium text-red-800 dark:text-red-200" data-testid="download-warning">
           {warning}
         </p>
       ) : null}
+      {request ? (
+        <p className="text-sm text-amber-900 dark:text-amber-200" data-testid="file-cancel-request">
+          {requestLine(request)} — {request.requested_by_me ? "une autre personne doit la confirmer" : "à confirmer sur la page du fichier"}.
+        </p>
+      ) : null}
       <span className="flex flex-wrap items-center gap-2">
-        {downloadable && f.download_count === 0 ? (
-          <a href={href} className={inlineButtonClass} data-testid="file-download">
-            Télécharger
-          </a>
-        ) : null}
+        {downloadable && f.download_count === 0 ? <DownloadLink href={href} label="Télécharger" testId="file-download" /> : null}
         {downloadable && f.download_count > 0 ? (
           <details data-testid="file-download-again">
             <summary className="cursor-pointer text-sm underline underline-offset-4">Télécharger de nouveau</summary>
             <p className="mt-2 text-sm">{warning}.</p>
-            <a href={`${href}?confirme=1`} className={`${inlineButtonClass} mt-2 inline-block`} data-testid="file-download-confirm">
-              J&apos;ai compris : télécharger de nouveau
-            </a>
+            <DownloadLink
+              href={`${href}?confirme=1`}
+              label="J'ai compris : télécharger de nouveau"
+              testId="file-download-confirm"
+              className={`${inlineButtonClass} mt-2 inline-block`}
+            />
           </details>
         ) : null}
         {f.status === "downloaded" ? (
@@ -129,7 +150,7 @@ function Account({ a, overview }: { a: PayingAccount; overview: TransferOverview
   const sepa = a.currency === "EUR";
   return (
     <Section title={`${a.label} (…${a.iban_last4})`} testId="paying-account">
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-4" id={`compte-${a.bank_account_id}`}>
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           Fichiers {a.pain_version}
           {a.bic ? ` · BIC ${a.bic}` : " · BIC non renseigné (NOTPROVIDED)"} · exécution au plus tôt le{" "}
@@ -163,12 +184,13 @@ function Account({ a, overview }: { a: PayingAccount; overview: TransferOverview
             </p>
           ) : null}
         </div>
-        {sepa && (a.eligible_count > 0 || a.sweep_preview_minor !== "0") ? (
+        {canGenerate(a) ? (
           <GenerateFile
             accountId={a.bank_account_id}
             effects={generationEffects(a, overview.own_account)}
             lateCount={a.late_count}
             idempotencyKey={randomUUID()}
+            label={generateLabel(a)}
           />
         ) : null}
         {!sepa ? <InfoNote>Les fichiers SEPA sont en euros : ce compte n&apos;en produit pas.</InfoNote> : null}
@@ -179,7 +201,7 @@ function Account({ a, overview }: { a: PayingAccount; overview: TransferOverview
           ) : (
             <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800" data-testid="files">
               {[...live, ...past].map((f) => (
-                <FileRow key={f.id} f={f} />
+                <FileRow key={f.id} f={f} earliest={a.earliest_execution_date} />
               ))}
             </ul>
           )}
@@ -209,7 +231,10 @@ function Account({ a, overview }: { a: PayingAccount; overview: TransferOverview
  * M2c-6a « Virements » (design §17.3): per paying account, the transfers waiting for a file (with why one would be
  * held today), the cash check, « Générer le fichier » (the sheet states every effect), the files with « Télécharger »
  * (the second time only past a warning), « Marquer comme transmis »; the payee names the bank's verification did not
- * match. Admins and ops managers at aal2 (the database checks it). Nothing is booked before the bank's debit.
+ * match. Admins and ops managers at aal2 (the database checks it). Nothing is booked before the bank's debit. Review
+ * fixes: a generated file whose date passed is « à régénérer », never downloaded (T2); a cancellation asked after
+ * download is named until another person confirms it on the file's page (T1); « Nom vérifié » is not offered to who
+ * recorded the mismatch, or proposed or confirmed the IBAN (T5).
  */
 export default async function TransfersPage() {
   const { supabase } = await staffSession();
@@ -249,8 +274,11 @@ export default async function TransfersPage() {
                   {parisDateTime(c.recorded_at)}
                   {c.recorded_by ? ` par ${c.recorded_by}` : ""}. Les virements vers ce compte sont bloqués.
                 </span>
-                {c.recorded_by_me ? (
-                  <span className="text-xs text-zinc-600 dark:text-zinc-400">Une autre personne doit vérifier le titulaire.</span>
+                {!payeeCheckClearable(c) ? (
+                  <span className="text-xs text-zinc-600 dark:text-zinc-400" data-testid="payee-check-other">
+                    Une autre personne doit vérifier le titulaire : ni celle qui a signalé le nom, ni celles qui ont proposé ou
+                    confirmé cet IBAN.
+                  </span>
                 ) : (
                   <ActionForm action={clearPayeeMismatch} submitLabel="Nom vérifié" buttonClassName={inlineButtonClass} className="flex flex-wrap items-end gap-2">
                     <input type="hidden" name="idempotency_key" value={randomUUID()} />

@@ -849,9 +849,11 @@ A bank account's `csv_profile` names its own headers (`{"columns": {"booking_dat
 
 - **Virement** (`bank_transfer`): what the servicer orders its bank to pay — a client's payout (`RMT…`, created at approval with its payee frozen), a refund to a payer asked with `execution_mode = file` (`RFD…`, the refund request's own id), the sweep of the servicer's settled share to its own account (`SWP…`, created at file generation). Our end-to-end id is what the bank's debit carries back. `ordered` (waiting for a file) → `in_file` (in a live file; `transfer_file_id`) → `booked` (its debit booked, M2c-6b; a refund's when the M2b-6 link books its debit) → `returned`; or `cancelled`. A transfer comes back from `in_file` to `ordered` only with its file (superseded, rejected, failed); a sweep is cancelled instead (never re-issued).
 - **Fichier de virements** (`transfer_file`, `TF-AAAA-NNNNNN`, unique not gapless; MsgId = the number): one pain.001 file per paying account and generation (`generate_transfer_file`), holding every ordered payout and refund of the account that passes the checks — one PmtInf per execution date (`<number>-<n>`), the sweep in its own — `BtchBookg false`. Written by the worker job `transfer_file` (deterministic bytes, SHA-256 kept, private bucket `transfer-files`). `pending` → `generated` → `downloaded` → `sent` (« Marquer comme transmis »); `superseded` (replaced by the next generation before download, or cancelled), `rejected` (by the bank, attested), `failed` (the job could not write it). A run becomes `sent` with its file's download.
-- **Retenu hors du fichier** (`transfer_file.held`, `private.transfer_hold_reason`): a payout whose run's gross exceeds what the client is still owed less its other runs in flight (`payout_not_covered`), whose payout account is blocked today (`payout_blocked:…`, `payee_name_mismatch` included) or changed since approval, or whose execution date passes its run's earliest latest execution date without a late reason (`late_reason_required`); it stays `ordered`.
-- **Téléchargement** (`transfer_file_download`): every download is recorded; the route serves the bytes only after checking their SHA-256; a second download only once the warning « Déjà téléchargé par … le … à … — ne le déposez pas deux fois » is acknowledged.
-- **Attestation** (`transfer_file.close_attestation`; `cancel_remittance_run(…, p_attestation)`): what ops attest to cancel after download — a file `not_uploaded` or `rejected_by_bank`; a run's transfer `not_executed` (also when the bank refused it on a payee name mismatch), once a statement covering its execution date shows no debit of it.
+- **Retenu hors du fichier** (`transfer_file.held`, `private.transfer_hold_reason`): a payout whose run's gross exceeds what the client is still owed less its other runs in flight (`payout_not_covered`), whose payout account is blocked today (`payout_blocked:…`, `payee_name_mismatch` included) or changed since approval (`payout_account_changed`), or whose execution date passes its run's earliest latest execution date without a late reason (`late_reason_required`); *review T3:* a payout or refund whose payee name has no character of the EPC basic Latin set once transliterated (`payee_name_not_epc`), or whose IBAN is outside the SEPA schemes' countries (`iban_not_sepa`; a refund to such an IBAN is executed by hand by default). It stays `ordered` and never fails the file for the others.
+- **Téléchargement** (`transfer_file_download`): every download is recorded; a second one only once the warning « Déjà téléchargé par … le … à … — ne le déposez pas deux fois » is acknowledged. *Review T2/T4:* the first download re-runs the generation's checks under the same locks — the requested date against the account's next execution day now (its cut-off), every payout's and refund's hold reason, the cash check — and a file that fails is **superseded, not served** (`file_stale`: « Date d'exécution dépassée » ; `file_blocked`: the transfers and their reasons), the page offering « Régénérer ». The bytes are read only after the command (no storage policy reads the bucket) and served only if their SHA-256 is the one recorded; a refusal sends the browser back to the file's page.
+- **Attestation** (`transfer_file.close_attestation`): what ops attest when asking to cancel a downloaded file — `not_uploaded` (never deposited at the bank) or `rejected_by_bank` (refused whole: status `rejected`). *Review T1:* an attestation alone never re-queues anything; see « Annulation à deux ».
+- **Annulation à deux** (`transfer_cancellation_request`; review T1, risk R4, design §9.7): a downloaded or sent file — or one transfer of it the bank refused (a payee name mismatch, say) — is cancelled in two steps: one admin or ops manager **asks** (`request_transfer_file_cancellation` with the attestation, or `request_transfer_cancellation`, a reason), a **different** one **confirms** (`confirm_transfer_file_cancellation` / `confirm_transfer_cancellation`), both at aal2. Each step needs the **preuve du relevé**: the imported statements of the paying account cover the requested execution date and the account's next business day, and show no debit carrying the file's (or the transfer's) end-to-end ids or PmtInfIds — or show the bank's rejection (a debit and its return). Refusals: `no_statement_evidence`, `debit_seen`, `same_person`, `already_requested`. Until the confirmation nothing changes: the file stays counted in the cash check and the per-client cap. A request is for the file's version it was made on (a download since makes it stale). A cancelled file's transfers go back « à mettre dans un fichier » (its sweep is recomputed); a cancelled transfer leaves the rest of the file as it is, and a file holding one is never served again (`holds_cancelled_transfer`).
+- **Reversement annulé après téléchargement** (review T1, money#2): its payout is cancelled first under « Annulation à deux », then the run (`payout_in_downloaded_file` until then, no attestation on the run); a run cancellation never removes a transfer from a downloaded file.
 - **Format pain.001** (`bank_account.pain_version`): `pain.001.001.09` (default) or `.03` when the bank's guide asks; text in the EPC basic Latin set (é → e, œ → oe, others → space); EUR only.
 
 ### 3.6 Plans, promises, disputes, holds, legal
@@ -1437,7 +1439,47 @@ Gates, first that applies (match runs, the job and the confirmation sheet alike)
 
 ### 4.7 Remittance run (M2c-4)
 
-`draft` (preparing → prepared, or preparation failed — no job, never prepared, the failure's step `prepare`: nothing retries it, « Actualiser » does; « Actualiser » prepares again with a new K; back from approval with a reason) → `approved` (lines frozen, documents numbered, payout ordered) → `sent` (its file downloaded or marked as transmitted, M2c-6a; back to `approved` when that file is cancelled with an attestation) → `booked` (payout debited, M2c-6b). `draft` → `booked` when nothing is transferred (N = 0: the settlement posted at approval). `draft` → `cancelled` (« Abandonner »: items unreserved); `approved` → `cancelled` before its transfer is in a file: a full credit note per invoice of the run, a corrective invoice per mandate and VAT rate re-charging what the run's credit notes credited on earlier invoices, lines released, the tier history exactly as before the run (M2c-4 review). Never back from `approved`. An approval refuses a run on its own — locked by a job or another command (`busy`), changed since the page (`stale`), late without a reason — and the others go on.
+`draft` (preparing → prepared, or preparation failed — no job, never prepared, the failure's step `prepare`: nothing retries it, « Actualiser » does; « Actualiser » prepares again with a new K; back from approval with a reason) → `approved` (lines frozen, documents numbered, payout ordered) → `sent` (its file downloaded or marked as transmitted, M2c-6a; back to `approved` when that file is cancelled — review T1: asked by one person, confirmed by another, with the statement's evidence; after download its own transfer is cancelled that way before the run can be, `payout_in_downloaded_file`) → `booked` (payout debited, M2c-6b). `draft` → `booked` when nothing is transferred (N = 0: the settlement posted at approval). `draft` → `cancelled` (« Abandonner »: items unreserved); `approved` → `cancelled` before its transfer is in a file: a full credit note per invoice of the run, a corrective invoice per mandate and VAT rate re-charging what the run's credit notes credited on earlier invoices, lines released, the tier history exactly as before the run (M2c-4 review). Never back from `approved`. An approval refuses a run on its own — locked by a job or another command (`busy`), changed since the page (`stale`), late without a reason — and the others go on.
+
+### 4.8 Transfer and transfer file (M2c-6a and its review: T1, T2)
+
+```mermaid
+stateDiagram-v2
+  [*] --> pending : generate_transfer_file (checks under the locks)
+  pending --> generated : job wrote it (SHA-256)
+  pending --> failed : job failed for good
+  pending --> superseded : cancelled, or a new generation
+  generated --> superseded : new generation / « Annuler le fichier » / download refused (file_stale, file_blocked)
+  generated --> downloaded : first download (checks re-run)
+  downloaded --> sent : « Marquer comme transmis »
+  downloaded --> superseded : two-step cancellation (not_uploaded), evidence
+  sent --> superseded : two-step cancellation (not_uploaded), evidence
+  downloaded --> rejected : two-step cancellation (rejected_by_bank), evidence
+  sent --> rejected : two-step cancellation (rejected_by_bank), evidence
+  superseded --> [*]
+  rejected --> [*]
+  failed --> [*]
+```
+
+- A **download** of a `generated` file re-runs the generation's checks under the same locks; one that fails supersedes the file, is not served, and is recorded nowhere as a download (review T2). A file holding a transfer cancelled since its download is never served again.
+- The **two-step cancellation** of a `downloaded` or `sent` file (review T1): `request_transfer_file_cancellation` (attestation, reason, evidence) leaves the file as it is; `confirm_transfer_file_cancellation` by **another** person, with the evidence still holding, makes it `superseded` (`not_uploaded`) or `rejected` (`rejected_by_bank`), its transfers back to `ordered` (its sweep cancelled, recomputed at the next file), its runs back to `approved`. The evidence: the paying account's imported statements cover the requested execution date and the next business day, with no debit of the file (by end-to-end id, or a batch debit by PmtInfId) — or its rejection.
+
+```mermaid
+stateDiagram-v2
+  [*] --> ordered : approval (RMT) / refund in file (RFD) / generation (SWP)
+  ordered --> in_file : generation (not held out)
+  in_file --> ordered : its file superseded, rejected or failed (a sweep: cancelled)
+  ordered --> cancelled : run or refund cancelled
+  in_file --> cancelled : file not downloaded: run or refund cancelled (file superseded first)
+  in_file --> cancelled : downloaded file: two-step cancellation of this transfer, evidence
+  in_file --> booked : its debit booked (M2c-6b; a refund by its RFD link)
+  booked --> returned : the payee's bank sent it back
+  cancelled --> [*]
+  returned --> [*]
+```
+
+- A transfer **held out** at generation (`private.transfer_hold_reason`) stays `ordered`, with its reason on « Virements ».
+- The **two-step cancellation of one transfer** in a downloaded or sent file (review T1, pain001#1): `request_transfer_cancellation` then `confirm_transfer_cancellation` by another person, each with the evidence for that transfer (no debit carrying its end-to-end id — nor a batch debit of its PmtInf that only its siblings explain —, or its return, over the same window). The rest of the file is unchanged. Then its run (`cancel_remittance_run`, refused with `payout_in_downloaded_file` before) or its refund (`cancel_refund`) can be cancelled; a sweep is recomputed at the next file.
 
 ## 5. Open questions (❓ founder)
 

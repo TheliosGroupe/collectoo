@@ -831,6 +831,7 @@ N = Σ net_m ;  D = Σ D_m ;  N + D = gross
 - **Cancel** (`cancel_remittance_run`, admin) is possible:
   - before any file holding the run's transfer is downloaded; or
   - after download, only with ops' recorded attestation that the order was deleted at the bank or the file was rejected, once the statement covering the requested date has been imported and shows no debit (compliance critique D7, ops critique #6).
+  - *M2c-6a review (T1):* after download, the run's transfer is cancelled first, in two steps — asked by one admin or ops manager (`request_transfer_cancellation`), confirmed by another (`confirm_transfer_cancellation`), both at aal2 — once the paying account's statements cover the requested date and the next business day with no debit of it (or its return); the run is then cancelled (`payout_in_downloaded_file` until then). A whole downloaded file is cancelled the same way (`request_transfer_file_cancellation` with the attestation, `confirm_transfer_file_cancellation`); a run's cancellation never removes a transfer from a downloaded file (OQ-80).
 
   Effects:
   - the transfer is cancelled and the file superseded;
@@ -946,6 +947,7 @@ The statement is built in SQL from the frozen lines, the entries and the identit
   - **Per client:** N + D ≤ −4670[c] − c's other in-flight transfers. A transfer that fails is held out of the file with `payout_not_covered`.
   - `ReqdExctnDt` ≥ the next business day of the paying account, and ≤ `latest_exec` unless a late reason was recorded.
   - A generated file whose date has passed before download is superseded and regenerated (new MsgId).
+  - *M2c-6a review (T2, T3):* the first download re-runs these checks under the same locks (the date against the account's next execution day then, every hold reason, the cash check): a file that fails is superseded and not served (`file_stale`, `file_blocked`), the page offering « Régénérer ». A payee name with no EPC character (`payee_name_not_epc`) or an IBAN outside the SEPA schemes' countries (`iban_not_sepa`, EPC409 as data; OQ-79) is held out of the file, never failing it.
 - **Validation:** the XSD of each version is vendored in `docs/reference/iso20022/`. The download host is `www.iso20022.org`; if the allowlist blocks it, it is named (CLOUD_ENV). Validation runs in the job and in CI, with a golden file per version.
 - **Download:** `transfer_file_download(file)` returns a short-lived signed URL after the hash check and records every download. A second download warns « Déjà téléchargé par Léa le 02/11 à 09:41 — ne le déposez pas deux fois » (ops critique #33). « Marquer comme transmis » records the upload time; an alert fires at the bank cut-off for a file downloaded but not marked.
 - **Verification of payee:** the payee name is the RIB holder's. A no-match or close-match the bank reports is recorded by ops (`payee_name_mismatch`). It blocks that payee until checked, and the run may be cancelled after download on that ground.
@@ -1077,7 +1079,8 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 - `invoice_late` (approval > 2 business days after K);
 - `transfer_not_filed` (> 1 business day);
 - `file_not_downloaded` (> 1 business day);
-- `file_not_marked_sent` (at the cut-off);
+- `file_not_marked_sent` (at the cut-off; *M2c-6a review T6:* checked every hour with the remittances schedule);
+- `transfer_file_pending` (*M2c-6a review T6:* a file the job has not written after 15 minutes);
 - `transfer_not_debited` (> 2 business days after the requested date);
 - `servicer_shortfall` (4679 in debit with no top-up ordered: P0);
 - `top_up_pending` (> 1 business day);
@@ -1107,6 +1110,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 | `request_remittance_run`, `refresh_remittance_run`, `discard_remittance_run` | admin, ops_manager |
 | `approve_remittance_runs(key, items ≤ 200, requested_execution_date?)`, `cancel_remittance_run(key, run, reason, attestation?, evidence?)` | admin, ops_manager / admin |
 | `generate_transfer_file(key, bank_account)`, `transfer_file_download(file)`, `mark_transfer_file_sent`, `cancel_transfer_file(key, file, not_sent_attestation)` | admin, ops_manager |
+| *M2c-6a review (T1):* `request_transfer_file_cancellation(key, file, version, reason, attestation)` / `confirm_transfer_file_cancellation(key, file, version)`, `request_transfer_cancellation(key, transfer, reason)` / `confirm_transfer_cancellation(key, transfer)` — the confirmer is not the requester, both with the statements' evidence | admin, ops_manager |
 | `link_debit` (new kinds `unplanned_payout`, `fee`, `loss`, `own_credit`, `client_payment`), `classify_bank_fee`, `request_top_up` | admin, ops_manager |
 | `record_client_payment(key, client, documents?, amount_text, date, evidence)`, `record_client_refund`, `write_off_advance`, `reverse_servicer_entry(key, entry, reason)` (fee, advance, loss), `issue_credit_note` (built in M2c-5b; `record_client_refund` pays a credit note's refund owed that no run settles, M2c-7) | admin (payments: ops_manager too) |
 
