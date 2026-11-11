@@ -22,7 +22,9 @@ M2c-4 numbers, posts and stores them; M2c-5 renders them.
 4. A reversal's credit is allocated first to the invoice that charged the line it undoes (its
    original), up to what that invoice still charges the (file, tier key) — every reversal of the
    run there before any credit goes LIFO — then LIFO to the other invoices that charged the key;
-   every allocation names its invoice (289 I 5) and its line. The per-key logic is
+   every allocation names its invoice (289 I 5) and its line. After a cancelled run, a reversal
+   it took something for is credited first on the invoices that cancellation put it back on, up
+   to its own share on each (`commission.Retake`, M2c-5b review math#0). The per-key logic is
    `commission.key_side`, which the engine's rounding reserve simulates too.
 5. Credit-note VAT per corrected invoice by cumulative difference at that invoice's rate: never
    above its VAT, exactly it on a full credit.
@@ -49,9 +51,12 @@ from collectoo_worker.remittance.commission import (
     CommissionInputError,
     FileFacts,
     KeySide,
+    KeyState,
     LineCommission,
+    LineInvoices,
     SidePart,
     key_side,
+    preferred_for,
 )
 from collectoo_worker.remittance.vat import credit_note_vat, vat_of
 
@@ -73,8 +78,10 @@ class EarlierCharge:
     invoice_id: str
     order: tuple[int, int]  # (year, seq) in the invoice series: LIFO takes the highest first
     charged_minor: int
-    credited_minor: int = 0
+    credited_minor: int = 0  # by every credit note on it, a manual one's included
     vat_rate: Decimal | None = None  # the invoice's own rate (M2c-4 stores it; None: the run's)
+    # what manual credit notes took back on it for the key and no later credit absorbed (M2c-5b)
+    waived_minor: int = 0
 
     @property
     def open_minor(self) -> int:
@@ -146,10 +153,23 @@ class DraftCreditNote:
 
 
 @dataclass(frozen=True)
+class WaiverAbsorption:
+    """What a manual credit note's waiver on an earlier invoice absorbs of a run's credit for one
+    (file, tier key) (M2c-5b): the client already has it back, so no credit note carries it."""
+
+    invoice_id: str
+    account_id: str
+    tier_key: str
+    amount_minor: int  # positive
+    entry_id: str  # the line whose credit it absorbs
+
+
+@dataclass(frozen=True)
 class MandateDocuments:
     mandate_id: str
     invoice: DraftInvoice | None
     credit_note: DraftCreditNote | None
+    absorbed: tuple[WaiverAbsorption, ...] = ()
 
 
 def run_documents(  # noqa: PLR0913, PLR0917 - the run's lines and the history
@@ -158,12 +178,14 @@ def run_documents(  # noqa: PLR0913, PLR0917 - the run's lines and the history
     charges: Mapping[Key, Sequence[EarlierCharge]],
     invoices: Mapping[str, EarlierInvoice],
     vat_rate: Decimal,
-    line_invoices: Mapping[str, str] | None = None,
+    line_invoices: LineInvoices | None = None,
 ) -> dict[str, MandateDocuments]:
-    """The invoice and credit note of each mandate of the run (absent: nothing to issue).
-    `line_invoices`: an earlier line → the invoice that charged it (M2c-4: the remittance line's
-    invoice), so that its reversal is credited on that invoice first. The engine reserves for the
-    same documents (`commission.compute(…, charges=, line_invoices=)`)."""
+    """The invoice and credit note of each mandate of the run (absent: nothing to issue), and what
+    the waivers of manual credit notes absorb of its credits (M2c-5b: recorded, no document).
+    `line_invoices`: an earlier line → the invoice that charges it (M2c-4: the remittance line's
+    invoice; after a cancellation, its corrective invoice then the line's own), so that its
+    reversal is credited there first. The engine reserves for the same documents
+    (`commission.compute(…, charges=, line_invoices=)`)."""
     by_mandate = _split(results, line_invoices or {})
     order = {r.entry_id: i for i, r in enumerate(results)}
     undoes = {r.entry_id for r in results if r.kind in REVERSALS}
@@ -172,13 +194,23 @@ def run_documents(  # noqa: PLR0913, PLR0917 - the run's lines and the history
         sides = {key: key_side(ps, charges.get(key, ())) for key, ps in by_mandate[mandate].items()}
         credit = _credit_note(mandate, sides, invoices, order, undoes)
         invoice = _invoice(mandate, sides, files, vat_rate)
-        if invoice or credit:
-            out[mandate] = MandateDocuments(mandate, invoice, credit)
+        absorbed = tuple(
+            sorted(
+                (
+                    WaiverAbsorption(inv, key[0], key[1], amount, entry)
+                    for key in sorted(sides)
+                    for inv, amount, entry in sides[key].absorbed
+                ),
+                key=lambda a: (order.get(a.entry_id, -1), a.account_id, a.tier_key, a.invoice_id),
+            )
+        )
+        if invoice or credit or absorbed:
+            out[mandate] = MandateDocuments(mandate, invoice, credit, absorbed)
     return out
 
 
 def _split(
-    results: Sequence[LineCommission], line_invoices: Mapping[str, str]
+    results: Sequence[LineCommission], line_invoices: LineInvoices
 ) -> dict[str, dict[Key, list[SidePart]]]:
     """Per mandate and (file, tier key), its parts in the engine's order: whether each undoes a
     collection of the same run, and the invoice that charged the line a reversal undoes."""
@@ -190,14 +222,15 @@ def _split(
         keys = by_mandate.setdefault(r.mandate_id, {})
         reversal = r.kind in REVERSALS
         same_run = reversal and r.original_entry_id in in_run
-        preferred = (
+        found = (
             line_invoices.get(r.original_entry_id)
             if reversal and r.original_entry_id and not same_run
             else None
         )
         for p in r.parts:
-            keys.setdefault((p.account_id, p.tier_key), []).append(
-                SidePart(r.entry_id, p, p.commission_minor, same_run, preferred)
+            key = (p.account_id, p.tier_key)
+            keys.setdefault(key, []).append(
+                SidePart(r.entry_id, p, p.commission_minor, same_run, preferred_for(found, key))
             )
     return by_mandate
 
@@ -319,6 +352,14 @@ def after_issue(
     new_charges = {k: list(v) for k, v in charges.items()}
     new_invoices = dict(invoices)
     for mandate, d in docs.items():
+        for w in d.absorbed:  # the waiver absorbs the credit: no document, the charge unchanged
+            key = (w.account_id, w.tier_key)
+            new_charges[key] = [
+                replace(c, waived_minor=c.waived_minor - w.amount_minor)
+                if c.invoice_id == w.invoice_id
+                else c
+                for c in new_charges[key]
+            ]
         if d.credit_note:
             for a in d.credit_note.allocations:
                 key = (a.account_id, a.tier_key)
@@ -341,3 +382,94 @@ def after_issue(
                     EarlierCharge(inv_id, order, amount, vat_rate=d.invoice.vat_rate)
                 )
     return new_charges, new_invoices
+
+
+# -- the manual credit note (M2c-5b; design §14.1, risk R2) ----------------------------------------
+
+
+class ManualCreditError(ValueError):
+    """A manual credit note that cannot be issued (the SQL command refuses it too)."""
+
+
+@dataclass(frozen=True)
+class ManualCredit:
+    """A manual credit note on one invoice: the HT it takes back from each (file, tier key) the
+    invoice still charges (positive), its HT and its VAT (positive magnitudes; VAT by cumulative
+    difference at the invoice's own rate, as every credit: CGI 289 I 5, 272 1)."""
+
+    invoice_id: str
+    allocations: tuple[tuple[Key, int], ...]
+    ht_minor: int
+    vat_minor: int
+
+    @property
+    def ttc_minor(self) -> int:
+        return self.ht_minor + self.vat_minor
+
+
+def manual_credit(
+    invoice: EarlierInvoice,
+    open_by_key: Mapping[Key, int],
+    amount_minor: int,
+    account_id: str | None = None,
+) -> ManualCredit:
+    """The allocation of a manual credit of `amount_minor` HT on an invoice (the SQL twin is
+    `public.issue_credit_note`): over what the invoice still charges each (file, tier key) — only
+    the file's keys when `account_id` is given — in proportion to it, the cents left by the integer
+    shares going one each to the keys with the largest remainders (ties by file, then tier key:
+    code-point order). Never more than any key's open charge, never more than the invoice's
+    remaining HT."""
+    keys = sorted(
+        (k, o)
+        for k, o in open_by_key.items()
+        if o > 0 and (account_id is None or k[0] == account_id)
+    )
+    total = sum(o for _, o in keys)
+    if amount_minor <= 0:
+        raise ManualCreditError("a manual credit note credits a positive HT")
+    if amount_minor > total or amount_minor > invoice.ht_minor - invoice.credited_ht_minor:
+        raise ManualCreditError(
+            f"invoice {invoice.invoice_id}: {amount_minor} credited, {total} still charged"
+        )
+    shares = [(k, amount_minor * o // total, amount_minor * o % total) for k, o in keys]
+    left = amount_minor - sum(s for _, s, _ in shares)
+    ranked = sorted(range(len(shares)), key=lambda i: (-shares[i][2], shares[i][0]))
+    plus = set(ranked[:left])
+    allocations = tuple(
+        (k, s + (1 if i in plus else 0)) for i, (k, s, _) in enumerate(shares) if s or i in plus
+    )
+    before = invoice.credited_ht_minor
+    vat = credit_note_vat(invoice.ht_minor, invoice.vat_rate, before, before + amount_minor)
+    return ManualCredit(invoice.invoice_id, allocations, amount_minor, vat)
+
+
+def after_manual_credit(
+    charges: Mapping[Key, Sequence[EarlierCharge]],
+    invoices: Mapping[str, EarlierInvoice],
+    history: Mapping[Key, KeyState],
+    credit: ManualCredit,
+) -> tuple[dict[Key, list[EarlierCharge]], dict[str, EarlierInvoice], dict[Key, KeyState]]:
+    """The history once a manual credit note is issued: what the invoice charges each key falls by
+    its allocation and the same amount becomes that (invoice, key)'s waiver; the key's commission
+    charged (V) is unchanged, its waiver grows: Σ open charges + Σ waivers = V still."""
+    new_charges = {k: list(v) for k, v in charges.items()}
+    new_history = dict(history)
+    for key, amount in credit.allocations:
+        new_charges[key] = [
+            replace(
+                c,
+                credited_minor=c.credited_minor + amount,
+                waived_minor=c.waived_minor + amount,
+            )
+            if c.invoice_id == credit.invoice_id
+            else c
+            for c in new_charges[key]
+        ]
+        state = new_history[key]
+        new_history[key] = replace(state, waived_minor=state.waived_minor + amount)
+    inv = invoices[credit.invoice_id]
+    new_invoices = dict(invoices)
+    new_invoices[credit.invoice_id] = replace(
+        inv, credited_ht_minor=inv.credited_ht_minor + credit.ht_minor
+    )
+    return new_charges, new_invoices, new_history

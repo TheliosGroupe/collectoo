@@ -6,6 +6,7 @@ import {
   DEBIT_REVIEW,
   DIRECT_REFUSAL,
   checkLabel,
+  checkSubjectLink,
   debitErrorCode,
   explainable,
   lineKindLabel,
@@ -327,6 +328,10 @@ describe("the remittances' nightly checks (M2c-4 and its review)", () => {
       // review M2c-5 (perf#2 = tests-ui#2, K4): documents the job could not draw, or still not drawn after 24 h
       "remittance_document_failed",
       "remittance_document_missing",
+      // M2c-5b (I22): a file's key state and its invoices' open charges and waivers disagree
+      "commission_key_state",
+      // review M2c-5b (legal#0, F2): a credit note's refund owed no run has settled after 30 days
+      "credit_refund_owed",
     ]) {
       expect(CHECK_LABEL[code]?.label, code).toBeTruthy();
       expect(CHECK_LABEL[code]?.help, code).toBeTruthy();
@@ -338,5 +343,36 @@ describe("the remittances' nightly checks (M2c-4 and its review)", () => {
       expect(CHECK_LABEL[code]?.help, code).toContain("débit");
       expect(CHECK_LABEL[code]?.label.toLowerCase(), code).not.toContain("payé");
     }
+  });
+
+  it("says a key I22 flags keeps the next run's commission pending, the client's money remitted gross (M2c-5b review round 2)", () => {
+    const help = checkLabel("commission_key_state").help;
+    expect(help).toMatch(/commission en attente/);
+    expect(help).toMatch(/reversement brut/);
+    expect(help).not.toMatch(/bloqu/);
+  });
+
+  it("says a credit note's refund is still owed, never that it was refunded (review M2c-5b legal#0, F2)", () => {
+    const l = checkLabel("credit_refund_owed");
+    expect(l.label).toMatch(/à rembourser/i);
+    expect(l.help).toMatch(/30 jours/);
+    for (const text of [l.label, l.help]) expect(text.toLowerCase()).not.toMatch(/remboursé|payé/);
+  });
+
+  it("leads a result on an invoice or a credit note to its page (review M2c-5b F2)", () => {
+    const base = { currency: "EUR", amount: "3600", count: null, oldest_days: 31, id: "r", severity: "alert" };
+    expect(checkSubjectLink({ ...base, code: "credit_refund_owed", subject_type: "commission_invoice", subject_id: "c1" })).toBe(
+      "/backoffice/reversements/factures/c1",
+    );
+    expect(checkSubjectLink({ ...base, code: "invoice_overdue", subject_type: "commission_invoice", subject_id: "i1" })).toBe(
+      "/backoffice/reversements/factures/i1",
+    );
+    expect(checkSubjectLink({ ...base, code: "remittance_due_soon", subject_type: "organization", subject_id: "o1" })).toBe(
+      "/backoffice/reversements",
+    );
+    expect(checkSubjectLink({ ...base, code: "payment_position", subject_type: "payment", subject_id: "p1" })).toBe(
+      "/backoffice/encaissements/paiements/p1",
+    );
+    expect(checkSubjectLink({ ...base, code: "receivable_negative", subject_type: "account", subject_id: "a1" })).toBeNull();
   });
 });

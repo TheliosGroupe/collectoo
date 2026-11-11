@@ -56,6 +56,7 @@ from remittance_helpers import (
     request_run,
     run_row,
     staff,
+    vat_rate_from_today,
 )
 
 from collectoo_worker.jobs.remittances import run_schedule
@@ -585,34 +586,6 @@ def _queued_approvals(run: str) -> int:
         )
 
 
-@contextmanager
-def _vat_rate_from_today(rate: str) -> Iterator[None]:
-    """Another standard rate from today (a change of the reference data), restored afterwards."""
-    with psycopg.connect(DB) as conn, conn.transaction():
-        conn.execute("alter table public.vat_rate disable trigger vat_rate_guard")
-        conn.execute(
-            "update public.vat_rate set valid_to = private.paris_today()"
-            " where valid_from = '2014-01-01'"
-        )
-        conn.execute(
-            """insert into public.vat_rate (code, territory, rate, valid_from, valid_to, legal_ref,
-                 legal_url) values ('standard', 'FR-metro', %s, private.paris_today(), '2027-01-01',
-                 'test', 'https://librejustice.fr/norm/fr/code-general-des-impots/278')""",
-            (rate,),
-        )
-        conn.execute("alter table public.vat_rate enable always trigger vat_rate_guard")
-    try:
-        yield
-    finally:
-        with psycopg.connect(DB) as conn, conn.transaction():
-            conn.execute("alter table public.vat_rate disable trigger vat_rate_guard")
-            conn.execute("delete from public.vat_rate where legal_ref = 'test'")
-            conn.execute(
-                "update public.vat_rate set valid_to = '2027-01-01' where valid_from = '2014-01-01'"
-            )
-            conn.execute("alter table public.vat_rate enable always trigger vat_rate_guard")
-
-
 @pytest.mark.parametrize("rate_change", [False, True], ids=["same-rate", "rate-changed"])
 def test_a_cancelled_runs_credit_note_is_restored_and_the_reversal_credited_once(  # noqa: PLR0915
     rate_change: bool,
@@ -673,7 +646,7 @@ def test_a_cancelled_runs_credit_note_is_restored_and_the_reversal_credited_once
         ("credit_note", -22_500),
     ]
     rate = "0.1000" if rate_change else "0.2000"
-    with _vat_rate_from_today(rate) if rate_change else _same_rate():
+    with vat_rate_from_today(rate) if rate_change else _same_rate():
         cancelled = staff(
             tenant,
             "select public.cancel_remittance_run(%s, %s, %s, %s)",

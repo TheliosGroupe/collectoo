@@ -138,8 +138,24 @@ references:
         valid_from: "2027-01-01"
         valid_to: null
         review: {due_from: "2026-12-01", reviewed_on: null, reviewed_by: null}
-      - title: "CIBS : successeur de CGI 272 1 al. 3 (rectification préalable de la facture initiale)"
-        note: "Non identifié lors de la lecture du 2026-11-10 (OQ-42) ; L214-6 dernière phrase (« En cas de restitution d'une contrepartie par le fournisseur, le droit à minoration de taxe devient exigible à ce moment ») est cité plus haut. À relire avec la revue de 2027."
+      # The TVA invoiced in error (CGI 283 3, 272 1: a manual credit note for a terms, basis or billing error, M2c-5b
+      # review legal#3), read on LibreJustice on 2026-11-10 in their versions from 2027-01-01.
+      - title: "CIBS art. L212-9 2°"
+        url: "https://librejustice.fr/norm/fr/code-des-impositions-sur-les-biens-et-services/l212-9"
+        version: "version à compter du 2027-01-01 (ordonnance n° 2026-671, art. 19 I ; la version du 2026-09-01 est « mort-née »)"
+        quote: "Est également constitutive d'un fait générateur de la taxe la mention sur une facture au sens de l'article L. 216-25 d'un montant de taxe qui remplit l'une des conditions suivantes : … 2° Il se rapporte à une opération soumise à la taxe et diffère du montant de taxe dont le fournisseur est redevable. Ce fait générateur intervient lors de l'émission de la facture …"
+        valid_from: "2027-01-01"
+        valid_to: null
+        review: {due_from: "2026-12-01", reviewed_on: null, reviewed_by: null}
+      - title: "CIBS art. L214-18 1°"
+        url: "https://librejustice.fr/norm/fr/code-des-impositions-sur-les-biens-et-services/l214-18"
+        version: "version à compter du 2027-01-01 (ordonnance n° 2026-671, art. 19 I ; la version du 2026-09-01 est « mort-née »)"
+        quote: "Le droit à minoration de la taxe irrégulièrement facturée mentionnée à l'article L. 212-9 devient exigible au bénéfice de l'émetteur de la facture : 1° Lorsqu'il émet une facture rectificative ne comprenant plus les montants de taxe erronés ;"
+        valid_from: "2027-01-01"
+        valid_to: null
+        review: {due_from: "2026-12-01", reviewed_on: null, reviewed_by: null}
+      - title: "CIBS : reprise de CGI 272 1 al. 3 (rectification préalable de la facture initiale)"
+        note: "Lecture du 2026-11-10 (M2c-5b review legal#3) : pour une TVA facturée à tort (avoir manuel pour erreur de conditions, d'assiette ou de facturation), L212-9 2° et L214-18 1° ci-dessus — la minoration devient exigible à l'émission de la facture rectificative ; pour une contrepartie restituée (encaissement annulé), L214-6 dernière phrase et L214-9 cités plus haut. Aucun article reprenant mot pour mot la « justification … de la rectification préalable de la facture initiale » n'a été trouvé (OQ-42, OQ-78 (a)). À relire avec la revue de 2027."
         valid_from: "2027-01-01"
         valid_to: null
         review: {due_from: "2026-12-01", reviewed_on: null, reviewed_by: null}

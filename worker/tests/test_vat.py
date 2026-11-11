@@ -68,7 +68,13 @@ def test_the_review_tripwire_logic() -> None:
             "CIBS art. L216-30 1°",
             "CIBS art. L216-25 al. 2",
             "CGI art. 269 2 c",
+            # the 2027 successors of CGI 283 3 and 272 1 for VAT invoiced in error (M2c-5b review
+            # legal#3): what a manual credit note for a terms, basis or billing error relies on
+            "CIBS art. L212-9 2°",
+            "CIBS art. L214-18 1°",
         } <= due
+        credit_note = next(r for r in pack.references if r.id == "credit_note")
+        assert not any("Non identifié" in (t.note or "") for t in credit_note.texts)
     assert row.review.due_from < row.valid_from, "reviewed before it applies"
     for text, applies, review in pack.texts():
         if applies is not None and applies > pack.read_on:
