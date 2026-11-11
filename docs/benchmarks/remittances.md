@@ -311,3 +311,30 @@ new I22 over the 50,000 keys the approval wrote:
 - `issue_credit_note` itself is keyed by the invoice: its charges by the primary key, each key's credits and waivers
   and latest state by their indexes; a credit note on an invoice charging 50,000 files is one plan and two inserts of
   50,000 rows (not measured at that size: an invoice that size is a scale artefact, not a correction ops make by hand).
+
+## Transfers and files (M2c-6a, migration `20261115090000`)
+
+`worker/tests/test_transfer_files_scale_integration.py` (2026-11-11, cloud session VM: 4 vCPU, 16 GB RAM, local stack,
+`TRANSFER_FILE_SIZE=5000`): 5,000 unidentified credits on one statement, each refunded in the file (5,000 `RFD`
+transfers ordered), the statistics of `bank_transfer`, `refund_request`, `transfer_file` and `transfer_file_item`
+forgotten first (the state CI meets).
+
+| Step (5,000 transfers) | Time |
+|---|---|
+| 5,000 `request_refund` in file mode (one statement, the transfers created) | 16.9 s (3.4 ms each) |
+| « Générer le fichier » (command: a hold reason per transfer, the cash check, the sweep, 5,000 items, the transfers `in_file`, the job queued) | **1.69 s** |
+| `transfer_file` job: write 0.69 s (lxml), structural check, upload 0.06 s, record | **0.90 s** (2.6 MB) |
+| `pain001.check` of the 5,000-transaction file alone | 0.46 s |
+| Download (command: the runs locked, the download recorded) | 0.06 s |
+| Cash check with the 5,000 in flight (each one's debit probed by its RFD id, then by PmtInfId) | **0.13 s** |
+| Cash check once a statement shows their 5,000 debits | 0.09 s |
+| « Virements » (`transfer_overview`) with the file and its 5,000 transfers | 0.14 s |
+
+- Design §19's target « pain.001 ≤ 200 transfers < 0.2 s »: 500 transfers take 0.22 s for the command and 0.10 s for
+  the job (writing 0.06 s); the writer is linear (≈ 0.14 ms a transaction).
+- The command reads each candidate's hold reason by keyed lookups (its run, the client's running balance, the payout
+  blockers): ≈ 0.3 ms a transfer; payouts cost a little more than refunds (one more read of the payout account and of
+  the client's other runs in flight).
+- The cash check probes each transfer in flight by `(bank_account_id, end_to_end_id)` on the new partial index of
+  debits, then its item by `(file_id, transfer_id)` and the batch debits by `(bank_account_id, payment_info_id)`:
+  keyed whatever the statistics (`enable_seqscan = off`).
