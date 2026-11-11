@@ -172,14 +172,24 @@ def test_5120_is_the_bank_after_fees_and_top_ups() -> None:
     assert payments == (1, 100_000)  # our own credits are never debtor payments
     own_credit, plain, ours = (line_id(tenant, f"A{n}{tag}") for n in (4, 5, 6))
     assert review_of(own_credit) == "top_up_not_found"
-    assert review_of(ours) == "own_transfer_out"
+    # M2c-6b-1 (plan §2.3): an RMT id that names no transfer of ours waits for ops as
+    # `transfer_unknown` (P0), and is never « explained » away (6b-2: `book_transfer_line`)
+    assert review_of(ours) == "transfer_unknown"
     assert review_of(plain) is None  # an other debit waits in « Frais » without a review
 
-    # ops: the credit from the own account is a top-up, the plain debit a fee, ours explained
+    # ops: the credit from the own account is a top-up, the plain debit a fee; ours stays unbooked
+    with pytest.raises(psycopg.errors.CheckViolation, match="not_explainable"):
+        api(
+            tenant,
+            "select public.link_debit(%s, %s, %s, null, null, null, %s)",
+            str(uuid.uuid4()),
+            ours,
+            "explained",
+            "virement manuel",
+        )
     for line, kind, why in (
         (own_credit, "own_credit", "virement du compte propre"),
         (plain, "fee", "frais de tenue de compte"),
-        (ours, "explained", "virement manuel, comptabilisé avec les reversements (M2c-6)"),
     ):
         api(
             tenant,
@@ -192,7 +202,7 @@ def test_5120_is_the_bank_after_fees_and_top_ups() -> None:
     assert _bookings(own_credit) == [("top_up", "servicer_top_up", 3_000)]
     assert _bookings(plain) == [("fee", "bank_fee", 50)]
 
-    # 5120 = the bank's closing balance less the line explained, not booked (I9): fees, top-ups
+    # 5120 = the bank's closing balance less our line not booked (I9): fees, top-ups
     with psycopg.connect(DB) as conn:
         unposted = conn.execute(
             "select minor, lines from private.bank_unposted(%s, %s)", (tenant["bank"], DAY)

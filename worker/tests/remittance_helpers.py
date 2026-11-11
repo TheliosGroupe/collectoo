@@ -16,7 +16,6 @@ from typing import Any
 import psycopg
 from allocation_helpers import File, Item, create_file, credit, statement
 from integration_helpers import DB, SCHEDULE, TERMS, as_user, one, ready_mandate, storage
-from psycopg.types.json import Jsonb
 from statement_helpers import bank_tenant
 
 from collectoo_worker.jobs.remittances import make_handler, record_dead_job
@@ -250,49 +249,107 @@ def next_business_day() -> date:
 
 
 def book_payout(run: str) -> None:
-    """What M2c-6 does at the payout's debit, emulated: the remittance (+4670 N / -5120 N) and the
-    settlement of the run's plan, the transfer and the run booked (as the runs' integration test
-    does)."""
+    """The payout's debit through the real path (M2c-6b-1, plan docs/design/m2c-6b-plan.md §2):
+    the run's transfer filed if it is not yet (a file generated, written by the job), the file
+    downloaded, then a one-day statement of its debit (by its RMT id, chained to the account's last
+    closing balance) imported and the payments queue drained — the M2b pass, then the funds pass
+    books the remittance, the run's settlement, the transfer and the run (`bank_line_booking`)."""
+    import hashlib  # noqa: PLC0415 - only this helper
+    import tempfile  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    from statement_helpers import drain as drain_payments  # noqa: PLC0415
+    from statement_helpers import upload  # noqa: PLC0415
+
+    from collectoo_worker.synth.camt053 import Entry, Tx, make_doc, render_camt053  # noqa: PLC0415
+
     r = run_row(run)
-    with psycopg.connect(DB) as conn, conn.transaction():
-        transfer = conn.execute(
-            "select id, debtor_bank_account_id, amount_minor from public.bank_transfer"
-            " where run_id = %s",
+    with psycopg.connect(DB) as conn:
+        t = conn.execute(
+            """select t.id, t.status, t.transfer_file_id, t.debtor_bank_account_id, t.amount_minor,
+                      t.end_to_end_id, t.payee_name, t.payee_iban, a.iban,
+                      (select m.user_id from public.membership m
+                       where m.organization_id = t.organization_id and m.role = 'ops_manager'
+                       order by m.user_id limit 1)
+               from public.bank_transfer t
+               join public.bank_account a on a.id = t.debtor_bank_account_id
+               where t.run_id = %s and t.kind = 'payout' and t.status <> 'cancelled'""",
             (run,),
         ).fetchone()
-        assert transfer is not None
-        conn.execute("select private.ledger_post_set_begin()")
-        conn.execute(
-            """insert into pg_temp._lps_entry (entry_no, organization_id, entry_type,
-                 effective_date, idempotency_key, client_organization_id, source_type, source_id)
-               values (1, %s, 'remittance', private.paris_today(), %s, %s, 'bank_transfer', %s)""",
-            (
-                r["organization_id"],
-                f"remit:{transfer[0]}",
-                r["client_organization_id"],
-                transfer[0],
-            ),
+    assert t is not None
+    tenant = {"servicer": str(r["organization_id"]), "staff": str(t[9]), "bank": str(t[3]),
+              "iban": t[8]}  # fmt: skip
+    file_id = t[2]
+    if t[1] == "ordered":
+        _bank_catch_up(tenant)
+        file_id = staff(tenant, "select public.generate_transfer_file(%s, %s, null)",
+                        str(uuid.uuid4()), tenant["bank"])["file_id"]  # fmt: skip
+        drain()
+    with psycopg.connect(DB) as conn:
+        f = conn.execute(
+            "select id, status, storage_path from public.transfer_file where id = %s", (file_id,)
+        ).fetchone()
+        last = conn.execute(
+            """select closing_booked_minor, to_date from public.bank_statement
+               where bank_account_id = %s order by to_date desc, created_at desc limit 1""",
+            (tenant["bank"],),
+        ).fetchone()
+    assert f is not None and last is not None
+    if f[1] == "generated":
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "f.xml"
+            storage().download("transfer-files", f[2], dest)
+            digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+        staff(tenant, "select public.transfer_file_download(%s, %s)", f[0], digest)
+    # dated as the account's last statement: the tests' later statements (each from a zero opening)
+    # stay the last ones the cash check of the next file reads
+    day = last[1]
+    ref = f"BP{uuid.uuid4().hex[:10].upper()}"
+    debit = Entry(int(t[4]), False, day, day, ref=ref, code="PMNT/ICDT/ESCT",
+                  txs=(Tx(int(t[4]), end_to_end_id=t[5], name=t[6], iban=t[7]),))  # fmt: skip
+    doc = make_doc([debit], iban=tenant["iban"], from_date=day, to_date=day,
+                   opening_minor=int(last[0]), stmt_id=f"S-{ref}")  # fmt: skip
+    upload(tenant, storage(), render_camt053(doc, "08"), name=f"{ref}.xml")
+    drain_payments(storage())
+    status = run_row(run)["status"]
+    assert status == "booked", f"the run's debit was not booked: {status}"
+
+
+def _bank_catch_up(tenant: dict[str, Any]) -> None:
+    """The tests' statements each open at zero; the cash check of a file reads the last closing
+    balance. A statement without lines that opens and closes at the account's booked cash (5120)
+    makes the bank say what the ledger holds, as a real chained statement would."""
+    from statement_helpers import upload  # noqa: PLC0415
+
+    from collectoo_worker.synth.camt053 import make_doc, render_camt053  # noqa: PLC0415
+
+    with psycopg.connect(DB) as conn:
+        cash = one(
+            conn,
+            """select coalesce(sum(p.amount_minor), 0) from public.ledger_account a
+               join public.ledger_posting p on p.ledger_account_id = a.id
+               where a.book = 'client_money_cash' and a.bank_account_id = %s""",
+            (tenant["bank"],),
         )
-        conn.execute(
-            """insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency,
-                 bank_account_id) values (1, 1, 'client_payable', %s, 'EUR', null),
-                 (1, 2, 'client_money_cash', %s, 'EUR', %s)""",
-            (transfer[2], -transfer[2], transfer[1]),
-        )
-        entry = one(conn, "select entry_id from private.ledger_post_set()")
-        conn.execute(
-            "select private.post_run_settlement(%s, %s, private.paris_today())",
-            (run, Jsonb(r["settlement_plan"])),
-        )
-        conn.execute(
-            "update public.bank_transfer set status = 'booked', entry_id = %s where id = %s",
-            (entry, transfer[0]),
-        )
-        conn.execute(
-            "update public.remittance_run set status = 'booked', booked_on = private.paris_today()"
-            " where id = %s",
-            (run,),
-        )
+        last = conn.execute(
+            """select closing_booked_minor, to_date from public.bank_statement
+               where bank_account_id = %s order by to_date desc, created_at desc limit 1""",
+            (tenant["bank"],),
+        ).fetchone()
+    assert last is not None
+    if int(last[0]) == int(cash):
+        return
+    ref = f"BC{uuid.uuid4().hex[:10].upper()}"
+    doc = make_doc([], iban=tenant["iban"], from_date=last[1], to_date=last[1],
+                   opening_minor=int(cash), stmt_id=f"S-{ref}")  # fmt: skip
+    upload(tenant, storage(), render_camt053(doc, "08"), name=f"{ref}.xml")
+    drain_payments_queue()
+
+
+def drain_payments_queue() -> None:
+    from statement_helpers import drain as drain_payments  # noqa: PLC0415
+
+    drain_payments(storage())
 
 
 @contextmanager

@@ -46,6 +46,7 @@ from remittance_helpers import (
     add_admin,
     add_client,
     approve,
+    book_payout,
     documents,
     drain,
     entry_books,
@@ -451,49 +452,8 @@ def test_a_collection_past_its_latest_execution_date_is_a_breach() -> None:
 
 
 def _book_payout(run: str) -> None:
-    """What M2c-6 does at the payout's debit, emulated: the remittance (+4670 N / -5120 N) and the
-    settlement of the run's plan, the transfer and the run booked."""
-    r = run_row(run)
-    with psycopg.connect(DB) as conn, conn.transaction():
-        transfer = conn.execute(
-            "select id, debtor_bank_account_id, amount_minor from public.bank_transfer"
-            " where run_id = %s",
-            (run,),
-        ).fetchone()
-        assert transfer is not None
-        conn.execute("select private.ledger_post_set_begin()")
-        conn.execute(
-            """insert into pg_temp._lps_entry (entry_no, organization_id, entry_type,
-                 effective_date,
-                 idempotency_key, client_organization_id, source_type, source_id)
-               values (1, %s, 'remittance', private.paris_today(), %s, %s, 'bank_transfer', %s)""",
-            (
-                r["organization_id"],
-                f"remit:{transfer[0]}",
-                r["client_organization_id"],
-                transfer[0],
-            ),
-        )
-        conn.execute(
-            """insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency,
-                 bank_account_id) values (1, 1, 'client_payable', %s, 'EUR', null),
-                 (1, 2, 'client_money_cash', %s, 'EUR', %s)""",
-            (transfer[2], -transfer[2], transfer[1]),
-        )
-        entry = one(conn, "select entry_id from private.ledger_post_set()")
-        conn.execute(
-            "select private.post_run_settlement(%s, %s, private.paris_today())",
-            (run, Jsonb(r["settlement_plan"])),
-        )
-        conn.execute(
-            "update public.bank_transfer set status = 'booked', entry_id = %s where id = %s",
-            (entry, transfer[0]),
-        )
-        conn.execute(
-            "update public.remittance_run set status = 'booked', booked_on = private.paris_today()"
-            " where id = %s",
-            (run,),
-        )
+    """The payout's debit through the real path (M2c-6b-1: `remittance_helpers.book_payout`)."""
+    book_payout(run)
 
 
 def test_the_worked_example_continues_a_credit_note_on_a_settled_invoice() -> None:

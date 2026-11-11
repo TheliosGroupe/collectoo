@@ -10,6 +10,11 @@ numbers, free text, batch bookings (with details that add up, without details, o
 returns (AC04, MD06, MS03, reversal indicator), bank fees, our own refunds (RFD…), pending
 entries, NOTPROVIDED end-to-end ids, ultimate debtors, and identical twins without references.
 Every name, IBAN and reference is synthetic (Faker fr_FR, valid check digits, random digits).
+
+`debits_of` (M2c-6b-1, plan docs/design/m2c-6b-plan.md §6) is the statement of a pain.001 file we
+wrote, as the bank would book it: each transfer debited by its own end-to-end id, or one batch line
+per PmtInf (with or without its details), a partial batch, every debit twice, returns (AC04) with
+or without the bank's charges deducted, and a bank fee.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from xml.sax.saxutils import escape, quoteattr
 
 from faker import Faker
@@ -28,6 +33,9 @@ from faker import Faker
 from collectoo_worker.payments.rf import rf_format, rf_make
 from collectoo_worker.payments.statement import classify, minor_to_iso
 from collectoo_worker.synth.ids import iban_fr
+
+if TYPE_CHECKING:
+    from collectoo_worker.remittance.pain001 import TransferFile
 
 RETURN_REASONS = ("AC04", "MD06", "MS03")
 
@@ -339,6 +347,133 @@ def generate_entries(  # noqa: PLR0913 - explicit generation parameters read bes
             if e.status == "BOOK":
                 produced += len(e.txs) if e.txs and e.adds_up() else 1
     return entries
+
+
+DEBIT_MODES = ("individual", "batch", "batch-details", "partial", "twice")
+TRANSFER_DEBIT_CODE = "PMNT/ICDT/ESCT"
+TRANSFER_RETURN_CODE = "PMNT/ICDT/RRTN"
+FEE_CODE = "ACMT/MDOP/CHRG"
+
+
+def debits_of(  # noqa: PLR0913 - what the bank did with the file, one parameter each
+    file: TransferFile,
+    *,
+    booking_date: date | None = None,
+    mode: str = "individual",
+    returns: Sequence[str] = (),
+    return_date: date | None = None,
+    charges_minor: int = 0,
+    fee_minor: int = 0,
+    ref_prefix: str = "DBT",
+) -> list[Entry]:
+    """The bank's lines for a pain.001 file (`remittance.pain001.read`): its debits on
+    `booking_date` (default: each PmtInf's requested execution date), as `mode` says —
+    `individual` (one line per transfer, by its end-to-end id), `batch` (one line per PmtInf, no
+    details: the parser keeps it unsplit with its PmtInfId), `batch-details` (one line per PmtInf
+    with each transfer's details: split into one line each), `partial` (a batch line without its
+    last transfer), `twice` (every individual debit booked again the next day). Then a return of
+    each end-to-end id in `returns` on `return_date` (default: three days later), credited less
+    `charges_minor` (the bank's charge deducted), and a bank fee of `fee_minor` if not zero."""
+    if mode not in DEBIT_MODES:
+        raise ValueError(f"mode {mode!r}: one of {', '.join(DEBIT_MODES)}")
+    if charges_minor < 0 or fee_minor < 0:
+        raise ValueError("charges and fee are not negative")
+    entries: list[Entry] = []
+    n = 0
+
+    def ref() -> str:
+        nonlocal n
+        n += 1
+        return f"{ref_prefix}{n:06d}"
+
+    by_e2e: dict[str, tuple[int, str, str]] = {}
+    last_day = booking_date or date.min
+    for pmt in file.payment_infos:
+        day = booking_date or pmt.requested_execution_date
+        last_day = max(last_day, day)
+        txs = [
+            Tx(
+                p.amount_minor,
+                end_to_end_id=p.end_to_end_id,
+                name=p.creditor_name,
+                iban=p.creditor_iban,
+                ustrd=(p.remittance_info,) if p.remittance_info else (),
+            )
+            for p in pmt.transactions
+        ]
+        for p in pmt.transactions:
+            by_e2e[p.end_to_end_id] = (p.amount_minor, p.creditor_name, p.creditor_iban)
+        if mode in ("individual", "twice"):
+            for x in txs:
+                one = Entry(
+                    x.amount_minor or 0,
+                    False,
+                    day,
+                    day,
+                    ref=ref(),
+                    code=TRANSFER_DEBIT_CODE,
+                    txs=(x,),
+                )
+                entries.append(one)
+                if mode == "twice":
+                    entries.append(
+                        replace(
+                            one,
+                            booking_date=day + timedelta(days=1),
+                            value_date=day + timedelta(days=1),
+                            ref=ref(),
+                        )
+                    )
+            continue
+        kept = txs[:-1] if mode == "partial" and len(txs) > 1 else txs
+        total = sum(x.amount_minor or 0 for x in kept)
+        entries.append(
+            Entry(
+                total,
+                False,
+                day,
+                day,
+                ref=ref(),
+                code=TRANSFER_DEBIT_CODE,
+                txs=tuple(kept) if mode == "batch-details" else (),
+                batch_count=len(kept),
+                payment_info_id=pmt.pmt_inf_id,
+            )
+        )
+    back = return_date or last_day + timedelta(days=3)
+    for e2e in returns:
+        if e2e not in by_e2e:
+            raise ValueError(f"end-to-end id {e2e!r} is not in the file")
+        sent, name, iban = by_e2e[e2e]
+        if charges_minor >= sent:
+            raise ValueError(f"{e2e}: the charges exceed the transfer")
+        amount = sent - charges_minor
+        entries.append(
+            Entry(
+                amount,
+                True,
+                back,
+                back,
+                ref=ref(),
+                code=TRANSFER_RETURN_CODE,
+                txs=(
+                    Tx(
+                        amount,
+                        end_to_end_id=e2e,
+                        name=name,
+                        iban=iban,
+                        return_reason="AC04",
+                    ),
+                ),
+            )
+        )
+    if fee_minor:
+        entries.append(
+            Entry(
+                fee_minor, False, back, back, ref=ref(), code=FEE_CODE, info="FRAIS VIREMENTS SEPA"
+            )
+        )
+    return sorted(entries, key=lambda e: e.booking_date)
 
 
 def make_doc(  # noqa: PLR0913 - the statement's identity
