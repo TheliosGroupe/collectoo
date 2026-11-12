@@ -12,11 +12,11 @@ import {
   explainable,
   feeEffect,
   lossEffect,
-  offersOwnBatchRefunds,
-  offersPaymentLinks,
   ownCreditEffect,
   lineKindLabel,
+  linkOffers,
   linkRefundEffect,
+  readsLinkOptions,
   relayable,
   relayedPaymentEffect,
   releaseEffect,
@@ -56,7 +56,7 @@ type Row = {
   end_to_end_id: string | null;
   original_end_to_end_id: string | null;
   /** M2c-6b-1: a batch line's PmtInfId (one of our files' when it is ours; debit_queue returns it since the review's
-   * money-1 fix — the page offers no link on our batch lines) */
+   * money-1 fix — on our batch lines the page offers only the refunds debit_link_options lists, linkOffers) */
   payment_info_id?: string | null;
   return_reason: string | null;
   review_reason: string | null;
@@ -157,12 +157,12 @@ export default async function DebitsPage({
   const rows = (data ?? []) as unknown as Row[];
   const total = rows[0]?.total ?? 0;
   // what ops may link a line to when the job found nothing it could link (bounded: one keyed read per line shown that
-  // offers links; never our own transfers and credits)
+  // offers links; never our own transfers and credits, nor our RMT/SWP lines — review round 2, L4)
   const options = new Map<string, Options>();
   if (tab === "a-classer") {
     const reads = await Promise.all(
       rows.map((r) =>
-        offersPaymentLinks(r) || offersOwnBatchRefunds(r)
+        readsLinkOptions(r)
           ? supabase.rpc("debit_link_options", {
               p_bank_transaction_id: r.bank_transaction_id,
             })
@@ -410,21 +410,15 @@ function LineActions({
     });
   for (const p of options?.payments ?? [])
     if (!payments.has(p.payment_id)) payments.set(p.payment_id, p);
-  // review M2c-1: no return or refund link on our own transfers and credits (the database refuses them); review
-  // M2c-6b-1 (money-1): nor on our payouts' and sweeps' lines (own_transfer_line) — the loss below included
-  const linkable = offersPaymentLinks(row);
-  // … but a batch line of our files takes a refund of its PmtInf in a file handed out (offersOwnBatchRefunds)
-  const refunds =
-    linkable || offersOwnBatchRefunds(row) ? (options?.refunds ?? []) : [];
-  const isReturn = row.direction === "debit" && row.kind !== "refund_out";
-  // M2c-1 (OQ-34): a return naming a payment of which less is left than it takes back
-  const beyond =
-    linkable && row.direction === "debit" && row.kind === "return"
-      ? [...payments.values()].filter(
-          (p) =>
-            p.named === true && BigInt(p.left_minor) < BigInt(row.amount_minor),
-        )
-      : [];
+  // review M2c-1, M2c-6b-1 (money-1) and round 2 (L4): what the line may be linked to — on our payouts' and sweeps'
+  // lines exactly what debit_link_options lists there (our batch line: its PmtInf's refunds handed out; RMT/SWP lines
+  // and their returns: nothing), never « Perte »; M2c-1 (OQ-34): « Perte » on a return naming a payment of which less
+  // is left than it takes back
+  const {
+    returns: returnable,
+    losses: beyond,
+    refunds,
+  } = linkOffers(row, [...payments.values()], options?.refunds ?? []);
   return (
     <div className="flex flex-col gap-2">
       {row.direction === "credit" && row.kind === "own_transfer_in" ? (
@@ -479,37 +473,30 @@ function LineActions({
           idempotencyKey={randomUUID()}
         />
       ))}
-      {row.direction === "debit" && linkable
-        ? [...payments.values()]
-            .filter((p) => BigInt(p.left_minor) >= BigInt(row.amount_minor))
-            .slice(0, isReturn ? 5 : 2)
-            .map((p) => {
-              const full = BigInt(p.left_minor) === BigInt(row.amount_minor);
-              return (
-                <LinkReturn
-                  key={p.payment_id}
-                  lineId={row.bank_transaction_id}
-                  paymentId={p.payment_id}
-                  leftMinor={p.left_minor}
-                  primary={p.named === true}
-                  label={`Retour du paiement de ${money(p.amount_minor, cur)} du ${frenchDate(p.booking_date)}${p.file_reference ? ` · ${p.file_reference}` : ""}${full ? "" : " (partiel)"}`}
-                  effect={returnEffect({
-                    amount: money(row.amount_minor, cur),
-                    left: money(
-                      (
-                        BigInt(p.left_minor) - BigInt(row.amount_minor)
-                      ).toString(),
-                      cur,
-                    ),
-                    full,
-                    dateFr: frenchDate(row.booking_date),
-                    hasFile: Boolean(p.file_reference),
-                  })}
-                  idempotencyKey={randomUUID()}
-                />
-              );
-            })
-        : null}
+      {returnable.map((p) => {
+        const full = BigInt(p.left_minor) === BigInt(row.amount_minor);
+        return (
+          <LinkReturn
+            key={p.payment_id}
+            lineId={row.bank_transaction_id}
+            paymentId={p.payment_id}
+            leftMinor={p.left_minor}
+            primary={p.named === true}
+            label={`Retour du paiement de ${money(p.amount_minor, cur)} du ${frenchDate(p.booking_date)}${p.file_reference ? ` · ${p.file_reference}` : ""}${full ? "" : " (partiel)"}`}
+            effect={returnEffect({
+              amount: money(row.amount_minor, cur),
+              left: money(
+                (BigInt(p.left_minor) - BigInt(row.amount_minor)).toString(),
+                cur,
+              ),
+              full,
+              dateFr: frenchDate(row.booking_date),
+              hasFile: Boolean(p.file_reference),
+            })}
+            idempotencyKey={randomUUID()}
+          />
+        );
+      })}
       {refunds.map((q) => (
         <LinkRefund
           key={q.refund_request_id}

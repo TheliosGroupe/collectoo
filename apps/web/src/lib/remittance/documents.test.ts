@@ -225,35 +225,69 @@ describe("the client's statements read the run as it stands (review M2c-5 figure
 // review M2c-6b-1 (legal-texts#6, K4): a returned payout's run stays booked (§9.7) — « Virement débité de notre compte »
 // in green would read as paid; the client's summary names its runs whose payout came back (`returned_runs`)
 describe("a run whose payout came back is never shown as paid (review M2c-6b-1 legal-texts#6, K4)", () => {
-  it("says the payout came back unpaid, on which day, and that it will be paid again, in the error tone", () => {
-    expect(statementRunView({ status: "booked", net_minor: "164000" }, "2026-11-05")).toEqual({
-      label: "Virement revenu impayé le 05/11/2026 : il vous sera reversé à nouveau",
-      tone: "error",
-      net: "164000",
-    });
+  const booked = { status: "booked", net_minor: "164000" };
+
+  it("says the payout came back unpaid, on which day, and that its amount will be paid again, in the error tone", () => {
+    // review round 2 (L2): before a run holding the returned amount is booked (`repaid_by` null or absent)
+    for (const repaid_by of [null, undefined])
+      expect(statementRunView(booked, { returned_on: "2026-11-05", repaid_by })).toEqual({
+        label: "Virement revenu impayé le 05/11/2026 : son montant sera reversé par un prochain reversement",
+        tone: "error",
+        net: "164000",
+      });
     // without a return, as before
-    for (const returnedOn of [undefined, null])
-      expect(statementRunView({ status: "booked", net_minor: "164000" }, returnedOn)).toEqual({
+    for (const returned of [undefined, null])
+      expect(statementRunView(booked, returned)).toEqual({
         label: "Virement débité de notre compte",
         tone: "ok",
         net: "164000",
       });
     // only a booked run's payout can come back: anything else keeps its own words
-    expect(statementRunView({ status: "approved", net_minor: "164000" }, "2026-11-05").label).toBe("Virement ordonné");
+    expect(statementRunView({ status: "approved", net_minor: "164000" }, { returned_on: "2026-11-05" }).label).toBe(
+      "Virement ordonné",
+    );
   });
 
-  it("reads the summary's returned runs by run id, ignoring what is not well formed", () => {
+  // review round 2 (L2, new:client-returned-stale): the summary lists a returned run for good (a returned transfer
+  // never changes status) — once the run that paid it again is booked, the row says so and no longer promises a payment
+  it("says which run paid it again once that run is booked, no longer that it will be paid, never in green", () => {
+    const view = statementRunView(booked, { returned_on: "2026-11-12", repaid_by: "RV-2026-000033" });
+    expect(view).toEqual({
+      label: "Virement revenu impayé le 12/11/2026 : reversé à nouveau par le reversement RV-2026-000033",
+      tone: "neutral",
+      net: "164000",
+    });
+    expect(view.label).not.toMatch(/sera reversé|prochain reversement|il vous sera/);
+    // the K4 text, true only until the money was paid again, is gone in both states
+    for (const repaid_by of [null, "RV-2026-000033"])
+      expect(statementRunView(booked, { returned_on: "2026-11-12", repaid_by }).label).not.toContain(
+        "il vous sera reversé à nouveau",
+      );
+  });
+
+  it("reads the summary's returned runs by run id, with the run that paid each again, ignoring what is not well formed", () => {
     const runs = returnedRuns({
       returned_runs: [
-        { run_id: "r1", returned_on: "2026-11-05", amount_minor: "164000" },
+        { run_id: "r1", returned_on: "2026-11-05", amount_minor: "164000", repaid_by: null },
         { run_id: "r2", returned_on: "05/11/2026", amount_minor: "1" },
         { run_id: "r3", returned_on: "2026-11-06", amount_minor: 164000 },
         { returned_on: "2026-11-06", amount_minor: "1" },
         null,
+        { run_id: "r4", returned_on: "2026-11-12", amount_minor: "164000", repaid_by: "RV-2026-000033" },
+        // no key (a database before round 2): not paid again yet
+        { run_id: "r5", returned_on: "2026-11-12", amount_minor: "5000" },
+        // a repaid_by that is not a run's number: the entry is left out, never guessed
+        { run_id: "r6", returned_on: "2026-11-12", amount_minor: "5000", repaid_by: 33 },
+        { run_id: "r7", returned_on: "2026-11-12", amount_minor: "5000", repaid_by: " " },
       ],
     });
-    expect([...runs.keys()]).toEqual(["r1"]);
-    expect(runs.get("r1")).toEqual({ run_id: "r1", returned_on: "2026-11-05", amount_minor: "164000" });
+    expect([...runs.keys()]).toEqual(["r1", "r4", "r5"]);
+    expect(runs.get("r1")).toEqual({ run_id: "r1", returned_on: "2026-11-05", amount_minor: "164000", repaid_by: null });
+    expect(runs.get("r4")?.repaid_by).toBe("RV-2026-000033");
+    expect(runs.get("r5")?.repaid_by).toBeNull();
+    // what the page passes for a row is the entry itself
+    expect(statementRunView(booked, runs.get("r4")).label).toContain("par le reversement RV-2026-000033");
+    expect(statementRunView(booked, runs.get("r5")).tone).toBe("error");
     for (const summary of [null, {}, { returned_runs: null }, { returned_runs: "x" }])
       expect(returnedRuns(summary as never).size).toBe(0);
   });

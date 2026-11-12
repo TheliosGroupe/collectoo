@@ -254,6 +254,23 @@ export const PAYOUT_NOT_EXECUTED =
 export const FILE_TRANSFER_NOT_EXECUTED =
   "Un virement que la banque n'exécute pas (fichier non déposé, virement refusé) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
 
+/**
+ * Review round 2 (L6; legal-texts#3's qualification, for the refunds of M2c-6a): a refund in a downloaded file leaves
+ * « en cours » when its debit is booked from the statement — by the debit job when the line carries its RFD reference,
+ * or its lot's PmtInfId when it is that lot's only transfer (private.pmt_inf_single_refund), else when ops link the line
+ * in « Débits et retours » — then the payee's bank's return, if one comes, is booked the same way. A refund the bank does
+ * not execute leaves no line at all: nothing reads its « rejection »; it stays « en cours » until the cancellation after
+ * download is available (M2c-6b-3, OQ-81).
+ */
+export const REFUND_BOOKED_WHEN =
+  "automatiquement à l'import quand la ligne porte sa référence RFD, ou celle de son lot quand il en est le seul virement ; sinon une fois la ligne rattachée au remboursement dans « Débits et retours »";
+/** A refund the payee's bank sends back after its debit: its return credit undoes it (the payment's amount free again). */
+export const REFUND_RETURNED =
+  "Si la banque du bénéficiaire le renvoie, son retour est comptabilisé de même et le montant redevient disponible sur le paiement.";
+/** A refund the bank does not execute: no line on any statement. */
+export const REFUND_NOT_EXECUTED =
+  "Un remboursement que la banque n'exécute pas (refusé avant son exécution, ou fichier jamais déposé) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
+
 const ERROR_TEXT: Record<ErrorCode, string> = {
   not_allowed: "Action non autorisée pour votre rôle.",
   totals_mismatch:
@@ -337,9 +354,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Ce paiement ne peut pas être remboursé depuis ici (il attend son imputation, ou un remboursement est déjà demandé). Rechargez la page.",
   refund_not_pending:
     "Ce remboursement n'est plus en attente : rechargez la page.",
-  // review round 6: a refund whose transfer is in a downloaded file can no longer be cancelled
-  refund_pending:
-    "Un remboursement est demandé pour ce paiement : il doit d'abord être annulé (« Annuler » sur sa ligne). Si son virement est dans un fichier déjà téléchargé, il ne peut plus l'être : il reste en cours jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé.",
+  // review round 6: a refund whose transfer is in a downloaded file can no longer be cancelled; M2c-6b-1 review round 2
+  // (L6): it leaves « en cours » when its debit is booked from the statement, never by a « rejection » no line shows
+  refund_pending: `Un remboursement est demandé pour ce paiement : il doit d'abord être annulé (« Annuler » sur sa ligne). Si son virement est dans un fichier déjà téléchargé, il ne peut plus l'être : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${REFUND_BOOKED_WHEN}). ${REFUND_NOT_EXECUTED} Voyez avec la banque et prévenez le support.`,
   already_linked: "Cette ligne a déjà été traitée : rechargez la page.",
   link_amount:
     "Le montant ne convient pas : il dépasse ce qui reste du paiement, ou n'est pas celui du remboursement demandé.",
@@ -576,8 +593,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Le nom du bénéficiaire doit contenir au moins une lettre latine ou un chiffre (le format SEPA n'accepte que l'alphabet latin de base).",
   refund_iban_not_sepa:
     "Cet IBAN est hors de la zone SEPA : le remboursement ne peut pas partir dans un fichier de virements. Choisissez « Je l'exécute moi-même ».",
-  refund_in_downloaded_file:
-    "Le virement de ce remboursement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire, et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
+  // M2c-6b-1 review round 2 (L6): booked from the statement (its debit, then its return), never a « rejection » read
+  refund_in_downloaded_file: `Le virement de ce remboursement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${REFUND_BOOKED_WHEN}), et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). ${REFUND_RETURNED} ${REFUND_NOT_EXECUTED} Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`,
   // M2c-6a review, round 5 (fail-closed): the cancellation of a downloaded file, or of one of its transfers, is off
   transfer_bank_booking_required: `Un fichier téléchargé ne peut pas encore être annulé dans Collectoo, ni un de ses virements : ils restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (${FILE_BOOKED_WHEN}). ${FILE_TRANSFER_NOT_EXECUTED} Gardez le fichier tel quel ; si la banque n'a pas exécuté un virement, vérifiez le relevé et voyez avec la banque.`,
   // review round 6: a file the bank executed, in full or in part, is not served again (whatever the switch)

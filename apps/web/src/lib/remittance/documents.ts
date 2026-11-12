@@ -120,12 +120,16 @@ export function runStatusText(status: string, net: string | null): string {
  * the page reads `remittance_run.status` and `net_minor` live. A cancelled run shows no amount to transfer.
  *
  * Review M2c-6b-1 (legal-texts#6, K4): a run whose payout the payee's bank sent back stays booked (design §9.7), so
- * « Virement débité de notre compte » in green would read as paid; `returnedOn` (the return credit's booking date, from
- * the summary's `returned_runs`) words it as come back unpaid, to be paid again, in the error tone — the amount kept.
+ * « Virement débité de notre compte » in green would read as paid; `returned` (the summary's `returned_runs` entry:
+ * the return credit's booking date) words it as come back unpaid, the amount kept. Review round 2 (L2,
+ * new:client-returned-stale): the entry stays listed for good (a returned transfer never changes status), so it says
+ * what became of the money — « … : son montant sera reversé par un prochain reversement » in the error tone until a run
+ * holding the returned amount is booked, then « … : reversé à nouveau par le reversement <numéro> » (`repaid_by`), in
+ * the neutral tone: the green stays the mark of a run whose own payout was debited.
  */
 export function statementRunView(
   run: { status: string; net_minor: string | number | null } | null,
-  returnedOn?: string | null,
+  returned?: { returned_on: string; repaid_by?: string | null } | null,
 ): {
   label: string;
   tone: "neutral" | "ok" | "error";
@@ -133,24 +137,27 @@ export function statementRunView(
 } {
   if (!run) return { label: "Statut indisponible", tone: "neutral", net: null };
   const net = run.net_minor === null ? null : String(run.net_minor);
-  if (run.status === "booked" && returnedOn)
-    return {
-      label: `Virement revenu impayé le ${frenchDay(returnedOn)} : il vous sera reversé à nouveau`,
-      tone: "error",
-      net,
-    };
+  if (run.status === "booked" && returned?.returned_on) {
+    const came = `Virement revenu impayé le ${frenchDay(returned.returned_on)}`;
+    return returned.repaid_by
+      ? { label: `${came} : reversé à nouveau par le reversement ${returned.repaid_by}`, tone: "neutral", net }
+      : { label: `${came} : son montant sera reversé par un prochain reversement`, tone: "error", net };
+  }
   const label = runStatusText(run.status, net);
   if (run.status === "cancelled") return { label, tone: "error", net: null };
   return { label, tone: run.status === "booked" ? "ok" : "neutral", net };
 }
 
-/** A run of the client whose payout came back (`client_remittance_summary.returned_runs`, review M2c-6b-1 K4). */
-export type ReturnedRun = { run_id: string; returned_on: string; amount_minor: string };
+/**
+ * A run of the client whose payout came back (`client_remittance_summary.returned_runs`, review M2c-6b-1 K4), and the
+ * number of the booked run whose live line holds the returned amount (`repaid_by`, review round 2 L2; null until then).
+ */
+export type ReturnedRun = { run_id: string; returned_on: string; amount_minor: string; repaid_by: string | null };
 
 /**
  * The client's runs whose payout came back, by run id, from the summary's `returned_runs` (amounts text in minor
- * units, dates ISO): an entry that is not well formed is left out — the page then keeps the run's own words, never a
- * guess.
+ * units, dates ISO, `repaid_by` a run's number or null — absent reads as null): an entry that is not well formed is
+ * left out — the page then keeps the run's own words, never a guess.
  */
 export function returnedRuns(summary: { returned_runs?: unknown } | null): Map<string, ReturnedRun> {
   const out = new Map<string, ReturnedRun>();
@@ -158,16 +165,17 @@ export function returnedRuns(summary: { returned_runs?: unknown } | null): Map<s
   if (!Array.isArray(rows)) return out;
   for (const r of rows as unknown[]) {
     if (!r || typeof r !== "object") continue;
-    const { run_id, returned_on, amount_minor } = r as Record<string, unknown>;
+    const { run_id, returned_on, amount_minor, repaid_by } = r as Record<string, unknown>;
     if (
       typeof run_id === "string" &&
       run_id !== "" &&
       typeof returned_on === "string" &&
       /^\d{4}-\d{2}-\d{2}$/.test(returned_on) &&
       typeof amount_minor === "string" &&
-      /^\d+$/.test(amount_minor)
+      /^\d+$/.test(amount_minor) &&
+      (repaid_by === undefined || repaid_by === null || (typeof repaid_by === "string" && repaid_by.trim() !== ""))
     )
-      out.set(run_id, { run_id, returned_on, amount_minor });
+      out.set(run_id, { run_id, returned_on, amount_minor, repaid_by: typeof repaid_by === "string" ? repaid_by : null });
   }
   return out;
 }
@@ -199,7 +207,8 @@ export type RemittanceSummary = {
   owed: OwedEntry[];
   in_flight: { number: string; status: string; currency: string; net_minor: string; requested_execution_date: string | null }[];
   next_run_day?: string | null;
-  /** review M2c-6b-1 (K4): the client's runs whose payout came back (read through returnedRuns) */
+  /** review M2c-6b-1 (K4): the client's runs whose payout came back, and (round 2, L2) the run that paid each again
+   * (read through returnedRuns) */
   returned_runs?: unknown;
 };
 

@@ -12,12 +12,14 @@ import {
   explainable,
   isOurTransferLine,
   lineKindLabel,
+  linkOffers,
   linkRefundEffect,
   minorToInput,
   normaliseIban,
   offersOwnBatchRefunds,
   offersPaymentLinks,
   pendingRefundInstruction,
+  readsLinkOptions,
   refundCancellable,
   refundExecutionMode,
   refundInDownloadedFile,
@@ -1101,6 +1103,44 @@ describe("M2c-6a review, round 7 (round 6's verifiers)", () => {
   });
 });
 
+// review round 2 (L6; legal-texts#3's qualification, for the refunds): a refund in a downloaded file is booked from the
+// statement — its debit when the line carries its RFD reference (or its lot's, when it is that lot's only transfer), else
+// once ops link the line, then the payee's bank's return if one comes; a refund the bank does not execute leaves no line,
+// so nothing reads its « rejection »: it stays « en cours » until the cancellation after download is available
+describe("M2c-6b-1 review, round 2: no refund text promises a « rejection » read from the statement (L6)", () => {
+  const refundTexts: [string, string][] = [
+    ["refund_in_downloaded_file", errorText("refund_in_downloaded_file")],
+    ["refund_pending", errorText("refund_pending")],
+    ["the payment's page", refundInDownloadedFileNote("TF-2026-000142")],
+  ];
+
+  it("drops « ou son rejet » and says the debit, then a return, is booked from the statement", () => {
+    for (const [what, text] of refundTexts) {
+      expect(text, what).not.toContain("ou son rejet");
+      expect(text, what).not.toMatch(/lu sur le relevé/);
+      expect(text, what).toMatch(/jusqu'à ce que son débit soit comptabilisé depuis le relevé/);
+      expect(text, what).toContain(
+        "automatiquement à l'import quand la ligne porte sa référence RFD, ou celle de son lot quand il en est le seul virement ; sinon une fois la ligne rattachée au remboursement dans « Débits et retours »",
+      );
+    }
+    for (const [what, text] of refundTexts.filter(([w]) => w !== "refund_pending"))
+      expect(text, what).toContain(
+        "Si la banque du bénéficiaire le renvoie, son retour est comptabilisé de même et le montant redevient disponible sur le paiement.",
+      );
+  });
+
+  it("says a refund the bank does not execute leaves no line and stays « en cours »: see the bank, tell support", () => {
+    for (const [what, text] of refundTexts) {
+      expect(text, what).toContain(
+        "Un remboursement que la banque n'exécute pas (refusé avant son exécution, ou fichier jamais déposé) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.",
+      );
+      expect(text, what).toMatch(/[vV]oyez avec la banque et prévenez le support/);
+      // the cancellation after download is still off (the switch stays off in 6b-1)
+      expect(text, what).not.toMatch(/annulez-le|demandez (son |l')annulation|faites d'abord annuler/);
+    }
+  });
+});
+
 describe("M2c-6b-1 review: our payouts' and sweeps' lines are booked, never linked (money-1, K1)", () => {
   const RMT = "RMT0A1B2C3D4E5F";
   const SWP = "SWPFEDCBA987654";
@@ -1137,6 +1177,20 @@ describe("M2c-6b-1 review: our payouts' and sweeps' lines are booked, never link
       kind: "return",
       end_to_end_id: SWP,
       original_end_to_end_id: null,
+    },
+    // review round 2 (L4): the database reads a line's own or original id whatever its direction and kind — a debit
+    // « return » naming our RMT id as its original, a credit carrying our id with another original
+    {
+      direction: "debit",
+      kind: "return",
+      end_to_end_id: "E2E-BANK-9",
+      original_end_to_end_id: RMT,
+    },
+    {
+      direction: "credit",
+      kind: "return",
+      end_to_end_id: SWP,
+      original_end_to_end_id: "E2E-BANK-9",
     },
   ];
   const others: Line[] = [
@@ -1206,6 +1260,81 @@ describe("M2c-6b-1 review: our payouts' and sweeps' lines are booked, never link
     expect(text).toContain("remboursement de ce lot");
   });
 
+  // review round 2 (L4, money-1 / K1 in depth): « À classer » offers on our lines exactly what public.debit_link_options
+  // lists there, which is only what private.post_debit_links accepts — on our batch line the file-mode refunds of that
+  // PmtInf handed out to the bank, on our RMT/SWP lines and their returns nothing; « Perte » (the loss beyond what is
+  // left of a payment) never, whatever the job named or the options list
+  const pay = (id: string, left: string, named?: boolean) => ({
+    payment_id: id,
+    amount_minor: left,
+    booking_date: "2026-11-02",
+    payer_name: "Payeur",
+    left_minor: left,
+    file_reference: null,
+    named,
+  });
+  const refund = (id: string) => ({
+    refund_request_id: id,
+    amount_minor: "1000",
+    end_to_end_id: `RFD${id.toUpperCase().padEnd(12, "0")}`,
+    status: "requested",
+    payee_name: "Bénéficiaire",
+  });
+  // what the job named (a payment of less than the line: « Perte » on a line not ours) and what the options could hold
+  const named = [pay("p_full", "1000", true), pay("p_short", "400", true), pay("p_other", "1000")];
+  const none = { returns: [], losses: [], refunds: [] };
+
+  it("offers on our batch line exactly the refunds debit_link_options lists, never a payment or its loss (L4)", () => {
+    const batch = ours.filter((o) => o.direction === "debit" && !o.end_to_end_id);
+    expect(batch.length).toBe(2);
+    for (const o of batch) {
+      const row = { ...o, amount_minor: "1000" };
+      expect(readsLinkOptions(row), JSON.stringify(o)).toBe(true);
+      const listed = [refund("q1"), refund("q2")];
+      const offers = linkOffers(row, named, listed);
+      expect(offers.refunds, JSON.stringify(o)).toEqual(listed);
+      expect(offers.returns, JSON.stringify(o)).toEqual([]);
+      expect(offers.losses, JSON.stringify(o)).toEqual([]);
+      // nothing listed (the PmtInf has a member cancelled and not returned, or no refund handed out): nothing offered
+      expect(linkOffers(row, named, []), JSON.stringify(o)).toEqual(none);
+    }
+  });
+
+  it("offers nothing on our RMT/SWP lines and the returns of them, nor reads their options (L4)", () => {
+    for (const o of ours.filter((x) => !(x.direction === "debit" && !x.end_to_end_id))) {
+      const row = { ...o, amount_minor: "1000" };
+      expect(readsLinkOptions(row), JSON.stringify(o)).toBe(false);
+      expect(linkOffers(row, named, [refund("q1")]), JSON.stringify(o)).toEqual(none);
+    }
+  });
+
+  it("keeps the M2b links on lines not ours: a payment's return, its loss beyond what is left, our refunds (L4)", () => {
+    const ret = { direction: "debit", kind: "return", end_to_end_id: "E2E-DEBTOR-1", amount_minor: "1000" };
+    expect(readsLinkOptions(ret)).toBe(true);
+    const offers = linkOffers(ret, named, [refund("q1")]);
+    expect(offers.returns.map((p) => p.payment_id)).toEqual(["p_full", "p_other"]);
+    // « Perte » only for a payment the line names (the job's candidate) of which less is left than it takes back
+    expect(offers.losses.map((p) => p.payment_id)).toEqual(["p_short"]);
+    expect(offers.refunds.map((q) => q.refund_request_id)).toEqual(["q1"]);
+    // another debit: up to five payments' returns, no loss; our refund's debit (RFD): at most two
+    const other = { direction: "debit", kind: "other_debit", end_to_end_id: "FRS-1", amount_minor: "1000" };
+    const more = [...named, ...["p4", "p5", "p6", "p7"].map((id) => pay(id, "2000"))];
+    expect(linkOffers(other, more, []).returns.map((p) => p.payment_id)).toEqual(["p_full", "p_other", "p4", "p5", "p6"]);
+    expect(linkOffers(other, more, []).losses).toEqual([]);
+    const rfd = { direction: "debit", kind: "refund_out", end_to_end_id: "RFD0123456789AB", amount_minor: "1000" };
+    expect(linkOffers(rfd, more, []).returns.map((p) => p.payment_id)).toEqual(["p_full", "p_other"]);
+    expect(linkOffers(rfd, more, []).losses).toEqual([]);
+    // a credit undoing a debit: our refunds come back only, never a payment's return
+    const back = { direction: "credit", kind: "return", original_end_to_end_id: "RFD0123456789AB", amount_minor: "1000" };
+    expect(linkOffers(back, named, [refund("q1")])).toEqual({ returns: [], losses: [], refunds: [refund("q1")] });
+    // our own transfers out and the credits from our accounts: nothing (review M2c-1)
+    for (const kind of ["transfer_out", "own_transfer_in", "client_transfer_in"])
+      for (const direction of ["debit", "credit"]) {
+        expect(readsLinkOptions({ direction, kind }), `${direction} ${kind}`).toBe(false);
+        expect(linkOffers({ direction, kind, amount_minor: "1000" }, named, [refund("q1")])).toEqual(none);
+      }
+  });
+
   it("never offers « Classer sans comptabiliser » on them", () => {
     for (const o of ours)
       expect(
@@ -1242,6 +1371,25 @@ describe("M2c-6b-1 review: the checks' and the reviews' words (legal-texts#2, #4
     const help = checkLabel("remittance_payout_overdue").help;
     expect(help).toContain("son débit n'est pas comptabilisé");
     expect(help).not.toContain("n'est pas débité par la banque");
+    expect(help).toContain("Débits et retours");
+  });
+
+  // review round 2 (L3, new:overdue-help-never-handed-out): a payout never handed out to the bank (still to put in a
+  // file, or in a file nobody downloaded) is proven unpaid at once — its breach row is written without any statement
+  // (private.run_remittance_runs_checks' olc.proven; pgTAP 035 sc_returned_overdue) — otherwise only once the
+  // statements of that date are imported without any line that could be its debit
+  it("says when the breach is recorded: at once for a payout never handed out, else once the statements show none (L3)", () => {
+    const help = checkLabel("remittance_payout_overdue").help;
+    expect(help).toContain(
+      "Le dépassement est enregistré aussitôt pour un virement jamais remis à la banque (encore à mettre dans un fichier, ou dans un fichier jamais téléchargé)",
+    );
+    expect(help).toContain(
+      "sinon, une fois les relevés de cette date importés sans aucune ligne qui puisse être ce débit",
+    );
+    // round 1's sentence said « only once the statements are imported » for every payout
+    expect(help).not.toContain("n'est enregistré qu'une fois");
+    // what round 1 fixed stays
+    expect(help).toContain("son débit n'est pas comptabilisé");
     expect(help).toContain("Débits et retours");
   });
 
