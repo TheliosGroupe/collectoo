@@ -747,3 +747,19 @@ line servicer's balances read by key, 1 row; the refund servicer's none). Of the
 the 50,000 items prepared and approved in 30.0–32.7 s, its payout filed, downloaded, debited and booked in 0.8–1.0 s.
 The other tests as before: 50,000 files boarded in 88–95 s, 50,000 credits matched in 29.2–32.6 s and allocated in
 72.8–78.3 s, the statement import 39.5–45.1 s, receipts 14.4–15.3 ms each.
+
+### M2c-6b-1 review fixes, round 4 (2026-11-12, same VM: 4 vCPU, 16 GB RAM, the main stack alone, right after `supabase db reset`, the `scale` job's settings)
+
+Round 4 reads a credit's original end-to-end id and PmtInfId in the import's classifier
+(`statement.refine_kind`, `private.bank_line_refined_kind`) and the payment's bank line in the match job
+(`private.apply_match_results`, a keyed lateral). `test_statement_scale_integration.py` alone (50,000-line camt.053,
+5,000 client IBANs, 48,368 payments):
+
+| Run | Test | Parse alone | Import job (drained) | of which ingest | Same lines again (ingest) |
+|---|---|---|---|---|---|
+| round 3, CI command ×4 | 40.9–45.1 s | 4.0–5.1 s | 26.3–28.7 s | 9.0–9.8 s | 6.4–6.6 s (1.1–1.3 s) |
+| round 4, classifier calling `private.names_our_transfer` | 45.6 s | 4.3 s | 26.2 s | 9.3 s | 7.3 s (2.3 s) |
+| round 4, its three arms written out (the code) | 42.0 s | 4.1 s | 24.3 s | 8.1 s | 6.3 s (1.4 s) |
+
+The nested call per credit (a SQL function with `SET search_path` is never inlined) cost the re-import's ingest about
+1 s; the classifier now writes the predicate's arms out (the parity test and pgTAP `035` 127–128 pin both copies).

@@ -64,6 +64,7 @@ from collectoo_worker.payments.statement import (
     check_dates,
     classify,
     iso_to_minor,
+    names_our_transfer,
 )
 
 NS_RE = re.compile(rb"urn:iso:std:iso:20022:tech:xsd:camt\.053\.001\.([0-9]{2})")
@@ -413,6 +414,7 @@ class _Reader:
         return_reason = _return_reason(tx) or next(filter(None, map(_return_reason, details)), None)
         code = _code(tx, "BkTxCd/") or entry.code
         family, sub_family = _family(code)
+        original = first(tx, "RtrInf/OrgnlEndToEndId")
         kind = classify(
             entry.direction,
             reversal=entry.reversal,
@@ -421,12 +423,28 @@ class _Reader:
             end_to_end_id=e2e,
             counterparty_iban=rf_normalise(iban) if iban else None,
             ibans=self.ibans,
+            original_end_to_end_id=original,
+            payment_info_id=entry.payment_info_id,
         )
         if unsplit:
             # A batch that cannot be split is still a return when the entry or any of its details
-            # undoes an earlier movement (ADR-0013 M2b-2 #2): never a payment.
-            undone = kind == "return" or any(
-                _family(_code(d, "BkTxCd/"))[1] in RETURN_SUBFAMILIES for d in details
+            # undoes an earlier movement (ADR-0013 M2b-2 #2): never a payment. Review M2c-6b-1
+            # round 4 (N1): so is a credit batch any of whose details is one of our transfers
+            # coming back (our RMT/SWP id as its own or its original): never a debtor's payment.
+            undone = (
+                kind == "return"
+                or any(_family(_code(d, "BkTxCd/"))[1] in RETURN_SUBFAMILIES for d in details)
+                or (
+                    credit
+                    and any(
+                        names_our_transfer(
+                            _provided(first(d, "Refs/EndToEndId")),
+                            first(d, "RtrInf/OrgnlEndToEndId"),
+                            None,
+                        )
+                        for d in details
+                    )
+                )
             )
             kind = "return" if undone else "batch_unsplit"
         if tx_ref is not None and own_ref and not unsplit:
@@ -473,8 +491,7 @@ class _Reader:
                 remittance_text=remittance,
                 creditor_reference=rf_normalise(creditor_ref) if creditor_ref else None,
                 return_reason=return_reason,
-                original_end_to_end_id=first(tx, "RtrInf/OrgnlEndToEndId")
-                or (e2e if kind == "return" else None),
+                original_end_to_end_id=original or (e2e if kind == "return" else None),
                 batch_entry_ref=(entry.ref or entry.where) if batch else None,
                 entry_ref=entry.ref,
                 payment_info_id=entry.payment_info_id,

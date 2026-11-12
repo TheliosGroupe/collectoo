@@ -166,8 +166,9 @@ export const DEBIT_REVIEW: Record<string, string> = {
     "Lot débité pour un autre montant que ses virements en cours (un virement manque ou a été rejeté) : rien n'est comptabilisé ; demandez à la banque le détail du lot.",
   batch_mixed:
     "Lot mêlant des virements de natures différentes : rien n'est comptabilisé ; demandez à la banque le détail du lot.",
+  // review round 4 (N1): also a second return of a transfer already returned (the job's `return_differs` either way)
   return_differs:
-    "Retour d'un virement du cabinet pour plus que son montant : rien n'est comptabilisé ; vérifiez dans la banque.",
+    "Retour d'un virement du cabinet pour plus que son montant, ou d'un virement déjà revenu : rien n'est comptabilisé ; vérifiez dans la banque.",
   // review M2c-6b-1 (T4, K5): also a return dated before its debit (the ledger never dates a reversal before its entry)
   return_before_debit:
     "Retour d'un virement du cabinet sans débit comptabilisé avant lui. Si le débit n'est pas encore comptabilisé, le retour est repris automatiquement à l'import d'un relevé, une fois le débit comptabilisé. S'il est daté d'avant le débit, rien n'est comptabilisé : vérifiez les deux lignes dans la banque et prévenez le support.",
@@ -391,10 +392,39 @@ export function clientRelayable(o: LineIds): boolean {
 export const OUR_TRANSFER_CREDIT_NOTE =
   "Crédit portant la référence de l'un de nos virements (reversement ou quote-part du cabinet) : c'est ce virement qui revient, sans que la banque l'ait signalé comme un retour. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement, et ne se classe pas sans comptabiliser. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.";
 
-/** The review « À classer » shows on a line: the note on our unflagged returned credits, else the job's reason. */
+/**
+ * Review M2c-6b-1 round 4 (N3): what « À classer » says of a credit naming one of our files' PmtInfIds with no
+ * end-to-end id (one of our lots coming back as one line: isOurTransferCredit, not isOurTransferLine) — an own or a
+ * client's credit, or a `return` (the import's reading of such a credit since round 4, N1) — in place of the job's
+ * review, which suggests a top-up, a relay or an explanation (top_up_not_found, client_credit, no_candidate). The
+ * database refuses the relay and the top-up (own_transfer_line); COMPLIANCE OQ-84: ops do not classify it without
+ * booking, they tell support.
+ */
+export const OUR_LOT_CREDIT_NOTE =
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements (sans référence de bout en bout) : c'est ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement. Ne le classez pas sans comptabiliser : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+
+/**
+ * Review M2c-6b-1 round 4 (N1): the funds pass's reasons on a credit (the return of our payout or sweep, flagged by the
+ * bank or read so at import) in a credit's words — the debit's ones say « Débit … ».
+ */
+const CREDIT_REVIEW: Record<string, string> = {
+  transfer_unknown:
+    "Crédit portant la référence d'un virement du cabinet (RMT, SWP) que Collectoo ne connaît pas : rien n'est comptabilisé ; vérifiez dans la banque.",
+  transfer_differs:
+    "Crédit revenant d'un virement du cabinet, mais sur un autre compte ou dans une autre devise : rien n'est comptabilisé ; vérifiez dans la banque.",
+};
+
+/**
+ * The review « À classer » shows on a line: the note on our unflagged returned credits (OUR_TRANSFER_CREDIT_NOTE), on a
+ * credit naming only one of our lots (OUR_LOT_CREDIT_NOTE, round 4's N3), else the job's reason — in a credit's words
+ * on a credit. The return of our payout or sweep keeps the funds pass's review, which names it (round 4's N1).
+ */
 export function debitReviewText(o: LineIds & { review_reason: string | null }): string | null {
   if (o.direction === "credit" && o.kind !== "return" && isOurTransferLine(o)) return OUR_TRANSFER_CREDIT_NOTE;
+  if (isOurTransferCredit(o) && !isOurTransferLine(o)) return OUR_LOT_CREDIT_NOTE;
   if (!o.review_reason) return null;
+  const credit = o.direction === "credit" ? CREDIT_REVIEW[o.review_reason] : undefined;
+  if (credit) return credit;
   return DEBIT_REVIEW[o.review_reason] ?? o.review_reason;
 }
 
@@ -1182,9 +1212,16 @@ export function debitErrorCode(message: string): ErrorCode {
     return "top_up_differs";
   if (message.includes("not_a_loss")) return "not_a_loss";
   if (message.includes("not_explainable")) return "not_explainable";
-  // review M2c-6b-1 round 3 (M1): a credit carrying our RMT/SWP id is our transfer coming back, never a debtor's payment
-  if (message.includes("own credit release refused: own_transfer_line"))
+  // review M2c-6b-1 round 3 (M1): a credit carrying our RMT/SWP id is our transfer coming back, never a debtor's payment;
+  // round 4 (N1): nor a held line carrying one, released (public.resolve_duplicate)
+  if (
+    message.includes("own credit release refused: own_transfer_line") ||
+    message.includes("duplicate release refused: own_transfer_line")
+  )
     return "own_credit_own_transfer_line";
+  // round 4 (N2): a credit carrying our TOP id is our top-up, never a debtor's payment
+  if (message.includes("own credit release refused: top_up_line"))
+    return "own_credit_top_up_line";
   // review M2c-6b-1 (money-1, K1): our payouts' and sweeps' lines are booked from the statement, never linked
   if (message.includes("own_transfer_line")) return "own_transfer_line";
   if (message.includes("before_previous_return")) return "link_before_return";

@@ -1602,3 +1602,82 @@ describe("M2c-6b-1 review: the checks' and the reviews' words (legal-texts#2, #4
     expect(debitReviewRank("return_before_debit")).toBe(1);
   });
 });
+
+// Review M2c-6b-1 round 4. N1: the import reads a credit carrying our RMT/SWP id (its own or its original), or naming one
+// of our files' PmtInfIds with no end-to-end id, as a `return` when it would have been a debtor's credit (COMPLIANCE
+// OQ-84): the funds pass books it as the transfer's return when it matches, otherwise « À classer » shows its review,
+// which names the line as a credit (never « Débit … »). N3: a credit naming only our PmtInfId (own, client or such a
+// return) shows what it is — one of our lots coming back — in place of the job's review, which suggests a relay, a
+// top-up or an explanation. N2: the relay's refusal of a credit carrying our TOP id.
+describe("M2c-6b-1 review round 4: our transfers coming back at import, on « À classer » (N1, N2, N3)", () => {
+  const PMT = "TF-2026-000123-2";
+  const RMT = "RMT0A1B2C3D4E5F";
+
+  it("tells ops what a credit naming only our PmtInfId is, in place of the job's review (N3)", () => {
+    for (const [kind, reason] of [
+      ["own_transfer_in", "top_up_not_found"],
+      ["client_transfer_in", "client_credit"],
+      ["return", "no_candidate"],
+    ]) {
+      const o = { direction: "credit", kind, end_to_end_id: null, payment_info_id: PMT };
+      const what = JSON.stringify(o);
+      const text = debitReviewText({ ...o, review_reason: reason });
+      expect(text, what).not.toBe(DEBIT_REVIEW[reason]);
+      expect(text, what).toContain("l'un des lots de nos fichiers de virements");
+      expect(text, what).toContain("il ne devient ni le paiement d'un débiteur ni un approvisionnement");
+      expect(text, what).toContain("Ne le classez pas sans comptabiliser");
+      expect(text, what).not.toContain("paiement à affecter");
+      expect(text, what).not.toContain("Ne le classez avec une explication que");
+      expect(debitReviewText({ ...o, review_reason: null }), what).toBe(text);
+    }
+    // the note on our RMT/SWP credits is unchanged (round 3)
+    const swp = { direction: "credit", kind: "own_transfer_in", end_to_end_id: "SWPFEDCBA987654" };
+    expect(debitReviewText({ ...swp, review_reason: "top_up_differs" })).toContain(
+      "c'est ce virement qui revient, sans que la banque l'ait signalé comme un retour",
+    );
+    // with an end-to-end id not ours, the PmtInfId alone is not ours (as the database reads it): the job's review
+    const withE2e = { direction: "credit", kind: "own_transfer_in", end_to_end_id: "VIR-1", payment_info_id: PMT };
+    expect(debitReviewText({ ...withE2e, review_reason: "top_up_not_found" })).toBe(DEBIT_REVIEW.top_up_not_found);
+    // a debit naming our PmtInfId is our batch line: its own review
+    const batch = { direction: "debit", kind: "other_debit", end_to_end_id: null, payment_info_id: PMT };
+    expect(debitReviewText({ ...batch, review_reason: "batch_partial" })).toBe(DEBIT_REVIEW.batch_partial);
+  });
+
+  it("keeps the funds pass's review on a return carrying our RMT id, worded for a credit (N1)", () => {
+    // N1's reading of an unflagged credit carrying our payout's id: the funds pass's reasons name it
+    for (const ids of [{ end_to_end_id: RMT, original_end_to_end_id: RMT }, { end_to_end_id: "E2E-1", original_end_to_end_id: RMT }]) {
+      const back = { direction: "credit", kind: "return", payment_info_id: null, ...ids };
+      expect(debitReviewText({ ...back, review_reason: "return_before_debit" })).toBe(DEBIT_REVIEW.return_before_debit);
+      expect(debitReviewText({ ...back, review_reason: "return_differs" })).toBe(DEBIT_REVIEW.return_differs);
+      const unknown = debitReviewText({ ...back, review_reason: "transfer_unknown" });
+      expect(unknown).toContain("Crédit portant la référence d'un virement du cabinet (RMT, SWP)");
+      expect(unknown).not.toContain("Débit");
+      const differs = debitReviewText({ ...back, review_reason: "transfer_differs" });
+      expect(differs).toContain("Crédit revenant d'un virement du cabinet");
+      expect(differs).not.toContain("Débit");
+    }
+    // a debit keeps the debit's words
+    const debit = { direction: "debit", kind: "transfer_out", end_to_end_id: RMT };
+    expect(debitReviewText({ ...debit, review_reason: "transfer_unknown" })).toBe(DEBIT_REVIEW.transfer_unknown);
+    expect(debitReviewText({ ...debit, review_reason: "transfer_differs" })).toBe(DEBIT_REVIEW.transfer_differs);
+    // a second return of a payout already returned: never « pour plus que son montant » alone
+    expect(DEBIT_REVIEW.return_differs).toContain("déjà revenu");
+    expect(DEBIT_REVIEW.return_differs).toContain("rien n'est comptabilisé");
+  });
+
+  it("words the refusals of a held line's release and of our top-up's relay (N1, N2)", () => {
+    // public.resolve_duplicate: a held line carrying our ids, with a debtor's reading recorded before round 4
+    expect(debitErrorCode("duplicate release refused: own_transfer_line")).toBe("own_credit_own_transfer_line");
+    // public.release_own_credit: a credit carrying our TOP id is our top-up, never a debtor's payment
+    const code = debitErrorCode("own credit release refused: top_up_line");
+    expect(code).toBe("own_credit_top_up_line");
+    const text = errorText(code);
+    expect(text).toContain("l'un de nos approvisionnements (TOP…)");
+    expect(text).toContain("« Approvisionnement par le compte propre »");
+    expect(text).toContain("jamais le paiement d'un débiteur");
+    expect(text).not.toMatch(/refused|top_up_line/);
+    // the release's other refusals keep their words
+    expect(debitErrorCode("own credit release refused: own_transfer_line")).toBe("own_credit_own_transfer_line");
+    expect(debitErrorCode("own credit release refused: not_own_credit")).toBe("not_own_credit");
+  });
+});

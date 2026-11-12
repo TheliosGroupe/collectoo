@@ -86,6 +86,9 @@ REFUND_PREFIX = "RFD"  # end-to-end ids of our own refunds (design §6 refund_re
 # (top-up) and 12 upper-case hex digits as their end-to-end id.
 TOP_UP_ID_RE = re.compile(r"TOP[0-9A-F]{12}")
 TRANSFER_OUT_ID_RE = re.compile(r"(RMT|SWP)[0-9A-F]{12}")
+# M2c-6a: the PmtInfId of one of our files' lots (<file number>-<n>), as the SQL reads it
+# ('^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'; fullmatch, never a trailing newline)
+OUR_PMT_INF_RE = re.compile(r"TF-[0-9]{4}-[0-9]{6,}-[0-9]+")
 # Bank transaction sub-families of the bank's own charges (a fee on the dedicated account).
 CHARGE_SUBFAMILIES = frozenset({"CHRG", "FEES"})
 
@@ -102,31 +105,58 @@ class KnownIbans:
 NO_IBANS = KnownIbans()
 
 
-def refine_kind(
+def names_our_transfer(
+    end_to_end_id: str | None, original_end_to_end_id: str | None, payment_info_id: str | None
+) -> bool:
+    """A line that is one of our transfers (twin of SQL `private.names_our_transfer`): our payout's
+    or sweep's RMT/SWP id as its own end-to-end id or as the original one it returns, or — with no
+    end-to-end id — one of our files' PmtInfIds (a lot of ours as one line)."""
+    return (
+        TRANSFER_OUT_ID_RE.fullmatch(end_to_end_id or "") is not None
+        or TRANSFER_OUT_ID_RE.fullmatch(original_end_to_end_id or "") is not None
+        or (end_to_end_id is None and OUR_PMT_INF_RE.fullmatch(payment_info_id or "") is not None)
+    )
+
+
+def refine_kind(  # noqa: PLR0911, PLR0913 - the facts of the line that decide its kind
     kind: str,
     direction: str,
     end_to_end_id: str | None,
     counterparty_iban: str | None,
     ibans: KnownIbans = NO_IBANS,
+    *,
+    original_end_to_end_id: str | None = None,
+    payment_info_id: str | None = None,
 ) -> str:
     """Our own transfers recognised (twin of SQL `private.bank_line_refined_kind`, a parity test
     compares them): a credit carrying our TOP id or from one of our own IBANs is ours
     (`own_transfer_in`, never a debtor payment); one from a client's payout IBAN is the client's
     (`client_transfer_in`); a debit carrying our RMT or SWP id, or to one of our own IBANs, is a
     `transfer_out`. Readings of these kinds are read again from the facts; a return or our RFD
-    refund stays what it is."""
+    refund stays what it is.
+
+    Review M2c-6b-1 round 4 (N1, COMPLIANCE OQ-84): any other credit — a debtor's credit or an
+    unsplit batch to the parser — that is one of our transfers coming back (`names_our_transfer`:
+    our RMT/SWP id as its own or its original, our lot's PmtInfId with no end-to-end id) is a
+    `return`, never a payment: the bank did not flag it (a CSV label the return words miss, no
+    counterparty IBAN column, or an IBAN neither ours nor a client's). The parsers set its original
+    id to its own when the file gives none, as for every return; the debit job books it as that
+    transfer's return when it matches, else leaves it to ops."""
     base = {
         "own_transfer_in": "debtor_credit",
         "client_transfer_in": "debtor_credit",
         "transfer_out": "other_debit",
     }.get(kind, kind)
     e2e = end_to_end_id or ""
-    if base == "debtor_credit" and direction == "credit":
-        if TOP_UP_ID_RE.fullmatch(e2e) or (counterparty_iban in ibans.own):
-            return "own_transfer_in"
-        if counterparty_iban in ibans.clients:
-            return "client_transfer_in"
-        return "debtor_credit"
+    if base in ("debtor_credit", "batch_unsplit") and direction == "credit":
+        if base == "debtor_credit":
+            if TOP_UP_ID_RE.fullmatch(e2e) or (counterparty_iban in ibans.own):
+                return "own_transfer_in"
+            if counterparty_iban in ibans.clients:
+                return "client_transfer_in"
+        if names_our_transfer(end_to_end_id, original_end_to_end_id, payment_info_id):
+            return "return"
+        return base
     if base == "other_debit" and direction == "debit":
         if TRANSFER_OUT_ID_RE.fullmatch(e2e) or (counterparty_iban in ibans.own):
             return "transfer_out"
@@ -143,13 +173,16 @@ def classify(  # noqa: PLR0913 - the facts of the line that decide its kind
     end_to_end_id: str | None,
     counterparty_iban: str | None = None,
     ibans: KnownIbans = NO_IBANS,
+    original_end_to_end_id: str | None = None,
+    payment_info_id: str | None = None,
 ) -> str:
     """Kind of a line (design §8.3 step 6; M2c §12).
 
     A line that undoes an earlier movement (return reason, reversal indicator or a return
     sub-family) is a `return`, in either direction: a credit that reverses a debit (a returned
     refund, a fee taken back) is not a debtor payment (ADR-0013, M2b-2 addendum). Then our own
-    transfers are recognised (`refine_kind`).
+    transfers are recognised (`refine_kind`; review round 4: from the line's original end-to-end id
+    and PmtInfId too).
     """
     if return_reason or reversal or (sub_family in RETURN_SUBFAMILIES):
         return "return"
@@ -159,7 +192,15 @@ def classify(  # noqa: PLR0913 - the facts of the line that decide its kind
         kind = "refund_out"
     else:
         kind = "other_debit"
-    return refine_kind(kind, direction, end_to_end_id, counterparty_iban, ibans)
+    return refine_kind(
+        kind,
+        direction,
+        end_to_end_id,
+        counterparty_iban,
+        ibans,
+        original_end_to_end_id=original_end_to_end_id,
+        payment_info_id=payment_info_id,
+    )
 
 
 def normalise_text(text: str | None) -> str:

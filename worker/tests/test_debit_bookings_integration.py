@@ -38,7 +38,7 @@ import psycopg
 import pytest
 from allocation_helpers import credit as bank_credit
 from allocation_helpers import state, statement
-from debit_helpers import checks, refund_request, return_entry, violations
+from debit_helpers import checks, import_entries, refund_request, return_entry, violations
 from integration_helpers import DB, as_user, storage
 from psycopg.rows import dict_row
 from remittance_helpers import (
@@ -65,7 +65,14 @@ from test_transfer_files_integration import (
 
 from collectoo_worker.jobs.debits import debit_dates, funds_lines, run_process_debits
 from collectoo_worker.remittance import pain001
-from collectoo_worker.synth.camt053 import FEE_CODE, debits_of, make_doc, render_camt053
+from collectoo_worker.synth.camt053 import (
+    FEE_CODE,
+    Entry,
+    Tx,
+    debits_of,
+    make_doc,
+    render_camt053,
+)
 from collectoo_worker.synth.ids import iban_fr
 from collectoo_worker.synth.reconciliation import credit_entries
 
@@ -1121,3 +1128,95 @@ def test_a_return_dated_before_its_debit_is_left_to_ops(tmp_path: Path) -> None:
     assert [k for k, _, _ in _bookings(sid)] == ["payout", "payout"]
     assert _reviews(sid) == ["return_before_debit"]
     assert _transfer(e2e)["status"] == "booked"
+
+
+# -- review round 4 (N1): our payout coming back unflagged ----------------------------------------
+
+
+def _back(tenant: dict[str, Any], credits: list[tuple[str, int]], day: date) -> str:
+    """A statement of credits carrying our payouts' RMT ids with no return code, reason or
+    reversal (an ordinary SEPA credit's code: the bank did not flag them as returns), imported and
+    drained."""
+    opening, _last = _last_closing(tenant)
+    tag = uuid.uuid4().hex[:6].upper()
+    entries = [
+        Entry(
+            n,
+            True,
+            day,
+            day,
+            ref=f"NB{tag}{i}",
+            code="PMNT/RCDT/ESCT",
+            txs=(Tx(n, ref=f"B{tag}{i}", end_to_end_id=e2e, name="LILAS FINANCE"),),
+        )
+        for i, (e2e, n) in enumerate(credits, start=1)
+    ]
+    return import_entries(tenant, storage(), entries, day=day, opening=opening)
+
+
+def _payments_of(statement_id: str) -> int:
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            """select count(*) from public.payment p
+               join public.bank_transaction t on t.id = p.bank_transaction_id
+               where t.statement_id = %s""",
+            (statement_id,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_our_payout_back_unflagged_is_its_return_once_and_never_before_its_debit(
+    tmp_path: Path,
+) -> None:
+    """N1: the import reads a credit carrying our payout's RMT id as a `return` even when the bank
+    does not flag it (before: `debtor_credit`, an unmatched payment of our own money). The funds
+    pass then books the payout's return when its debit is booked (`payout_returned`, the transfer
+    `returned`); never for a payout still in its file (debit not booked: `return_before_debit`,
+    nothing booked); and never twice (a second such credit: `return_differs`, nothing booked). No
+    payment is made of any of them."""
+    tenant, _other, _r1, _r2 = _two_runs()
+    _f, data = _downloaded(tenant, tmp_path)
+    (first, n1), (second, n2) = _payouts(data)
+    day = max(paris_today(), _last_closing(tenant)[1])
+    # the first payout's debit alone (by its RMT id): booked; the second stays in its file
+    opening, _last = _last_closing(tenant)
+    debit = Entry(
+        n1,
+        False,
+        day,
+        day,
+        ref=f"ND{uuid.uuid4().hex[:6].upper()}",
+        code="PMNT/ICDT/ESCT",
+        txs=(Tx(n1, ref=f"D{uuid.uuid4().hex[:6].upper()}", end_to_end_id=first, name="X"),),
+    )
+    sid0 = import_entries(tenant, storage(), [debit], day=day, opening=opening)
+    assert _bookings(sid0) == [("payout", first, n1)]
+    assert (_transfer(first)["status"], _transfer(second)["status"]) == ("booked", "in_file")
+    # both come back, unflagged
+    sid = _back(tenant, [(first, n1), (second, n2)], day)
+    with psycopg.connect(DB) as conn:
+        kinds = conn.execute(
+            """select kind, original_end_to_end_id from public.bank_transaction
+               where statement_id = %s order by line_no""",
+            (sid,),
+        ).fetchall()
+    assert [tuple(k) for k in kinds] == [("return", first), ("return", second)]
+    assert _payments_of(sid) == 0
+    assert _bookings(sid) == [("payout_returned", first, n1)]
+    assert _reviews(sid) == ["return_before_debit"]
+    assert (_transfer(first)["status"], _transfer(second)["status"]) == ("returned", "in_file")
+    # the first one again: never a second return
+    sid2 = _back(tenant, [(first, n1)], day)
+    assert _payments_of(sid2) == 0
+    assert _bookings(sid2) == []
+    assert _reviews(sid2) == ["return_differs"]
+    with psycopg.connect(DB) as conn:
+        returned = conn.execute(
+            """select count(*) from public.bank_line_booking b
+               join public.bank_transfer t on t.id = b.transfer_id
+               where t.end_to_end_id = %s and b.kind = 'payout_returned'""",
+            (first,),
+        ).fetchone()
+    assert returned is not None and returned[0] == 1
+    _no_violation(tenant)

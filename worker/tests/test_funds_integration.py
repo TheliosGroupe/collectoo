@@ -26,7 +26,7 @@ from debit_helpers import API_DB, api, checks, import_entries, line_id, review_o
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from integration_helpers import DB, one, storage
-from statement_helpers import bank_tenant, drain
+from statement_helpers import bank_tenant, drain, upload
 
 from collectoo_worker.payments.statement import KnownIbans, refine_kind
 from collectoo_worker.synth.camt053 import Entry, Tx
@@ -81,6 +81,50 @@ def test_python_and_sql_classify_our_own_transfers_alike(
     ).fetchone()
     assert row is not None
     assert row[0] == refine_kind(kind, direction, e2e, iban, IBANS)
+
+
+# review M2c-6b-1 round 4 (N1): the classifier also reads the line's original end-to-end id and its
+# PmtInfId — a credit carrying our RMT/SWP id (its own or its original) or naming our lot with no
+# end-to-end id is never a debtor's credit nor an unsplit batch — in Python and SQL alike
+our_ids = st.one_of(
+    st.none(),
+    st.sampled_from(["RMT0123456789AB", "SWP0123456789AC", "RMT0123456789AB\n", "TOP0123456789AB"]),
+    st.from_regex(r"(TOP|RMT|SWP|RFD|E2E|rmt)[0-9A-Fa-f]{10,13}", fullmatch=True),
+    st.text(st.characters(blacklist_characters="\x00", blacklist_categories=["Cs"]), max_size=20),
+)
+pmt_inf_ids = st.one_of(
+    st.none(),
+    st.sampled_from(["TF-2026-000001-1", "TF-2026-000001-1\n", "TF-2026-1-1", "PMTINF-1", ""]),
+    st.from_regex(r"TF-[0-9]{4}-[0-9]{5,8}-[0-9]{1,3}", fullmatch=True),
+)
+
+
+@settings(max_examples=400, deadline=None)
+@given(
+    kind=st.sampled_from(KINDS),
+    direction=st.sampled_from(["credit", "debit"]),
+    e2e=our_ids,
+    original=our_ids,
+    pmt_inf=pmt_inf_ids,
+    iban=st.one_of(st.none(), st.sampled_from([OWN, CLIENT, "FR7630004000031234567890143"])),
+)
+def test_python_and_sql_read_our_transfers_coming_back_alike(  # noqa: PLR0913, PLR0917
+    parity_conn: psycopg.Connection[Any],
+    kind: str,
+    direction: str,
+    e2e: str | None,
+    original: str | None,
+    pmt_inf: str | None,
+    iban: str | None,
+) -> None:
+    row = parity_conn.execute(
+        "select private.bank_line_refined_kind(%s, %s, %s, %s, %s, %s, %s, %s)",
+        (kind, direction, e2e, original, pmt_inf, iban, sorted(IBANS.own), sorted(IBANS.clients)),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == refine_kind(
+        kind, direction, e2e, iban, IBANS, original_end_to_end_id=original, payment_info_id=pmt_inf
+    )
 
 
 def _own_account(tenant: dict[str, Any]) -> tuple[str, str]:
@@ -486,3 +530,50 @@ def test_a_top_up_ordered_while_its_own_account_closes_waits_and_is_refused() ->
             (own,),
         )
     assert orders == 0
+
+
+def test_a_csv_without_the_iban_column_makes_no_payment_of_our_transfers_coming_back() -> None:
+    """Review M2c-6b-1 round 4 (N1; the round-3 verifier's `real_import.py`): a CSV export with the
+    « Référence de bout en bout » column and no counterparty IBAN, imported through the payments
+    queue — a credit carrying our payout's RMT id with a label the return words miss, one carrying
+    our sweep's SWP id, and a debtor's credit. Before, the import made two `unmatched` payments of
+    our ids (431,840 to unallocated_payment). Now both are `return` lines, their original id their
+    own; the import makes one payment, the debtor's; the debit job's funds pass finds no transfer of
+    this servicer by those ids and leaves both in « À classer » with why (`transfer_unknown`)."""
+    tenant = bank_tenant(feed="csv")
+    store = storage()
+    tag = uuid.uuid4().hex[:6].upper()
+    rmt = "RMT" + uuid.uuid4().hex[:12].upper()
+    swp = "SWP" + uuid.uuid4().hex[:12].upper()
+    csv = (
+        "Date;Libellé;Débit;Crédit;Référence de bout en bout\n"
+        f"10/11/2026;VIR SEPA RECU /DE LILAS FINANCE /MOTIF RETOUR FONDS {tag};;4198,40;{rmt}\n"
+        f"10/11/2026;VIR SEPA RECU /DE COLLECTOO SAS {tag};;120,00;{swp}\n"
+        f"10/11/2026;VIR SEPA RECU /DE DUPONT /MOTIF FACTURE {tag};;50,00;E2E-{tag}\n"
+    ).encode()
+    target = upload(tenant, store, csv, name=f"releve-{tag}.csv")
+    drain(store)
+    sid = str(target["statement_id"])
+    with psycopg.connect(DB) as conn:
+        lines = conn.execute(
+            """select t.kind, t.end_to_end_id, t.original_end_to_end_id, p.status, r.reason
+               from public.bank_transaction t
+               left join public.payment p on p.bank_transaction_id = t.id
+               left join public.bank_debit_review r on r.bank_transaction_id = t.id
+               where t.statement_id = %s order by t.line_no""",
+            (sid,),
+        ).fetchall()
+        row = conn.execute(
+            "select status, counts from public.bank_statement where id = %s", (sid,)
+        ).fetchone()
+    assert row is not None
+    status, counts = row
+    assert status == "imported"
+    assert [tuple(r) for r in lines] == [
+        ("return", rmt, rmt, None, "transfer_unknown"),
+        ("return", swp, swp, None, "transfer_unknown"),
+        ("debtor_credit", f"E2E-{tag}", None, "unmatched", None),
+    ]
+    assert counts["payments"] == {"count": 1, "minor": "5000"}
+    assert counts["returns"] == 2
+    assert [c["minor"] for c in counts["cash_in"]] == ["5000"]

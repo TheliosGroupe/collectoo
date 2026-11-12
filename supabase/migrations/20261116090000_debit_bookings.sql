@@ -57,6 +57,15 @@
 -- (client_payable_balance_org_idx). Integration of round 3: the top-up refuses a credit naming one of our PmtInfIds
 -- without an end-to-end id, as public.release_own_credit does; private.post_run_settlements posts at most 2,000 runs per
 -- private.ledger_post_set call (a 5,000-member batch line's postings overflowed work_mem in one insert).
+--
+-- Review round 4: at import, a credit carrying one of our transfers' ids that the parser read as a debtor's credit or an
+-- unsplit batch is a `return` (private.bank_line_refined_kind reads its original end-to-end id and PmtInfId too, through
+-- private.names_our_transfer; private.stage_refined_kinds and private.held_line_kind redefined), so the import makes no
+-- payment of it and the funds pass books it as the transfer's return when it matches (a held duplicate released as such a
+-- return included); a payment whose line carries such an id is never assigned (public.assign_payment,
+-- public.accept_suggestions, private.apply_match_results), a held line carrying one never released as a payment
+-- (public.resolve_duplicate), and « Paiements à traiter » flags it (public.payment_queue, dropped and created); the relay
+-- refuses a credit carrying our TOP id (public.release_own_credit: `top_up_line`).
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -462,7 +471,8 @@ $$;
 --   * a batch line — a debit with no end-to-end id and the PmtInfId of one of our files, read as other_debit,
 --     batch_unsplit or transfer_out — one row per member of that PmtInf in its current file (`member`; the file must
 --     be of the line's account); a PmtInf of one refund alone is left to the M2b pass (private.pmt_inf_single_refund);
---   * a credit returning our payout or sweep (`return`: the transfer of its original id);
+--   * a credit returning our payout or sweep (`return`: the transfer of its original id) — review round 4 (N1): a held
+--     duplicate released as such a return too;
 --   * a credit carrying our TOP id (`top_up`), from our own account or from a client (as M2c-1);
 --   * a debit coded as the bank's charge (CHRG, FEES: a fee).
 -- Each branch is read by its own partial index, led by the servicer, ordered and limited on its own, then merged
@@ -534,7 +544,12 @@ begin
          and (p_after_date is null or (t.booking_date, t.id) > (p_after_date, p_after_id))
          and exists (select 1 from public.bank_duplicate_resolution r where r.bank_transaction_id = t.id
                        and r.decision = 'released'
-                       and r.released_kind in ('transfer_out', 'own_transfer_in', 'client_transfer_in') offset 0)
+                       and (r.released_kind in ('transfer_out', 'own_transfer_in', 'client_transfer_in')
+                            -- review round 4 (N1): a held credit returning our payout or sweep, released as a return
+                            -- (the M2b pass leaves it to this pass, as the import's)
+                            or (r.released_kind = 'return' and t.direction = 'credit'
+                                and coalesce(t.original_end_to_end_id, t.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$'))
+                     offset 0)
          and not exists (select 1 from public.bank_line_booking b where b.bank_transaction_id = t.id offset 0)
          and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id offset 0)
          and not exists (select 1 from public.bank_own_credit_release c where c.bank_transaction_id = t.id offset 0)
@@ -4322,7 +4337,8 @@ $$;
 -- own or as the original it returns, or one of our PmtInfIds without an end-to-end id — is refused
 -- `own_transfer_line` (23514, with its hint): our payout or sweep coming back (a CSV feed reads a return whose label
 -- misses RETURN_RE as client_transfer_in or own_transfer_in) is booked from the statement, never relayed as a debtor's
--- payment. Every other refusal unchanged.
+-- payment. Review round 4 (N2): nor a credit carrying our TOP id — the servicer's own top-up, `top_up_line` (23514, with
+-- its hint). Every other refusal unchanged.
 
 create or replace function public.release_own_credit(p_idempotency_key text, p_bank_transaction_id uuid, p_reason text)
 returns jsonb
@@ -4367,14 +4383,24 @@ begin
   -- a top-up): it is booked from the statement as that transfer's return (automatically when the bank flags it as a
   -- return; otherwise by ops, M2c-6b-2's line booking). Released, a payout sent back by the client's bank would credit a
   -- debtor's file with money the debtor never paid, be charged commission and be remitted again.
-  if coalesce(t.end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
-     or coalesce(t.original_end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
-     or (t.end_to_end_id is null and coalesce(t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$', false)) then
+  -- (review round 4: the predicate as private.names_our_transfer, shared with the import's classifier and the refusals of
+  -- assign_payment, accept_suggestions, the match job and resolve_duplicate)
+  if private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id) then
     raise exception 'own credit release refused: own_transfer_line' using errcode = 'check_violation',
       hint = 'Ce crédit est l''un de nos propres virements qui revient (reversement, quote-part du cabinet, lot de notre '
              'fichier) : il se comptabilise depuis le relevé, automatiquement quand la banque le signale comme un retour, '
              'sinon par l''équipe (écran à venir). Il ne devient jamais le paiement d''un débiteur ni un '
              'approvisionnement.';
+  end if;
+  -- review round 4 (N2, older than the round: the page hides the action since M2c-1, the API did not refuse it): a
+  -- credit carrying our TOP id is the servicer's own top-up, booked as « Approvisionnement par le compte propre » (the
+  -- debit job when it matches the order, else ops), never a debtor's payment — relayed, the servicer's money would be
+  -- assigned to a debtor's file and remitted, its TOP transfer left unbooked
+  if coalesce(t.end_to_end_id ~ '^TOP[0-9A-F]{12}$', false) then
+    raise exception 'own credit release refused: top_up_line' using errcode = 'check_violation',
+      hint = 'Ce crédit porte la référence de l''un de nos approvisionnements (TOP…) : c''est l''argent du cabinet, '
+             'jamais le paiement d''un débiteur. Il se comptabilise comme « Approvisionnement par le compte propre » : '
+             'automatiquement quand il correspond à l''approvisionnement demandé, sinon par l''équipe.';
   end if;
   if exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id) then
     raise exception 'own credit release refused: already_linked' using errcode = 'check_violation';
@@ -5068,6 +5094,566 @@ end;
 $$;
 
 ------------------------------------------------------------------------------------------
+-- Review round 4 (N1, round 3's M1 left open at the import). A credit carrying one of our transfers' ids — our RMT/SWP id
+-- as its own end-to-end id or as the original it returns, or one of our files' PmtInfIds with no end-to-end id — that
+-- the parser read as a debtor's credit or an unsplit batch (a CSV label the return words miss, no counterparty IBAN
+-- column, an IBAN neither ours nor a client's) was made a payment by private.ingest_statement (step 4): our own money
+-- matched to a debtor's file, charged commission and remitted again. Now it is a `return` (COMPLIANCE OQ-84's default):
+-- no payment; the funds pass books it as the transfer's return when it matches (payout_returned / sweep_returned), else
+-- leaves it in « À classer » with why (transfer_unknown, return_before_debit, return_differs); a credit naming our lot
+-- alone gets the M2b pass's review (no_candidate). From our own or a client's IBAN it keeps round 3's kinds
+-- (own_transfer_in / client_transfer_in), which every command refuses. In depth: a payment whose line carries such an id
+-- (made before this round) is never assigned (public.assign_payment, public.accept_suggestions, the match job), a held
+-- line carrying one is never released as a payment (public.resolve_duplicate), and « Paiements à traiter » flags it
+-- (public.payment_queue.own_transfer_line). New: private.names_our_transfer, private.bank_line_refined_kind's
+-- eight-argument form. Redefined (same signatures, settings and grants, each from the file named):
+-- private.bank_line_refined_kind's six-argument form (20261111090000), private.stage_refined_kinds and
+-- private.held_line_kind (20261111120000), public.resolve_duplicate (20261111090000), public.assign_payment,
+-- public.accept_suggestions and private.apply_match_results (20261109150000); public.payment_queue (20261109190000,
+-- dropped and created: a new column).
+------------------------------------------------------------------------------------------
+
+-- A line that is one of our transfers (twin of payments.statement.names_our_transfer): our payout's or sweep's RMT/SWP
+-- id as its own end-to-end id or as the original one it returns, or — with no end-to-end id — one of our files'
+-- PmtInfIds (a lot of ours as one line). The predicate of public.release_own_credit (round 3) and of the refusals below.
+create or replace function private.names_our_transfer(p_end_to_end_id text, p_original_end_to_end_id text,
+                                                      p_payment_info_id text)
+returns boolean
+language sql
+immutable
+parallel safe
+set search_path = ''
+as $$
+  select coalesce(p_end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+         or coalesce(p_original_end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+         or (p_end_to_end_id is null and coalesce(p_payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$', false));
+$$;
+
+-- The kind of a line once our own transfers are recognised (twin of payments.statement.refine_kind; the parity test
+-- compares them): as before (20261111090000), and a credit read as a debtor's credit or an unsplit batch that is one of
+-- our transfers coming back (private.names_our_transfer's predicate, from its original end-to-end id and PmtInfId too)
+-- is a `return` — never a payment. From our own or a client's IBAN (or carrying our TOP id) a credit stays ours or the
+-- client's.
+create or replace function private.bank_line_refined_kind(p_kind text, p_direction text, p_end_to_end_id text,
+                                                          p_original_end_to_end_id text, p_payment_info_id text,
+                                                          p_counterparty_iban text, p_own_ibans text[],
+                                                          p_client_ibans text[])
+returns text
+language sql
+immutable
+parallel safe
+set search_path = ''
+as $$
+  select case
+    when b.base in ('debtor_credit', 'batch_unsplit') and p_direction = 'credit' then
+      case when b.base = 'debtor_credit'
+                and (coalesce(p_end_to_end_id ~ '^TOP[0-9A-F]{12}$', false)
+                     or coalesce(p_counterparty_iban = any (p_own_ibans), false)) then 'own_transfer_in'
+           when b.base = 'debtor_credit' and coalesce(p_counterparty_iban = any (p_client_ibans), false)
+             then 'client_transfer_in'
+           -- private.names_our_transfer's three arms, written out: the import calls this once per line, and a nested
+           -- function call per credit cost ~1 s on a 50,000-line re-import (the parity test and pgTAP 035 pin both)
+           when coalesce(p_end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+                or coalesce(p_original_end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+                or (p_end_to_end_id is null and coalesce(p_payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$', false))
+             then 'return'
+           else b.base end
+    when b.base = 'other_debit' and p_direction = 'debit' then
+      case when coalesce(p_end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+                or coalesce(p_counterparty_iban = any (p_own_ibans), false) then 'transfer_out'
+           else 'other_debit' end
+    else b.base end
+  from (select case p_kind when 'own_transfer_in' then 'debtor_credit' when 'client_transfer_in' then 'debtor_credit'
+                           when 'transfer_out' then 'other_debit' else p_kind end as base) b;
+$$;
+
+-- The six-argument form (20261111090000; its callers' signature): the line without an original end-to-end id nor a
+-- PmtInfId, read by the eight-argument form — never a second classifier.
+create or replace function private.bank_line_refined_kind(p_kind text, p_direction text, p_end_to_end_id text,
+                                                          p_counterparty_iban text, p_own_ibans text[],
+                                                          p_client_ibans text[])
+returns text
+language sql
+immutable
+parallel safe
+set search_path = ''
+as $$
+  select private.bank_line_refined_kind(p_kind, p_direction, p_end_to_end_id, null, null, p_counterparty_iban,
+                                        p_own_ibans, p_client_ibans);
+$$;
+
+-- This import's lines whose kind changes (redefined from 20261111120000): the line's original end-to-end id and PmtInfId
+-- handed to the classifier too. Same plan settings. (The parsers set a return's original id to its own when the file
+-- gives none; every reader takes coalesce(original, own).)
+create or replace function private.stage_refined_kinds(p_organization_id uuid, p_own_ibans text[])
+returns table (line_no integer, kind text)
+language plpgsql
+stable
+set search_path = ''
+set enable_nestloop = off
+set enable_mergejoin = off
+as $$
+begin
+  return query
+  select y.line_no, y.kind from (
+    select x.line_no, x.kind as old_kind,
+           private.bank_line_refined_kind(x.kind, x.direction, x.end_to_end_id, x.original_end_to_end_id,
+                                          x.payment_info_id, x.counterparty_iban, p_own_ibans,
+                                          case when c.iban is null then '{}'::text[] else array[c.iban] end) as kind
+    from pg_temp._bi_stage x
+    left join (select distinct a.iban from public.client_payout_account a
+               where a.organization_id = p_organization_id and a.confirmed_at is not null) c
+      on c.iban = x.counterparty_iban) y
+  where y.kind is distinct from y.old_kind;
+end;
+$$;
+
+-- What a held line is without a recorded reading (redefined from 20261111120000): its original end-to-end id and
+-- PmtInfId read too. A recorded reading is kept (the stage's, refined at its import).
+create or replace function private.held_line_kind(p_bank_transaction_id uuid)
+returns table (kind text, method text)
+language sql
+stable
+set search_path = ''
+as $$
+  select coalesce(h.kind, private.bank_line_refined_kind(case
+           when t.return_reason is not null or t.reversal_indicator or t.original_end_to_end_id is not null then 'return'
+           when t.direction = 'credit' then 'debtor_credit'
+           when t.end_to_end_id like 'RFD%' then 'refund_out'
+           else 'other_debit' end, t.direction, t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id,
+           t.counterparty_iban,
+           array(select o.iban from public.bank_account o where o.organization_id = t.organization_id and o.purpose = 'own'),
+           case when exists (select 1 from public.client_payout_account a
+                             where a.organization_id = t.organization_id and a.iban = t.counterparty_iban
+                               and a.confirmed_at is not null)
+                then array[t.counterparty_iban] else '{}'::text[] end)),
+         coalesce(h.method, 'other')
+  from public.bank_transaction t
+  left join private.bank_line_held_kind h on h.bank_transaction_id = t.id
+  where t.id = p_bank_transaction_id;
+$$;
+
+-- « Libérer » (redefined from 20261111090000; same settings): a held line carrying one of our transfers' ids is never
+-- released as a payment — read from its facts it is a return (the funds pass's); with a debtor's reading recorded before
+-- this round it is refused, « duplicate release refused: own_transfer_line » (23514, with its hint). Nothing else changes.
+create or replace function public.resolve_duplicate(p_idempotency_key text, p_bank_transaction_id uuid,
+                                                    p_is_duplicate boolean, p_reason text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+set lock_timeout = '2s'
+as $$
+declare
+  t public.bank_transaction;
+  v_reason text := btrim(coalesce(p_reason, ''));
+  v_request jsonb;
+  v_result jsonb;
+  k record;
+  v_payment uuid;
+begin
+  select * into t from public.bank_transaction where id = p_bank_transaction_id;
+  if not found or not private.has_role(t.organization_id, array['admin', 'ops_manager']) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  v_request := jsonb_build_object('bank_transaction_id', p_bank_transaction_id, 'is_duplicate', p_is_duplicate,
+                                  'reason', v_reason);
+  v_result := private.command_replay('resolve_duplicate', p_idempotency_key, v_request);
+  if v_result is not null then
+    return v_result;
+  end if;
+  if v_reason = '' or length(v_reason) > 2000 then
+    raise exception 'a reason is required' using errcode = 'check_violation';
+  end if;
+  if t.kind <> 'suspected_duplicate' or p_is_duplicate is null then
+    raise exception 'duplicate: this line is not held as a suspected duplicate' using errcode = 'check_violation';
+  end if;
+  perform pg_advisory_xact_lock(hashtext('bank_import:' || t.bank_account_id::text));
+  if exists (select 1 from public.bank_duplicate_resolution r where r.bank_transaction_id = t.id) then
+    raise exception 'duplicate: already decided: reload the page' using errcode = 'check_violation';
+  end if;
+  if p_is_duplicate then
+    insert into public.bank_duplicate_resolution (bank_transaction_id, organization_id, bank_account_id, decision,
+                                                  reason, decided_by)
+    values (t.id, t.organization_id, t.bank_account_id, 'duplicate', v_reason, auth.uid());
+    v_result := jsonb_build_object('bank_transaction_id', t.id, 'decision', 'duplicate');
+  else
+    select * into k from private.held_line_kind(t.id);
+    -- review round 4 (N1, in depth): a line carrying one of our transfers' ids is never released as a payment (a reading
+    -- recorded before round 4 may say debtor_credit; read from its facts it is a return)
+    if k.kind in ('debtor_credit', 'batch_unsplit')
+       and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id) then
+      raise exception 'duplicate release refused: own_transfer_line' using errcode = 'check_violation',
+        hint = 'Cette ligne porte la référence de l''un de nos propres virements (reversement, quote-part du cabinet, '
+               'lot de notre fichier) : c''est ce virement qui revient, jamais le paiement d''un débiteur. Elle se '
+               'comptabilise depuis le relevé, par l''équipe (écran à venir). Prévenez le support.';
+    end if;
+    insert into public.bank_duplicate_resolution (bank_transaction_id, organization_id, bank_account_id, decision,
+                                                  released_kind, reason, decided_by)
+    values (t.id, t.organization_id, t.bank_account_id, 'released', k.kind, v_reason, auth.uid());
+    if k.kind in ('debtor_credit', 'batch_unsplit') then
+      v_payment := private.book_credit_payment(t.id, k.method,
+                                               coalesce(t.counterparty_name, t.ultimate_counterparty_name),
+                                               t.counterparty_iban, null);
+      perform pgmq.send('payments', jsonb_build_object('type', 'match', 'organization_id', t.organization_id,
+                                                       'trigger', 'import'));
+    elsif k.kind in ('return', 'refund_out') then
+      perform pgmq.send('payments', jsonb_build_object('type', 'process_debits', 'organization_id', t.organization_id));
+    end if;
+    v_result := jsonb_build_object('bank_transaction_id', t.id, 'decision', 'released', 'kind', k.kind,
+                                   'payment_id', v_payment);
+  end if;
+  perform private.command_record('resolve_duplicate', p_idempotency_key, v_request, v_result);
+  return v_result;
+end;
+$$;
+
+-- Assigning a payment (redefined from 20261109150000; same settings): ops' assignment refuses a payment whose bank line
+-- carries one of our transfers' ids, « payment assignment refused: own_transfer_line » (23514, with its hint); « Accepter »
+-- skips it (`own_transfer_line`); the match job neither matches it nor keeps a candidate for it (no_match). Nothing else
+-- changes.
+create or replace function public.assign_payment(p_idempotency_key text, p_payment_id uuid, p_splits jsonb,
+                                                 p_designation jsonb, p_reason text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+set lock_timeout = '2s'
+as $$
+declare
+  p public.payment;
+  a public.account;
+  v_reason text := btrim(coalesce(p_reason, ''));
+  v_request jsonb;
+  v_result jsonb;
+  v_account uuid;
+  v_items uuid[];
+  v_source text;
+  v_doc uuid;
+  v_designation jsonb;
+  v_suggested jsonb;
+begin
+  select * into p from public.payment where id = p_payment_id for update;
+  if not found or not private.has_role(p.organization_id, array['admin', 'ops_manager']) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  v_request := jsonb_build_object('payment_id', p_payment_id, 'splits', p_splits, 'designation', p_designation,
+                                  'reason', v_reason);
+  v_result := private.command_replay('assign_payment', p_idempotency_key, v_request);
+  if v_result is not null then
+    return v_result;
+  end if;
+  if v_reason = '' or length(v_reason) > 2000 then
+    raise exception 'a reason is required' using errcode = 'check_violation';
+  end if;
+  -- review M2c-6b-1 round 4 (N1, in depth): a payment whose bank line carries one of our transfers' ids (made before
+  -- round 4 read such a credit as a return) is our own money coming back, never a debtor's payment
+  if exists (select 1 from public.bank_transaction t
+             where t.id = p.bank_transaction_id
+               and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)) then
+    raise exception 'payment assignment refused: own_transfer_line' using errcode = 'check_violation',
+      hint = 'Ce paiement vient d''une ligne qui porte la référence de l''un de nos propres virements (reversement, '
+             'quote-part du cabinet, lot de notre fichier) : c''est ce virement qui revient, pas le paiement d''un '
+             'débiteur. Il ne s''affecte à aucun dossier : il se comptabilise depuis le relevé, par l''équipe (écran à '
+             'venir). Prévenez le support.';
+  end if;
+  if p.status <> 'unmatched' or p.account_id is not null then
+    raise exception 'the payment is already matched: unassign it first' using errcode = 'check_violation';
+  end if;
+  if jsonb_typeof(p_splits) is distinct from 'array' or jsonb_array_length(p_splits) <> 1
+     or jsonb_typeof(p_splits -> 0) <> 'object' or (p_splits -> 0) ? 'amount_text'
+     or coalesce(p_splits -> 0 ->> 'account_id', '') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    raise exception 'one file for the whole payment (splitting comes with allocation)' using errcode = 'check_violation';
+  end if;
+  v_account := (p_splits -> 0 ->> 'account_id')::uuid;
+  select * into a from public.account where id = v_account;
+  if not found or a.organization_id <> p.organization_id then
+    raise exception 'unknown file' using errcode = 'check_violation';
+  end if;
+  if a.status = 'staged' then
+    raise exception 'the file is not confirmed yet' using errcode = 'check_violation';
+  end if;
+  if p_designation is not null then
+    -- The debtor's own indication « lorsqu'il paie » (1342-10): invoices of this file only.
+    v_source := p_designation ->> 'source';
+    if jsonb_typeof(p_designation -> 'item_ids') is distinct from 'array'
+       or v_source is null or v_source not in ('remittance_text', 'document', 'portal') then
+      raise exception 'invalid designation' using errcode = 'check_violation';
+    end if;
+    select array_agg(distinct x.v::uuid) into v_items
+    from jsonb_array_elements_text(p_designation -> 'item_ids') x (v)
+    where x.v ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+    if coalesce(cardinality(v_items), 0) = 0 or cardinality(v_items) <> jsonb_array_length(p_designation -> 'item_ids')
+       or (select count(*) from public.claim_item i where i.account_id = a.id and i.id = any (v_items))
+          <> cardinality(v_items) then
+      raise exception 'invalid designation: invoices of this file only' using errcode = 'check_violation';
+    end if;
+    if v_source = 'document' then
+      -- the debtor's letter or e-mail, filed on this file (not any document of the client)
+      v_doc := nullif(p_designation ->> 'evidence_document_id', '')::uuid;
+      if v_doc is null or not exists (select 1 from public.document d where d.id = v_doc
+                                        and d.organization_id = a.organization_id
+                                        and d.client_organization_id = a.client_organization_id
+                                        and d.account_id = a.id) then
+        raise exception 'invalid designation: the document is required, filed on this file'
+          using errcode = 'check_violation';
+      end if;
+    end if;
+    v_designation := jsonb_build_object('item_ids', to_jsonb(v_items), 'source', v_source,
+                                        'evidence_document_id', v_doc, 'captured_at', now());
+  end if;
+  -- what ops saw proposed, kept with the decision
+  select jsonb_agg(jsonb_build_object('rank', c.rank, 'account_id', c.account_id, 'rule', c.rule) order by c.rank)
+  into v_suggested from public.payment_match_candidate c where c.payment_id = p.id;
+  perform private.assign_begin();
+  insert into pg_temp._assign (ord, payment_id, account_id, method, rule, rule_version, evidence, designation, teaches)
+  values (1, p.id, a.id, 'manual', null, 'ops',
+          jsonb_strip_nulls(jsonb_build_object('suggested', v_suggested)), v_designation, true);
+  perform private.record_assignments(p.organization_id, 'ops', auth.uid(), v_reason);
+  select jsonb_build_object('payment_id', x.id, 'account_id', a.id, 'review_reason', x.review_reason)
+  into v_result from public.payment x where x.id = p.id;
+  perform private.command_record('assign_payment', p_idempotency_key, v_request, v_result);
+  return v_result;
+end;
+$$;
+
+create or replace function public.accept_suggestions(p_idempotency_key text, p_items jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+set lock_timeout = '2s'
+as $$
+declare
+  v_uuid constant text := '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+  v_items jsonb;
+  v_ids uuid[];
+  v_org uuid;
+  v_orgs bigint;
+  v_found bigint;
+  v_request jsonb;
+  v_result jsonb;
+begin
+  if jsonb_typeof(p_items) is distinct from 'array' or jsonb_array_length(p_items) not between 1 and 200
+     or exists (select 1 from jsonb_array_elements(p_items) e
+                where jsonb_typeof(e) <> 'object' or coalesce(e ->> 'payment_id', '') !~ v_uuid
+                   or coalesce(e ->> 'account_id', '') !~ v_uuid) then
+    raise exception 'between 1 and 200 payments, each with the file shown' using errcode = 'check_violation';
+  end if;
+  select jsonb_agg(jsonb_build_object('payment_id', x.payment_id, 'account_id', x.account_id) order by x.payment_id),
+         array_agg(x.payment_id order by x.payment_id)
+  into v_items, v_ids
+  from (select distinct (e ->> 'payment_id')::uuid as payment_id, (e ->> 'account_id')::uuid as account_id
+        from jsonb_array_elements(p_items) e) x;
+  if cardinality(v_ids) <> (select count(distinct x) from unnest(v_ids) x) then
+    raise exception 'one file per payment' using errcode = 'check_violation';
+  end if;
+  select count(distinct p.organization_id), min(p.organization_id::text)::uuid, count(*)
+  into v_orgs, v_org, v_found from public.payment p where p.id = any (v_ids);
+  if v_found <> cardinality(v_ids) or v_orgs <> 1 or not private.has_role(v_org, array['admin', 'ops_manager']) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  v_request := jsonb_build_object('items', v_items);
+  v_result := private.command_replay('accept_suggestions', p_idempotency_key, v_request);
+  if v_result is not null then
+    return v_result;
+  end if;
+  perform 1 from public.payment p where p.id = any (v_ids) order by p.id for update;
+
+  perform private.assign_begin();
+  insert into pg_temp._assign (ord, payment_id, account_id, method, rule, rule_version, evidence, designation, teaches)
+  select row_number() over (order by p.booking_date, p.created_at, p.id), p.id, c.account_id, 'manual', null, 'ops',
+         jsonb_build_object('accepted', jsonb_build_object('rule', c.rule, 'signals', c.signals)),
+         case when jsonb_typeof(c.signals -> 'designation') = 'array' and jsonb_array_length(c.signals -> 'designation') > 0
+              then jsonb_build_object('item_ids', c.signals -> 'designation', 'source', 'remittance_text',
+                                      'captured_at', now()) end,
+         true
+  from jsonb_to_recordset(v_items) i (payment_id uuid, account_id uuid)
+  join public.payment p on p.id = i.payment_id
+  join public.payment_match_candidate c on c.payment_id = p.id and c.rank = 1 and c.acceptable
+                                       and c.account_id = i.account_id
+  join public.account a on a.id = c.account_id and a.organization_id = p.organization_id and a.status <> 'staged'
+  where p.status = 'unmatched' and p.account_id is null and p.review_reason = 'no_match'
+    -- review M2c-6b-1 round 4 (N1, in depth): never a payment whose line carries one of our transfers' ids
+    and not exists (select 1 from public.bank_transaction t
+                    where t.id = p.bank_transaction_id
+                      and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id));
+  -- a designation names invoices of the accepted file only
+  update pg_temp._assign g set designation = null
+  where g.designation is not null
+    and (select count(*) from public.claim_item i
+         where i.account_id = g.account_id
+           and i.id::text in (select jsonb_array_elements_text(g.designation -> 'item_ids')))
+        <> jsonb_array_length(g.designation -> 'item_ids');
+  perform private.record_assignments(v_org, 'ops', auth.uid(), 'suggestion acceptée');
+
+  select jsonb_build_object(
+    'accepted', (select count(*) from pg_temp._assign),
+    'skipped', coalesce((
+      select jsonb_agg(jsonb_build_object('payment_id', i.payment_id, 'reason',
+               case when p.status <> 'unmatched' or p.account_id is not null then 'not_waiting'
+                    when exists (select 1 from public.bank_transaction t
+                                 where t.id = p.bank_transaction_id
+                                   and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id,
+                                                                  t.payment_info_id)) then 'own_transfer_line'
+                    when c.account_id is not null and c.account_id <> i.account_id then 'suggestion_changed'
+                    else 'no_suggestion' end) order by i.payment_id)
+      from jsonb_to_recordset(v_items) i (payment_id uuid, account_id uuid)
+      join public.payment p on p.id = i.payment_id
+      left join public.payment_match_candidate c on c.payment_id = i.payment_id and c.rank = 1 and c.acceptable
+      where not exists (select 1 from pg_temp._assign g where g.payment_id = i.payment_id)), '[]'))
+  into v_result;
+  perform private.command_record('accept_suggestions', p_idempotency_key, v_request, v_result);
+  return v_result;
+end;
+$$;
+
+create or replace function private.apply_match_results(p_organization_id uuid, p_trigger text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_gates jsonb;
+  v_queue jsonb;
+begin
+  if p_trigger not in ('import', 'rematch', 'ops') then
+    raise exception 'match: unknown trigger %', p_trigger using errcode = '22023';
+  end if;
+  analyze pg_temp._mr_decision;
+  drop table if exists pg_temp._mr;
+  create temp table _mr on commit drop as
+  select d.*, private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id) as ours
+  from pg_temp._mr_decision d
+  join public.payment p on p.id = d.payment_id
+  -- (the payment's line by its key, whatever the statistics of the lines just imported: ARCHITECTURE §4)
+  left join lateral (select q.end_to_end_id, q.original_end_to_end_id, q.payment_info_id from public.bank_transaction q
+                     where q.id = p.bank_transaction_id offset 0) t on true
+  where p.organization_id = p_organization_id and p.status = 'unmatched' and p.account_id is null;
+  analyze pg_temp._mr;
+  -- review M2c-6b-1 round 4 (N1, in depth): a payment whose bank line carries one of our transfers' ids is never matched
+  -- nor offered a file — no automatic match, no candidate: it waits for ops as no_match (« Paiements à traiter » says
+  -- what it is and offers no assignment)
+  update pg_temp._mr m set outcome = 'none', account_id = null, method = null, review_reason = 'no_match',
+                           candidate_account_id = null
+  where m.ours;
+
+  perform private.assign_begin();
+  insert into pg_temp._assign (ord, payment_id, account_id, method, rule, rule_version, evidence, designation, teaches)
+  select m.ord, m.payment_id, m.account_id, m.method, m.rule, m.rule_version, m.evidence, m.designation, m.teaches
+  from pg_temp._mr m
+  where m.outcome = 'auto'
+    and not exists (select 1 from public.account a where a.id = m.account_id and a.organization_id <> p_organization_id);
+  v_gates := private.record_assignments(p_organization_id, p_trigger, null, null);
+
+  update public.payment p
+  set review_reason = m.review_reason, candidate_account_id = c.id
+  from pg_temp._mr m
+  left join public.account c on c.id = m.candidate_account_id and c.organization_id = p_organization_id
+  where p.id = m.payment_id and m.outcome <> 'auto'
+    and (p.review_reason, p.candidate_account_id) is distinct from (m.review_reason, c.id);
+  delete from public.payment_match_candidate c using pg_temp._mr m where c.payment_id = m.payment_id;
+  insert into public.payment_match_candidate (payment_id, rank, organization_id, account_id, rule, acceptable, signals)
+  select c.payment_id, c.rank, p_organization_id, c.account_id, c.rule, c.acceptable, c.signals
+  from pg_temp._mr_candidate c
+  join pg_temp._mr m on m.payment_id = c.payment_id and m.outcome <> 'auto' and not m.ours
+  join public.account a on a.id = c.account_id and a.organization_id = p_organization_id;
+
+  select coalesce(jsonb_object_agg(r, n), '{}') into v_queue
+  from (select m.review_reason as r, count(*) as n from pg_temp._mr m where m.outcome <> 'auto' group by 1) x;
+  return jsonb_build_object('decided', (select count(*) from pg_temp._mr), 'automatic', v_gates, 'queue', v_queue);
+end;
+$$;
+
+-- « Paiements à traiter » (redefined from 20261109190000, dropped and created: a new column): `own_transfer_line`, the
+-- payment's bank line carries one of our transfers' ids (the page shows what it is and offers no assignment). The rows,
+-- their order and their filters are unchanged.
+drop function public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer);
+create function public.payment_queue(p_tab text default 'a-traiter', p_reason text default null,
+                                     p_client uuid default null, p_min_minor bigint default null,
+                                     p_max_minor bigint default null, p_min_days integer default null,
+                                     p_offset integer default 0, p_limit integer default 20)
+returns table (payment_id uuid, amount_minor text, currency char(3), booking_date date, age_days integer,
+               payer_name text, payer_iban_end text, remittance_text text, creditor_reference text, status text,
+               review_reason text, match_method text, matched_at timestamptz, account_id uuid,
+               candidate_account_id uuid, client_organization_id uuid, total bigint, forwarded boolean,
+               own_transfer_line boolean)
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  v_orgs uuid[] := private.money_staff_org_ids();
+  v_today date := (now() at time zone 'Europe/Paris')::date;
+  v_before date := (now() at time zone 'Europe/Paris')::date - p_min_days;
+  v_offset integer := greatest(coalesce(p_offset, 0), 0);
+  v_limit integer := least(greatest(coalesce(p_limit, 20), 1), 100);
+  v_total bigint;
+begin
+  if p_tab = 'rapproches' then
+    select count(*) into v_total
+    from public.payment p
+    where p.organization_id = any (v_orgs) and p.account_id is not null and p.review_reason is null
+      and (p_client is null or p.client_organization_id = p_client)
+      and (p_min_minor is null or p.amount_minor >= p_min_minor)
+      and (p_max_minor is null or p.amount_minor <= p_max_minor)
+      and (v_before is null or p.booking_date <= v_before);
+    return query
+    select p.id, p.amount_minor::text, p.currency, p.booking_date, (v_today - p.booking_date)::integer, p.payer_name,
+           right(p.payer_iban, 4), p.remittance_text, p.creditor_reference, p.status, p.review_reason, p.match_method,
+           p.matched_at, p.account_id, p.candidate_account_id, p.client_organization_id, v_total,
+           exists (select 1 from public.ledger_entry f where f.payment_id = p.id and f.entry_type = 'forward'),
+           coalesce((select private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+                     from public.bank_transaction t where t.id = p.bank_transaction_id), false)
+    from (select p.* from public.payment p
+          where p.organization_id = any (v_orgs) and p.account_id is not null and p.review_reason is null
+            and (p_client is null or p.client_organization_id = p_client)
+            and (p_min_minor is null or p.amount_minor >= p_min_minor)
+            and (p_max_minor is null or p.amount_minor <= p_max_minor)
+            and (v_before is null or p.booking_date <= v_before)
+          order by p.matched_at desc, p.booking_date, p.id
+          offset v_offset limit v_limit) p
+    order by p.matched_at desc, p.booking_date, p.id;
+    return;
+  end if;
+
+  select count(*) into v_total
+  from public.payment p
+  where p.organization_id = any (v_orgs) and (p.status = 'unmatched' or p.review_reason is not null)
+    and (p_reason is null or p.review_reason = p_reason or (p_reason = 'waiting' and p.review_reason is null))
+    and (p_client is null
+         or coalesce(p.client_organization_id,
+                     (select c.client_organization_id from public.account c where c.id = p.candidate_account_id))
+            = p_client)
+    and (p_min_minor is null or p.amount_minor >= p_min_minor)
+    and (p_max_minor is null or p.amount_minor <= p_max_minor)
+    and (v_before is null or p.booking_date <= v_before);
+  return query
+  select p.id, p.amount_minor::text, p.currency, p.booking_date, (v_today - p.booking_date)::integer, p.payer_name,
+         right(p.payer_iban, 4), p.remittance_text, p.creditor_reference, p.status, p.review_reason, p.match_method,
+         p.matched_at, p.account_id, p.candidate_account_id, coalesce(p.client_organization_id, c.client_organization_id),
+         v_total, false,  -- a forwarded payment has nothing left to decide: never in this tab
+         coalesce((select private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+                     from public.bank_transaction t where t.id = p.bank_transaction_id), false)
+  from (select p.* from public.payment p
+        where p.organization_id = any (v_orgs) and (p.status = 'unmatched' or p.review_reason is not null)
+          and (p_reason is null or p.review_reason = p_reason or (p_reason = 'waiting' and p.review_reason is null))
+          and (p_client is null
+               or coalesce(p.client_organization_id,
+                           (select c.client_organization_id from public.account c where c.id = p.candidate_account_id))
+                  = p_client)
+          and (p_min_minor is null or p.amount_minor >= p_min_minor)
+          and (p_max_minor is null or p.amount_minor <= p_max_minor)
+          and (v_before is null or p.booking_date <= v_before)
+        order by p.booking_date, p.id
+        offset v_offset limit v_limit) p
+  left join public.account c on c.id = p.candidate_account_id
+  order by p.booking_date, p.id;
+end;
+$$;
+
+------------------------------------------------------------------------------------------
 -- Privileges (restated for every function redefined here; the new ones internal, or the worker's)
 ------------------------------------------------------------------------------------------
 
@@ -5112,6 +5698,28 @@ grant execute on function public.release_own_credit(text, uuid, text),
   public.confirm_transfer_file_cancellation(text, uuid, integer),
   public.request_transfer_cancellation(text, uuid, text), public.confirm_transfer_cancellation(text, uuid),
   public.cancel_remittance_run(text, uuid, integer, text)
+  to authenticated;
+-- review round 4 (N1): the classifier internal, the worker's parity test (service role) reading both forms (as granted
+-- by 20261111090000); its predicate a pure function « Paiements à traiter » (public.payment_queue, the caller's rights)
+-- reads too; the redefined internals as granted by 20261109150000, 20261110120000 and 20261111120000; the commands and
+-- the queue to the back office (20261109150000, 20261109190000, 20261111090000)
+revoke execute on function private.bank_line_refined_kind(text, text, text, text, text, text, text[], text[]),
+  private.bank_line_refined_kind(text, text, text, text, text[], text[]), private.apply_match_results(uuid, text),
+  private.held_line_kind(uuid)
+  from public, anon, authenticated, service_role;
+revoke execute on function private.stage_refined_kinds(uuid, text[]), private.names_our_transfer(text, text, text)
+  from public, anon, authenticated;
+grant execute on function private.bank_line_refined_kind(text, text, text, text, text, text, text[], text[]),
+  private.bank_line_refined_kind(text, text, text, text, text[], text[]), private.apply_match_results(uuid, text)
+  to service_role;
+grant execute on function private.names_our_transfer(text, text, text) to authenticated;
+revoke execute on function public.assign_payment(text, uuid, jsonb, jsonb, text), public.accept_suggestions(text, jsonb),
+  public.resolve_duplicate(text, uuid, boolean, text),
+  public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer)
+  from public, anon;
+grant execute on function public.assign_payment(text, uuid, jsonb, jsonb, text), public.accept_suggestions(text, jsonb),
+  public.resolve_duplicate(text, uuid, boolean, text),
+  public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer)
   to authenticated;
 
 -- The debits on statements imported before this migration: the debit job books them at its next run (one message per

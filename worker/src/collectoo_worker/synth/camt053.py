@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape, quoteattr
 from faker import Faker
 
 from collectoo_worker.payments.rf import rf_format, rf_make
-from collectoo_worker.payments.statement import classify, minor_to_iso
+from collectoo_worker.payments.statement import classify, minor_to_iso, names_our_transfer
 from collectoo_worker.synth.ids import iban_fr
 
 if TYPE_CHECKING:
@@ -524,9 +524,15 @@ def expected_lines(doc: Doc) -> list[Expected]:
                     return_reason=reason,
                     sub_family=_sub_family(e.code),
                     end_to_end_id=one.end_to_end_id,
+                    payment_info_id=e.payment_info_id,
                 )
                 if not e.adds_up():
-                    kind = "return" if kind == "return" else "batch_unsplit"
+                    # (review M2c-6b-1 round 4, N1) a credit batch any of whose details is one of
+                    # our transfers coming back is a return, as the parser reads it
+                    ours = e.credit and any(
+                        names_our_transfer(t.end_to_end_id, None, None) for t in e.txs
+                    )
+                    kind = "return" if kind == "return" or ours else "batch_unsplit"
                 out.append(
                     Expected(
                         section_no,
@@ -556,6 +562,7 @@ def expected_lines(doc: Doc) -> list[Expected]:
                     return_reason=t.return_reason,
                     sub_family=_sub_family(e.code),
                     end_to_end_id=t.end_to_end_id,
+                    payment_info_id=e.payment_info_id,
                 )
                 prefix = "t" if own else ("e" if e.ref else "h")
                 bank_ref = t.ref if own else (f"{e.ref}-{i}" if e.ref else None)

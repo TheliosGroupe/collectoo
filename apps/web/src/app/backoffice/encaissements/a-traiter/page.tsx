@@ -6,6 +6,7 @@ import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import {
   METHOD_LABEL,
+  OUR_TRANSFER_PAYMENT_NOTE,
   QUEUE_PAGE_SIZE,
   type QueueAccount,
   REASON_FILTERS,
@@ -17,6 +18,7 @@ import {
   highlight,
   lastPage,
   minorToEuros,
+  offersAssignment,
   queueHref,
   queueQuery,
   reviewReason,
@@ -54,6 +56,8 @@ type Row = {
   candidate_account_id: string | null;
   total: number;
   forwarded: boolean; // passed to the client without allocation (« Rapprochés »): never shown as « Imputé »
+  // review M2c-6b-1 round 4 (N1): its bank line carries one of our transfers' ids — never assigned (offersAssignment)
+  own_transfer_line: boolean;
 };
 type Candidate = { payment_id: string; rank: number; account_id: string; rule: string; acceptable: boolean; signals: Signals };
 type Decision = { payment_id: string; action: string; rule: string | null; evidence: Signals & { designation?: string[] } };
@@ -141,7 +145,9 @@ export default async function QueuePage({ searchParams }: PageProps<"/backoffice
     ? await supabase.rpc("match_queue_accounts", { p_account_ids: fileIds })
     : { data: [] };
   const files = new Map((fileRows ?? []).map((f) => [f.account_id, f as QueueAccount]));
-  const acceptable = rows.filter((r) => candidates.some((c) => c.payment_id === r.payment_id && c.acceptable)).length;
+  const acceptable = rows.filter(
+    (r) => offersAssignment(r) && candidates.some((c) => c.payment_id === r.payment_id && c.acceptable),
+  ).length;
   const waiting = rows.some((r) => r.status === "unmatched" && r.review_reason === null);
   const filtered = q.motif !== null || q.client !== null || q.min !== null || q.max !== null || q.age !== null;
 
@@ -297,7 +303,8 @@ function PaymentCard({
     ...(decision?.evidence.designation ?? []),
   ];
   const top = candidates[0];
-  const topFile = top?.acceptable ? files.get(top.account_id) : undefined;
+  const assignable = offersAssignment(r);
+  const topFile = assignable && top?.acceptable ? files.get(top.account_id) : undefined;
   const choices = candidates.filter((c) => !(c.acceptable && c.rank === 1) && files.has(c.account_id));
   return (
     <li className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800" data-testid="queue-card">
@@ -373,13 +380,20 @@ function PaymentCard({
           Dossier attendu : <strong>{waitingFor.external_ref}</strong> · {waitingFor.client_name}
         </p>
       ) : null}
-      {reason.help && (r.status !== "matched" || r.review_reason) ? (
+      {r.own_transfer_line ? (
+        <p
+          className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200"
+          data-testid="queue-own-transfer"
+        >
+          {OUR_TRANSFER_PAYMENT_NOTE}
+        </p>
+      ) : reason.help && (r.status !== "matched" || r.review_reason) ? (
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           {r.review_reason === "no_match" && !topFile ? NO_SUGGESTION_HELP : reason.help}
         </p>
       ) : null}
 
-      {r.status === "unmatched" && r.review_reason && !["account_not_confirmed", "no_mandate"].includes(r.review_reason) ? (
+      {assignable ? (
         <div className="flex flex-col gap-3">
           {topFile ? (
             <div className="flex flex-col gap-1">

@@ -38,7 +38,7 @@
 -- (The batch rule's linear plan: test_debit_bookings_batch_rules_integration.py.)
 -- Cancellation after download stays off (033 and 034 unchanged); some scenarios switch it on in their own subtransaction.
 begin;
-select plan(126);
+select plan(134);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -2489,6 +2489,279 @@ select is(pg_temp.isolated('sc_top_up_own_pmt'),
 -- ledger_post_set call post what post_run_settlement posts run by run, in either order; no chunk below 1
 select is((select v from j where k = 'settle_chunked'), (select v from j where k = 'settle_chunked_want'),
   'post_run_settlements one run per ledger_post_set call = post_run_settlement run by run, in either order; chunk ≥ 1');
+
+-- 12. Review round 4 ------------------------------------------------------------------------------------------------------
+-- N1 (round 3's M1, left open: the import): a credit carrying one of our transfers' ids — our RMT/SWP id as its own
+-- end-to-end id or as the original it returns, or one of our PmtInfIds without an end-to-end id — is never a debtor's
+-- credit nor an unsplit batch, whatever the parser read: a `return` (COMPLIANCE OQ-84's default), so
+-- private.ingest_statement makes no payment of it (before: one `unmatched` payment each, our own money booked to
+-- unallocated_payment); a debtor's credit still is one
+create or replace function pg_temp.sc_n1_ingest() returns jsonb language plpgsql as $$
+declare s uuid := 'e4000000-0000-0000-0000-000000000070'; v jsonb;
+begin
+  insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                     size_bytes, storage_path)
+  values (s, '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf', 'EUR', 'camt053', 'n1.xml',
+          encode(sha256(convert_to(s::text, 'UTF8')), 'hex'), 1, 'test/' || s);
+  update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = s;
+  -- the lines as a parser before round 4 read them
+  insert into private.bank_import_stage (statement_id, line_no, section_no, dedup_key, direction, amount_minor, currency,
+                                         booking_date, end_to_end_id, original_end_to_end_id, payment_info_id, kind,
+                                         method)
+  select s, x.n, 1, 't:N1-' || x.n, 'credit', 1000, 'EUR', private.paris_today(), x.e2e, x.orig, x.pmt, x.kind, 'sct'
+  from (values
+    (1, pg_temp.e2e(pg_temp.trid('r2')), null, null, 'debtor_credit'),        -- our payout's RMT id, unflagged
+    (2, pg_temp.e2e(pg_temp.v('s1')), null, null, 'debtor_credit'),           -- our sweep's SWP id
+    (3, 'E2E-N1-3', pg_temp.e2e(pg_temp.trid('r2')), null, 'debtor_credit'),  -- our payout as the original it returns
+    (4, null, null, pg_temp.pmt(pg_temp.trid('r1')), 'debtor_credit'),        -- one of our lots, no end-to-end id
+    (5, null, null, pg_temp.pmt(pg_temp.trid('r1')), 'batch_unsplit'),        -- an unsplit batch of our lot
+    (6, pg_temp.e2e(pg_temp.trid('r2')), null, null, 'batch_unsplit'),
+    (7, 'E2E-N1-7', null, null, 'debtor_credit')                              -- a debtor's credit
+  ) x (n, e2e, orig, pmt, kind);
+  v := private.ingest_statement(s, jsonb_build_object('format', 'camt053', 'version', '08', 'line_count', 7,
+         'skipped_not_booked', 0, 'sections', jsonb_build_array(jsonb_build_object(
+           'stmt_id', 'N1', 'seq', 1, 'from_date', private.paris_today(), 'to_date', private.paris_today(),
+           'opening_minor', '0', 'closing_minor', '7000'))));
+  return jsonb_build_object(
+    'kinds', (select string_agg(t.line_no || '=' || t.kind, ' ' order by t.line_no) from public.bank_transaction t
+              where t.statement_id = s),
+    'payments', (select count(*) from public.payment p join public.bank_transaction t on t.id = p.bank_transaction_id
+                 where t.statement_id = s),
+    'paid', v -> 'payments', 'returns', v -> 'returns');
+end $$;
+select is(pg_temp.isolated('sc_n1_ingest'),
+          '{"kinds": "1=return 2=return 3=return 4=return 5=return 6=return 7=debtor_credit", "payments": 1,
+            "paid": {"count": 1, "minor": "1000"}, "returns": 6}'::jsonb,
+  'N1: at import, credits carrying our RMT/SWP id (own or original) or naming our PmtInfId without an end-to-end id are '
+  'returns, never a payment; a debtor''s credit still is one');
+-- the classifier (private.bank_line_refined_kind, the twin of statement.refine_kind) reads the original id and the
+-- PmtInfId; from our own or a client's IBAN a credit keeps round 3's kinds (every command refuses them); the six-argument
+-- form (no original, no PmtInfId) answers as the eight-argument one
+create or replace function pg_temp.sc_n1_classifier() returns jsonb language plpgsql as $$
+begin
+  return jsonb_build_object(
+    'eight', pg_temp.attempt($q$
+      select string_agg(private.bank_line_refined_kind(x.kind, 'credit', x.e2e, x.orig, x.pmt, x.iban,
+                                                       array['FR7610107001011234567890129'],
+                                                       array['FR1420041010050500013M02606']), ' ' order by x.n)
+      from (values (1, 'debtor_credit', 'RMT0123456789AB', null, null, null),
+                   (2, 'debtor_credit', null, 'SWP0123456789AB', null, null),
+                   (3, 'batch_unsplit', null, null, 'TF-2026-000001-1', null),
+                   (4, 'debtor_credit', 'E2E-1', null, 'TF-2026-000001-1', null),
+                   (5, 'debtor_credit', 'SWP0123456789AB', null, null, 'FR7610107001011234567890129'),
+                   (6, 'debtor_credit', 'RMT0123456789AB', null, null, 'FR1420041010050500013M02606'),
+                   (7, 'own_transfer_in', 'RMT0123456789AB', null, null, 'FR7630004000031234567890143'),
+                   (8, 'debtor_credit', 'rmt0123456789ab', null, null, null),
+                   (9, 'debtor_credit', null, null, 'TF-2026-000001-1' || chr(10), null))
+             x (n, kind, e2e, orig, pmt, iban) $q$),
+    'six', private.bank_line_refined_kind('debtor_credit', 'credit', 'RMT0123456789AB', null, '{}', '{}'));
+end $$;
+select is(pg_temp.isolated('sc_n1_classifier'),
+          '{"eight": "return return return debtor_credit own_transfer_in client_transfer_in return debtor_credit debtor_credit",
+            "six": "return"}'::jsonb,
+  'N1: the classifier reads a credit''s original id and PmtInfId: our transfers coming back are returns (from our own or '
+  'a client''s IBAN round 3''s kinds); look-alikes and an end-to-end id not ours are not');
+
+-- N1 in depth: a payment whose bank line carries one of our transfers' ids (made before round 4, or by any other path) is
+-- never assigned to a debtor's file — public.assign_payment refuses it (own_transfer_line, with its hint), the match
+-- job's automatic match and suggestions leave it unmatched with no candidate (no_match), « Accepter » skips it
+-- (own_transfer_line), « Paiements à traiter » flags it (payment_queue.own_transfer_line); an ordinary payment is
+-- assigned, matched and accepted as before
+create or replace function pg_temp.legacy_payments(p_n text, p_lines jsonb) returns uuid[] language plpgsql as $$
+declare v uuid[];
+begin
+  perform pg_temp.stmt(p_n, private.paris_today(), p_lines);
+  select array_agg(private.book_credit_payment(pg_temp.ln(p_n, k), 'sct', 'PAYEUR ' || k, null, 'no_match') order by k)
+  into v from generate_series(1, jsonb_array_length(p_lines)) k;
+  return v;
+end $$;
+create or replace function pg_temp.assign(p_key text, p_payment uuid, p_account uuid) returns text language plpgsql as $$
+declare v text;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v := public.assign_payment(p_key, p_payment, jsonb_build_array(jsonb_build_object('account_id', p_account)), null,
+                             'affecté (test)') ->> 'account_id';
+  reset role;
+  return v;
+end $$;
+create or replace function pg_temp.ours(p_n text, p_amount bigint, p_ordinary integer default 1) returns jsonb
+language sql as $$
+  select jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'debtor_credit', 'amount', p_amount,
+                       'e2e', pg_temp.e2e(pg_temp.trid('r2'))),
+    jsonb_build_object('dir', 'credit', 'kind', 'debtor_credit', 'amount', p_amount, 'e2e', 'E2E-' || p_n || '-2',
+                       'orig', pg_temp.e2e(pg_temp.v('s1'))),
+    jsonb_build_object('dir', 'credit', 'kind', 'debtor_credit', 'amount', p_amount,
+                       'pmt', pg_temp.pmt(pg_temp.trid('r1'))))
+  || (select coalesce(jsonb_agg(jsonb_build_object('dir', 'credit', 'kind', 'debtor_credit', 'amount', p_amount,
+                                                   'e2e', 'E2E-' || p_n || '-o' || k)), '[]')
+      from generate_series(1, p_ordinary) k) $$;
+create or replace function pg_temp.sc_n1_assign() returns jsonb language plpgsql as $$
+declare p uuid[];
+begin
+  perform pg_temp.file('7a', '20000000-0000-0000-0000-0000000000a1', 50000);
+  p := pg_temp.legacy_payments('71', pg_temp.ours('71', 2000));
+  return jsonb_build_object(
+    'rmt', pg_temp.attempt(format('select pg_temp.assign(%L, %L, %L)', 'n1-assign-0001', p[1], pg_temp.f('7a'))),
+    'others', jsonb_build_array(
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.assign(%L, %L, %L)', 'n1-assign-0002', p[2],
+                                             pg_temp.f('7a')))),
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.assign(%L, %L, %L)', 'n1-assign-0003', p[3],
+                                             pg_temp.f('7a'))))),
+    'ordinary', pg_temp.assign('n1-assign-0004', p[4], pg_temp.f('7a')) = pg_temp.f('7a')::text);
+end $$;
+select is(pg_temp.isolated('sc_n1_assign'),
+          jsonb_build_object(
+            'rmt', 'payment assignment refused: own_transfer_line | Ce paiement vient d''une ligne qui porte la référence '
+                   'de l''un de nos propres virements (reversement, quote-part du cabinet, lot de notre fichier) : c''est '
+                   'ce virement qui revient, pas le paiement d''un débiteur. Il ne s''affecte à aucun dossier : il se '
+                   'comptabilise depuis le relevé, par l''équipe (écran à venir). Prévenez le support.',
+            'others', to_jsonb(array_fill('payment assignment refused: own_transfer_line'::text, array[2])),
+            'ordinary', true),
+  'N1: assign_payment refuses a payment whose line carries our RMT id, returns our SWP id or names our PmtInfId '
+  '(own_transfer_line, its hint); an ordinary payment is assigned');
+create or replace function pg_temp.sc_n1_match() returns jsonb language plpgsql as $$
+declare p uuid[]; v jsonb;
+begin
+  perform pg_temp.file('7a', '20000000-0000-0000-0000-0000000000a1', 50000);
+  p := pg_temp.legacy_payments('72', pg_temp.ours('72', 2100));
+  update public.payment set review_reason = null where id = any (p);   -- waiting for the match job, as after an import
+  perform private.match_results_begin();
+  insert into pg_temp._mr_decision (payment_id, ord, outcome, rule, method, account_id, rule_version, evidence)
+  values (p[1], 1, 'auto', 'R1', 'rf_structured', pg_temp.f('7a'), 'test', '{}'),
+         (p[3], 3, 'auto', 'R1', 'rf_structured', pg_temp.f('7a'), 'test', '{}'),
+         (p[4], 4, 'auto', 'R1', 'rf_structured', pg_temp.f('7a'), 'test', '{}');
+  insert into pg_temp._mr_decision (payment_id, ord, outcome, rule, rule_version, evidence, review_reason)
+  values (p[2], 2, 'suggestion', 'R5', 'test', '{}', 'no_match');
+  insert into pg_temp._mr_candidate (payment_id, rank, account_id, rule, acceptable, signals)
+  values (p[2], 1, pg_temp.f('7a'), 'R5', true, '{}');
+  v := private.apply_match_results('00000000-0000-0000-0000-0000000000aa', 'import');
+  return jsonb_build_object(
+    'payments', (select jsonb_agg(jsonb_build_array(x.status, x.account_id is not null, x.review_reason) order by o.n)
+                 from unnest(p) with ordinality o (id, n) join public.payment x on x.id = o.id),
+    'candidates', (select count(*) from public.payment_match_candidate c where c.payment_id = any (p)));
+end $$;
+select is(pg_temp.isolated('sc_n1_match'),
+          '{"payments": [["unmatched", false, "no_match"], ["unmatched", false, "no_match"],
+                         ["unmatched", false, "no_match"], ["matched", true, null]], "candidates": 0}'::jsonb,
+  'N1: the match job never matches nor suggests a file for a payment whose line carries our ids (no_match, no '
+  'candidate); an ordinary payment is matched');
+create or replace function pg_temp.accept(p_key text, p_items jsonb) returns jsonb language plpgsql as $$
+declare v jsonb;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v := public.accept_suggestions(p_key, p_items);
+  reset role;
+  return v;
+end $$;
+create or replace function pg_temp.sc_n1_accept() returns jsonb language plpgsql as $$
+declare p uuid[]; v jsonb;
+begin
+  perform pg_temp.file('7a', '20000000-0000-0000-0000-0000000000a1', 50000);
+  p := pg_temp.legacy_payments('73', pg_temp.ours('73', 2200));
+  -- the one-tap suggestions a match job before round 4 left them
+  insert into public.payment_match_candidate (payment_id, rank, organization_id, account_id, rule, acceptable, signals)
+  select x, 1, '00000000-0000-0000-0000-0000000000aa', pg_temp.f('7a'), 'R5', true, '{}' from unnest(p) x;
+  v := pg_temp.accept('n1-accept-0001', (select jsonb_agg(jsonb_build_object('payment_id', x, 'account_id', pg_temp.f('7a')))
+                                         from unnest(p) x));
+  return jsonb_build_object(
+    'accepted', v -> 'accepted',
+    'skipped', (select jsonb_agg(s ->> 'reason') from jsonb_array_elements(v -> 'skipped') s),
+    'ours', (select jsonb_agg(x.status order by x.status) from public.payment x where x.id = any (p[1:3])));
+end $$;
+select is(pg_temp.isolated('sc_n1_accept'),
+          '{"accepted": 1, "skipped": ["own_transfer_line", "own_transfer_line", "own_transfer_line"],
+            "ours": ["unmatched", "unmatched", "unmatched"]}'::jsonb,
+  'N1: « Accepter » skips a payment whose line carries our ids (own_transfer_line) and accepts an ordinary one');
+create or replace function pg_temp.sc_n1_queue() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.legacy_payments('75', pg_temp.ours('75', 7771, 2));
+  return jsonb_build_object('flagged', pg_temp.try('01', $q$
+    select count(*) filter (where q.own_transfer_line) || '/' || count(*)
+    from public.payment_queue('a-traiter', null, null, 7771, 7771, null, 0, 100) q $q$));
+end $$;
+select is(pg_temp.isolated('sc_n1_queue'), '{"flagged": "3/5"}'::jsonb,
+  'N1: « Paiements à traiter » flags each payment whose line carries our ids (payment_queue.own_transfer_line)');
+
+-- N1 in depth: « Libérer » (public.resolve_duplicate) of a held line that carries our ids makes no payment — read from
+-- its facts it is a return (listed for the funds pass as the return of our transfer); with the reading an import
+-- before round 4 recorded (a debtor's credit) it is refused (own_transfer_line, with its hint); an ordinary held credit
+-- is released as a payment
+create or replace function pg_temp.release_dup(p_key text, p_line uuid) returns text language plpgsql as $$
+declare v jsonb;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v := public.resolve_duplicate(p_key, p_line, false, 'pas un doublon (test)');
+  reset role;
+  return (v ->> 'kind') || ' payment=' || (v ->> 'payment_id' is not null)::text;
+end $$;
+create or replace function pg_temp.sc_n1_release_dup() returns jsonb language plpgsql as $$
+declare v_recorded text; v_facts text; v_lot text; v_ordinary text;
+begin
+  perform pg_temp.stmt('74', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'suspected_duplicate', 'amount', 2300, 'e2e', pg_temp.e2e(pg_temp.v('s1'))),
+    jsonb_build_object('dir', 'credit', 'kind', 'suspected_duplicate', 'amount', 2300,
+                       'e2e', pg_temp.e2e(pg_temp.trid('r2'))),
+    jsonb_build_object('dir', 'credit', 'kind', 'suspected_duplicate', 'amount', 2300, 'e2e', 'E2E-N1-74'),
+    jsonb_build_object('dir', 'credit', 'kind', 'suspected_duplicate', 'amount', 2300,
+                       'pmt', pg_temp.pmt(pg_temp.trid('r1')))));
+  insert into private.bank_line_held_kind (bank_transaction_id, kind, method)
+  values (pg_temp.ln('74', 1), 'debtor_credit', 'sct');
+  v_recorded := pg_temp.attempt(format('select pg_temp.release_dup(%L, %L)', 'n1-dup-0001', pg_temp.ln('74', 1)));
+  v_facts := pg_temp.release_dup('n1-dup-0002', pg_temp.ln('74', 2));
+  v_lot := pg_temp.attempt(format('select pg_temp.release_dup(%L, %L)', 'n1-dup-0004', pg_temp.ln('74', 4)));
+  v_ordinary := pg_temp.release_dup('n1-dup-0003', pg_temp.ln('74', 3));
+  return jsonb_build_object(
+    'recorded', v_recorded, 'facts', v_facts, 'lot', v_lot, 'ordinary', v_ordinary,
+    'funds_pass', (select string_agg(c.line_kind || ':' || c.role, ',')
+                   from private.bank_booking_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100000) c
+                   where c.line_id = pg_temp.ln('74', 2)),
+    'payments', (select count(*) from public.payment p
+                 where p.bank_transaction_id in (pg_temp.ln('74', 1), pg_temp.ln('74', 2), pg_temp.ln('74', 3))));
+end $$;
+select is(pg_temp.isolated('sc_n1_release_dup'),
+          jsonb_build_object(
+            'recorded', 'duplicate release refused: own_transfer_line | Cette ligne porte la référence de l''un de nos '
+                        'propres virements (reversement, quote-part du cabinet, lot de notre fichier) : c''est ce '
+                        'virement qui revient, jamais le paiement d''un débiteur. Elle se comptabilise depuis le relevé, '
+                        'par l''équipe (écran à venir). Prévenez le support.',
+            'facts', 'return payment=false', 'lot', 'return payment=false', 'funds_pass', 'return:return',
+            'ordinary', 'debtor_credit payment=true', 'payments', 1),
+  'N1: a held line carrying our ids (our SWP or RMT id, our PmtInfId) is released as a return (no payment; the funds '
+  'pass reads our transfer''s), or refused with a recorded debtor''s reading (own_transfer_line); an ordinary held '
+  'credit is still released as a payment');
+
+-- N2 (pre-existing: the top-up's relay by the API): « Paiement d'un débiteur relayé » (public.release_own_credit) refuses a
+-- credit carrying our TOP id — the servicer's own top-up, booked as « Approvisionnement par le compte propre », never a
+-- debtor's payment (`top_up_line`, with its hint); a look-alike reference is still relayed
+create or replace function pg_temp.sc_n2_relay_top() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.stmt('76', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 2500, 'e2e', 'TOP0123456789AD',
+                       'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'kind', 'client_transfer_in', 'amount', 2500, 'e2e', 'TOP0123456789AE',
+                       'iban', 'FR1420041010050500013M02606'),
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 2500, 'e2e', 'TOPAZ-2026-0001',
+                       'iban', 'FR7610107001011234567890129')));
+  return jsonb_build_object(
+    'own_top', pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 'n2-relay-0001', pg_temp.ln('76', 1))),
+    'client_top', pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 'n2-relay-0002',
+                                                         pg_temp.ln('76', 2)))),
+    'look_alike', pg_temp.relay('n2-relay-0003', pg_temp.ln('76', 3)),
+    'payments', (select count(*) from public.payment
+                 where bank_transaction_id in (pg_temp.ln('76', 1), pg_temp.ln('76', 2))));
+end $$;
+select is(pg_temp.isolated('sc_n2_relay_top'),
+          jsonb_build_object(
+            'own_top', 'own credit release refused: top_up_line | Ce crédit porte la référence de l''un de nos '
+                       'approvisionnements (TOP…) : c''est l''argent du cabinet, jamais le paiement d''un débiteur. Il se '
+                       'comptabilise comme « Approvisionnement par le compte propre » : automatiquement quand il '
+                       'correspond à l''approvisionnement demandé, sinon par l''équipe.',
+            'client_top', 'own credit release refused: top_up_line', 'look_alike', 'unmatched', 'payments', 0),
+  'N2: a credit carrying our TOP id is never relayed as a debtor''s payment (top_up_line, its hint); a look-alike is');
 
 select * from finish();
 rollback;

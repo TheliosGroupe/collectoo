@@ -234,6 +234,10 @@ export type ErrorCode =
   | "own_transfer_line"
   // review round 3 (M1, M2): a credit carrying our RMT/SWP id is never a debtor's payment nor a top-up
   | "own_credit_own_transfer_line"
+  // review round 4 (N2): a credit carrying our TOP id is our top-up, never a debtor's payment
+  | "own_credit_top_up_line"
+  // review round 4 (N1): a payment whose bank line carries one of our transfers' ids is never assigned to a file
+  | "payment_own_transfer_line"
   | "unknown";
 
 /**
@@ -608,6 +612,12 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   // review round 3 (M1, M2): public.release_own_credit's and the top-up's refusal of a credit carrying our RMT/SWP id
   own_credit_own_transfer_line:
     "Ce crédit porte la référence de l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient, ou celle de l'un des lots de nos fichiers. Il se comptabilise depuis le relevé, automatiquement à l'import quand la banque le signale comme un retour, sinon par l'équipe (écran à venir). Il ne devient ni le paiement d'un débiteur ni un approvisionnement. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.",
+  // review round 4 (N2): public.release_own_credit's refusal of a credit carrying our TOP id
+  own_credit_top_up_line:
+    "Ce crédit porte la référence de l'un de nos approvisionnements (TOP…) : c'est l'argent du cabinet, jamais le paiement d'un débiteur. Il se comptabilise comme « Approvisionnement par le compte propre » : automatiquement quand il correspond à l'approvisionnement demandé, sinon par l'équipe.",
+  // review round 4 (N1): public.assign_payment's refusal of a payment whose bank line carries one of our transfers' ids
+  payment_own_transfer_line:
+    "Ce paiement vient d'une ligne qui porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, pas le paiement d'un débiteur. Il ne s'affecte à aucun dossier : il se comptabilise depuis le relevé, par l'équipe (écran à venir). Prévenez le support.",
   unknown:
     "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };

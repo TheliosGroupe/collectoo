@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import { errorText } from "@/lib/boarding/forms";
 import { money } from "@/lib/payments/statements";
 import {
+  OUR_TRANSFER_PAYMENT_NOTE,
   QUEUE_PAGE_SIZE,
   REASON_FILTERS,
   acceptNotice,
+  offersAssignment,
   ageBadge,
   autoShare,
   eurosToMinor,
@@ -231,5 +233,45 @@ describe("a page past the last one", () => {
     expect(lastPage(0)).toBe(1);
     expect(lastPage(QUEUE_PAGE_SIZE)).toBe(1);
     expect(lastPage(QUEUE_PAGE_SIZE + 1)).toBe(2);
+  });
+});
+
+// Review M2c-6b-1 round 4 (N1, in depth): a payment whose bank line carries one of our transfers' ids (our RMT/SWP id,
+// as its own or its original, or our PmtInfId without an end-to-end id; payment_queue.own_transfer_line) is our own
+// money coming back, never a debtor's payment: assign_payment refuses it, the match job and « Accepter » skip it, and
+// « Paiements à traiter » shows the note and offers no assignment.
+describe("a payment that is one of our transfers coming back (N1)", () => {
+  const P = "00000000-0000-0000-0000-0000000000f2";
+  const row = { status: "unmatched", review_reason: "no_match", own_transfer_line: false };
+
+  it("offers no assignment on it, and the usual ones elsewhere", () => {
+    expect(offersAssignment(row)).toBe(true);
+    expect(offersAssignment({ ...row, review_reason: "ambiguous" })).toBe(true);
+    expect(offersAssignment({ ...row, own_transfer_line: true })).toBe(false);
+    expect(offersAssignment({ ...row, review_reason: "ambiguous", own_transfer_line: true })).toBe(false);
+    // as before: nothing to assign while it waits for a file, once matched, or while the job has not decided
+    expect(offersAssignment({ ...row, review_reason: "account_not_confirmed" })).toBe(false);
+    expect(offersAssignment({ ...row, review_reason: "no_mandate" })).toBe(false);
+    expect(offersAssignment({ ...row, review_reason: null })).toBe(false);
+    expect(offersAssignment({ ...row, status: "matched" })).toBe(false);
+  });
+
+  it("says what it is", () => {
+    expect(OUR_TRANSFER_PAYMENT_NOTE).toContain("l'un de nos propres virements");
+    expect(OUR_TRANSFER_PAYMENT_NOTE).toContain("pas le paiement d'un débiteur");
+    expect(OUR_TRANSFER_PAYMENT_NOTE).toContain("Ne l'affectez à aucun dossier");
+    expect(OUR_TRANSFER_PAYMENT_NOTE).toContain("prévenez le support");
+  });
+
+  it("words assign_payment's refusal and « Accepter »'s skip", () => {
+    const code = matchingErrorCode("payment assignment refused: own_transfer_line");
+    expect(code).toBe("payment_own_transfer_line");
+    const text = errorText(code);
+    expect(text).toContain("l'un de nos propres virements");
+    expect(text).toContain("ne s'affecte à aucun dossier");
+    expect(text).not.toMatch(/refused|own_transfer_line/);
+    expect(acceptNotice(1, [{ payment_id: P, reason: "own_transfer_line" }]).text).toBe(
+      "1 suggestion acceptée ; 1 paiement ignoré : l'un de nos virements qui revient (1). Vérifiez les propositions à jour.",
+    );
   });
 });

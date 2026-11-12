@@ -351,3 +351,65 @@ test("a credit carrying our SWP or RMT id, unflagged, is neither a top-up nor a 
   }
   await reviewShot(page, testInfo, "m6b1-our-credit-unflagged");
 });
+
+/**
+ * Review M2c-6b-1 round 4 (N1): the same transfers coming back from an IBAN that is neither ours nor a client's (or from
+ * a CSV without the IBAN column) were read as debtors' credits and became payments to assign — our own money matched to
+ * a debtor's file. Now the import reads them as returns (COMPLIANCE OQ-84): no payment in « Paiements à traiter »; in
+ * « À classer », the debit job's reason worded for a credit (no transfer of ours by that id here), and no action.
+ * Synthetic data.
+ */
+test("a credit carrying our SWP or RMT id from an unknown IBAN is a return, never a payment (review round 4)", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(240_000);
+  const own = await createTenant();
+  await createMandate(own);
+  const seed = Number.parseInt(own.clientId.slice(0, 6), 16);
+  const bankIban = ibanFr(seed + 21);
+  const { error } = await adminClient().from("bank_account").insert({
+    organization_id: own.servicerId,
+    iban: bankIban,
+    currency: "EUR",
+    label: "Fonds de tiers – Banque R",
+    purpose: "client_funds",
+    feed: "camt053",
+    opened_on: "2026-01-01",
+  });
+  if (error) throw error;
+  await loginAsStaff(page, await createMember(own.servicerId, "ops_manager"));
+
+  const credits: Credit[] = [
+    { ref: "UR-1", amountMinor: BigInt(45000), name: "BANQUE X", iban: ibanFr(seed + 23), e2e: "SWP0123456789AB", ustrd: ["RETOUR FONDS"] },
+    { ref: "UR-2", amountMinor: BigInt(27000), name: "BANQUE Y", iban: ibanFr(seed + 29), e2e: "RMT0A1B2C3D4E5F", ustrd: ["REVERSEMENT"] },
+  ];
+  await page.goto("/backoffice/encaissements");
+  const form = page.getByTestId("statement-upload");
+  await form.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({
+    name: "releve-retours-iban-inconnu.xml",
+    mimeType: "application/xml",
+    buffer: Buffer.from(camt053Lines(bankIban, "2026-11-09", credits, [], BigInt(0)), "utf-8"),
+  });
+  await form.getByRole("button", { name: "Importer le relevé" }).click();
+  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+
+  // no payment to assign
+  await page.goto("/backoffice/encaissements/a-traiter");
+  await expect(page.getByText("Aucun paiement à traiter : tous les encaissements sont rattachés à un dossier.")).toBeVisible();
+
+  // the debit job's funds pass leaves both to ops with why (reloaded until it has run)
+  const unknown = "Crédit portant la référence d'un virement du cabinet (RMT, SWP) que Collectoo ne connaît pas";
+  const rows = page.getByTestId("debit-row");
+  await expect(async () => {
+    await page.goto("/backoffice/encaissements/debits");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.getByTestId("debit-review").filter({ hasText: unknown })).toHaveCount(2);
+  }).toPass({ timeout: 90_000 });
+  for (const row of [rows.filter({ hasText: "450,00" }), rows.filter({ hasText: "270,00" })]) {
+    await expect(row).toContainText("Crédit annulant un débit");
+    await expect(row.getByTestId("debit-review")).toContainText(unknown);
+    for (const action of ["book-top-up", "release-own-credit", "release-client-credit", "explain", "link-return", "link-refund"])
+      await expect(row.getByTestId(action)).toHaveCount(0);
+  }
+  await reviewShot(page, testInfo, "m6b1-our-credit-unknown-iban");
+});
