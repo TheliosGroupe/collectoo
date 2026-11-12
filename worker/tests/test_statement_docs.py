@@ -552,10 +552,12 @@ def test_a_late_line_states_its_cause_never_a_free_text() -> None:
     p = statement_payload()
     at = COLUMNS.index("late_cause")
     words = []
-    for code in ("unmeetable", "identified_late", "approved_late", "an approver's text", None):
+    codes = ("payout_returned", "unmeetable", "identified_late", "approved_late")
+    for code in (*codes, "an approver's text", None):
         p["lines"][1][at] = code
         words.append(_csv_rows(p)[1]["hors_delai"])
     assert words == [
+        "oui \u2013 virement revenu impayé, reversé à nouveau",
         "oui \u2013 délai contractuel intenable (art. R124-6 : un mois)",
         "oui \u2013 encaissement identifié tardivement",
         "oui \u2013 validation tardive",
@@ -563,6 +565,46 @@ def test_a_late_line_states_its_cause_never_a_free_text() -> None:
         "oui",
     ]
     assert "leur cause figurent dans le fichier CSV" in statement_text(p, "0" * 64)
+
+
+def test_a_returned_payout_paid_again_late_states_the_return_as_its_cause() -> None:
+    """M2c-6b-1 review round 2 (L1, new:statement-late-cause): the line of a returned payout paid
+    again keeps the date of the line it came from (K2); late, its CSV cause is the return
+    (« virement revenu impayé, reversé à nouveau »), never a collection's; the PDF counts it among
+    the late lines and names the CSV for their cause; the PDF renders."""
+    from document_cases import COLUMNS  # noqa: PLC0415
+
+    p = statement_payload()
+    line = list(p["lines"][1])
+    for column, value in (
+        ("nature", "payout_returned"),
+        ("file", None),
+        ("debtor", None),
+        ("items", []),
+        ("components", []),
+        ("rules", []),
+        ("rates", []),
+        ("basis_minor", "0"),
+        ("commission_minor", "0"),
+        ("commission_state", "none"),
+        ("invoice", None),
+        ("receipt", None),
+        ("late", True),
+        ("late_cause", "payout_returned"),
+    ):
+        line[COLUMNS.index(column)] = value
+    p["lines"][1] = line
+    row = _csv_rows(p)[1]
+    assert row["nature"] == "Virement revenu impayé \u2014 reversé à nouveau"
+    assert row["hors_delai"] == "oui \u2013 virement revenu impayé, reversé à nouveau"
+    text = statement_text(p, "0" * 64)
+    late = "1 encaissement(s) reversé(s) hors délai : le détail et leur cause figurent dans le"
+    assert late in text
+    for collection_cause in ("identifié tardivement", "validation tardive"):
+        assert collection_cause not in text
+        assert collection_cause not in row["hors_delai"]
+    pdf = render_statement_pdf(p, "0" * 64)
+    assert pdf.startswith(b"%PDF") and render_statement_pdf(p, "0" * 64) == pdf
 
 
 def test_the_indemnity_is_stated_to_every_professional_buyer() -> None:

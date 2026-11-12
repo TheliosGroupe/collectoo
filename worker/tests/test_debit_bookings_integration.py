@@ -12,9 +12,12 @@ own message (plan §2.5 [critic]).
 * a batch line missing a member, a second debit of a payout: never booked, left to ops with why;
 * §7.3: a payout returned (charges deducted: the full reversal, the difference a `bank_fee`), the
   payout account `returned`, a `payout_returned` item; a bank fee on its own;
-* concurrency (plan §2.5 [critic]): the job's first message and a command holding a run's row
-  (its cancellation, its file's re-download) never deadlock: the funds pass runs in its own
-  transaction (staged on three sessions);
+* concurrency (plan §2.5 [critic], §4.3): the job's first message and a command holding a run's
+  row (its cancellation, its file's re-download), the paying account (a file's generation) or the
+  payment of a single-refund batch line (a refund of the rest) never deadlock: the funds pass runs
+  in its own transaction (staged on three sessions); the funds pass and a refund holding a late
+  line's payment never deadlock (concurrency-2); the funds pass waits for the allocation lock
+  holding only what comes before it in ADR-0014's order;
 * a returned payout re-proposed keeps its R124-6 date (K2); a return dated before its debit is
   left to ops (K5).
 """
@@ -22,27 +25,49 @@ own message (plan §2.5 [critic]).
 from __future__ import annotations
 
 import hashlib
+import random
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
-from debit_helpers import checks, return_entry, violations
+from allocation_helpers import credit as bank_credit
+from allocation_helpers import state, statement
+from debit_helpers import checks, refund_request, return_entry, violations
 from integration_helpers import DB, as_user, storage
 from psycopg.rows import dict_row
-from remittance_helpers import approve, confirm_payout, paris_today, request_run, run_row, staff
+from remittance_helpers import (
+    approve,
+    confirm_payout,
+    paris_today,
+    recent_business_day,
+    remittance_tenant,
+    request_run,
+    run_row,
+    staff,
+)
 from remittance_helpers import drain as drain_remittances
 from statement_helpers import drain as drain_payments
 from statement_helpers import upload
-from test_transfer_files_integration import _bytes, _file_row, _generate, _two_runs
+from test_transfer_files_integration import (
+    _bytes,
+    _file,
+    _file_row,
+    _generate,
+    _own_account,
+    _two_runs,
+)
 
 from collectoo_worker.jobs.debits import debit_dates, funds_lines, run_process_debits
 from collectoo_worker.remittance import pain001
 from collectoo_worker.synth.camt053 import FEE_CODE, debits_of, make_doc, render_camt053
+from collectoo_worker.synth.ids import iban_fr
+from collectoo_worker.synth.reconciliation import credit_entries
 
 pytestmark = pytest.mark.integration
 
@@ -291,11 +316,27 @@ def test_a_payout_returned_less_the_bank_s_charge_and_a_fee(tmp_path: Path) -> N
 
 # -- concurrency: the funds pass in its own transaction (plan §2.5 [critic]; concurrency-1, T1) --
 
-# what the other side may answer, by SQLSTATE and message: it holds the run's row, then waits for
-# the allocation lock; refused under them (the switch off: a downloaded file's payout is not
-# cancelled, an executed file is not downloaded again)
+# the sessions of these tests report a deadlock after DEADLOCK_TIMEOUT (the server's check), well
+# under every command's own lock_timeout (2 s or 5 s): a command that times out on a lock
+# (55P03) waited for a slow job, never in a cycle — it is retried, a deadlock (40P01) never is
+# (review round 2: the 5 s timeouts under CI load)
+DEADLOCK_TIMEOUT_MS = 100
+COMMANDS = {
+    "cancel": "public.cancel_remittance_run(text,uuid,integer,text)",
+    "download": "public.transfer_file_download(uuid,text,boolean)",
+    "generate": "public.generate_transfer_file(text,uuid,text)",
+    "refund": "public.request_refund(text,uuid,text,text,text,text,text,text,text,text)",
+}
+# what the other side may answer, by SQLSTATE and message: it holds a run's row (or a payment's),
+# then waits for the allocation lock; refused under them (the switch off: a downloaded file's
+# payout is not cancelled, an executed file is not downloaded again), or done
 REFUSALS = {
     "cancel": ("23514", "remittance run refused: payout_in_downloaded_file"),
+    "download": ("23514", "transfer file refused: file_executed"),
+}
+# a retry after a lock timeout may come once the funds pass has booked the run
+LATER_REFUSALS = {
+    "cancel": ("23514", "remittance run refused: not_cancellable"),
     "download": ("23514", "transfer file refused: file_executed"),
 }
 
@@ -318,40 +359,137 @@ def _import_only(statement: bytes, tenant: dict[str, Any], name: str) -> None:
         pass
 
 
-def _waits_on_advisory(pid: int, timeout_s: float = 15.0) -> bool:
-    """True once the session waits on an advisory lock (the allocation lock)."""
+def _waits(pid: int, event: str | None = "advisory", timeout_s: float = 15.0) -> bool:
+    """True once the session waits on a heavyweight lock (`event`: an advisory lock — the
+    allocation lock —, or any when None: a row's)."""
     with psycopg.connect(DB, autocommit=True) as conn:
         end = time.monotonic() + timeout_s
         while time.monotonic() < end:
             row = conn.execute(
                 "select wait_event_type, wait_event from pg_stat_activity where pid = %s", (pid,)
             ).fetchone()
-            if row is not None and tuple(row) == ("Lock", "advisory"):
+            if row is not None and row[0] == "Lock" and (event is None or row[1] == event):
                 return True
             time.sleep(0.02)
     return False
 
 
-@pytest.mark.parametrize("other", ["cancel", "download"])
+def _session() -> psycopg.Connection[Any]:
+    """A session that reports a deadlock after DEADLOCK_TIMEOUT_MS (autocommit: each
+    `transaction()` block is one transaction)."""
+    conn = psycopg.connect(DB, autocommit=True)
+    conn.execute(f"set deadlock_timeout = '{DEADLOCK_TIMEOUT_MS}ms'")
+    return conn
+
+
+def _lock_timeout_ms(function: str) -> int:
+    """The lock_timeout a command sets for itself (its function's SET clause)."""
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            """select (select c from unnest(p.proconfig) c where c like 'lock_timeout=%%')
+               from pg_proc p where p.oid = %s::regprocedure""",
+            (function,),
+        ).fetchone()
+    assert row is not None and row[0] is not None, function
+    value = str(row[0]).split("=", 1)[1]
+    assert value.endswith("s") and not value.endswith("ms"), value
+    return int(value[:-1]) * 1000
+
+
+def _retried(
+    run: Callable[[], None], refusal: tuple[str, str] | None, later: tuple[str, str] | None
+) -> tuple[str, int]:
+    """The command, retried after a lock timeout (55P03); its outcome (`done`, or `refused` with
+    the expected refusal — or, on a retry, the one it gets once the run is booked) and the number of
+    timeouts. Anything else, a deadlock (40P01) included, is raised."""
+    timeouts = 0
+    while True:
+        try:
+            run()
+        except psycopg.errors.LockNotAvailable:
+            timeouts += 1
+            if timeouts == 5:
+                raise
+            continue
+        except psycopg.Error as exc:
+            got = (exc.sqlstate, exc.diag.message_primary)
+            if got == refusal or (timeouts > 0 and got == later):
+                return "refused", timeouts
+            raise
+        return "done", timeouts
+
+
+def _unidentified(tenant: dict[str, Any], amount: int) -> str:
+    """A credit naming nothing (no reference) on the account's next statement (opened with the
+    last one's closing: the files' cash check reads it): an unmatched payment ops may refund."""
+    opening, last = _last_closing(tenant)
+    day = max(paris_today(), last)
+    prefix = f"U{uuid.uuid4().hex[:6].upper()}"
+    entries = credit_entries([bank_credit(amount)], start=day, days=1, prefix=prefix)
+    doc = make_doc(entries, iban=tenant["iban"], from_date=day, to_date=day,
+                   opening_minor=opening, stmt_id=f"S-{prefix}")  # fmt: skip
+    target = upload(tenant, storage(), render_camt053(doc, "08"), name=f"{prefix}.xml")
+    drain_payments(storage())
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            """select p.id::text from public.payment p
+               join public.bank_transaction t on t.id = p.bank_transaction_id
+               where t.statement_id = %s""",
+            (target["statement_id"],),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _refund_args(payment: str, amount: int) -> tuple[Any, ...]:
+    """request_refund's arguments as the page sends them (the payment's reason and what is left),
+    in the next file, to a synthetic IBAN."""
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            """select p.review_reason, x.unallocated_minor::text
+               from public.payment p cross join lateral private.payment_positions(array[p.id]) x
+               where p.id = %s""",
+            (payment,),
+        ).fetchone()
+    assert row is not None
+    return (str(uuid.uuid4()), payment, str(amount), iban_fr(random.Random(payment)), "PAYEUR",
+            "other", row[0], row[1], "remboursement au payeur", "file")  # fmt: skip
+
+
+REQUEST_REFUND = "select public.request_refund(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+
+
+@pytest.mark.parametrize("other", ["cancel", "download", "generate", "refund"])
 def test_the_funds_pass_and_a_command_holding_the_run_never_deadlock(  # noqa: PLR0915
     tmp_path: Path, other: str
 ) -> None:
-    """Plan §2.5 [critic]: a command holds a run's row, then waits for the allocation lock
-    (cancel_remittance_run, transfer_file_download); the job's first message (the M2b pass: a
-    payer's return on the statement takes the allocation lock) must not then wait for that row.
-    Staged on three sessions: one holds the allocation lock; the job's first message queues on
-    it; the command locks r1's row and queues behind the job; the lock is released. The M2b pass
-    commits without the funds pass, the command gets the lock and is refused, the funds message
-    (the queue's, in its own transaction) books each payout once. With the funds pass in the M2b
-    pass's transaction, the job would hold the allocation lock while it waits for r1's row: a
-    deadlock (mutant MERGED: DeadlockDetected)."""
+    """Plan §2.5 [critic], §4.3: a command holds a run's row (cancel_remittance_run,
+    transfer_file_download), the paying account's (generate_transfer_file) or the payment of the
+    single-refund batch line the M2b pass links (request_refund), then waits for the allocation
+    lock; the job's first message (the M2b pass: a payer's return or that refund on the statement
+    takes the allocation lock) must not then wait for what the command holds. Staged on three
+    sessions: one holds the allocation lock; the job's first message queues on it; the command
+    queues behind the job; the lock is released. The M2b pass commits without the funds pass, the
+    command gets the lock (refused, or done), the funds message (the queue's, in its own
+    transaction) books each payout once. With the funds pass in the M2b pass's transaction (mutant
+    MERGED) the job would hold the allocation lock while it waits for the command's run row: a
+    deadlock (cancel, download), or the job's outcome `job:with_funds` (each)."""
     tenant, _client, r1, r2 = _two_runs()
+    refund: dict[str, Any] = {}
+    if other == "refund":  # a refund of 50,00 € in the file: its PmtInf one refund alone
+        refund["payment"] = _unidentified(tenant, 10_000)
+        refund["prior"] = state(refund["payment"])[1]
+        refund["first"] = refund_request(tenant, refund["payment"], 5_000, "unidentified")
     f, data = _downloaded(tenant, tmp_path)
+    if other == "generate":  # a refund ordered after the download: the next file's
+        refund["payment"] = _unidentified(tenant, 10_000)
+        refund["first"] = refund_request(tenant, refund["payment"], 5_000, "unidentified")
     opening, last = _last_closing(tenant)
     day = max(paris_today(), last)
     ref = f"C{uuid.uuid4().hex[:6].upper()}"
+    mode = "batch" if other == "refund" else "individual"
     entries = [
-        *debits_of(pain001.read(data), booking_date=day, ref_prefix=ref),
+        *debits_of(pain001.read(data), booking_date=day, ref_prefix=ref, mode=mode),
         # a payer's return (a line of the M2b pass: it takes the allocation lock)
         return_entry(5_000, f"E2E{uuid.uuid4().hex[:12].upper()}", f"{ref}R", day),
     ]
@@ -360,16 +498,18 @@ def test_the_funds_pass_and_a_command_holding_the_run_never_deadlock(  # noqa: P
                    opening_minor=opening, stmt_id=stmt)  # fmt: skip
     _import_only(render_camt053(doc, "08"), tenant, f"{stmt}.xml")
     assert run_row(r1)["status"] == "sent"  # its debit is not booked yet
+    assert _lock_timeout_ms(COMMANDS[other]) > DEADLOCK_TIMEOUT_MS
     org = str(tenant["servicer"])
     version = run_row(r1)["version"]
     pids: dict[str, int] = {}
     errors: list[BaseException] = []
     outcome: list[str] = []
+    timeouts: list[int] = []
     go = threading.Event()
 
     def job() -> None:
         try:
-            with psycopg.connect(DB) as conn:
+            with _session() as conn:
                 pids["job"] = conn.info.backend_pid
                 with conn.transaction():  # the job's first message (the queue's transaction)
                     summary = run_process_debits(
@@ -381,30 +521,43 @@ def test_the_funds_pass_and_a_command_holding_the_run_never_deadlock(  # noqa: P
             errors.append(exc)
 
     def command() -> None:
-        sqlstate, message = REFUSALS[other]
         try:
-            with psycopg.connect(DB) as conn:
+            with _session() as conn:
                 pids["other"] = conn.info.backend_pid
                 go.wait(30)
-                with conn.transaction():
-                    as_user(conn, tenant["admin"], "aal2")
-                    conn.execute("set local statement_timeout = '30s'")
-                    if other == "cancel":
-                        conn.execute(
-                            "select public.cancel_remittance_run(%s, %s, %s, %s)",
-                            (str(uuid.uuid4()), r1, version, "test de concurrence"),
-                        )
-                    else:  # a re-download, acknowledged
-                        conn.execute(
-                            "select public.transfer_file_download(%s, %s, true)",
-                            (f["id"], hashlib.sha256(data).hexdigest()),
-                        )
-            outcome.append(f"{other}:done")
-        except psycopg.Error as exc:
-            if exc.sqlstate == sqlstate and exc.diag.message_primary == message:
-                outcome.append(f"{other}:refused")
-            else:
-                errors.append(exc)  # anything else (a deadlock included) fails the test
+                # once its batch line executed the first refund: the payment as it was, 50,00 € left
+                args = (str(uuid.uuid4()), refund.get("payment"), "5000",
+                        iban_fr(random.Random(refund.get("payment"))), "PAYEUR", "other",
+                        refund.get("prior"), "5000", "remboursement au payeur", "file")  # fmt: skip
+
+                def run() -> None:
+                    with conn.transaction():
+                        as_user(conn, tenant["staff"] if other == "refund" else tenant["admin"],
+                                "aal2")  # fmt: skip
+                        conn.execute("set local statement_timeout = '60s'")
+                        if other == "cancel":
+                            conn.execute(
+                                "select public.cancel_remittance_run(%s, %s, %s, %s)",
+                                (str(uuid.uuid4()), r1, version, "test de concurrence"),
+                            )
+                        elif other == "download":  # a re-download, acknowledged
+                            conn.execute(
+                                "select public.transfer_file_download(%s, %s, true)",
+                                (f["id"], hashlib.sha256(data).hexdigest()),
+                            )
+                        elif other == "generate":
+                            conn.execute(
+                                "select public.generate_transfer_file(%s, %s, null)",
+                                (str(uuid.uuid4()), tenant["bank"]),
+                            )
+                        else:  # the rest of the payment the single-refund line executes
+                            conn.execute(REQUEST_REFUND, args)
+
+                done, n = _retried(run, REFUSALS.get(other), LATER_REFUSALS.get(other))
+                timeouts.append(n)
+            outcome.append(f"{other}:{done}")
+        except BaseException as exc:  # a deadlock included: fails the test
+            errors.append(exc)
 
     a, b = threading.Thread(target=job), threading.Thread(target=command)
     # the third session holds the allocation lock; once it commits, the job gets the lock first
@@ -417,17 +570,21 @@ def test_the_funds_pass_and_a_command_holding_the_run_never_deadlock(  # noqa: P
             if "job" in pids and "other" in pids:
                 break
             time.sleep(0.01)
-        assert _waits_on_advisory(pids["job"]), "the job's first message never queued"
+        assert _waits(pids["job"]), "the job's first message never queued"
         go.set()
-        assert _waits_on_advisory(pids["other"]), "the command never queued behind it"
-    a.join(90)
-    b.join(90)
+        # the refund waits for its payment's row, which the job's M2b pass holds
+        assert _waits(pids["other"], None if other == "refund" else "advisory"), (
+            "the command never queued behind it"
+        )
+    a.join(120)
+    b.join(120)
     assert not a.is_alive() and not b.is_alive()
     deadlocks = [e for e in errors if isinstance(e, psycopg.errors.DeadlockDetected)]
     assert deadlocks == [], deadlocks
     if errors:
         raise errors[0]
-    assert sorted(outcome) == sorted(["job:m2b", f"{other}:refused"])
+    done = "done" if other in ("generate", "refund") else "refused"
+    assert sorted(outcome) == sorted(["job:m2b", f"{other}:{done}"]), (outcome, timeouts)
     drain_payments(storage())
     with psycopg.connect(DB) as conn:
         booked = conn.execute(
@@ -436,9 +593,332 @@ def test_the_funds_pass_and_a_command_holding_the_run_never_deadlock(  # noqa: P
                where t.run_id = any(%s::uuid[]) and t.kind = 'payout' group by t.run_id""",
             ([r1, r2],),
         ).fetchall()
+        refunds = conn.execute(
+            """select q.status, t.status, coalesce(f.download_count, -1)
+               from public.refund_request q
+               join public.bank_transfer t on t.id = q.transfer_id
+               left join public.transfer_file f on f.id = t.transfer_file_id
+               where q.payment_id = %s order by q.requested_at""",
+            (refund.get("payment"),),
+        ).fetchall()
     assert dict(booked) == {r1: 1, r2: 1}  # each payout booked once (I20)
     assert run_row(r1)["status"] == run_row(r2)["status"] == "booked"
+    if other == "refund":  # executed by its batch line; the rest asked for the next file
+        assert [tuple(r) for r in refunds] == [
+            ("executed", "booked", 1),
+            ("requested", "ordered", -1),
+        ]
+    if other == "generate":  # the refund in the new file, not downloaded yet
+        assert [tuple(r) for r in refunds] == [("requested", "in_file", 0)]
     _no_violation(tenant)
+
+
+# -- concurrency-2: the payments of late lines locked before the allocation lock -----------------
+
+
+@pytest.fixture
+def late_run(tmp_path: Path) -> dict[str, Any]:
+    """Martin's payout of 1 640,00 € in a downloaded file, approved on time while its line's
+    latest execution date (set in the draft before approval: the header, which the approval reads,
+    keeps the later one) is yesterday: debited today, it is late and its breach row is written at
+    the booking — the foreign key key-share locks its payment. That payment (2 100,00 € paid on a
+    file of 2 000,00 €) keeps 100,00 € of overpayment ops may refund. Its debit is on a statement
+    imported, the job's message taken off unrun."""
+    tenant = remittance_tenant()
+    _own_account(tenant)
+    f1 = _file(tenant, 200_000)
+    ids = statement(tenant, storage(), [bank_credit(210_000, rf=f1.rf)],
+                    f"L{uuid.uuid4().hex[:6].upper()}", recent_business_day())  # fmt: skip
+    payment = next(iter(ids.values()))
+    run = request_run(tenant)
+    with psycopg.connect(DB) as conn, conn.transaction():
+        yesterday = conn.execute(
+            "select max(c.day) from public.business_calendar c "
+            "where c.scope = 'FR-conservative' and not c.closed and c.day < %s",
+            (paris_today(),),
+        ).fetchone()
+        assert yesterday is not None
+        conn.execute(
+            "update private.remittance_draft_line set latest_execution_date = %s where run_id = %s",
+            (yesterday[0], run),
+        )
+    approve(tenant, run)
+    drain_remittances()
+    assert run_row(run)["status"] == "approved"
+    f, data = _downloaded(tenant, tmp_path)
+    opening, last = _last_closing(tenant)
+    day = max(paris_today(), last)
+    assert day > yesterday[0]
+    entries = debits_of(pain001.read(data), booking_date=day, ref_prefix=f"K{uuid.uuid4().hex[:5]}")
+    stmt = f"S-{uuid.uuid4().hex[:10]}"
+    doc = make_doc(entries, iban=tenant["iban"], from_date=day, to_date=day,
+                   opening_minor=opening, stmt_id=stmt)  # fmt: skip
+    _import_only(render_camt053(doc, "08"), tenant, f"{stmt}.xml")
+    t = _run_transfer(run)
+    with psycopg.connect(DB) as conn:
+        line = conn.execute(
+            "select id from public.bank_transaction where end_to_end_id = %s", (t["end_to_end_id"],)
+        ).fetchone()
+        late = conn.execute(
+            "select payment_id::text from public.remittance_line where run_id = %s "
+            "and latest_execution_date < %s",
+            (run, day),
+        ).fetchall()
+    assert line is not None and [r[0] for r in late] == [payment]
+    return {"tenant": tenant, "run": run, "payment": payment, "file": f, "transfer": t,
+            "line": str(line[0]), "org": str(tenant["servicer"])}  # fmt: skip
+
+
+def _funds_pass(org: str, pids: dict[str, int], errors: list[BaseException]) -> None:
+    """The debit job's funds message (its own transaction), in a session that reports a deadlock
+    after DEADLOCK_TIMEOUT_MS."""
+    try:
+        with _session() as conn:
+            pids["funds"] = conn.info.backend_pid
+            with conn.transaction():
+                run_process_debits(conn, {"organization_id": org, "funds_after": None})
+    except BaseException as exc:  # asserted by the tests
+        errors.append(exc)
+
+
+def test_the_funds_pass_and_a_command_holding_a_late_line_s_payment_never_deadlock(  # noqa: PLR0915
+    late_run: dict[str, Any],
+) -> None:
+    """Review concurrency-2: the funds pass books a late payout; its breach row's foreign key
+    key-share locks the late line's payment. request_refund (file mode) holds that payment FOR
+    UPDATE, then waits for the allocation lock. The funds pass takes that key-share lock before the
+    allocation lock (private.post_bank_bookings, in id order), so it never waits for the payment
+    while holding the allocation lock. Staged: a third session holds the allocation lock; the funds
+    pass queues on it (holding the payment's key share); the refund then waits for the payment; the
+    lock is released: the funds pass books, the refund follows. Mutants: the key-share statement
+    deleted, or moved after the allocation lock — the refund takes the payment first and queues
+    behind the funds pass, which then waits for the payment under the allocation lock: a
+    deadlock (40P01)."""
+    x = late_run
+    assert _lock_timeout_ms(COMMANDS["refund"]) > DEADLOCK_TIMEOUT_MS
+    args = _refund_args(x["payment"], 10_000)
+    pids: dict[str, int] = {}
+    errors: list[BaseException] = []
+    outcome: list[str] = []
+    timeouts: list[int] = []
+
+    def refund() -> None:
+        try:
+            with _session() as conn:
+                pids["refund"] = conn.info.backend_pid
+
+                def run() -> None:
+                    with conn.transaction():
+                        as_user(conn, x["tenant"]["staff"], "aal2")
+                        conn.execute("set local statement_timeout = '60s'")
+                        conn.execute(REQUEST_REFUND, args)
+
+                done, n = _retried(run, None, None)
+                timeouts.append(n)
+                outcome.append(f"refund:{done}")
+        except BaseException as exc:  # a deadlock included: fails the test
+            errors.append(exc)
+
+    funds = threading.Thread(target=_funds_pass, args=(x["org"], pids, errors))
+    command = threading.Thread(target=refund)
+    with psycopg.connect(DB) as holder, holder.transaction():
+        holder.execute("select pg_advisory_xact_lock(hashtext('payments:' || %s))", (x["org"],))
+        funds.start()
+        for _ in range(1500):
+            if "funds" in pids:
+                break
+            time.sleep(0.01)
+        assert _waits(pids["funds"]), "the funds pass never queued on the allocation lock"
+        command.start()
+        for _ in range(1500):
+            if "refund" in pids:
+                break
+            time.sleep(0.01)
+        assert _waits(pids["refund"], None), "the refund never waited"
+    funds.join(120)
+    command.join(120)
+    assert not funds.is_alive() and not command.is_alive()
+    deadlocks = [e for e in errors if isinstance(e, psycopg.errors.DeadlockDetected)]
+    assert deadlocks == [], deadlocks
+    if errors:
+        raise errors[0]
+    assert outcome == ["refund:done"], (outcome, timeouts)
+    with psycopg.connect(DB) as conn:
+        booked = conn.execute(
+            "select count(*) from public.bank_line_booking where bank_transaction_id = %s",
+            (x["line"],),
+        ).fetchone()
+        breach = conn.execute(
+            "select payment_id::text from public.remittance_deadline_breach where run_id = %s",
+            (x["run"],),
+        ).fetchall()
+        asked = conn.execute(
+            "select status, execution_mode from public.refund_request where payment_id = %s",
+            (x["payment"],),
+        ).fetchall()
+    assert booked is not None and booked[0] == 1
+    assert run_row(x["run"])["status"] == "booked"
+    assert [r[0] for r in breach] == [x["payment"]]  # the late line's, at the booking
+    assert [tuple(r) for r in asked] == [("requested", "file")]
+    _no_violation(x["tenant"])
+
+
+def test_the_job_and_a_refund_holding_a_late_line_s_payment_never_deadlock(  # noqa: PLR0915
+    late_run: dict[str, Any],
+) -> None:
+    """Plan §4.3, the harness above with the job's first message (a payer's return on the
+    statement: its M2b pass takes the allocation lock first): request_refund holds the late
+    line's payment, then queues behind the job on the allocation lock. The M2b pass commits
+    without the funds pass; the refund gets the lock; the funds message then key-shares the
+    payment and books the late payout. With the funds pass in the M2b pass's transaction — even
+    silent, its summary unchanged (mutant MERGED B) — it would wait for that payment under the
+    allocation lock the refund waits for: a deadlock (the key-share lock before the allocation
+    lock cannot help once the M2b pass holds it)."""
+    x = late_run
+    org = x["org"]
+    opening, last = _last_closing(x["tenant"])
+    day = max(paris_today(), last)
+    ref = f"P{uuid.uuid4().hex[:6].upper()}"
+    stmt = f"S-{uuid.uuid4().hex[:10]}"
+    doc = make_doc([return_entry(5_000, f"E2E{uuid.uuid4().hex[:12].upper()}", f"{ref}R", day)],
+                   iban=x["tenant"]["iban"], from_date=day, to_date=day, opening_minor=opening,
+                   stmt_id=stmt)  # fmt: skip
+    _import_only(render_camt053(doc, "08"), x["tenant"], f"{stmt}.xml")
+    args = _refund_args(x["payment"], 10_000)
+    pids: dict[str, int] = {}
+    errors: list[BaseException] = []
+    outcome: list[str] = []
+    timeouts: list[int] = []
+    go = threading.Event()
+
+    def job() -> None:
+        try:
+            with _session() as conn:
+                pids["job"] = conn.info.backend_pid
+                with conn.transaction():  # the job's first message (the queue's transaction)
+                    summary = run_process_debits(
+                        conn, {"type": "process_debits", "organization_id": org}
+                    )
+                outcome.append("job:with_funds" if "funds" in summary else "job:m2b")
+            drain_payments(storage())  # then the funds message it queued, in its own
+        except BaseException as exc:  # asserted below
+            errors.append(exc)
+
+    def refund() -> None:
+        try:
+            with _session() as conn:
+                pids["refund"] = conn.info.backend_pid
+                go.wait(30)
+
+                def run() -> None:
+                    with conn.transaction():
+                        as_user(conn, x["tenant"]["staff"], "aal2")
+                        conn.execute("set local statement_timeout = '60s'")
+                        conn.execute(REQUEST_REFUND, args)
+
+                done, n = _retried(run, None, None)
+                timeouts.append(n)
+                outcome.append(f"refund:{done}")
+        except BaseException as exc:  # a deadlock included: fails the test
+            errors.append(exc)
+
+    a, b = threading.Thread(target=job), threading.Thread(target=refund)
+    with psycopg.connect(DB) as holder, holder.transaction():
+        holder.execute("select pg_advisory_xact_lock(hashtext('payments:' || %s))", (org,))
+        a.start()
+        b.start()
+        for _ in range(1500):
+            if "job" in pids and "refund" in pids:
+                break
+            time.sleep(0.01)
+        assert _waits(pids["job"]), "the job's first message never queued"
+        go.set()
+        assert _waits(pids["refund"]), "the refund never queued behind it, holding the payment"
+    a.join(120)
+    b.join(120)
+    assert not a.is_alive() and not b.is_alive()
+    deadlocks = [e for e in errors if isinstance(e, psycopg.errors.DeadlockDetected)]
+    assert deadlocks == [], deadlocks
+    if errors:
+        raise errors[0]
+    assert sorted(outcome) == ["job:m2b", "refund:done"], (outcome, timeouts)
+    drain_payments(storage())
+    with psycopg.connect(DB) as conn:
+        breach = conn.execute(
+            "select payment_id::text from public.remittance_deadline_breach where run_id = %s",
+            (x["run"],),
+        ).fetchall()
+    assert run_row(x["run"])["status"] == "booked"
+    assert [r[0] for r in breach] == [x["payment"]]
+    _no_violation(x["tenant"])
+
+
+def _nowait(sql: str, *params: Any) -> bool:
+    """Whether a session gets the lock at once (each statement its own transaction)."""
+    with psycopg.connect(DB, autocommit=True) as conn:
+        try:
+            row = conn.execute(sql, params).fetchone()
+        except psycopg.errors.LockNotAvailable:
+            return False
+    return row is None or row[0] is not False
+
+
+def test_the_funds_pass_waits_for_the_allocation_lock_holding_only_what_comes_before_it(
+    late_run: dict[str, Any],
+) -> None:
+    """Plan §4.3 (035's « a second session holding the allocation lock »; review round 2: a
+    pgTAP test cannot stage it, its own transaction holds that lock from its fixtures and a dblink
+    session cannot see them): while another session holds the allocation lock, the funds pass
+    waits for it holding the run's row (FOR UPDATE), the paying account (FOR SHARE) and the late
+    line's payment (FOR KEY SHARE: concurrency-2), and not yet the line, the remit lock, the file or
+    the transfer — ADR-0014's order (runs → payout accounts → bank accounts → payments →
+    `payments:<org>` → lines → `remit:<org>` → files → transfers). Released, it books."""
+    x = late_run
+    t = x["transfer"]
+    pids: dict[str, int] = {}
+    errors: list[BaseException] = []
+    funds = threading.Thread(target=_funds_pass, args=(x["org"], pids, errors))
+    with psycopg.connect(DB) as holder, holder.transaction():
+        holder.execute("select pg_advisory_xact_lock(hashtext('payments:' || %s))", (x["org"],))
+        funds.start()
+        for _ in range(1500):
+            if "funds" in pids:
+                break
+            time.sleep(0.01)
+        assert _waits(pids["funds"]), "the funds pass never queued on the allocation lock"
+        held = {
+            "run": not _nowait(
+                "select true from public.remittance_run where id = %s for update nowait", x["run"]
+            ),
+            "bank_account": not _nowait(
+                "select true from public.bank_account where id = %s for update nowait",
+                x["tenant"]["bank"],
+            ),
+            "payment": not _nowait(
+                "select true from public.payment where id = %s for update nowait", x["payment"]
+            ),
+            "line": not _nowait(
+                "select true from public.bank_transaction where id = %s for update nowait",
+                x["line"],
+            ),
+            "remit": not _nowait(
+                "select pg_try_advisory_xact_lock(hashtext('remit:' || %s))", x["org"]
+            ),
+            "file": not _nowait(
+                "select true from public.transfer_file where id = %s for update nowait",
+                x["file"]["id"],
+            ),
+            "transfer": not _nowait(
+                "select true from public.bank_transfer where id = %s for update nowait", t["id"]
+            ),
+        }
+    funds.join(120)
+    assert not funds.is_alive()
+    if errors:
+        raise errors[0]
+    assert held == {"run": True, "bank_account": True, "payment": True, "line": False,
+                    "remit": False, "file": False, "transfer": False}  # fmt: skip
+    assert run_row(x["run"])["status"] == "booked"
 
 
 # -- a returned payout re-proposed keeps its R124-6 date (K2; review legal-texts#1, money-2) ----

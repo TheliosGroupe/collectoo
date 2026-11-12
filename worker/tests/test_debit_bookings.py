@@ -196,6 +196,29 @@ def test_a_batch_line_is_never_a_best_subset() -> None:
     assert reason(batch(82000)) == TRANSFER_UNKNOWN
 
 
+def test_a_batch_line_of_a_file_never_handed_out_is_that_first() -> None:
+    """Review round 2 (T2's precedence): a batch line naming the PmtInf of a file the bank never
+    had (never downloaded) is `transfer_not_handed_out`, even when a member of that PmtInf is
+    cancelled and the line could be it — the file's state is read before its members' (mutant:
+    the file's check removed, the line reads `cancelled_transfer_debited`)."""
+    live = fact("T1", 82000, role="member", downloads=0, file_status="generated")
+    gone = replace(live, id="T2", amount_minor=50000, status="cancelled")
+    assert reason(batch(50000, live, gone)) == TRANSFER_NOT_HANDED_OUT
+    assert reason(batch(132000, live, gone)) == TRANSFER_NOT_HANDED_OUT
+    # handed out, the same line is the cancelled member's possible debit (P0)
+    handed = [
+        replace(
+            m,
+            file_status="downloaded",
+            batch_file_status="downloaded",
+            file_download_count=1,
+            batch_file_download_count=1,
+        )
+        for m in (live, gone)
+    ]
+    assert reason(batch(50000, *handed)) == CANCELLED_TRANSFER_DEBITED
+
+
 def test_a_batch_line_is_never_booked_when_one_member_could_not_be() -> None:
     """Review T2 (mutant P16): in a downloaded file, a batch line whose sum and kind are right is
     left to ops, never booked, when one of its members could not be booked on its own: its run
