@@ -1234,8 +1234,15 @@ describe("M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is 
     for (const [what, text] of payoutTexts) {
       expect(text, what).not.toMatch(read);
       expect(text, what).toMatch(/comptabilisé depuis le relevé/);
-      // M2c-6b-1 (plan §4.2): a payout's debit is now booked at the statement's import
-      expect(text, what).toContain("automatiquement");
+      // M2c-6b-1 (plan §4.2): a payout's debit is now booked at the statement's import — review legal-texts#3: only a
+      // line that carries its RMT reference or its lot's (a CSV without the reference is not booked by itself)
+      expect(text, what).toContain(
+        "automatiquement à l'import quand la ligne porte sa référence RMT ou celle de son lot",
+      );
+      expect(text, what).toContain(
+        "sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir",
+      );
+      expect(text, what).not.toContain("(automatiquement, à l");
       expect(text, what).not.toContain(
         "pas encore disponible pour un reversement",
       );
@@ -1256,8 +1263,12 @@ describe("M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is 
     for (const [what, text] of fileTexts) {
       expect(text, what).not.toMatch(read);
       expect(text, what).toMatch(/comptabilisés depuis le relevé/);
+      // review legal-texts#3: « automatiquement » only for a line carrying the reference (RMT/SWP) or its lot's
       expect(text, what).toContain(
-        "à l'import du relevé : automatiquement pour les reversements et la quote-part du cabinet, dès son rattachement pour un remboursement",
+        "à l'import du relevé : automatiquement pour un reversement ou la quote-part du cabinet dont la ligne porte la référence RMT ou SWP, ou celle de son lot, sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir ; dès son rattachement pour un remboursement",
+      );
+      expect(text, what).not.toContain(
+        "automatiquement pour les reversements et la quote-part du cabinet, dès",
       );
       expect(text, what).not.toContain("ne peuvent pas encore l'être");
     }
@@ -1325,5 +1336,62 @@ describe("M2c-6a review, round 6: a file the bank executed is not served again (
       code: "file_executed",
       blocked: [],
     });
+  });
+});
+
+// review M2c-6b-1 (legal-texts#3, with its verifier's qualification): 6b-1 books a payout's debit, and the return of a
+// payout the payee's bank sends back after its debit; a payout the bank does not execute (refused, or not authorised
+// after « Nom non concordant ») leaves no statement line, so nothing books its « rejection »: it stays « en cours »
+// until the cancellation after download is available (M2c-6b-3, OQ-81)
+describe("M2c-6b-1 review: no text promises that a payout the bank does not execute is read from the statement", () => {
+  const rejection: [string, string][] = [
+    ["payee mismatch", payeeMismatchFollowUp(false)],
+    ["the run's page", runPayoutInDownloadedFileNote("TF-2026-000142")],
+    [
+      "run_payout_in_downloaded_file",
+      errorText("run_payout_in_downloaded_file"),
+    ],
+  ];
+
+  it("drops « ou son rejet » and says such a payout leaves no line and stays « en cours »", () => {
+    for (const [what, text] of rejection) {
+      expect(text, what).not.toContain("ou son rejet");
+      expect(text, what).toContain("n'apparaît sur aucun relevé");
+      expect(text, what).toMatch(
+        /reste en cours|il reste « en cours »|et reste en cours/,
+      );
+      expect(text, what).toContain("non autorisé après");
+      expect(text, what).toContain("voyez avec la banque");
+      expect(text, what).toContain("prévenez le support");
+      // the cancellation after download is still off (the switch stays off in 6b-1)
+      expect(text, what).toContain("pas encore disponible");
+      expect(text, what).not.toMatch(/demandez (son |l')annulation/);
+    }
+    // a payout the payee's bank sends back after its debit is read: its return
+    expect(payeeMismatchFollowUp(false)).toContain(
+      "si la banque du bénéficiaire le renvoie, son retour",
+    );
+    expect(runPayoutInDownloadedFileNote("TF-2026-000142")).toContain(
+      "Si la banque du bénéficiaire le renvoie, son retour est comptabilisé de même",
+    );
+  });
+
+  it("says a file's transfer the bank does not execute (the file not deposited) leaves no line", () => {
+    for (const [what, text] of [
+      ["DOWNLOADED_FILE_NOTE", DOWNLOADED_FILE_NOTE],
+      [
+        "transfer_bank_booking_required",
+        errorText("transfer_bank_booking_required"),
+      ],
+      ["file_not_marked_sent", checkLabel("file_not_marked_sent").help],
+    ]) {
+      expect(text, what).toContain("n'apparaît sur aucun relevé");
+      expect(text, what).toContain(
+        "jusqu'à ce que l'annulation après téléchargement soit disponible",
+      );
+    }
+    expect(checkLabel("file_not_marked_sent").help).toContain(
+      "Un fichier jamais déposé n'apparaît sur aucun relevé",
+    );
   });
 });

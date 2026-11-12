@@ -11,6 +11,7 @@ import {
   invoiceKind,
   listPage,
   neutraliseText,
+  returnedRuns,
   pageOf,
   runStatementState,
   runStatusText,
@@ -218,6 +219,43 @@ describe("the client's statements read the run as it stands (review M2c-5 figure
       net: null,
     });
     expect(statementRunView(null)).toEqual({ label: "Statut indisponible", tone: "neutral", net: null });
+  });
+});
+
+// review M2c-6b-1 (legal-texts#6, K4): a returned payout's run stays booked (§9.7) — « Virement débité de notre compte »
+// in green would read as paid; the client's summary names its runs whose payout came back (`returned_runs`)
+describe("a run whose payout came back is never shown as paid (review M2c-6b-1 legal-texts#6, K4)", () => {
+  it("says the payout came back unpaid, on which day, and that it will be paid again, in the error tone", () => {
+    expect(statementRunView({ status: "booked", net_minor: "164000" }, "2026-11-05")).toEqual({
+      label: "Virement revenu impayé le 05/11/2026 : il vous sera reversé à nouveau",
+      tone: "error",
+      net: "164000",
+    });
+    // without a return, as before
+    for (const returnedOn of [undefined, null])
+      expect(statementRunView({ status: "booked", net_minor: "164000" }, returnedOn)).toEqual({
+        label: "Virement débité de notre compte",
+        tone: "ok",
+        net: "164000",
+      });
+    // only a booked run's payout can come back: anything else keeps its own words
+    expect(statementRunView({ status: "approved", net_minor: "164000" }, "2026-11-05").label).toBe("Virement ordonné");
+  });
+
+  it("reads the summary's returned runs by run id, ignoring what is not well formed", () => {
+    const runs = returnedRuns({
+      returned_runs: [
+        { run_id: "r1", returned_on: "2026-11-05", amount_minor: "164000" },
+        { run_id: "r2", returned_on: "05/11/2026", amount_minor: "1" },
+        { run_id: "r3", returned_on: "2026-11-06", amount_minor: 164000 },
+        { returned_on: "2026-11-06", amount_minor: "1" },
+        null,
+      ],
+    });
+    expect([...runs.keys()]).toEqual(["r1"]);
+    expect(runs.get("r1")).toEqual({ run_id: "r1", returned_on: "2026-11-05", amount_minor: "164000" });
+    for (const summary of [null, {}, { returned_runs: null }, { returned_runs: "x" }])
+      expect(returnedRuns(summary as never).size).toBe(0);
   });
 });
 

@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { ErrorCode } from "@/lib/boarding/forms";
+import { type ErrorCode, PAYOUT_BOOKED_WHEN } from "@/lib/boarding/forms";
 import type { Database } from "@/lib/database.types";
 import { money } from "@/lib/payments/statements";
 import { frenchDate } from "@/lib/remittance/runs";
@@ -110,11 +110,10 @@ const REFUSAL_TEXT: Record<string, string> = {
     "Cette facture est déjà entièrement rectifiée : il ne reste rien à créditer.",
   // review round 6: true with cancellation after download off — once its transfer is in a downloaded file, a run can no
   // longer be cancelled; round 7 (N3): it waits for its debit to be booked from the statement (M2c-6b-1: at its import)
-  in_flight:
-    "Un reversement validé compense cette facture sur son virement, dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que ce virement n'est dans aucun fichier téléchargé, le reversement peut aussi être annulé ; une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (automatiquement, à son import).",
+  // (review M2c-6b-1, legal-texts#3: automatically only when the line carries its RMT reference or its lot's)
+  in_flight: `Un reversement validé compense cette facture sur son virement, dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que ce virement n'est dans aucun fichier téléchargé, le reversement peut aussi être annulé ; une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`,
   // review M2c-5b (ledger-vat#0, F1): the invoice's own run, cancelled, would credit the invoice in full
-  run_in_flight:
-    "Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que son virement n'est dans aucun fichier téléchargé, il peut aussi être annulé (ce qui rectifierait toute la facture) ; une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (automatiquement, à son import).",
+  run_in_flight: `Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que son virement n'est dans aucun fichier téléchargé, il peut aussi être annulé (ce qui rectifierait toute la facture) ; une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`,
   file_not_on_invoice: "Ce dossier n'a plus rien de facturé sur cette facture.",
   amount_required: "Indiquez un montant HT positif, au centime près.",
   more_than_remaining:

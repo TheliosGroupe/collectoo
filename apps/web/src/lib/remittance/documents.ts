@@ -118,17 +118,58 @@ export function runStatusText(status: string, net: string | null): string {
  * A statement's line in the client space, from its run as it stands (review M2c-5 figures#1 = tests-ui#1, K7): the
  * statement's payload is frozen when it is drawn, so its status stays « approved » after a cancellation or the debit;
  * the page reads `remittance_run.status` and `net_minor` live. A cancelled run shows no amount to transfer.
+ *
+ * Review M2c-6b-1 (legal-texts#6, K4): a run whose payout the payee's bank sent back stays booked (design §9.7), so
+ * « Virement débité de notre compte » in green would read as paid; `returnedOn` (the return credit's booking date, from
+ * the summary's `returned_runs`) words it as come back unpaid, to be paid again, in the error tone — the amount kept.
  */
-export function statementRunView(run: { status: string; net_minor: string | number | null } | null): {
+export function statementRunView(
+  run: { status: string; net_minor: string | number | null } | null,
+  returnedOn?: string | null,
+): {
   label: string;
   tone: "neutral" | "ok" | "error";
   net: string | null;
 } {
   if (!run) return { label: "Statut indisponible", tone: "neutral", net: null };
   const net = run.net_minor === null ? null : String(run.net_minor);
+  if (run.status === "booked" && returnedOn)
+    return {
+      label: `Virement revenu impayé le ${frenchDay(returnedOn)} : il vous sera reversé à nouveau`,
+      tone: "error",
+      net,
+    };
   const label = runStatusText(run.status, net);
   if (run.status === "cancelled") return { label, tone: "error", net: null };
   return { label, tone: run.status === "booked" ? "ok" : "neutral", net };
+}
+
+/** A run of the client whose payout came back (`client_remittance_summary.returned_runs`, review M2c-6b-1 K4). */
+export type ReturnedRun = { run_id: string; returned_on: string; amount_minor: string };
+
+/**
+ * The client's runs whose payout came back, by run id, from the summary's `returned_runs` (amounts text in minor
+ * units, dates ISO): an entry that is not well formed is left out — the page then keeps the run's own words, never a
+ * guess.
+ */
+export function returnedRuns(summary: { returned_runs?: unknown } | null): Map<string, ReturnedRun> {
+  const out = new Map<string, ReturnedRun>();
+  const rows = summary?.returned_runs;
+  if (!Array.isArray(rows)) return out;
+  for (const r of rows as unknown[]) {
+    if (!r || typeof r !== "object") continue;
+    const { run_id, returned_on, amount_minor } = r as Record<string, unknown>;
+    if (
+      typeof run_id === "string" &&
+      run_id !== "" &&
+      typeof returned_on === "string" &&
+      /^\d{4}-\d{2}-\d{2}$/.test(returned_on) &&
+      typeof amount_minor === "string" &&
+      /^\d+$/.test(amount_minor)
+    )
+      out.set(run_id, { run_id, returned_on, amount_minor });
+  }
+  return out;
 }
 
 /**
@@ -158,6 +199,8 @@ export type RemittanceSummary = {
   owed: OwedEntry[];
   in_flight: { number: string; status: string; currency: string; net_minor: string; requested_execution_date: string | null }[];
   next_run_day?: string | null;
+  /** review M2c-6b-1 (K4): the client's runs whose payout came back (read through returnedRuns) */
+  returned_runs?: unknown;
 };
 
 const isMinor = (v: unknown): v is string => typeof v === "string" && /^-?\d+$/.test(v);

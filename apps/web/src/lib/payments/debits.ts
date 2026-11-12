@@ -1,4 +1,4 @@
-import type { ErrorCode } from "@/lib/boarding/forms";
+import { type ErrorCode, FILE_BOOKED_WHEN } from "@/lib/boarding/forms";
 import {
   type Notification,
   notificationState,
@@ -162,8 +162,9 @@ export const DEBIT_REVIEW: Record<string, string> = {
     "Lot mêlant des virements de natures différentes : rien n'est comptabilisé ; demandez à la banque le détail du lot.",
   return_differs:
     "Retour d'un virement du cabinet pour plus que son montant : rien n'est comptabilisé ; vérifiez dans la banque.",
+  // review M2c-6b-1 (T4, K5): also a return dated before its debit (the ledger never dates a reversal before its entry)
   return_before_debit:
-    "Retour d'un virement du cabinet dont le débit n'est pas encore comptabilisé : nouvel essai automatique une fois le débit comptabilisé.",
+    "Retour d'un virement du cabinet sans débit comptabilisé avant lui. Si le débit n'est pas encore comptabilisé, le retour est repris automatiquement à l'import d'un relevé, une fois le débit comptabilisé. S'il est daté d'avant le débit, rien n'est comptabilisé : vérifiez les deux lignes dans la banque et prévenez le support.",
 };
 
 /** The reasons that may mean money left twice or without an order (P0, first in « À classer »; plan §2.3). */
@@ -179,16 +180,53 @@ export function debitReviewRank(reason: string | null): number {
   return reason !== null && P0_DEBIT_REVIEWS.has(reason) ? 0 : 1;
 }
 
+/** Our payouts' and sweeps' end-to-end ids, and our files' PmtInfIds (as the worker writes them). */
+const OUR_TRANSFER_ID = /^(RMT|SWP)[0-9A-F]{12}$/;
+const OUR_PMT_INF = /^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$/;
+
 /**
- * Whether « À classer » offers the M2b links on a line — a payment's return (« Retour du paiement … ») and our refunds
- * (« Remboursement … »): only on the lines M2b reads as such, a debit read as a return, our refund or another debit, and
- * a credit undoing a debit. Our own transfers out and the credits from our own account or from a client (M2c-1 kinds)
- * never: the database refuses those links (« debit link refused: not_a_return »; review M2c-1).
+ * M2c-6b-1 (plan §2.4 rule 5; review money-1, K1): a line of our payouts or sweeps, as the database reads it — a debit
+ * carrying our RMT/SWP end-to-end id (whatever kind the statement gives it), a debit with no end-to-end id carrying one
+ * of our files' PmtInfIds (a batch line: the database also checks the PmtInf is one of that account's files), and a
+ * credit return whose original id (or its own, when the bank gives none) is our RMT/SWP id. Such a line is only ever
+ * booked from the statement (the debit job, or ops in M2c-6b-2): never a payment's return or its loss, a refund, a
+ * refund come back or an explanation — the database refuses each (`own_transfer_line`).
+ */
+export function isOurTransferLine(o: {
+  direction: string;
+  kind: string;
+  end_to_end_id?: string | null;
+  original_end_to_end_id?: string | null;
+  payment_info_id?: string | null;
+}): boolean {
+  if (o.direction === "debit")
+    return (
+      OUR_TRANSFER_ID.test(o.end_to_end_id ?? "") ||
+      (!o.end_to_end_id && OUR_PMT_INF.test(o.payment_info_id ?? ""))
+    );
+  return (
+    o.direction === "credit" &&
+    o.kind === "return" &&
+    OUR_TRANSFER_ID.test(o.original_end_to_end_id ?? o.end_to_end_id ?? "")
+  );
+}
+
+/**
+ * Whether « À classer » offers the M2b links on a line — a payment's return (« Retour du paiement … », and its excess
+ * as the servicer's loss) and our refunds (« Remboursement … », « Remboursement revenu … »): only on the lines M2b reads
+ * as such, a debit read as a return, our refund or another debit, and a credit undoing a debit. Our own transfers out
+ * and the credits from our own account or from a client (M2c-1 kinds) never: the database refuses those links
+ * (« debit link refused: not_a_return »; review M2c-1). Nor our payouts' and sweeps' lines (review M2c-6b-1 money-1:
+ * `own_transfer_line`, isOurTransferLine).
  */
 export function offersPaymentLinks(o: {
   direction: string;
   kind: string;
+  end_to_end_id?: string | null;
+  original_end_to_end_id?: string | null;
+  payment_info_id?: string | null;
 }): boolean {
+  if (isOurTransferLine(o)) return false;
   if (o.direction === "debit")
     return (
       o.kind === "return" || o.kind === "refund_out" || o.kind === "other_debit"
@@ -252,27 +290,25 @@ export function explainable(o: {
   originalEndToEndId?: string | null;
   paymentInfoId?: string | null;
 }): boolean {
-  // M2c-6b-1 (plan §2.3, the database's not_explainable): our payout's or sweep's debit (its RMT or SWP id, or a batch
-  // line of one of our PmtInfs) and the return of one are booked from the statement, never explained away
+  // M2c-6b-1 (plan §2.3; the database's own_transfer_line, review money-1): our payout's or sweep's debit (its RMT or
+  // SWP id, or a batch line of one of our PmtInfs) and the return of one are booked from the statement, never explained
+  // away — nor any line carrying one of our RMT/SWP ids, whichever way
   if (
+    isOurTransferLine({
+      direction: o.direction,
+      kind: o.kind,
+      end_to_end_id: o.endToEndId,
+      original_end_to_end_id: o.originalEndToEndId,
+      payment_info_id: o.paymentInfoId,
+    }) ||
     OUR_TRANSFER_ID.test(o.endToEndId ?? "") ||
     OUR_TRANSFER_ID.test(o.originalEndToEndId ?? "")
-  )
-    return false;
-  if (
-    o.direction === "debit" &&
-    !o.endToEndId &&
-    OUR_PMT_INF.test(o.paymentInfoId ?? "")
   )
     return false;
   if (o.direction !== "debit") return true;
   if (o.kind === "refund_out") return false;
   return !(o.kind === "return" && o.namesPayment);
 }
-
-/** Our payouts' and sweeps' end-to-end ids, and our files' PmtInfIds (as the worker writes them). */
-const OUR_TRANSFER_ID = /^(RMT|SWP)[0-9A-F]{12}$/;
-const OUR_PMT_INF = /^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$/;
 
 /**
  * What a return does, before ops confirm it (full or partial). A payment on no file has nothing imputed, no receipt
@@ -532,10 +568,11 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     // review M2c-4 (tests-ui#3, C4): also, at once, a draft whose preparation failed (details.prepare_failed)
     help: "Un brouillon de reversement attend sa validation depuis plus d'un jour ouvré, ou sa préparation a échoué et rien ne la relance : validez-le, ou ouvrez-le et cliquez « Actualiser » (ou « Abandonner »).",
   },
-  // review M2c-4 (legal#3): an approved run is not paid until the bank's debit
+  // review M2c-4 (legal#3): an approved run is not paid until the bank's debit; review M2c-6b-1 (legal-texts#2, K3):
+  // what the check knows is that the debit is not booked — the statement may show it on a line the job cannot book
   remittance_payout_overdue: {
     label: "Reversement validé non débité après la date limite",
-    help: "Le virement d'un reversement validé n'est pas débité par la banque alors que la dernière date d'exécution de certains de ses encaissements est passée (art. R124-6 CPCE) : vérifiez qu'il a été transmis et exécuté.",
+    help: "La dernière date d'exécution de certains encaissements d'un reversement validé est passée (art. R124-6 CPCE) et son débit n'est pas comptabilisé : vérifiez que le virement a été transmis et exécuté. Si le relevé montre ce débit sans sa référence, ou dans une ligne groupée d'un autre montant, la ligne attend dans « Débits et retours » ; le dépassement n'est enregistré qu'une fois les relevés de cette date importés sans aucune ligne qui puisse être ce débit.",
   },
   remittance_payout_not_executed: {
     label: "Reversement non exécuté à la date demandée",
@@ -577,9 +614,11 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Fichier de virements non téléchargé",
     help: "Un fichier généré depuis plus d'un jour ouvré n'a pas été téléchargé : téléchargez-le et déposez-le à la banque (s'il n'est plus à jour, le téléchargement le remplace : régénérez-le), ou annulez-le.",
   },
+  // review M2c-6b-1 (legal-texts#3): automatically only for a line carrying the reference; a file never deposited
+  // leaves no line
   file_not_marked_sent: {
     label: "Fichier téléchargé, non marqué comme transmis",
-    help: "Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis ». Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : s'il ne doit pas partir, gardez-le tel quel, vérifiez le relevé et voyez avec la banque ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé (à l'import du relevé : automatiquement pour les reversements et la quote-part du cabinet, dès son rattachement pour un remboursement).",
+    help: `Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis ». Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : s'il ne doit pas partir, gardez-le tel quel, vérifiez le relevé et voyez avec la banque ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé (${FILE_BOOKED_WHEN}). Un fichier jamais déposé n'apparaît sur aucun relevé : ses virements restent en cours jusqu'à ce que l'annulation après téléchargement soit disponible.`,
   },
   transfer_not_debited: {
     label: "Virements sans débit sur le relevé",
@@ -729,9 +768,10 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Virement vers le compte propre revenu",
     help: "La quote-part du cabinet virée vers son compte propre est revenue : vérifiez le compte propre.",
   },
+  // review M2c-6b-1 (legal-texts#7): « dû au client »
   payout_overrun: {
     label: "Reversement au-delà du dû",
-    help: "Un reversement débité dépassait ce que le client était dû : une avance au client est comptabilisée, à récupérer.",
+    help: "Un reversement débité dépassait ce qui restait dû au client : une avance au client est comptabilisée, à récupérer.",
   },
   bank_line_unbooked: {
     label: "Débits du cabinet non comptabilisés",
@@ -741,9 +781,10 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Quote-part du cabinet non virée",
     help: "La part du cabinet reste sur le compte dédié depuis plus de deux jours ouvrés sans virement vers son compte propre : générez le fichier de virements.",
   },
+  // review M2c-6b-1 (legal-texts#4): a top-up moves the servicer's own money to the dedicated account (+5120 / −4679)
   top_up_pending: {
     label: "Approvisionnement attendu",
-    help: "Le compte dédié doit de l'argent au cabinet (frais, avance) et aucun approvisionnement n'est arrivé.",
+    help: "Un approvisionnement du compte dédié depuis le compte propre du cabinet a été demandé il y a plus d'un jour ouvré et son crédit n'apparaît pas encore sur les relevés importés. Vérifiez le virement depuis le compte propre : il couvre ce que le cabinet doit au compte dédié (frais bancaires, avances).",
   },
 };
 
@@ -1003,6 +1044,8 @@ export function debitErrorCode(message: string): ErrorCode {
     return "top_up_differs";
   if (message.includes("not_a_loss")) return "not_a_loss";
   if (message.includes("not_explainable")) return "not_explainable";
+  // review M2c-6b-1 (money-1, K1): our payouts' and sweeps' lines are booked from the statement, never linked
+  if (message.includes("own_transfer_line")) return "own_transfer_line";
   if (message.includes("before_previous_return")) return "link_before_return";
   if (message.includes("payment_returned")) return "link_payment_returned";
   if (message.includes("posting_failed")) return "link_posting_failed";

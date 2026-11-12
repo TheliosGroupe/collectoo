@@ -10,6 +10,7 @@ import {
   inFlightNotes,
   listPage,
   pageOf,
+  returnedRuns,
   statementRunView,
 } from "@/lib/remittance/documents";
 import { createClient } from "@/lib/supabase/server";
@@ -25,7 +26,9 @@ const PAGE_SIZE = 100;
  *
  * Review M2c-5: each statement reads its run as it stands (`remittance_run!run_id`, K7) — never the status frozen in
  * the statement's payload, which stays « approved » after a cancellation or the debit; the in-flight gross is worded as
- * part of « À reverser à ce jour » (K2); the list pages (« Plus anciens »).
+ * part of « À reverser à ce jour » (K2); the list pages (« Plus anciens »). Review M2c-6b-1 (legal-texts#6, K4): a run
+ * whose payout came back reads « Virement revenu impayé le … : il vous sera reversé à nouveau » (the summary's
+ * `returned_runs`: the client cannot read the transfer itself).
  */
 export default async function ClientRemittancesPage({ searchParams }: PageProps<"/client/reversements">) {
   const supabase = await createClient();
@@ -66,6 +69,8 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
   const summary = (summaryData ?? null) as unknown as RemittanceSummary | null;
   const owed = summary?.owed ?? [];
   const notes = inFlightNotes(summary);
+  // review M2c-6b-1 (legal-texts#6, K4): the runs whose payout came back (their run stays booked)
+  const returned = returnedRuns(summary);
   const statements = pageOf(statementRows, PAGE_SIZE);
   const href = (page: number) => (page > 0 ? `/client/reversements?page=${page}` : "/client/reversements");
   return (
@@ -114,9 +119,10 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
         ) : (
           <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
             {statements.rows.map((s) => {
-              // K7: the run as it stands — a cancellation or the debit after the statement was drawn shows here
+              // K7: the run as it stands — a cancellation or the debit after the statement was drawn shows here; review
+              // M2c-6b-1 (K4): and a payout that came back, never « débité » in green
               const run = s.run ?? null;
-              const view = statementRunView(run);
+              const view = statementRunView(run, returned.get(s.run_id)?.returned_on);
               return (
                 <li key={s.run_id} className="flex flex-col gap-1 py-3" data-testid="statement-row">
                   <span className="flex flex-wrap items-center justify-between gap-2">
