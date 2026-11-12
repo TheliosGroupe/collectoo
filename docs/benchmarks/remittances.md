@@ -442,7 +442,7 @@ the 5,000 payouts 3.09 s (2.89 s); the file written and downloaded. The statisti
 | Step | Size | Time | Rows read (keyed, per transfer) | Plan §1.4 |
 |---|---|---|---|---|
 | (b) The file's PmtInf debited as one batch line (no end-to-end id): the funds pass, one transaction (rolled back) | 5,000 members | **31.3 s**; 5,000 bookings | `bank_transfer` 65,050 of which 5,050 by a sequential scan (12 keyed), `transfer_file_item` 30,000 (6), `bank_line_booking` 15,000 (3) | < 60 s |
-| (a) A statement of the file's 5,000 debits, one line per RMT end-to-end id: the import | 5,000 lines | 1.1 s | | |
+| (a) A statement of the file's 5,000 debits, one line per RMT end-to-end id: the import | 5,000 lines | 1.2 s (1.1 s) | | |
 | … the debit job: the M2b pass, then the funds pass in three messages | 5,000 payouts | **22.6 s** (22.9 s): chunks of 2,000, 2,000 and 1,000 lines in 9.2, 9.0 and 4.2 s (9.2, 9.1, 4.4 s) | `bank_transfer` 65,153 (65,162) of which 15,150 by sequential scans (10 keyed), `transfer_file_item` 10,000 (2), `bank_line_booking` 15,000 (3) | each chunk < 60 s; < 120 s |
 | … 200 RMT lines in one funds pass | 200 | not measured in these runs (an estimate of ≈ 0.9 s from the chunks' rate stood here; measured in round 2, below) | | ≈ 1 s |
 | Nightly checks with the 5,000 booked payouts and the 50 cancelled transfers (I19, I20, the bookings' alerts) | 5,050 transfers | **1.05 s** (1.12 s), 0 violations | | < 5 s |
@@ -531,7 +531,7 @@ one transaction, rolled back, its own `pg_stat_xact_user_tables`):
 | 200-member batch line, one funds pass | `bank_transfer` rows read | `transfer_file_item` | time |
 |---|---|---|---|
 | before (the build's rule, mutant `mut_p1`: the old rule in the new migration) | 42,400 | 41,000 | 1.08 s |
-| after | **2,600** (13 a member) | **1,200** (6) | 0.57–0.64 s |
+| after | **2,600** (13 a member) | **1,200** (6) | 0.56–0.64 s |
 
 The bound is 16 and 8 reads a member (+ 50); red before, green after. At 5,000 members the reads are 65,000 / 30,000 /
 15,000 (`bank_line_booking`), none by a sequential scan.
@@ -559,8 +559,10 @@ reads (its transfer by its id); the sweep is ordered only once payouts are booke
 
 The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` alone, right after a reset), final
 migration (2afccb5): **5 passed** in 918.8 s. Fixture 59.0 s / 24.6 s / 724.0 s (prepare jobs 125.1 s, commands 4.7 s,
-approval jobs 585.7 s) / « Générer le fichier » 3.19 s; (b) the batch line **31.8 s** (29.5–31.3 s before; its time
-is the posting — `post_run_settlements` 14.5 s, `ledger_post_set` 6.7 s — not the batch rule); (a) the debit job
+approval jobs 585.7 s) / « Générer le fichier » 3.19 s; (b) the batch line **31.8 s** (29.5–31.3 s before; most of
+its time is the posting — `post_run_settlements` 14.5 s, `ledger_post_set` 6.7 s —, and about 5.7 s the re-check's
+statements over the line's 5,000 rows, quadratic: round 2's verifier, P1, in an emulation; linear since review round 3,
+below); (a) the debit job
 **21.6 s**, chunks 8.5, 9.0 and 4.0 s; the nightly checks with 5,000 booked payouts and 50 cancelled transfers
 **1.12 s** (1.05–1.12 s before), 0 violations, every table read by key or, where the servicer owns the table, by a
 sequential scan (`payment` 5,250 rows of which its own 5,050). The first run with ac15bd4 (the VM busier: fixture

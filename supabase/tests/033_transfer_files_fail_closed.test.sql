@@ -674,8 +674,11 @@ select results_eq($$ select pg_temp.try('04', pg_temp.cancel_run('r5-run-0001', 
              'refund refused: in_downloaded_file'::text, 'refund refused: in_downloaded_file'::text) $$,
   'a run or a refund whose transfer is in a downloaded or sent file is still not cancelled');
 -- review round 7 (round 6's verifier, N3): what those refusals say a downloaded file's transfers wait for — their
--- debits booked from the statement, which a refund's is once linked and a payout's or the sweep's cannot be yet
--- (M2c-6b books them); never « read from the statement » (a payout's debit read changes nothing today)
+-- debits booked from the statement; never « read from the statement » (a payout's debit read changed nothing then).
+-- M2c-6b-1 review round 3 (M4): M2c-6b-1 books the payouts' and the sweep's debits, so the hints no longer say « not yet
+-- possible for a payout or the sweep » nor « son rejet » (no statement shows a rejection): booked from the statement at
+-- their arrival, then the payee bank's return; a transfer refused before execution leaves no line and stays « en cours »;
+-- see the bank and tell support. The refusals themselves are unchanged.
 create or replace function pg_temp.hint(p_user text, p_sql text) returns text language plpgsql as $$
 declare v_hint text;
 begin
@@ -697,6 +700,11 @@ create or replace function pg_temp.waits(p_hint text) returns text language sql 
     case when p_hint ~ 'ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l''être'
            or p_hint ~ 'pas encore possible pour un reversement ni pour la quote-part du cabinet'
            or p_hint ~ 'ce qui n''est pas encore disponible pour un reversement' then 'payout_not_yet' end,
+    case when p_hint ~ 'son rejet' then 'rejection' end,
+    case when p_hint ~ 'banque du bénéficiaire' then 'returned' end,
+    case when p_hint ~ 'n''apparaît sur aucun relevé : il reste « en cours » jusqu''à ce que l''annulation après '
+                       'téléchargement soit disponible' then 'not_executed' end,
+    case when p_hint ~ 'prévenez le support' then 'support' end,
     case when p_hint ~ 'lus? sur le relevé' then 'read' end) $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(array[pg_temp.waits(pg_temp.hint('01', pg_temp.cancel_file('r7-cnf-0001', 'f1'))),
@@ -705,8 +713,9 @@ select is(array[pg_temp.waits(pg_temp.hint('01', pg_temp.cancel_file('r7-cnf-000
                 pg_temp.waits(pg_temp.hint('01', pg_temp.req_tr('r7-rqt-0001', pg_temp.v('m1')))),
                 pg_temp.waits(pg_temp.hint('04', pg_temp.conf_tr('r7-cft-0001', pg_temp.v('m1')))),
                 pg_temp.waits(pg_temp.hint('04', pg_temp.cancel_run('r7-run-0001', 'r1')))],
-  array_fill('booked,payout_not_yet'::text, array[6]),
-  'the refusals'' hints: a downloaded file''s transfers wait for their debits booked from the statement, not yet possible for a payout or the sweep');
+  array_fill('booked,returned,not_executed,support'::text, array[6]),
+  'the refusals'' hints: a downloaded file''s transfers wait for their debits booked from the statement (then a return), '
+  'a transfer refused before execution stays « en cours »; never « not yet possible for a payout », « son rejet » or « read »');
 select is(pg_temp.snapshot(), (select v #>> '{}' from j where k = 'before'), 'and nothing changed');
 
 -- Whoever writes it: the guards --------------------------------------------------------------------------------------

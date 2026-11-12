@@ -27,6 +27,7 @@ from typing import Any, LiteralString
 import psycopg
 import pytest
 from debit_helpers import violations
+from explain_helpers import work
 from integration_helpers import DB, one, storage
 from psycopg.conninfo import make_conninfo
 from psycopg.types.json import Jsonb
@@ -92,6 +93,10 @@ OWN_ROWS: dict[str, LiteralString] = {
     "public.client_notification": """select count(*) from public.client_notification n
                                      join public.organization o on o.id = n.client_organization_id
                                      where o.servicer_organization_id = %s""",
+    # review round 3 (M5): I13 and I14 read the clients' running balances by the servicer's key
+    # (every servicer's, twice, before)
+    "private.client_payable_balance": "select count(*) from private.client_payable_balance"
+    " where organization_id = %s",
 }
 PER_OWN_ROW = {
     "public.ledger_entry": 8,
@@ -105,6 +110,7 @@ PER_OWN_ROW = {
     "public.refund_request": 6,
     "public.receipt": 4,
     "public.client_notification": 4,
+    "private.client_payable_balance": 2,
 }
 CHECK_SLACK = 2_000  # the small tables' rows (reference data, statements, bank accounts)
 # a sequential scan reads every servicer's rows: one is the right plan only where the servicer owns
@@ -124,7 +130,8 @@ def checks_with_reads(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, di
         ).fetchone()
         elapsed = time.monotonic() - started
         rows = conn.execute(
-            """select relid::regclass::text, coalesce(idx_tup_fetch, 0), coalesce(seq_tup_read, 0)
+            """select schemaname || '.' || relname, coalesce(idx_tup_fetch, 0),
+                      coalesce(seq_tup_read, 0)
                from pg_stat_xact_user_tables
                where coalesce(idx_tup_fetch, 0) + coalesce(seq_tup_read, 0) > 0"""
         ).fetchall()
@@ -134,8 +141,7 @@ def checks_with_reads(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, di
         ).fetchall()
     print(f"\nnightly checks {elapsed:.2f}s, the functions' own ms (calls): {spent}")
     assert row is not None
-    reads = {("public." + r[0]).replace("public.public.", "public."): (int(r[1]), int(r[2]))
-             for r in rows}  # fmt: skip
+    reads = {str(r[0]): (int(r[1]), int(r[2])) for r in rows}  # (schema-qualified: private's too)
     return dict(row[0]), elapsed, reads
 
 
@@ -146,19 +152,7 @@ PER_CHECK = 4  # rows each check may handle, per row the servicer owns (OWN_ROWS
 # touches a few; an index scan through every request of the servicer, dead versions included,
 # for each payment touched 1.44 million for 5,000 refunds (review round 2, P3)
 PER_CHECK_BLOCKS = 4
-
-
-def _work(node: dict[str, Any]) -> int:
-    """The rows a plan node and its children handled: those each node returned, and those its
-    filters, join filters and rechecks threw away (a table read whole, or rows compared n²)."""
-    loops = int(node.get("Actual Loops", 1))
-    n = loops * (
-        int(node.get("Actual Rows", 0))
-        + int(node.get("Rows Removed by Filter", 0))
-        + int(node.get("Rows Removed by Join Filter", 0))
-        + int(node.get("Rows Removed by Index Recheck", 0))
-    )
-    return n + sum(_work(c) for c in node.get("Plans", []))
+_work = work  # (explain_helpers: the rows a plan node and its children handled)
 
 
 def checks_work(tenant: dict[str, Any]) -> list[tuple[str, int, int]]:
