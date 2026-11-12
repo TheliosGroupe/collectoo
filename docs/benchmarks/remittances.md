@@ -465,3 +465,13 @@ The fixture makes this the longest scale test (≈ 14 min, of which ≈ 11.5 min
 the CI scale job measured at 15 min 48 s before and its 30-minute timeout, the job needs a longer timeout or this test
 its own job (`.github/workflows/ci.yml` is not changed here). `PAYOUT_FILE_SIZE` changes the size.
 
+The two other scale tests the review changed, run next in the same database (`RECEIPT_FILES=5000`: 2 passed in
+314.6 s):
+
+| Step | Time |
+|---|---|
+| `test_transfer_files_scale_integration.py`: the debit job over the 5,000 RFD debits (the M2b pass) / the nightly checks, now held to < 5 s | 10.1 s / **1.8 s** |
+| `test_remittance_scale_integration.py` (50,000 lines), after the cancellation (3.96 s): the items in a new run, prepared and approved (the approval's documents job included) | 30.3 s (prepare 12.1 s: load 4.96, price 5.70, write 2.24) |
+| … its payout filed, downloaded, its debit (its RMT id, `book_payout`) imported and booked by the debit job: the remittance and the 50,000-line run's settlement | **1.0 s** (the funds pass 0.2 s: one booking) |
+| … the nightly checks with that run booked (I19, I20 clean) | 4.8 s, 0 violations (4.4 s after the first approval) |
+
