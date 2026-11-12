@@ -250,3 +250,104 @@ test("a debtor's payment relayed by the client, from its confirmed payout IBAN, 
   await expect(relayed).toHaveCount(1);
   await expect(relayed.getByTestId("queue-amount")).toContainText("120,00");
 });
+
+/**
+ * Review M2c-6b-1 round 3 (M1, M2): one of our transfers coming back without the bank's return flag — the sweep's SWP
+ * id on a credit from our own account, a payout's RMT id on a credit from the client's payout IBAN (as a CSV feed whose
+ * label misses RETURN_RE reads them, or a camt.053 without a return code) — is neither a top-up nor a debtor's payment
+ * relayed by the servicer or the client, nor classified without booking: the database refuses each (own_transfer_line)
+ * and « À classer » offers none, saying what the line is (booked by ops with M2c-6b-2's line booking). Synthetic data.
+ */
+test("a credit carrying our SWP or RMT id, unflagged, is neither a top-up nor a relayed payment (review round 3)", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(240_000);
+  const own = await createTenant();
+  await createMandate(own);
+  const seed = Number.parseInt(own.clientId.slice(0, 6), 16);
+  const bankIban = ibanFr(seed + 11);
+  const ownIban = ibanFr(seed + 13);
+  const clientIban = ibanFr(seed + 17);
+  const { error } = await adminClient().from("bank_account").insert([
+    {
+      organization_id: own.servicerId,
+      iban: bankIban,
+      currency: "EUR",
+      label: "Fonds de tiers – Banque S",
+      purpose: "client_funds",
+      feed: "camt053",
+      opened_on: "2026-01-01",
+    },
+    {
+      organization_id: own.servicerId,
+      iban: ownIban,
+      currency: "EUR",
+      label: "Compte propre – Banque S",
+      purpose: "own",
+      feed: null,
+      opened_on: "2026-01-01",
+    },
+  ]);
+  if (error) throw error;
+  await createConfirmedPayoutAccount(
+    own,
+    clientIban,
+    own.clientName.toUpperCase(),
+  );
+  await loginAsStaff(page, await createMember(own.servicerId, "ops_manager"));
+
+  const credits: Credit[] = [
+    // the sweep back from our own account (its SWP id), unflagged: read as a credit from the own account
+    {
+      ref: "OR-1",
+      amountMinor: BigInt(45000),
+      name: "CABINET COLLECTOO",
+      iban: ownIban,
+      e2e: "SWP0123456789AB",
+      ustrd: ["QUOTE-PART CABINET"],
+    },
+    // a payout back from the client's payout IBAN (its RMT id), unflagged: read as a credit from a client
+    {
+      ref: "OR-2",
+      amountMinor: BigInt(27000),
+      name: own.clientName.toUpperCase(),
+      iban: clientIban,
+      e2e: "RMT0A1B2C3D4E5F",
+      ustrd: ["REVERSEMENT"],
+    },
+  ];
+  await page.goto("/backoffice/encaissements");
+  const form = page.getByTestId("statement-upload");
+  await form.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({
+    name: "releve-retours-non-signales.xml",
+    mimeType: "application/xml",
+    buffer: Buffer.from(
+      camt053Lines(bankIban, "2026-11-09", credits, [], BigInt(0)),
+      "utf-8",
+    ),
+  });
+  await form.getByRole("button", { name: "Importer le relevé" }).click();
+  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
+    timeout: 60_000,
+  });
+
+  await page.goto("/backoffice/encaissements/debits");
+  const rows = page.getByTestId("debit-row");
+  await expect(rows).toHaveCount(2, { timeout: 60_000 });
+  const fromOwn = rows.filter({ hasText: "Virement reçu du compte propre" });
+  const fromClient = rows.filter({ hasText: "Virement reçu d'un client" });
+  await expect(fromOwn).toContainText("450,00");
+  await expect(fromClient).toContainText("270,00");
+  for (const row of [fromOwn, fromClient]) {
+    await expect(row.getByTestId("book-top-up")).toHaveCount(0);
+    await expect(row.getByTestId("release-own-credit")).toHaveCount(0);
+    await expect(row.getByTestId("release-client-credit")).toHaveCount(0);
+    await expect(row.getByTestId("explain")).toHaveCount(0);
+    await expect(row.getByTestId("link-return")).toHaveCount(0);
+    await expect(row.getByTestId("link-refund")).toHaveCount(0);
+    await expect(row.getByTestId("debit-review")).toContainText(
+      "c'est ce virement qui revient, sans que la banque l'ait signalé comme un retour",
+    );
+  }
+  await reviewShot(page, testInfo, "m6b1-our-credit-unflagged");
+});

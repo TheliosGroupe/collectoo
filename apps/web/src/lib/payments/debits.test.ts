@@ -12,6 +12,7 @@ import {
   debitErrorCode,
   debitReviewText,
   explainable,
+  isOurTransferCredit,
   isOurTransferLine,
   lineKindLabel,
   linkDebitErrorCode,
@@ -1511,6 +1512,44 @@ describe("M2c-6b-1 review round 3: our transfers coming back are never a debtor'
     expect(debitReviewText({ ...debit, review_reason: "transfer_unknown" })).toBe(DEBIT_REVIEW.transfer_unknown);
     // a reason the page does not know yet is shown as its code (as before)
     expect(debitReviewText({ ...plain, review_reason: "something_new" })).toBe("something_new");
+  });
+
+  // integration of round 3: the database reads a credit naming one of our files' PmtInfIds without an end-to-end id as
+  // ours too — a lot of one of our files coming back as one line: public.release_own_credit and the top-up rule refuse it
+  // (own_transfer_line). With an end-to-end id that is not ours, the PmtInfId alone does not make it ours (as there).
+  it("offers neither relay nor the top-up on a credit naming our PmtInfId without an end-to-end id (integration)", () => {
+    const PMT = "TF-2026-000123-2";
+    for (const kind of ["own_transfer_in", "client_transfer_in"]) {
+      for (const e2e of [null, ""]) {
+        const o = { direction: "credit", kind, end_to_end_id: e2e, payment_info_id: PMT };
+        const what = JSON.stringify(o);
+        expect(isOurTransferCredit(o), what).toBe(true);
+        expect(relayable(o), what).toBe(false);
+        expect(clientRelayable(o), what).toBe(false);
+        expect(offersTopUp(o), what).toBe(false);
+      }
+      const withE2e = { direction: "credit", kind, end_to_end_id: "VIR-CABINET-0001", payment_info_id: PMT };
+      expect(isOurTransferCredit(withE2e), kind).toBe(false);
+      // a PmtInfId that only looks like ours
+      for (const pmt of ["TF-2026-00012-2", "tf-2026-000123-2", "TF-2026-000123-", "PMT-2026-000123-2"])
+        expect(isOurTransferCredit({ direction: "credit", kind, end_to_end_id: null, payment_info_id: pmt }), pmt).toBe(
+          false,
+        );
+    }
+    const own = { direction: "credit", kind: "own_transfer_in", end_to_end_id: "VIR-CABINET-0001", payment_info_id: PMT };
+    expect(offersTopUp(own)).toBe(true);
+    expect(relayable(own)).toBe(true);
+    expect(clientRelayable({ ...own, kind: "client_transfer_in" })).toBe(true);
+    // a debit naming our PmtInfId is our batch line (isOurTransferLine), never a credit of ours
+    const batch = { direction: "debit", kind: "other_debit", end_to_end_id: null, payment_info_id: PMT };
+    expect(isOurTransferCredit(batch)).toBe(false);
+    expect(isOurTransferLine(batch)).toBe(true);
+    // the credits carrying our RMT/SWP id are ours as before
+    for (const o of ours) expect(isOurTransferCredit(o), JSON.stringify(o)).toBe(true);
+    // the refusal's words name our lots too
+    expect(errorText("own_credit_own_transfer_line")).toContain(
+      "l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient, ou celle de l'un des lots de nos fichiers.",
+    );
   });
 });
 

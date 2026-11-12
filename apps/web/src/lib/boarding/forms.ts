@@ -607,7 +607,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, ligne groupée d'un lot de nos fichiers) : elle se comptabilise depuis le relevé, automatiquement à l'import ou par l'équipe (écran à venir). Elle ne se rattache pas à un paiement, ni à un remboursement (sauf la ligne groupée d'un lot de remboursements, à un remboursement de ce lot dont le fichier est déjà téléchargé), et ne se classe pas sans comptabiliser.",
   // review round 3 (M1, M2): public.release_own_credit's and the top-up's refusal of a credit carrying our RMT/SWP id
   own_credit_own_transfer_line:
-    "Ce crédit porte la référence de l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient. Il se comptabilise depuis le relevé, automatiquement à l'import quand la banque le signale comme un retour, sinon par l'équipe (écran à venir). Il ne devient ni le paiement d'un débiteur ni un approvisionnement. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.",
+    "Ce crédit porte la référence de l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient, ou celle de l'un des lots de nos fichiers. Il se comptabilise depuis le relevé, automatiquement à l'import quand la banque le signale comme un retour, sinon par l'équipe (écran à venir). Il ne devient ni le paiement d'un débiteur ni un approvisionnement. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.",
   unknown:
     "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };

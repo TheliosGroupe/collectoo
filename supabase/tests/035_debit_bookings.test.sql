@@ -38,7 +38,7 @@
 -- (The batch rule's linear plan: test_debit_bookings_batch_rules_integration.py.)
 -- Cancellation after download stays off (033 and 034 unchanged); some scenarios switch it on in their own subtransaction.
 begin;
-select plan(124);
+select plan(126);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -805,6 +805,31 @@ begin
 end $$;
 select is(pg_temp.isolated('settle_set'), pg_temp.isolated('settle_one'),
   'post_run_settlements (one call) = post_run_settlement run by run: the same entry and settlements (D > 0, D = 0)');
+-- integration of review round 3 (M3): the settlements posted p_chunk runs per ledger_post_set call (2,000 by default:
+-- a 5,000-member batch line's postings in one insert overflowed work_mem) post the same, in either order (a chunk of
+-- D = 0 only is skipped); no chunk below 1
+create or replace function pg_temp.settle_chunked(p_first text, p_second text) returns jsonb language plpgsql as $$
+declare e1 uuid; e2 uuid;
+begin
+  select entry_id into e1 from private.post_run_settlements(array[pg_temp.v(p_first), pg_temp.v(p_second)],
+                                                            array[private.paris_today(), private.paris_today()], 1)
+  where run_id = pg_temp.v('r6');
+  return jsonb_build_array(pg_temp.books(e1), e2,
+    (select jsonb_agg(jsonb_build_array(document_kind, kind, amount_minor, vat_moved_minor, settled_on) order by id)
+     from public.commission_settlement where run_id in (pg_temp.v('r6'), pg_temp.v('r7'))));
+end $$;
+create or replace function pg_temp.settle_chunk_67() returns jsonb language sql as $$
+  select pg_temp.settle_chunked('r6', 'r7') $$;
+create or replace function pg_temp.settle_chunk_76() returns jsonb language sql as $$
+  select pg_temp.settle_chunked('r7', 'r6') $$;
+-- (computed here, while r6 is not settled yet; asserted at the end of the file, so the earlier tests keep their numbers)
+insert into j select 'settle_chunked',
+  jsonb_build_array(pg_temp.isolated('settle_chunk_67'), pg_temp.isolated('settle_chunk_76'),
+                    pg_temp.attempt(format($q$ select count(*) from private.post_run_settlements(array[%L::uuid],
+                                               array[private.paris_today()], 0) $q$, pg_temp.v('r6'))));
+insert into j select 'settle_chunked_want',
+  jsonb_build_array(pg_temp.isolated('settle_one'), pg_temp.isolated('settle_one'),
+                    'post_run_settlements: chunk must be at least 1');
 select pg_temp.handed_out('f2', 'gen-file-2');
 select ok(not ('servicer_funds_unswept' = any (pg_temp.tcodes(pg_temp.bd_after(3)))),
   'no servicer_funds_unswept once the share''s sweep is in a file');
@@ -2433,6 +2458,37 @@ begin
 end $$;
 select is(pg_temp.isolated('sc_balances_keyed'), '{"seq_read": 0, "own_read_once": true}'::jsonb,
   'M5: I13 and I14 read the servicer''s running balances by its key, once (none of another servicer''s 10,000)');
+
+-- Integration of round 3 (M1 with M2): the top-up reads a credit as public.release_own_credit does — an own credit naming
+-- one of our PmtInfIds without an end-to-end id (a lot of one of our files coming back as one line; test 120 refuses its
+-- relay) is never a top-up either, by ops or by the job (own_transfer_line); with an end-to-end id that is not ours (the
+-- release's scope too) it still is one
+create or replace function pg_temp.sc_top_up_own_pmt() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.stmt('64', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 12000, 'pmt', pg_temp.pmt(pg_temp.trid('r1')),
+                       'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 5000, 'e2e', 'VIR-CABINET-0001',
+                       'pmt', pg_temp.pmt(pg_temp.trid('r1')), 'iban', 'FR7610107001011234567890129')));
+  return jsonb_build_object(
+    'ops', pg_temp.refusal(pg_temp.attempt(format(
+             $q$ select pg_temp.link('top-pmt-0001', %L, 'own_credit', null, null, null) $q$, pg_temp.ln('64', 1)))),
+    'job', (select pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('64', 1), 'top_up'))) ->> 'top_ups'),
+    'job_why', pg_temp.skipped(pg_temp.ln('64', 1)),
+    'booked', pg_temp.bookings(pg_temp.ln('64', 1)),
+    'with_e2e', pg_temp.link('top-pmt-0002', pg_temp.ln('64', 2), 'own_credit', null, null, null),
+    'with_e2e_booked', pg_temp.bookings(pg_temp.ln('64', 2)));
+end $$;
+select is(pg_temp.isolated('sc_top_up_own_pmt'),
+          '{"ops": "bank booking refused: own_transfer_line", "job": "0", "job_why": "own_transfer_line", "booked": [],
+            "with_e2e": "own_credit", "with_e2e_booked": ["1 top_up 5000"]}'::jsonb,
+  'M1/M2: an own credit naming our PmtInfId without an end-to-end id is never a top-up (ops or job: own_transfer_line), '
+  'as it is never relayed; with an end-to-end id not ours it still is one');
+
+-- Integration of round 3 (M3; computed in section 2, before r6 is settled): the settlements posted p_chunk runs per
+-- ledger_post_set call post what post_run_settlement posts run by run, in either order; no chunk below 1
+select is((select v from j where k = 'settle_chunked'), (select v from j where k = 'settle_chunked_want'),
+  'post_run_settlements one run per ledger_post_set call = post_run_settlement run by run, in either order; chunk ≥ 1');
 
 select * from finish();
 rollback;

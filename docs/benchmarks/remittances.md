@@ -700,3 +700,50 @@ tolerance). P4, 200 RMT lines: the debit job 0.65 s, its funds pass 0.5 s (≤ 2
 scan. (b) the 5,000-member batch line 31.8 s; (a) 5,000 RMT lines, the debit job 20.7 s, chunks 8.1, 8.5 and 4.0 s;
 both with 0 rows of `bank_transfer` or `transfer_file_item` read by sequential scans. Nightly checks with 5,000 booked
 payouts and 50 cancelled transfers 1.17 s, 0 violations.
+
+### Integration of round 3 (2026-11-12, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+The two round-3 branches merged (`m6b1-fix3-int`) with the integration's two changes (the top-up rule's PmtInfId arm;
+`private.post_run_settlements` posting at most 2,000 runs per `ledger_post_set` call), the CI jobs' commands with the
+jobs' `pg_stat_statements` / `auto_explain` settings, nothing else running on the VM.
+
+**The `scale-payouts` job's command.** On the merged branches, before the integration's chunking: **4 passed, 1
+failed** (855 s). (b) wrote **1,980,000 bytes** of temporary files, which round 3's new assertion refuses (the database
+branch had run (b) at 1,000 members only). A second run of (b) alone with `log_temp_files = 0` gave the same bytes and
+named one file: the postings' insert of `private.ledger_post_set` under `private.post_run_settlements` — the batch
+line's 5,000 settlements posted in one call, 30,000 postings whose statement triggers' transition table (`new_rows`,
+66 bytes a posting on disk) outgrew `work_mem` (4 MB). Not the re-check: no plan node spilled. With the settlements
+posted 2,000 runs per call, once on the final code: **5 passed** in 872.5 s. Fixture 49.9 s / 21.4 s / 680.5 s /
+« Générer le fichier » 3.14 s.
+
+| Step | Size | Integration of round 2 | Integration of round 3 |
+|---|---|---|---|
+| (P1) a batch line, the funds pass | 200 members | 0.48 s | **0.46 s**; `bank_transfer` 2,600 and `transfer_file_item` 1,200 rows read (400 transfers by a sequential scan of the 200-payout database, under the 1,000-row tolerance); temporary files **0 bytes** |
+| (P4) 200 RMT lines | 200 | the job 0.65 s, its funds pass 0.5 s | the job **0.58 s**, its funds pass 0.5 s (≤ 2.0 s); no transfer read by a sequential scan |
+| (b) the file's PmtInf as one batch line, one funds pass (rolled back) | 5,000 members | 31.8 s | **21.4 s** (26.0 s before the chunking); temporary files **0 bytes** (1,980,000 before); reads `bank_transfer` 65,000, `transfer_file_item` 30,000, `bank_line_booking` 15,000, none by a sequential scan |
+| … again under auto_explain (rolled back) | 5,000 members | — | 23.0 s; 157 statements over 1 ms, **none spilled**, each re-check statement (keys, facts, rules) within 40 rows a member + 50 |
+| (a) 5,000 RMT lines: the import; the debit job | 5,000 | 20.7 s, chunks 8.1, 8.5, 4.0 s | import 1.1 s; the job **22.0 s**, chunks 9.1, 8.5 and 4.2 s; none by a sequential scan |
+| Nightly checks with 5,000 booked payouts and 50 cancelled transfers | 5,050 transfers | 1.17 s | **1.31 s**, 0 violations |
+
+Under auto_explain the heaviest statements of (b) are not the re-check's but `private.ledger_post_set`'s matching of
+pooled accounts (`_lps_dim` and `_lps_x`, `20261111090000`): 50.5 and 50.1 million rows handled for the 5,000
+remittances, 40.4, 40.4 and 20.2 million for the three settlement calls — O(lines × the servicer's clients, here 5,000),
+no temporary file, known since round 3's database branch (merged code, left for a later slice; the chunking neither
+adds nor removes any). They are most of (b)'s 21.4 s.
+
+**The CI `scale` job's command, in its order** (`RECEIPT_FILES=5000`, every `*scale_integration.py` but the payouts'),
+twice on the merged branches before the chunking (runs 1–2) and twice on the final code (runs 3–4):
+
+| Run | Result | Refund servicer's nightly checks (< 5 s) | its debit job, 5,000 RFD debits | 50,000-line run's last checks | the run's checks with its draft / after approval | Allocation test's checks (50,000 payments) |
+|---|---|---|---|---|---|---|
+| 1 | **7 passed** (1,004 s) | **0.33 s** | 11.8 s | 5.5 s | 4.0 / 5.0 s | 3.9 s |
+| 2 | **7 passed** (1,024 s) | **0.35 s** | 11.0 s | 5.1 s | 4.2 / 4.8 s | 4.0 s |
+| 3 | **7 passed** (991 s) | **0.42 s** | 10.9 s | 5.2 s | 4.1 / 4.6 s | 4.0 s |
+| 4 | **7 passed** (985 s) | **0.32 s** | 11.2 s | 5.6 s | 4.5 / 4.7 s | 4.0 s |
+
+Every bound held, the transfer-files test's `OWN_ROWS` with `private.client_payable_balance` included (M5: the 50,000-
+line servicer's balances read by key, 1 row; the refund servicer's none). Of the 50,000-line run's last checks,
+`run_payment_checks` took 2.8–3.0 s and `commission_key_open` (50,000 calls) 1.4–1.5 s, as in round 2. The re-run of
+the 50,000 items prepared and approved in 30.0–32.7 s, its payout filed, downloaded, debited and booked in 0.8–1.0 s.
+The other tests as before: 50,000 files boarded in 88–95 s, 50,000 credits matched in 29.2–32.6 s and allocated in
+72.8–78.3 s, the statement import 39.5–45.1 s, receipts 14.4–15.3 ms each.

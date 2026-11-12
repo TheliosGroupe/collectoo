@@ -54,7 +54,9 @@
 -- public.request_transfer_cancellation, public.confirm_transfer_cancellation and public.cancel_remittance_run
 -- (redefined from 20261115090000, only their hints changed) say what a downloaded file's transfer waits for now that
 -- its debit is booked from the statement; I13 and I14 read the running balances by the servicer's key
--- (client_payable_balance_org_idx).
+-- (client_payable_balance_org_idx). Integration of round 3: the top-up refuses a credit naming one of our PmtInfIds
+-- without an end-to-end id, as public.release_own_credit does; private.post_run_settlements posts at most 2,000 runs per
+-- private.ledger_post_set call (a 5,000-member batch line's postings overflowed work_mem in one insert).
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -613,8 +615,12 @@ $$;
 -- `client_settlement` of each plan (C fund: +4670[c] D / −4679 D ‖ S fund: +4689 D / −4111[c] Dc / −4112[c] Da;
 -- +44574 v / −44571 v; key settle:<run>, its document the run, dated p_dates[i]) and its commission_settlement rows
 -- (pgTAP 035 compares it with post_run_settlement on each shape). One call per run would rebuild the working tables
--- and run ledger_post_set 5,000 times in the transaction a 5,000-member batch line needs.
-create or replace function private.post_run_settlements(p_run_ids uuid[], p_dates date[])
+-- and run ledger_post_set 5,000 times in the transaction a 5,000-member batch line needs. Integration of review round 3
+-- (M3): at most p_chunk runs per ledger_post_set call (2,000 by default, the debit job's chunk of lines): the postings'
+-- insert keeps its statement triggers' transition table (new_rows) in memory — a 5,000-member batch line's 30,000
+-- postings in one insert overflowed work_mem (1.98 MB written to a temporary file, the payout scale test's (b)); and
+-- every run with a settlement gets its entry, or nothing is posted (pgTAP 035 compares the chunked calls too).
+create or replace function private.post_run_settlements(p_run_ids uuid[], p_dates date[], p_chunk integer default 2000)
 returns table (run_id uuid, entry_id uuid)
 language plpgsql
 security definer
@@ -623,7 +629,11 @@ as $$
 #variable_conflict use_column
 declare
   v_bad text;
+  v_from integer;
 begin
+  if p_chunk is null or p_chunk < 1 then
+    raise exception 'post_run_settlements: chunk must be at least 1' using errcode = '22023';
+  end if;
   drop table if exists pg_temp._prs;
   create temp table _prs on commit drop as
   select x.ord::integer as ord, r.id, r.organization_id, r.client_organization_id, r.currency, r.number,
@@ -646,21 +656,32 @@ begin
   drop table if exists pg_temp._prs_posted;
   create temp table _prs_posted (entry_no integer primary key, entry_id uuid not null) on commit drop;
   if exists (select 1 from pg_temp._prs p where p.d <> 0) then
-    perform private.ledger_post_set_begin();
-    insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key,
-                                    client_organization_id, source_type, source_id)
-    select p.ord, p.organization_id, 'client_settlement', p.on_date, 'settle:' || p.id, p.client_organization_id,
-           'remittance_run', p.id::text
-    from pg_temp._prs p where p.d <> 0;
-    insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency)
-    select p.ord, row_number() over (partition by p.ord order by l.o)::integer, l.book, l.amount, p.currency
-    from pg_temp._prs p
-    cross join lateral (values (1, 'client_payable', p.d), (2, 'due_to_servicer', -p.d),
-                               (3, 'due_from_client_funds', p.d), (4, 'commission_receivable', -p.dc),
-                               (5, 'client_advance_receivable', -p.da), (6, 'vat_pending', p.vat),
-                               (7, 'vat_collected', -p.vat)) l (o, book, amount)
-    where p.d <> 0 and l.amount <> 0;
-    insert into pg_temp._prs_posted (entry_no, entry_id) select x.entry_no, x.entry_id from private.ledger_post_set() x;
+    -- the runs in their order, p_chunk at a time (each chunk one ledger_post_set call)
+    for v_from in select g from generate_series(1, (select max(p.ord) from pg_temp._prs p), p_chunk) g loop
+      continue when not exists (select 1 from pg_temp._prs p
+                                where p.d <> 0 and p.ord between v_from and v_from + p_chunk - 1);
+      perform private.ledger_post_set_begin();
+      insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key,
+                                      client_organization_id, source_type, source_id)
+      select p.ord, p.organization_id, 'client_settlement', p.on_date, 'settle:' || p.id, p.client_organization_id,
+             'remittance_run', p.id::text
+      from pg_temp._prs p where p.d <> 0 and p.ord between v_from and v_from + p_chunk - 1;
+      insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency)
+      select p.ord, row_number() over (partition by p.ord order by l.o)::integer, l.book, l.amount, p.currency
+      from pg_temp._prs p
+      cross join lateral (values (1, 'client_payable', p.d), (2, 'due_to_servicer', -p.d),
+                                 (3, 'due_from_client_funds', p.d), (4, 'commission_receivable', -p.dc),
+                                 (5, 'client_advance_receivable', -p.da), (6, 'vat_pending', p.vat),
+                                 (7, 'vat_collected', -p.vat)) l (o, book, amount)
+      where p.d <> 0 and l.amount <> 0 and p.ord between v_from and v_from + p_chunk - 1;
+      insert into pg_temp._prs_posted (entry_no, entry_id)
+      select x.entry_no, x.entry_id from private.ledger_post_set() x;
+    end loop;
+    select min(p.number) into v_bad from pg_temp._prs p
+    where p.d <> 0 and not exists (select 1 from pg_temp._prs_posted x where x.entry_no = p.ord);
+    if v_bad is not null then
+      raise exception 'settlement of %: not posted', v_bad using errcode = '23514';
+    end if;
     insert into public.commission_settlement (organization_id, client_organization_id, document_kind, document_id,
                                               entry_id, kind, amount_minor, vat_moved_minor, settled_on, run_id)
     select p.organization_id, p.client_organization_id,
@@ -1121,10 +1142,14 @@ begin
       -- review round 3 (M2, round 2's L4): never one of our payouts' or sweeps' lines — a credit carrying our RMT/SWP
       -- id as its own or as the original it returns (a sweep back from the own IBAN that the feed did not flag as a
       -- return: a CSV label missing RETURN_RE reads it own_transfer_in), as the loss rule below; such a credit is
-      -- booked from the statement as that transfer's return (sweep_returned), never as a top-up
+      -- booked from the statement as that transfer's return (sweep_returned), never as a top-up. Nor (integration of
+      -- round 3, as public.release_own_credit reads a credit) a line naming one of our PmtInfIds without an end-to-end
+      -- id, whatever its direction: our batch line, or a lot of one of our files coming back as one credit (a top-up is
+      -- never in a file: our TOP id, typed in the bank)
       when coalesce(b.end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
            or coalesce(b.returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
-           or (b.batch_line and b.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$') then 'own_transfer_line'
+           or (b.end_to_end_id is null and coalesce(b.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$', false))
+        then 'own_transfer_line'
       when b.link_kind is not null then 'already_linked'
       when b.direction <> 'credit' or b.line_kind <> 'own_transfer_in' then 'not_an_own_credit'
       when b.amount_minor is not null then 'bad_request'
@@ -5047,7 +5072,7 @@ $$;
 ------------------------------------------------------------------------------------------
 
 revoke execute on function private.client_advance_guard(), private.pmt_inf_single_refund(uuid, text),
-  private.bank_booking_candidates(uuid, date, uuid, integer), private.post_run_settlements(uuid[], date[]),
+  private.bank_booking_candidates(uuid, date, uuid, integer), private.post_run_settlements(uuid[], date[], integer),
   private.bank_line_cash_moved(uuid, uuid), private.batch_line_may_hold(uuid, uuid, text, uuid),
   private.transfer_late_lines(uuid), private.bank_booking_begin(), private.bank_booking_post_rows(uuid),
   private.post_bank_bookings(uuid, boolean), private.apply_bank_bookings(uuid), private.bank_line_booking_guard(),
