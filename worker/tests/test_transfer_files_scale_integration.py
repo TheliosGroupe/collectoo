@@ -65,6 +65,18 @@ def _transfer_reads() -> int:
     return int(row[0]) if row else 0
 
 
+def _seq_reads(table: str) -> int:
+    """Rows of `table` read by sequential scans since the statistics were last reset, by every
+    backend."""
+    with psycopg.connect(DB) as conn:
+        conn.execute("select pg_stat_force_next_flush()")
+        row = conn.execute(
+            "select coalesce(seq_tup_read, 0) from pg_stat_user_tables where relid = %s::regclass",
+            (table,),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def _cash(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, int]:
     """The cash check, its time, and the bank lines it read (this transaction's counters)."""
     started = time.monotonic()
@@ -230,10 +242,23 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
     assert executed == SIZE
     # each transfer read by key, a bounded number of times over the passes (10,000 for 5,000)
     assert transfer_reads <= 3 * SIZE, transfer_reads
+    with psycopg.connect(DB) as conn:
+        own_accounts = one(
+            conn,
+            "select count(*) from public.ledger_account where organization_id = %s",
+            (tenant["servicer"],),
+        )
+    accounts_before = _seq_reads("public.ledger_account")
     nightly = time.monotonic()
     run = checks(tenant)
     nightly_s = time.monotonic() - nightly
+    accounts_read = _seq_reads("public.ledger_account") - accounts_before
     assert violations(str(run["run_id"])) == []
+    # integration of the M2c-6b-1 review: the servicer-level checks read the servicer's own ledger
+    # accounts by key (organization, book), never every servicer's by sequential scans — five of
+    # them read the 150,000 accounts of the scale runs before (25 MB each, cold after their
+    # writes: 5 to 7.6 s here); a small table read whole stays within the slack
+    assert accounts_read <= 5 * own_accounts + 2_000, (accounts_read, own_accounts)
 
     logs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("transfer file ")]
     print(
@@ -244,6 +269,7 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
         f" {seen_s:.2f}s ({seen_read} read); « Virements »"
         f" {overview_s:.2f}s; the debit job booking the {SIZE} debits {book_s:.1f}s"
         f" ({transfer_reads} transfer rows read, all passes); nightly checks {nightly_s:.1f}s"
+        f" ({accounts_read} ledger accounts read by sequential scans)"
     )
     # the commands within the API's 8 s; the job well within the queue's visibility timeout
     assert generate_s < 8

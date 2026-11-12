@@ -464,7 +464,7 @@ Two plans that rest on the statistics (worker report to the SQL side, ARCHITECTU
 
 The fixture makes this the longest scale test (≈ 14 min, of which ≈ 11.5 min the 5,050 runs through the jobs): with
 the CI scale job measured at 15 min 48 s before and its 30-minute timeout, the job needs a longer timeout or this test
-its own job (`.github/workflows/ci.yml` is not changed here). `PAYOUT_FILE_SIZE` changes the size.
+its own job (done at the integration: `scale-payouts`, below). `PAYOUT_FILE_SIZE` changes the size.
 
 The two other scale tests the review changed, run next in the same database (`RECEIPT_FILES=5000`: 2 passed in
 314.6 s):
@@ -475,4 +475,40 @@ The two other scale tests the review changed, run next in the same database (`RE
 | `test_remittance_scale_integration.py` (50,000 lines), after the cancellation (3.96 s): the items in a new run, prepared and approved (the approval's documents job included) | 30.3 s (prepare 12.1 s: load 4.96, price 5.70, write 2.24) |
 | … its payout filed, downloaded, its debit (its RMT id, `book_payout`) imported and booked by the debit job: the remittance and the 50,000-line run's settlement | **1.0 s** (the funds pass 0.2 s: one booking) |
 | … the nightly checks with that run booked (I19, I20 clean) | 4.8 s, 0 violations (4.4 s after the first approval) |
+
+### Integration of the review fixes (2026-11-12, same VM, the main stack, each run right after `supabase db reset`)
+
+The three fix branches merged (the database's K1–K6, the worker's K2/K5/T1–T8, the pages' texts); since then the CI
+`scale` job runs every scale test but this one, which has its own job `scale-payouts` (40-minute timeout).
+
+`scale-payouts` — `test_debit_bookings_scale_integration.py` alone, with the final migration (the index below):
+**2 passed, 1 xfailed** (the non-strict record of the sequential reads) in 815.2 s; before the index, 802.9 s with the
+figures in brackets.
+
+| Step | Size | Time | Rows read (of which by sequential scans) |
+|---|---|---|---|
+| Fixture: clients / collections / runs requested, prepared (109.7 s) and approved (commands 4.5 s, jobs 552.1 s) / « Générer le fichier » | 5,050 runs | 44.2 s / 20.5 s / 680.7 s / 3.23 s | |
+| (b) The PmtInf as one batch line, the funds pass (rolled back) | 5,000 members | **29.5 s** (31.2 s) | `bank_transfer` 65,050 (5,050), `transfer_file_item` 30,000 (0; 5,000 in the earlier run), `bank_line_booking` 15,000 (0) |
+| (a) 5,000 RMT lines: import / the debit job (chunks of 2,000, 2,000, 1,000) | 5,000 payouts | 1.1 s / **21.6 s** (22.8 s): 8.8, 8.4, 4.2 s | `bank_transfer` 65,150 (15,150), `transfer_file_item` 10,000 (0), `bank_line_booking` 15,000 (0) |
+| Nightly checks, 5,000 booked + 50 cancelled | 5,050 transfers | **1.10 s** (1.07 s), 0 violations | |
+
+`scale` — the CI command (`RECEIPT_FILES=5000`, every other `*scale_integration.py` in one run): **6 passed, 1 failed**
+in 989.6 s (16 min 31 s), then, with the index below, 996.2 s (16 min 38 s), the same failure:
+
+| Step | Time |
+|---|---|
+| `test_remittance_scale_integration.py` (50,000 lines): the items re-run, prepared and approved / its payout filed, downloaded, debited and booked (the funds pass 0.2 s) / the nightly checks with that run booked | 30.9 s / **0.8 s** / 6.3 s (then 30.2 s / 1.0 s / 5.9 s) |
+| `test_transfer_files_scale_integration.py`: the debit job over the 5,000 RFD debits (15,000 `bank_transfer` rows read, three per transfer since K1 reads the request's transfer) / the nightly checks | 11.9 s / **7.6 s** — then 12.2 s / **5.5 s**: over the < 5 s the review set (T6), **red** |
+
+The refund file test's nightly checks, measured right after a scale run's writes (the 50,000-line run, or the payouts'
+fixture), took 5.0 to 7.6 s in seven runs of nine (0.3 and 0.5 s in the other two; 0.2 to 0.4 s alone after a reset). `pg_stat_statements`
+(nested statements tracked) put the time in `private.run_payment_checks`' one checks statement reading about 9,600
+blocks not in shared buffers, cold after the previous run's 700 MB of writes; not in `private.refund_debit_links`
+(5,000 calls, 11 ms in all). Five of those reads were sequential scans of every servicer's ledger accounts (no index
+led by the organisation held the claim items' accounts: 749,680 rows read for a servicer of two):
+`ledger_account_org_book_idx (organization_id, book)` (migration `20261116090000`) makes them keyed — 0 rows read by
+sequential scans, which the test now asserts — but the remaining cold reads (`ledger_entry` ≈ 3,150 blocks,
+`bank_transaction` ≈ 1,670 by a sequential scan, `ledger_posting` ≈ 1,300) keep the checks above 5 s in the CI order.
+Left open (integration report): a plan-robustness pass over the nightly checks' remaining unkeyed reads, or the
+founder's call on this test's bound (30 s before the review).
 

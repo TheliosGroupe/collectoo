@@ -173,6 +173,11 @@ create index bank_transaction_return_credit_idx on public.bank_transaction (orga
 -- the whole link table once per executed refund — every link ever made, quadratic in the servicer's history)
 create index bank_debit_link_refund_request_idx on public.bank_debit_link (refund_request_id)
   where refund_request_id is not null;
+-- The servicer-level checks (private.run_payment_checks: the fund identities, the receivables, the owners' claims) read
+-- the servicer's ledger accounts by organisation and book; no index led by the organisation held the claim items'
+-- accounts, so each read was a sequential scan of every servicer's accounts — five per nightly run (integration of the
+-- M2c-6b-1 review: 750,000 accounts read for a servicer of two after the scale runs, 5 to 7.6 s cold)
+create index ledger_account_org_book_idx on public.ledger_account (organization_id, book);
 
 ------------------------------------------------------------------------------------------
 -- One PmtInf per kind (plan §2.1): the payouts, then the refunds, then the sweep, each per execution date. A batch line

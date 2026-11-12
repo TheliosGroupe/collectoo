@@ -680,7 +680,9 @@ and pgTAP `033`/`034` keep their assertions and TODO markers.
   from one RMT debit per payout and from the file's PmtInf as one batch line, with the nightly checks timed against plan
   §1.4 (`test_5000_rmt_debits_booked_by_the_debit_job_then_the_nightly_checks`,
   `test_the_file_s_pmt_inf_as_one_batch_line_books_every_member`, `test_the_funds_pass_reads_no_table_of_transfers_in_full`);
-  `docs/benchmarks/remittances.md` says what was measured. Integrator: fill in the figures and the 50k run's debit.
+  `docs/benchmarks/remittances.md` says what was measured (the worker's runs, then the integration's: 5,000 payouts
+  booked in 22.8 s as RMT lines — chunks 9.2/9.1/4.3 s — and 31.2 s as one batch line; nightly checks 1.07 s; the 50k
+  run's payout debited and booked in 0.8 s).
 - **T7 (medium; K6) — I20's refund rule keyed.** It read the whole link table once per executed refund (quadratic in
   the servicer's history). `bank_debit_link_refund_request_idx` (partial, `refund_request_id is not null`) and
   `private.refund_debit_links(request)` (only the request's links, `enable_seqscan = off`), called only for the refunds
@@ -688,6 +690,30 @@ and pgTAP `033`/`034` keep their assertions and TODO markers.
   could not see a second link of one request).
 - **T8 (low) — the integration test's payout-account assertion.** Read through the returned transfer's run (no `is
   None` escape), the other run's account still `active`; mutant (the account update removed) killed.
+
+**Integration (2026-11-12).** The three branches merged without conflict. Reconciled: the page's offer on our batch
+lines follows the database (money-1 above); a payout returned a second time is held as the first (money-2 above);
+the worker's `test_funds_integration` expects `own_transfer_line` for « explained » on an RMT line; the K2
+`blocked_reason` test's strict xfail is removed (it passes); `database.types.ts` regenerated (`debit_queue.payment_info_id`);
+every refusal, review reason and alert code the database and the worker return has its French label (checked by grep:
+`own_transfer_line`, `return_before_debit`, the check codes). CI: the 5,000-payout scale test runs in its own job
+(`scale-payouts`, 40 min), the `scale` job keeps the others (it measured 15 min 48 s before; this test alone ≈ 15 min).
+Found by the scale job's own order: the refund file test's nightly checks, newly held to < 5 s (T6), took 5.0 to 7.6 s
+in seven runs of nine right after a scale run's writes (0.2 to 0.5 s otherwise). `pg_stat_statements` puts the time in
+`private.run_payment_checks`' checks statement reading ≈ 9,600 blocks cold, not in `private.refund_debit_links` (5,000
+calls, 11 ms). Five of those reads were sequential scans of every servicer's ledger accounts (no index led by the
+organisation held the claim items' accounts): `ledger_account_org_book_idx (organization_id, book)` makes them keyed,
+and the test now bounds the ledger accounts the checks read by sequential scans (red before: 749,680 for a servicer of
+two; after: 0). The other cold reads (`ledger_entry`, `bank_transaction` by a sequential scan, `ledger_posting`) still
+keep the checks at 5.5 s in the CI order: **the `scale` job stays red on that bound** — left open (a plan-robustness
+pass over the checks' remaining unkeyed reads, or the founder's call on the bound; `docs/benchmarks/remittances.md`).
+Left open, recorded: the worker's two plans that rest on the statistics (`post_bank_bookings`' batch rule re-reading
+its grouped members per row at a few hundred members; `bank_booking_post_rows`' update of `bank_transfer` over a
+sequential scan once per chunk — `docs/benchmarks/remittances.md`, the non-strict xfail
+`test_the_funds_pass_reads_no_table_of_transfers_in_full`); concurrency-2's two-connection test; concurrency-1's
+`generate_transfer_file` and `request_refund` variants and 035's dblink lock-order item; `debit_link_options` still lists
+payments and refunds for our lines (every such link is refused by `post_debit_links`; the page asks it only for lines it
+offers links on); the refund texts' « son débit, ou son rejet, soit lu sur le relevé » (M2c-6a).
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
