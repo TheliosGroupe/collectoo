@@ -21,7 +21,15 @@ meets). Then:
 then the nightly checks with the K booked payouts and the 50 cancelled transfers. Targets (plan
 §1.4): each funds chunk < 60 s, the job < 120 s, a bounded number of reads of `bank_transfer`,
 `transfer_file_item` and `bank_line_booking` per transfer, the nightly checks < 5 s with 0
-violations. Prints the timings (docs/benchmarks/remittances.md). PAYOUT_FILE_SIZE changes K."""
+violations, the checks' reads keyed by the servicer (rows read per table bounded by its own rows,
+none of another servicer's read by a sequential scan). Each measured pass runs with the statistics
+of the tables it reads forgotten and kept so (autovacuum off on them meanwhile): the bounds on its
+reads hold in the state CI meets, not by chance (review round 2, P2).
+
+Review round 2 (P1, P4): a second fixture of SMALL = 200 payouts (plan §1.4: « 200 RMT/SWP lines
+≈ 1 s »): their PmtInf as one batch line, its reads bounded per member (the batch rule was n² at a
+few hundred members), then their 200 RMT lines in one funds pass, timed. PAYOUT_SMALL_SIZE
+changes it."""
 
 import hashlib
 import json
@@ -32,11 +40,12 @@ import re
 import threading
 import time
 import uuid
+from datetime import date
 from typing import Any
 
 import psycopg
 import pytest
-from debit_helpers import checks, violations
+from debit_helpers import violations
 from integration_helpers import DB, SCHEDULE, TERMS, as_user, one, storage
 from psycopg.types.json import Jsonb
 from reconciliation_helpers import pay
@@ -48,7 +57,13 @@ from remittance_helpers import (
     staff,
 )
 from statement_helpers import upload
-from stats_helpers import forget_statistics
+from stats_helpers import forget_statistics, frozen_statistics
+from test_transfer_files_scale_integration import (
+    assert_checks_bounded,
+    assert_checks_keyed,
+    checks_with_reads,
+    checks_work,
+)
 
 from collectoo_worker.jobs.debits import run_process_debits
 from collectoo_worker.jobs.payments import make_handler as payments_handler
@@ -65,7 +80,12 @@ pytestmark = pytest.mark.integration
 SIZE = int(os.environ.get("PAYOUT_FILE_SIZE", "5000"))
 CANCELLED = min(50, max(SIZE // 10, 1))
 CONSUMERS = 4
+SMALL = int(os.environ.get("PAYOUT_SMALL_SIZE", "200"))
 READS = ("public.bank_transfer", "public.transfer_file_item", "public.bank_line_booking")
+# the tables whose statistics each measured pass forgets (and keeps forgotten), and those whose
+# reads it records
+FROZEN = (*READS, "public.client_advance", "public.remittance_run")
+SEEN = (*FROZEN, "public.remittance_line", "public.transfer_file", "public.client_payout_account")
 FUNDS_LOG = re.compile(r"\(funds\): (\d+) lines, (\d+) bookings, .* ([0-9.]+)s$")
 OFFICE = '{"line1": "1 rue de la Paix", "postcode": "75002", "city": "Paris", "country": "FR"}'
 
@@ -274,7 +294,7 @@ def _reads(seq: bool = False) -> dict[str, int]:
                       case when %s then coalesce(seq_tup_read, 0)
                            else coalesce(idx_tup_fetch, 0) + coalesce(seq_tup_read, 0) end
                from pg_stat_user_tables where relid = any(%s::regclass[])""",
-            (seq, list(READS)),
+            (seq, list(SEEN)),
         ).fetchall()
     return {("public." + r[0]).replace("public.public.", "public."): int(r[1]) for r in rows}
 
@@ -286,7 +306,7 @@ def _xact_reads(conn: psycopg.Connection[Any], seq: bool = False) -> dict[str, i
                   case when %s then coalesce(seq_tup_read, 0)
                        else coalesce(idx_tup_fetch, 0) + coalesce(seq_tup_read, 0) end
            from pg_stat_xact_user_tables where relid = any(%s::regclass[])""",
-        (seq, list(READS)),
+        (seq, list(SEEN)),
     ).fetchall()
     return {("public." + r[0]).replace("public.public.", "public."): int(r[1]) for r in rows}
 
@@ -355,16 +375,22 @@ PER_TRANSFER = {
 }
 PER_MEMBER = {**PER_TRANSFER, "public.transfer_file_item": 8}
 SLACK = 1_000  # the other sessions' reads in the window (statistics flushed late)
+XACT_SLACK = 50  # one transaction's own reads: no other session in them
+# plan §1.4: « 200 RMT/SWP lines ≈ 1 s » in one funds pass. Measured (review round 2, P4) on the
+# 200-payout fixture, the 4-vCPU VM shared with another stack: 0.5 to 0.9 s in four runs (the job's
+# log, to 0.1 s; docs/benchmarks/remittances.md); the bound keeps twice the worst
+SMALL_FUNDS_PASS_S = 2.0
 
 
-@pytest.fixture(scope="module")
-def filed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-    """K + 50 clients' runs approved through the jobs, 50 cancelled before any file, the file of
-    the K payouts generated, written and downloaded; the statistics forgotten."""
+def _file_payouts(
+    factory: pytest.TempPathFactory, size: int, cancelled: int, label: str
+) -> dict[str, Any]:
+    """size + cancelled clients' runs approved through the jobs, `cancelled` of them cancelled
+    before any file, the file of the `size` payouts generated, written and downloaded."""
     timings: dict[str, float] = {}
     started = time.monotonic()
     tenant = remittance_tenant()  # its servicer's identity complete, an admin
-    clients, credits = _clients(tenant, SIZE + CANCELLED)
+    clients, credits = _clients(tenant, size + cancelled)
     timings["clients"] = time.monotonic() - started
     mark = time.monotonic()
     pay(tenant, storage(), credits, prefix=f"K{uuid.uuid4().hex[:5].upper()}",
@@ -373,7 +399,7 @@ def filed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     mark = time.monotonic()
     runs = _runs(tenant, clients)
     timings["runs"] = time.monotonic() - mark
-    for r in runs[SIZE:]:  # cancelled before any file: their transfers `cancelled`
+    for r in runs[size:]:  # cancelled before any file: their transfers `cancelled`
         out = staff(
             tenant,
             "select public.cancel_remittance_run(%s, %s, %s, %s)",
@@ -390,57 +416,75 @@ def filed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         tenant["bank"],
     )  # fmt: skip
     timings["generate"] = time.monotonic() - mark
-    assert generated["nb_of_txs"] == SIZE and generated["held"] == [], generated
+    assert generated["nb_of_txs"] == size and generated["held"] == [], generated
     _drain_remittances()  # the transfer_file job
     with psycopg.connect(DB) as conn:
         path, digest = conn.execute(
             "select storage_path, file_sha256 from public.transfer_file where id = %s",
             (generated["file_id"],),
         ).fetchone() or (None, None)
-    dest = tmp_path_factory.mktemp("payouts") / "payouts.xml"
+    dest = factory.mktemp(label) / "payouts.xml"
     storage().download("transfer-files", str(path), dest)
     data = dest.read_bytes()
     assert hashlib.sha256(data).hexdigest() == digest
     staff(tenant, "select public.transfer_file_download(%s, %s)", generated["file_id"], digest)
     payouts = pain001.read(data)
-    assert payouts.nb_of_txs == SIZE
-    for table in (*READS, "public.client_advance", "public.remittance_run"):
-        forget_statistics(table)
+    assert payouts.nb_of_txs == size
     print(
-        f"\n{SIZE} payouts (+{CANCELLED} cancelled), the fixture: clients"
+        f"\n{size} payouts (+{cancelled} cancelled), the fixture: clients"
         f" {timings['clients']:.1f}s, collections {timings['collections']:.1f}s, runs"
         f" requested/prepared/approved {timings['runs']:.1f}s; « Générer le fichier »"
         f" {timings['generate']:.2f}s"
     )
     return {
+        "size": size,
+        "cancelled": cancelled,
         "tenant": tenant,
         "org": str(tenant["servicer"]),
         "file_id": str(generated["file_id"]),
         "payouts": payouts,
-        "paid": runs[:SIZE],
+        "paid": runs[:size],
     }
 
 
-def test_the_file_s_pmt_inf_as_one_batch_line_books_every_member(filed: dict[str, Any]) -> None:
-    """(b) Each PmtInf of the file debited as one batch line (no end-to-end id): one booking per
-    member, in one funds pass (one transaction: the set-based settlements, the seq row_number,
-    the completeness check on the line's highest seq), timed and counted, then rolled back (the
-    statement's RMT lines, test (a), book the file for real)."""
+@pytest.fixture(scope="module")
+def filed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """K + 50 clients' runs, 50 cancelled before any file, the file of the K payouts."""
+    return _file_payouts(tmp_path_factory, SIZE, CANCELLED, "payouts")
+
+
+@pytest.fixture(scope="module")
+def filed_small(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """SMALL clients' runs (plan §1.4's 200 lines; review round 2, P1 and P4), their file."""
+    return _file_payouts(tmp_path_factory, SMALL, 0, "small")
+
+
+def _statement(conn: psycopg.Connection[Any], filed: dict[str, Any], name: str) -> str:
+    st = one(
+        conn,
+        """insert into public.bank_statement (organization_id, bank_account_id, currency,
+             format, file_name, file_sha256, size_bytes, storage_path)
+           values (%s, %s, 'EUR', 'camt053', %s, %s, 1, %s) returning id""",
+        (filed["org"], filed["tenant"]["bank"], name, uuid.uuid4().hex * 2, f"test/{uuid.uuid4()}"),
+    )
+    conn.execute(
+        "update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = %s",
+        (st,),
+    )
+    return str(st)
+
+
+def _batch_pass(filed: dict[str, Any]) -> tuple[float, int, dict[str, int], dict[str, int]]:
+    """Each PmtInf of the file debited as one batch line (no end-to-end id), the funds pass in one
+    transaction with the statistics of the tables it reads forgotten (and kept so: autovacuum off
+    on them meanwhile), then rolled back: its time, the payouts it booked, its reads (keyed and by
+    sequential scans) — this transaction's own."""
     org, tenant, payouts = filed["org"], filed["tenant"], filed["payouts"]
-    with psycopg.connect(DB) as conn:
+    with frozen_statistics(*FROZEN), psycopg.connect(DB) as conn:
+        for t in FROZEN:
+            forget_statistics(t)
         try:
-            st = one(
-                conn,
-                """insert into public.bank_statement (organization_id, bank_account_id, currency,
-                     format, file_name, file_sha256, size_bytes, storage_path)
-                   values (%s, %s, 'EUR', 'camt053', 'batch.xml', %s, 1, %s) returning id""",
-                (org, tenant["bank"], uuid.uuid4().hex * 2, f"test/{uuid.uuid4()}"),
-            )
-            conn.execute(
-                "update public.bank_statement set status = 'uploaded', uploaded_at = now()"
-                " where id = %s",
-                (st,),
-            )
+            st = _statement(conn, filed, "batch.xml")
             for n, p in enumerate(payouts.payment_infos, start=1):
                 conn.execute(
                     """insert into public.bank_transaction (organization_id, bank_account_id,
@@ -471,31 +515,22 @@ def test_the_file_s_pmt_inf_as_one_batch_line_books_every_member(filed: dict[str
             )
         finally:
             conn.rollback()
-    reads = {t: after.get(t, 0) - before.get(t, 0) for t in READS}
-    seq_reads = {t: seq_after.get(t, 0) - seq_before.get(t, 0) for t in READS}
-    filed["batch_seq_reads"] = seq_reads
-    print(
-        f"\n(b) {len(payouts.payment_infos)} batch line(s) of {SIZE} members: the funds pass"
-        f" {elapsed:.1f}s, reads {reads} (by sequential scans {seq_reads})"
-    )
-    assert booked == SIZE, summary
-    # plan §1.4: within a minute, each member read by key a bounded number of times. (With a few
-    # hundred members the batch rule's grouped members were re-read once per row of the line, n²
-    # reads at 150 members — a plan the estimates choose: worker report to the SQL side.)
-    assert elapsed < 60, elapsed
-    for t, per in PER_MEMBER.items():
-        assert reads[t] - seq_reads[t] <= per * SIZE + SLACK, (t, reads, seq_reads)
+    assert booked == filed["size"], summary
+    reads = {t: after.get(t, 0) - before.get(t, 0) for t in SEEN}
+    seq_reads = {t: seq_after.get(t, 0) - seq_before.get(t, 0) for t in SEEN}
+    return elapsed, int(booked), reads, seq_reads
 
 
-def test_5000_rmt_debits_booked_by_the_debit_job_then_the_nightly_checks(
+def _rmt_pass(
     filed: dict[str, Any], caplog: pytest.LogCaptureFixture
-) -> None:
-    """(a) The statement of the file's K debits, one line per RMT end-to-end id, imported; the
-    debit job (the M2b pass, then the funds pass in chunks of 2,000 lines, each its own message)
-    books every payout once, its run settled; then the nightly checks with the K booked payouts
-    and the 50 cancelled transfers."""
+) -> tuple[float, float, list[tuple[int, int, float]], dict[str, int], dict[str, int], date]:
+    """The statement of the file's debits, one line per RMT end-to-end id, imported; the debit
+    job (the M2b pass, then the funds pass in chunks of 2,000 lines, each its own message), with
+    the statistics of the tables the funds pass reads forgotten and kept so: the import's time,
+    the job's, the funds chunks (lines, bookings, s), the reads of every session meanwhile (keyed
+    and by sequential scans), the debit day."""
     caplog.set_level(logging.INFO, logger="collectoo.payments")
-    org, tenant, payouts = filed["org"], filed["tenant"], filed["payouts"]
+    tenant, payouts = filed["tenant"], filed["payouts"]
     with psycopg.connect(DB) as conn:
         opening, last = conn.execute(
             """select closing_booked_minor, to_date from public.bank_statement
@@ -512,27 +547,36 @@ def test_5000_rmt_debits_booked_by_the_debit_job_then_the_nightly_checks(
     upload(tenant, storage(), render_camt053(doc, "08"), name=f"{stmt}.xml")
     _drain_payments(debits=False)  # the import; its debit job's message taken off
     imported = time.monotonic() - mark
-    with psycopg.connect(DB) as conn, conn.transaction():
-        conn.execute(
-            "select pgmq.send('payments', %s)",
-            (Jsonb({"type": "process_debits", "organization_id": org}),),
-        )
-    caplog.clear()
-    time.sleep(1.5)  # the statistics of the import's sessions flushed first
-    reads_before, seq_before = _reads(), _reads(seq=True)
-    mark = time.monotonic()
-    _drain_payments()
-    book_s = time.monotonic() - mark
-    reads_after, seq_after = _reads(), _reads(seq=True)
-    reads = {t: reads_after.get(t, 0) - reads_before.get(t, 0) for t in READS}
-    seq_reads = {t: seq_after.get(t, 0) - seq_before.get(t, 0) for t in READS}
+    with frozen_statistics(*FROZEN):
+        for t in FROZEN:
+            forget_statistics(t)
+        with psycopg.connect(DB) as conn, conn.transaction():
+            conn.execute(
+                "select pgmq.send('payments', %s)",
+                (Jsonb({"type": "process_debits", "organization_id": filed["org"]}),),
+            )
+        caplog.clear()
+        time.sleep(1.5)  # the statistics of the import's sessions flushed first
+        reads_before, seq_before = _reads(), _reads(seq=True)
+        mark = time.monotonic()
+        _drain_payments()
+        book_s = time.monotonic() - mark
+        reads_after, seq_after = _reads(), _reads(seq=True)
+    for t in FROZEN:  # as the fixture left them (the analysis on leaving the block undone)
+        forget_statistics(t)
+    reads = {t: reads_after.get(t, 0) - reads_before.get(t, 0) for t in SEEN}
+    seq_reads = {t: seq_after.get(t, 0) - seq_before.get(t, 0) for t in SEEN}
     chunks = [
         (int(m.group(1)), int(m.group(2)), float(m.group(3)))
         for r in caplog.records
         if (m := FUNDS_LOG.search(r.getMessage()))
     ]
+    return imported, book_s, chunks, reads, seq_reads, day
+
+
+def _booked(filed: dict[str, Any], day: date) -> tuple[int, int, int, int, int]:
     with psycopg.connect(DB) as conn:
-        booked, distinct, runs_booked, settled, cancelled = conn.execute(
+        return conn.execute(
             """select (select count(*) from public.bank_line_booking b
                        join public.bank_transfer t on t.id = b.transfer_id
                        where t.transfer_file_id = %s and b.kind = 'payout'),
@@ -545,42 +589,114 @@ def test_5000_rmt_debits_booked_by_the_debit_job_then_the_nightly_checks(
                        where source_id = any(%s::text[]) and entry_type = 'client_settlement'),
                       (select count(*) from public.bank_transfer
                        where organization_id = %s and kind = 'payout' and status = 'cancelled')""",
-            (filed["file_id"], filed["file_id"], filed["paid"], day, filed["paid"], org),
+            (filed["file_id"], filed["file_id"], filed["paid"], day, filed["paid"], filed["org"]),
         ).fetchone() or (0, 0, 0, 0, 0)
-    assert (booked, distinct, runs_booked, settled, cancelled) == (
-        SIZE,
-        SIZE,
-        SIZE,
-        SIZE,
-        CANCELLED,
+
+
+# a table of a few hundred rows (the 200-payout fixture's, alone in a fresh database) read whole by
+# a sequential scan is the planner's right choice; every servicer's 5,000 transfers never are
+TINY_TABLE = 1_000
+
+
+def _no_whole_table(seq_reads: dict[str, int]) -> None:
+    """ARCHITECTURE §4: the funds pass reads transfers by key only, whatever the statistics (a
+    sequential scan reads every servicer's transfers, once per chunk) — the tables of transfers
+    read by a sequential scan only while they are tiny."""
+    over = {t: seq_reads[t] for t in READS if seq_reads[t] > TINY_TABLE}
+    assert over == {}, seq_reads
+
+
+def test_a_batch_line_of_200_members_reads_each_member_a_bounded_number_of_times(
+    filed_small: dict[str, Any],
+) -> None:
+    """Review round 2, P1: a batch line of a few hundred members, booked in one funds pass, reads
+    each member's item and transfer a bounded number of times (the batch rule's grouped members
+    were re-read once per row of the line: 150 members read 23,250 items, n²)."""
+    n = filed_small["size"]
+    elapsed, booked, reads, seq_reads = _batch_pass(filed_small)
+    print(
+        f"\n(P1) a batch line of {n} members: the funds pass {elapsed:.2f}s, reads {reads}"
+        f" (by sequential scans {seq_reads})"
     )
-    mark = time.monotonic()
-    run = checks(tenant)
-    nightly_s = time.monotonic() - mark
+    assert booked == n
+    for t, per in PER_MEMBER.items():
+        assert reads[t] <= per * n + XACT_SLACK, (t, reads)
+    _no_whole_table(seq_reads)
+
+
+def test_200_rmt_debits_in_one_funds_pass(
+    filed_small: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review round 2, P4 — plan §1.4: « 200 RMT/SWP lines ≈ 1 s ». The statement of the 200
+    payouts' debits (one line per RMT id) imported, the debit job: one funds pass books them
+    (an SWP line takes the same rules and reads: the sweep's transfer, by its id), each transfer
+    read by key, none by a sequential scan."""
+    n = filed_small["size"]
+    imported, book_s, chunks, reads, seq_reads, day = _rmt_pass(filed_small, caplog)
+    assert _booked(filed_small, day) == (n, n, n, n, 0)
+    print(
+        f"\n(P4) {n} RMT debits: import {imported:.1f}s; the debit job {book_s:.2f}s, funds"
+        f" chunks (lines, bookings, s) {chunks}, reads {reads} (by sequential scans {seq_reads})"
+    )
+    assert [(lines, bookings) for lines, bookings, _ in chunks] == [(n, n)], chunks
+    assert chunks[0][2] <= SMALL_FUNDS_PASS_S, chunks
+    for t, per in PER_TRANSFER.items():
+        assert reads[t] <= per * n + SLACK, (t, reads)
+    _no_whole_table(seq_reads)
+
+
+def test_the_file_s_pmt_inf_as_one_batch_line_books_every_member(filed: dict[str, Any]) -> None:
+    """(b) Each PmtInf of the file debited as one batch line (no end-to-end id): one booking per
+    member, in one funds pass (one transaction: the set-based settlements, the seq row_number,
+    the completeness check on the line's highest seq), timed and counted, then rolled back (the
+    statement's RMT lines, test (a), book the file for real)."""
+    elapsed, booked, reads, seq_reads = _batch_pass(filed)
+    filed["batch_seq_reads"] = seq_reads
+    print(
+        f"\n(b) {len(filed['payouts'].payment_infos)} batch line(s) of {SIZE} members: the funds"
+        f" pass {elapsed:.1f}s, reads {reads} (by sequential scans {seq_reads})"
+    )
+    assert booked == SIZE
+    # plan §1.4: within a minute, each member read by key a bounded number of times
+    assert elapsed < 60, elapsed
+    for t, per in PER_MEMBER.items():
+        assert reads[t] <= per * SIZE + XACT_SLACK, (t, reads, seq_reads)
+
+
+def test_5000_rmt_debits_booked_by_the_debit_job_then_the_nightly_checks(
+    filed: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """(a) The statement of the file's K debits, one line per RMT end-to-end id, imported; the
+    debit job (the M2b pass, then the funds pass in chunks of 2,000 lines, each its own message)
+    books every payout once, its run settled; then the nightly checks with the K booked payouts
+    and the 50 cancelled transfers."""
+    imported, book_s, chunks, reads, seq_reads, day = _rmt_pass(filed, caplog)
+    filed["seq_reads"] = seq_reads
+    assert _booked(filed, day) == (SIZE, SIZE, SIZE, SIZE, CANCELLED)
+    run, nightly_s, check_reads = checks_with_reads(filed["tenant"])
     assert violations(str(run["run_id"])) == []
     print(
         f"\n(a) {SIZE} RMT debits: import {imported:.1f}s; the debit job {book_s:.1f}s, funds"
         f" chunks (lines, bookings, s) {chunks}, reads {reads} (by sequential scans"
         f" {seq_reads}); nightly checks with {SIZE}"
         f" booked payouts and {CANCELLED} cancelled transfers {nightly_s:.2f}s"
+        f" (rows read: {check_reads})"
     )
     # plan §1.4: each chunk within a minute, the job within two (the queue's visibility: 300 s)
     assert chunks and sum(n for n, _, _ in chunks) == SIZE, chunks
     assert all(sec < 60 for _, _, sec in chunks), chunks
     assert book_s < 120, book_s
-    filed["seq_reads"] = seq_reads
-    for t, per in PER_TRANSFER.items():  # keyed: the reads by index, per transfer
-        assert reads[t] - seq_reads[t] <= per * SIZE + SLACK, (t, reads, seq_reads)
+    for t, per in PER_TRANSFER.items():  # keyed: the reads per transfer
+        assert reads[t] <= per * SIZE + SLACK, (t, reads, seq_reads)
+    assert_checks_keyed(filed["org"], check_reads)
+    assert_checks_bounded(filed["org"], checks_work(filed["tenant"]))
     assert nightly_s < 5, nightly_s
 
 
-@pytest.mark.xfail(
-    strict=False,  # the plan rests on the statistics, which autovacuum may restore meanwhile
-    reason="needs SQL (worker report): bank_booking_post_rows' update of bank_transfer"
-    " (status booked) is a hash join over a sequential scan of bank_transfer, once per chunk",
-)
 def test_the_funds_pass_reads_no_table_of_transfers_in_full(filed: dict[str, Any]) -> None:
-    """ARCHITECTURE §4 for (a) and (b): the funds pass reads transfers by key only, whatever the
-    statistics (a sequential scan reads every servicer's transfers, once per chunk)."""
-    none = {t: 0 for t in READS}
-    assert (filed.get("batch_seq_reads"), filed["seq_reads"]) == (none, none)
+    """ARCHITECTURE §4 for (a) and (b), review round 2 (P2): with the statistics of the tables
+    it reads forgotten (and kept so during the pass), the funds pass reads no table of transfers
+    by a sequential scan — the update of the transfers booked included (it hashed every
+    servicer's transfers, once per chunk: 15,150 rows read for 5,050 transfers)."""
+    _no_whole_table(filed["batch_seq_reads"])
+    _no_whole_table(filed["seq_reads"])

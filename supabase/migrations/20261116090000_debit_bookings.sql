@@ -815,13 +815,22 @@ begin
   order by z.bank_transaction_id, z.o;
 
   -- the transfers booked (their entry) or returned (the reversal); the runs booked at the debit date; the run's payout
-  -- account returned (it blocks payouts until replaced or reconfirmed: payout_account_returned)
-  update public.bank_transfer x set status = 'booked', entry_id = e.entry_id
-  from pg_temp._bb b join pg_temp._bb_entry e on e.entry_no = b.ord
-  where b.kind in ('payout', 'sweep', 'top_up') and b.transfer_id is not null and x.id = b.transfer_id;
-  update public.bank_transfer x set status = 'returned', return_entry_id = e.entry_id
-  from pg_temp._bb b join pg_temp._bb_entry e on e.entry_no = b.ord
-  where b.kind in ('payout_returned', 'sweep_returned') and x.id = b.transfer_id;
+  -- account returned (it blocks payouts until replaced or reconfirmed: payout_account_returned). The transfers are
+  -- reached by key whatever the statistics (review round 2, P2: joined to the rows alone, a table whose statistics are
+  -- forgotten was hashed over a sequential scan of every servicer's transfers, once per chunk): the array of their
+  -- ids is the index's condition.
+  update public.bank_transfer x set status = 'booked', entry_id = s.entry_id
+  from (select b.transfer_id, e.entry_id from pg_temp._bb b join pg_temp._bb_entry e on e.entry_no = b.ord
+        where b.kind in ('payout', 'sweep', 'top_up') and b.transfer_id is not null) s
+  where x.id = any (array(select b.transfer_id from pg_temp._bb b
+                          where b.kind in ('payout', 'sweep', 'top_up') and b.transfer_id is not null))
+    and x.id = s.transfer_id;
+  update public.bank_transfer x set status = 'returned', return_entry_id = s.entry_id
+  from (select b.transfer_id, e.entry_id from pg_temp._bb b join pg_temp._bb_entry e on e.entry_no = b.ord
+        where b.kind in ('payout_returned', 'sweep_returned')) s
+  where x.id = any (array(select b.transfer_id from pg_temp._bb b
+                          where b.kind in ('payout_returned', 'sweep_returned') and b.transfer_id is not null))
+    and x.id = s.transfer_id;
   update public.remittance_run r set status = 'booked', booked_on = b.line_date, version = r.version + 1
   from pg_temp._bb b
   where b.kind = 'payout' and r.id = b.tr_run and r.status in ('approved', 'sent');
@@ -1153,8 +1162,30 @@ begin
   -- A batch line (plan §2.3 row 3, §2.4 rule 2): booked only for exactly the in_file members of the PmtInf it names, in
   -- its file of the line's account (the members that file holds), none cancelled (but returned), of one kind, adding up
   -- to the line — never a « best subset ». The members are read under their locks.
-  update pg_temp._bb b set why = w.why
-  from (
+  -- Linear whatever the line's size (review round 2, P1): each step is MATERIALIZED, so it runs once — the lines, the
+  -- rows each line holds, the members of each line's PmtInf by keyed laterals (each item, file and transfer read
+  -- once), then the verdict per line. (As one grouped subquery joined to the rows, the planner re-ran it once per row
+  -- of the line: 150 members read 23,250 items and ~25,000 transfers.)
+  with l as materialized (
+    select distinct o.bank_transaction_id, o.line_bank, o.payment_info_id, o.line_minor from pg_temp._bb o
+    where o.batch_line and o.kind in ('payout', 'sweep') and o.why is null),
+  r as materialized (   -- every row the line holds (the job's, whatever their verdict)
+    select o.bank_transaction_id, array_agg(o.transfer_id order by o.transfer_id) as ids
+    from pg_temp._bb o
+    where o.bank_transaction_id in (select l.bank_transaction_id from l)
+    group by o.bank_transaction_id),
+  m as materialized (
+    select l.bank_transaction_id, t.id, t.kind, t.status, t.amount_minor, fl.download_count, fl.status as file_status,
+           case when t.status = 'cancelled' then private.transfer_return_seen(t.id) else false end as returned
+    from l
+    cross join lateral (select y.file_id, y.transfer_id from public.transfer_file_item y
+                        where y.pmt_inf_id = l.payment_info_id offset 0) i
+    cross join lateral (select q.debtor_bank_account_id, q.status, q.download_count from public.transfer_file q
+                        where q.id = i.file_id offset 0) fl
+    cross join lateral (select q.id, q.kind, q.status, q.amount_minor, q.transfer_file_id from public.bank_transfer q
+                        where q.id = i.transfer_id offset 0) t
+    where fl.debtor_bank_account_id = l.line_bank and t.transfer_file_id = i.file_id),
+  w as materialized (
     select l.bank_transaction_id,
            case
              when count(m.id) = 0 then 'transfer_unknown'
@@ -1167,23 +1198,15 @@ begin
                   or bool_or(m.status = 'in_file' and m.kind = 'refund') then 'batch_mixed'
              when coalesce(sum(m.amount_minor) filter (where m.status = 'in_file'), 0) <> l.line_minor
                then 'batch_partial'
-             when (array_agg(m.id order by m.id) filter (where m.status = 'in_file'))
-                  is distinct from (select array_agg(o.transfer_id order by o.transfer_id) from pg_temp._bb o
-                                    where o.bank_transaction_id = l.bank_transaction_id) then 'batch_incomplete'
+             when (array_agg(m.id order by m.id) filter (where m.status = 'in_file')) is distinct from r.ids
+               then 'batch_incomplete'
            end as why
-    from (select distinct o.bank_transaction_id, o.line_bank, o.payment_info_id, o.line_minor from pg_temp._bb o
-          where o.batch_line and o.kind in ('payout', 'sweep') and o.why is null) l
-    left join lateral (
-      select t.id, t.kind, t.status, t.amount_minor, fl.download_count, fl.status as file_status,
-             case when t.status = 'cancelled' then private.transfer_return_seen(t.id) else false end as returned
-      from (select y.file_id, y.transfer_id from public.transfer_file_item y
-            where y.pmt_inf_id = l.payment_info_id offset 0) i
-      cross join lateral (select q.debtor_bank_account_id, q.status, q.download_count from public.transfer_file q
-                          where q.id = i.file_id offset 0) fl
-      cross join lateral (select q.id, q.kind, q.status, q.amount_minor, q.transfer_file_id from public.bank_transfer q
-                          where q.id = i.transfer_id offset 0) t
-      where fl.debtor_bank_account_id = l.line_bank and t.transfer_file_id = i.file_id) m on true
-    group by l.bank_transaction_id, l.line_minor) w
+    from l
+    left join m on m.bank_transaction_id = l.bank_transaction_id
+    left join r on r.bank_transaction_id = l.bank_transaction_id
+    group by l.bank_transaction_id, l.line_minor, r.ids)
+  update pg_temp._bb b set why = w.why
+  from w
   where b.bank_transaction_id = w.bank_transaction_id and b.why is null and w.why is not null;
   -- a transfer booked once per call (a later line waits: ops, or the next run)
   update pg_temp._bb b set why = 'transfer_twice'
@@ -2259,7 +2282,8 @@ $$;
 -- run_payment_checks (redefined from 20261112090000, each check in the same single statement): I19 by the bookings'
 -- 5120 postings (signed), bank_line_booked (each booked line booked whole, the deferred check's twin), I20
 -- transfer_booked_once (per kind; its refund rule keyed by the request: private.refund_debit_links, only for the
--- refunds it judges); the rest unchanged.
+-- refunds it judges). Review round 2 (P3): every check's reads keyed by the servicer and by the rows it needs (the
+-- statement's own comment); what each check finds unchanged.
 create or replace function private.run_payment_checks(p_organization_id uuid)
 returns jsonb
 language plpgsql
@@ -2285,48 +2309,108 @@ begin
   -- checks run (a link, a release, an allocation from a PostgREST session) is in every check or in none — never a gap
   -- between the cash read by one check and the payments read by another (review fix: the job runs READ COMMITTED,
   -- where each statement of a function sees the latest commits).
+  -- Review round 2 (P3): every check reads the servicer's rows by its key and the rows it needs by theirs, whatever the
+  -- statistics (ARCHITECTURE §4): a lateral holding only a key (OFFSET 0: never pulled up, nothing pushed into it) for
+  -- each row reached from another, a correlated EXISTS (OFFSET 0: never turned into a hashed anti-join) for each test of
+  -- presence. Joined to the servicer's rows by hash, a table was read whole — every servicer's postings, entries, bank
+  -- lines and notifications, cold after a scale run's writes (5 to 7.6 s for a servicer of 5,000 refunds). A posting's
+  -- account is its entry's servicer's (LG002), and an entry names a payment of its own servicer (LG002): the
+  -- servicer's accounts reach every posting of its entries, its payments every entry tagged with a payment. A check
+  -- that sums the servicer's ledger by definition (the funds' identities, each client's 4670, the receivables) reads
+  -- each of its accounts' postings once, through the accounts.
   insert into pg_temp._chk (code, severity, subject_type, subject_id, currency, amount_minor, count, oldest_days, details)
-  with pos as materialized (
-    -- Every payment's position from its tagged entries (one pass), and its pending refunds.
+  with pe as materialized (
+    -- Each of the servicer's payments with its entries' postings on the unallocated pool (4710: what it allocated,
+    -- forwarded or returned; a payment with none, one row of nulls), from the payment by keys: its entries by its
+    -- id, their postings by theirs (those on the servicer's 4710 accounts), the entry each reverses by its id. (As a
+    -- join of the payments to their grouped postings, a servicer whose payments the statistics did not know yet was
+    -- joined by a nested loop: 5,000 payments × 2,500 groups = 12.5 million rows compared, 7.7 s.)
     select p.id, p.status, p.review_reason, p.account_id, p.amount_minor, p.currency, p.booking_date, p.bank_account_id,
-           p.updated_at, coalesce(s.a, 0)::bigint as allocated, coalesce(s.r, 0)::bigint as returned,
-           (p.amount_minor - coalesce(s.a, 0) - coalesce(s.r, 0))::bigint as unallocated,
-           coalesce(q.pending, 0)::bigint as pending, coalesce(q.n, 0) as pending_n
+           p.bank_transaction_id, p.updated_at, x.entry_account_id, x.entry_type, x.posted
     from public.payment p
-    left join (select e.payment_id,
-                      sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) in ('allocation', 'forward')) as a,
-                      sum(lp.amount_minor) filter (where coalesce(t.entry_type, e.entry_type) = 'cash_out') as r
-               from public.ledger_entry e
-               left join public.ledger_entry t on t.id = e.reverses_entry_id
-               join public.ledger_posting lp on lp.entry_id = e.id
-               join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment'
-               where e.organization_id = p_organization_id and e.payment_id is not null
-               group by e.payment_id) s on s.payment_id = p.id
-    left join (select q.payment_id, sum(q.amount_minor) as pending, count(*) as n from public.refund_request q
-               where q.organization_id = p_organization_id and q.status = 'requested' group by q.payment_id) q
-      on q.payment_id = p.id
+    left join lateral (
+      select e.account_id as entry_account_id, coalesce(t.entry_type, e.entry_type) as entry_type, lp.amount_minor as posted
+      from (select q.id, q.organization_id, q.account_id, q.entry_type, q.reverses_entry_id from public.ledger_entry q
+            where q.payment_id = p.id offset 0) e
+      cross join lateral (select q.amount_minor, q.ledger_account_id from public.ledger_posting q
+                          where q.entry_id = e.id offset 0) lp
+      left join lateral (select q.entry_type from public.ledger_entry q where q.id = e.reverses_entry_id offset 0) t on true
+      where e.organization_id = p_organization_id
+        and lp.ledger_account_id = any (array(select a.id from public.ledger_account a
+                                              where a.organization_id = p_organization_id
+                                                and a.book = 'unallocated_payment'))) x on true
     where p.organization_id = p_organization_id
+  ),
+  pos as materialized (
+    -- Every payment's position from its tagged entries (one pass), and its pending refund (by the payment's key).
+    select g.id, g.status, g.review_reason, g.account_id, g.amount_minor, g.currency, g.booking_date, g.bank_account_id,
+           g.bank_transaction_id, g.updated_at, g.allocated, g.returned,
+           (g.amount_minor - g.allocated - g.returned)::bigint as unallocated,
+           coalesce(q.pending, 0)::bigint as pending, coalesce(q.n, 0) as pending_n
+    from (select c.id, c.status, c.review_reason, c.account_id, c.amount_minor, c.currency, c.booking_date,
+                 c.bank_account_id, c.bank_transaction_id, c.updated_at,
+                 coalesce(sum(c.posted) filter (where c.entry_type in ('allocation', 'forward')), 0)::bigint as allocated,
+                 coalesce(sum(c.posted) filter (where c.entry_type = 'cash_out'), 0)::bigint as returned
+          from pe c
+          group by c.id, c.status, c.review_reason, c.account_id, c.amount_minor, c.currency, c.booking_date,
+                   c.bank_account_id, c.bank_transaction_id, c.updated_at) g
+    left join lateral (select sum(q.amount_minor) filter (where q.status = 'requested') as pending,
+                              count(*) filter (where q.status = 'requested') as n
+                       from (select q.amount_minor, q.status from public.refund_request q
+                             where q.payment_id = g.id offset 0) q) q on true
+    -- (by the payment's key only — a request's payment is its servicer's, its foreign key: with the servicer or the
+    -- status in the lateral, stale statistics chose the index of the requests still requested, led by the servicer,
+    -- and read every request of the servicer for each payment, the executed ones' dead versions included until
+    -- vacuum: 1.44 million buffers, 2 s, for 5,000 refunds)
+  ),
+  bal as materialized (
+    -- Each of the servicer's accounts of the funds' books (client and servicer money: 5120, 4710, 4670, 4679, the
+    -- servicer's own) with what its postings add up to, read by the account's key.
+    select la.id, la.book, b.money_of, la.currency, la.client_organization_id, la.bank_account_id, la.portfolio_id,
+           s.total
+    from public.ledger_account la
+    join public.ledger_book b on b.code = la.book
+    cross join lateral (select sum(q.amount_minor) as total
+                        from (select q.amount_minor from public.ledger_posting q
+                              where q.ledger_account_id = la.id offset 0) q) s
+    where la.organization_id = p_organization_id
+      and la.book = any (array(select k.code from public.ledger_book k where k.money_of in ('client', 'servicer')))
+      and s.total is not null
+  ),
+  recv as materialized (
+    -- Each of the servicer's receivable accounts (1100: one per claim item and component): what its postings add up
+    -- to, and whether a payment (an allocation or a direct payment's adjustment) or a netting lowered it — each
+    -- lowering posting's entry read by its id.
+    select la.id, la.claim_item_id, la.component, la.currency, la.portfolio_id, b.balance, b.lowered, b.lowered_item
+    from public.ledger_account la
+    cross join lateral (
+      select sum(q.amount_minor) as balance, coalesce(bool_or(e.lowers), false) as lowered,
+             coalesce(bool_or(e.lowers_item), false) as lowered_item
+      from (select q.entry_id, q.amount_minor from public.ledger_posting q where q.ledger_account_id = la.id offset 0) q
+      left join lateral (
+        select x.entry_type in ('allocation', 'netting')
+                 or (x.entry_type = 'adjustment' and x.source_type = 'direct_payment') as lowers,
+               x.entry_type = 'allocation'
+                 or (x.entry_type = 'adjustment' and x.source_type = 'direct_payment') as lowers_item
+        from public.ledger_entry x where q.amount_minor < 0 and x.id = q.entry_id offset 0) e on true) b
+    where la.organization_id = p_organization_id and la.book = 'debtor_receivable' and b.balance is not null
   )
   -- I8′: the dedicated-account fund closed per currency (5120 + 4710 + 4670 + 4679 = 0), the servicer's fund closed
   -- per currency (own_fund_identity), and the 4679 / 4689 mirror (fund_mirror, I12), from one pass over the funds.
   select x.code, 'violation'::text, 'servicer'::text, null::uuid, x.currency::char(3), x.total::bigint,
          null::integer, null::integer, x.details
   from (select f.currency, v.code, v.total, v.details
-        from (select la.currency,
-                     sum(lp.amount_minor) filter (where b.money_of = 'client') as client_total,
-                     sum(lp.amount_minor) filter (where b.money_of = 'servicer') as servicer_total,
-                     sum(lp.amount_minor) filter (where la.book in ('due_to_servicer', 'due_from_client_funds'))
-                       as mirror_total,
-                     sum(lp.amount_minor) filter (where la.book = 'client_money_cash') as cash,
-                     sum(lp.amount_minor) filter (where la.book = 'unallocated_payment') as pool,
-                     sum(lp.amount_minor) filter (where la.book = 'client_payable') as owed,
-                     sum(lp.amount_minor) filter (where la.book = 'due_to_servicer') as servicer_share,
-                     sum(lp.amount_minor) filter (where la.book = 'due_from_client_funds') as servicer_claim
-              from public.ledger_account la
-              join public.ledger_book b on b.code = la.book and b.money_of in ('client', 'servicer')
-              join public.ledger_posting lp on lp.ledger_account_id = la.id
-              where la.organization_id = p_organization_id and la.portfolio_id is null
-              group by la.currency) f
+        from (select a.currency,
+                     sum(a.total) filter (where a.money_of = 'client') as client_total,
+                     sum(a.total) filter (where a.money_of = 'servicer') as servicer_total,
+                     sum(a.total) filter (where a.book in ('due_to_servicer', 'due_from_client_funds')) as mirror_total,
+                     sum(a.total) filter (where a.book = 'client_money_cash') as cash,
+                     sum(a.total) filter (where a.book = 'unallocated_payment') as pool,
+                     sum(a.total) filter (where a.book = 'client_payable') as owed,
+                     sum(a.total) filter (where a.book = 'due_to_servicer') as servicer_share,
+                     sum(a.total) filter (where a.book = 'due_from_client_funds') as servicer_claim
+              from bal a where a.portfolio_id is null
+              group by a.currency) f
         cross join lateral (values
           ('client_money_identity', coalesce(f.client_total, 0),
            jsonb_build_object('cash_minor', coalesce(f.cash, 0)::text, 'unallocated_minor', coalesce(f.pool, 0)::text,
@@ -2344,10 +2428,9 @@ begin
   select 'client_payable_debit', 'violation', 'client', coalesce(p.client_organization_id, r.client_organization_id),
          coalesce(p.currency, r.currency), coalesce(p.total, 0)::bigint, null, null,
          jsonb_build_object('postings_minor', coalesce(p.total, 0)::text, 'running_minor', coalesce(r.balance_minor, 0)::text)
-  from (select la.client_organization_id, la.currency, sum(lp.amount_minor) as total
-        from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
-        where la.organization_id = p_organization_id and la.book = 'client_payable'
-        group by la.client_organization_id, la.currency) p
+  from (select a.client_organization_id, a.currency, sum(a.total) as total
+        from bal a where a.book = 'client_payable'
+        group by a.client_organization_id, a.currency) p
   full join (select c.client_organization_id, c.currency, c.balance_minor from private.client_payable_balance c
              where c.organization_id = p_organization_id) r
     on r.client_organization_id = p.client_organization_id and r.currency = p.currency
@@ -2386,22 +2469,24 @@ begin
          jsonb_build_object('cash_minor', coalesce(c.cash, 0)::text, 'unallocated_minor', coalesce(y.unallocated, 0)::text,
                             'allocated_minor', coalesce(y.allocated, 0)::text,
                             'booked_lines_minor', coalesce(k.moved, 0)::text)
-  from (select la.bank_account_id, sum(lp.amount_minor) as cash
-        from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
-        where la.organization_id = p_organization_id and la.book = 'client_money_cash'
-        group by la.bank_account_id) c
+  from (select a.bank_account_id, sum(a.total) as cash
+        from bal a where a.book = 'client_money_cash'
+        group by a.bank_account_id) c
   full join (select x.bank_account_id, sum(x.amount_minor - x.returned) as held, sum(x.unallocated) as unallocated,
                     sum(x.allocated) as allocated
              from pos x where x.bank_account_id is not null group by x.bank_account_id) y
     on y.bank_account_id = c.bank_account_id
   full join (select k.bank_account_id, sum(p.amount_minor) as moved
              from public.bank_line_booking k
-             join public.ledger_posting p on p.entry_id = k.entry_id
-             join public.ledger_account la on la.id = p.ledger_account_id and la.book = 'client_money_cash'
+             cross join lateral (select q.amount_minor, q.ledger_account_id from public.ledger_posting q
+                                 where q.entry_id = k.entry_id offset 0) p
+             cross join lateral (select q.book, q.bank_account_id from public.ledger_account q
+                                 where q.id = p.ledger_account_id offset 0) la
+             where k.organization_id = p_organization_id and la.book = 'client_money_cash'
                and la.bank_account_id = k.bank_account_id
-             where k.organization_id = p_organization_id
              group by k.bank_account_id) k on k.bank_account_id = coalesce(c.bank_account_id, y.bank_account_id)
-  join public.bank_account b on b.id = coalesce(c.bank_account_id, y.bank_account_id, k.bank_account_id)
+  cross join lateral (select q.currency from public.bank_account q
+                      where q.id = coalesce(c.bank_account_id, y.bank_account_id, k.bank_account_id) offset 0) b
   where coalesce(c.cash, 0) <> coalesce(y.held, 0) + coalesce(k.moved, 0)
 
   union all
@@ -2420,24 +2505,25 @@ begin
   -- bookings say, per kind (plan §2.5 [critic]): a payout, sweep or top-up by bank_line_booking — booked or returned
   -- with exactly one debit booking whose entry is its entry, returned with its return booking, no booking while not
   -- booked; a refund by its request (the M2b RFD link: its cash_out the transfer's entry, one link; its bounce the
-  -- transfer's return). A run booked with a payout has its transfer booked or returned.
+  -- transfer's return). A run booked with a payout has its transfer booked or returned. (Each transfer's bookings and
+  -- its request read by its key.)
   select 'transfer_booked_once', 'violation', 'bank_transfer', x.id, x.currency, x.amount_minor, null, null,
          jsonb_build_object('kind', x.kind, 'status', x.status, 'debit_bookings', x.debits,
                             'return_bookings', x.returns)
   from (select t.id, t.kind, t.status, t.currency, t.amount_minor, t.entry_id, t.return_entry_id,
-               (select count(*) from public.bank_line_booking b where b.transfer_id = t.id
-                  and b.kind in ('payout', 'sweep', 'top_up')) as debits,
-               (select count(*) from public.bank_line_booking b where b.transfer_id = t.id
-                  and b.kind in ('payout', 'sweep', 'top_up') and b.entry_id = t.entry_id) as debit_own,
-               (select count(*) from public.bank_line_booking b where b.transfer_id = t.id
-                  and b.kind in ('payout_returned', 'sweep_returned')) as returns,
-               (select count(*) from public.bank_line_booking b where b.transfer_id = t.id
-                  and b.kind in ('payout_returned', 'sweep_returned') and b.entry_id = t.return_entry_id) as return_own,
-               q.cash_out_entry_id, q.bounce_entry_id,
+               c.debits, c.debit_own, c.returns, c.return_own, q.cash_out_entry_id, q.bounce_entry_id,
                case when t.kind = 'refund' and t.status in ('booked', 'returned')
                     then private.refund_debit_links(q.id) end as refund_links
         from public.bank_transfer t
-        left join public.refund_request q on q.transfer_id = t.id
+        cross join lateral (
+          select count(*) filter (where b.kind in ('payout', 'sweep', 'top_up')) as debits,
+                 count(*) filter (where b.kind in ('payout', 'sweep', 'top_up') and b.entry_id = t.entry_id) as debit_own,
+                 count(*) filter (where b.kind in ('payout_returned', 'sweep_returned')) as returns,
+                 count(*) filter (where b.kind in ('payout_returned', 'sweep_returned')
+                                    and b.entry_id = t.return_entry_id) as return_own
+          from (select b.kind, b.entry_id from public.bank_line_booking b where b.transfer_id = t.id offset 0) b) c
+        left join lateral (select q.id, q.cash_out_entry_id, q.bounce_entry_id from public.refund_request q
+                           where q.transfer_id = t.id offset 0) q on true
         where t.organization_id = p_organization_id) x
   where x.debits > 1 or x.returns > 1
      or (x.kind in ('payout', 'sweep', 'top_up')
@@ -2452,25 +2538,30 @@ begin
   select 'transfer_booked_once', 'violation', 'remittance_run', r.id, r.currency, r.net_minor, null, null,
          jsonb_build_object('number', r.number, 'transfer_status', t.status)
   from public.remittance_run r
-  left join public.bank_transfer t on t.id = r.transfer_id
+  left join lateral (select q.status from public.bank_transfer q where q.id = r.transfer_id offset 0) t on true
   where r.organization_id = p_organization_id and r.status = 'booked' and r.net_minor > 0
     and (t.status is null or t.status not in ('booked', 'returned'))
 
   union all
-  -- I11: the cash booked for a statement day = its payments (released duplicates included).
+  -- I11: the cash booked for a statement day = its payments (released duplicates included). The cash_in entries'
+  -- 5120 postings through the servicer's 5120 accounts; each payment's line by its id.
   select 'cash_in_statement', 'violation', 'bank_statement', coalesce(ci.statement_id, pd.statement_id), null,
          (coalesce(ci.total, 0) - coalesce(pd.total, 0))::bigint, null, null,
          jsonb_build_object('date', coalesce(ci.d, pd.d), 'cash_in_minor', coalesce(ci.total, 0)::text,
                             'payments_minor', coalesce(pd.total, 0)::text)
   from (select e.source_id::uuid as statement_id, e.effective_date as d, sum(lp.amount_minor) as total
-        from public.ledger_entry e
-        join public.ledger_posting lp on lp.entry_id = e.id
-        join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'client_money_cash'
-        where e.organization_id = p_organization_id and e.entry_type = 'cash_in'
+        from public.ledger_account la
+        cross join lateral (select q.entry_id, q.amount_minor from public.ledger_posting q
+                            where q.ledger_account_id = la.id offset 0) lp
+        cross join lateral (select q.organization_id, q.entry_type, q.source_id, q.effective_date
+                            from public.ledger_entry q where q.id = lp.entry_id offset 0) e
+        where la.organization_id = p_organization_id and la.book = 'client_money_cash'
+          and e.organization_id = p_organization_id and e.entry_type = 'cash_in'
         group by e.source_id, e.effective_date) ci
   full join (select t.statement_id, p.booking_date as d, sum(p.amount_minor) as total
-             from public.payment p join public.bank_transaction t on t.id = p.bank_transaction_id
-             where p.organization_id = p_organization_id
+             from pos p
+             cross join lateral (select q.statement_id from public.bank_transaction q
+                                 where q.id = p.bank_transaction_id offset 0) t
              group by t.statement_id, p.booking_date) pd
     on pd.statement_id = ci.statement_id and pd.d = ci.d
   where coalesce(ci.total, 0) <> coalesce(pd.total, 0)
@@ -2496,14 +2587,9 @@ begin
   -- the net allocated per (payment, file) is never negative
   select 'payment_negative_allocation', 'violation', 'payment', x.payment_id, null, x.total::bigint, null, null,
          jsonb_build_object('account_id', x.account_id)
-  from (select e.payment_id, e.account_id, sum(lp.amount_minor) as total
-        from public.ledger_entry e
-        left join public.ledger_entry t on t.id = e.reverses_entry_id
-        join public.ledger_posting lp on lp.entry_id = e.id
-        join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'unallocated_payment'
-        where e.organization_id = p_organization_id and e.payment_id is not null
-          and coalesce(t.entry_type, e.entry_type) = 'allocation'
-        group by e.payment_id, e.account_id) x
+  from (select c.id as payment_id, c.entry_account_id as account_id, sum(c.posted) as total
+        from pe c where c.entry_type = 'allocation'
+        group by c.id, c.entry_account_id) x
   where x.total < 0
 
   union all
@@ -2511,85 +2597,87 @@ begin
   -- below zero as a whole once such an entry touched it.
   select 'receivable_negative', 'violation', 'claim_item', x.claim_item_id, x.currency, x.balance::bigint, null, null,
          jsonb_build_object('component', x.component)
-  from (select la.claim_item_id, la.component, la.currency, sum(lp.amount_minor) as balance
-        from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
-        where la.organization_id = p_organization_id and la.book = 'debtor_receivable'
-          and exists (select 1 from public.ledger_posting q join public.ledger_entry e on e.id = q.entry_id
-                      where q.ledger_account_id = la.id and q.amount_minor < 0
-                        and (e.entry_type in ('allocation', 'netting')
-                             or (e.entry_type = 'adjustment' and e.source_type = 'direct_payment')))
-        group by la.claim_item_id, la.component, la.currency) x
+  from (select r.claim_item_id, r.component, r.currency, sum(r.balance) as balance
+        from recv r where r.lowered
+        group by r.claim_item_id, r.component, r.currency) x
   where x.balance < 0
   union all
   select 'item_negative', 'violation', 'claim_item', y.claim_item_id, y.currency, y.balance::bigint, null, null,
          '{}'::jsonb
-  from (select la.claim_item_id, la.currency, sum(lp.amount_minor) as balance
-        from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
-        where la.organization_id = p_organization_id and la.book = 'debtor_receivable'
-          and la.claim_item_id in (
-            select l2.claim_item_id from public.ledger_account l2
-            join public.ledger_posting q on q.ledger_account_id = l2.id
-            join public.ledger_entry e on e.id = q.entry_id
-            where l2.organization_id = p_organization_id and l2.book = 'debtor_receivable' and q.amount_minor < 0
-              and (e.entry_type = 'allocation' or (e.entry_type = 'adjustment' and e.source_type = 'direct_payment')))
-        group by la.claim_item_id, la.currency) y
+  from (select r.claim_item_id, r.currency, sum(r.balance) as balance
+        from (select r.claim_item_id, r.currency, r.balance,
+                     bool_or(r.lowered_item) over (partition by r.claim_item_id) as touched
+              from recv r where r.claim_item_id is not null) r
+        where r.touched
+        group by r.claim_item_id, r.currency) y
   where y.balance < 0
 
   union all
   -- The owner-claim mirror (M2a risk #5): per portfolio, component and currency, 3100 = −Σ1100.
   select 'owner_claim_mirror', 'violation', 'portfolio', x.portfolio_id, x.currency, x.total::bigint, null, null,
          jsonb_build_object('component', x.component)
-  from (select la.portfolio_id, la.component, la.currency, sum(lp.amount_minor) as total
-        from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
-        where la.organization_id = p_organization_id and la.book in ('debtor_receivable', 'owner_claim')
-        group by la.portfolio_id, la.component, la.currency) x
+  from (select z.portfolio_id, z.component, z.currency, sum(z.balance) as total
+        from (select r.portfolio_id, r.component, r.currency, r.balance from recv r
+              union all
+              select la.portfolio_id, la.component, la.currency, s.total
+              from public.ledger_account la
+              cross join lateral (select sum(q.amount_minor) as total
+                                  from (select q.amount_minor from public.ledger_posting q
+                                        where q.ledger_account_id = la.id offset 0) q) s
+              where la.organization_id = p_organization_id and la.book = 'owner_claim' and s.total is not null) z
+        group by z.portfolio_id, z.component, z.currency) x
   where x.total <> 0
 
   union all
   -- R124-6: one receipt number per payment on a file and a current version about its file (void once returned). A
-  -- payment changed in the last hour may still be in the receipts queue.
+  -- payment changed in the last hour may still be in the receipts queue. (Each payment's receipts by its key.)
   select y.code, 'violation', 'payment', y.id, null, null, null, v_today - y.booking_date,
          jsonb_build_object('status', y.status)
   from (select c.id, c.booking_date, c.status,
-               case when r.payment_id is null and c.status <> 'returned' then 'receipt_missing'
+               case when r.v is null and c.status <> 'returned' then 'receipt_missing'
                     when r.numbers > 1 then 'receipt_numbers'
-                    when c.status = 'returned' and r.payment_id is not null and cur.kind <> 'void' then 'receipt_not_void'
-                    when c.status <> 'returned' and r.payment_id is not null
+                    when c.status = 'returned' and r.v is not null and cur.kind <> 'void' then 'receipt_not_void'
+                    when c.status <> 'returned' and r.v is not null
                          and (cur.kind = 'void' or cur.account_id is distinct from c.account_id) then 'receipt_stale'
                end as code
         from pos c
-        left join (select x.payment_id, count(distinct x.number) as numbers, max(x.version) as v
-                   from public.receipt x where x.organization_id = p_organization_id group by x.payment_id) r
-          on r.payment_id = c.id
-        left join public.receipt cur on cur.payment_id = c.id and cur.version = r.v
+        cross join lateral (select count(distinct x.number) as numbers, max(x.version) as v
+                            from (select x.number, x.version, x.organization_id from public.receipt x
+                                  where x.payment_id = c.id offset 0) x
+                            where x.organization_id = p_organization_id) r
+        left join lateral (select x.kind, x.account_id from public.receipt x
+                           where x.payment_id = c.id and x.version = r.v offset 0) cur on true
         where c.account_id is not null and c.updated_at < now() - interval '1 hour'
           and not (c.status in ('matched', 'partially_allocated') and c.review_reason is null)) y
   where y.code is not null
 
   union all
   -- R124-5: one notification per entry that moves what a client is owed, one per payment held for a file, one per
-  -- return of a payment on a file.
+  -- return of a payment on a file. (The payments' entries from the payments, each notification by its key.)
   select 'notification_missing', 'violation', 'ledger_entry', e.id, null, null, null, null,
          jsonb_build_object('entry_type', e.entry_type, 'payment_id', e.payment_id)
-  from public.ledger_entry e
-  left join public.ledger_entry t on t.id = e.reverses_entry_id
-  where e.organization_id = p_organization_id and e.payment_id is not null
+  from pos c
+  cross join lateral (select q.id, q.organization_id, q.entry_type, q.payment_id, q.reverses_entry_id
+                      from public.ledger_entry q where q.payment_id = c.id offset 0) e
+  left join lateral (select q.entry_type from public.ledger_entry q where q.id = e.reverses_entry_id offset 0) t on true
+  where e.organization_id = p_organization_id
     and (e.entry_type in ('allocation', 'forward') or (e.entry_type = 'reversal' and t.entry_type in ('allocation', 'forward')))
-    and not exists (select 1 from public.client_notification n where n.ledger_entry_id = e.id)
+    and not exists (select 1 from public.client_notification n where n.ledger_entry_id = e.id offset 0)
   union all
   select 'notification_missing', 'violation', 'payment', c.id, null, null, null, null,
          jsonb_build_object('kind', 'payment_held')
   from pos c
   where c.review_reason = 'hold_blocks_allocation' and c.account_id is not null
     and not exists (select 1 from public.client_notification n
-                    where n.payment_id = c.id and n.account_id = c.account_id and n.kind = 'payment_held')
+                    where n.payment_id = c.id and n.account_id = c.account_id and n.kind = 'payment_held' offset 0)
   union all
-  select 'notification_missing', 'violation', 'payment', l.payment_id, null, null, null, null,
+  select 'notification_missing', 'violation', 'payment', c.id, null, null, null, null,
          jsonb_build_object('kind', 'payment_returned')
-  from public.bank_debit_link l
-  join public.payment p on p.id = l.payment_id
-  where l.organization_id = p_organization_id and l.kind = 'return' and p.account_id is not null
-    and not exists (select 1 from public.client_notification n where n.ledger_entry_id = l.cash_entry_id)
+  from pos c
+  cross join lateral (select l.organization_id, l.kind, l.cash_entry_id from public.bank_debit_link l
+                      where l.payment_id = c.id offset 0) l   -- (a link's payment is its servicer's: its foreign key)
+  where l.organization_id = p_organization_id and l.kind = 'return' and c.account_id is not null
+    and not exists (select 1 from public.client_notification n where n.ledger_entry_id = l.cash_entry_id offset 0)
 
   union all
   -- Statements (I9): a camt.053 statement whose opening is not the previous closing (« relevé manquant »), and each
@@ -2609,9 +2697,12 @@ begin
          jsonb_build_object('as_of', z.to_date, 'closing_minor', z.closing::text, 'cash_minor', z.cash::text,
                             'unposted_minor', z.unposted::text, 'unposted_lines', z.unposted_lines)
   from (select l.bank_account_id, l.currency, l.to_date, l.closing_booked_minor as closing,
-               coalesce((select sum(lp.amount_minor) from public.ledger_account la
-                         join public.ledger_posting lp on lp.ledger_account_id = la.id and lp.effective_date <= l.to_date
-                         where la.bank_account_id = l.bank_account_id and la.book = 'client_money_cash'), 0) as cash,
+               coalesce((select sum(lp.amount_minor)
+                         from (select a.id from public.ledger_account a
+                               where a.bank_account_id = l.bank_account_id and a.book = 'client_money_cash' offset 0) la
+                         cross join lateral (select q.amount_minor from public.ledger_posting q
+                                             where q.ledger_account_id = la.id and q.effective_date <= l.to_date
+                                             offset 0) lp), 0) as cash,
                u.minor as unposted, u.lines as unposted_lines
         from (select distinct on (s.bank_account_id) s.bank_account_id, s.currency, s.to_date, s.closing_booked_minor
               from public.bank_statement s
@@ -2627,10 +2718,9 @@ begin
   select 'servicer_shortfall', 'alert', 'servicer', null, s.currency, (s.owed - coalesce(o.ordered, 0))::bigint, null,
          null, jsonb_build_object('due_to_servicer_minor', s.owed::text,
                                   'top_ups_ordered_minor', coalesce(o.ordered, 0)::text)
-  from (select la.currency, sum(lp.amount_minor) as owed
-        from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
-        where la.organization_id = p_organization_id and la.book = 'due_to_servicer'
-        group by la.currency) s
+  from (select a.currency, sum(a.total) as owed
+        from bal a where a.book = 'due_to_servicer'
+        group by a.currency) s
   left join (select x.currency, sum(x.amount_minor) as ordered from public.bank_transfer x
              where x.organization_id = p_organization_id and x.kind = 'top_up' and x.status in ('ordered', 'in_file')
              group by x.currency) o on o.currency = s.currency
@@ -2662,32 +2752,49 @@ begin
         group by q.currency
         union all
         -- returns, our refunds, credits undoing a debit (released duplicates of those kinds) not linked — they can
-        -- only be booked, never explained — and other debits of a pending refund's amount on its bank account
+        -- only be booked, never explained — and other debits of a pending refund's amount on its bank account: the
+        -- servicer's lines of those kinds, three days old at least, by the kinds' partial indexes; each test by key
         select 'debit_unclassified', t.currency, sum(t.amount_minor)::bigint, count(*)::integer,
                max(v_today - t.booking_date), (array_agg(t.id order by t.booking_date, t.id))[1:50]
-        from public.bank_transaction t
-        left join public.bank_duplicate_resolution r on r.bank_transaction_id = t.id
-        where t.organization_id = p_organization_id
-          and (t.kind in ('return', 'refund_out', 'transfer_out', 'own_transfer_in', 'client_transfer_in')
+        from (select q.id, q.kind, q.direction, q.currency, q.amount_minor, q.booking_date, q.bank_account_id,
+                     q.organization_id
+              from public.bank_transaction q
+              where q.organization_id = p_organization_id and q.booking_date <= v_today - 3
+                and q.kind in ('return', 'refund_out', 'suspected_duplicate')
+              union all
+              select q.id, q.kind, q.direction, q.currency, q.amount_minor, q.booking_date, q.bank_account_id,
+                     q.organization_id
+              from public.bank_transaction q
+              where q.organization_id = p_organization_id and q.booking_date <= v_today - 3
+                and q.kind in ('transfer_out', 'own_transfer_in', 'client_transfer_in')
+              union all
+              select q.id, q.kind, q.direction, q.currency, q.amount_minor, q.booking_date, q.bank_account_id,
+                     q.organization_id
+              from public.bank_transaction q
+              where q.organization_id = p_organization_id and q.booking_date <= v_today - 3
+                and q.kind = 'other_debit') t
+        left join lateral (select r.released_kind from public.bank_duplicate_resolution r
+                           where r.bank_transaction_id = t.id offset 0) r on true
+        where (t.kind in ('return', 'refund_out', 'transfer_out', 'own_transfer_in', 'client_transfer_in')
                or (t.kind = 'suspected_duplicate'
                    and r.released_kind in ('return', 'refund_out', 'transfer_out', 'own_transfer_in',
                                            'client_transfer_in'))
                or (t.kind = 'other_debit' and t.direction = 'debit'
-                   and exists (select 1 from public.refund_request q
-                               where q.bank_account_id = t.bank_account_id and q.amount_minor = t.amount_minor
-                                 and q.organization_id = t.organization_id and q.status = 'requested')))
-          and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id)
-          and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = t.id)
-          and not exists (select 1 from public.bank_own_credit_release c where c.bank_transaction_id = t.id)
-          and v_today - t.booking_date >= 3
+                   and exists (select 1 from (select q.organization_id, q.status from public.refund_request q
+                                              where q.bank_account_id = t.bank_account_id
+                                                and q.amount_minor = t.amount_minor offset 0) q
+                               where q.organization_id = t.organization_id and q.status = 'requested' offset 0)))
+          and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id offset 0)
+          and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = t.id offset 0)
+          and not exists (select 1 from public.bank_own_credit_release c where c.bank_transaction_id = t.id offset 0)
         group by t.currency
         union all
         select 'duplicate_unresolved', t.currency, sum(t.amount_minor)::bigint, count(*)::integer,
                max(v_today - t.booking_date), (array_agg(t.id order by t.booking_date, t.id))[1:50]
         from public.bank_transaction t
         where t.organization_id = p_organization_id and t.kind = 'suspected_duplicate'
-          and not exists (select 1 from public.bank_duplicate_resolution r where r.bank_transaction_id = t.id)
-          and v_today - t.booking_date >= 3
+          and t.booking_date <= v_today - 3
+          and not exists (select 1 from public.bank_duplicate_resolution r where r.bank_transaction_id = t.id offset 0)
         group by t.currency
         union all
         select 'direct_payment_waiting', d.currency, sum(d.amount_minor)::bigint, count(*)::integer,

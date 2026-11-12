@@ -178,7 +178,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
-      - name: 5,000 payouts booked from their debits, one line each and as one batch line (docs/benchmarks/remittances.md)
+      - name: 200 and 5,000 payouts booked from their debits, one line each and as one batch line (docs/benchmarks/remittances.md)
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen && uv run pytest -m integration -s tests/test_debit_bookings_scale_integration.py

@@ -12,7 +12,8 @@ synchronous command under the API's 8 s: the transfer cancelled, one
 full credit note with one allocation per file, the lines released, the items back in the queue, the
 tier history restored) and the checks again. M2c-6b-1 (review T6): the items in a new run,
 prepared and approved, its payout filed, downloaded and debited on a statement (its RMT id): the
-debit job books it and settles the 50,000-line run; the checks (I19, I20) after it. The remittance
+debit job books it and settles the 50,000-line run; the checks (I19, I20) after it, their reads
+bounded by the servicer's own rows per table and per check (review round 2, P3). The remittance
 tables are never analysed (the state CI meets): the plans must not rest on statistics. Prints the
 timings (docs/benchmarks/remittances.md). REMIT_FILES changes the size."""
 
@@ -41,6 +42,12 @@ from statement_helpers import bank_tenant
 from stats_helpers import forget_statistics
 from test_allocation_scale_integration import _credits, _files
 from test_matching_scale_integration import _board
+from test_transfer_files_scale_integration import (
+    assert_checks_bounded,
+    assert_checks_keyed,
+    checks_with_reads,
+    checks_work,
+)
 
 pytestmark = pytest.mark.integration
 FILES = int(os.environ.get("REMIT_FILES", "50000"))
@@ -260,9 +267,7 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
             (rerun, rerun),
         ).fetchone() or (0, 0)
     assert (settled, bookings) == (1, 1)
-    final_checking = time.monotonic()
-    final = checks(tenant)
-    final_s = time.monotonic() - final_checking
+    final, final_s, final_reads = checks_with_reads(tenant)
     with psycopg.connect(DB) as conn:
         found = conn.execute(
             """select code from public.payment_check_result where run_id = %s
@@ -282,9 +287,14 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
         f" cancellation (command, the file superseded) {cancel_s:.2f}s; M2c-6b-1: the items"
         f" re-run, prepared and approved {redone - redoing:.1f}s; its payout filed, downloaded,"
         f" debited and booked {booked_s:.1f}s ({'; '.join(funds)}); nightly checks with the"
-        f" 50,000-line run booked {final_s:.1f}s"
+        f" 50,000-line run booked {final_s:.1f}s (rows read by index, by sequential scans:"
+        f" {final_reads})"
     )
     # design §19 targets, with room for a shared CI runner (the commands: the API's 8 s)
     assert requested - started < 8
     assert approved - commanded < 60
     assert cancel_s < 8
+    # review round 2 (P3): the 50,000-line servicer's checks read its own rows by key — its ledger
+    # once per check that sums it — never every servicer's by a sequential scan
+    assert_checks_keyed(str(tenant["servicer"]), final_reads)
+    assert_checks_bounded(str(tenant["servicer"]), checks_work(tenant))
