@@ -10,9 +10,11 @@ documents job the approval queues (M2c-5: the statement's payload built in SQL f
 lines, its CSV and PDF, the invoice's PDF, uploaded and recorded), the cancellation by an admin (a
 synchronous command under the API's 8 s: the transfer cancelled, one
 full credit note with one allocation per file, the lines released, the items back in the queue, the
-tier history restored) and the checks again. The remittance tables are never analysed (the state CI
-meets): the plans must not rest on statistics. Prints the timings (docs/benchmarks/remittances.md).
-REMIT_FILES changes the size."""
+tier history restored) and the checks again. M2c-6b-1 (review T6): the items in a new run,
+prepared and approved, its payout filed, downloaded and debited on a statement (its RMT id): the
+debit job books it and settles the 50,000-line run; the checks (I19, I20) after it. The remittance
+tables are never analysed (the state CI meets): the plans must not rest on statistics. Prints the
+timings (docs/benchmarks/remittances.md). REMIT_FILES changes the size."""
 
 import json
 import logging
@@ -28,6 +30,7 @@ from integration_helpers import DB, one, storage
 from reconciliation_helpers import pay
 from remittance_helpers import (
     add_admin,
+    book_payout,
     confirm_payout,
     drain,
     recent_business_day,
@@ -209,6 +212,64 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
             (after["run_id"],),
         ).fetchall()
     assert found == [], found
+
+    # M2c-6b-1 (review T6): the items back in the queue go in a new run, approved; its payout is
+    # filed, downloaded and debited (its RMT id on a one-day statement, `book_payout`: the real
+    # path): the debit job books it and settles the 50,000-line run; then the nightly checks (I19
+    # signed by the 5120 postings, I20 transfer_booked_once) over it
+    caplog.set_level(logging.INFO, logger="collectoo.payments")
+    again = staff(
+        tenant,
+        "select public.request_remittance_run(%s, %s, 'EUR')",
+        str(uuid.uuid4()),
+        tenant["client"],
+    )
+    rerun = str(again["run_id"])
+    redoing = time.monotonic()
+    drain()  # its prepare job
+    redrafted = run_row(rerun)
+    assert redrafted["prepared_at"] is not None, redrafted["last_failure"]
+    assert redrafted["line_count"] == items
+    item = [
+        {
+            "run_id": rerun,
+            "inputs_hash": redrafted["inputs_hash"],
+            "net_text": str(redrafted["net_minor"]),
+        }
+    ]
+    queued = staff(
+        tenant, "select public.approve_remittance_runs(%s, %s)", str(uuid.uuid4()), json.dumps(item)
+    )
+    assert queued["results"][0]["status"] == "queued", queued
+    drain()  # the approval job, then the documents job
+    redone = time.monotonic()
+    assert run_row(rerun)["status"] == "approved"
+    booking = time.monotonic()
+    book_payout(rerun)  # filed, downloaded, its debit imported, the debit job drained
+    booked_s = time.monotonic() - booking
+    funds = [r.getMessage() for r in caplog.records if "(funds)" in r.getMessage()]
+    paid = run_row(rerun)
+    assert paid["status"] == "booked" and paid["booked_on"] is not None
+    with psycopg.connect(DB) as conn:
+        settled, bookings = conn.execute(
+            """select (select count(*) from public.ledger_entry
+                       where source_id = %s and entry_type = 'client_settlement'),
+                      (select count(*) from public.bank_line_booking b
+                       join public.bank_transfer t on t.id = b.transfer_id
+                       where t.run_id = %s and b.kind = 'payout')""",
+            (rerun, rerun),
+        ).fetchone() or (0, 0)
+    assert (settled, bookings) == (1, 1)
+    final_checking = time.monotonic()
+    final = checks(tenant)
+    final_s = time.monotonic() - final_checking
+    with psycopg.connect(DB) as conn:
+        found = conn.execute(
+            """select code from public.payment_check_result where run_id = %s
+               and severity = 'violation'""",
+            (final["run_id"],),
+        ).fetchall()
+    assert found == [], found
     logs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("prepare ")]
     docs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("documents ")]
     print(
@@ -218,7 +279,10 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
         f" ({'; '.join(docs)}); nightly checks"
         f" {checked - approved:.1f}s (with the draft waiting {draft_checks_s:.1f}s); overview"
         f" with the draft {overview_s:.2f}s; transfer file (command) {file_s:.2f}s;"
-        f" cancellation (command, the file superseded) {cancel_s:.2f}s"
+        f" cancellation (command, the file superseded) {cancel_s:.2f}s; M2c-6b-1: the items"
+        f" re-run, prepared and approved {redone - redoing:.1f}s; its payout filed, downloaded,"
+        f" debited and booked {booked_s:.1f}s ({'; '.join(funds)}); nightly checks with the"
+        f" 50,000-line run booked {final_s:.1f}s"
     )
     # design §19 targets, with room for a shared CI runner (the commands: the API's 8 s)
     assert requested - started < 8

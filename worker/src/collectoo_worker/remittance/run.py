@@ -19,7 +19,11 @@ the run's draft; the approval freezes it.
   their pricing is returned apart (`Draft.repricing`): their money was remitted already.
 * **Deadlines**: one per distinct (E, delay), for the positive collections (allocations and
   forwards); E the payment's (a reversal carries its collection's); the delay the mandate version's
-  on E, one month without one.
+  on E, one month without one. A payout that came back (`payout_returned`, design §9.2, Q7;
+  M2c-6b-1 review legal-texts#1) is held to the date of the returned run's line it came from — the
+  facts carry that line's E (`encaissement_date`) and its terms' delay (`held_days`), as
+  private.pending_item_deadlines holds it while it waits; it stays uncommissioned and outside
+  every mandate's gross (no file), and its line keeps E and that terms version.
 * **A paired line** (a collection undone in its own run under `credit`) is stored with commission 0
   and no parts; the engine never prices it.
 """
@@ -96,6 +100,11 @@ class Item:
     basis: Mapping[str, int] = field(default_factory=dict)
     forward_reason: str | None = None
     original_entry_id: str | None = None
+    # a payout that came back (design §9.2, Q7): the mandate terms version of the returned run's
+    # line it is held to and that version's delay (one month without one); `encaissement_date` is
+    # that line's E. None: no dated line to hold it to (no date, as the SQL queue).
+    held_terms_id: str | None = None
+    held_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -262,6 +271,23 @@ def _pending_reasons(facts: Facts, items: Sequence[Item]) -> list[str]:
     return reasons
 
 
+def _deadline(
+    facts: Facts, deadlines: _Calendar, item: Item, mandate: str | None
+) -> RemittanceDeadline | None:
+    """A positive item's R124-6 date: a collection's from its E and its mandate's delay on E (one
+    month without terms); a payout that came back, the returned run's line's (its E and that
+    line's delay: never one month for want of a file, a shorter mandate delay holds it)."""
+    e = item.encaissement_date
+    if item.amount_minor <= 0 or e is None:
+        return None
+    if item.kind in COLLECTIONS:
+        t = _terms_on(facts, mandate, e)
+        return deadlines.deadline(e, t.max_days if t else ONE_MONTH_DAYS)
+    if item.kind is LineKind.PAYOUT_RETURNED and item.held_days is not None:
+        return deadlines.deadline(e, item.held_days)
+    return None
+
+
 def prepare_run(facts: Facts, cal: Calendar | None = None) -> Draft:
     """The draft of a run from its facts (see the module's docstring)."""
     deadlines = _Calendar(cal or conservative())
@@ -323,14 +349,9 @@ def prepare_run(facts: Facts, cal: Calendar | None = None) -> Draft:
     lines = []
     for n, item in enumerate(items, start=1):
         commission, state, reason, parts, mandate, terms_id = priced(item)
-        dl = None
-        if (
-            item.kind in COLLECTIONS
-            and item.amount_minor > 0
-            and item.encaissement_date is not None
-        ):
-            t = _terms_on(facts, mandate, item.encaissement_date)
-            dl = deadlines.deadline(item.encaissement_date, t.max_days if t else ONE_MONTH_DAYS)
+        dl = _deadline(facts, deadlines, item, mandate)
+        if dl is not None and item.kind is LineKind.PAYOUT_RETURNED:
+            terms_id = terms_id or item.held_terms_id  # its terms on the line, not its mandate
         lines.append(
             DraftLine(
                 n,

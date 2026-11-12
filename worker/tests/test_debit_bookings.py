@@ -14,7 +14,7 @@ import random
 from dataclasses import replace
 from datetime import date, timedelta
 
-from hypothesis import given, settings
+from hypothesis import find, given, settings
 from hypothesis import strategies as st
 
 from collectoo_worker.payments.debits import (
@@ -64,6 +64,7 @@ def fact(  # noqa: PLR0913 - a transfer's facts
     debit_booked: bool = False,
     return_booked: bool = False,
     return_seen: bool = False,
+    debit_date: date | None = None,
 ) -> TransferFact:
     return TransferFact(
         id=tid,
@@ -84,6 +85,7 @@ def fact(  # noqa: PLR0913 - a transfer's facts
         debit_booked=debit_booked,
         return_booked=return_booked,
         return_seen=return_seen,
+        debit_date=debit_date,
     )
 
 
@@ -194,6 +196,21 @@ def test_a_batch_line_is_never_a_best_subset() -> None:
     assert reason(batch(82000)) == TRANSFER_UNKNOWN
 
 
+def test_a_batch_line_is_never_booked_when_one_member_could_not_be() -> None:
+    """Review T2 (mutant P16): in a downloaded file, a batch line whose sum and kind are right is
+    left to ops, never booked, when one of its members could not be booked on its own: its run
+    not in flight (cancelled, or moved to a re-issue), debited from another account, or already
+    debited (P0: a second debit)."""
+    a, b = fact("T1", 82000, role="member"), fact("T2", 50000, role="member")
+    assert reason(batch(132000, a, replace(b, run_status="cancelled"))) == RUN_NOT_IN_FLIGHT
+    assert reason(batch(132000, a, replace(b, run_transfer_id="T9"))) == RUN_NOT_IN_FLIGHT
+    assert reason(batch(132000, a, replace(b, debtor_bank_account_id="bank-2"))) == (
+        TRANSFER_DIFFERS
+    )
+    assert reason(batch(132000, a, replace(b, debit_booked=True))) == TRANSFER_DEBITED_TWICE
+    assert reason(batch(132000, a, replace(b, currency="CHF"))) == TRANSFER_DIFFERS
+
+
 # -- a return -------------------------------------------------------------------------------------
 
 
@@ -212,6 +229,20 @@ def test_a_returned_payout_is_booked_from_its_original_id() -> None:
     assert decide_line(back(12000, sweep, orig="SWP0123456789AB")) == [
         Booking("R1", "sweep_returned", "S1")
     ]
+
+
+def test_a_return_dated_before_its_debit_is_never_booked() -> None:
+    """Review T4, K5: a return dated before the debit it returns (the debit's entry date) is
+    `return_before_debit`, as the SQL re-check says — the same day or later, booked."""
+    booked = fact("T1", 164000, status="booked", debit_booked=True)
+    later = replace(booked, debit_date=DAY + timedelta(days=1))
+    assert reason(back(164000, later)) == RETURN_BEFORE_DEBIT
+    assert decide_line(back(164000, replace(booked, debit_date=DAY))) == [
+        Booking("R1", "payout_returned", "T1")
+    ]
+    sweep = fact("S1", 12000, kind="sweep", status="booked", debit_booked=True)
+    early = back(12000, replace(sweep, debit_date=DAY + timedelta(days=2)), orig="SWP0123456789AB")
+    assert reason(early) == RETURN_BEFORE_DEBIT
 
 
 # -- a pass ----------------------------------------------------------------------------------
@@ -275,6 +306,9 @@ def worlds(draw: st.DrawFn) -> list[FundsLine]:
                 debit_booked=status in ("booked", "returned") or draw(st.booleans()),
                 return_booked=status == "returned",
                 return_seen=draw(st.booleans()),
+                debit_date=DAY + timedelta(days=draw(st.integers(0, 2)))
+                if status in ("booked", "returned")
+                else None,
             )
         )
     lines: list[FundsLine] = []
@@ -292,7 +326,27 @@ def worlds(draw: st.DrawFn) -> list[FundsLine]:
                 )
             )
             total = draw(st.sampled_from([sum(m.amount_minor for m in members), amount]))
-            lines.append(batch(total, *(replace(m, role="member") for m in members), line=f"L{k}"))
+            # every member is in the one file the PmtInfId names (review T2): its facts are that
+            # file's, so the line reaches the cancelled, kind, sum and per-member rules
+            head = min(members, key=lambda m: m.id)
+            lines.append(
+                batch(
+                    total,
+                    *(
+                        replace(
+                            m,
+                            role="member",
+                            file_status=head.file_status,
+                            file_download_count=head.file_download_count,
+                            batch_file_id=FILE,
+                            batch_file_status=head.file_status,
+                            batch_file_download_count=head.file_download_count,
+                        )
+                        for m in members
+                    ),
+                    line=f"L{k}",
+                )
+            )
         elif t.kind in ("payout", "sweep"):
             orig = ("RMT" if t.kind == "payout" else "SWP") + "0123456789AB"
             lines.append(back(amount, t, orig=orig, line=f"L{k}"))
@@ -337,6 +391,7 @@ def test_a_booking_only_when_every_condition_holds(lines: list[FundsLine]) -> No
         else:
             assert b.kind == f"{f.kind}_returned" and f.status == "booked" and f.debit_booked
             assert line.amount_minor <= f.amount_minor and f.id not in returned
+            assert f.debit_date is None or line.booking_date >= f.debit_date
             returned.add(f.id)
 
 
@@ -375,3 +430,36 @@ def test_amounts_make_up_is_a_subset_sum(amounts: list[int], target: int) -> Non
         for c in itertools.combinations(amounts, k)
     )
     assert amounts_make_up(amounts, target) == brute
+
+
+def _booked_batch(lines: list[FundsLine]) -> bool:
+    return any(b.booked for x in lines if x.batch for b in decide_line(x))
+
+
+def test_the_worlds_book_batch_lines_and_reach_every_review() -> None:
+    """Review T2: the generator must reach the batch rules (a booked batch line), or the
+    properties check nothing of them; and every reason a transfer line can be reviewed for."""
+    world = find(worlds(), _booked_batch, settings=settings(max_examples=2000, database=None))
+    assert _booked_batch(world)
+    seen: set[str] = set()
+
+    @settings(max_examples=1500, database=None)
+    @given(worlds())
+    def collect(lines: list[FundsLine]) -> None:
+        seen.update(b.review_reason for b in decide_bookings(lines) if b.review_reason)
+        seen.update(
+            b.review_reason for x in lines if x.batch for b in decide_line(x) if b.review_reason
+        )
+
+    collect()
+    assert {
+        BATCH_MIXED,
+        BATCH_PARTIAL,
+        CANCELLED_TRANSFER_DEBITED,
+        RUN_NOT_IN_FLIGHT,
+        TRANSFER_DEBITED_TWICE,
+        TRANSFER_DIFFERS,
+        TRANSFER_NOT_HANDED_OUT,
+        RETURN_BEFORE_DEBIT,
+        RETURN_DIFFERS,
+    } <= seen
