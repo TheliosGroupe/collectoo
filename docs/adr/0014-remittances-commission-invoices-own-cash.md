@@ -866,5 +866,81 @@ kept); the worker's lint, 968 unit and 173 integration tests; the web's lint, ty
 times, 7 passed each (the refund servicer's nightly checks 0.34–0.47 s, the 50,000-line run's 4.9–5.7 s); the
 `scale-payouts` command once, 5 passed (the nightly checks 1.17 s).
 
+<!-- integrator: check against the merged code and test names -->
+**Round 3 (2026-11-12).** The verifiers of round 2 left one money gap older than the round (a credit carrying our id
+released as a debtor's payment), its top-up twin (L4), the switch-off hints (L6) and a new quadratic in the batch rule
+(P1, a regression of round 2's own rewrite); P3's optional residual is done too. Three branches again (database,
+performance, pages and docs) on one contract (M1–M5); the migration is still edited in place, every function
+redefined with `CREATE OR REPLACE` restating `SECURITY DEFINER`, its `SET` clauses (`lock_timeout` included) and its
+grants; the cancellation after download stays **off**; `033` keeps its assertions and `034` its TODO markers.
+
+- **M1 (pre-existing:relay-of-our-returned-transfer) — our transfer coming back is never a debtor's payment.** A payout
+  or sweep the payee's bank sends back reaches the dedicated account as a credit carrying our RMT/SWP id (its own
+  end-to-end id, or the original it returns). A camt.053 flags it (kind `return`: the debit job books it as the
+  transfer's return); a CSV flags it only when its label starts as `RETURN_RE` reads a return, else it is read by its
+  counterparty IBAN — `client_transfer_in` from the client's payout IBAN, `own_transfer_in` from our own — and « À
+  classer » offered « Paiement d'un débiteur relayé par le client / par le cabinet » on it: a debtor's file credited with
+  money the debtor never paid, commission charged on it and remitted again, the run left booked with no
+  `payout_returned` item (the verifier's `sql/l4.sql`: `{"status":"unmatched"}` on both shapes).
+  `public.release_own_credit` (redefined: `SECURITY DEFINER`, `lock_timeout '2s'`, `search_path ''`, the grants) refuses
+  a credit whose end-to-end id or original end-to-end id is `^(RMT|SWP)[0-9A-F]{12}$` (or a batch line of one of our TF-
+  PmtInfs) with « own credit release refused: own_transfer_line » (check_violation, a French hint as the other
+  `own_transfer_line` refusals: one of our own transfers coming back, booked from the statement — automatically when the
+  bank flags it as a return, otherwise by ops with M2c-6b-2's line booking — never as a debtor's payment or a top-up).
+  pgTAP `035` (the two shapes refused; mutants: each id arm removed). Pages (`lib/payments/debits.ts`): `relayable` and
+  `clientRelayable` are false when `isOurTransferLine(row)` (which already read a credit's own and original ids, either
+  direction: no extension needed — a credit is never a batch line, as for the database's `batch_line` and
+  `our_batch_line`); the refusal maps to its own code `own_credit_own_transfer_line` (« Ce crédit porte la référence de
+  l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient … Il ne devient ni le paiement d'un
+  débiteur ni un approvisionnement »), checked before the links' `own_transfer_line`; and « À classer » shows, in place
+  of the job's review on such a credit (`client_credit`, `top_up_not_found`, `top_up_differs`, which suggest the
+  relay), what it is and that it waits for ops' booking (`debitReviewText`, `OUR_TRANSFER_CREDIT_NOTE`; the bank's
+  flagged return and our debits keep their review). With « Classer sans comptabiliser » and every link already hidden
+  on our lines (round 2), such a credit has no action until M2c-6b-2. vitest « M2c-6b-1 review round 3: our transfers
+  coming back are never a debtor's payment nor a top-up (M1, M2) » (five cases, 10 shapes of our credits: own and
+  client credits × our id as own id, as original, both); mutants — the id test removed from `relayable`, from
+  `clientRelayable`, from `offersTopUp`; the release's refusal mapped to the links' words; the top-up's refusal not by
+  kind; no note; the note on the flagged return too; `isOurTransferLine` ignoring the original id — each killed (8/8).
+  COMPLIANCE **OQ-84** records the unflagged return left to ops until M2c-6b-2, with this default.
+- **M2 (L4) — nor a top-up; the fee exception.** `private.post_bank_bookings`' `top_up` rule refuses our lines with
+  `own_transfer_line` before `not_an_own_credit` (the `loss` rule's predicate: own or original id
+  `^(RMT|SWP)[0-9A-F]{12}$`, or a TF- batch line): an `own_transfer_in` credit carrying our SWP id was booked as a top-up
+  with no transfer, the sweep left booked and its return counted as the servicer's own money. pgTAP `035` (own_credit
+  on an own credit carrying an SWP id, and one carrying an RMT id as its original: `own_transfer_line`). Pages: «
+  Approvisionnement par le compte propre » only when `offersTopUp(row)` (a credit from the own account that is not
+  `isOurTransferLine`); the refusal, « bank booking refused: own_transfer_line » as for the loss, is worded by the kind
+  ops asked for (`linkDebitErrorCode`: on `own_credit` the credit's words of M1, on `loss` the line's). **The fee rule
+  keeps booking a bank charge whatever its original id**: it already refuses a line whose own end-to-end id is our
+  RMT/SWP id and our TF- batch line (`not_a_fee`), but not a debit `other_debit` whose original id names our payout.
+  Recorded as an exception rather than closed, because such a line is a **bank charge of ours**: the bank's fee for
+  handling our payout or its return, which names the transfer it charges for. Bank fees on the dedicated account are the
+  servicer's cost (OQ-47's default, 6270; « Frais bancaires (à la charge du cabinet) »), and it is not money leaving for
+  a payee. Booking it as a fee moves no transfer's status and hides neither its debit nor its return (those lines carry
+  the RMT/SWP id as their own id, or are the payee bank's credit, and stay refused). Refused, it would be a real charge
+  that nobody could book before M2c-6b-2 (an I9 gap). The debit job books the same line automatically by its charge code (CHRG/FEES)
+  whatever its original id (`decide_line` tests only a debit's own end-to-end id), so ops' path agrees with the job's.
+- **M3 (P1, a regression of round 2's rewrite) — the batch rule linear in time and memory.** Round 2's batch rule read
+  each member once but grouped by the array of every transfer id the line holds: each of N rows carried an N-element
+  array into the sort (392 MB of temp files and 1.8 s per 5,000-member line, 882 MB at 7,500), and « one kind per line »
+  and `transfer_twice` were n² semi-joins over the unanalysed `_bb` (about 5.7 s at 5,000 members together). Now a
+  `MATERIALIZED` step aggregates per line (count, flags, the in-file sum, `live_ids` ordered) before `live_ids` is
+  compared with the line's ids; « one kind per line » is a per-line aggregate (`count(distinct kind) > 1` with a payout
+  or sweep kind, equivalent to the EXISTS); `transfer_twice` is hashable (`analyze pg_temp._bb` after its CTAS, or a
+  window form). The verifier's rewrite measured 41 ms at 5,000 members and no temp file. Tests that fail on the
+  quadratic: the payout scale test's (b) 5,000-member pass asserts a `pg_stat_database` `temp_bytes` delta of 0 and
+  bounds the batch statements' rows from auto_explain JSON (as `checks_work` does); a non-scale probe at 1,000–2,500
+  members fails under round 2's rule.
+- **M4 (L6) — the switch-off hints say what happens now.** The hints of `private.refund_transfer_follow` (« refund
+  refused: in_downloaded_file »), `public.cancel_remittance_run`, `public.request_transfer_cancellation` and
+  `public.confirm_transfer_cancellation` (redefined, settings and grants restated) no longer speak of « son rejet » or of
+  a booking « pas encore disponible pour un reversement / la quote-part » (false since 6b-1 books payouts): the transfer
+  is booked from the statement when its debit (or the payee bank's return) arrives; a transfer the bank refuses before
+  execution leaves no statement line and stays « en cours » until the cancellation after download is available; see
+  the bank and tell support. Only the hints change (codes, messages and behaviour as before; the pages show their own
+  texts, round 2's L6). pgTAP `035` asserts `pg_exception_hint` for a refund cancelled in a downloaded file.
+- **M5 (P3's residual) — I13/I14 by key.** The nightly checks' I13 and I14 read `private.client_payable_balance` by key
+  (an index on its organization column, or through the servicer's `client_payable` accounts by primary key), no longer
+  every servicer's clients twice; the table joins the checks' `OWN_ROWS` bound.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { staffSession } from "@/lib/auth/staff";
 import type { ActionResult } from "@/lib/boarding/forms";
-import { debitErrorCode } from "@/lib/payments/debits";
+import { debitErrorCode, linkDebitErrorCode } from "@/lib/payments/debits";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const AMOUNT = /^\d{1,16}$/;
@@ -13,10 +13,11 @@ function field(formData: FormData, name: string): string {
   return String(formData.get(name) ?? "").trim();
 }
 
-function done(error: { message: string } | null, paymentId?: string): ActionResult {
+function done(error: { message: string } | null, paymentId?: string, linkKind?: string): ActionResult {
   if (error) {
     console.error("debit command failed", { error: error.message });
-    return { error: debitErrorCode(error.message) };
+    // link_debit's refusals by the kind asked for (review M2c-6b-1 round 3: a top-up refused on our credit)
+    return { error: linkKind ? linkDebitErrorCode(error.message, linkKind) : debitErrorCode(error.message) };
   }
   revalidatePath("/backoffice/encaissements/debits");
   if (paymentId) revalidatePath(`/backoffice/encaissements/paiements/${paymentId}`);
@@ -50,7 +51,7 @@ export async function linkDebit(formData: FormData): Promise<ActionResult> {
     p_expected_left_minor: (onPayment ? expected : null) as string,
     p_reason: reason,
   });
-  return done(error, onPayment ? payment : undefined);
+  return done(error, onPayment ? payment : undefined, kind);
 }
 
 /** « Paiement d'un débiteur relayé par le cabinet »: an unbooked credit from the own account becomes a debtor's
