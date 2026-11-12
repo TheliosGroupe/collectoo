@@ -33,6 +33,16 @@
 -- dropped and created: new columns), private.run_payment_checks, private.pending_item_deadlines (20261112090000),
 -- private.run_remittance_runs_checks (the M2c-5b body of 20261114090000, renamed by 20261115090000),
 -- private.run_transfer_checks (20261115090000), public.accounting_export_entries (20261113090000).
+--
+-- Review round 1: our payouts' and sweeps' lines are never a payment's return, a refund or a refund that came back, nor
+-- explained (`own_transfer_line`, every link kind: a batch line takes only a refund whose transfer is in a file handed
+-- out, its own trigger admitting only its own PmtInf; debit_queue returns the line's PmtInfId); a
+-- returned payout paid again keeps its date and its breach rows say so (`payout_returned`, private.remittance_late_lines
+-- redefined from 20261112090000); an in-flight payout is proven unpaid only with no line that could still be its debit
+-- (private.transfer_debit_may_be_seen); the payments a booking's breach rows name are key-share locked before the
+-- allocation lock; a return dated before its debit is reviewed `return_before_debit`; I20's refund rule is keyed
+-- (private.refund_debit_links, bank_debit_link_refund_request_idx); the client's summary lists its runs whose payout
+-- came back (public.client_remittance_summary, redefined from 20261113090000).
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -159,6 +169,10 @@ create index bank_transaction_batch_line_idx on public.bank_transaction (organiz
   where direction = 'debit' and end_to_end_id is null and payment_info_id is not null;
 create index bank_transaction_return_credit_idx on public.bank_transaction (organization_id, booking_date, id)
   where direction = 'credit' and kind = 'return';
+-- I20's refund rule counts each executed refund's M2b links by its request (review T7: without it, the nightly check read
+-- the whole link table once per executed refund — every link ever made, quadratic in the servicer's history)
+create index bank_debit_link_refund_request_idx on public.bank_debit_link (refund_request_id)
+  where refund_request_id is not null;
 
 ------------------------------------------------------------------------------------------
 -- One PmtInf per kind (plan §2.1): the payouts, then the refunds, then the sweep, each per execution date. A batch line
@@ -811,16 +825,18 @@ begin
   where b.kind = 'payout_returned' and a.id = b.run_payout_account and a.status = 'active';
 
   -- R124-6 (I21): an item of a booked run debited after the date it is held to (its latest execution date, or one
-  -- month for a delay that cannot be met, as private.remittance_late_lines) gets its breach row, once
+  -- month for a delay that cannot be met, as private.remittance_late_lines) gets its breach row, once; a returned
+  -- payout paid again is recorded « bloqué : virement revenu impayé » (Q7's default, OQ-36; review legal-texts#1).
+  -- Its payment's key-share lock (the foreign key) was taken before the allocation lock (post_bank_bookings).
   with late as materialized (
     select b.tr_run as run_id, b.line_date, ru.organization_id, ru.client_organization_id,
            ru.requested_execution_date, ru.late_reason, l.ledger_entry_id, l.payment_id, l.deadline,
-           l.latest_execution_date, l.unmeetable, l.encaissement_date
+           l.latest_execution_date, l.unmeetable, l.encaissement_date, l.kind
     from pg_temp._bb b
     cross join lateral (select q.organization_id, q.client_organization_id, q.requested_execution_date, q.late_reason
                         from public.remittance_run q where q.id = b.tr_run offset 0) ru
     cross join lateral (select x.ledger_entry_id, x.payment_id, x.deadline, x.latest_execution_date, x.unmeetable,
-                               x.encaissement_date
+                               x.encaissement_date, x.kind
                         from public.remittance_line x
                         where x.run_id = b.tr_run and x.amount_minor > 0 and not x.released
                           and x.latest_execution_date < b.line_date offset 0) l
@@ -832,11 +848,12 @@ begin
     cross join lateral private.remittance_deadline_or_null(k.e_date, 30) d)
   insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
                                                  run_id, deadline, latest_execution_date, requested_execution_date,
-                                                 late_reason)
+                                                 late_reason, blocked_reason)
   select l.organization_id, l.client_organization_id, l.ledger_entry_id, l.payment_id, l.run_id,
          case when l.unmeetable then m.deadline else l.deadline end,
          case when l.unmeetable then m.latest_execution_date else l.latest_execution_date end,
-         l.requested_execution_date, l.late_reason
+         l.requested_execution_date, l.late_reason,
+         case when l.kind = 'payout_returned' then 'payout_returned' end
   from late l left join m on l.unmeetable and m.e_date = l.encaissement_date
   where not l.unmeetable or m.latest_execution_date < l.line_date
   on conflict (ledger_entry_id) do nothing;
@@ -888,7 +905,12 @@ $$;
 
 -- Posts pg_temp._bank_booking (redefined from 20261111090000). Lock order (plan §2.5; ADR-0014 M2c-6a's order plus
 -- M2b's): the runs of the transfers FOR UPDATE (id order) → the payout accounts a return marks FOR NO KEY UPDATE →
--- the bank accounts FOR SHARE → the allocation lock `payments:<org>` (when a row moves 4670) → the bank lines FOR NO KEY
+-- the bank accounts FOR SHARE → the payments of the payout runs' lines that can be late at this debit FOR KEY SHARE (id
+-- order; review concurrency-2: the breach rows name them, and their foreign key's key-share lock taken under the
+-- allocation lock deadlocked with request_refund, link_debit, reverse_allocation or forward_payment, which hold the
+-- payment FOR UPDATE and wait for that lock — the house rule: row locks before the advisory lock; pg_temp._bb_pay_locks
+-- keeps the set, a superset of the breach rows' payments since a run's lines and a line's booking date never change)
+-- → the allocation lock `payments:<org>` (when a row moves 4670) → the bank lines FOR NO KEY
 -- UPDATE (the lock every decision on a line takes: an M2b link, a release) → the remit lock → the files FOR SHARE →
 -- the transfers FOR UPDATE (id order) — every member of a batch line's PmtInf, booked or not, so that a concurrent
 -- cancellation of a member is seen under the lock. Top-ups (M2c-1's first lock) moved after the remit lock:
@@ -953,6 +975,19 @@ begin
           union
           select k.creditor_bank_account_id from pg_temp._bb_keys k where k.creditor_bank_account_id is not null))
   order by a.id for share;
+  drop table if exists pg_temp._bb_pay_locks;
+  create temp table _bb_pay_locks on commit drop as
+  select distinct y.payment_id
+  from pg_temp._bank_booking b
+  join pg_temp._bb_keys k on k.transfer_id = b.transfer_id
+  cross join lateral (select q.booking_date from public.bank_transaction q where q.id = b.bank_transaction_id offset 0) t
+  cross join lateral (select x.payment_id from public.remittance_line x
+                      where x.run_id = k.run_id and x.amount_minor > 0 and not x.released and x.payment_id is not null
+                        and x.latest_execution_date < t.booking_date offset 0) y
+  where b.kind = 'payout' and k.run_id is not null;
+  perform 1 from public.payment p
+  where p.id = any (array(select l.payment_id from pg_temp._bb_pay_locks l))
+  order by p.id for key share;
   if exists (select 1 from pg_temp._bank_booking b where b.kind in ('payout', 'payout_returned', 'unplanned_payout')) then
     perform pg_advisory_xact_lock(hashtext('payments:' || p_organization_id::text));
   end if;
@@ -1230,7 +1265,8 @@ $$;
 
 -- The job's decisions (pg_temp._bank_booking: automatic bookings; pg_temp._booking_review: lines left to ops): bookings
 -- posted, the lines' reviews replaced (redefined from 20261111090000: a line the re-check refused keeps its code in the
--- review's detail).
+-- review's detail, `changed`; review T4/K5: a return dated before its debit — the line's own fault, not a change since
+-- the job read it — is reviewed `return_before_debit`, as the job's rules review it).
 create or replace function private.apply_bank_bookings(p_organization_id uuid)
 returns jsonb
 language plpgsql
@@ -1246,7 +1282,9 @@ begin
   select f.bank_transaction_id, 'posting_failed', f.detail from pg_temp._booking_failed f
   on conflict (bank_transaction_id) do update set reason = excluded.reason, detail = excluded.detail;
   insert into pg_temp._booking_review (bank_transaction_id, reason, detail)
-  select s.bank_transaction_id, 'changed', s.why from pg_temp._booking_skipped s
+  select s.bank_transaction_id, case when s.why = 'return_before_debit' then s.why else 'changed' end,
+         case when s.why = 'return_before_debit' then null else s.why end
+  from pg_temp._booking_skipped s
   on conflict (bank_transaction_id) do nothing;
   delete from public.bank_debit_review v using pg_temp._booking_review r where v.bank_transaction_id = r.bank_transaction_id;
   insert into public.bank_debit_review (bank_transaction_id, organization_id, reason, candidates, detail)
@@ -1405,8 +1443,10 @@ $$;
 ------------------------------------------------------------------------------------------
 -- The M2b pass (redefined from 20261111090000): a credit returning our payout or sweep is no longer its candidate (the
 -- funds pass books it); a batch line of one refund alone is (plan §2.2 [critic]: the M2b pass links it, never the
--- funds pass after the allocation lock); a link refuses explaining our transfers' lines (§2.4 rule 5) and takes a
--- batch line kept unsplit as a refund when it is that PmtInf. Same settings.
+-- funds pass after the allocation lock); a link refuses our transfers' lines (§2.4 rule 5; review money-1: whatever
+-- its kind — `own_transfer_line`) but a refund whose transfer is in a file handed out (the refund's trigger then admits
+-- only a batch line of its own PmtInf in that file), and takes a batch line kept unsplit as a refund when it is that
+-- PmtInf. Same settings.
 ------------------------------------------------------------------------------------------
 
 create or replace function private.debit_candidates(p_organization_id uuid, p_after_date date, p_after_id uuid,
@@ -1587,6 +1627,8 @@ begin
                                                   where f.id = i.file_id offset 0) f
                               where i.pmt_inf_id = t.payment_info_id and f.debtor_bank_account_id = t.bank_account_id),
                   false) as our_batch_line,
+         -- the request's transfer in a file handed out to the bank (its PmtInf the only batch line that can execute it)
+         coalesce(rt.status = 'in_file' and rf.status in ('downloaded', 'sent'), false) as req_handed_out,
          (t.kind = 'suspected_duplicate' and dr.decision is distinct from 'released') as held,
          exists (select 1 from public.bank_debit_link x where x.bank_transaction_id = l.bank_transaction_id offset 0)
            as linked,
@@ -1610,8 +1652,11 @@ begin
   left join lateral (select x.organization_id, x.bank_account_id, x.booking_date, x.status, x.account_id, x.amount_minor
                      from public.payment x where x.id = l.payment_id offset 0) p on true
   left join lateral (select x.payment_id, x.status, x.amount_minor, x.bank_account_id, x.cash_out_entry_id,
-                            x.executed_on, x.prior_status, x.prior_review_reason
+                            x.executed_on, x.prior_status, x.prior_review_reason, x.transfer_id
                      from public.refund_request x where x.id = l.refund_request_id offset 0) q on true
+  left join lateral (select x.status, x.transfer_file_id from public.bank_transfer x where x.id = q.transfer_id
+                     offset 0) rt on true
+  left join lateral (select x.status from public.transfer_file x where x.id = rt.transfer_file_id offset 0) rf on true
   left join lateral (select max(e.effective_date) as d from public.ledger_entry e
                      join public.ledger_entry v on v.id = e.reverses_entry_id
                      where e.payment_id = l.payment_id and e.effective_date > v.effective_date) nb on true;
@@ -1631,6 +1676,20 @@ begin
     -- a part of a line (M2c: the return of what is left of a payment, its excess the servicer's loss) is ops' only
     when d.amount_minor is not null and (d.method <> 'ops' or d.kind <> 'return' or d.amount_minor <= 0) then 'bad_request'
     when d.held then 'held_duplicate'
+    -- M2c-6b-1 (plan §2.4 rule 5 [critic]; review money-1): our payouts' and sweeps' lines — a debit carrying our
+    -- RMT/SWP id, a batch line of one of our files (whatever kind the bank's statement gives it), a credit returning one
+    -- of them — are only ever booked (private.post_bank_bookings: the job, or ops in M2c-6b-2), never a payment's
+    -- return (nor its loss), a refund, a refund that came back or an explanation: one person's link would hide the
+    -- payouts' debits, their returns' items and the P0 alerts (cancelled_transfer_debited, transfer_not_handed_out).
+    -- The one link a batch line takes: a refund whose transfer is in a file handed out to the bank (downloaded or sent)
+    -- — the refund a PmtInf of one refund alone is (private.pmt_inf_single_refund, the M2b pass's), or ops' link of a
+    -- refund of a PmtInf of refunds — which private.refund_transfer_follow (M2c-6a round 6's G2 rule) then executes
+    -- only by a batch line of its own PmtInf in that file, refusing any other (reissue_in_downloaded_file); never a
+    -- manual refund (no transfer), nor one whose transfer is not handed out (nothing the bank could have debited).
+    when ((d.direction = 'debit' and (d.line_e2e ~ '^(RMT|SWP)[0-9A-F]{12}$' or d.our_batch_line))
+          or (d.direction = 'credit' and d.line_kind = 'return' and d.line_returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$'))
+         and not (d.kind = 'refund' and d.our_batch_line and d.req_handed_out)
+      then 'own_transfer_line'
     -- our own transfers out and the credits from our own account or a client are never a payment's return, refund or
     -- refund that came back (whatever payment or request is named)
     when d.kind <> 'explained' and d.line_kind in ('transfer_out', 'own_transfer_in', 'client_transfer_in')
@@ -1644,13 +1703,7 @@ begin
       -- fix: a chargeback larger than what is left of its payment is never hidden as an explained gap, OQ-34). A
       -- return naming nothing of ours (e.g. a fee's direct debit the bank rejected) is explained with a motif.
       when d.direction = 'debit' and d.line_kind = 'refund_out' then 'not_explainable'
-      -- M2c-6b-1 (plan §2.4 rule 5 [critic]): our payouts' and sweeps' lines — a debit carrying our RMT/SWP id, a batch
-      -- line of one of our files, a credit returning one of them — are only ever booked (or, for a refund alone,
-      -- linked): one person's motif never silences a debit of a cancelled transfer (cancelled_transfer_debited)
-      when d.direction = 'debit' and (d.line_e2e ~ '^(RMT|SWP)[0-9A-F]{12}$' or d.our_batch_line)
-        then 'not_explainable'
-      when d.direction = 'credit' and d.line_kind = 'return' and d.line_returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$'
-        then 'not_explainable'
+      -- (our payouts' and sweeps' lines: own_transfer_line above, whatever the kind)
       when d.direction = 'debit' and d.line_kind = 'return' and exists (
              select 1 from public.bank_transaction x
              where x.id = d.bank_transaction_id
@@ -1701,6 +1754,12 @@ begin
     and exists (select 1 from pg_temp._dl o where o.payment_id = d.payment_id and o.why is null and o.ord < d.ord);
   select d.why, d.bank_transaction_id into v_why from pg_temp._dl d where d.why is not null order by d.ord limit 1;
   if found and p_strict then
+    if v_why.why = 'own_transfer_line' then
+      raise exception 'debit link refused: %', v_why.why using errcode = 'check_violation',
+        hint = 'Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, lot '
+               'de notre fichier) : elle se comptabilise depuis le relevé, automatiquement ou par l''équipe (écran à '
+               'venir). Elle ne se rattache pas à un paiement et ne se classe pas sans comptabilisation.';
+    end if;
     raise exception 'debit link refused: %', v_why.why using errcode = 'check_violation';
   end if;
   insert into pg_temp._debit_skipped (bank_transaction_id, why)
@@ -1781,14 +1840,17 @@ end;
 $$;
 
 -- « Débits et retours » (redefined from 20261111090000): a batch line of our files is listed « À classer » (the funds
--- pass's review reasons, M2c-6b-1), never among the fees. Same settings.
-create or replace function public.debit_queue(p_tab text default 'a-classer', p_offset integer default 0,
-                                              p_limit integer default 20)
+-- pass's review reasons, M2c-6b-1), never among the fees; each line with its PmtInfId (review money-1: the page offers
+-- no link on our batch lines, as it offers none on a line carrying our RMT/SWP id). Same settings; dropped and created
+-- (a column added last).
+drop function public.debit_queue(text, integer, integer);
+create function public.debit_queue(p_tab text default 'a-classer', p_offset integer default 0,
+                                   p_limit integer default 20)
 returns table (bank_transaction_id uuid, statement_id uuid, bank_account_id uuid, direction text, kind text,
                amount_minor text, currency char(3), booking_date date, age_days integer, counterparty_name text,
                counterparty_iban_end text, remittance_text text, end_to_end_id text, original_end_to_end_id text,
                return_reason text, review_reason text, candidates jsonb, decision text, decided_at timestamptz,
-               decided_payment_id uuid, total bigint, held_kind text)
+               decided_payment_id uuid, total bigint, held_kind text, payment_info_id text)
 language plpgsql
 security definer
 set search_path = ''
@@ -1918,7 +1980,8 @@ begin
                                  where c.bank_transaction_id is not null and p.bank_transaction_id = t.id)),
          v_total,
          -- a held duplicate: how the import read it (the « Libérer » sheet says what it becomes)
-         case when t.kind = 'suspected_duplicate' then (select h.kind from private.held_line_kind(t.id) h) end
+         case when t.kind = 'suspected_duplicate' then (select h.kind from private.held_line_kind(t.id) h) end,
+         t.payment_info_id
   from (select * from pg_temp._dq x
         order by (case when p_tab = 'traites' then x.created_at end) desc nulls last, x.booking_date, x.id
         offset v_offset limit v_limit) t
@@ -2029,9 +2092,26 @@ $$;
 -- Nightly checks and alerts (§15; plan §2.5)
 ------------------------------------------------------------------------------------------
 
+-- The M2b refund links of a refund request (I20's refund rule: exactly one), read by the request's key whatever the
+-- statistics (review T7: a correlated count over the whole link table per executed refund, every night).
+create or replace function private.refund_debit_links(p_refund_request_id uuid)
+returns bigint
+language plpgsql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+begin
+  return (select count(*) from (select l.kind from public.bank_debit_link l
+                                where l.refund_request_id = p_refund_request_id offset 0) l
+          where l.kind = 'refund');
+end;
+$$;
+
 -- run_payment_checks (redefined from 20261112090000, each check in the same single statement): I19 by the bookings'
 -- 5120 postings (signed), bank_line_booked (each booked line booked whole, the deferred check's twin), I20
--- transfer_booked_once (per kind); the rest unchanged.
+-- transfer_booked_once (per kind; its refund rule keyed by the request: private.refund_debit_links, only for the
+-- refunds it judges); the rest unchanged.
 create or replace function private.run_payment_checks(p_organization_id uuid)
 returns jsonb
 language plpgsql
@@ -2206,8 +2286,8 @@ begin
                (select count(*) from public.bank_line_booking b where b.transfer_id = t.id
                   and b.kind in ('payout_returned', 'sweep_returned') and b.entry_id = t.return_entry_id) as return_own,
                q.cash_out_entry_id, q.bounce_entry_id,
-               (select count(*) from public.bank_debit_link l where l.kind = 'refund' and l.refund_request_id = q.id)
-                 as refund_links
+               case when t.kind = 'refund' and t.status in ('booked', 'returned')
+                    then private.refund_debit_links(q.id) end as refund_links
         from public.bank_transfer t
         left join public.refund_request q on q.transfer_id = t.id
         where t.organization_id = p_organization_id) x
@@ -2761,10 +2841,51 @@ begin
 end;
 $$;
 
+-- Whether a debit line of the paying account could still be this transfer's debit (review legal-texts#2: evidence of
+-- absence before an in-flight payout is proven unpaid): a line not booked nor linked, booked from the transfer's
+-- requested execution date to p_to, that carries its end-to-end id, or names its PmtInf in its current file with no
+-- end-to-end id (a batch line, whatever its amount: one member may have been rejected), or carries neither reference
+-- for exactly its amount (a CSV export without the « référence de bout en bout » column, a bank that drops it). Such a
+-- line waits for ops (M2c-6b-2 books it, writing the breach row if the debit was late; classified as something else,
+-- the next nightly check writes it). Keyed: the transfer by its key, the account's lines by (account, booking date).
+create or replace function private.transfer_debit_may_be_seen(p_transfer_id uuid, p_to date)
+returns boolean
+language plpgsql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  t public.bank_transfer;
+  v_pmt_inf text;
+begin
+  select * into t from public.bank_transfer where id = p_transfer_id;
+  if t.id is null or p_to is null or p_to < t.requested_execution_date then
+    return false;
+  end if;
+  select i.pmt_inf_id into v_pmt_inf from public.transfer_file_item i
+  where i.file_id = t.transfer_file_id and i.transfer_id = t.id;
+  return exists (
+    select 1
+    from (select x.id, x.direction, x.end_to_end_id, x.payment_info_id, x.amount_minor, x.currency
+          from public.bank_transaction x
+          where x.bank_account_id = t.debtor_bank_account_id
+            and x.booking_date between t.requested_execution_date and p_to offset 0) x
+    where x.direction = 'debit'
+      and (x.end_to_end_id = t.end_to_end_id
+           or (x.end_to_end_id is null and x.payment_info_id = v_pmt_inf)
+           or (x.end_to_end_id is null and x.payment_info_id is null and x.amount_minor = t.amount_minor
+               and x.currency = t.currency))
+      and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = x.id offset 0)
+      and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = x.id offset 0));
+end;
+$$;
+
 -- The runs' checks (the M2c-5b body of 20261114090000, which 20261115090000 renamed run_remittance_runs_checks; the
 -- body unchanged but for two breach rows, plan §2.5 [critic]): an in-flight item's breach row is written only once the
--- paying account's statements cover its latest execution date without the payout's debit; a returned payout's item
--- breached while waiting is recorded `payout_returned` (Q7). Same settings.
+-- paying account's statements cover its latest execution date without the payout's debit — and without a line that
+-- could still be it (review legal-texts#2: private.transfer_debit_may_be_seen) —; a returned payout's item breached
+-- while waiting, or paid again and breached in flight, is recorded `payout_returned` (Q7). Same settings.
 create or replace function private.run_remittance_runs_checks(p_check_run_id uuid, p_organization_id uuid,
                                                               p_today date default null)
 returns void
@@ -2807,15 +2928,18 @@ begin
   -- … and so does a collection whose run was approved but whose payout is not debited by then (§9.2: paid means
   -- debited). M2c-6b-1 (plan §2.5 [critic]): « paid » is the bank's debit date, often imported a day later, and the
   -- table is append-only — so the row is written only once the paying account's statements cover that date
-  -- (private.statement_covers) and show no debit of the payout; until then the alert below only. A payout never
-  -- handed out to the bank (still ordered, or in a file nobody downloaded) is not paid whatever the statements: its row
-  -- is written at once. A late debit booked later writes its row at the booking (private.bank_booking_post_rows).
+  -- (private.statement_covers) and show no debit of the payout, nor a line not booked yet that could be it (its
+  -- PmtInf's batch line whatever its amount, a line of its amount with neither reference: review legal-texts#2); until
+  -- then the alert below only. A payout never handed out to the bank (still ordered, or in a file nobody downloaded)
+  -- is not paid whatever the statements: its row is written at once. A late debit booked later writes its row at the
+  -- booking (private.bank_booking_post_rows).
   olc as materialized (
     select k.run_id, k.latest_execution_date,
            coalesce(t.status = 'ordered' or (t.status = 'in_file' and coalesce(t.download_count, 0) = 0)
                     or (private.statement_covers(t.debtor_bank_account_id, k.latest_execution_date,
                                                  k.latest_execution_date)
-                        and not private.transfer_debit_seen(t.id)), false) as proven
+                        and not private.transfer_debit_seen(t.id)
+                        and not private.transfer_debit_may_be_seen(t.id, k.latest_execution_date)), false) as proven
     from (select distinct o.run_id, o.latest_execution_date from ol o where not o.out_of_horizon) k
     left join lateral (select q.id, q.debtor_bank_account_id, q.status,
                               (select f.download_count from public.transfer_file f where f.id = q.transfer_file_id)
@@ -2825,9 +2949,13 @@ begin
   inflight_breach as (
     insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
                                                    run_id, deadline, latest_execution_date, requested_execution_date,
-                                                   late_reason)
+                                                   late_reason, blocked_reason)
     select p_organization_id, o.client_organization_id, o.ledger_entry_id, o.payment_id, o.run_id, o.deadline,
-           o.latest_execution_date, o.requested_execution_date, o.late_reason
+           o.latest_execution_date, o.requested_execution_date, o.late_reason,
+           -- a returned payout paid again (Q7, review legal-texts#1): its line's kind, by the item's live line
+           case when (select x.kind from public.remittance_line x
+                      where x.ledger_entry_id = o.ledger_entry_id and not x.released) = 'payout_returned'
+                then 'payout_returned' end
     from ol o
     join olc c on c.run_id = o.run_id and c.latest_execution_date = o.latest_execution_date and c.proven
     where not o.out_of_horizon
@@ -3211,6 +3339,124 @@ as $$
   left join m on m.e_date = i.e_date and dl.unmeetable;
 $$;
 
+-- The lines of an approved run paid after their latest execution date (redefined from 20261112090000; review
+-- legal-texts#1, Q7's default, OQ-36): as before — its late approval always, a breach row per item paid after the date
+-- it is held to unless one was written, one month for a delay that cannot be met — and a returned payout paid again
+-- (a line `payout_returned`, held to its returned run's date by the prepare) has its breach recorded « bloqué :
+-- virement revenu impayé » (blocked_reason payout_returned), as the nightly check records it while it waits. Same
+-- settings.
+create or replace function private.remittance_late_lines(r public.remittance_run, p_paid_on date)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if r.earliest_latest_execution_date is null or p_paid_on <= r.earliest_latest_execution_date then
+    return;   -- no line late (the header's earliest date is the lines' minimum)
+  end if;
+  with late as materialized (
+    select l.ledger_entry_id, l.payment_id, l.deadline, l.latest_execution_date, l.unmeetable, l.encaissement_date,
+           l.kind
+    from public.remittance_line l
+    where l.run_id = r.id and l.amount_minor > 0 and l.latest_execution_date < p_paid_on),
+  m as materialized (   -- one month, once per distinct E of the unmeetable lines
+    select k.e_date, d.deadline, d.latest_execution_date
+    from (select distinct x.encaissement_date as e_date from late x
+          where x.unmeetable and x.encaissement_date is not null) k
+    cross join lateral private.remittance_deadline_or_null(k.e_date, 30) d)
+  insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
+                                                 run_id, deadline, latest_execution_date, requested_execution_date,
+                                                 late_reason, blocked_reason)
+  select r.organization_id, r.client_organization_id, l.ledger_entry_id, l.payment_id, r.id,
+         case when l.unmeetable then m.deadline else l.deadline end,
+         case when l.unmeetable then m.latest_execution_date else l.latest_execution_date end, p_paid_on, r.late_reason,
+         case when l.kind = 'payout_returned' then 'payout_returned' end
+  from late l left join m on l.unmeetable and m.e_date = l.encaissement_date
+  where not l.unmeetable or m.latest_execution_date < p_paid_on   -- (a month the calendar cannot place: its alert)
+  on conflict (ledger_entry_id) do nothing;
+  insert into public.remittance_late_approval (run_id, ledger_entry_id, organization_id, client_organization_id,
+                                               latest_execution_date, requested_execution_date, late_reason,
+                                               approved_by)
+  select r.id, l.ledger_entry_id, r.organization_id, r.client_organization_id, l.latest_execution_date, p_paid_on,
+         r.late_reason, r.approval_requested_by
+  from public.remittance_line l
+  where l.run_id = r.id and l.amount_minor > 0 and l.latest_execution_date < p_paid_on;
+end;
+$$;
+
+-- What the client space shows (redefined from 20261113090000; review legal-texts#6): as before, and its runs whose
+-- payout came back (their run stays booked, §9.7: « Virement débité de notre compte » would read as paid) —
+-- `returned_runs`: each run's id, the date of the bank's return credit and the payout's amount (text), so the page says
+-- « Virement revenu impayé le … : il vous sera reversé à nouveau ». The client cannot read bank_transfer (money staff
+-- only): it is read here, for the client's own runs. Same settings.
+create or replace function public.client_remittance_summary(p_client_organization_id uuid)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  c public.organization;
+  v_owed jsonb;
+  v_flight jsonb;
+  v_returned jsonb;
+  v_today date := private.paris_today();
+begin
+  select * into c from public.organization where id = p_client_organization_id;
+  if not found or not (c.id = any (private.client_whole_org_ids())
+                       or c.servicer_organization_id = any (private.money_staff_org_ids())) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  select coalesce(jsonb_agg(jsonb_build_object('currency', x.currency, 'owed_minor', x.owed::text,
+                                               'in_flight_gross_minor', x.gross::text, 'in_flight_runs', x.runs)
+                            order by x.currency), '[]')
+  into v_owed
+  from (select coalesce(b.currency, f.currency) as currency, coalesce(-b.balance_minor, 0) as owed,
+               coalesce(f.gross, 0) as gross, coalesce(f.runs, '[]'::jsonb) as runs
+        from (select y.currency, y.balance_minor from private.client_payable_balance y
+              where y.client_organization_id = c.id and y.balance_minor <> 0) b
+        full join (select r.currency, sum(r.gross_minor) as gross,
+                          jsonb_agg(jsonb_build_object(
+                            'number', r.number, 'status', r.status,
+                            'gross_minor', r.gross_minor::text, 'net_minor', r.net_minor::text,
+                            'commission_minor', coalesce(r.commission_taken_minor, 0)::text,
+                            'advance_minor', coalesce(r.advance_recovered_minor, 0)::text,
+                            'refund_minor', coalesce(r.refund_minor, 0)::text,
+                            'requested_execution_date', r.requested_execution_date)
+                            order by r.approved_at, r.number) as runs
+                   from public.remittance_run r
+                   where r.client_organization_id = c.id and r.status in ('approved', 'sent')
+                   group by r.currency) f on f.currency = b.currency) x;
+  select coalesce(jsonb_agg(jsonb_build_object('number', r.number, 'status', r.status, 'currency', r.currency,
+                                               'net_minor', r.net_minor::text,
+                                               'requested_execution_date', r.requested_execution_date,
+                                               'approved_on', (r.approved_at at time zone 'Europe/Paris')::date)
+                            order by r.approved_at), '[]')
+  into v_flight from public.remittance_run r
+  where r.client_organization_id = c.id and r.status in ('approved', 'sent');
+  -- the client's runs whose payout came back: the transfer by its key, the return's line by its booking
+  select coalesce(jsonb_agg(jsonb_build_object('run_id', r.id, 'returned_on', x.returned_on,
+                                               'amount_minor', t.amount_minor::text)
+                            order by x.returned_on, r.number), '[]')
+  into v_returned
+  from public.remittance_run r
+  cross join lateral (select q.id, q.status, q.amount_minor, q.return_entry_id from public.bank_transfer q
+                      where q.id = r.transfer_id offset 0) t
+  cross join lateral (select coalesce(
+                               (select l.booking_date from public.bank_line_booking k
+                                join public.bank_transaction l on l.id = k.bank_transaction_id
+                                where k.transfer_id = t.id and k.kind = 'payout_returned' limit 1),
+                               (select e.effective_date from public.ledger_entry e where e.id = t.return_entry_id))
+                             as returned_on) x
+  where r.client_organization_id = c.id and r.transfer_id is not null and t.status = 'returned';
+  return jsonb_build_object('owed', v_owed, 'in_flight', v_flight, 'returned_runs', v_returned,
+                            'next_run_day', private.next_scheduled_run_day(c.id, v_today + 1),
+                            'today', v_today);
+end;
+$$;
+
 -- The accounting export (redefined from 20261113090000): the document of the debits' entries — our transfer's
 -- end-to-end id, a bank line's reference, an advance's cause (R123-174; plan §2.5 [critic]). Same settings.
 create or replace function public.accounting_export_entries(p_from date, p_to date, p_after text default null,
@@ -3305,9 +3551,11 @@ revoke execute on function private.client_advance_guard(), private.pmt_inf_singl
   private.post_bank_bookings(uuid, boolean), private.apply_bank_bookings(uuid), private.bank_line_booking_guard(),
   private.bank_line_booking_check(), private.debit_candidates(uuid, date, uuid, integer),
   private.post_debit_links(uuid, boolean), private.run_payment_checks(uuid),
-  private.run_remittance_runs_checks(uuid, uuid, date), private.run_transfer_checks(uuid, uuid, date)
+  private.run_remittance_runs_checks(uuid, uuid, date), private.run_transfer_checks(uuid, uuid, date),
+  private.refund_debit_links(uuid), private.transfer_debit_may_be_seen(uuid, date)
   from public, anon, authenticated, service_role;
-revoke execute on function private.pending_item_deadlines(uuid, boolean) from public, anon, authenticated;
+revoke execute on function private.pending_item_deadlines(uuid, boolean),
+  private.remittance_late_lines(public.remittance_run, date) from public, anon, authenticated;
 -- the worker (service role): the debit job (its M2b pass and its funds pass), the checks job, the remittance schedule
 -- (as granted by 20261110120000, 20261111090000 and 20261112090000)
 grant execute on function private.bank_booking_begin(), private.bank_booking_candidates(uuid, date, uuid, integer),
@@ -3315,9 +3563,9 @@ grant execute on function private.bank_booking_begin(), private.bank_booking_can
   private.run_payment_checks(uuid), private.pending_item_deadlines(uuid, boolean)
   to service_role;
 revoke execute on function public.generate_transfer_file(text, uuid, text), public.debit_queue(text, integer, integer),
-  public.accounting_export_entries(date, date, text, integer) from public, anon;
+  public.accounting_export_entries(date, date, text, integer), public.client_remittance_summary(uuid) from public, anon;
 grant execute on function public.generate_transfer_file(text, uuid, text), public.debit_queue(text, integer, integer),
-  public.accounting_export_entries(date, date, text, integer) to authenticated;
+  public.accounting_export_entries(date, date, text, integer), public.client_remittance_summary(uuid) to authenticated;
 
 -- The debits on statements imported before this migration: the debit job books them at its next run (one message per
 -- servicer with one of our transfer lines not booked).

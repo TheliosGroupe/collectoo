@@ -19,9 +19,16 @@
 --     booking for a late debit, none for an on-time one;
 --   * the set-based settlements against post_run_settlement (parity), client_advance RLS and its guards, the new
 --     alerts, I9/I19/I20/I13/I14 clean after each step.
+-- Review round 1: our transfers' lines refuse every link (`own_transfer_line`; a refund whose transfer is in a handed-out
+-- file reaches its own trigger); a returned payout paid again records its breach `payout_returned` at the approval, the
+-- booking and in flight; no breach row while a line could still be the payout's debit; the payments the breach rows name
+-- key-share locked before the allocation lock; each nightly check fires on its fault (I20's rules, bank_line_booked,
+-- bank_line_unbooked, servicer_funds_unswept, top_up_pending); each last-line rule of the re-check fed a row only it
+-- refuses (a return before its debit reviewed `return_before_debit`); a debit dated before the job's day (and on the
+-- previous month's last day) dates everything at the debit; I20's refund rule keyed; the client's returned runs.
 -- Cancellation after download stays off (033 and 034 unchanged); one scenario switches it on in its own subtransaction.
 begin;
-select plan(70);
+select plan(94);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -596,6 +603,56 @@ begin
   perform private.approve_remittance_run(v_run, (select job_token from public.remittance_run where id = v_run));
   return v_run;
 end $$;
+-- Review round 1 (M2c-6b-1): the n-th business day after today (the checks' clocks, whatever day the suite runs)
+create or replace function pg_temp.bd_after(p_n integer) returns date language sql as $$
+  select c.day from public.business_calendar c
+  where c.scope = 'FR-conservative' and not c.closed and c.day > private.paris_today()
+  order by c.day offset p_n - 1 limit 1 $$;
+-- the transfer checks' codes as of p_today
+create or replace function pg_temp.tcodes(p_today date) returns text[] language plpgsql as $$
+declare v uuid;
+begin
+  insert into public.payment_check_run (organization_id) values ('00000000-0000-0000-0000-0000000000aa') returning id into v;
+  perform private.run_transfer_checks(v, '00000000-0000-0000-0000-0000000000aa', p_today);
+  update public.payment_check_run set finished_at = clock_timestamp() where id = v;
+  return coalesce((select array_agg(distinct c.code order by c.code) from public.payment_check_result c
+                   where c.run_id = v), '{}');
+end $$;
+-- the payment checks' rows, as [code, subject]
+create or replace function pg_temp.pchecks() returns jsonb language plpgsql as $$
+declare v uuid;
+begin
+  v := (private.run_payment_checks('00000000-0000-0000-0000-0000000000aa') ->> 'run_id')::uuid;
+  return coalesce((select jsonb_agg(distinct jsonb_build_array(c.code, c.subject_id)) from public.payment_check_result c
+                   where c.run_id = v), '[]');
+end $$;
+-- « Lier » by ops (user 01), its refusal raised
+create or replace function pg_temp.link(p_key text, p_line uuid, p_kind text, p_payment uuid, p_refund uuid,
+                                        p_expected text) returns text language plpgsql as $$
+declare v text;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v := public.link_debit(p_key, p_line, p_kind, p_payment, p_refund, p_expected, 'motif de test') ->> 'kind';
+  reset role;
+  return v;
+end $$;
+-- a statement in a subtransaction always rolled back: its value as text, or the error's message and hint
+create or replace function pg_temp.attempt(p_sql text) returns text language plpgsql as $$
+declare v text; h text;
+begin
+  begin
+    execute p_sql into v;
+    raise exception 'attempt rolled back' using errcode = 'TR002';
+  exception when sqlstate 'TR002' then
+    null;
+  when others then
+    get stacked diagnostics v = message_text, h = pg_exception_hint;
+    v := v || coalesce(' | ' || nullif(h, ''), '');
+  end;
+  reset role;
+  return coalesce(v, 'null');
+end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 
 -- Collections (three days ago) and the first runs: Martin 200 000 → net 164 000; Lilas 512 000 → net 419 840;
@@ -617,7 +674,8 @@ insert into t select 'r3', pg_temp.run('a3', '{"03": "12000"}', 12000, 2000, 10,
 select pg_temp.stmt('00', private.paris_today() - 1);
 
 
--- 1. Individual debits: the payouts' RMT ids and the sweep's SWP id ---------------------------------------------------
+-- 1. Individual debits: the payouts' RMT ids and the sweep's SWP id, on yesterday's statement imported today (review T5:
+-- everything dated at the debit, never at the job's day) ---------------------------------------------------------------
 select pg_temp.handed_out('f1', 'gen-file-1');
 select is(array[pg_temp.pmt(pg_temp.trid('r1')), pg_temp.pmt(pg_temp.trid('r2')),
                 pg_temp.pmt((pg_temp.sweep(pg_temp.v('f1'))).id)],
@@ -626,7 +684,7 @@ select is(array[pg_temp.pmt(pg_temp.trid('r1')), pg_temp.pmt(pg_temp.trid('r2'))
   'one PmtInf per kind: the payouts in -1, the sweep in -2 (as M2c-6a numbered such a file)');
 select is((pg_temp.sweep(pg_temp.v('f1'))).amount_minor, 12000::bigint, 'F1 sweeps Cyprès'' settled 120,00 €');
 insert into t select 's1', (pg_temp.sweep(pg_temp.v('f1'))).id;
-select pg_temp.stmt('01', private.paris_today(), jsonb_build_array(
+select pg_temp.stmt('01', private.paris_today() - 1, jsonb_build_array(
   jsonb_build_object('amount', 164000, 'e2e', pg_temp.e2e(pg_temp.trid('r1'))),
   jsonb_build_object('amount', 419840, 'e2e', pg_temp.e2e(pg_temp.trid('r2'))),
   jsonb_build_object('amount', 12000, 'e2e', pg_temp.e2e(pg_temp.v('s1')), 'iban', 'FR7610107001011234567890129')));
@@ -651,10 +709,11 @@ select results_eq(
   $$ select entry_type, effective_date, source_type, source_id from public.ledger_entry
      where id in (pg_temp.ek('remit:' || pg_temp.trid('r1')), pg_temp.ek('settle:' || pg_temp.v('r1')),
                   pg_temp.ek('sweep:' || pg_temp.v('s1'))) order by entry_type $$,
-  $$ values ('client_settlement'::text, private.paris_today(), 'remittance_run'::text, pg_temp.v('r1')::text),
-            ('remittance', private.paris_today(), 'bank_transfer', pg_temp.trid('r1')::text),
-            ('servicer_sweep', private.paris_today(), 'bank_transfer', pg_temp.v('s1')::text) $$,
-  'the remittance, the run''s settlement and the sweep, dated at the debit, each naming its document');
+  $$ values ('client_settlement'::text, private.paris_today() - 1, 'remittance_run'::text, pg_temp.v('r1')::text),
+            ('remittance', private.paris_today() - 1, 'bank_transfer', pg_temp.trid('r1')::text),
+            ('servicer_sweep', private.paris_today() - 1, 'bank_transfer', pg_temp.v('s1')::text) $$,
+  'the remittance, the run''s settlement and the sweep, dated at the debit (yesterday, not the job''s day), each naming '
+  'its document');
 select is(pg_temp.books(pg_temp.ek('remit:' || pg_temp.trid('r1'))),
           '{"client_payable": 164000, "client_money_cash": -164000}'::jsonb, 'remittance: +4670[Martin] N / −5120 N');
 select is(pg_temp.books(pg_temp.ek('settle:' || pg_temp.v('r1'))),
@@ -672,17 +731,23 @@ select results_eq(
   'the transfers booked, each with its entry');
 select results_eq(
   $$ select status, booked_on from public.remittance_run where id in (pg_temp.v('r1'), pg_temp.v('r2')) order by number $$,
-  $$ values ('booked'::text, private.paris_today()), ('booked', private.paris_today()) $$,
-  'runs sent → booked at the debit date');
+  $$ values ('booked'::text, private.paris_today() - 1), ('booked', private.paris_today() - 1) $$,
+  'runs sent → booked at the debit date (yesterday)');
 select results_eq(
   $$ select kind, amount_minor, vat_moved_minor, settled_on, entry_id = pg_temp.ek('settle:' || run_id)
      from public.commission_settlement where run_id = pg_temp.v('r1') $$,
-  $$ values ('compensation'::text, 36000::bigint, 6000::bigint, private.paris_today(), true) $$,
-  'the invoice set off at the debit (commission_settlement of the settlement entry)');
+  $$ values ('compensation'::text, 36000::bigint, 6000::bigint, private.paris_today() - 1, true) $$,
+  'the invoice set off at the debit date (commission_settlement of the settlement entry)');
 select is(array[pg_temp.owed('a1'), pg_temp.owed('a2'), pg_temp.share()], array[0, 0, -128160]::bigint[],
   'Martin and Lilas owed nothing; the servicer''s settled share (360,00 + 921,60 €) on the account, Cyprès'' swept');
 select is((select count(*) from public.client_advance)::integer, 0, 'no cover needed: no advance');
 select is(pg_temp.dirty(), '{}'::text[], 'I8′, I12, I13, I14, I19, I20 and I9 clean after the individual debits');
+-- review T3: the servicer's settled share on the account, no sweep ordered or in a file: servicer_funds_unswept once it
+-- has been so for more than two business days, not before
+select is(array['servicer_funds_unswept' = any (pg_temp.tcodes(pg_temp.bd_after(3))),
+                'servicer_funds_unswept' = any (pg_temp.tcodes(private.paris_today()))],
+          array[true, false],
+  'servicer_funds_unswept: 4679 in debit three business days on, no sweep ordered (an alert); not on the day');
 insert into j select 'b1bis', pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('01', 1), 'payout', pg_temp.trid('r1')),
                                                              pg_temp.row(pg_temp.ln('01', 2), 'payout', pg_temp.trid('r2')),
                                                              pg_temp.row(pg_temp.ln('01', 3), 'sweep', pg_temp.v('s1'))));
@@ -731,6 +796,8 @@ end $$;
 select is(pg_temp.isolated('settle_set'), pg_temp.isolated('settle_one'),
   'post_run_settlements (one call) = post_run_settlement run by run: the same entry and settlements (D > 0, D = 0)');
 select pg_temp.handed_out('f2', 'gen-file-2');
+select ok(not ('servicer_funds_unswept' = any (pg_temp.tcodes(pg_temp.bd_after(3)))),
+  'no servicer_funds_unswept once the share''s sweep is in a file');
 insert into t select 'q1t', (select transfer_id from public.refund_request where id = (select (v ->> 'refund_request_id')::uuid from j where k = 'q1'));
 insert into t select 's2', (pg_temp.sweep(pg_temp.v('f2'))).id;
 select is(array[pg_temp.pmt(pg_temp.trid('r6')), pg_temp.pmt(pg_temp.trid('r7')), pg_temp.pmt(pg_temp.v('q1t')),
@@ -768,6 +835,24 @@ select results_eq(
      join public.bank_transfer t on t.id = q.transfer_id where q.id = (select (v ->> 'refund_request_id')::uuid from j where k = 'q1') $$,
   $$ values ('executed'::text, 'booked'::text, true) $$,
   'the single-refund batch line executes its refund (M2b link), its transfer booked with the refund''s cash_out');
+-- review T4 (the batch rule's last line): with the switch on (rolled back), Durand's payout cancelled alone out of F2,
+-- a line of Dupont's amount on that PmtInf and a row for Dupont only — the live members add up, the cancelled one could
+-- be in the line: never booked
+create or replace function pg_temp.sc_batch_cancelled() returns jsonb language plpgsql as $$
+begin
+  update private.feature_switch set enabled = true where key = 'downloaded_file_cancellation';
+  update public.bank_transfer set status = 'cancelled', cancelled_at = now(), cancel_reason = 'annulé (test)'
+  where id = pg_temp.trid('r7');
+  perform pg_temp.stmt('11', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 82000, 'kind', 'batch_unsplit', 'pmt', pg_temp.pmt(pg_temp.trid('r6')))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('11', 1), 'payout', pg_temp.trid('r6'))));
+  return jsonb_build_object('why', pg_temp.skipped(pg_temp.ln('11', 1)), 'r6', pg_temp.status(pg_temp.trid('r6')),
+                            'bookings', cardinality(pg_temp.bookings(pg_temp.ln('11', 1))));
+end $$;
+select is(pg_temp.isolated('sc_batch_cancelled'),
+          '{"why": "cancelled_transfer_debited", "r6": "in_file", "bookings": 0}'::jsonb,
+  'a batch line its live members add up to, with a cancelled member of the PmtInf: cancelled_transfer_debited, '
+  'nothing booked');
 insert into j select 'b2', pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('02', 1), 'payout', pg_temp.trid('r6')),
                                                           pg_temp.row(pg_temp.ln('02', 1), 'payout', pg_temp.trid('r7')),
                                                           pg_temp.row(pg_temp.ln('02', 3), 'sweep', pg_temp.v('s2'))));
@@ -783,6 +868,22 @@ select is(pg_temp.dirty(), '{}'::text[], 'clean after the batch lines (I20 with 
 
 
 -- 3. Returns: a payout back, a payout back less the bank's charges, the sweep back, a refund back -----------------------
+-- Martin replaced his payout account after the debit (a second admin confirmed it): the old one is retired
+create or replace function pg_temp.replace_martin() returns uuid language plpgsql as $$
+declare v uuid;
+begin
+  perform pg_temp.as_user('04');
+  set local role authenticated;
+  v := (public.propose_payout_account('pa-a1-new', '00000000-0000-0000-0000-0000000000a1', 'EUR',
+                                      'FR7630004000031234567890143', 'MARTIN SAS', null,
+                                      'd0000000-0000-0000-0000-0000000002a1') ->> 'payout_account_id')::uuid;
+  perform pg_temp.as_user('10');
+  perform public.confirm_payout_account('pa-a1-new-ok', v, 'FR7630004000031234567890143');
+  reset role;
+  return v;
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+insert into t select 'pa1', pg_temp.replace_martin();
 select pg_temp.stmt('03', private.paris_today(), jsonb_build_array(
   jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 164000, 'orig', pg_temp.e2e(pg_temp.trid('r1'))),
   jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 81000, 'orig', pg_temp.e2e(pg_temp.trid('r6'))),
@@ -799,6 +900,27 @@ select results_eq(
 select is((select count(*)::integer from private.debit_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100)
            where line_id in (pg_temp.ln('03', 1), pg_temp.ln('03', 2), pg_temp.ln('03', 3))), 0,
   'the M2b pass no longer reads a credit carrying our RMT/SWP id');
+-- review money-1 (K1): a credit returning our payout is never linked as a refund that came back (only the funds pass
+-- books it: its item, the account returned, the P0)
+select is(pg_temp.attempt(format($q$ select pg_temp.link('rr-on-rmt-0001', %L, 'refund_returned', null, %L, null) $q$,
+                                 pg_temp.ln('03', 1), (select (v ->> 'refund_request_id')::uuid from j where k = 'q1'))),
+          'debit link refused: own_transfer_line | Cette ligne est un débit ou un retour de nos propres virements '
+          '(reversement, quote-part du cabinet, lot de notre fichier) : elle se comptabilise depuis le relevé, '
+          'automatiquement ou par l''équipe (écran à venir). Elle ne se rattache pas à un paiement et ne se classe pas '
+          'sans comptabilisation.',
+  '« Remboursement revenu » refused on the return of our RMT payout: own_transfer_line, with its hint');
+-- review T4/K5: a return dated before its payout's debit (yesterday's) is left to ops as return_before_debit
+create or replace function pg_temp.sc_early_return() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.stmt('12', private.paris_today() - 2, jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 164000, 'orig', pg_temp.e2e(pg_temp.trid('r1')))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('12', 1), 'payout_returned', pg_temp.trid('r1'))));
+  return jsonb_build_object('why', pg_temp.skipped(pg_temp.ln('12', 1)), 'review', pg_temp.review(pg_temp.ln('12', 1)),
+                            'r1', pg_temp.status(pg_temp.trid('r1')));
+end $$;
+select is(pg_temp.isolated('sc_early_return'),
+          '{"why": "return_before_debit", "review": "return_before_debit", "r1": "booked"}'::jsonb,
+  'a return dated before its debit: refused under the locks and reviewed return_before_debit (not « changed »)');
 insert into j select 'b3', pg_temp.book(jsonb_build_array(
   pg_temp.row(pg_temp.ln('03', 1), 'payout_returned', pg_temp.trid('r1')),
   pg_temp.row(pg_temp.ln('03', 2), 'payout_returned', pg_temp.trid('r6')),
@@ -830,15 +952,17 @@ select results_eq(
             ('00000000-0000-0000-0000-0000000000a1', 'payout_returned', 164000) $$,
   'each returned payout is a payout_returned item for its client (the 4670 trigger)');
 select results_eq(
-  $$ select client_organization_id, status from public.client_payout_account
+  $$ select client_organization_id, status, id = pg_temp.v('pa1') from public.client_payout_account
      where client_organization_id in ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a6')
-     order by client_organization_id $$,
-  $$ values ('00000000-0000-0000-0000-0000000000a1'::uuid, 'returned'::text),
-            ('00000000-0000-0000-0000-0000000000a6', 'returned') $$,
-  'the payout accounts returned (they block payouts until replaced or reconfirmed)');
-select ok('payout_account_returned' = any (private.remittance_payout_blockers('00000000-0000-0000-0000-0000000000a1', 'EUR',
+     order by client_organization_id, status $$,
+  $$ values ('00000000-0000-0000-0000-0000000000a1'::uuid, 'active'::text, true),
+            ('00000000-0000-0000-0000-0000000000a1', 'retired', false),
+            ('00000000-0000-0000-0000-0000000000a6', 'returned', false) $$,
+  'Dupont''s payout account returned (it blocks payouts until replaced or reconfirmed); Martin''s, replaced before '
+  'the return, stays retired and his new one active (only an active account is marked; review T4)');
+select ok('payout_account_returned' = any (private.remittance_payout_blockers('00000000-0000-0000-0000-0000000000a6', 'EUR',
                                                                                private.paris_today())),
-  'Martin''s next payout is blocked: payout_account_returned');
+  'Dupont''s next payout is blocked: payout_account_returned');
 select is((select latest_execution_date from private.pending_item_deadlines('00000000-0000-0000-0000-0000000000aa')
            where client_organization_id = '00000000-0000-0000-0000-0000000000a1'),
           (select d.latest_execution_date
@@ -857,6 +981,22 @@ select is(pg_temp.alerts('sweep_returned'), jsonb_build_array(jsonb_build_array(
   'sweep_returned while the share is not swept again');
 select is(pg_temp.dirty(), '{}'::text[],
   'clean after the returns (I19 signed with the charges; I20 with a bounced file-mode refund)');
+-- review legal-texts#6 (K4): the client space knows its payout came back (it cannot read the transfer: RLS)
+insert into auth.users (id, email, aud, role)
+values ('10000000-0000-0000-0000-000000000014', 'u14@book.test', 'authenticated', 'authenticated');
+insert into public.membership (user_id, organization_id, role)
+values ('10000000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-0000000000a1', 'client_admin');
+select is(array[pg_temp.try('14', $q$ select (public.client_remittance_summary('00000000-0000-0000-0000-0000000000a1')
+                                               -> 'returned_runs')::text $q$),
+                pg_temp.try('08', $q$ select (public.client_remittance_summary('00000000-0000-0000-0000-0000000000a2')
+                                               -> 'returned_runs')::text $q$),
+                pg_temp.try('08', $q$ select (public.client_remittance_summary('00000000-0000-0000-0000-0000000000a1')
+                                               -> 'returned_runs')::text $q$)],
+          array[jsonb_build_array(jsonb_build_object('run_id', pg_temp.v('r1'), 'returned_on', private.paris_today(),
+                                                     'amount_minor', '164000'))::text,
+                '[]', 'not allowed'],
+  'client_remittance_summary: Martin''s admin reads his returned run (the return''s date, the amount); Lilas'' none; '
+  'Lilas'' admin never Martin''s');
 -- I20's two indexes: a second debit booking of a transfer is refused at once
 select throws_ok(
   $$ insert into public.bank_line_booking (bank_transaction_id, seq, organization_id, bank_account_id, kind, transfer_id,
@@ -872,6 +1012,16 @@ insert into t select 't9', pg_temp.trid('r9');
 -- in a file generated, never downloaded: the bank cannot have its bytes
 insert into t select 'f3', (pg_temp.gen('01', 'gen-file-3') ->> 'file_id')::uuid;
 select pg_temp.write(pg_temp.v('f3'));
+-- review T4 (the row rule): a debit carrying the RMT id of a payout whose file was never downloaded (rolled back)
+create or replace function pg_temp.sc_not_handed_out() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.stmt('13', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 24600, 'e2e', pg_temp.e2e(pg_temp.v('t9')))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('13', 1), 'payout', pg_temp.v('t9'))));
+  return jsonb_build_object('why', pg_temp.skipped(pg_temp.ln('13', 1)), 't9', pg_temp.status(pg_temp.v('t9')));
+end $$;
+select is(pg_temp.isolated('sc_not_handed_out'), '{"why": "transfer_not_handed_out", "t9": "in_file"}'::jsonb,
+  'an RMT debit of a payout in a file never downloaded: transfer_not_handed_out, never booked');
 select pg_temp.stmt('04', private.paris_today(), jsonb_build_array(
   jsonb_build_object('amount', 419840, 'e2e', pg_temp.e2e(pg_temp.trid('r2'))),
   jsonb_build_object('amount', 24600, 'kind', 'batch_unsplit', 'pmt', pg_temp.pmt(pg_temp.v('t9')))));
@@ -910,8 +1060,60 @@ select is(array[pg_temp.try('01', format($q$ select public.link_debit('explain-0
                                             ->> 'kind' $q$, pg_temp.ln('05', 1))),
                 pg_temp.try('01', format($q$ select public.link_debit('explain-0002', %L, 'explained', null, null, null, 'vu')
                                             ->> 'kind' $q$, pg_temp.ln('04', 2)))],
-          array['debit link refused: not_explainable', 'debit link refused: not_explainable'],
+          array['debit link refused: own_transfer_line', 'debit link refused: own_transfer_line'],
   '« explained » refused on a debit carrying our RMT id and on a batch line of our file');
+-- review money-1 (K1): nor a payment's return, nor a refund (but a PmtInf's single refund), whatever the line's kind
+create or replace function pg_temp.refusal(p_text text) returns text language sql as $$
+  select split_part(p_text, ' | ', 1) $$;
+create or replace function pg_temp.k1_manual_refund() returns text language plpgsql as $$
+declare q uuid; v text;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  q := (public.request_refund('k1-manual-0001', pg_temp.pay('13'), '1000', 'FR7630004000031234567890143', 'PAYEUR 13',
+                              'other', null, '1000000', 'payeur inconnu', 'manual') ->> 'refund_request_id')::uuid;
+  v := public.link_debit('k1-manual-link', pg_temp.ln('05', 2), 'refund', null, q, null, 'remboursement') ->> 'kind';
+  reset role;
+  return v;
+end $$;
+create or replace function pg_temp.k1_other_debit_rmt() returns text language plpgsql as $$
+begin
+  perform pg_temp.stmt('14', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 1000, 'kind', 'other_debit', 'e2e', pg_temp.e2e(pg_temp.trid('r2')))));
+  return pg_temp.link('k1-ret-rmt-od', pg_temp.ln('14', 1), 'return', pg_temp.pay('13'), null, '1000000');
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(array[pg_temp.refusal(pg_temp.attempt(format($q$ select pg_temp.link('k1-ret-batch', %L, 'return', %L, null,
+                                                                                 '1000000') $q$,
+                                                       pg_temp.ln('05', 2), pg_temp.pay('13')))),
+                pg_temp.refusal(pg_temp.attempt('select pg_temp.k1_manual_refund()')),
+                pg_temp.refusal(pg_temp.attempt(format($q$ select pg_temp.link('k1-ret-rmt', %L, 'return', %L, null,
+                                                                                 '1000000') $q$,
+                                                       pg_temp.ln('05', 1), pg_temp.pay('13')))),
+                pg_temp.refusal(pg_temp.attempt(format($q$ select pg_temp.link('k1-ref-rmt', %L, 'refund', null, %L,
+                                                                                 null) $q$,
+                                                       pg_temp.ln('05', 1),
+                                                       (select (v ->> 'refund_request_id')::uuid from j where k = 'q1')))),
+                pg_temp.refusal(pg_temp.attempt('select pg_temp.k1_other_debit_rmt()'))],
+          array_fill('debit link refused: own_transfer_line'::text, array[5]),
+  '« Retour du paiement » on our batch line, a manual refund on it, a return or a refund on an RMT debit (transfer_out '
+  'or other_debit): own_transfer_line');
+-- a refund whose transfer is in a file handed out reaches its own trigger (M2c-6a's G2 rule: only its own PmtInf's batch
+-- line in that file executes it), which refuses our payouts' batch line
+create or replace function pg_temp.k1_handed_out_refund() returns text language plpgsql as $$
+declare q uuid; v text;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  q := (public.request_refund('k1-filed-0001', pg_temp.pay('13'), '1000', null, null, 'other', null, '1000000',
+                              'payeur inconnu') ->> 'refund_request_id')::uuid;
+  reset role;
+  perform pg_temp.handed_out('fk1', 'gen-file-k1');
+  return pg_temp.link('k1-filed-link', pg_temp.ln('05', 2), 'refund', null, q, null);
+end $$;
+select ok(pg_temp.attempt('select pg_temp.k1_handed_out_refund()')
+            ~ '^debit link refused: posting_failed \(23514: refund refused: reissue_in_downloaded_file',
+  'a refund in a downloaded file, linked on our payouts'' batch line: refused by its trigger (another PmtInf)');
 select is(pg_temp.try('01', format($q$ select public.link_debit('fee-line-0001', %L, 'fee', null, null, null, 'frais')
                                       ->> 'kind' $q$, pg_temp.ln('05', 2))),
           'bank booking refused: not_a_fee', 'a fee refused on a batch line of our file (even coded as a charge)');
@@ -955,8 +1157,15 @@ select pg_temp.handed_out('f4', 'gen-file-4');
 select private.ledger_reverse((select id from public.ledger_entry where payment_id = pg_temp.pay('08')
                                  and entry_type = 'allocation'), 'rev-test-0008', 'Retour du paiement (test)',
                               private.paris_today());
+-- a PmtInf of one payout the bank booked as one line without TxDtls (NbOfTxs 1: the parser's other_debit; review T4)
 select pg_temp.stmt('06', private.paris_today(), jsonb_build_array(
-  jsonb_build_object('amount', 82000, 'kind', 'batch_unsplit', 'pmt', pg_temp.pmt(pg_temp.trid('r8')))));
+  jsonb_build_object('amount', 82000, 'kind', 'other_debit', 'pmt', pg_temp.pmt(pg_temp.trid('r8')))));
+select results_eq(
+  $$ select line_kind, role, transfer_id from private.bank_booking_candidates('00000000-0000-0000-0000-0000000000aa',
+                                                                              null, null, 100)
+     where line_id = pg_temp.ln('06', 1) $$,
+  $$ values ('other_debit'::text, 'member'::text, pg_temp.trid('r8')) $$,
+  'a one-payout PmtInf''s line read as other_debit is the funds pass''s: its member');
 select pg_temp.stmt('07', private.paris_today() + 1, jsonb_build_array(
   jsonb_build_object('amount', 700, 'kind', 'other_debit', 'code', 'PMNT/CCRD/CHRG')));
 insert into j select 'b5', pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('06', 1), 'payout', pg_temp.trid('r8')),
@@ -1005,7 +1214,7 @@ create or replace function pg_temp.bd_before(p_day date) returns date language s
   select max(c.day) from public.business_calendar c
   where c.scope = 'FR-conservative' and not c.closed and c.day < p_day $$;
 insert into dated values (pg_temp.f('04'), pg_temp.bd_before(private.paris_today() - 1)),
-                         (pg_temp.f('05'), private.paris_today() - 1), (pg_temp.f('11'), private.paris_today() + 5);
+                         (pg_temp.f('05'), private.paris_today() - 1), (pg_temp.f('11'), private.paris_today());
 insert into earliest_hdr values ('a4', private.paris_today() + 20), ('a5', private.paris_today() + 20);
 insert into t select 'r4', pg_temp.run('a4', '{"04": "40000"}', 7200, 1200);
 select pg_temp.handed_out('f5', 'gen-file-5');
@@ -1040,7 +1249,23 @@ select results_eq(
   $$ select b.latest_execution_date, l.account_id from public.remittance_deadline_breach b
      join public.remittance_line l on l.ledger_entry_id = b.ledger_entry_id where b.run_id = pg_temp.v('r5') $$,
   $$ values (private.paris_today() - 1, pg_temp.f('05')) $$,
-  'at the debit: a breach row for the item debited after its date, none for the one on time');
+  'at the debit: a breach row for the item debited after its date, none for the one debited on its last execution '
+  'day (review T4)');
+-- review concurrency-2: the pass took the key-share locks its breach rows' payments need before the allocation lock — the
+-- set it locked holds every payment a breach row of the booking names
+create or replace function pg_temp.key_shared() returns uuid[] language plpgsql as $$
+declare v uuid[];
+begin
+  if to_regclass('pg_temp._bb_pay_locks') is null then
+    return null;
+  end if;
+  execute 'select array_agg(l.payment_id order by l.payment_id) from pg_temp._bb_pay_locks l' into v;
+  return v;
+end $$;
+select is(pg_temp.key_shared(),
+          (select array_agg(b.payment_id order by b.payment_id) from public.remittance_deadline_breach b
+           where b.run_id = pg_temp.v('r5') and b.payment_id is not null),
+  'the payments locked FOR KEY SHARE before the allocation lock: those of the late lines, the breach rows'' payments');
 
 
 -- 7. client_advance: who reads it, nobody writes it -----------------------------------------------------------------
@@ -1124,6 +1349,348 @@ select is((select v - 'alerted' from j where k = 'g2'),
 select is((select jsonb_array_length(v -> 'alerted') from j where k = 'g2'), 2,
   'cancelled_transfer_debited raised for the old id''s line and the old PmtInf''s batch line (not the foreign one)');
 select is(private.switch_on('downloaded_file_cancellation'), false, 'and the switch is off again (033 and 034 unchanged)');
+
+
+-- 9. Review round 1 -------------------------------------------------------------------------------------------------------
+-- T3: each nightly check fires on the one fault it watches (seeded in a subtransaction rolled back)
+create or replace function pg_temp.free_entry(p_n integer) returns uuid language sql as $$
+  select e.id from public.ledger_entry e
+  where e.organization_id = '00000000-0000-0000-0000-0000000000aa' and e.entry_type = 'client_settlement'
+    and not exists (select 1 from public.bank_transfer t where t.entry_id = e.id or t.return_entry_id = e.id)
+  order by e.id offset p_n limit 1 $$;
+-- I20, status rule: Lambert's payout (in its downloaded file) `booked` with an entry and no debit booking
+create or replace function pg_temp.sc_i20_payout() returns jsonb language plpgsql as $$
+begin
+  update public.bank_transfer set status = 'booked', entry_id = pg_temp.free_entry(0) where id = pg_temp.trid('r4');
+  return pg_temp.pchecks();
+end $$;
+-- I20, run rule: Lambert's run `booked` while its payout is still in its file
+create or replace function pg_temp.sc_i20_run() returns jsonb language plpgsql as $$
+begin
+  update public.remittance_run set status = 'booked', booked_on = private.paris_today() where id = pg_temp.v('r4');
+  return pg_temp.pchecks();
+end $$;
+-- I20, status rule: the booked sweep of F2 `returned` with no return booking
+create or replace function pg_temp.sc_i20_returned() returns jsonb language plpgsql as $$
+begin
+  update public.bank_transfer set status = 'returned', return_entry_id = pg_temp.free_entry(1) where id = pg_temp.v('s2');
+  return pg_temp.pchecks();
+end $$;
+-- I20, refund rule: a file-mode refund's transfer `booked` with an entry that is not its request's cash_out (no link)
+create or replace function pg_temp.sc_i20_refund() returns jsonb language plpgsql as $$
+declare q uuid; v uuid;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  q := (public.request_refund('i20-refund-0001', pg_temp.pay('13'), '1000', null, null, 'other', null, '1000000',
+                              'payeur inconnu') ->> 'refund_request_id')::uuid;
+  reset role;
+  v := (select transfer_id from public.refund_request where id = q);
+  update public.bank_transfer set status = 'booked', entry_id = pg_temp.free_entry(0) where id = v;
+  return jsonb_build_object('transfer', v, 'checks', pg_temp.pchecks());
+end $$;
+-- bank_line_booked: a fee of 4,00 € booked on the 10,00 € other debit (the deferred completeness check not run yet)
+create or replace function pg_temp.sc_line_booked() returns jsonb language plpgsql as $$
+declare v_entry uuid;
+begin
+  perform private.ledger_post_set_begin();
+  insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key, source_type,
+                                  source_id, reason)
+  values (1, '00000000-0000-0000-0000-0000000000aa', 'bank_fee', private.paris_today(), 'fee:' || pg_temp.ln('05', 2),
+          'bank_transaction', pg_temp.ln('05', 2)::text, 'frais (test)');
+  insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency, bank_account_id) values
+    (1, 1, 'due_to_servicer', 400, 'EUR', null),
+    (1, 2, 'client_money_cash', -400, 'EUR', '80000000-0000-0000-0000-0000000000cf'),
+    (1, 3, 'bank_fees', 400, 'EUR', null), (1, 4, 'due_from_client_funds', -400, 'EUR', null);
+  select x.entry_id into v_entry from private.ledger_post_set() x;
+  insert into public.bank_line_booking (bank_transaction_id, seq, organization_id, bank_account_id, kind, entry_id,
+                                        amount_minor, method)
+  values (pg_temp.ln('05', 2), 1, '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf', 'fee',
+          v_entry, 400, 'auto');
+  return pg_temp.pchecks();
+end $$;
+-- top_up_pending: a top-up ordered today, still not credited
+create or replace function pg_temp.sc_top_up() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  perform public.request_top_up('top-up-test-0001', '80000000-0000-0000-0000-0000000000c0',
+                                '80000000-0000-0000-0000-0000000000cf', '5000', 'approvisionnement (test)');
+  reset role;
+  return jsonb_build_array('top_up_pending' = any (pg_temp.tcodes(pg_temp.bd_after(3))),
+                           'top_up_pending' = any (pg_temp.tcodes(private.paris_today())));
+end $$;
+select ok(pg_temp.isolated('sc_i20_payout')
+            @> jsonb_build_array(jsonb_build_array('transfer_booked_once', pg_temp.trid('r4'))),
+  'I20: a payout booked without its debit booking');
+select ok(pg_temp.isolated('sc_i20_run') @> jsonb_build_array(jsonb_build_array('transfer_booked_once', pg_temp.v('r4'))),
+  'I20: a run booked while its payout is not');
+select ok(pg_temp.isolated('sc_i20_returned')
+            @> jsonb_build_array(jsonb_build_array('transfer_booked_once', pg_temp.v('s2'))),
+  'I20: a sweep returned without its return booking');
+select ok((select (x.v -> 'checks') @> jsonb_build_array(jsonb_build_array('transfer_booked_once', x.v ->> 'transfer'))
+           from (select pg_temp.isolated('sc_i20_refund') as v) x),
+  'I20: a refund''s transfer booked with an entry that is not its request''s cash_out (no M2b link)');
+select ok((select x.v @> jsonb_build_array(jsonb_build_array('bank_line_booked', pg_temp.ln('05', 2)))
+                  and not x.v @> jsonb_build_array(jsonb_build_array('bank_cash_identity',
+                                                                     '80000000-0000-0000-0000-0000000000cf'))
+           from (select pg_temp.isolated('sc_line_booked') as v) x),
+  'bank_line_booked: a line booked for less than its amount (I19 itself balanced)');
+select is(array['bank_line_unbooked' = any (pg_temp.tcodes(pg_temp.bd_after(3))),
+                'bank_line_unbooked' = any (pg_temp.tcodes(private.paris_today()))],
+          array[true, false],
+  'bank_line_unbooked: our lines left to ops more than a business day (an I9 gap), not on the day');
+select is(pg_temp.isolated('sc_top_up'), '[true, false]'::jsonb,
+  'top_up_pending: a top-up not credited more than a business day after its order, not on the day');
+
+-- K2 (legal-texts#1, money-2): Martin's returned payout paid again keeps its returned run's date (the worker's prepare
+-- dates its line: emulated here) and a breach of it is recorded « bloqué : virement revenu impayé », at the approval,
+-- at the debit, in flight
+create or replace function pg_temp.prepare_returned(p_run uuid, p_latest date, p_hdr date) returns void
+language plpgsql as $$
+declare r public.remittance_run; l public.remittance_line;
+begin
+  select * into r from public.remittance_run where id = p_run;
+  select * into l from public.remittance_line x where x.run_id = pg_temp.v('r1') and x.amount_minor > 0
+  order by x.latest_execution_date, x.line_no limit 1;
+  perform private.remittance_prepare_begin(p_run, r.job_token);
+  insert into private.remittance_draft_line (run_id, line_no, ledger_entry_id, kind, mandate_id, mandate_terms_id,
+                                             encaissement_date, effective_date, posted_at, deadline,
+                                             latest_execution_date, amount_minor, commission_state)
+  select p_run, 1, q.ledger_entry_id, q.kind, l.mandate_id, l.mandate_terms_id, l.encaissement_date, e.effective_date,
+         q.posted_at, p_latest + 1, p_latest, q.amount_minor, 'none'
+  from private.remittance_pending q join public.ledger_entry e on e.id = q.ledger_entry_id
+  where q.draft_run_id = p_run;
+  perform private.remittance_record_draft(p_run, r.job_token, jsonb_build_object(
+    'line_count', 1, 'gross', '164000', 'invoice_ht', '0', 'invoice_vat', '0', 'invoice_ttc', '0', 'credit_ht', '0',
+    'credit_vat', '0', 'credit_ttc', '0', 'taken', '0', 'advances', '0', 'refunds', '0', 'settlement', '0',
+    'net', '164000', 'vat_rate', '0.2', 'earliest_deadline', p_latest + 1, 'earliest_latest_execution_date', p_hdr,
+    'unmeetable', 0, 'blockers', '[]'::jsonb, 'commission_blockers', '[]'::jsonb, 'engine_version', 'commission-1',
+    'inputs_hash', encode(sha256(convert_to(p_run::text, 'UTF8')), 'hex'), 'payout_account_id', pg_temp.v('pa1'),
+    'history_seq', (select coalesce(max(seq), 0) from public.remittance_key_state
+                    where client_organization_id = r.client_organization_id),
+    'documents', '[]'::jsonb, 'key_states', '[]'::jsonb,
+    'plan', jsonb_build_object('settles', '[]'::jsonb, 'net', '164000', 'settlement', '0', 'dc', '0', 'da', '0',
+                               'vat_moved', '0', 'deferred', true, 'invoice_ht', '0', 'invoice_vat', '0',
+                               'invoice_ttc', '0')));
+end $$;
+create or replace function pg_temp.returned_run(p_key text, p_latest date, p_hdr date) returns uuid language plpgsql as $$
+declare v_run uuid;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v_run := (public.request_remittance_run('rq-' || p_key, '00000000-0000-0000-0000-0000000000a1') ->> 'run_id')::uuid;
+  reset role;
+  perform pg_temp.prepare_returned(v_run, p_latest, p_hdr);
+  return v_run;
+end $$;
+-- approved by ops for the next business day (with p_reason when given), the approval job run when queued
+create or replace function pg_temp.approve(p_key text, p_run uuid, p_reason text default null) returns text
+language plpgsql as $$
+declare v jsonb;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v := public.approve_remittance_runs('ap-' || p_key, pg_temp.item(p_run), null, p_reason);
+  reset role;
+  if v -> 'results' -> 0 ->> 'status' = 'queued' then
+    perform private.approve_remittance_run(p_run, (select job_token from public.remittance_run where id = p_run));
+  end if;
+  return coalesce(v -> 'results' -> 0 ->> 'reason', v -> 'results' -> 0 ->> 'status');
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+create or replace function pg_temp.sc_returned_late_approval() returns jsonb language plpgsql as $$
+declare v_run uuid; v_first text; v_second text;
+begin
+  v_run := pg_temp.returned_run('k2-late-approval', private.paris_today() - 1, private.paris_today() - 1);
+  v_first := pg_temp.approve('k2-late-approval-1', v_run);
+  v_second := pg_temp.approve('k2-late-approval-2', v_run, 'payé de nouveau après son retour (test)');
+  return jsonb_build_object('without_reason', v_first, 'with_reason', v_second,
+    'run', (select status from public.remittance_run where id = v_run),
+    'late_approvals', (select count(*) from public.remittance_late_approval where run_id = v_run),
+    'breach', (select jsonb_agg(jsonb_build_array(b.blocked_reason, b.latest_execution_date = private.paris_today() - 1))
+               from public.remittance_deadline_breach b where b.run_id = v_run));
+end $$;
+create or replace function pg_temp.sc_returned_late_debit() returns jsonb language plpgsql as $$
+declare v_run uuid; v_tr uuid;
+begin
+  v_run := pg_temp.returned_run('k2-late-debit', private.paris_today() - 1, private.paris_today() + 20);
+  perform pg_temp.approve('k2-late-debit', v_run);
+  v_tr := (select transfer_id from public.remittance_run where id = v_run);
+  perform pg_temp.handed_out('fk2b', 'gen-file-k2b');
+  perform pg_temp.stmt('15', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 164000, 'e2e', pg_temp.e2e(v_tr))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('15', 1), 'payout', v_tr)));
+  return jsonb_build_object('run', (select status from public.remittance_run where id = v_run),
+    'late_approvals', (select count(*) from public.remittance_late_approval where run_id = v_run),
+    'breach', (select jsonb_agg(jsonb_build_array(b.blocked_reason, b.requested_execution_date is not null))
+               from public.remittance_deadline_breach b where b.run_id = v_run));
+end $$;
+create or replace function pg_temp.sc_returned_overdue() returns jsonb language plpgsql as $$
+declare v_run uuid; v_c uuid;
+begin
+  v_run := pg_temp.returned_run('k2-overdue', private.paris_today() - 1, private.paris_today() + 20);
+  perform pg_temp.approve('k2-overdue', v_run);
+  v_c := pg_temp.chk();
+  return jsonb_build_object(
+    'transfer', (select t.status from public.bank_transfer t join public.remittance_run r on r.transfer_id = t.id
+                 where r.id = v_run),
+    'breach', (select jsonb_agg(b.blocked_reason) from public.remittance_deadline_breach b where b.run_id = v_run),
+    'overdue', exists (select 1 from public.payment_check_result c where c.run_id = v_c
+                         and c.code = 'remittance_payout_overdue' and c.subject_id = v_run));
+end $$;
+select is(pg_temp.isolated('sc_returned_late_approval'),
+          '{"without_reason": "late_reason_required", "with_reason": "queued", "run": "approved", "late_approvals": 1,
+            "breach": [["payout_returned", true]]}'::jsonb,
+  'a returned payout paid again after its date: late_reason_required without a reason; with one, its late approval '
+  'and its breach row « bloqué : virement revenu impayé » (payout_returned)');
+select is(pg_temp.isolated('sc_returned_late_debit'),
+          '{"run": "booked", "late_approvals": 0, "breach": [["payout_returned", true]]}'::jsonb,
+  'approved on time, debited after its date: the booking''s breach row is payout_returned');
+select is(pg_temp.isolated('sc_returned_overdue'),
+          '{"transfer": "ordered", "breach": ["payout_returned"], "overdue": true}'::jsonb,
+  'in flight past its date (never handed out): the nightly check''s breach row is payout_returned');
+
+-- K3 (legal-texts#2): proven unpaid only with evidence of absence — a debit line that could hold the payout (a batch line
+-- of its PmtInf whatever its amount, a line with neither reference of exactly its amount) in its window keeps the
+-- alert only; a line of another amount does not (Cyprès, paid early on a CSV export without the end-to-end column)
+create or replace function pg_temp.csv(p_n text, p_lines jsonb, p_from date, p_to date, p_uploaded timestamptz)
+returns uuid language plpgsql as $$
+declare s uuid := ('e4000000-0000-0000-0000-0000000000' || p_n)::uuid;
+begin
+  insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                     size_bytes, storage_path)
+  values (s, '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf', 'EUR', 'csv', 'r.csv',
+          encode(sha256(convert_to(s::text, 'UTF8')), 'hex'), 1, 'test/' || s);
+  update public.bank_statement set status = 'uploaded', uploaded_at = p_uploaded where id = s;
+  insert into public.bank_transaction (organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+                                       amount_minor, currency, booking_date, kind, end_to_end_id, payment_info_id)
+  select '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf', s, l.ord, 'c:' || s || l.ord,
+         'debit', (l.v ->> 'amount')::bigint, 'EUR', (l.v ->> 'day')::date, l.v ->> 'kind', l.v ->> 'e2e', l.v ->> 'pmt'
+  from jsonb_array_elements(p_lines) with ordinality l (v, ord);
+  update public.bank_statement set status = 'imported', from_date = p_from, to_date = p_to, counts = '{}',
+    finished_at = clock_timestamp()
+  where id = s;
+  return s;
+end $$;
+create or replace function pg_temp.k3(p_plus bigint, p_batch boolean) returns jsonb language plpgsql as $$
+declare v_r date; v_l date; v_l1 date; v_run uuid; v_tr public.bank_transfer; v_c uuid;
+begin
+  v_r := private.next_business_day(private.paris_today());
+  v_l := private.next_business_day(private.next_business_day(v_r));
+  v_l1 := private.next_business_day(v_l);
+  perform pg_temp.file('15', '20000000-0000-0000-0000-0000000000a3', 40000);
+  perform pg_temp.collect('15', 40000, private.paris_today() - 3);
+  insert into dated values (pg_temp.f('15'), v_l);
+  v_run := pg_temp.runk('a3', '{"15": "40000"}', 7200, 1200, 'k3');
+  perform pg_temp.handed_out('fk3', 'gen-file-k3');
+  select x.* into v_tr from public.bank_transfer x join public.remittance_run r on r.transfer_id = x.id where r.id = v_run;
+  perform pg_temp.csv('01', jsonb_build_array(
+      jsonb_build_object('day', v_r, 'kind', 'transfer_out', 'amount', v_tr.amount_minor + p_plus,
+                         'pmt', case when p_batch then pg_temp.pmt(v_tr.id) end),
+      jsonb_build_object('day', v_l1, 'kind', 'other_debit', 'amount', 150)),
+    v_r, v_l1, (v_l1 + 1 + time '09:00') at time zone 'Europe/Paris');
+  insert into public.payment_check_run (organization_id) values ('00000000-0000-0000-0000-0000000000aa')
+  returning id into v_c;
+  perform private.run_remittance_runs_checks(v_c, '00000000-0000-0000-0000-0000000000aa', v_l1);
+  return jsonb_build_object(
+    'window', v_tr.requested_execution_date = v_r
+              and (select min(l.latest_execution_date) from public.remittance_line l where l.run_id = v_run) = v_l,
+    'covered', private.statement_covers('80000000-0000-0000-0000-0000000000cf', v_l, v_l),
+    'breach_rows', (select count(*) from public.remittance_deadline_breach where run_id = v_run),
+    'overdue', exists (select 1 from public.payment_check_result c where c.run_id = v_c
+                         and c.code = 'remittance_payout_overdue' and c.subject_id = v_run));
+end $$;
+create or replace function pg_temp.sc_k3_exact() returns jsonb language sql as $$ select pg_temp.k3(0, false) $$;
+create or replace function pg_temp.sc_k3_batch() returns jsonb language sql as $$ select pg_temp.k3(500, true) $$;
+create or replace function pg_temp.sc_k3_other() returns jsonb language sql as $$ select pg_temp.k3(1, false) $$;
+select is(array[pg_temp.isolated('sc_k3_exact'), pg_temp.isolated('sc_k3_batch'), pg_temp.isolated('sc_k3_other')],
+          array['{"window": true, "covered": true, "breach_rows": 0, "overdue": true}'::jsonb,
+                '{"window": true, "covered": true, "breach_rows": 0, "overdue": true}',
+                '{"window": true, "covered": true, "breach_rows": 1, "overdue": true}'],
+  'statements covering its date: a reference-less line of its amount, or a batch line of its PmtInf, in its window '
+  'keeps the alert only (no permanent breach row); a line of another amount is no evidence: the row');
+
+-- T5: a payout debited on the last day of the previous month, imported this month: the remittance, the settlement (its
+-- VAT due) and the run's booked_on in the month of the debit
+create or replace function pg_temp.sc_month_end() returns jsonb language plpgsql as $$
+declare v_d date := date_trunc('month', private.paris_today())::date - 1; v_run uuid; v_tr uuid; v_settle uuid;
+begin
+  perform pg_temp.file('16', '20000000-0000-0000-0000-0000000000a3', 40000);
+  perform pg_temp.collect('16', 40000, v_d - 3);
+  insert into dated values (pg_temp.f('16'), private.paris_today() + 20);
+  v_run := pg_temp.runk('a3', '{"16": "40000"}', 7200, 1200, 'month-end');
+  v_tr := (select transfer_id from public.remittance_run where id = v_run);
+  perform pg_temp.handed_out('fme', 'gen-file-me');
+  perform pg_temp.stmt('16', v_d, jsonb_build_array(jsonb_build_object('amount', 32800, 'e2e', pg_temp.e2e(v_tr))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('16', 1), 'payout', v_tr)));
+  v_settle := pg_temp.ek('settle:' || v_run);
+  return jsonb_build_object(
+    'previous_month', to_char(v_d, 'YYYY-MM') < to_char(private.paris_today(), 'YYYY-MM'),
+    'remit', (select effective_date = v_d from public.ledger_entry where id = pg_temp.ek('remit:' || v_tr)),
+    'settle', (select effective_date = v_d from public.ledger_entry where id = v_settle),
+    'vat', (select count(*) = 2 and bool_and(p.effective_date = v_d) from public.ledger_posting p
+            join public.ledger_account la on la.id = p.ledger_account_id
+            where p.entry_id = v_settle and la.book in ('vat_pending', 'vat_collected') and p.amount_minor <> 0),
+    'settled_on', (select bool_and(c.settled_on = v_d) from public.commission_settlement c where c.run_id = v_run),
+    'booked_on', (select r.booked_on = v_d from public.remittance_run r where r.id = v_run));
+end $$;
+select is(pg_temp.isolated('sc_month_end'),
+          '{"previous_month": true, "remit": true, "settle": true, "vat": true, "settled_on": true,
+            "booked_on": true}'::jsonb,
+  'debited on the last day of the previous month: remit:, settle: (its VAT due), settled_on and booked_on all dated '
+  'that day');
+
+-- T7 (K6): I20's refund rule counts each executed refund's links by its request's key (private.refund_debit_links, the
+-- partial index on refund_request_id) — never the whole link table once per executed refund (quadratic). Proven
+-- structurally, whatever the plans the rest of the checks get: the nightly checks call the keyed count once per executed
+-- refund (pg_stat_xact_user_functions), and each call reads only that request's links (pg_stat_xact_user_tables)
+create or replace function pg_temp.sc_refund_links_keyed() returns jsonb language plpgsql as $$
+declare i integer; n text; v_calls bigint; v_read bigint; v_requests uuid[];
+begin
+  set local track_functions = 'pl';
+  for i in 1..20 loop
+    n := to_hex(64 + i);   -- payments 41 … 54 (hex), 1,00 € each, unidentified
+    perform pg_temp.collect(n, 100, private.paris_today() - 3, false);
+    perform pg_temp.as_user('01');
+    set local role authenticated;
+    perform public.request_refund('t7-refund-' || n, pg_temp.pay(n), '100', null, null, 'other', null, '100',
+                                  'payeur inconnu');
+    reset role;
+  end loop;
+  v_requests := array(select q.id from public.refund_request q
+                      where q.payment_id in (select pg_temp.pay(to_hex(64 + g)) from generate_series(1, 20) g));
+  perform pg_temp.handed_out('ft7', 'gen-file-t7');
+  perform pg_temp.stmt('17', private.paris_today(),
+    (select jsonb_agg(jsonb_build_object('amount', 100, 'kind', 'refund_out', 'e2e', x.end_to_end_id)
+                      order by x.end_to_end_id)
+     from public.refund_request q join public.bank_transfer x on x.id = q.transfer_id where q.id = any (v_requests)));
+  perform private.debit_link_begin();
+  insert into pg_temp._debit_link (ord, bank_transaction_id, kind, payment_id, refund_request_id, method)
+  select row_number() over (order by l.id), l.id, 'refund', q.payment_id, q.id, 'auto'
+  from public.bank_transaction l
+  join public.bank_transfer x on x.end_to_end_id = l.end_to_end_id
+  join public.refund_request q on q.transfer_id = x.id
+  where l.statement_id = 'e3000000-0000-0000-0000-000000000017';
+  perform private.apply_debit_decisions('00000000-0000-0000-0000-0000000000aa');
+  select coalesce(sum(f.calls), 0) into v_calls from pg_stat_xact_user_functions f
+  where f.schemaname = 'private' and f.funcname = 'refund_debit_links';
+  perform private.run_payment_checks('00000000-0000-0000-0000-0000000000aa');
+  select coalesce(sum(f.calls), 0) - v_calls into v_calls from pg_stat_xact_user_functions f
+  where f.schemaname = 'private' and f.funcname = 'refund_debit_links';
+  select s.seq_tup_read + coalesce(s.idx_tup_fetch, 0) into v_read from pg_stat_xact_user_tables s
+  where s.relid = 'public.bank_debit_link'::regclass;
+  perform private.refund_debit_links(r) from unnest(v_requests) r;
+  select s.seq_tup_read + coalesce(s.idx_tup_fetch, 0) - v_read into v_read from pg_stat_xact_user_tables s
+  where s.relid = 'public.bank_debit_link'::regclass;
+  return jsonb_build_object('executed', (select count(*) from public.refund_request q
+                                         where q.id = any (v_requests) and q.status = 'executed'),
+                            'keyed_per_refund', v_calls >= 20,
+                            'reads_per_call', v_read <= 2 * 20);
+end $$;
+select is(pg_temp.isolated('sc_refund_links_keyed'),
+          '{"executed": 20, "keyed_per_refund": true, "reads_per_call": true}'::jsonb,
+  'I20 with 20 more executed refunds: one keyed count per executed refund, each reading only its request''s links');
 
 select * from finish();
 rollback;
