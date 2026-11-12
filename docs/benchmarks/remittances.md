@@ -667,3 +667,34 @@ servicer owns nearly every row of the database; there, hash joins over whole tab
 the keyed probes. The keyed plan is the one that holds whatever the statistics and the number of servicers
 (ARCHITECTURE §4); that test bounds no time. Likewise the statement-import servicer (48,368 unallocated payments, no
 entries): 0.35–0.46 s → 0.66–0.78 s warm (a few keyed probes per payment).
+
+### Integration of round 2 (2026-11-12, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+The three round-2 branches merged (`m6b1-fix2-int`), the CI jobs' commands with the jobs' `pg_stat_statements` /
+`auto_explain` settings, nothing else running on the VM.
+
+**The CI `scale` job's command, in its order** (`RECEIPT_FILES=5000`, every `*scale_integration.py` but the payouts'),
+three times:
+
+| Run | Result | Refund servicer's nightly checks (< 5 s) | its debit job, 5,000 RFD debits | 50,000-line run's last checks | the run's checks with its draft / after approval | Allocation test's checks (50,000 payments) |
+|---|---|---|---|---|---|---|
+| 1 | **7 passed** (1,057 s) | **0.47 s** | 12.5 s | 5.7 s | 4.3 / 5.1 s | 4.2 s |
+| 2 | **7 passed** (1,021 s) | **0.36 s** | 11.2 s | 4.9 s | 4.3 / 5.4 s | 4.3 s |
+| 3 | **7 passed** (998 s) | **0.34 s** | 11.6 s | 5.3 s | 4.6 / 4.7 s | 4.2 s |
+
+Every bound held: the refund servicer's per-table and per-check read bounds and its wall bound (0.34–0.47 s against
+5 s; with the build's SQL, 5.0–8.0 s in round 1's and round 2's runs), and the 50,000-line run's. Of the 50,000-line run's last checks,
+`run_payment_checks` took 2.7–2.9 s and `commission_key_open` (50,000 calls, `run_remittance_runs_checks`) 1.3–1.5 s,
+as round 2 measured them. The re-run of the 50,000 items prepared and approved in 30.4–33.4 s, its payout filed,
+downloaded, debited and booked in 0.7–1.0 s. The other tests as before: 50,000 files boarded in 88–95 s, 50,000
+credits matched in 29.9–32.0 s and allocated in 72.8–76.8 s, the statement import 40.9–45.1 s, receipts 14.8–16.2 ms
+each.
+
+**The `scale-payouts` job's command** (`test_debit_bookings_scale_integration.py` alone), once: **5 passed** in
+868.3 s. Fixture 50.1 s / 21.3 s / 690.4 s (prepare jobs 112.7 s, commands 4.6 s, approval jobs 565.4 s) /
+« Générer le fichier » 2.93 s. P1, a batch line of 200 members: 0.48 s, 2,600 `bank_transfer` and 1,200
+`transfer_file_item` rows read (400 transfers by a sequential scan of the 200-payout database, under the 1,000-row
+tolerance). P4, 200 RMT lines: the debit job 0.65 s, its funds pass 0.5 s (≤ 2.0 s), no transfer read by a sequential
+scan. (b) the 5,000-member batch line 31.8 s; (a) 5,000 RMT lines, the debit job 20.7 s, chunks 8.1, 8.5 and 4.0 s;
+both with 0 rows of `bank_transfer` or `transfer_file_item` read by sequential scans. Nightly checks with 5,000 booked
+payouts and 50 cancelled transfers 1.17 s, 0 violations.

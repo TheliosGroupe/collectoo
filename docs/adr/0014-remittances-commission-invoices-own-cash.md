@@ -723,16 +723,18 @@ offers links on); the refund texts' « son débit, ou son rejet, soit lu sur le 
 **Round 2 (2026-11-12).** The verifiers of round 1 left three regressions of its own texts, two defence-in-depth gaps
 and the scale job red; fixed by three branches (database and concurrency tests, performance, pages and docs) on one
 contract (L1–L6), then integrated. The migration is still edited in place; the cancellation after download stays
-**off**; `033` keeps its assertions and `034` its TODO markers.
-<!-- integrator: check against the merged code and test names -->
+**off**; `033` keeps its assertions and `034` its TODO markers. It closes every item the integration above left open,
+the `scale` job's red bound included (P3).
 
 - **L1 (new:statement-late-cause) — a returned payout paid again late states its own cause.** K2 made a re-proposed
   `payout_returned` line late-able, and the client's statement then gave it a collection's cause (« encaissement
   identifié tardivement » or « validation tardive »). `private.remittance_statement_build` (redefined from
   `20261114090000`, same settings and grants) gives such a line `late_cause = 'payout_returned'`, tested before the other
   causes; the renderer's `LATE_CAUSE` (`remittance/statement.py`) words it « virement revenu impayé, reversé à nouveau »
-  (CSV `hors_delai`, and the PDF as for the other causes). A new code only: no payload drawn before carries it, so no
-  template version bump. pgTAP `035` (`sc_returned_statement`); pytest
+  in the CSV's `hors_delai` (« oui – virement revenu impayé, reversé à nouveau »); the PDF, as for every cause, counts
+  the late lines and names the CSV for their cause. A new code only: no payload drawn before carries it, so no
+  template version bump (the earlier bumps, `facture-commission-fr-3` and `quittance-fr-3`, changed what existing
+  payloads render). pgTAP `035` (`sc_returned_statement`); pytest
   `test_a_returned_payout_paid_again_late_states_the_return_as_its_cause`. COMPLIANCE CPCE-08, DOMAIN « Revenu impayé ».
 - **L2 (new:client-returned-stale) — the client's returned run says whether, and by which run, it was paid again.** A
   returned transfer never changes status, so `returned_runs` lists its run for good and « il vous sera reversé à
@@ -794,9 +796,12 @@ contract (L1–L6), then integrated. The migration is still edited in place; the
   members reads 2,600 transfer and 1,200 item rows (42,400 and 41,000 before).
   `test_a_batch_line_of_200_members_reads_each_member_a_bounded_number_of_times` (red before).
 - **P2 (finding B) — the transfers' status update keyed.** `private.bank_booking_post_rows` updates the transfers booked
-  or returned by the array of their ids, never a hash join over every servicer's transfers once statistics are
-  forgotten; `test_the_funds_pass_reads_no_table_of_transfers_in_full` is strict (no xfail) and holds with statistics
-  forgotten and frozen.
+  or returned by the array of their ids (`x.id = any(array(…))`, the index condition), never a sequential scan of every
+  servicer's transfers once statistics are forgotten (15,150 rows per pass before, 0 after);
+  `test_the_funds_pass_reads_no_table_of_transfers_in_full` is strict (no xfail) and holds with statistics forgotten and
+  frozen (autovacuum off on those tables meanwhile); it and the 200-payout tests allow at most 1,000 rows read by
+  sequential scans of a table of transfers, the 200-payout fixture alone in a fresh database, where such a scan is the
+  planner's right choice.
 - **P3 (the `scale` job red) — the nightly checks keyed.** `private.run_payment_checks`' checks statement reads by the
   servicer and the rows each check needs (the payments' positions from the payments by keyed laterals, the funds and
   receivable accounts' postings through those accounts, bank lines, notifications, receipts, requests and bookings by
@@ -806,11 +811,15 @@ contract (L1–L6), then integrated. The migration is still edited in place; the
   `docs/benchmarks/remittances.md` « M2c-6b-1 review fixes, round 2 ». (P4: `test_200_rmt_debits_in_one_funds_pass`
   measures plan §1.4's 200 RMT/SWP lines in one funds pass.)
 - **Concurrency tests.** concurrency-2's test that bites:
-  `test_the_funds_pass_and_a_command_holding_a_late_line_s_payment_never_deadlock` — a payout late at its debit;
-  `request_refund` in file mode holds its line's payment FOR UPDATE and waits on `payments:<org>` while the funds pass
-  books it: no 40P01; with the key-share statement deleted, or moved after the allocation lock (the two mutants that
-  survived `035`), DeadlockDetected. `test_the_job_and_a_refund_holding_a_late_line_s_payment_never_deadlock`: the same
-  refund against the job's first message (both MERGED mutants deadlock). concurrency-1's deferred variants:
+  `test_the_funds_pass_and_a_command_holding_a_late_line_s_payment_never_deadlock` — a payout late at its debit (the
+  `late_run` fixture: its draft line's latest execution date yesterday, the header's later, so the approval is on
+  time); a third session holds `payments:<org>`, the funds pass queues on it holding the late line's payment FOR KEY
+  SHARE, then `request_refund` in file mode (which takes that payment FOR UPDATE before `payments:<org>`) waits for the
+  payment row; released, the funds pass books (breach row naming the payment) and the refund follows: no 40P01. With the
+  key-share statement deleted, or moved after the allocation lock (the two mutants that survived `035`), the refund
+  takes the payment first and the funds pass waits for it under the allocation lock: DeadlockDetected.
+  `test_the_job_and_a_refund_holding_a_late_line_s_payment_never_deadlock`: the same refund against the job's first
+  message (both MERGED mutants deadlock). concurrency-1's deferred variants:
   `test_the_funds_pass_and_a_command_holding_the_run_never_deadlock` also runs `generate_transfer_file` (holding the
   paying account) and `request_refund` on the payment of a single-refund batch line the M2b pass links (holding that
   payment); mutant MERGED: cancel and download deadlock, generate and refund read `job:with_funds`; its silent twin
@@ -828,8 +837,34 @@ contract (L1–L6), then integrated. The migration is still edited in place; the
   alone). T4: one `035` case per remaining re-check rule of `post_bank_bookings` (run_not_in_flight, not_its_line, one
   kind per line, batch_mixed, batch_partial, batch_incomplete, a PmtInf not in its current file, transfer_differs by
   account and by amount, return_differs, transfer_twice, transfer_debited_twice, the review deleted) — the rows M2c-6b-2's
-  ops path will send; the batch rule's « not handed out » and « all booked » arms are shadowed by the row rule
-  (equivalent mutants).
+  ops path will send; the batch rule's « not handed out », « all booked » and « no member » (`transfer_unknown`) arms
+  are shadowed by the row rule (equivalent mutants: every row that reaches them names a member in its current file,
+  of the line's account, which the row rule checks first).
+
+**Integration of round 2 (2026-11-12).** The three branches merged without a conflict. The one function both the
+database and the performance branch edited, `private.post_bank_bookings`, is the union of the two (the `loss` rule and
+the strict refusal's hint; the batch rule's `MATERIALIZED` steps); `bank_booking_post_rows` and `run_payment_checks`
+are the performance branch's alone, the statement build, `client_remittance_summary`, `post_debit_links` and
+`debit_link_options` the database branch's alone. Round 2's mutants were run again on the merged migration where the
+performance branch rewrote what they mutate: I20's five sub-clauses (in the new checks statement), the batch rule's
+`batch_mixed`, `batch_partial`, `batch_incomplete`, current-file (`t.transfer_file_id = i.file_id`) and
+`cancelled_transfer_debited` arms, `bank_booking_post_rows`' review delete, and the `loss` rule's `own_transfer_line` —
+each killed by `035`; the batch rule's « no member » arm survives as an equivalent mutant (above). Reconciled: L1's
+PDF wording (the PDF names no cause; above); L3 says « remis à la banque » (the Virements pages keep « Transmis » for a
+file marked sent); L2's neutral tone, and a `repaid_by` that is not a run's number drops the entry (the run's own
+words); L4: the `loss` rule and the page read a batch line as ours by its TF- PmtInfId alone, while
+`post_debit_links` and `debit_link_options` also need a file of the line's account holding that PmtInf — on a line
+only the pattern makes ours (a TF- PmtInfId no file of that account holds) the page offers the refunds listed and no
+payment, and the loss is refused: the conservative side, recorded rather than aligned. Codes: `late_cause =
+'payout_returned'` is read only by the worker's renderer, which words it; `own_transfer_line` from the `loss` rule
+reaches the page's existing mapping (`message.includes('own_transfer_line')`); no other new code, refusal or review
+reason. `database.types.ts` regenerated: unchanged (no signature changed). Screenshots: the E2E seed has neither a
+returned payout nor our lines with options, so no page changed with visible data (the run's image diffs are dates and
+ids only: not committed). Suites, after `supabase db reset`: pgTAP 35 files, 2,479 tests (`034`'s TODO markers
+kept); the worker's lint, 968 unit and 173 integration tests; the web's lint, types and 312 vitest tests; the E2E's
+50 tests. Scale (`docs/benchmarks/remittances.md` « Integration of round 2 »): the CI `scale` job's command three
+times, 7 passed each (the refund servicer's nightly checks 0.34–0.47 s, the 50,000-line run's 4.9–5.7 s); the
+`scale-payouts` command once, 5 passed (the nightly checks 1.17 s).
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
