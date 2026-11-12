@@ -4,14 +4,15 @@ import { Badge, InfoNote, Section, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import {
-  DEBIT_REVIEW,
   debitReviewRank,
+  debitReviewText,
   clientRelayable,
   clientRelayedPaymentEffect,
   decisionLabel,
   explainable,
   feeEffect,
   lossEffect,
+  offersTopUp,
   ownCreditEffect,
   lineKindLabel,
   linkOffers,
@@ -282,7 +283,7 @@ export default async function DebitsPage({
                     voir le relevé
                   </Link>
                 </p>
-                {r.review_reason ? (
+                {debitReviewText(r) !== null ? (
                   <p
                     className="text-sm text-amber-900 dark:text-amber-200"
                     data-testid="debit-review"
@@ -292,7 +293,9 @@ export default async function DebitsPage({
                         Prioritaire
                       </Badge>
                     ) : null}{" "}
-                    {DEBIT_REVIEW[r.review_reason] ?? r.review_reason}
+                    {/* review round 3 (M1): on our transfer coming back unflagged, what it is in place of the job's
+                        top-up or client-credit review */}
+                    {debitReviewText(r)}
                   </p>
                 ) : null}
                 {tab === "a-classer" ? (
@@ -421,26 +424,26 @@ function LineActions({
   } = linkOffers(row, [...payments.values()], options?.refunds ?? []);
   return (
     <div className="flex flex-col gap-2">
-      {row.direction === "credit" && row.kind === "own_transfer_in" ? (
-        <>
-          <BookLine
-            lineId={row.bank_transaction_id}
-            kind="own_credit"
-            label="Approvisionnement par le compte propre"
-            effect={ownCreditEffect(money(row.amount_minor, cur))}
-            idempotencyKey={randomUUID()}
-          />
-          {relayable(row) ? (
-            <ReleaseOwnCredit
-              lineId={row.bank_transaction_id}
-              effect={relayedPaymentEffect({
-                amount: money(row.amount_minor, cur),
-                dateFr: frenchDate(row.booking_date),
-              })}
-              idempotencyKey={randomUUID()}
-            />
-          ) : null}
-        </>
+      {/* review round 3 (M1, M2): neither the top-up nor a relay on a credit carrying our RMT/SWP id (our transfer
+          coming back, isOurTransferLine): the database refuses both (own_transfer_line) */}
+      {offersTopUp(row) ? (
+        <BookLine
+          lineId={row.bank_transaction_id}
+          kind="own_credit"
+          label="Approvisionnement par le compte propre"
+          effect={ownCreditEffect(money(row.amount_minor, cur))}
+          idempotencyKey={randomUUID()}
+        />
+      ) : null}
+      {relayable(row) ? (
+        <ReleaseOwnCredit
+          lineId={row.bank_transaction_id}
+          effect={relayedPaymentEffect({
+            amount: money(row.amount_minor, cur),
+            dateFr: frenchDate(row.booking_date),
+          })}
+          idempotencyKey={randomUUID()}
+        />
       ) : null}
       {clientRelayable(row) ? (
         <ReleaseOwnCredit

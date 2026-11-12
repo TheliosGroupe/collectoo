@@ -317,20 +317,39 @@ export function linkOffers<
   };
 }
 
+/** A line's ids as isOurTransferLine reads them (the credit's own end-to-end id, the original one it returns). */
+type LineIds = {
+  direction: string;
+  kind: string;
+  end_to_end_id?: string | null;
+  original_end_to_end_id?: string | null;
+  payment_info_id?: string | null;
+};
+
+/**
+ * Whether « Approvisionnement par le compte propre » is offered (M2c-1): a credit from the own account
+ * (`own_transfer_in`). Review M2c-6b-1 round 3 (M2, L4): never on a credit carrying our payout's or sweep's RMT/SWP id,
+ * as its own or as the original it returns (isOurTransferLine) — one of our own transfers coming back that the feed
+ * did not flag as a return (a CSV label missing RETURN_RE); private.post_bank_bookings' top_up rule refuses it
+ * (`own_transfer_line`), it is booked from the statement (ops in M2c-6b-2).
+ */
+export function offersTopUp(o: LineIds): boolean {
+  return o.direction === "credit" && o.kind === "own_transfer_in" && !isOurTransferLine(o);
+}
+
 /**
  * Whether « Paiement d'un débiteur relayé par le cabinet » is offered (review M2c-1): a credit from the own account
  * (`own_transfer_in`) that does not carry our `TOP…` reference — a credit carrying it is our top-up, never a debtor's
- * payment. The database checks the rest (unbooked, unlinked, on a dedicated account).
+ * payment. Review M2c-6b-1 round 3 (M1): nor one carrying our RMT/SWP id (isOurTransferLine) — our payout or sweep
+ * coming back, never a debtor's payment (public.release_own_credit refuses it: `own_transfer_line`). The database
+ * checks the rest (unbooked, unlinked, on a dedicated account).
  */
-export function relayable(o: {
-  direction: string;
-  kind: string;
-  end_to_end_id: string | null;
-}): boolean {
+export function relayable(o: LineIds & { end_to_end_id: string | null }): boolean {
   return (
     o.direction === "credit" &&
     o.kind === "own_transfer_in" &&
-    !/^TOP[0-9A-F]{12}$/.test(o.end_to_end_id ?? "")
+    !/^TOP[0-9A-F]{12}$/.test(o.end_to_end_id ?? "") &&
+    !isOurTransferLine(o)
   );
 }
 
@@ -338,13 +357,28 @@ export function relayable(o: {
  * Review M2c-2: whether « Paiement d'un débiteur relayé par le client » is offered — a credit from a client's confirmed
  * payout IBAN (`client_transfer_in`), e.g. the client forwarding a debtor's payment it received. It is released by
  * public.release_own_credit as an own credit is; the database checks the rest (unbooked, unlinked, on a dedicated
- * account).
+ * account). Review M2c-6b-1 round 3 (M1, pre-existing:relay-of-our-returned-transfer): never one carrying our RMT/SWP
+ * id (isOurTransferLine) — the client's payout coming back from its IBAN, unflagged by a CSV feed; relayed, it would
+ * credit a debtor's file with money the debtor never paid (and be remitted again). The database refuses it.
  */
-export function clientRelayable(o: {
-  direction: string;
-  kind: string;
-}): boolean {
-  return o.direction === "credit" && o.kind === "client_transfer_in";
+export function clientRelayable(o: LineIds): boolean {
+  return o.direction === "credit" && o.kind === "client_transfer_in" && !isOurTransferLine(o);
+}
+
+/**
+ * Review M2c-6b-1 round 3 (M1): what « À classer » says of a credit carrying our RMT/SWP id that the bank did not flag
+ * as a return (an own or a client's credit, read so by a CSV feed whose label misses RETURN_RE) — in place of the job's
+ * review, which reads it as a top-up or a client's credit (top_up_not_found, top_up_differs, client_credit) and
+ * suggests a relay the database refuses. The return the bank flags (kind `return`) and our debits keep their review.
+ */
+export const OUR_TRANSFER_CREDIT_NOTE =
+  "Crédit portant la référence de l'un de nos virements (reversement ou quote-part du cabinet) : c'est ce virement qui revient, sans que la banque l'ait signalé comme un retour. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement, et ne se classe pas sans comptabiliser. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.";
+
+/** The review « À classer » shows on a line: the note on our unflagged returned credits, else the job's reason. */
+export function debitReviewText(o: LineIds & { review_reason: string | null }): string | null {
+  if (o.direction === "credit" && o.kind !== "return" && isOurTransferLine(o)) return OUR_TRANSFER_CREDIT_NOTE;
+  if (!o.review_reason) return null;
+  return DEBIT_REVIEW[o.review_reason] ?? o.review_reason;
 }
 
 /** The button and sheet title of a relayed debtor payment, by who relays it. */
@@ -1131,6 +1165,9 @@ export function debitErrorCode(message: string): ErrorCode {
     return "top_up_differs";
   if (message.includes("not_a_loss")) return "not_a_loss";
   if (message.includes("not_explainable")) return "not_explainable";
+  // review M2c-6b-1 round 3 (M1): a credit carrying our RMT/SWP id is our transfer coming back, never a debtor's payment
+  if (message.includes("own credit release refused: own_transfer_line"))
+    return "own_credit_own_transfer_line";
   // review M2c-6b-1 (money-1, K1): our payouts' and sweeps' lines are booked from the statement, never linked
   if (message.includes("own_transfer_line")) return "own_transfer_line";
   if (message.includes("before_previous_return")) return "link_before_return";
@@ -1154,4 +1191,15 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("lock") || message.includes("canceling statement"))
     return "allocation_busy";
   return "unknown";
+}
+
+/**
+ * Errors of public.link_debit, by the kind ops asked for (review M2c-6b-1 round 3, M2): private.post_bank_bookings
+ * refuses a top-up and a loss on our lines with the same « bank booking refused: own_transfer_line ». On a top-up (kind
+ * `own_credit`) the line is a credit carrying our RMT/SWP id — our transfer coming back — so it gets the credit's words
+ * (as public.release_own_credit's refusal does); every other refusal as debitErrorCode reads it.
+ */
+export function linkDebitErrorCode(message: string, kind: string): ErrorCode {
+  const code = debitErrorCode(message);
+  return code === "own_transfer_line" && kind === "own_credit" ? "own_credit_own_transfer_line" : code;
 }

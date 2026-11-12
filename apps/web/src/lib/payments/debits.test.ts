@@ -8,16 +8,20 @@ import {
   checkLabel,
   debitReviewRank,
   checkSubjectLink,
+  clientRelayable,
   debitErrorCode,
+  debitReviewText,
   explainable,
   isOurTransferLine,
   lineKindLabel,
+  linkDebitErrorCode,
   linkOffers,
   linkRefundEffect,
   minorToInput,
   normaliseIban,
   offersOwnBatchRefunds,
   offersPaymentLinks,
+  offersTopUp,
   pendingRefundInstruction,
   readsLinkOptions,
   refundCancellable,
@@ -28,6 +32,7 @@ import {
   refundReasons,
   refundTransfers,
   refundable,
+  relayable,
   releaseEffect,
   returnEffect,
   returnedNote,
@@ -1363,6 +1368,149 @@ describe("M2c-6b-1 review: our payouts' and sweeps' lines are booked, never link
     expect(debitErrorCode("debit link refused: not_a_return")).toBe(
       "link_refused",
     );
+  });
+});
+
+// review round 3 (M1, M2; pre-existing:relay-of-our-returned-transfer, L4): a credit carrying our payout's or sweep's
+// RMT/SWP id — as its own end-to-end id or as the original it returns — is one of our own transfers coming back (a feed
+// that does not flag the return: a CSV whose label misses RETURN_RE reads it own_transfer_in or client_transfer_in). It
+// is booked from the statement (automatically when the bank flags it as a return, otherwise by ops in M2c-6b-2), never
+// released as a debtor's payment (public.release_own_credit) nor booked as a top-up (private.post_bank_bookings' top_up
+// rule): both refuse it (own_transfer_line), and « À classer » offers neither.
+describe("M2c-6b-1 review round 3: our transfers coming back are never a debtor's payment nor a top-up (M1, M2)", () => {
+  const RMT = "RMT0A1B2C3D4E5F";
+  const SWP = "SWPFEDCBA987654";
+  type Credit = {
+    direction: string;
+    kind: string;
+    end_to_end_id: string | null;
+    original_end_to_end_id?: string | null;
+    payment_info_id?: string | null;
+  };
+  // our id as the line's own end-to-end id, or as the original one it returns (whatever the other one is)
+  const ourIds: Partial<Credit>[] = [
+    { end_to_end_id: SWP },
+    { end_to_end_id: RMT },
+    { end_to_end_id: null, original_end_to_end_id: RMT },
+    { end_to_end_id: "NOTPROVIDED", original_end_to_end_id: SWP },
+    { end_to_end_id: RMT, original_end_to_end_id: "E2E-BANK-9" },
+  ];
+  const ours: Credit[] = ["own_transfer_in", "client_transfer_in"].flatMap((kind) =>
+    ourIds.map((ids) => ({ direction: "credit", kind, end_to_end_id: null, ...ids })),
+  );
+
+  it("offers neither relay, nor the top-up, nor an explanation on a credit carrying our RMT/SWP id (M1, M2)", () => {
+    expect(ours.length).toBe(10);
+    for (const o of ours) {
+      const what = JSON.stringify(o);
+      expect(isOurTransferLine(o), what).toBe(true);
+      // « Paiement d'un débiteur relayé par le cabinet » / « … par le client » (public.release_own_credit)
+      expect(relayable(o), what).toBe(false);
+      expect(clientRelayable(o), what).toBe(false);
+      // « Approvisionnement par le compte propre » (link_debit own_credit: the top_up rule)
+      expect(offersTopUp(o), what).toBe(false);
+      // nor « Classer sans comptabiliser », nor any link (own_transfer_line, review round 2)
+      expect(
+        explainable({
+          direction: o.direction,
+          kind: o.kind,
+          namesPayment: false,
+          endToEndId: o.end_to_end_id,
+          originalEndToEndId: o.original_end_to_end_id,
+          paymentInfoId: o.payment_info_id,
+        }),
+        what,
+      ).toBe(false);
+      expect(readsLinkOptions(o), what).toBe(false);
+    }
+  });
+
+  it("keeps them on the credits that are not ours (a reference that only looks like ours included)", () => {
+    // a credit from the own account: a top-up, or a debtor's payment the servicer relays (unless it carries our TOP id)
+    for (const e2e of [null, "NOTPROVIDED", "TOPAZ-2026-11", "RMT-2026-11-04", "SWP0A1B2C3D4E5", "rmt0a1b2c3d4e5f"]) {
+      const own = { direction: "credit", kind: "own_transfer_in", end_to_end_id: e2e };
+      expect(offersTopUp(own), String(e2e)).toBe(true);
+      expect(relayable(own), String(e2e)).toBe(true);
+      expect(clientRelayable(own), String(e2e)).toBe(false);
+      const client = { direction: "credit", kind: "client_transfer_in", end_to_end_id: e2e };
+      expect(clientRelayable(client), String(e2e)).toBe(true);
+      expect(relayable(client), String(e2e)).toBe(false);
+      expect(offersTopUp(client), String(e2e)).toBe(false);
+    }
+    // our top-up's reference: booked as the top-up, never a debtor's payment
+    const top = { direction: "credit", kind: "own_transfer_in", end_to_end_id: "TOP0123456789AB" };
+    expect(offersTopUp(top)).toBe(true);
+    expect(relayable(top)).toBe(false);
+    // only a credit from the own account is a top-up
+    for (const [direction, kind] of [
+      ["credit", "debtor_credit"],
+      ["credit", "return"],
+      ["debit", "own_transfer_in"],
+      ["debit", "transfer_out"],
+    ])
+      expect(offersTopUp({ direction, kind, end_to_end_id: null }), `${direction} ${kind}`).toBe(false);
+  });
+
+  it("words release_own_credit's refusal of such a credit (own credit release refused: own_transfer_line)", () => {
+    const code = debitErrorCode("own credit release refused: own_transfer_line");
+    expect(code).toBe("own_credit_own_transfer_line");
+    const text = errorText(code);
+    expect(text).toContain("l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient");
+    expect(text).toContain(
+      "Il se comptabilise depuis le relevé, automatiquement à l'import quand la banque le signale comme un retour, sinon par l'équipe (écran à venir).",
+    );
+    expect(text).toContain("Il ne devient ni le paiement d'un débiteur ni un approvisionnement.");
+    expect(text).not.toMatch(/refused|own_transfer|RETURN_RE/);
+    // the links' refusal keeps its words, and the release's other refusals theirs
+    expect(debitErrorCode("debit link refused: own_transfer_line")).toBe("own_transfer_line");
+    expect(debitErrorCode("own credit release refused: not_own_credit")).toBe("not_own_credit");
+    expect(debitErrorCode("own credit release refused: something_new")).toBe("booking_refused");
+  });
+
+  it("words the top-up's refusal of such a credit as a credit's, a loss's as a line's (M2)", () => {
+    // private.post_bank_bookings raises « bank booking refused: own_transfer_line » for the top-up and the loss alike:
+    // the kind ops asked for tells which words fit
+    expect(linkDebitErrorCode("bank booking refused: own_transfer_line", "own_credit")).toBe(
+      "own_credit_own_transfer_line",
+    );
+    expect(linkDebitErrorCode("bank booking refused: own_transfer_line", "loss")).toBe("own_transfer_line");
+    expect(linkDebitErrorCode("debit link refused: own_transfer_line", "explained")).toBe("own_transfer_line");
+    expect(linkDebitErrorCode("debit link refused: own_transfer_line", "return")).toBe("own_transfer_line");
+    // the top-up's other refusals as before
+    expect(linkDebitErrorCode("bank booking refused: not_an_own_credit", "own_credit")).toBe("not_an_own_credit");
+    expect(linkDebitErrorCode("bank booking refused: transfer_not_pending", "own_credit")).toBe("top_up_differs");
+    expect(linkDebitErrorCode("bank booking refused: own_account_unknown", "own_credit")).toBe("own_account_unknown");
+  });
+
+  it("tells ops what such a credit is in place of the relay's or the top-up's review (M1)", () => {
+    for (const o of ours) {
+      const what = JSON.stringify(o);
+      const reason = o.kind === "client_transfer_in" ? "client_credit" : "top_up_differs";
+      const text = debitReviewText({ ...o, review_reason: reason });
+      expect(text, what).not.toBe(DEBIT_REVIEW[reason]);
+      expect(text, what).toContain(
+        "Crédit portant la référence de l'un de nos virements (reversement ou quote-part du cabinet) : c'est ce virement qui revient, sans que la banque l'ait signalé comme un retour.",
+      );
+      expect(text, what).toContain(
+        "Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement, et ne se classe pas sans comptabiliser.",
+      );
+      expect(text, what).toContain("Vérifiez dans la banque");
+      expect(text, what).not.toContain("paiement à affecter");
+      // shown even when the job left no review on it
+      expect(debitReviewText({ ...o, review_reason: null }), what).toBe(text);
+    }
+    // the credits not ours, the returns the bank flags and our debits keep the job's review
+    const plain = { direction: "credit", kind: "client_transfer_in", end_to_end_id: null };
+    expect(debitReviewText({ ...plain, review_reason: "client_credit" })).toBe(DEBIT_REVIEW.client_credit);
+    expect(debitReviewText({ ...plain, review_reason: null })).toBeNull();
+    const own = { direction: "credit", kind: "own_transfer_in", end_to_end_id: "TOP0123456789AB" };
+    expect(debitReviewText({ ...own, review_reason: "top_up_differs" })).toBe(DEBIT_REVIEW.top_up_differs);
+    const flagged = { direction: "credit", kind: "return", end_to_end_id: null, original_end_to_end_id: RMT };
+    expect(debitReviewText({ ...flagged, review_reason: "return_differs" })).toBe(DEBIT_REVIEW.return_differs);
+    const debit = { direction: "debit", kind: "transfer_out", end_to_end_id: SWP };
+    expect(debitReviewText({ ...debit, review_reason: "transfer_unknown" })).toBe(DEBIT_REVIEW.transfer_unknown);
+    // a reason the page does not know yet is shown as its code (as before)
+    expect(debitReviewText({ ...plain, review_reason: "something_new" })).toBe("something_new");
   });
 });
 
