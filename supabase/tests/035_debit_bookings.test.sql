@@ -28,7 +28,7 @@
 -- previous month's last day) dates everything at the debit; I20's refund rule keyed; the client's returned runs.
 -- Cancellation after download stays off (033 and 034 unchanged); one scenario switches it on in its own subtransaction.
 begin;
-select plan(94);
+select plan(95);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -1550,6 +1550,45 @@ select is(pg_temp.isolated('sc_returned_late_debit'),
 select is(pg_temp.isolated('sc_returned_overdue'),
           '{"transfer": "ordered", "breach": ["payout_returned"], "overdue": true}'::jsonb,
   'in flight past its date (never handed out): the nightly check''s breach row is payout_returned');
+-- legal-texts#1 item 3 (integration of the worker's K2): a payout returned a second time. Its re-proposed line has the
+-- worker's shape (jobs/remittances.py _held_to: no mandate — no file, no mandate's gross — but the terms version it was
+-- held to); the new item waiting is still held to the first run's line: its E, that version's delay, and monitored
+-- (the nightly J-5/J-1 alerts and its breach row), as the worker's prepare holds it (parity)
+create or replace function pg_temp.held_returned() returns jsonb language sql as $$
+  select jsonb_agg(jsonb_build_array(d.encaissement_date, d.max_days, d.deadline, d.latest_execution_date, d.unmeetable,
+                                     d.monitored))
+  from private.pending_item_deadlines('00000000-0000-0000-0000-0000000000aa') d
+  join private.remittance_pending q on q.ledger_entry_id = d.ledger_entry_id
+  where q.kind = 'payout_returned' and q.client_organization_id = '00000000-0000-0000-0000-0000000000a1' $$;
+create or replace function pg_temp.sc_returned_twice() returns jsonb language plpgsql as $$
+declare v_run uuid; v_tr uuid; v_first jsonb; l public.remittance_line;
+begin
+  select * into l from public.remittance_line x where x.run_id = pg_temp.v('r1') and x.amount_minor > 0
+  order by x.latest_execution_date, x.line_no limit 1;
+  v_first := pg_temp.held_returned();   -- the first return's item, waiting
+  v_run := pg_temp.returned_run('k2-twice', private.paris_today() + 5, private.paris_today() + 20);
+  update private.remittance_draft_line set mandate_id = null where run_id = v_run;
+  perform pg_temp.approve('k2-twice', v_run);
+  v_tr := (select transfer_id from public.remittance_run where id = v_run);
+  perform pg_temp.handed_out('fk2t', 'gen-file-k2t');
+  perform pg_temp.stmt('18', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 164000, 'e2e', pg_temp.e2e(v_tr))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('18', 1), 'payout', v_tr)));
+  perform pg_temp.stmt('19', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 164000, 'orig', pg_temp.e2e(v_tr))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('19', 1), 'payout_returned', v_tr)));
+  return jsonb_build_object(
+    'line', (select jsonb_build_array(x.mandate_id is null, x.mandate_terms_id = l.mandate_terms_id,
+                                      x.encaissement_date = l.encaissement_date)
+             from public.remittance_line x where x.run_id = v_run),
+    'transfer', pg_temp.status(v_tr),
+    'first', jsonb_build_array(v_first -> 0 -> 0 = to_jsonb(l.encaissement_date), v_first -> 0 -> 5),
+    'same', pg_temp.held_returned() = v_first);
+end $$;
+select is(pg_temp.isolated('sc_returned_twice'),
+          '{"line": [true, true, true], "transfer": "returned", "first": [true, true], "same": true}'::jsonb,
+  'a payout returned twice: the new item is held as the first was (the first run''s line: its E, its terms'' delay), '
+  'monitored');
 
 -- K3 (legal-texts#2): proven unpaid only with evidence of absence — a debit line that could hold the payout (a batch line
 -- of its PmtInf whatever its amount, a line with neither reference of exactly its amount) in its window keeps the

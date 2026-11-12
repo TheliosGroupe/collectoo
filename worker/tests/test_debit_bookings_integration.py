@@ -606,7 +606,6 @@ def test_a_returned_payout_re_proposed_keeps_its_r124_6_date(re_proposed: dict[s
     assert line is not None and tuple(line) == x["original"]
 
 
-@pytest.mark.xfail(strict=True, reason="needs m6b1-fix-sql K2")
 def test_a_returned_payout_s_breach_row_says_why_it_was_held(re_proposed: dict[str, Any]) -> None:
     """K2 (Q7): the breach row of a payout_returned line says it was held by the return."""
     assert [r[5] for r in re_proposed["breach"]] == ["payout_returned"]

@@ -583,9 +583,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   // review round 6: a file the bank executed, in full or in part, is not served again (whatever the switch)
   transfer_file_executed:
     "La banque a déjà exécuté ce fichier, en tout ou partie (un relevé montre le débit de l'un de ses virements ou de son lot) : il n'est plus servi. Ne le déposez plus : déposé de nouveau, il paierait une seconde fois.",
-  // M2c-6b-1 review (money-1, K1): the database's hint, in the page's words
+  // M2c-6b-1 review (money-1, K1): the database's hint, in the page's words (and the one link a batch line takes)
   own_transfer_line:
-    "Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, ligne groupée d'un lot de nos fichiers) : elle se comptabilise depuis le relevé, automatiquement à l'import ou par l'équipe (écran à venir). Elle ne se rattache pas à un paiement ni à un remboursement, et ne se classe pas sans comptabiliser.",
+    "Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, ligne groupée d'un lot de nos fichiers) : elle se comptabilise depuis le relevé, automatiquement à l'import ou par l'équipe (écran à venir). Elle ne se rattache pas à un paiement, ni à un remboursement (sauf la ligne groupée d'un lot de remboursements, à un remboursement de ce lot dont le fichier est déjà téléchargé), et ne se classe pas sans comptabiliser.",
   unknown:
     "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };

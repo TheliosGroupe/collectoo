@@ -212,6 +212,28 @@ export function isOurTransferLine(o: {
 }
 
 /**
+ * M2c-6b-1 (review money-1, K1 as the database implements it): the one link a batch line of one of our files takes — a
+ * debit with no end-to-end id carrying one of our PmtInfIds. A refund whose transfer is in a file handed out to the
+ * bank (downloaded or sent) is linked there: private.refund_transfer_follow (M2c-6a round 6, G2) executes it only by a
+ * batch line of its own PmtInf in that file (`reissue_in_downloaded_file` otherwise), as ops did from this page in
+ * M2c-6a (a refunds PmtInf's line of one refund's amount); a manual refund, or one whose transfer is not handed out, is
+ * refused (`own_transfer_line`). So « À classer » offers such a line the refunds of its amount (« Remboursement … ») and
+ * nothing else — never a payment's return, its loss or an explanation (a PmtInf of one refund alone is linked by the
+ * job's M2b pass).
+ */
+export function offersOwnBatchRefunds(o: {
+  direction: string;
+  end_to_end_id?: string | null;
+  payment_info_id?: string | null;
+}): boolean {
+  return (
+    o.direction === "debit" &&
+    !o.end_to_end_id &&
+    OUR_PMT_INF.test(o.payment_info_id ?? "")
+  );
+}
+
+/**
  * Whether « À classer » offers the M2b links on a line — a payment's return (« Retour du paiement … », and its excess
  * as the servicer's loss) and our refunds (« Remboursement … », « Remboursement revenu … »): only on the lines M2b reads
  * as such, a debit read as a return, our refund or another debit, and a credit undoing a debit. Our own transfers out

@@ -15,6 +15,7 @@ import {
   linkRefundEffect,
   minorToInput,
   normaliseIban,
+  offersOwnBatchRefunds,
   offersPaymentLinks,
   pendingRefundInstruction,
   refundCancellable,
@@ -1187,6 +1188,22 @@ describe("M2c-6b-1 review: our payouts' and sweeps' lines are booked, never link
           offersPaymentLinks({ direction, kind }),
           `${direction} ${kind}`,
         ).toBe(false);
+  });
+
+  it("offers our batch line the refunds of its amount only — the one link the database takes on it (K1 as built)", () => {
+    // a batch line of one of our PmtInfs: a refund whose transfer is in that file, handed out to the bank, is linked
+    // there (M2c-6a round 6: refund_transfer_follow executes it only by its own PmtInf's line) — never a payment's
+    // return, its loss or an explanation
+    const batch = ours.filter((o) => o.direction === "debit" && !o.end_to_end_id);
+    expect(batch.length).toBe(2);
+    for (const o of batch)
+      expect(offersOwnBatchRefunds(o), JSON.stringify(o)).toBe(true);
+    // our RMT/SWP debits and the returns of them take nothing; nor any line not ours (offersPaymentLinks covers those)
+    for (const o of [...ours.filter((x) => !batch.includes(x)), ...others])
+      expect(offersOwnBatchRefunds(o), JSON.stringify(o)).toBe(false);
+    // and the database's refusal of another refund there says which one it takes
+    const text = errorText("own_transfer_line");
+    expect(text).toContain("remboursement de ce lot");
   });
 
   it("never offers « Classer sans comptabiliser » on them", () => {

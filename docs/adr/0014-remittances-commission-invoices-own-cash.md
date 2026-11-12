@@ -509,9 +509,6 @@ Migration `20261116090000_debit_bookings.sql` (forward-only; it redefines what i
   debit, never booked; review legal-texts#3, T4/K5). Our RMT/SWP debits, our batch lines and their returns are never
   linked to a payment or a refund nor explained (`own_transfer_line` since the review, money-1/K1; `not_explainable`
   before) and are never fees (`not_a_fee`). 6b-2 adds ops' `book_transfer_line`.
-  <!-- integrator: the « same chunk » clause follows the verifier of legal-texts#3 (decide_bookings reviews such a
-  return, it does not defer it); if the worker branch now defers it to a follow-up pass, restore « decided again by a
-  follow-up pass ». -->
 - **One PmtInf per kind** (plan §2.1): `generate_transfer_file` groups payouts, refunds, then the sweep, so a batch line
   is one kind. A PmtInf holding one refund alone is that refund's debit, linked by the M2b pass (`debit_candidates`).
 - **The funds pass runs in its own transaction** (plan §2.5 [critic]): the debit job's first message runs the M2b pass
@@ -549,8 +546,6 @@ Migration `20261116090000_debit_bookings.sql` (forward-only; it redefines what i
 
 ## M2c-6b-1 review fixes (2026-11-12)
 
-<!-- integrator: check against the merged code and test names -->
-
 Confirmed findings of the four-lens review (money, concurrency, legal texts, tests and scale; 17 findings), fixed by
 three branches (database, worker, pages and docs) that follow one contract (K1–K6), then integrated. The migration
 `20261116090000_debit_bookings.sql`, not merged yet, is edited in place; the cancellation after download stays **off**
@@ -572,8 +567,13 @@ and pgTAP `033`/`034` keep their assertions and TODO markers.
   paiement » on our batch line, a manual refund on it, a return or a refund on an RMT debit, « Remboursement revenu »
   on the return of our RMT payout — each `own_transfer_line`. Contract deviation: K1's exception named
   `private.pmt_inf_single_refund`; the database's is « a refund whose transfer is in a file handed out », wider (ops may
-  link one refund of a PmtInf of refunds) but bounded by the refund trigger's G2 rule; the web offers none on our lines
-  either way.
+  link one refund of a PmtInf of refunds) but bounded by the refund trigger's G2 rule (033's test of ops linking a refund
+  to a batch line of its own two-refund PmtInf, and 034's `reissue_in_downloaded_file`, must stay). Integration: the
+  page follows the database, not the contract's letter — on our batch lines (no end-to-end id, one of our PmtInfIds) it
+  offers the refunds of the line's amount only (`offersOwnBatchRefunds`: « Remboursement … », as M2c-6a's page did for
+  such a line), never a payment's return, its loss or an explanation; on our RMT/SWP debits and their returns, nothing
+  (vitest « offers our batch line the refunds of its amount only »; mutants: the PmtInf test, the end-to-end test, the
+  whole predicate — each killed). `own_transfer_line`'s words name that one link.
 - **money-2 (medium) and legal-texts#1 (high; K2) — a returned payout re-proposed keeps its R124-6 date.** The
   prepare's facts gave a `payout_returned` item no encaissement date, so its draft line, the run header, the approval's
   late reason, `remittance_late_lines`, the in-flight check and the booking-time breach all saw a null date: once in a
@@ -586,8 +586,13 @@ and pgTAP `033`/`034` keep their assertions and TODO markers.
   Tests: pytest `test_a_returned_payout_keeps_the_deadline_of_the_line_it_came_from`; integration
   `test_a_returned_payout_re_proposed_keeps_its_r124_6_date`, `test_a_returned_payout_s_breach_row_says_why_it_was_held`;
   pgTAP `035` (late_reason_required without a reason, the late approval and the `payout_returned` breach row with one;
-  at the booking; in flight). Docs: COMPLIANCE CPCE-08, OQ-36 (the note for counsel kept), DOMAIN « Revenu impayé » and
-  « Manquement au délai ».
+  at the booking; in flight). Integration (the worker's K2 deviation): the re-proposed line has no mandate (no file, so
+  no mandate's gross or netting), only the terms version it is held to; a payout returned a **second** time was then
+  held by `private.pending_item_deadlines` to one month and left unmonitored (no J-5/J-1 alert, no waiting breach row).
+  Its `payout_returned` branch now takes, for a line without a mandate, its terms version's delay and mandate, as the
+  worker's `_held_to` does (pgTAP `035` « a payout returned twice »: the new item held exactly as the first, monitored;
+  red before). Docs: COMPLIANCE CPCE-08, OQ-36 (the note for counsel kept), DOMAIN « Revenu impayé » and « Manquement au
+  délai ».
 - **concurrency-1 (medium) and T1 (medium) — the deadlock test stages the cycle it guards.** The build's test called a
   three-argument `cancel_remittance_run` that does not exist, swallowed the error and ran after the funds pass had
   booked everything. `test_the_funds_pass_and_a_command_holding_the_run_never_deadlock` (cancel, download): a statement
@@ -601,8 +606,9 @@ and pgTAP `033`/`034` keep their assertions and TODO markers.
   `link_debit`, `reverse_allocation` and `forward_payment` (which hold the payment FOR UPDATE and wait for that lock).
   `private.post_bank_bookings` now locks FOR KEY SHARE, in id order and before the allocation lock, the payments of the
   payout runs' lines that can be late at this debit (a superset of the breach rows'); lock order: runs → payout accounts
-  → bank accounts → those payments → `payments:<org>` → lines → remit lock → files → transfers. pgTAP `035` checks the
-  superset; the two-connection test is the integrator's to confirm.
+  → bank accounts → those payments → `payments:<org>` → lines → remit lock → files → transfers. pgTAP `035` checks that
+  the payments locked are the breach rows' (mutant: nothing locked — killed). No two-connection test (a request_refund
+  or reverse_allocation waiting on the allocation lock against the funds pass booking a late debit): deferred, recorded.
 - **legal-texts#2 (medium; K3) — no permanent breach row for a payout whose debit the job cannot book.** A CSV line
   without the end-to-end id, or a batch line short of one member, left a payout paid on time « proven unpaid » and an
   append-only breach row written. The in-flight proof now also needs no unbooked, unlinked debit line on the paying
@@ -644,8 +650,8 @@ and pgTAP `033`/`034` keep their assertions and TODO markers.
   page reads it (`returnedRuns`) and `statementRunView(run, returnedOn)` shows « Virement revenu impayé le jj/mm/aaaa :
   il vous sera reversé à nouveau » in the error tone, the amount kept (vitest `documents.test.ts`; the contract's
   wording — plan §4.2 had planned « … : un nouveau reversement vous est proposé » for 6b-2).
-  pgTAP `035`: the client's admin reads its returned run, another client's none. The screenshots of the client page are the
-  integrator's to retake if the returned state is shot.
+  pgTAP `035`: the client's admin reads its returned run, another client's none. The E2E has no returned payout, so no
+  screenshot of that state (the client page's screenshots are unchanged).
 - **legal-texts#7 (low) — `payout_overrun`'s French.** « … dépassait ce qui restait dû au client … » (vitest).
 - **T2 (medium) — the Hypothesis worlds book batch lines.** `worlds()` gave batch members no file facts, so every
   generated batch line was `transfer_not_handed_out` and the batch half of both properties checked nothing (mutant P16,

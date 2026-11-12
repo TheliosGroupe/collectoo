@@ -178,7 +178,8 @@ def test_5120_is_the_bank_after_fees_and_top_ups() -> None:
     assert review_of(plain) is None  # an other debit waits in « Frais » without a review
 
     # ops: the credit from the own account is a top-up, the plain debit a fee; ours stays unbooked
-    with pytest.raises(psycopg.errors.CheckViolation, match="not_explainable"):
+    # (review M2c-6b-1 money-1, K1: whatever the link kind, `own_transfer_line`)
+    with pytest.raises(psycopg.errors.CheckViolation, match="own_transfer_line"):
         api(
             tenant,
             "select public.link_debit(%s, %s, %s, null, null, null, %s)",

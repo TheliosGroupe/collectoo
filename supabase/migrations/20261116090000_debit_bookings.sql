@@ -3290,9 +3290,12 @@ as $$
     union all
     -- M2c-6b-1 (design §9.2, Q7's default): a payout that came back is held to the earliest date of the returned run's
     -- positive live lines — its E and its mandate's delay, those of the line with the earliest latest execution date
-    -- (the reversal → the reversed remittance → its transfer → its run → its lines, each by key)
+    -- (the reversal → the reversed remittance → its transfer → its run → its lines, each by key). A line that is itself
+    -- a re-proposed payout (returned a second time) has no mandate (the worker's prepare: no file, no mandate's gross)
+    -- but the terms version it was held to: that version gives the delay and the mandate (monitored), as the worker's
+    -- prepare reads it (jobs/remittances.py _held_to; review M2c-6b-1 legal-texts#1 item 3, parity)
     select q.ledger_entry_id, q.client_organization_id, q.currency, q.amount_minor, q.draft_run_id, rl.payment_id,
-           rl.encaissement_date, coalesce(t.days, 30), rl.mandate_id
+           rl.encaissement_date, coalesce(t.days, ti.days, 30), coalesce(rl.mandate_id, ti.mandate_id)
     from private.remittance_pending q
     cross join lateral (select le.reverses_entry_id from public.ledger_entry le
                         where le.id = q.ledger_entry_id offset 0) e
@@ -3302,7 +3305,8 @@ as $$
     cross join lateral (select bt.run_id from public.bank_transfer bt
                         where bt.id = case when pg_input_is_valid(re.source_id, 'uuid') then re.source_id::uuid end
                         offset 0) bt
-    cross join lateral (select l.payment_id, l.encaissement_date, l.mandate_id from public.remittance_line l
+    cross join lateral (select l.payment_id, l.encaissement_date, l.mandate_id, l.mandate_terms_id
+                        from public.remittance_line l
                         where l.run_id = bt.run_id and l.amount_minor > 0 and not l.released
                           and l.latest_execution_date is not null and l.encaissement_date is not null
                         order by l.latest_execution_date, l.line_no limit 1) rl
@@ -3310,6 +3314,8 @@ as $$
                        where mt.mandate_id = rl.mandate_id and mt.valid_from <= rl.encaissement_date
                          and (mt.valid_to is null or rl.encaissement_date < mt.valid_to)
                        limit 1) t on true
+    left join lateral (select mt.mandate_id, mt.remittance_max_days as days from public.mandate_terms mt
+                       where rl.mandate_id is null and mt.id = rl.mandate_terms_id offset 0) ti on true
     where q.organization_id = p_organization_id and q.amount_minor > 0 and q.kind = 'payout_returned'
       and (not p_unreserved_only or q.draft_run_id is null)),
   mon as (

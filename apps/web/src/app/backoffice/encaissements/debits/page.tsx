@@ -12,6 +12,7 @@ import {
   explainable,
   feeEffect,
   lossEffect,
+  offersOwnBatchRefunds,
   offersPaymentLinks,
   ownCreditEffect,
   lineKindLabel,
@@ -161,7 +162,7 @@ export default async function DebitsPage({
   if (tab === "a-classer") {
     const reads = await Promise.all(
       rows.map((r) =>
-        offersPaymentLinks(r)
+        offersPaymentLinks(r) || offersOwnBatchRefunds(r)
           ? supabase.rpc("debit_link_options", {
               p_bank_transaction_id: r.bank_transaction_id,
             })
@@ -412,7 +413,9 @@ function LineActions({
   // review M2c-1: no return or refund link on our own transfers and credits (the database refuses them); review
   // M2c-6b-1 (money-1): nor on our payouts' and sweeps' lines (own_transfer_line) — the loss below included
   const linkable = offersPaymentLinks(row);
-  const refunds = linkable ? (options?.refunds ?? []) : [];
+  // … but a batch line of our files takes a refund of its PmtInf in a file handed out (offersOwnBatchRefunds)
+  const refunds =
+    linkable || offersOwnBatchRefunds(row) ? (options?.refunds ?? []) : [];
   const isReturn = row.direction === "debit" && row.kind !== "refund_out";
   // M2c-1 (OQ-34): a return naming a payment of which less is left than it takes back
   const beyond =
