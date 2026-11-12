@@ -54,6 +54,7 @@ from collectoo_worker.payments.statement import (
     METHOD_BY_FAMILY,
     NO_IBANS,
     RETURN_SUBFAMILIES,
+    TRANSFER_OUT_ID_RE,
     DedupKeys,
     KnownIbans,
     ParsedStatement,
@@ -431,22 +432,20 @@ class _Reader:
             # undoes an earlier movement (ADR-0013 M2b-2 #2): never a payment. Review M2c-6b-1
             # round 4 (N1): so is a credit batch any of whose details is one of our transfers
             # coming back (our RMT/SWP id as its own or its original): never a debtor's payment.
+            ours = _our_ids(details) if credit else []
             undone = (
                 kind == "return"
                 or any(_family(_code(d, "BkTxCd/"))[1] in RETURN_SUBFAMILIES for d in details)
-                or (
-                    credit
-                    and any(
-                        names_our_transfer(
-                            _provided(first(d, "Refs/EndToEndId")),
-                            first(d, "RtrInf/OrgnlEndToEndId"),
-                            None,
-                        )
-                        for d in details
-                    )
-                )
+                or bool(ours)
             )
             kind = "return" if undone else "batch_unsplit"
+            # Review round 5 (Q2): such a batch keeps that identification on its line — the first
+            # of its details' ids of ours (the file's order) as its original id, unless what the
+            # line carries names one of our transfers already — so every refusal reading
+            # `names_our_transfer` on the stored line sees it (before: no id at all, and the line
+            # took « Classer sans comptabiliser » or any refund that came back).
+            if ours and not names_our_transfer(e2e, original, entry.payment_info_id):
+                original = ours[0]
         if tx_ref is not None and own_ref and not unsplit:
             key = self.keys.claim(f"t:{tx_ref}")
         elif entry.ref is not None:
@@ -595,6 +594,21 @@ def _family(code: str | None) -> tuple[str | None, str | None]:
 
 def _return_reason(tx: Flat) -> str | None:
     return first(tx, "RtrInf/Rsn/Cd") or first(tx, "RtrInf/Rsn/Prtry")
+
+
+def _our_ids(details: list[Flat]) -> list[str]:
+    """The ids of ours an unsplit batch's details carry, in the file's order: each detail that is
+    one of our transfers coming back (`names_our_transfer`: our RMT/SWP id as its own end-to-end id
+    or as the original it returns) gives that id — its original one when that is ours."""
+    out: list[str] = []
+    for d in details:
+        e2e = _provided(first(d, "Refs/EndToEndId"))
+        original = first(d, "RtrInf/OrgnlEndToEndId")
+        if names_our_transfer(e2e, original, None):
+            ours = original if TRANSFER_OUT_ID_RE.fullmatch(original or "") else e2e
+            if ours is not None:
+                out.append(ours)
+    return out
 
 
 def _iso_date(text: str, where: str) -> date:

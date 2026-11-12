@@ -1666,8 +1666,9 @@ describe("M2c-6b-1 review round 4: our transfers coming back at import, on « À
   });
 
   it("words the refusals of a held line's release and of our top-up's relay (N1, N2)", () => {
-    // public.resolve_duplicate: a held line carrying our ids, with a debtor's reading recorded before round 4
-    expect(debitErrorCode("duplicate release refused: own_transfer_line")).toBe("own_credit_own_transfer_line");
+    // public.resolve_duplicate: a held line carrying our ids, with a debtor's reading recorded before round 4 — its own
+    // words since round 5 (Q4, below)
+    expect(debitErrorCode("duplicate release refused: own_transfer_line")).toBe("duplicate_own_transfer_line");
     // public.release_own_credit: a credit carrying our TOP id is our top-up, never a debtor's payment
     const code = debitErrorCode("own credit release refused: top_up_line");
     expect(code).toBe("own_credit_top_up_line");
@@ -1679,5 +1680,84 @@ describe("M2c-6b-1 review round 4: our transfers coming back at import, on « À
     // the release's other refusals keep their words
     expect(debitErrorCode("own credit release refused: own_transfer_line")).toBe("own_credit_own_transfer_line");
     expect(debitErrorCode("own credit release refused: not_own_credit")).toBe("not_own_credit");
+  });
+});
+
+// Review M2c-6b-1 round 5. Q1: a credit naming one of our lots with no end-to-end id (isOurTransferCredit, not
+// isOurTransferLine) is never linked but as « Remboursement revenu » of the refund its lot held alone, the one refund
+// public.debit_link_options lists on it, and never classified without booking — private.post_debit_links refuses every
+// other link and the explanation (own_transfer_line), as OUR_LOT_CREDIT_NOTE says. Q4: « Libérer »'s refusal of a held
+// line carrying our ids says where the line stays (« Doublons possibles ») and to tell support.
+describe("M2c-6b-1 review round 5: our lots coming back, the held line's release (Q1, Q4)", () => {
+  const PMT = "TF-2026-000123-2";
+  const lot = {
+    direction: "credit",
+    kind: "return",
+    amount_minor: "5000",
+    end_to_end_id: null,
+    original_end_to_end_id: null,
+    payment_info_id: PMT,
+  };
+
+  it("offers on a credit naming our lot only the refund debit_link_options lists, never an explanation (Q1)", () => {
+    expect(isOurTransferCredit(lot)).toBe(true);
+    expect(isOurTransferLine(lot)).toBe(false);
+    expect(offersPaymentLinks(lot)).toBe(false);
+    expect(readsLinkOptions(lot)).toBe(true);
+    const listed = [{ refund_request_id: "q1" }];
+    expect(linkOffers(lot, [{ left_minor: "5000", named: true }], listed)).toEqual({
+      returns: [],
+      losses: [],
+      refunds: listed,
+    });
+    expect(linkOffers(lot, [], []).refunds).toEqual([]);
+    const ids = { namesPayment: false, endToEndId: null, originalEndToEndId: null, paymentInfoId: PMT };
+    expect(explainable({ direction: "credit", kind: "return", ...ids })).toBe(false);
+    // an own or a client's credit naming our lot: no refund, no explanation, its options not read
+    for (const kind of ["own_transfer_in", "client_transfer_in"]) {
+      const o = { ...lot, kind };
+      expect(readsLinkOptions(o), kind).toBe(false);
+      expect(linkOffers(o, [], listed).refunds, kind).toEqual([]);
+      expect(explainable({ direction: "credit", kind, ...ids }), kind).toBe(false);
+      expect(debitReviewText({ ...o, review_reason: null }), kind).not.toContain("Remboursement revenu");
+    }
+    // what the page says of it agrees: never classified without booking; the one refund its lot held alone
+    const note = debitReviewText({ ...lot, review_reason: "no_candidate" });
+    expect(note).toContain("Ne le classez pas sans comptabiliser");
+    expect(note).toContain("« Remboursement revenu »");
+    expect(note).toContain("ne contenait qu'un remboursement");
+    // with an end-to-end id that is not ours, the PmtInfId alone does not make it ours (as the database reads it)
+    const notOurs = { ...lot, end_to_end_id: "E2E-1" };
+    expect(offersPaymentLinks(notOurs)).toBe(true);
+    expect(linkOffers(notOurs, [], listed).refunds).toEqual(listed);
+    expect(explainable({ direction: "credit", kind: "return", ...ids, endToEndId: "E2E-1" })).toBe(true);
+    // a credit return naming nothing of ours: as before
+    const plain = { ...lot, payment_info_id: null };
+    expect(offersPaymentLinks(plain)).toBe(true);
+    expect(explainable({ direction: "credit", kind: "return", ...ids, paymentInfoId: null })).toBe(true);
+    // a credit carrying our RMT id: nothing, its options not even read (round 2)
+    const rmt = { ...lot, original_end_to_end_id: "RMT0A1B2C3D4E5F" };
+    expect(readsLinkOptions(rmt)).toBe(false);
+    expect(linkOffers(rmt, [], listed).refunds).toEqual([]);
+    // our batch debit keeps its one link (the refunds of its PmtInf handed out)
+    const batch = { ...lot, direction: "debit", kind: "other_debit" };
+    expect(readsLinkOptions(batch)).toBe(true);
+    expect(linkOffers(batch, [], listed).refunds).toEqual(listed);
+  });
+
+  it("words « Libérer »'s refusal of a held line carrying our ids: it stays in « Doublons possibles » (Q4)", () => {
+    const code = debitErrorCode("duplicate release refused: own_transfer_line");
+    expect(code).toBe("duplicate_own_transfer_line");
+    const text = errorText(code);
+    expect(text).toContain("l'un de nos propres virements");
+    expect(text).toContain("jamais le paiement d'un débiteur");
+    expect(text).toContain("« Doublons possibles »");
+    expect(text).toContain("Prévenez le support");
+    expect(text).not.toContain("« À classer »");
+    expect(text).not.toContain("automatiquement à l'import");
+    expect(text).not.toMatch(/refused|own_transfer_line/);
+    // the relay's refusal keeps its words (« À classer »: an own or a client's credit stays there)
+    expect(debitErrorCode("own credit release refused: own_transfer_line")).toBe("own_credit_own_transfer_line");
+    expect(errorText("own_credit_own_transfer_line")).toContain("« À classer »");
   });
 });

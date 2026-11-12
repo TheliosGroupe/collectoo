@@ -1220,3 +1220,67 @@ def test_our_payout_back_unflagged_is_its_return_once_and_never_before_its_debit
         ).fetchone()
     assert returned is not None and returned[0] == 1
     _no_violation(tenant)
+
+
+def test_our_lot_and_an_unsplit_batch_back_unflagged_are_never_linked_nor_explained(
+    tmp_path: Path,
+) -> None:
+    """Review round 5. A downloaded file of two payouts (one PmtInf), then, unflagged by the bank,
+    a credit naming that lot with no end-to-end id and an unsplit credit batch (its count disagrees
+    with its details) one of whose details carries the first payout's RMT id beside a debtor's.
+    Both are `return` (round 4, N1); no payment. Q2: the batch keeps our RMT id as its original
+    (before: no id at all). Q3: the M2b pass reviews the lot's credit `no_candidate` (before: it
+    never read it); the batch, carrying our RMT id, is the funds pass's (the payout still in its
+    file: `return_before_debit`, nothing booked). Q1: neither takes « Classer sans comptabiliser »
+    (`own_transfer_line`), and debit_link_options lists nothing on either."""
+    tenant, _other, _r1, _r2 = _two_runs()
+    _f, data = _downloaded(tenant, tmp_path)
+    (first, n1), (_second, _n2) = _payouts(data)
+    lot = pain001.read(data).payment_infos[0].pmt_inf_id
+    opening, last = _last_closing(tenant)
+    day = max(paris_today(), last)
+    tag = uuid.uuid4().hex[:6].upper()
+    entries = [
+        Entry(
+            n1, True, day, day, ref=f"NL{tag}", payment_info_id=lot, txs=(Tx(n1, ref=f"L{tag}"),)
+        ),
+        Entry(
+            n1 + 2_000,
+            True,
+            day,
+            day,
+            ref=f"NU{tag}",
+            batch_count=3,
+            txs=(
+                Tx(2_000, ref=f"U1{tag}", end_to_end_id=f"E2E-{tag}", name="DURAND"),
+                Tx(n1, ref=f"U2{tag}", end_to_end_id=first, name="LILAS FINANCE"),
+            ),
+        ),
+    ]
+    sid = import_entries(tenant, storage(), entries, day=day, opening=opening)
+    with psycopg.connect(DB) as conn:
+        lines = conn.execute(
+            """select id, kind, end_to_end_id, original_end_to_end_id, payment_info_id,
+                      private.names_our_transfer(end_to_end_id, original_end_to_end_id,
+                                                 payment_info_id)
+               from public.bank_transaction where statement_id = %s order by line_no""",
+            (sid,),
+        ).fetchall()
+    assert [tuple(r[1:]) for r in lines] == [
+        ("return", None, None, lot, True),
+        ("return", None, first, None, True),
+    ]
+    assert _payments_of(sid) == 0
+    assert _reviews(sid) == ["no_candidate", "return_before_debit"]
+    assert _bookings(sid) == []
+    for line in (str(r[0]) for r in lines):
+        options = staff(tenant, "select public.debit_link_options(%s)", line)
+        assert (options["payments"], options["refunds"]) == ([], [])
+        with pytest.raises(psycopg.errors.CheckViolation, match="own_transfer_line"):
+            staff(
+                tenant,
+                "select public.link_debit(%s, %s, 'explained', null, null, null, 'vu')",
+                str(uuid.uuid4()),
+                line,
+            )
+    _no_violation(tenant)

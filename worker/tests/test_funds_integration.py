@@ -28,7 +28,7 @@ from hypothesis import strategies as st
 from integration_helpers import DB, one, storage
 from statement_helpers import bank_tenant, drain, upload
 
-from collectoo_worker.payments.statement import KnownIbans, refine_kind
+from collectoo_worker.payments.statement import KnownIbans, names_our_transfer, refine_kind
 from collectoo_worker.synth.camt053 import Entry, Tx
 from collectoo_worker.synth.ids import iban_fr
 
@@ -125,6 +125,12 @@ def test_python_and_sql_read_our_transfers_coming_back_alike(  # noqa: PLR0913, 
     assert row[0] == refine_kind(
         kind, direction, e2e, iban, IBANS, original_end_to_end_id=original, payment_info_id=pmt_inf
     )
+    # review round 5 (Q1, Q2): the predicate every refusal reads on the stored line, alike
+    ours = parity_conn.execute(
+        "select private.names_our_transfer(%s, %s, %s)", (e2e, original, pmt_inf)
+    ).fetchone()
+    assert ours is not None
+    assert ours[0] is names_our_transfer(e2e, original, pmt_inf)
 
 
 def _own_account(tenant: dict[str, Any]) -> tuple[str, str]:

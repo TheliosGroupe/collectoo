@@ -29,6 +29,7 @@ from collectoo_worker.payments.statement import (
     TRANSFER_OUT_ID_RE,
     KnownIbans,
     classify,
+    names_our_transfer,
     refine_kind,
 )
 from collectoo_worker.synth.camt053 import Entry, Tx, expected_lines, make_doc, render_camt053
@@ -447,7 +448,14 @@ def test_a_camt053_reads_our_unflagged_credits_as_returns(tmp_path: Path) -> Non
     naming one of our lots with no end-to-end id; an unsplit credit batch of our lot (its count
     disagrees with its details); an unsplit credit batch whose details carry our RMT ids: each a
     `return` (its original id its own when it has one). A debtor's credit is unchanged, and the
-    synthetic ground truth agrees."""
+    synthetic ground truth agrees.
+
+    Review round 5 (Q2): an unsplit credit batch read `return` because one of its details carries
+    our RMT/SWP id keeps that identification on its line — the detail's id as the line's original
+    one (the first in the file's order when several do) — so every refusal that reads
+    `names_our_transfer` on the stored line sees it (before: no id at all, so « Classer sans
+    comptabiliser » and « Remboursement revenu » were accepted on it). A batch our PmtInfId already
+    names keeps no original (the smallest change), and a debtor's batch stays `batch_unsplit`."""
     entries = [
         Entry(5000, True, DAY, DAY, ref="NR1", txs=(Tx(5000, ref="R1", end_to_end_id=RMT),)),
         Entry(1000, True, DAY, DAY, ref="NP1", payment_info_id=LOT, txs=(Tx(1000, ref="P1"),)),
@@ -474,17 +482,93 @@ def test_a_camt053_reads_our_unflagged_credits_as_returns(tmp_path: Path) -> Non
             ),
         ),
         Entry(700, True, DAY, DAY, ref="ND1", txs=(Tx(700, ref="D1", end_to_end_id="E2E-D1"),)),
+        # one detail of ours among a debtor's (its count disagrees): our SWP id kept as the original
+        Entry(
+            6500,
+            True,
+            DAY,
+            DAY,
+            ref="NB3",
+            batch_count=3,
+            txs=(
+                Tx(1500, ref="E1", end_to_end_id="E2E-E1"),
+                Tx(5000, ref="E2", end_to_end_id=SWP),
+            ),
+        ),
+        # our lot's PmtInfId names it already: no original added
+        Entry(
+            9000,
+            True,
+            DAY,
+            DAY,
+            ref="NB4",
+            payment_info_id=LOT,
+            batch_count=3,
+            txs=(Tx(4500, ref="F1", end_to_end_id=RMT), Tx(4500, ref="F2")),
+        ),
+        # a debtor's unsplit batch: unchanged
+        Entry(
+            3000,
+            True,
+            DAY,
+            DAY,
+            ref="NB5",
+            batch_count=3,
+            txs=(Tx(1500, ref="G1", end_to_end_id="E2E-G1"), Tx(1500, ref="G2")),
+        ),
+        # a detail returning our sweep under another end-to-end id (its original, ours, is kept)
+        Entry(
+            4000,
+            True,
+            DAY,
+            DAY,
+            ref="NB6",
+            batch_count=3,
+            txs=(
+                Tx(2000, ref="H1", end_to_end_id="E2E-H1", return_reason="MD06"),
+                Tx(2000, ref="H2", end_to_end_id="E2E-H2"),
+            ),
+        ),
+        # an unsplit debit batch whose details carry our ids: our debits, never a return
+        Entry(
+            9000,
+            False,
+            DAY,
+            DAY,
+            ref="NB7",
+            code="PMNT/ICDT/ESCT",
+            batch_count=3,
+            txs=(
+                Tx(4500, ref="K1", end_to_end_id=RMT),
+                Tx(4500, ref="K2", end_to_end_id="RMT0123456789AD"),
+            ),
+        ),
     ]
     doc = make_doc(entries, iban=ELSEWHERE, from_date=DAY, to_date=DAY, opening_minor=0)
     path = tmp_path / "s.xml"
-    path.write_bytes(render_camt053(doc, "08"))
+    xml = render_camt053(doc, "08")
+    reason = b"<RtrInf><Rsn><Cd>MD06</Cd></Rsn></RtrInf>"
+    assert xml.count(reason) == 1
+    path.write_bytes(
+        xml.replace(reason, b"<RtrInf><OrgnlEndToEndId>" + SWP.encode() + b"</OrgnlEndToEndId>"
+                    b"<Rsn><Cd>MD06</Cd></Rsn></RtrInf>")
+    )  # fmt: skip
     parsed = parse_camt053(path, iban=ELSEWHERE, currency="EUR", ibans=IBANS)
     got = [(x.kind, x.end_to_end_id, x.original_end_to_end_id) for x in parsed.lines]
     assert got == [
         ("return", RMT, RMT),
         ("return", None, None),
         ("return", None, None),
-        ("return", None, None),
+        ("return", None, RMT),  # the first of our ids in the file's order
         ("debtor_credit", "E2E-D1", None),
+        ("return", None, SWP),
+        ("return", None, None),
+        ("batch_unsplit", None, None),
+        ("return", None, SWP),  # the detail's original, not its own end-to-end id
+        ("batch_unsplit", None, None),
     ]
     assert [x.kind for x in expected_lines(doc)] == [k for k, _, _ in got]
+    # every line read `return` because it is ours carries what the refusals read
+    for x in parsed.lines:
+        if x.kind == "return":
+            assert names_our_transfer(x.end_to_end_id, x.original_end_to_end_id, x.payment_info_id)

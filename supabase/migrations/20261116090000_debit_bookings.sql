@@ -66,6 +66,12 @@
 -- public.accept_suggestions, private.apply_match_results), a held line carrying one never released as a payment
 -- (public.resolve_duplicate), and « Paiements à traiter » flags it (public.payment_queue, dropped and created); the relay
 -- refuses a credit carrying our TOP id (public.release_own_credit: `top_up_line`).
+--
+-- Review round 5: a credit that is one of our transfers coming back (private.names_our_transfer) — one naming one of our
+-- lots with no end-to-end id included — takes no link nor explanation (private.post_debit_links: `own_transfer_line`,
+-- every kind) but « Remboursement revenu » of the refund that lot held alone (new private.pmt_inf_refund_back; COMPLIANCE
+-- OQ-84's default), the one refund public.debit_link_options lists there; the M2b pass reads a credit return with
+-- neither id again (private.debit_candidates' filter NULL-safe: its no_candidate review, as on main).
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -463,6 +469,32 @@ as $$
                       from public.bank_transfer t where t.id = i.transfer_id offset 0) m
   where f.debtor_bank_account_id = p_bank_account_id and f.download_count > 0 and f.status in ('downloaded', 'sent')
     and m.transfer_file_id = i.file_id;
+$$;
+
+-- Review round 5 (Q1): the refund a credit naming one of our lots with no end-to-end id may be — that lot's refund come
+-- back: the PmtInf, in a file of the account handed out (downloaded or sent), holds one member only, a refund executed
+-- (its transfer booked, in that file) whose request is that transfer's. private.pmt_inf_single_refund's lot once its
+-- refund was executed (that function reads the lot while its refund is still in_file, for its debit; once executed the
+-- transfer is booked and it answers null). Returns the refund request, or null (any other member, cancelled or moved
+-- out included). The one link private.post_debit_links accepts on such a credit, and the one refund
+-- public.debit_link_options lists there (COMPLIANCE OQ-84's default). Keyed as pmt_inf_single_refund.
+create or replace function private.pmt_inf_refund_back(p_bank_account_id uuid, p_pmt_inf_id text)
+returns uuid
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select case when count(*) = 1 and count(q.id) = 1 then (array_agg(q.id))[1] end
+  from (select i.file_id, i.transfer_id from public.transfer_file_item i where i.pmt_inf_id = p_pmt_inf_id offset 0) i
+  cross join lateral (select f.debtor_bank_account_id, f.status, f.download_count from public.transfer_file f
+                      where f.id = i.file_id offset 0) f
+  cross join lateral (select t.id, t.kind, t.status, t.transfer_file_id from public.bank_transfer t
+                      where t.id = i.transfer_id offset 0) m
+  left join lateral (select r.id from public.refund_request r
+                     where r.transfer_id = m.id and m.kind = 'refund' and m.status = 'booked'
+                       and m.transfer_file_id = i.file_id offset 0) q on true
+  where f.debtor_bank_account_id = p_bank_account_id and f.download_count > 0 and f.status in ('downloaded', 'sent');
 $$;
 
 -- The lines the debit job may book in the funds (redefined from 20261111090000, dropped and created: one row per
@@ -1576,7 +1608,10 @@ $$;
 -- funds pass after the allocation lock); a link refuses our transfers' lines (§2.4 rule 5; review money-1: whatever
 -- its kind — `own_transfer_line`) but a refund whose transfer is in a file handed out (the refund's trigger then admits
 -- only a batch line of its own PmtInf in that file), and takes a batch line kept unsplit as a refund when it is that
--- PmtInf. Same settings.
+-- PmtInf. Review round 5: a credit that is one of our transfers coming back (private.names_our_transfer, a lot of ours
+-- with no end-to-end id included) takes no link but « Remboursement revenu » of the refund that lot held alone
+-- (private.pmt_inf_refund_back, Q1); a credit return with neither id stays the M2b pass's (Q3: the filter NULL-safe).
+-- Same settings.
 ------------------------------------------------------------------------------------------
 
 create or replace function private.debit_candidates(p_organization_id uuid, p_after_date date, p_after_id uuid,
@@ -1605,9 +1640,11 @@ begin
       and t.kind in ('return', 'refund_out', 'suspected_duplicate')
       and (p_after_date is null or (t.booking_date, t.id) > (p_after_date, p_after_id))
       and (t.kind <> 'suspected_duplicate' or r.decision = 'released')
-      -- M2c-6b-1: a credit returning our payout or sweep (its RMT/SWP id) is the funds pass's
-      and not (t.direction = 'credit'
-               and coalesce(t.original_end_to_end_id, t.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$')
+      -- M2c-6b-1: a credit returning our payout or sweep (its RMT/SWP id) is the funds pass's; review round 5 (Q3):
+      -- NULL-safe — a credit return with neither id (one naming only our lot included) stays this pass's, as on main
+      -- (its pure rule: no_candidate)
+      and not coalesce(t.direction = 'credit'
+                       and coalesce(t.original_end_to_end_id, t.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
       and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id offset 0)
       and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = t.id offset 0)
     union all
@@ -1749,6 +1786,14 @@ begin
          coalesce(l.amount_minor, t.amount_minor) as line_minor, t.booking_date as line_date,
          coalesce(dr.released_kind, t.kind) as line_kind, t.end_to_end_id as line_e2e,
          coalesce(t.original_end_to_end_id, t.end_to_end_id) as line_returned_id,
+         -- review round 5 (Q1): a credit that is one of our transfers coming back (private.names_our_transfer: our
+         -- RMT/SWP id as its own or its original, or one of our lots' PmtInfIds with no end-to-end id), and the one
+         -- refund such a credit naming our lot may be (the refund that lot held alone, private.pmt_inf_refund_back)
+         (t.direction = 'credit'
+          and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)) as our_credit,
+         case when t.direction = 'credit' and t.end_to_end_id is null
+                   and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
+              then private.pmt_inf_refund_back(t.bank_account_id, t.payment_info_id) end as lot_refund,
          -- M2c-6b-1: a debit with no end-to-end id carrying the PmtInfId of one of our files (a batch line)
          coalesce(t.direction = 'debit' and t.end_to_end_id is null
                   and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
@@ -1845,9 +1890,19 @@ begin
     -- « return » naming our RMT id as its original included); and the refund exception only while its PmtInf has no
     -- member cancelled and not returned in its current file (L5: with the cancellation after download on, the line may
     -- be that cancelled transfer's debit — the funds pass reviews it cancelled_transfer_debited).
-    when (coalesce(d.line_e2e ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
-          or coalesce(d.line_returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false) or d.our_batch_line)
-         and not (d.kind = 'refund' and d.our_batch_line and d.req_handed_out and not d.pmt_inf_cancelled)
+    -- Review round 5 (Q1, round 4's N1 residual): a credit that is one of our transfers coming back, as every refusal
+    -- reads it (private.names_our_transfer) — a credit naming one of our lots with no end-to-end id included, which the
+    -- import reads as a `return` since round 4 — whatever the link kind; its one exception (COMPLIANCE OQ-84's
+    -- default): « Remboursement revenu » of the refund that lot held alone (private.pmt_inf_refund_back: a file-mode
+    -- refund alone in its PmtInf, executed, coming back with only its lot's reference). Before, such a credit took any
+    -- executed refund of its amount (that refund's payment then holding our lot's money, assignable to a debtor's file)
+    -- and « Classer sans comptabiliser ».
+    when ((coalesce(d.line_e2e ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+           or coalesce(d.line_returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false) or d.our_batch_line)
+          and not (d.kind = 'refund' and d.our_batch_line and d.req_handed_out and not d.pmt_inf_cancelled))
+         or (coalesce(d.our_credit, false)
+             and not (d.kind = 'refund_returned' and d.lot_refund is not null
+                      and d.refund_request_id is not distinct from d.lot_refund))
       then 'own_transfer_line'
     -- our own transfers out and the credits from our own account or a client are never a payment's return, refund or
     -- refund that came back (whatever payment or request is named)
@@ -2001,7 +2056,9 @@ $$;
 -- What a line can be linked to (redefined from 20261110120000; review round 2, L4/L5): on one of our payouts' and sweeps'
 -- lines, only what private.post_debit_links accepts — on a batch line of one of our PmtInfs, the file-mode refunds of
 -- that PmtInf (in its current file, handed out to the bank) of the line's amount, and none while that PmtInf has a member
--- cancelled and not returned (switch on); on a line whose own or original id is one of our RMT/SWP ids, nothing; never a
+-- cancelled and not returned (switch on); on a line whose own or original id is one of our RMT/SWP ids, nothing; review
+-- round 5 (Q1): on a credit naming one of our lots with no end-to-end id (private.names_our_transfer), the refund that
+-- lot held alone (private.pmt_inf_refund_back) when the line is a `return` of its amount, nothing else; never a
 -- payment. Other lines as before. Same settings and grants.
 create or replace function public.debit_link_options(p_bank_transaction_id uuid)
 returns jsonb
@@ -2067,6 +2124,26 @@ begin
   if coalesce(t.end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
      or coalesce(coalesce(t.original_end_to_end_id, t.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$', false) then
     return jsonb_build_object('payments', '[]'::jsonb, 'refunds', '[]'::jsonb, 'kind', v_kind);
+  end if;
+  -- review round 5 (Q1): a credit that is one of our transfers coming back (private.names_our_transfer, as
+  -- private.post_debit_links reads it): no payment, and as refund only the one that function accepts there — on a
+  -- `return` naming one of our lots with no end-to-end id, the refund that lot held alone
+  -- (private.pmt_inf_refund_back), executed, on the line's account and of its amount
+  if t.direction = 'credit'
+     and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id) then
+    return jsonb_build_object(
+      'payments', '[]'::jsonb,
+      'refunds', coalesce((
+        select jsonb_agg(jsonb_build_object('refund_request_id', q.id, 'payment_id', q.payment_id,
+                                            'amount_minor', q.amount_minor::text, 'end_to_end_id', q.end_to_end_id,
+                                            'status', q.status, 'payee_name', q.payee_name,
+                                            'payee_iban_end', right(q.payee_iban, 4), 'requested_at', q.requested_at))
+        from public.refund_request q
+        where v_kind = 'return' and t.end_to_end_id is null
+          and q.id = private.pmt_inf_refund_back(t.bank_account_id, t.payment_info_id)
+          and q.status = 'executed' and q.bank_account_id = t.bank_account_id and q.amount_minor = t.amount_minor),
+        '[]'),
+      'kind', v_kind);
   end if;
   return jsonb_build_object(
     'payments', case when t.direction = 'debit' then coalesce((
@@ -5101,8 +5178,10 @@ $$;
 -- matched to a debtor's file, charged commission and remitted again. Now it is a `return` (COMPLIANCE OQ-84's default):
 -- no payment; the funds pass books it as the transfer's return when it matches (payout_returned / sweep_returned), else
 -- leaves it in « À classer » with why (transfer_unknown, return_before_debit, return_differs); a credit naming our lot
--- alone gets the M2b pass's review (no_candidate). From our own or a client's IBAN it keeps round 3's kinds
--- (own_transfer_in / client_transfer_in), which every command refuses. In depth: a payment whose line carries such an id
+-- alone gets the M2b pass's review (no_candidate; since review round 5, Q3, with private.debit_candidates' filter
+-- NULL-safe — before, the pass never read a credit with neither id) and takes no link but « Remboursement revenu » of the
+-- refund that lot held alone (round 5, Q1: private.post_debit_links). From our own or a client's IBAN it keeps round 3's
+-- kinds (own_transfer_in / client_transfer_in), which every command refuses. In depth: a payment whose line carries such an id
 -- (made before this round) is never assigned (public.assign_payment, public.accept_suggestions, the match job), a held
 -- line carrying one is never released as a payment (public.resolve_duplicate), and « Paiements à traiter » flags it
 -- (public.payment_queue.own_transfer_line). New: private.names_our_transfer, private.bank_line_refined_kind's
@@ -5658,7 +5737,8 @@ $$;
 ------------------------------------------------------------------------------------------
 
 revoke execute on function private.client_advance_guard(), private.pmt_inf_single_refund(uuid, text),
-  private.bank_booking_candidates(uuid, date, uuid, integer), private.post_run_settlements(uuid[], date[], integer),
+  private.pmt_inf_refund_back(uuid, text), private.bank_booking_candidates(uuid, date, uuid, integer),
+  private.post_run_settlements(uuid[], date[], integer),
   private.bank_line_cash_moved(uuid, uuid), private.batch_line_may_hold(uuid, uuid, text, uuid),
   private.transfer_late_lines(uuid), private.bank_booking_begin(), private.bank_booking_post_rows(uuid),
   private.post_bank_bookings(uuid, boolean), private.apply_bank_bookings(uuid), private.bank_line_booking_guard(),

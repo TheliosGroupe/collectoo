@@ -238,6 +238,8 @@ export type ErrorCode =
   | "own_credit_top_up_line"
   // review round 4 (N1): a payment whose bank line carries one of our transfers' ids is never assigned to a file
   | "payment_own_transfer_line"
+  // review round 5 (Q4): « Libérer » refuses a held line carrying one of our transfers' ids (public.resolve_duplicate)
+  | "duplicate_own_transfer_line"
   | "unknown";
 
 /**
@@ -618,6 +620,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   // review round 4 (N1): public.assign_payment's refusal of a payment whose bank line carries one of our transfers' ids
   payment_own_transfer_line:
     "Ce paiement vient d'une ligne qui porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, pas le paiement d'un débiteur. Il ne s'affecte à aucun dossier : il se comptabilise depuis le relevé, par l'équipe (écran à venir). Prévenez le support.",
+  // review round 5 (Q4): public.resolve_duplicate's refusal (its hint, in the page's words): the line stays held
+  duplicate_own_transfer_line:
+    "Cette ligne porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, jamais le paiement d'un débiteur. Elle ne peut pas être libérée comme un paiement : elle se comptabilise depuis le relevé, par l'équipe (écran à venir), et reste dans « Doublons possibles » d'ici là. Prévenez le support.",
   unknown:
     "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };

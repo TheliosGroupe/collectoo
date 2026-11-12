@@ -35,10 +35,14 @@
 -- Review round 3: a credit carrying our transfers' ids is never relayed as a debtor's payment nor taken as a top-up
 -- (own_transfer_line), a bank charge naming our payout as its original still a fee (the recorded exception); a refund's
 -- cancellation in a downloaded file says what it waits for (its hint); the checks read the running balances by key.
+-- Review round 4: our transfers coming back read as returns at import, never assigned, matched, accepted or released as
+-- payments; our TOP id never relayed. Review round 5: a credit naming one of our lots takes no link nor explanation but
+-- « Remboursement revenu » of the refund that lot held alone (debit_link_options lists exactly that); the M2b pass reads
+-- a credit return with neither id (no_candidate).
 -- (The batch rule's linear plan: test_debit_bookings_batch_rules_integration.py.)
 -- Cancellation after download stays off (033 and 034 unchanged); some scenarios switch it on in their own subtransaction.
 begin;
-select plan(134);
+select plan(136);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -1005,6 +1009,104 @@ select is((select latest_execution_date from private.pending_item_deadlines('000
            where l.run_id = pg_temp.v('r1')),
   'the returned payout''s item is held to its run''s line: that collection''s E and its mandate''s delay (§9.2)');
 select is(pg_temp.status(pg_temp.v('s1')), 'returned', 'the sweep returned');
+-- Review round 5 (Q1; computed here, while F2's single-refund lot holds q1 executed and not come back yet; asserted in
+-- section 13, so the earlier tests keep their numbers): a credit naming one of our lots with no end-to-end id
+-- (private.names_our_transfer) takes no link but « Remboursement revenu » of the refund that lot held alone — never
+-- another refund of the same amount, nor any refund on a payouts' lot, nor « Classer sans comptabiliser », whatever its
+-- kind; debit_link_options lists exactly that
+create or replace function pg_temp.sc_q1_lot_links() returns jsonb language plpgsql as $$
+declare
+  v_q1 uuid := (select (v ->> 'refund_request_id')::uuid from j where k = 'q1');
+  v_lot text := pg_temp.pmt(pg_temp.v('q1t'));
+  v_payouts text := pg_temp.pmt(pg_temp.trid('r6'));
+  v_pay uuid; v_reason text; v_left text; v_other uuid; v_p1 uuid; v_p2 uuid; v_pair text; v_lone text; v_out jsonb;
+begin
+  -- another refund of 50,00 €, executed (manual mode: by its own debit)
+  perform pg_temp.collect('c5', 5000, private.paris_today() - 3, false);
+  v_pay := pg_temp.pay('c5');
+  select p.review_reason, x.unallocated_minor::text into v_reason, v_left
+  from public.payment p cross join lateral private.payment_positions(array[p.id]) x where p.id = v_pay;
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v_other := (public.request_refund('q5-refund-0001', v_pay, '5000', 'FR7630004000031234567890143', 'PAYEUR C5',
+                                    'other', v_reason, v_left, 'payeur inconnu', 'manual') ->> 'refund_request_id')::uuid;
+  reset role;
+  perform pg_temp.stmt('a0', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 5000, 'kind', 'refund_out', 'e2e', 'RFDQ5-0000001')));
+  perform pg_temp.link('q5-refund-link-0001', pg_temp.ln('a0', 1), 'refund', null, v_other, null);
+  -- a lot of two file-mode refunds of 25,00 € (a file handed out), the first executed by its own RFD debit
+  perform pg_temp.collect('c6', 2500, private.paris_today() - 3, false);
+  select x.unallocated_minor::text into v_left from private.payment_positions(array[pg_temp.pay('13')]) x;
+  select p.review_reason into v_reason from public.payment p where p.id = pg_temp.pay('13');
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v_p1 := (public.request_refund('q5-pair-0001', pg_temp.pay('13'), '2500', null, null, 'other', v_reason, v_left,
+                                 'payeur inconnu') ->> 'refund_request_id')::uuid;
+  reset role;
+  select p.review_reason into v_reason from public.payment p where p.id = pg_temp.pay('c6');
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v_p2 := (public.request_refund('q5-pair-0002', pg_temp.pay('c6'), '2500', null, null, 'other', v_reason, '2500',
+                                 'payeur inconnu') ->> 'refund_request_id')::uuid;
+  reset role;
+  perform pg_temp.handed_out('fq5', 'gen-file-q5');
+  v_pair := pg_temp.pmt((select transfer_id from public.refund_request where id = v_p1));
+  perform pg_temp.stmt('a2', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 2500, 'kind', 'refund_out',
+                       'e2e', (select end_to_end_id from public.refund_request where id = v_p1))));
+  perform pg_temp.link('q5-pair-link-0001', pg_temp.ln('a2', 1), 'refund', null, v_p1, null);
+  -- our lots coming back, each as one credit with no end-to-end id
+  perform pg_temp.stmt('a1', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 5000, 'pmt', v_lot),        -- q1's lot (q1 alone)
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 5000, 'pmt', v_payouts),    -- a payouts' lot
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 7777, 'pmt', v_lot),
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 7777, 'pmt', v_lot,
+                       'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 5000, 'pmt', v_payouts,      -- q1's RFD as its
+                       'orig', pg_temp.e2e(pg_temp.v('q1t'))),                                   -- original, another lot
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 2500, 'pmt', v_pair)));    -- the two refunds' lot
+  v_out := jsonb_build_object(
+    'pair', jsonb_build_array((select status from public.refund_request where id = v_p1),
+                              (select status from public.refund_request where id = v_p2),
+                              v_pair <> v_lot and v_pair = pg_temp.pmt((select transfer_id from public.refund_request
+                                                                         where id = v_p2))),
+    'options', (select jsonb_agg(x.o order by x.k) from (
+      select k, (select jsonb_build_object(
+                          'payments', jsonb_array_length(o -> 'payments'),
+                          'refunds', coalesce((select jsonb_agg(case r ->> 'refund_request_id' when v_q1::text then 'q1'
+                                                                  when v_other::text then 'other'
+                                                                  when v_p1::text then 'p1' else 'unknown' end
+                                                                order by r ->> 'refund_request_id')
+                                               from jsonb_array_elements(o -> 'refunds') r), '[]'))
+                 from (select pg_temp.try('01', format('select public.debit_link_options(%L)::text',
+                                                       pg_temp.ln('a1', k)))::jsonb as o) y) as o
+      from generate_series(1, 6) k) x),
+    'pair_p1', split_part(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, %L, null)',
+                                 'q5-rr-0006', pg_temp.ln('a1', 6), 'refund_returned', v_p1)), ' | ', 1),
+    'lone_other', split_part(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, %L, null)',
+                                    'q5-rr-0001', pg_temp.ln('a1', 1), 'refund_returned', v_other)), ' | ', 1),
+    'payouts_q1', split_part(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, %L, null)',
+                                    'q5-rr-0002', pg_temp.ln('a1', 2), 'refund_returned', v_q1)), ' | ', 1),
+    'payouts_other', split_part(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, %L, null)',
+                                       'q5-rr-0003', pg_temp.ln('a1', 2), 'refund_returned', v_other)), ' | ', 1),
+    'rfd_other_lot', split_part(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, %L, null)',
+                                       'q5-rr-0004', pg_temp.ln('a1', 5), 'refund_returned', v_q1)), ' | ', 1),
+    'explained', split_part(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, null, null)',
+                                   'q5-ex-0001', pg_temp.ln('a1', 3), 'explained')), ' | ', 1),
+    'own_explained', split_part(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, null, null)',
+                                       'q5-ex-0002', pg_temp.ln('a1', 4), 'explained')), ' | ', 1));
+  -- the one link taken (its refusal, if any, as the result)
+  begin
+    v_lone := pg_temp.link('q5-rr-0005', pg_temp.ln('a1', 1), 'refund_returned', null, v_q1, null);
+  exception when others then
+    v_lone := sqlerrm;
+  end;
+  return v_out || jsonb_build_object('lone_q1', v_lone,
+    'q1', (select status from public.refund_request where id = v_q1), 'q1t', pg_temp.status(pg_temp.v('q1t')),
+    'other', (select status from public.refund_request where id = v_other));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+insert into j select 'q1_lot_links', pg_temp.isolated('sc_q1_lot_links');
 -- the refund that came back: the M2b pass bounces it (its transfer returned)
 select private.debit_link_begin();
 insert into pg_temp._debit_link (ord, bank_transaction_id, kind, payment_id, refund_request_id, method)
@@ -2762,6 +2864,53 @@ select is(pg_temp.isolated('sc_n2_relay_top'),
                        'correspond à l''approvisionnement demandé, sinon par l''équipe.',
             'client_top', 'own credit release refused: top_up_line', 'look_alike', 'unmatched', 'payments', 0),
   'N2: a credit carrying our TOP id is never relayed as a debtor''s payment (top_up_line, its hint); a look-alike is');
+
+-- 13. Review round 5 ------------------------------------------------------------------------------------------------------
+-- Q1 (round 4's N1 residual; computed in section 3, while q1 was executed and not come back yet): on a credit naming one
+-- of our lots with no end-to-end id, private.post_debit_links refuses every link kind (own_transfer_line) but
+-- « Remboursement revenu » of the refund that lot held alone (private.pmt_inf_refund_back; COMPLIANCE OQ-84's default),
+-- and public.debit_link_options lists exactly that: on a payouts' lot nothing (before: the unrelated refund of the same
+-- amount, linked, made our lot's money a debtor's payment again), no explanation on such a credit (own or return)
+select is((select v from j where k = 'q1_lot_links'),
+          '{"pair": ["executed", "requested", true],
+            "options": [{"payments": 0, "refunds": ["q1"]}, {"payments": 0, "refunds": []},
+                        {"payments": 0, "refunds": []}, {"payments": 0, "refunds": []},
+                        {"payments": 0, "refunds": []}, {"payments": 0, "refunds": []}],
+            "pair_p1": "debit link refused: own_transfer_line",
+            "lone_other": "debit link refused: own_transfer_line", "payouts_q1": "debit link refused: own_transfer_line",
+            "payouts_other": "debit link refused: own_transfer_line",
+            "rfd_other_lot": "debit link refused: own_transfer_line",
+            "explained": "debit link refused: own_transfer_line", "own_explained": "debit link refused: own_transfer_line",
+            "lone_q1": "refund_returned", "q1": "bounced", "q1t": "returned", "other": "executed"}'::jsonb,
+  'Q1: a credit naming our lot (no end-to-end id) takes only « Remboursement revenu » of the refund its lot held alone; '
+  'every other link and the explanation refused (own_transfer_line); debit_link_options lists exactly that');
+
+-- Q3 (round 4's new:m2b-pass-drops-idless-credit-returns): the M2b pass reads a credit return with no end-to-end id
+-- and no original (its filter NULL-safe), as on main — one naming only our lot included — and its pure rule gives it
+-- no_candidate; a credit carrying our RMT id stays the funds pass's
+create or replace function pg_temp.sc_q3_idless_return() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.stmt('a3', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 3100),
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 3100, 'pmt', pg_temp.pmt(pg_temp.trid('r2'))),
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 3100, 'e2e', pg_temp.e2e(pg_temp.trid('r2')),
+                       'orig', pg_temp.e2e(pg_temp.trid('r2')))));
+  -- the M2b pass as the job runs it: the lines it reads, then its pure rule (a credit return naming no refund)
+  perform private.debit_link_begin();
+  insert into pg_temp._debit_review (bank_transaction_id, reason)
+  select distinct c.line_id, 'no_candidate'
+  from private.debit_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100000) c
+  where c.line_id in (pg_temp.ln('a3', 1), pg_temp.ln('a3', 2), pg_temp.ln('a3', 3))
+    and c.payment_id is null and c.refund_request_id is null;
+  perform private.apply_debit_decisions('00000000-0000-0000-0000-0000000000aa');
+  return jsonb_build_object('reviews', (select coalesce(jsonb_agg(t.line_no || ':' || r.reason order by t.line_no), '[]')
+                                        from public.bank_debit_review r
+                                        join public.bank_transaction t on t.id = r.bank_transaction_id
+                                        where t.statement_id = 'e3000000-0000-0000-0000-0000000000a3'));
+end $$;
+select is(pg_temp.isolated('sc_q3_idless_return'), '{"reviews": ["1:no_candidate", "2:no_candidate"]}'::jsonb,
+  'Q3: a credit return with no end-to-end id and no original (one naming only our lot too) gets the M2b pass''s '
+  'no_candidate review; one carrying our RMT id stays the funds pass''s');
 
 select * from finish();
 rollback;
