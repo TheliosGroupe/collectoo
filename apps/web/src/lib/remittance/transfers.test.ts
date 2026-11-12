@@ -1286,12 +1286,16 @@ describe("M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is 
     expect(
       "jusqu'à ce que leurs débits soient lus sur le relevé bancaire",
     ).toMatch(read);
-    // a refund's debit is linked today: its own texts keep « read from the statement », which is so
+    // a refund's debit is booked once its line is linked (automatically for its RFD reference): review round 2 (L6)
+    // says so — « comptabilisé depuis le relevé », never « son débit, ou son rejet, soit lu sur le relevé »
     for (const code of [
       "refund_in_downloaded_file",
       "refund_pending",
-    ] as ErrorCode[])
-      expect(errorText(code), code).toMatch(read);
+    ] as ErrorCode[]) {
+      expect(errorText(code), code).not.toMatch(read);
+      expect(errorText(code), code).toMatch(/comptabilisé depuis le relevé/);
+      expect(errorText(code), code).not.toContain("ou son rejet");
+    }
   });
 });
 

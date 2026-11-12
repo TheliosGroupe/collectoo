@@ -1,4 +1,10 @@
-import { type ErrorCode, FILE_BOOKED_WHEN } from "@/lib/boarding/forms";
+import {
+  type ErrorCode,
+  FILE_BOOKED_WHEN,
+  REFUND_BOOKED_WHEN,
+  REFUND_NOT_EXECUTED,
+  REFUND_RETURNED,
+} from "@/lib/boarding/forms";
 import {
   type Notification,
   notificationState,
@@ -185,12 +191,14 @@ const OUR_TRANSFER_ID = /^(RMT|SWP)[0-9A-F]{12}$/;
 const OUR_PMT_INF = /^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$/;
 
 /**
- * M2c-6b-1 (plan §2.4 rule 5; review money-1, K1): a line of our payouts or sweeps, as the database reads it — a debit
- * carrying our RMT/SWP end-to-end id (whatever kind the statement gives it), a debit with no end-to-end id carrying one
- * of our files' PmtInfIds (a batch line: the database also checks the PmtInf is one of that account's files), and a
- * credit return whose original id (or its own, when the bank gives none) is our RMT/SWP id. Such a line is only ever
+ * M2c-6b-1 (plan §2.4 rule 5; review money-1, K1): a line of our payouts or sweeps, as the database reads it — a line
+ * whose own end-to-end id, or original one, is our RMT/SWP id (whatever its direction and the kind the statement gives
+ * it: a debit of our payout or sweep, the payee's bank's return credit of one, a debit « return » naming one; review
+ * round 2, L4, as private.post_debit_links reads it), and a debit with no end-to-end id carrying one of our files'
+ * PmtInfIds (a batch line: the database also checks the PmtInf is one of that account's files). Such a line is only ever
  * booked from the statement (the debit job, or ops in M2c-6b-2): never a payment's return or its loss, a refund, a
- * refund come back or an explanation — the database refuses each (`own_transfer_line`).
+ * refund come back or an explanation — the database refuses each (`own_transfer_line`), but on our batch line the
+ * refunds of that PmtInf handed out to the bank (offersOwnBatchRefunds).
  */
 export function isOurTransferLine(o: {
   direction: string;
@@ -199,15 +207,10 @@ export function isOurTransferLine(o: {
   original_end_to_end_id?: string | null;
   payment_info_id?: string | null;
 }): boolean {
-  if (o.direction === "debit")
-    return (
-      OUR_TRANSFER_ID.test(o.end_to_end_id ?? "") ||
-      (!o.end_to_end_id && OUR_PMT_INF.test(o.payment_info_id ?? ""))
-    );
   return (
-    o.direction === "credit" &&
-    o.kind === "return" &&
-    OUR_TRANSFER_ID.test(o.original_end_to_end_id ?? o.end_to_end_id ?? "")
+    OUR_TRANSFER_ID.test(o.end_to_end_id ?? "") ||
+    OUR_TRANSFER_ID.test(o.original_end_to_end_id ?? "") ||
+    (o.direction === "debit" && !o.end_to_end_id && OUR_PMT_INF.test(o.payment_info_id ?? ""))
   );
 }
 
@@ -254,6 +257,64 @@ export function offersPaymentLinks(o: {
       o.kind === "return" || o.kind === "refund_out" || o.kind === "other_debit"
     );
   return o.direction === "credit" && o.kind === "return";
+}
+
+/** Whether « À classer » reads public.debit_link_options for a line: only for a line it may offer links on. */
+export function readsLinkOptions(o: {
+  direction: string;
+  kind: string;
+  end_to_end_id?: string | null;
+  original_end_to_end_id?: string | null;
+  payment_info_id?: string | null;
+}): boolean {
+  return offersPaymentLinks(o) || offersOwnBatchRefunds(o);
+}
+
+/**
+ * The links « À classer » offers on a line, from the payments the job named and public.debit_link_options listed
+ * (`payments`, a payment the job named marked `named`) and the refunds that function listed (`refunds`):
+ *   - « Retour du paiement … » on a debit M2b reads as a payment's return or another debit: the payments of which at
+ *     least the line's amount is left (5 for a return, 2 for another debit);
+ *   - « Retour au-delà du paiement … (perte du cabinet) » on a debit read as a return: the payments the job named of
+ *     which less is left than the line takes back (M2c-1, OQ-34);
+ *   - « Remboursement … » / « Remboursement revenu … »: the refunds listed.
+ * Review round 2 (L4, money-1 / K1 in depth): on our lines exactly what debit_link_options lists there, which is only
+ * what private.post_debit_links accepts — on our batch line the refunds it lists (that PmtInf's file-mode refunds of the
+ * line's amount handed out to the bank; none while a member is cancelled and not returned), never a payment's return or
+ * its loss, whatever the job named; on our RMT/SWP lines and their returns nothing (their options are not even read).
+ */
+export function linkOffers<
+  P extends { left_minor: string; named?: boolean },
+  R,
+>(
+  row: {
+    direction: string;
+    kind: string;
+    amount_minor: string;
+    end_to_end_id?: string | null;
+    original_end_to_end_id?: string | null;
+    payment_info_id?: string | null;
+  },
+  payments: P[],
+  refunds: R[],
+): { returns: P[]; losses: P[]; refunds: R[] } {
+  // review M2c-1: no return or refund link on our own transfers and credits (the database refuses them); review
+  // M2c-6b-1 (money-1): nor on our payouts' and sweeps' lines (own_transfer_line) — the loss included
+  const linkable = offersPaymentLinks(row);
+  const amount = BigInt(row.amount_minor);
+  const isReturn = row.direction === "debit" && row.kind !== "refund_out";
+  return {
+    returns:
+      linkable && row.direction === "debit"
+        ? payments.filter((p) => BigInt(p.left_minor) >= amount).slice(0, isReturn ? 5 : 2)
+        : [],
+    losses:
+      linkable && row.direction === "debit" && row.kind === "return"
+        ? payments.filter((p) => p.named === true && BigInt(p.left_minor) < amount)
+        : [],
+    // … but our batch line takes a refund of its PmtInf in a file handed out (offersOwnBatchRefunds): what is listed
+    refunds: linkable || offersOwnBatchRefunds(row) ? refunds : [],
+  };
 }
 
 /**
@@ -314,7 +375,7 @@ export function explainable(o: {
 }): boolean {
   // M2c-6b-1 (plan §2.3; the database's own_transfer_line, review money-1): our payout's or sweep's debit (its RMT or
   // SWP id, or a batch line of one of our PmtInfs) and the return of one are booked from the statement, never explained
-  // away — nor any line carrying one of our RMT/SWP ids, whichever way
+  // away — nor any line carrying one of our RMT/SWP ids, whichever way (isOurTransferLine reads both ids, round 2)
   if (
     isOurTransferLine({
       direction: o.direction,
@@ -322,9 +383,7 @@ export function explainable(o: {
       end_to_end_id: o.endToEndId,
       original_end_to_end_id: o.originalEndToEndId,
       payment_info_id: o.paymentInfoId,
-    }) ||
-    OUR_TRANSFER_ID.test(o.endToEndId ?? "") ||
-    OUR_TRANSFER_ID.test(o.originalEndToEndId ?? "")
+    })
   )
     return false;
   if (o.direction !== "debit") return true;
@@ -591,10 +650,12 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     help: "Un brouillon de reversement attend sa validation depuis plus d'un jour ouvré, ou sa préparation a échoué et rien ne la relance : validez-le, ou ouvrez-le et cliquez « Actualiser » (ou « Abandonner »).",
   },
   // review M2c-4 (legal#3): an approved run is not paid until the bank's debit; review M2c-6b-1 (legal-texts#2, K3):
-  // what the check knows is that the debit is not booked — the statement may show it on a line the job cannot book
+  // what the check knows is that the debit is not booked — the statement may show it on a line the job cannot book;
+  // round 2 (L3): a payout never handed out to the bank (still ordered, or in a file nobody downloaded) is proven unpaid
+  // at once (private.run_remittance_runs_checks' olc.proven), whatever the statements
   remittance_payout_overdue: {
     label: "Reversement validé non débité après la date limite",
-    help: "La dernière date d'exécution de certains encaissements d'un reversement validé est passée (art. R124-6 CPCE) et son débit n'est pas comptabilisé : vérifiez que le virement a été transmis et exécuté. Si le relevé montre ce débit sans sa référence, ou dans une ligne groupée d'un autre montant, la ligne attend dans « Débits et retours » ; le dépassement n'est enregistré qu'une fois les relevés de cette date importés sans aucune ligne qui puisse être ce débit.",
+    help: "La dernière date d'exécution de certains encaissements d'un reversement validé est passée (art. R124-6 CPCE) et son débit n'est pas comptabilisé : vérifiez que le virement a été transmis et exécuté. Si le relevé montre ce débit sans sa référence, ou dans une ligne groupée d'un autre montant, la ligne attend dans « Débits et retours ». Le dépassement est enregistré aussitôt pour un virement jamais remis à la banque (encore à mettre dans un fichier, ou dans un fichier jamais téléchargé) ; sinon, une fois les relevés de cette date importés sans aucune ligne qui puisse être ce débit.",
   },
   remittance_payout_not_executed: {
     label: "Reversement non exécuté à la date demandée",
@@ -960,9 +1021,13 @@ export function refundCancellable(
   return status === "requested" && !refundInDownloadedFile(transfer);
 }
 
-/** What the payment's page says in place of « Annuler » for a refund whose transfer is in a downloaded file. */
+/**
+ * What the payment's page says in place of « Annuler » for a refund whose transfer is in a downloaded file. M2c-6b-1
+ * review round 2 (L6): it leaves « en cours » when its debit is booked from the statement (then its return, if one
+ * comes); a refund the bank does not execute leaves no line (REFUND_NOT_EXECUTED).
+ */
 export function refundInDownloadedFileNote(fileNumber: string): string {
-  return `Le virement de ce remboursement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire, et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.`;
+  return `Le virement de ce remboursement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${REFUND_BOOKED_WHEN}), et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). ${REFUND_RETURNED} ${REFUND_NOT_EXECUTED} Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`;
 }
 
 /** What the refund sheet says the RFD reference becomes, by the execution chosen (« auto »: the database's default). */

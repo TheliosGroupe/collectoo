@@ -607,8 +607,12 @@ and pgTAP `033`/`034` keep their assertions and TODO markers.
   `private.post_bank_bookings` now locks FOR KEY SHARE, in id order and before the allocation lock, the payments of the
   payout runs' lines that can be late at this debit (a superset of the breach rows'); lock order: runs → payout accounts
   → bank accounts → those payments → `payments:<org>` → lines → remit lock → files → transfers. pgTAP `035` checks that
-  the payments locked are the breach rows' (mutant: nothing locked — killed). No two-connection test (a request_refund
-  or reverse_allocation waiting on the allocation lock against the funds pass booking a late debit): deferred, recorded.
+  the set of payments the step selects (`pg_temp._bb_pay_locks`) covers the breach rows' (mutant: the whole step removed
+  — killed). It reads that set only, not the lock: the verifier's two lock mutants survived it (95/95 each) — the `for
+  key share` statement deleted with the set kept, and the lock moved after the allocation lock — so « killed » held for
+  the whole step, not for the lock. No two-connection test (a request_refund or reverse_allocation waiting on the
+  allocation lock against the funds pass booking a late debit): deferred, recorded; round 2 adds it and both lock
+  mutants fail it (below).
 - **legal-texts#2 (medium; K3) — no permanent breach row for a payout whose debit the job cannot book.** A CSV line
   without the end-to-end id, or a batch line short of one member, left a payout paid on time « proven unpaid » and an
   append-only breach row written. The in-flight proof now also needs no unbooked, unlinked debit line on the paying
@@ -649,7 +653,8 @@ and pgTAP `033`/`034` keep their assertions and TODO markers.
   text) for the client's runs whose transfer is `returned` (the client cannot read `bank_transfer`); the « Reversements »
   page reads it (`returnedRuns`) and `statementRunView(run, returnedOn)` shows « Virement revenu impayé le jj/mm/aaaa :
   il vous sera reversé à nouveau » in the error tone, the amount kept (vitest `documents.test.ts`; the contract's
-  wording — plan §4.2 had planned « … : un nouveau reversement vous est proposé » for 6b-2).
+  wording — plan §4.2 had planned « … : un nouveau reversement vous est proposé » for 6b-2). Round 2 (L2, below)
+  replaces that text: it stayed after the money was paid again.
   pgTAP `035`: the client's admin reads its returned run, another client's none. The E2E has no returned payout, so no
   screenshot of that state (the client page's screenshots are unchanged).
 - **legal-texts#7 (low) — `payout_overrun`'s French.** « … dépassait ce qui restait dû au client … » (vitest).
@@ -714,6 +719,117 @@ sequential scan once per chunk — `docs/benchmarks/remittances.md`, the non-str
 `generate_transfer_file` and `request_refund` variants and 035's dblink lock-order item; `debit_link_options` still lists
 payments and refunds for our lines (every such link is refused by `post_debit_links`; the page asks it only for lines it
 offers links on); the refund texts' « son débit, ou son rejet, soit lu sur le relevé » (M2c-6a).
+
+**Round 2 (2026-11-12).** The verifiers of round 1 left three regressions of its own texts, two defence-in-depth gaps
+and the scale job red; fixed by three branches (database and concurrency tests, performance, pages and docs) on one
+contract (L1–L6), then integrated. The migration is still edited in place; the cancellation after download stays
+**off**; `033` keeps its assertions and `034` its TODO markers.
+<!-- integrator: check against the merged code and test names -->
+
+- **L1 (new:statement-late-cause) — a returned payout paid again late states its own cause.** K2 made a re-proposed
+  `payout_returned` line late-able, and the client's statement then gave it a collection's cause (« encaissement
+  identifié tardivement » or « validation tardive »). `private.remittance_statement_build` (redefined from
+  `20261114090000`, same settings and grants) gives such a line `late_cause = 'payout_returned'`, tested before the other
+  causes; the renderer's `LATE_CAUSE` (`remittance/statement.py`) words it « virement revenu impayé, reversé à nouveau »
+  (CSV `hors_delai`, and the PDF as for the other causes). A new code only: no payload drawn before carries it, so no
+  template version bump. pgTAP `035` (`sc_returned_statement`); pytest
+  `test_a_returned_payout_paid_again_late_states_the_return_as_its_cause`. COMPLIANCE CPCE-08, DOMAIN « Revenu impayé ».
+- **L2 (new:client-returned-stale) — the client's returned run says whether, and by which run, it was paid again.** A
+  returned transfer never changes status, so `returned_runs` lists its run for good and « il vous sera reversé à
+  nouveau » stayed after the money was paid again. Each entry carries `repaid_by` (`public.client_remittance_summary`
+  redefined): the number of the run whose live line holds that return's `payout_returned` item (the line by the
+  transfer's return entry, keyed), once that run is booked; null while the item waits, sits in a draft or in a run in
+  flight. The « Reversements » page (`returnedRuns`, `statementRunView(run, returned)` in `lib/remittance/documents.ts`)
+  reads « Virement revenu impayé le jj/mm/aaaa : son montant sera reversé par un prochain reversement » in the error tone
+  before, and « Virement revenu impayé le jj/mm/aaaa : reversé à nouveau par le reversement <numéro> » in the neutral
+  tone after (the green stays the mark of a run whose own payout was debited); an absent key reads null, an entry whose
+  `repaid_by` is not a run's number is left out (the run's own words, never a guess). vitest `documents.test.ts` (both
+  states and the parsing; mutants: `repaid_by` ignored by the view, by the parsing, the ok tone — killed); pgTAP `035`
+  (`sc_repaid`: before and after the re-run is booked). DOMAIN « Revenu impayé ». The wording is the contract's L2,
+  which settles round 1's K4 question.
+- **L3 (new:overdue-help-never-handed-out).** The `remittance_payout_overdue` help said the breach is recorded only once
+  the statements of that date are imported; for a payout never handed out to the bank the row is written at once
+  (`olc.proven`; pgTAP `035` `sc_returned_overdue`). It now says « Le dépassement est enregistré aussitôt pour un
+  virement jamais remis à la banque (encore à mettre dans un fichier, ou dans un fichier jamais téléchargé) ; sinon, une
+  fois les relevés de cette date importés sans aucune ligne qui puisse être ce débit. » — « remis à la banque », not
+  « transmis », which the Virements pages keep for a file ops marked sent (vitest « says when the breach is recorded …
+  (L3) »; mutant: round 1's sentence — killed).
+- **L4 (money-1 / K1 in depth) — every link kind refuses our lines; the page offers there only what the database
+  accepts.** `private.post_bank_bookings`' `loss` rule (link_debit « loss » on a payment with nothing left, which skips
+  `post_debit_links`) refuses with `own_transfer_line` a line whose own or original id is one of our RMT/SWP ids, and a
+  batch line of one of our TF- PmtInfs; `private.post_debit_links` reads a line's own or original id whatever its
+  direction and kind (a debit « return » naming our RMT id as its original included); `public.debit_link_options`
+  (redefined, granted as before) lists on our batch line only its PmtInf's file-mode refunds of the line's amount whose
+  transfer is in a file handed out (none while a member is cancelled and not returned, L5), on our RMT/SWP lines and
+  their returns nothing, never a payment. pgTAP `035` (`sc_loss_own`: « Perte » on each shape of our lines;
+  `sc_options_off`). Pages (`lib/payments/debits.ts`): `isOurTransferLine` reads a line as the database does (its own or
+  original id, either direction; the batch line); `readsLinkOptions` and `linkOffers` give « À classer » its offers — on
+  our batch line exactly the refunds listed, on our RMT/SWP lines and their returns nothing (their options not read), «
+  Retour du paiement … » and « Retour au-delà du paiement … (perte du cabinet) » never on our lines, whatever the job
+  named (vitest « offers on our batch line exactly the refunds debit_link_options lists … (L4) », « offers nothing on
+  our RMT/SWP lines and the returns of them … (L4) », « keeps the M2b links on lines not ours … (L4) »; mutants: the
+  original id ignored, the loss not gated, returns on our batch line, refunds on every line, options read for every
+  line — each killed). This closes round 1's « `debit_link_options` still lists payments and refunds for our lines ».
+- **L5 (K1's switch-on hole).** The refund exception on our batch line also requires that its PmtInf has no member in
+  its current file cancelled and not returned (`not private.transfer_return_seen`). A transfer that the request's own
+  transfer re-issues (its `replaces` chain) is not such a member: without that exclusion 034's G2 link was refused
+  `own_transfer_line` instead of reaching the refund's trigger (`reissue_in_downloaded_file`; mutant: the exclusion
+  removed — 034 test 4 fails). Harmless while the switch is off; proven with it on in a rolled-back block (pgTAP `035`
+  `sc_options_on`, the verifier's probe p2 scenario B: R_b cancelled after download, R_a's link refused
+  `own_transfer_line`, no refund listed, the line left to the funds pass). No new `034` todo: nothing fails with the
+  switch on. Contract deviation: the re-issue exclusion, which the contract's text did not name.
+- **L6 — no refund text promises a « rejection » read from the statement.** `refund_in_downloaded_file`,
+  `refund_pending` and the payment's page note (`refundInDownloadedFileNote`) said a refund stays « en cours » until «
+  son débit, ou son rejet, soit lu sur le relevé ». They now say its debit is booked from the statement
+  (`REFUND_BOOKED_WHEN`: automatically when the line carries its RFD reference, or its lot's when it is that lot's only
+  transfer; otherwise once the line is linked in « Débits et retours »), then the payee's bank's return if one comes
+  (`REFUND_RETURNED`), and that a refund the bank does not execute leaves no line and stays « en cours » until the
+  cancellation after download is available (`REFUND_NOT_EXECUTED`): see the bank, tell support (`lib/boarding/forms.ts`;
+  vitest « no refund text promises a « rejection » read from the statement (L6) »; round 7's assertion that the refund
+  texts keep « lu sur le relevé » (`transfers.test.ts`) now asserts « comptabilisé depuis le relevé »; mutants: the old
+  words, no `REFUND_NOT_EXECUTED`, no `REFUND_RETURNED`, no ops path — each killed). COMPLIANCE SEPA-01's round-5
+  sentence (« until M2c-6b reads its debit or rejection ») corrected the same way.
+- **P1 (round 1's worker finding A) — the batch rule linear at every size.** `private.post_bank_bookings`' batch rule in
+  MATERIALIZED steps (the lines, their rows, each PmtInf's members by keyed laterals, the verdict): one batch line of 200
+  members reads 2,600 transfer and 1,200 item rows (42,400 and 41,000 before).
+  `test_a_batch_line_of_200_members_reads_each_member_a_bounded_number_of_times` (red before).
+- **P2 (finding B) — the transfers' status update keyed.** `private.bank_booking_post_rows` updates the transfers booked
+  or returned by the array of their ids, never a hash join over every servicer's transfers once statistics are
+  forgotten; `test_the_funds_pass_reads_no_table_of_transfers_in_full` is strict (no xfail) and holds with statistics
+  forgotten and frozen.
+- **P3 (the `scale` job red) — the nightly checks keyed.** `private.run_payment_checks`' checks statement reads by the
+  servicer and the rows each check needs (the payments' positions from the payments by keyed laterals, the funds and
+  receivable accounts' postings through those accounts, bank lines, notifications, receipts, requests and bookings by
+  key; correlated EXISTS kept as subplans), with the same results on every servicer of a CI-order database; per-table and
+  per-check read bounds on the nightly checks (the refund file, the payouts and the 50k run) so the tests no longer rest
+  on wall-clock alone. The distribution in the CI order, and any check that aggregates a tenant's ledger by definition:
+  `docs/benchmarks/remittances.md` « M2c-6b-1 review fixes, round 2 ». (P4: `test_200_rmt_debits_in_one_funds_pass`
+  measures plan §1.4's 200 RMT/SWP lines in one funds pass.)
+- **Concurrency tests.** concurrency-2's test that bites:
+  `test_the_funds_pass_and_a_command_holding_a_late_line_s_payment_never_deadlock` — a payout late at its debit;
+  `request_refund` in file mode holds its line's payment FOR UPDATE and waits on `payments:<org>` while the funds pass
+  books it: no 40P01; with the key-share statement deleted, or moved after the allocation lock (the two mutants that
+  survived `035`), DeadlockDetected. `test_the_job_and_a_refund_holding_a_late_line_s_payment_never_deadlock`: the same
+  refund against the job's first message (both MERGED mutants deadlock). concurrency-1's deferred variants:
+  `test_the_funds_pass_and_a_command_holding_the_run_never_deadlock` also runs `generate_transfer_file` (holding the
+  paying account) and `request_refund` on the payment of a single-refund batch line the M2b pass links (holding that
+  payment); mutant MERGED: cancel and download deadlock, generate and refund read `job:with_funds`; its silent twin
+  deadlocks cancel and download. 035's dblink item, as a worker test (a pgTAP test's own transaction already holds the
+  allocation lock, and a dblink session cannot see its rows):
+  `test_the_funds_pass_waits_for_the_allocation_lock_holding_only_what_comes_before_it` probes with NOWAIT that the
+  waiting funds pass holds the run, the account and the late payment, not yet the line, the remit lock, the file or the
+  transfer (both concurrency-2 mutants fail it). The harness's lock timeouts: its sessions report a deadlock after
+  100 ms (asserted under each command's own lock_timeout); a command that times out on a lock (55P03, a slow job under
+  load) is retried, a deadlock (40P01) never is.
+- **The tests' residuals (T2–T4).** T2: decide_bookings' precedence pinned — a never-downloaded file's batch line with a
+  cancelled member is `transfer_not_handed_out` before `cancelled_transfer_debited`
+  (`test_a_batch_line_of_a_file_never_handed_out_is_that_first`). T3: I20's sub-clauses seeded alone in `035` (a payout
+  debit booking on a transfer still in its file; an executed refund linked 0 or 2 times; the cash_out alone; the bounce
+  alone). T4: one `035` case per remaining re-check rule of `post_bank_bookings` (run_not_in_flight, not_its_line, one
+  kind per line, batch_mixed, batch_partial, batch_incomplete, a PmtInf not in its current file, transfer_differs by
+  account and by amount, return_differs, transfer_twice, transfer_debited_twice, the review deleted) — the rows M2c-6b-2's
+  ops path will send; the batch rule's « not handed out » and « all booked » arms are shadowed by the row rule
+  (equivalent mutants).
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
