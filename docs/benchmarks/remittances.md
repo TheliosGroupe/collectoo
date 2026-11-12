@@ -427,8 +427,9 @@ job's `test_transfer_files_scale_integration.py`, the new tables' statistics for
 
 ### Review fixes (2026-11-12): 5,000 payouts booked by the funds pass (`test_debit_bookings_scale_integration.py`)
 
-Same VM, the worker agent's own local stack right after `supabase db reset`, the test run alone: 2 passed, 2 xfailed
-in 837.8 s (13 min 58 s). The fixture (review T6): 5,050 clients created set-based as pgTAP 035's (each its mandate
+Same VM, the worker agent's own local stack right after `supabase db reset`, the test run alone (twice: 837.8 s, then
+the committed version 2 passed, 1 xfailed in 872.2 s; the figures below agree within 0.3 s, the second run's quoted
+where they differ). The fixture (review T6): 5,050 clients created set-based as pgTAP 035's (each its mandate
 with complete terms, 15 % flat with netting, a confirmed payout account and one file with its RF reference and opening
 balance) 43.1 s; a statement paying each file imported, matched and allocated 30.0 s; 5,050 runs requested (500
 commands a transaction), prepared by four consumers 121.3 s (24 ms a run), approved by 26 commands 4.5 s and their
@@ -439,11 +440,11 @@ written and downloaded. The statistics of `bank_transfer`, `transfer_file_item`,
 
 | Step | Size | Time | Rows read (keyed, per transfer) | Plan §1.4 |
 |---|---|---|---|---|
-| (b) The file's PmtInf debited as one batch line (no end-to-end id): the funds pass, one transaction (rolled back) | 5,000 members | **31.3 s**; 5,000 bookings | `bank_transfer` 65,052 (13), `transfer_file_item` 30,000 (6), `bank_line_booking` 15,000 (3) | < 60 s |
+| (b) The file's PmtInf debited as one batch line (no end-to-end id): the funds pass, one transaction (rolled back) | 5,000 members | **31.3 s**; 5,000 bookings | `bank_transfer` 65,050 of which 5,050 by a sequential scan (12 keyed), `transfer_file_item` 30,000 (6), `bank_line_booking` 15,000 (3) | < 60 s |
 | (a) A statement of the file's 5,000 debits, one line per RMT end-to-end id: the import | 5,000 lines | 1.1 s | | |
-| … the debit job: the M2b pass, then the funds pass in three messages | 5,000 payouts | **22.9 s**: chunks of 2,000, 2,000 and 1,000 lines in 9.2, 9.1 and 4.4 s | `bank_transfer` 65,162 of which 15,150 by sequential scans (10 keyed), `transfer_file_item` 10,000 (2), `bank_line_booking` 15,000 (3) | each chunk < 60 s; < 120 s |
+| … the debit job: the M2b pass, then the funds pass in three messages | 5,000 payouts | **22.6 s**: chunks of 2,000, 2,000 and 1,000 lines in 9.2, 9.0 and 4.2 s | `bank_transfer` 65,162 of which 15,150 by sequential scans (10 keyed), `transfer_file_item` 10,000 (2), `bank_line_booking` 15,000 (3) | each chunk < 60 s; < 120 s |
 | … 200 RMT lines, at the chunks' rate | 200 | ≈ 0.9 s | | ≈ 1 s |
-| Nightly checks with the 5,000 booked payouts and the 50 cancelled transfers (I19, I20, the bookings' alerts) | 5,050 transfers | **1.12 s**, 0 violations | | < 5 s |
+| Nightly checks with the 5,000 booked payouts and the 50 cancelled transfers (I19, I20, the bookings' alerts) | 5,050 transfers | **1.05 s**, 0 violations | | < 5 s |
 
 Each payout booked once (5,000 bookings of 5,000 distinct transfers), each run `booked` on the debit date with its
 `client_settlement`. The test asserts the targets and the keyed reads per transfer (at most 16 of `bank_transfer`, 4 of
