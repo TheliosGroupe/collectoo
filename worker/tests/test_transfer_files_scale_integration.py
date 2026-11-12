@@ -114,8 +114,10 @@ SEQ_PER_OWN_ROW = 2
 
 def checks_with_reads(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, dict[str, Any]]:
     """The nightly checks of the servicer (the job's SQL), timed, and the rows their transaction
-    read from each table: (by index, by sequential scans) — deterministic, whatever the cache."""
-    with psycopg.connect(DB) as conn, conn.transaction():
+    read from each table: (by index, by sequential scans) — deterministic, whatever the cache.
+    Prints where the time went (the functions' own time, track_functions)."""
+    with psycopg.connect(ADMIN) as conn, conn.transaction():
+        conn.execute("set local track_functions = 'all'")
         started = time.monotonic()
         row = conn.execute(
             "select private.run_payment_checks(%s)", (tenant["servicer"],)
@@ -126,6 +128,11 @@ def checks_with_reads(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, di
                from pg_stat_xact_user_tables
                where coalesce(idx_tup_fetch, 0) + coalesce(seq_tup_read, 0) > 0"""
         ).fetchall()
+        spent = conn.execute(
+            """select funcname, round(self_time::numeric), calls from pg_stat_xact_user_functions
+               order by self_time desc limit 5"""
+        ).fetchall()
+    print(f"\nnightly checks {elapsed:.2f}s, the functions' own ms (calls): {spent}")
     assert row is not None
     reads = {("public." + r[0]).replace("public.public.", "public."): (int(r[1]), int(r[2]))
              for r in rows}  # fmt: skip
@@ -135,6 +142,10 @@ def checks_with_reads(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, di
 # The local stack's superuser (as stats_helpers): auto_explain's ANALYZE settings are its own.
 ADMIN = make_conninfo(DB, user="supabase_admin")
 PER_CHECK = 4  # rows each check may handle, per row the servicer owns (OWN_ROWS' tables together)
+# buffers each check may touch (shared, hit or read), per row the servicer owns: a probe by key
+# touches a few; an index scan through every request of the servicer, dead versions included,
+# for each payment touched 1.44 million for 5,000 refunds (review round 2, P3)
+PER_CHECK_BLOCKS = 4
 
 
 def _work(node: dict[str, Any]) -> int:
@@ -150,49 +161,68 @@ def _work(node: dict[str, Any]) -> int:
     return n + sum(_work(c) for c in node.get("Plans", []))
 
 
-def checks_work(tenant: dict[str, Any]) -> list[tuple[str, int]]:
+def checks_work(tenant: dict[str, Any]) -> list[tuple[str, int, int]]:
     """The checks statement of the servicer's nightly checks, run again under EXPLAIN ANALYZE
-    (auto_explain: row counts, no timing) and rolled back: the rows each check handled — each
-    branch of its UNION ALL and each of its CTEs. Deterministic: rows, whatever the cache."""
+    (auto_explain: row counts and buffers, no timing) and rolled back: the rows each check handled
+    and the buffers it touched — each branch of its UNION ALL (with the CTEs it is the first to
+    read) and each of its CTEs. Deterministic: rows and pages, whatever the cache."""
     notices: list[str] = []
     with psycopg.connect(ADMIN) as conn:
         conn.add_notice_handler(lambda d: notices.append(d.message_primary or ""))
         try:
             for setting in (
                 "load 'auto_explain'",
-                "set auto_explain.log_min_duration = 0",
+                # (the checks statement takes longer; the statements a function runs per row,
+                # less: logged, 50,000 of them cost a minute)
+                "set auto_explain.log_min_duration = 1",
                 "set auto_explain.log_analyze = on",
                 "set auto_explain.log_timing = off",
+                "set auto_explain.log_buffers = on",
                 "set auto_explain.log_format = 'json'",
                 "set auto_explain.log_nested_statements = on",
                 "set client_min_messages = log",
             ):
                 conn.execute(setting)
+            started = time.monotonic()
             conn.execute("select private.run_payment_checks(%s)", (tenant["servicer"],))
+            again_s = time.monotonic() - started
         finally:
             conn.rollback()
+    print(f"\nnightly checks again (row counts on, warm) {again_s:.2f}s")
     plans = [json.loads(n.split("plan:", 1)[1]) for n in notices if "plan:" in n]
-    plan = next(
+    found = [
         p["Plan"] for p in plans if p["Query Text"].lstrip().startswith("insert into pg_temp._chk")
-    )
+    ]
+    assert len(found) == 1, [p["Query Text"][:60] for p in plans]
+    plan = found[0]
     append = plan["Plans"][0]["Plans"][0]
     assert append["Node Type"] == "Append", append["Node Type"]
     return [
-        (c.get("Subplan Name") or f"check {k}", _work(c)) for k, c in enumerate(append["Plans"])
+        (
+            c.get("Subplan Name") or f"check {k}",
+            _work(c),
+            int(c.get("Shared Hit Blocks", 0)) + int(c.get("Shared Read Blocks", 0)),
+        )
+        for k, c in enumerate(append["Plans"])
     ]
 
 
-def assert_checks_bounded(org: str, work: list[tuple[str, int]]) -> None:
-    """Each check handled at most PER_CHECK rows per row the servicer owns (+ the slack): never
-    every servicer's rows, never its own n² (review round 2, P3: its payments joined to their
-    grouped entries by a nested loop compared 12.5 million rows for 5,000 refunds)."""
+def assert_checks_bounded(org: str, work: list[tuple[str, int, int]]) -> None:
+    """Each check handled at most PER_CHECK rows and touched at most PER_CHECK_BLOCKS buffers per
+    row the servicer owns (+ the slack): never every servicer's rows, never its own n² (review
+    round 2, P3: its payments joined to their grouped entries by a nested loop compared 12.5
+    million rows for 5,000 refunds)."""
     with psycopg.connect(DB) as conn:
         own = sum(int(one(conn, q, (org,))) for q in OWN_ROWS.values())
     print(
-        f"\nnightly checks, rows handled per check (the servicer owns {own}):"
+        f"\nnightly checks, rows handled and buffers touched per check (the servicer owns {own}):"
         f" {sorted(work, key=lambda w: -w[1])[:8]}"
     )
-    over = [(name, n) for name, n in work if n > PER_CHECK * own + CHECK_SLACK]
+    over = [
+        w
+        for w in work
+        if w[1] > PER_CHECK * own + CHECK_SLACK or w[2] > PER_CHECK_BLOCKS * own + CHECK_SLACK
+    ]
     assert over == [], (over, own)
 
 

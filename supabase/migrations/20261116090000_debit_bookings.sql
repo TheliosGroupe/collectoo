@@ -2211,10 +2211,14 @@ begin
           from pe c
           group by c.id, c.status, c.review_reason, c.account_id, c.amount_minor, c.currency, c.booking_date,
                    c.bank_account_id, c.bank_transaction_id, c.updated_at) g
-    left join lateral (select sum(q.amount_minor) as pending, count(*) as n
-                       from (select q.amount_minor from public.refund_request q
-                             where q.payment_id = g.id and q.status = 'requested'
-                               and q.organization_id = p_organization_id offset 0) q) q on true
+    left join lateral (select sum(q.amount_minor) filter (where q.status = 'requested') as pending,
+                              count(*) filter (where q.status = 'requested') as n
+                       from (select q.amount_minor, q.status from public.refund_request q
+                             where q.payment_id = g.id offset 0) q) q on true
+    -- (by the payment's key only — a request's payment is its servicer's, its foreign key: with the servicer or the
+    -- status in the lateral, stale statistics chose the index of the requests still requested, led by the servicer,
+    -- and read every request of the servicer for each payment, the executed ones' dead versions included until
+    -- vacuum: 1.44 million buffers, 2 s, for 5,000 refunds)
   ),
   bal as materialized (
     -- Each of the servicer's accounts of the funds' books (client and servicer money: 5120, 4710, 4670, 4679, the
@@ -2495,8 +2499,9 @@ begin
                end as code
         from pos c
         cross join lateral (select count(distinct x.number) as numbers, max(x.version) as v
-                            from (select x.number, x.version from public.receipt x
-                                  where x.payment_id = c.id and x.organization_id = p_organization_id offset 0) x) r
+                            from (select x.number, x.version, x.organization_id from public.receipt x
+                                  where x.payment_id = c.id offset 0) x
+                            where x.organization_id = p_organization_id) r
         left join lateral (select x.kind, x.account_id from public.receipt x
                            where x.payment_id = c.id and x.version = r.v offset 0) cur on true
         where c.account_id is not null and c.updated_at < now() - interval '1 hour'
@@ -2632,9 +2637,10 @@ begin
                    and r.released_kind in ('return', 'refund_out', 'transfer_out', 'own_transfer_in',
                                            'client_transfer_in'))
                or (t.kind = 'other_debit' and t.direction = 'debit'
-                   and exists (select 1 from public.refund_request q
-                               where q.bank_account_id = t.bank_account_id and q.amount_minor = t.amount_minor
-                                 and q.organization_id = t.organization_id and q.status = 'requested' offset 0)))
+                   and exists (select 1 from (select q.organization_id, q.status from public.refund_request q
+                                              where q.bank_account_id = t.bank_account_id
+                                                and q.amount_minor = t.amount_minor offset 0) q
+                               where q.organization_id = t.organization_id and q.status = 'requested' offset 0)))
           and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id offset 0)
           and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = t.id offset 0)
           and not exists (select 1 from public.bank_own_credit_release c where c.bank_transaction_id = t.id offset 0)
