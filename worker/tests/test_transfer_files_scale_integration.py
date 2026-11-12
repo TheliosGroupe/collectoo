@@ -15,17 +15,19 @@ state CI meets). Prints the timings (docs/benchmarks/remittances.md). TRANSFER_F
 the size."""
 
 import hashlib
+import json
 import logging
 import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, LiteralString
 
 import psycopg
 import pytest
-from debit_helpers import checks, violations
+from debit_helpers import violations
 from integration_helpers import DB, one, storage
+from psycopg.conninfo import make_conninfo
 from psycopg.types.json import Jsonb
 from reconciliation_helpers import pay
 from remittance_helpers import drain, recent_business_day, staff
@@ -65,16 +67,149 @@ def _transfer_reads() -> int:
     return int(row[0]) if row else 0
 
 
-def _seq_reads(table: str) -> int:
-    """Rows of `table` read by sequential scans since the statistics were last reset, by every
-    backend."""
-    with psycopg.connect(DB) as conn:
-        conn.execute("select pg_stat_force_next_flush()")
+# The nightly checks' reads, by table (review round 2, P3): the rows of the servicer's own each
+# table holds, and how many times the checks may read each of them at most (each check reads the
+# rows it needs by the servicer's key; a check aggregating the servicer's whole ledger reads it
+# once). A table read by a sequential scan reads every servicer's rows: only small tables may be.
+OWN_ROWS: dict[str, LiteralString] = {
+    "public.ledger_entry": "select count(*) from public.ledger_entry where organization_id = %s",
+    "public.ledger_account": "select count(*) from public.ledger_account"
+    " where organization_id = %s",
+    "public.bank_transaction": "select count(*) from public.bank_transaction"
+    " where organization_id = %s",
+    "public.payment": "select count(*) from public.payment where organization_id = %s",
+    "public.bank_transfer": "select count(*) from public.bank_transfer where organization_id = %s",
+    "public.bank_line_booking": "select count(*) from public.bank_line_booking"
+    " where organization_id = %s",
+    "public.bank_debit_link": "select count(*) from public.bank_debit_link"
+    " where organization_id = %s",
+    "public.refund_request": "select count(*) from public.refund_request"
+    " where organization_id = %s",
+    "public.receipt": "select count(*) from public.receipt where organization_id = %s",
+    "public.ledger_posting": """select count(*) from public.ledger_posting p
+                                join public.ledger_entry e on e.id = p.entry_id
+                                where e.organization_id = %s""",
+    "public.client_notification": """select count(*) from public.client_notification n
+                                     join public.organization o on o.id = n.client_organization_id
+                                     where o.servicer_organization_id = %s""",
+}
+PER_OWN_ROW = {
+    "public.ledger_entry": 8,
+    "public.ledger_posting": 12,
+    "public.ledger_account": 12,
+    "public.bank_transaction": 6,
+    "public.payment": 6,
+    "public.bank_transfer": 6,
+    "public.bank_line_booking": 10,
+    "public.bank_debit_link": 6,
+    "public.refund_request": 6,
+    "public.receipt": 4,
+    "public.client_notification": 4,
+}
+CHECK_SLACK = 2_000  # the small tables' rows (reference data, statements, bank accounts)
+# a sequential scan reads every servicer's rows: one is the right plan only where the servicer owns
+# most of the table (one servicer alone in the database), never where others' rows outnumber its own
+SEQ_PER_OWN_ROW = 2
+
+
+def checks_with_reads(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, dict[str, Any]]:
+    """The nightly checks of the servicer (the job's SQL), timed, and the rows their transaction
+    read from each table: (by index, by sequential scans) — deterministic, whatever the cache."""
+    with psycopg.connect(DB) as conn, conn.transaction():
+        started = time.monotonic()
         row = conn.execute(
-            "select coalesce(seq_tup_read, 0) from pg_stat_user_tables where relid = %s::regclass",
-            (table,),
+            "select private.run_payment_checks(%s)", (tenant["servicer"],)
         ).fetchone()
-    return int(row[0]) if row else 0
+        elapsed = time.monotonic() - started
+        rows = conn.execute(
+            """select relid::regclass::text, coalesce(idx_tup_fetch, 0), coalesce(seq_tup_read, 0)
+               from pg_stat_xact_user_tables
+               where coalesce(idx_tup_fetch, 0) + coalesce(seq_tup_read, 0) > 0"""
+        ).fetchall()
+    assert row is not None
+    reads = {("public." + r[0]).replace("public.public.", "public."): (int(r[1]), int(r[2]))
+             for r in rows}  # fmt: skip
+    return dict(row[0]), elapsed, reads
+
+
+# The local stack's superuser (as stats_helpers): auto_explain's ANALYZE settings are its own.
+ADMIN = make_conninfo(DB, user="supabase_admin")
+PER_CHECK = 4  # rows each check may handle, per row the servicer owns (OWN_ROWS' tables together)
+
+
+def _work(node: dict[str, Any]) -> int:
+    """The rows a plan node and its children handled: those each node returned, and those its
+    filters, join filters and rechecks threw away (a table read whole, or rows compared n²)."""
+    loops = int(node.get("Actual Loops", 1))
+    n = loops * (
+        int(node.get("Actual Rows", 0))
+        + int(node.get("Rows Removed by Filter", 0))
+        + int(node.get("Rows Removed by Join Filter", 0))
+        + int(node.get("Rows Removed by Index Recheck", 0))
+    )
+    return n + sum(_work(c) for c in node.get("Plans", []))
+
+
+def checks_work(tenant: dict[str, Any]) -> list[tuple[str, int]]:
+    """The checks statement of the servicer's nightly checks, run again under EXPLAIN ANALYZE
+    (auto_explain: row counts, no timing) and rolled back: the rows each check handled — each
+    branch of its UNION ALL and each of its CTEs. Deterministic: rows, whatever the cache."""
+    notices: list[str] = []
+    with psycopg.connect(ADMIN) as conn:
+        conn.add_notice_handler(lambda d: notices.append(d.message_primary or ""))
+        try:
+            for setting in (
+                "load 'auto_explain'",
+                "set auto_explain.log_min_duration = 0",
+                "set auto_explain.log_analyze = on",
+                "set auto_explain.log_timing = off",
+                "set auto_explain.log_format = 'json'",
+                "set auto_explain.log_nested_statements = on",
+                "set client_min_messages = log",
+            ):
+                conn.execute(setting)
+            conn.execute("select private.run_payment_checks(%s)", (tenant["servicer"],))
+        finally:
+            conn.rollback()
+    plans = [json.loads(n.split("plan:", 1)[1]) for n in notices if "plan:" in n]
+    plan = next(
+        p["Plan"] for p in plans if p["Query Text"].lstrip().startswith("insert into pg_temp._chk")
+    )
+    append = plan["Plans"][0]["Plans"][0]
+    assert append["Node Type"] == "Append", append["Node Type"]
+    return [
+        (c.get("Subplan Name") or f"check {k}", _work(c)) for k, c in enumerate(append["Plans"])
+    ]
+
+
+def assert_checks_bounded(org: str, work: list[tuple[str, int]]) -> None:
+    """Each check handled at most PER_CHECK rows per row the servicer owns (+ the slack): never
+    every servicer's rows, never its own n² (review round 2, P3: its payments joined to their
+    grouped entries by a nested loop compared 12.5 million rows for 5,000 refunds)."""
+    with psycopg.connect(DB) as conn:
+        own = sum(int(one(conn, q, (org,))) for q in OWN_ROWS.values())
+    print(
+        f"\nnightly checks, rows handled per check (the servicer owns {own}):"
+        f" {sorted(work, key=lambda w: -w[1])[:8]}"
+    )
+    over = [(name, n) for name, n in work if n > PER_CHECK * own + CHECK_SLACK]
+    assert over == [], (over, own)
+
+
+def assert_checks_keyed(org: str, reads: dict[str, Any]) -> None:
+    """Each table the checks read: its rows read at most PER_OWN_ROW times the servicer's own (+
+    the slack), and by sequential scans (every servicer's rows) at most SEQ_PER_OWN_ROW times."""
+    with psycopg.connect(DB) as conn:
+        own = {t: int(one(conn, q, (org,))) for t, q in OWN_ROWS.items()}
+    print(f"\nnightly checks, rows read (by index, by sequential scans) / the servicer's own: "
+          f"{ {t: (reads.get(t, (0, 0)), own[t]) for t in OWN_ROWS} }")  # fmt: skip
+    over = {
+        t: (reads.get(t, (0, 0)), own[t])
+        for t in OWN_ROWS
+        if sum(reads.get(t, (0, 0))) > PER_OWN_ROW[t] * own[t] + CHECK_SLACK
+        or reads.get(t, (0, 0))[1] > SEQ_PER_OWN_ROW * own[t] + CHECK_SLACK
+    }
+    assert over == {}, over
 
 
 def _cash(tenant: dict[str, Any]) -> tuple[dict[str, Any], float, int]:
@@ -242,24 +377,8 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
     assert executed == SIZE
     # each transfer read by key, a bounded number of times over the passes (10,000 for 5,000)
     assert transfer_reads <= 3 * SIZE, transfer_reads
-    with psycopg.connect(DB) as conn:
-        own_accounts = one(
-            conn,
-            "select count(*) from public.ledger_account where organization_id = %s",
-            (tenant["servicer"],),
-        )
-    accounts_before = _seq_reads("public.ledger_account")
-    nightly = time.monotonic()
-    run = checks(tenant)
-    nightly_s = time.monotonic() - nightly
-    accounts_read = _seq_reads("public.ledger_account") - accounts_before
+    run, nightly_s, check_reads = checks_with_reads(tenant)
     assert violations(str(run["run_id"])) == []
-    # integration of the M2c-6b-1 review: the servicer-level checks read the servicer's own ledger
-    # accounts by key (organization, book), never every servicer's by sequential scans — five of
-    # them read the 150,000 accounts of the scale runs before (25 MB each, cold after their
-    # writes: 5 to 7.6 s here); a small table read whole stays within the slack
-    assert accounts_read <= 5 * own_accounts + 2_000, (accounts_read, own_accounts)
-
     logs = [r.getMessage() for r in caplog.records if r.getMessage().startswith("transfer file ")]
     print(
         f"\n{SIZE} transfers: refunds asked in {asked_s:.1f}s; generation (command)"
@@ -268,8 +387,8 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
         f" {SIZE} in flight {cash_s:.2f}s ({cash_read} bank lines read), once their debits are seen"
         f" {seen_s:.2f}s ({seen_read} read); « Virements »"
         f" {overview_s:.2f}s; the debit job booking the {SIZE} debits {book_s:.1f}s"
-        f" ({transfer_reads} transfer rows read, all passes); nightly checks {nightly_s:.1f}s"
-        f" ({accounts_read} ledger accounts read by sequential scans)"
+        f" ({transfer_reads} transfer rows read, all passes); nightly checks {nightly_s:.2f}s"
+        f" (rows read by index, by sequential scans: {check_reads})"
     )
     # the commands within the API's 8 s; the job well within the queue's visibility timeout
     assert generate_s < 8
@@ -277,4 +396,10 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
     assert overview_s < 8
     assert write_s < 60
     assert book_s < 120
+    # integration of the M2c-6b-1 review, then review round 2 (P3): every check reads the
+    # servicer's rows by its key — the ledger accounts by (organization, book), the payments'
+    # entries from the payments, each payment's bank line by its id — never every servicer's by a
+    # sequential scan (cold right after the earlier scale runs' writes: 5 to 7.6 s here)
+    assert_checks_keyed(str(tenant["servicer"]), check_reads)
+    assert_checks_bounded(str(tenant["servicer"]), checks_work(tenant))
     assert nightly_s < 5  # plan §1.4
