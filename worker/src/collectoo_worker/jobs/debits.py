@@ -261,6 +261,7 @@ def _fact(row: dict[str, Any]) -> TransferFact | None:
         debit_booked=bool(row["debit_booked"]),
         return_booked=bool(row["return_booked"]),
         return_seen=bool(row["return_seen"]),
+        debit_date=row.get("debit_date"),
     )
 
 
@@ -313,6 +314,7 @@ def _process_funds_lines(conn: Conn, org: str, after: list[str] | None) -> dict[
             "select * from private.bank_booking_candidates(%s, %s, %s, %s)",
             (org, after[0] if after else None, after[1] if after else None, CHUNK),
         ).fetchall()
+    debit_dates(conn, rows)
     lines = funds_lines(rows)
     if len(lines) >= CHUNK:
         last = lines[-1]
@@ -336,6 +338,32 @@ def _process_funds_lines(conn: Conn, org: str, after: list[str] | None) -> dict[
         time.monotonic() - started,
     )
     return summary
+
+
+def debit_dates(conn: Conn, rows: list[dict[str, Any]]) -> None:
+    """Each returned transfer's debit date (`debit_date` on its rows): the date of the entry its
+    debit booked — what private.post_bank_bookings compares a return's date with (review T4, K5:
+    a return dated before its debit is `return_before_debit`). Keyed by the transfer, then its
+    entry."""
+    ids = sorted(
+        {str(r["transfer_id"]) for r in rows if r["role"] == "return" and r["debit_booked"]}
+    )
+    if not ids:
+        return
+    dates = dict(
+        conn.execute(
+            """select t.id::text, e.effective_date
+               from unnest(%s::uuid[]) u (id)
+               cross join lateral (select q.id, q.entry_id from public.bank_transfer q
+                                   where q.id = u.id offset 0) t
+               cross join lateral (select le.effective_date from public.ledger_entry le
+                                   where le.id = t.entry_id offset 0) e""",
+            (ids,),
+        ).fetchall()
+    )
+    for r in rows:
+        if r["role"] == "return" and r["transfer_id"] is not None:
+            r["debit_date"] = dates.get(str(r["transfer_id"]))
 
 
 def apply_bookings(conn: Conn, org: str, bookings: list[Booking]) -> dict[str, Any]:

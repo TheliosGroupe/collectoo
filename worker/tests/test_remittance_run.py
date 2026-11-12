@@ -13,7 +13,9 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
+from collectoo_worker.remittance.calendar import conservative
 from collectoo_worker.remittance.commission import FileFacts, KeyState, LineKind
+from collectoo_worker.remittance.deadline import remittance_deadline
 from collectoo_worker.remittance.documents import EarlierCharge, EarlierInvoice
 from collectoo_worker.remittance.run import (
     Facts,
@@ -374,6 +376,41 @@ def test_the_draft_records_what_its_plan_assumed() -> None:
     assert held.header["proceeding_opened_on"] == date(2026, 10, 15)
     hashes = {d.header["inputs_hash"] for d in (base, on_debits, held)}
     assert len(hashes) == 3
+
+
+def test_a_returned_payout_keeps_the_deadline_of_the_line_it_came_from() -> None:
+    """Design §9.2, Q7 (M2c-6b-1 review legal-texts#1, money-2): a payout that came back is held to
+    the R124-6 date of the returned run's line it came from — that line's E and its mandate's delay
+    (15 days here: never the one-month default for want of a file). It stays uncommissioned and
+    outside any mandate's gross; the line carries E and the terms version, and the header's dates
+    count it (the approval's late reason, the file's late flag). With no dated line to hold it to,
+    no date, as before."""
+    e = date(2026, 10, 12)
+    back = Item(
+        entry_id="RT",
+        kind=LineKind.PAYOUT_RETURNED,
+        amount_minor=164_000,
+        posted_at=_at(date(2026, 11, 2), 9),
+        effective_date=date(2026, 11, 2),
+        encaissement_date=e,
+        held_terms_id="T1",
+        held_days=15,
+    )
+    d = prepare_run(_facts([back]))
+    (line,) = d.lines
+    want = remittance_deadline(e, 15, conservative())
+    assert line.deadline == want and want != remittance_deadline(e, 30, conservative())
+    assert (line.commission_minor, line.state, line.reason) == (0, "none", "not_commissionable")
+    assert (line.mandate_id, line.terms_id, line.item.encaissement_date) == (None, "T1", e)
+    assert d.header["earliest_deadline"] == want.deadline
+    assert d.header["earliest_latest_execution_date"] == want.latest_execution
+    assert d.plan.net_minor == 164_000  # no mandate's gross: nothing netted against it
+    # unmeetable (a 1-5 day delay, OQ-71): flagged on the line, held to the month by the checks
+    short = prepare_run(_facts([replace(back, held_days=1)]))
+    assert short.lines[0].deadline is not None and short.lines[0].deadline.unmeetable
+    # no dated line found for it: no date (the SQL queue drops it too)
+    bare = prepare_run(_facts([replace(back, held_terms_id=None, held_days=None)]))
+    assert bare.lines[0].deadline is None and bare.header["earliest_deadline"] is None
 
 
 def test_percent_is_french() -> None:

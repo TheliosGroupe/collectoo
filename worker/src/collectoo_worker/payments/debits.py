@@ -294,7 +294,7 @@ RUN_NOT_IN_FLIGHT = "run_not_in_flight"  # the payout's run is not approved or s
 BATCH_PARTIAL = "batch_partial"  # a batch line its PmtInf's members do not add up to
 BATCH_MIXED = "batch_mixed"  # payouts and refunds, or several refunds, in one line
 RETURN_DIFFERS = "return_differs"  # more than the transfer, or of a transfer not booked
-RETURN_BEFORE_DEBIT = "return_before_debit"  # a return of a transfer whose debit is not booked
+RETURN_BEFORE_DEBIT = "return_before_debit"  # its debit not booked, or booked on a later day
 
 BOOKING_REVIEW_REASONS = frozenset(
     {
@@ -352,6 +352,9 @@ class TransferFact:
     debit_booked: bool = False  # a debit booking of it exists
     return_booked: bool = False
     return_seen: bool = False  # (cancelled) the bank returned it: it was paid in its batch
+    debit_date: date | None = (
+        None  # (booked) its debit's date: its entry's, as the SQL re-check reads
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,7 +535,7 @@ def _batch(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one outcome per
     return [Booking(line.id, m.kind, transfer_id=m.id) for m in live]
 
 
-def _transfer_return(line: FundsLine) -> list[Booking]:
+def _transfer_return(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one review per rule
     """A credit returning our payout or sweep (its original id): the transfer's return."""
     expected = "payout" if (line.returned_id or "").startswith("RMT") else "sweep"
     named = [f for f in line.facts if f.role == "return"]
@@ -547,6 +550,10 @@ def _transfer_return(line: FundsLine) -> list[Booking]:
         return _funds_review(line, TRANSFER_DIFFERS, named)
     if line.amount_minor > f.amount_minor:
         return _funds_review(line, RETURN_DIFFERS, named)
+    if f.debit_date is not None and line.booking_date < f.debit_date:
+        # dated before the debit it returns (the SQL re-check's last rule; review T4, K5): never
+        # booked (the ledger refuses a reversal dated before its entry), ops see why
+        return _funds_review(line, RETURN_BEFORE_DEBIT, named)
     return [Booking(line.id, f"{expected}_returned", transfer_id=f.id)]
 
 
