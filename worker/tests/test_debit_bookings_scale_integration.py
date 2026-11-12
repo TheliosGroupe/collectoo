@@ -377,7 +377,7 @@ PER_MEMBER = {**PER_TRANSFER, "public.transfer_file_item": 8}
 SLACK = 1_000  # the other sessions' reads in the window (statistics flushed late)
 XACT_SLACK = 50  # one transaction's own reads: no other session in them
 # plan §1.4: « 200 RMT/SWP lines ≈ 1 s » in one funds pass. Measured (review round 2, P4) on the
-# 200-payout fixture, the 4-vCPU VM shared with another stack: 0.6 to 0.9 s in five runs (the job's
+# 200-payout fixture, the 4-vCPU VM shared with another stack: 0.5 to 0.9 s in four runs (the job's
 # log, to 0.1 s; docs/benchmarks/remittances.md); the bound keeps twice the worst
 SMALL_FUNDS_PASS_S = 2.0
 

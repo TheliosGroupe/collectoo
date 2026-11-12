@@ -428,23 +428,24 @@ job's `test_transfer_files_scale_integration.py`, the new tables' statistics for
 ### Review fixes (2026-11-12): 5,000 payouts booked by the funds pass (`test_debit_bookings_scale_integration.py`)
 
 Same VM, the worker agent's own local stack right after `supabase db reset`, the test run alone (twice: 837.8 s, then
-the committed version 2 passed, 1 xfailed in 872.2 s; the figures below agree within 0.3 s, the second run's quoted
-where they differ). The fixture (review T6): 5,050 clients created set-based as pgTAP 035's (each its mandate
+the committed version: 2 passed, 1 xfailed in 872.2 s). The figures below are the committed run's, the first run's in
+brackets where they differ (review round 2, P4: this paragraph quoted the first run's fixture figures as the
+second's). The fixture (review T6): 5,050 clients created set-based as pgTAP 035's (each its mandate
 with complete terms, 15 % flat with netting, a confirmed payout account and one file with its RF reference and opening
-balance) 43.1 s; a statement paying each file imported, matched and allocated 30.0 s; 5,050 runs requested (500
-commands a transaction), prepared by four consumers 121.3 s (24 ms a run), approved by 26 commands 4.5 s and their
-jobs 559.1 s (111 ms a run, serialised on the servicer's allocation and remit locks; the documents jobs they queue are
-taken off unrun); 50 runs cancelled before any file; « Générer le fichier » of the 5,000 payouts 2.89 s; the file
-written and downloaded. The statistics of `bank_transfer`, `transfer_file_item`, `bank_line_booking`,
+balance) 45.3 s (43.1 s); a statement paying each file imported, matched and allocated 30.7 s (30.0 s); 5,050 runs
+requested (500 commands a transaction), prepared by four consumers 127.8 s (121.3 s; 25 ms a run), approved by 26
+commands 5.3 s (4.5 s) and their jobs 582.6 s (559.1 s; 115 ms a run, serialised on the servicer's allocation and remit
+locks; the documents jobs they queue are taken off unrun); 50 runs cancelled before any file; « Générer le fichier » of
+the 5,000 payouts 3.09 s (2.89 s); the file written and downloaded. The statistics of `bank_transfer`, `transfer_file_item`, `bank_line_booking`,
 `client_advance` and `remittance_run` are forgotten before the bookings.
 
 | Step | Size | Time | Rows read (keyed, per transfer) | Plan §1.4 |
 |---|---|---|---|---|
 | (b) The file's PmtInf debited as one batch line (no end-to-end id): the funds pass, one transaction (rolled back) | 5,000 members | **31.3 s**; 5,000 bookings | `bank_transfer` 65,050 of which 5,050 by a sequential scan (12 keyed), `transfer_file_item` 30,000 (6), `bank_line_booking` 15,000 (3) | < 60 s |
 | (a) A statement of the file's 5,000 debits, one line per RMT end-to-end id: the import | 5,000 lines | 1.1 s | | |
-| … the debit job: the M2b pass, then the funds pass in three messages | 5,000 payouts | **22.6 s**: chunks of 2,000, 2,000 and 1,000 lines in 9.2, 9.0 and 4.2 s | `bank_transfer` 65,162 of which 15,150 by sequential scans (10 keyed), `transfer_file_item` 10,000 (2), `bank_line_booking` 15,000 (3) | each chunk < 60 s; < 120 s |
-| … 200 RMT lines, at the chunks' rate | 200 | ≈ 0.9 s | | ≈ 1 s |
-| Nightly checks with the 5,000 booked payouts and the 50 cancelled transfers (I19, I20, the bookings' alerts) | 5,050 transfers | **1.05 s**, 0 violations | | < 5 s |
+| … the debit job: the M2b pass, then the funds pass in three messages | 5,000 payouts | **22.6 s** (22.9 s): chunks of 2,000, 2,000 and 1,000 lines in 9.2, 9.0 and 4.2 s (9.2, 9.1, 4.4 s) | `bank_transfer` 65,153 (65,162) of which 15,150 by sequential scans (10 keyed), `transfer_file_item` 10,000 (2), `bank_line_booking` 15,000 (3) | each chunk < 60 s; < 120 s |
+| … 200 RMT lines in one funds pass | 200 | not measured in these runs (an estimate of ≈ 0.9 s from the chunks' rate stood here; measured in round 2, below) | | ≈ 1 s |
+| Nightly checks with the 5,000 booked payouts and the 50 cancelled transfers (I19, I20, the bookings' alerts) | 5,050 transfers | **1.05 s** (1.12 s), 0 violations | | < 5 s |
 
 Each payout booked once (5,000 bookings of 5,000 distinct transfers), each run `booked` on the debit date with its
 `client_settlement`. The test asserts the targets and the keyed reads per transfer (at most 16 of `bank_transfer`, 4 of
@@ -512,3 +513,157 @@ sequential scans, which the test now asserts — but the remaining cold reads (`
 Left open (integration report): a plan-robustness pass over the nightly checks' remaining unkeyed reads, or the
 founder's call on this test's bound (30 s before the review).
 
+
+### M2c-6b-1 review fixes, round 2 (2026-11-12, same VM: 4 vCPU, 16 GB RAM, a second local stack beside the main one)
+
+All runs on a second Supabase stack (ports 553xx) while another agent's test suites ran on the main stack: the VM was
+shared, so wall times are noisier and somewhat higher than in the sections above (the 5,050 runs' fixture took
+724–868 s here against 681–724 s before). Each figure below says what it was measured on. The scratch scripts named
+(`mut_p1`, `mut_p2`, `bounds_probe.py`, the comparison of the two functions) are in the session's scratch area, not
+the repository.
+
+**P1 — the batch rule, linear.** `private.post_bank_bookings`' batch rule is now four `MATERIALIZED` steps (the lines,
+the rows each holds, the members of each line's PmtInf by keyed laterals, the verdict per line). As one grouped
+subquery joined to the line's rows it was re-run once per row. New test
+`test_a_batch_line_of_200_members_reads_each_member_a_bounded_number_of_times` (200-payout fixture, the funds pass in
+one transaction, rolled back, its own `pg_stat_xact_user_tables`):
+
+| 200-member batch line, one funds pass | `bank_transfer` rows read | `transfer_file_item` | time |
+|---|---|---|---|
+| before (the build's rule, mutant `mut_p1`: the old rule in the new migration) | 42,400 | 41,000 | 1.08 s |
+| after | **2,600** (13 a member) | **1,200** (6) | 0.57–0.64 s |
+
+The bound is 16 and 8 reads a member (+ 50); red before, green after. At 5,000 members the reads are 65,000 / 30,000 /
+15,000 (`bank_line_booking`), none by a sequential scan.
+
+**P2 — the transfers booked, by key.** `private.bank_booking_post_rows` updates the transfers booked or returned
+through `x.id = any (array(…))` (the index's condition) and joins their entries by id. Each measured pass of the
+payout test now forgets the statistics of `bank_transfer`, `transfer_file_item`, `bank_line_booking`,
+`client_advance` and `remittance_run` right before it and keeps them forgotten (autovacuum off on them meanwhile), so
+the bounds hold in that state, not by chance; `test_the_funds_pass_reads_no_table_of_transfers_in_full` is strict (no
+xfail): no table of transfers read by a sequential scan beyond a tiny table (≤ 1,000 rows: the 200-payout fixture's,
+alone in a fresh database, where a sequential scan is the planner's right choice).
+
+| Funds pass, statistics forgotten | `bank_transfer` rows read by sequential scans |
+|---|---|
+| (a) 5,000 RMT lines, 3 chunks — before (integration, 9537d10) | 15,150 (3 × every transfer) |
+| (a) — after | **0** (55,000 keyed, 11 a transfer) |
+| (b) one 5,000-member batch line — before / after | 5,050 / **0** |
+| 200 RMT lines, a database holding 5,450 transfers — mutant `mut_p2` (the old update only) / after | 5,650 / **0** |
+
+**P4 — 200 RMT lines in one funds pass** (plan §1.4 « ≈ 1 s »), `test_200_rmt_debits_in_one_funds_pass`: the
+statement of the 200 payouts' debits imported, the debit job run; the funds pass (one message, the job's log to 0.1 s):
+0.6, 0.8, 0.9 and 0.5 s (four runs with this migration; the whole job 0.64–1.07 s), 11 keyed `bank_transfer` reads a
+transfer, none by a sequential scan. Asserted ≤ 2.0 s (twice the worst run). An SWP line takes the same rules and
+reads (its transfer by its id); the sweep is ordered only once payouts are booked, so the fixture has none.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` alone, right after a reset), final
+migration (2afccb5): **5 passed** in 918.8 s. Fixture 59.0 s / 24.6 s / 724.0 s (prepare jobs 125.1 s, commands 4.7 s,
+approval jobs 585.7 s) / « Générer le fichier » 3.19 s; (b) the batch line **31.8 s** (29.5–31.3 s before; its time
+is the posting — `post_run_settlements` 14.5 s, `ledger_post_set` 6.7 s — not the batch rule); (a) the debit job
+**21.6 s**, chunks 8.5, 9.0 and 4.0 s; the nightly checks with 5,000 booked payouts and 50 cancelled transfers
+**1.12 s** (1.05–1.12 s before), 0 violations, every table read by key or, where the servicer owns the table, by a
+sequential scan (`payment` 5,250 rows of which its own 5,050). The first run with ac15bd4 (the VM busier: fixture
+868 s, (b) 41.1 s, checks 1.26 s) failed only the 200-member test's then-strict « no sequential scan » on a table of
+200 transfers, since tolerated up to 1,000 rows. On one database, alternating the build's `run_payment_checks` and
+this one (six calls each, warm): 1.21 s and 1.13 s on average.
+
+**P3 — the nightly checks, keyed.** Profiled first (the build's SQL, the CI scale job's command in its order, each
+`run_payment_checks` call of the tests under auto_explain ANALYZE BUFFERS, nested statements, its transaction's
+`pg_stat_xact_user_tables`):
+
+- The refund-file servicer (5,000 refunds): 8.0 s, 7.7 s of it in one place — the payments joined to their grouped
+  entries (`pos`) by a nested loop, the statistics not knowing the servicer's payments yet (1 row estimated on each
+  side): 12,497,500 rows compared by the join filter. Not cold reads: 3,123 blocks read in that branch. Most likely
+  why the bound failed in 7 runs of 9 and passed in the others: a plan that rests on whether autovacuum has analysed
+  `payment` and `ledger_entry` since the servicer's 5,000 payments (not proven run by run).
+- The 50,000-line servicer: the checks statement 4.1–4.8 s, with whole-table sequential scans: `ledger_posting` four
+  times (6.26 million rows: `receivable_negative`, `item_negative` twice, `owner_claim_mirror`), `ledger_entry` three
+  times (786,066: the same and `notification_missing`), `bank_transaction` (169,500: I11 `cash_in_statement`, the
+  payments' lines hashed), `client_notification` (107,000: `notification_missing`).
+
+What each check reads now (one statement still, one snapshot; ARCHITECTURE §4: a lateral holding only a key for each
+row reached from another, `EXISTS … OFFSET 0` kept as a keyed subplan):
+
+| Check | Before | Now |
+|---|---|---|
+| payments' positions (`pos`: I4/I5, I19's payments, ageing, receipts, notifications) | entries tagged with a payment, grouped, then joined to the payments (hash or, misestimated, nested loop) | each payment, its entries by `payment_id`, their postings by `entry_id`, kept when on the servicer's 4710 accounts (`pe`), grouped per payment; the pending refund by the payment's key |
+| `payment_negative_allocation` | the servicer's entries again | `pe` |
+| I8′, I13, I19 (cash), `servicer_shortfall` | accounts × postings, joined by hash | each of the servicer's funds accounts (`(organization_id, book)`), its postings by `ledger_posting_balance_idx` (`bal`) |
+| `receivable_negative`, `item_negative`, `owner_claim_mirror` | sequential scans of every servicer's postings and entries | each receivable account (`(organization_id, book)`), its postings by key, each lowering posting's entry by its id — one pass (`recv`); `item_negative` by a window, no join |
+| I11 `cash_in_statement` | payments ⋈ every servicer's bank lines by hash | the servicer's 5120 accounts' postings, each entry by its id; each payment's line by its id |
+| I19 (booked lines), I20 | joins by hash (refund requests, transfers, bookings) | each booking's postings, each posting's account; each transfer's bookings in one keyed scan, its request by `transfer_id`; each run's transfer by its id |
+| `notification_missing` | every servicer's entries and notifications by sequential scans | the servicer's payments' entries by `payment_id`, each notification by its key; the returns from the payments (a link's payment is its servicer's: its foreign key) |
+| receipts, `debit_unclassified`, `duplicate_unresolved` | the servicer's receipts grouped, joined by hash; every line of the servicer | each payment's receipts by its key; the lines of those kinds three days old at least, by the kinds' partial indexes, each test by key |
+
+A posting's account is its entry's servicer's and an entry names a payment of its own servicer (both refused at
+posting, LG002), so the accounts reach every posting the checks summed and the payments every entry tagged with a
+payment: what each check finds is unchanged. Checked on two CI-order databases (8 servicers each): the build's
+function and this one return the same rows (`except all` both ways: none), and pgTAP (35 files, 2,455 tests) passes.
+
+Checks that sum the servicer's ledger by definition, so that read all of the servicer's rows of a book — not a
+defect: the funds' identities I8′ (every posting of the servicer's 5120, 4710, 4670, 4679, 4689 and own books), I13
+(each client's 4670), I19 (each dedicated account's 5120), `servicer_shortfall` (4679), `bank_balance_gap` (5120 up to
+the last statement), I11 (the 5120 postings, the cash_in ones kept), the receivables' three checks (every 1100 and
+3100 posting) and the payments' positions (every payment). Their plan: an index scan of the servicer's accounts by
+`(organization_id, book)` (or its payments by `organization_id`), then each account's postings by
+`ledger_posting_balance_idx` in a lateral — linear in the servicer's own postings, never another servicer's. The
+largest is `recv` for the 50,000-line servicer: 150,000 accounts, 250,000 postings, 100,000 lowering entries read by
+id (1.6 million rows handled).
+
+Deterministic bounds (`test_transfer_files_scale_integration.py`: `checks_with_reads`, `assert_checks_keyed`,
+`checks_work`, `assert_checks_bounded`; used by the refund-file test, the 50,000-line run's last check and the payout
+test (a)):
+
+- per table (`pg_stat_xact_user_tables` of the timed call): rows read ≤ k × the servicer's own rows + 2,000 (k from 4
+  to 12 a table), and by sequential scans ≤ 2 × its own + 2,000 (a sequential scan is the right plan only where the
+  servicer owns most of the table);
+- per check (the same call again under auto_explain ANALYZE without timing, rolled back, its JSON plan): the rows each
+  branch of the statement and each CTE handled (returned, filtered out, thrown away by join filters) and the buffers
+  it touched ≤ 4 × the rows the servicer owns in those tables + 2,000 each.
+
+The buffers bound came from a second finding. A first version of the rewrite (commit ac15bd4) kept the refund
+servicer's checks at 1.9–2.4 s in the CI order (five runs: 2.04, 2.04, 1.88, 2.08 and 2.38 s), though they read only
+its own 45,000 rows and took 0.25 s a minute later. Reproduced (the refund test alone, autovacuum off): each payment's
+pending refund was looked up with the servicer and the status inside the lateral, and the stale statistics chose
+`refund_request_waiting_idx` (the requests still requested, led by the servicer) — every request of the servicer for
+each payment, the 5,000 executed ones' dead versions included until vacuum: 1.44 million buffers, no extra row (the
+rows bound did not see it). Looked up by the payment's key only (the receipts' and the other debits' pending-refund
+lookups too), the same state takes 0.29 s and 63,000 buffers; the buffers bound fails with the first version (1.49
+million against 0.18 million) and passes with this one.
+
+Before/after on the same data (the bounds probe, `bounds_probe.py` in the scratch area): with the build's function,
+the receipts servicer (5,000 payments) read `ledger_posting` 4.7 million rows and `ledger_entry` 524,054 by sequential
+scans and its `receivable_negative` handled 2.8 million rows (bound 0.42 million); the 50,000-line servicer read 7.8
+million and 786,081, `item_negative` 5.4 million rows (bound 4.0 million) — both bounds red. With this one: 0 rows by
+sequential scans of those tables, the largest check 1.6 times the servicer's rows — green. Also green with the
+statistics of `payment` and `ledger_entry` forgotten.
+
+Warm, same database, the build's function then this one: the refund servicer 6.0 s → 0.24 s; the receipts servicer
+1.96–2.29 s → 0.50–0.63 s; the allocation servicer (50,000 payments) 5.2 s → 4.2–4.4 s; the 50,000-line servicer
+5.7–6.6 s → 5.0–5.5 s (of which `run_remittance_runs_checks`, `private.pending_item_deadlines` over the 50,000 items,
+≈ 2.6 s: not this statement); the payout servicer (5,050 transfers) 1.21 s → 1.13 s (six calls each).
+
+**The CI `scale` job's command, in its order** (`RECEIPT_FILES=5000`, every `*scale_integration.py` but the payouts',
+each run right after `supabase db reset`, the CI job's `pg_stat_statements` / `auto_explain` settings), five times
+with the final migration (2afccb5), five times with the first version (ac15bd4) before it, and once with the build's
+SQL (profiled, so its checks were instrumented):
+
+| Run | Result | Refund servicer's nightly checks (< 5 s) | 50,000-line run's last checks | the run's checks with its draft / after approval | Allocation test's checks (50,000 payments) |
+|---|---|---|---|---|---|
+| build (9537d10), profiled | 6 passed, 1 failed (17 min 42 s) | **8.0 s** (instrumented) | 6.8 s (instrumented) | 6.3 / 6.6 s | 3.1 s |
+| ac15bd4 ×5 | 7 passed each (17–20 min) | 2.04, 2.04, 1.88, 2.08, 2.38 s | 6.2, 5.5, 5.5, 6.8, 6.2 s | 3.9–5.1 / 4.4–5.4 s | 3.9–4.9 s |
+| **2afccb5 ×5** | **7 passed each** (1,130, 1,059, 1,077, 1,099, 1,072 s) | **0.51, 0.45, 0.36, 0.32, 0.48 s** | 6.2, 5.7, 5.8, 6.0, 5.6 s | 4.1–5.2 / 4.5–5.3 s | 4.0–4.5 s |
+
+The worst cold run of the refund servicer's checks is 0.51 s (≤ 2.5 s): the test keeps its wall bound at 5 s, beside
+the deterministic bounds above. Its debit job over the 5,000 RFD debits: 11.6–13.9 s (< 120 s). The integration's
+figures for the 50,000-line run's last checks were 6.3 and 5.9 s: 5.6–6.2 s now, of which this statement's own time
+3.0–3.5 s (`track_functions`) and `private.run_remittance_runs_checks` most of the rest (`commission_key_open` called
+50,000 times, 1.4–1.6 s, and `pending_item_deadlines`: not in this slice's statements). Warm on one database the
+statement is faster for this servicer (6.6 → 5.4 s for the whole call, above).
+
+One check got slower, and why: the allocation test's (3.1 s before, 4.0–4.5 s now). It runs first in the order, so its
+servicer owns nearly every row of the database; there, hash joins over whole tables read only its own rows and beat
+the keyed probes. The keyed plan is the one that holds whatever the statistics and the number of servicers
+(ARCHITECTURE §4); that test bounds no time. Likewise the statement-import servicer (48,368 unallocated payments, no
+entries): 0.35–0.46 s → 0.66–0.78 s warm (a few keyed probes per payment).

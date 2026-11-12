@@ -12,7 +12,8 @@ synchronous command under the API's 8 s: the transfer cancelled, one
 full credit note with one allocation per file, the lines released, the items back in the queue, the
 tier history restored) and the checks again. M2c-6b-1 (review T6): the items in a new run,
 prepared and approved, its payout filed, downloaded and debited on a statement (its RMT id): the
-debit job books it and settles the 50,000-line run; the checks (I19, I20) after it. The remittance
+debit job books it and settles the 50,000-line run; the checks (I19, I20) after it, their reads
+bounded by the servicer's own rows per table and per check (review round 2, P3). The remittance
 tables are never analysed (the state CI meets): the plans must not rest on statistics. Prints the
 timings (docs/benchmarks/remittances.md). REMIT_FILES changes the size."""
 

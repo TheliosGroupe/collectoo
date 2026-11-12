@@ -10,7 +10,8 @@ by its RFD id: none in flight any more). M2c-6b-1: the debit job over those 5,00
 M2b pass links each to its refund (the funds pass, in its own message, finds none of them: RFD
 lines are the M2b pass's; payouts booked by the funds pass are timed in
 test_debit_bookings_scale_integration.py), each transfer read by key; then the nightly checks with
-I19 and I20 over them (plan §1.4: < 5 s). The new tables' statistics are forgotten first (the
+I19 and I20 over them (plan §1.4: < 5 s), their reads bounded by the servicer's own rows per
+table and per check (review round 2, P3). The new tables' statistics are forgotten first (the
 state CI meets). Prints the timings (docs/benchmarks/remittances.md). TRANSFER_FILE_SIZE changes
 the size."""
 
@@ -69,8 +70,7 @@ def _transfer_reads() -> int:
 
 # The nightly checks' reads, by table (review round 2, P3): the rows of the servicer's own each
 # table holds, and how many times the checks may read each of them at most (each check reads the
-# rows it needs by the servicer's key; a check aggregating the servicer's whole ledger reads it
-# once). A table read by a sequential scan reads every servicer's rows: only small tables may be.
+# rows it needs by the servicer's key; a check summing the servicer's whole ledger reads it once).
 OWN_ROWS: dict[str, LiteralString] = {
     "public.ledger_entry": "select count(*) from public.ledger_entry where organization_id = %s",
     "public.ledger_account": "select count(*) from public.ledger_account"
@@ -428,8 +428,10 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
     assert book_s < 120
     # integration of the M2c-6b-1 review, then review round 2 (P3): every check reads the
     # servicer's rows by its key — the ledger accounts by (organization, book), the payments'
-    # entries from the payments, each payment's bank line by its id — never every servicer's by a
-    # sequential scan (cold right after the earlier scale runs' writes: 5 to 7.6 s here)
+    # entries from the payments, each payment's bank line and pending refund by its id — never
+    # every servicer's by a sequential scan, never its own n² (5 to 7.6 s here in the CI order
+    # before: the payments joined to their grouped entries by a nested loop, the statistics not
+    # knowing them yet), never every request of the servicer per payment (2 s: dead versions)
     assert_checks_keyed(str(tenant["servicer"]), check_reads)
     assert_checks_bounded(str(tenant["servicer"]), checks_work(tenant))
     assert nightly_s < 5  # plan §1.4
