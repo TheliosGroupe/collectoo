@@ -1646,7 +1646,9 @@ begin
                   false) as our_batch_line,
          -- review round 2 (L5, K1 with the switch on): that PmtInf has, in its current file, a member cancelled and not
          -- returned by the bank — the line may be that cancelled transfer's execution (the funds pass's P0,
-         -- cancelled_transfer_debited); a refund linked to it would hide it
+         -- cancelled_transfer_debited); a refund linked to it would hide it. A transfer the request's own transfer
+         -- re-issues is not such a member: the line may be that old file's late execution, which the refund's trigger
+         -- answers (reissue_in_downloaded_file: cancel the re-issue's file first; 034's G2)
          coalesce(t.direction = 'debit' and t.end_to_end_id is null
                   and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
                   and exists (select 1 from public.transfer_file_item i
@@ -1656,7 +1658,16 @@ begin
                                                   where m.id = i.transfer_id offset 0) m
                               where i.pmt_inf_id = t.payment_info_id and f.debtor_bank_account_id = t.bank_account_id
                                 and m.transfer_file_id = i.file_id and m.status = 'cancelled'
-                                and not private.transfer_return_seen(i.transfer_id)),
+                                and not private.transfer_return_seen(i.transfer_id)
+                                and not exists (
+                                  with recursive c (id, n) as (
+                                    select x.replaces_transfer_id, 1 from public.bank_transfer x
+                                    where x.id = q.transfer_id and x.replaces_transfer_id is not null
+                                    union all
+                                    select x.replaces_transfer_id, c.n + 1 from c
+                                    join public.bank_transfer x on x.id = c.id
+                                    where x.replaces_transfer_id is not null and c.n < 32)
+                                  select 1 from c where c.id = i.transfer_id)),
                   false) as pmt_inf_cancelled,
          -- the request's transfer in a file handed out to the bank (its PmtInf the only batch line that can execute it)
          coalesce(rt.status = 'in_file' and rf.status in ('downloaded', 'sent'), false) as req_handed_out,
