@@ -352,9 +352,8 @@ class TransferFact:
     debit_booked: bool = False  # a debit booking of it exists
     return_booked: bool = False
     return_seen: bool = False  # (cancelled) the bank returned it: it was paid in its batch
-    debit_date: date | None = (
-        None  # (booked) its debit's date: its entry's, as the SQL re-check reads
-    )
+    # (booked) its debit's date: its entry's, as the SQL re-check reads it
+    debit_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)

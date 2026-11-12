@@ -6,11 +6,13 @@ file of 5,000 transfers and the cash check under load).
 (one command: the per-transfer checks, the cash check, the items, the transfers in the file), the
 `transfer_file` job (5,000 transactions written, checked, uploaded), the download, the cash check
 and « Virements » with the 5,000 in flight, then a statement showing their 5,000 debits (each seen
-by its RFD id: none in flight any more). M2c-6b-1: the debit job books those 5,000 debits (the
-M2b pass links each to its refund; the funds pass, in its own message, reads the account's lines
-of ours), each transfer read by key; then the nightly checks with I19 and I20 over them. The new
-tables' statistics are forgotten first (the state CI meets). Prints the timings
-(docs/benchmarks/remittances.md). TRANSFER_FILE_SIZE changes the size."""
+by its RFD id: none in flight any more). M2c-6b-1: the debit job over those 5,000 debits — the
+M2b pass links each to its refund (the funds pass, in its own message, finds none of them: RFD
+lines are the M2b pass's; payouts booked by the funds pass are timed in
+test_debit_bookings_scale_integration.py), each transfer read by key; then the nightly checks with
+I19 and I20 over them (plan §1.4: < 5 s). The new tables' statistics are forgotten first (the
+state CI meets). Prints the timings (docs/benchmarks/remittances.md). TRANSFER_FILE_SIZE changes
+the size."""
 
 import hashlib
 import logging
@@ -249,4 +251,4 @@ def test_a_file_of_5000_transfers(  # noqa: PLR0915 - one scenario, its timings 
     assert overview_s < 8
     assert write_s < 60
     assert book_s < 120
-    assert nightly_s < 30
+    assert nightly_s < 5  # plan §1.4

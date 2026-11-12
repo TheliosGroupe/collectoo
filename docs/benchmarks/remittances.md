@@ -406,22 +406,62 @@ is followed by the funds pass in its own message and transaction, which reads th
 (`private.bank_booking_candidates`: per-branch limited unions, each transfer read once as a composite row) and books
 payouts, sweeps, returns, fees, top-ups and each payout's run settlement (one `ledger_post_set` call, the set
 settlement, the cover advances); the nightly checks add I19 signed by the 5120 postings, I20 `transfer_booked_once`
-and the bookings' alerts. Plan targets (§1.4): the job within the queue's visibility timeout, each transfer read by
-key a bounded number of times, the nightly checks well under 30 s.
+and the bookings' alerts. Plan targets (§1.4): each funds chunk < 60 s and the job < 120 s (the queue's visibility
+timeout is 300 s), each transfer read by key a bounded number of times, 200 RMT/SWP lines ≈ 1 s, the nightly checks
+< 5 s with 5,000 booked transfers and 50 cancelled.
 
 ### Result (2026-11-11, cloud session VM: 4 vCPU, 16 GB RAM, local stack right after `supabase db reset`; the scale
 job's `test_transfer_files_scale_integration.py`, the new tables' statistics forgotten first)
 
 | Step | Size | Time |
 |---|---|---|
-| The debit job over a statement of the file's debits (M2b pass in chunks, then the funds pass) | 5,000 RFD debits | **9.8 s**; 10,000 `bank_transfer` rows read over both passes (2 per transfer: keyed) |
+| The debit job over a statement of the file's debits: the M2b pass links each to its refund (the funds pass, in its own message, reads none of these lines: an RFD line is the M2b pass's) | 5,000 RFD debits | **9.8 s**; 10,000 `bank_transfer` rows read over both passes (2 per transfer: keyed) |
 | Nightly checks with I19, I20 and the bookings' alerts over them | 5,000 booked | **1.7 s**, 0 violations |
 | Generation (command) / job / download (command) of the 5,000-transfer file (unchanged from M2c-6a) | 5,000 transfers | 2.36 s / 0.95 s / 0.75 s |
 | Cash check with 5,000 in flight / once their debits are seen | 5,000 | 0.11 s (0 lines read) / 0.08 s (5,000 read) |
 
-- The scale test asserts the job under 120 s, the checks under 30 s, and at most 3 reads of `bank_transfer` per
-  transfer over all passes; every refund executed with its `cash_out`.
-- Payouts and sweeps booked by the funds pass are timed in the integration tests only (a run per client: a 5,000-payout
-  scale fixture needs 5,000 clients' runs; one run's debit with its settlement is a single `ledger_post_set` call plus
-  the set settlement, measured at under 0.1 s a chunk in `test_debit_bookings_integration.py`'s job logs).
+- This row times the M2b pass only (review T6): `private.bank_booking_candidates` selects none of the RFD lines, so the
+  funds pass read 0 lines here; payouts booked by the funds pass are measured below. The scale test asserts the job
+  under 120 s, the checks under 5 s (plan §1.4; it said 30 s before the review), and at most 3 reads of
+  `bank_transfer` per transfer over all passes; every refund executed with its `cash_out`.
+
+### Review fixes (2026-11-12): 5,000 payouts booked by the funds pass (`test_debit_bookings_scale_integration.py`)
+
+Same VM, the worker agent's own local stack right after `supabase db reset`, the test run alone: 2 passed, 2 xfailed
+in 837.8 s (13 min 58 s). The fixture (review T6): 5,050 clients created set-based as pgTAP 035's (each its mandate
+with complete terms, 15 % flat with netting, a confirmed payout account and one file with its RF reference and opening
+balance) 43.1 s; a statement paying each file imported, matched and allocated 30.0 s; 5,050 runs requested (500
+commands a transaction), prepared by four consumers 121.3 s (24 ms a run), approved by 26 commands 4.5 s and their
+jobs 559.1 s (111 ms a run, serialised on the servicer's allocation and remit locks; the documents jobs they queue are
+taken off unrun); 50 runs cancelled before any file; « Générer le fichier » of the 5,000 payouts 2.89 s; the file
+written and downloaded. The statistics of `bank_transfer`, `transfer_file_item`, `bank_line_booking`,
+`client_advance` and `remittance_run` are forgotten before the bookings.
+
+| Step | Size | Time | Rows read (keyed, per transfer) | Plan §1.4 |
+|---|---|---|---|---|
+| (b) The file's PmtInf debited as one batch line (no end-to-end id): the funds pass, one transaction (rolled back) | 5,000 members | **31.3 s**; 5,000 bookings | `bank_transfer` 65,052 (13), `transfer_file_item` 30,000 (6), `bank_line_booking` 15,000 (3) | < 60 s |
+| (a) A statement of the file's 5,000 debits, one line per RMT end-to-end id: the import | 5,000 lines | 1.1 s | | |
+| … the debit job: the M2b pass, then the funds pass in three messages | 5,000 payouts | **22.9 s**: chunks of 2,000, 2,000 and 1,000 lines in 9.2, 9.1 and 4.4 s | `bank_transfer` 65,162 of which 15,150 by sequential scans (10 keyed), `transfer_file_item` 10,000 (2), `bank_line_booking` 15,000 (3) | each chunk < 60 s; < 120 s |
+| … 200 RMT lines, at the chunks' rate | 200 | ≈ 0.9 s | | ≈ 1 s |
+| Nightly checks with the 5,000 booked payouts and the 50 cancelled transfers (I19, I20, the bookings' alerts) | 5,050 transfers | **1.12 s**, 0 violations | | < 5 s |
+
+Each payout booked once (5,000 bookings of 5,000 distinct transfers), each run `booked` on the debit date with its
+`client_settlement`. The test asserts the targets and the keyed reads per transfer (at most 16 of `bank_transfer`, 4 of
+`transfer_file_item` — 8 for a batch line's member — and 4 of `bank_line_booking`).
+
+Two plans that rest on the statistics (worker report to the SQL side, ARCHITECTURE §4):
+
+- `private.post_bank_bookings`' batch rule (`update pg_temp._bb … from (select … group by …) w`): with a few hundred
+  members the planner re-evaluates the grouped members' subquery once per row of the line — at 150 members 23,250 reads
+  of `transfer_file_item` and about 25,000 of `bank_transfer` for one line (158,106 buffer hits in that one statement,
+  `pg_stat_statements`), at 200 members 41,000 and 42,696 (n²); at 5,000 it hashes it (linear, above). A
+  `MATERIALIZED` CTE would make it independent of the estimates.
+- `private.bank_booking_post_rows`' `update public.bank_transfer … from pg_temp._bb …` (status `booked`) is a hash join
+  over a sequential scan of `bank_transfer` once its statistics are forgotten (auto_explain), once per chunk: 15,150
+  rows = 3 chunks × every transfer in the database. The test records it (a non-strict xfail: autovacuum may restore the
+  statistics during the run).
+
+The fixture makes this the longest scale test (≈ 14 min, of which ≈ 11.5 min the 5,050 runs through the jobs): with
+the CI scale job measured at 15 min 48 s before and its 30-minute timeout, the job needs a longer timeout or this test
+its own job (`.github/workflows/ci.yml` is not changed here). `PAYOUT_FILE_SIZE` changes the size.
 
