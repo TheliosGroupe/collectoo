@@ -29,8 +29,15 @@ reads hold in the state CI meets, not by chance (review round 2, P2).
 Review round 2 (P1, P4): a second fixture of SMALL = 200 payouts (plan §1.4: « 200 RMT/SWP lines
 ≈ 1 s »): their PmtInf as one batch line, its reads bounded per member (the batch rule was n² at a
 few hundred members), then their 200 RMT lines in one funds pass, timed. PAYOUT_SMALL_SIZE
-changes it."""
+changes it.
 
+Review round 3 (M3; round 2's P1): each batch pass writes no temporary file (pg_stat_database's
+temp_bytes unchanged: the batch rule's 5,000-member line was sorted to disk, 392 MB), and (b) is
+run again under auto_explain (rolled back too): each statement of the re-check over the line's rows
+handles a bounded number of rows per member (n² join filters before). A batch line of 2,000
+members is held to the same in the db job (test_debit_bookings_batch_rules_integration.py)."""
+
+import contextlib
 import hashlib
 import json
 import logging
@@ -46,6 +53,7 @@ from typing import Any
 import psycopg
 import pytest
 from debit_helpers import violations
+from explain_helpers import ADMIN, explained, statement, temp_blocks, work
 from integration_helpers import DB, SCHEDULE, TERMS, as_user, one, storage
 from psycopg.types.json import Jsonb
 from reconciliation_helpers import pay
@@ -474,16 +482,38 @@ def _statement(conn: psycopg.Connection[Any], filed: dict[str, Any], name: str) 
     return str(st)
 
 
-def _batch_pass(filed: dict[str, Any]) -> tuple[float, int, dict[str, int], dict[str, int]]:
+def _temp_bytes(conn: psycopg.Connection[Any]) -> int:
+    """The database's temporary-file bytes so far (pg_stat_database), this session's own flushed
+    first (its statistics are sent when it goes idle: forced, after its last transaction)."""
+    conn.execute("select pg_stat_force_next_flush()")
+    conn.commit()
+    n = one(conn, "select temp_bytes from pg_stat_database where datname = current_database()")
+    conn.commit()
+    return int(n)
+
+
+def _batch_pass(
+    filed: dict[str, Any], plans: list[dict[str, Any]] | None = None
+) -> tuple[float, int, dict[str, int], dict[str, int], int]:
     """Each PmtInf of the file debited as one batch line (no end-to-end id), the funds pass in one
     transaction with the statistics of the tables it reads forgotten (and kept so: autovacuum off
     on them meanwhile), then rolled back: its time, the payouts it booked, its reads (keyed and by
-    sequential scans) — this transaction's own."""
+    sequential scans) — this transaction's own —, and the temporary-file bytes the database wrote
+    meanwhile. `plans`: filled with the plans of the pass's statements longer than 1 ms
+    (auto_explain JSON, rows and buffers, no timing: the superuser's connection, the pass run as
+    postgres, the worker's role)."""
     org, tenant, payouts = filed["org"], filed["tenant"], filed["payouts"]
-    with frozen_statistics(*FROZEN), psycopg.connect(DB) as conn:
+    with (
+        frozen_statistics(*FROZEN),
+        psycopg.connect(DB if plans is None else ADMIN) as conn,
+        explained(conn, 1, plans) if plans is not None else contextlib.nullcontext(),
+    ):
         for t in FROZEN:
             forget_statistics(t)
+        temp_before = _temp_bytes(conn)
         try:
+            if plans is not None:
+                conn.execute("set role postgres")  # (reverted by the rollback)
             st = _statement(conn, filed, "batch.xml")
             for n, p in enumerate(payouts.payment_infos, start=1):
                 conn.execute(
@@ -515,10 +545,11 @@ def _batch_pass(filed: dict[str, Any]) -> tuple[float, int, dict[str, int], dict
             )
         finally:
             conn.rollback()
+        temp = _temp_bytes(conn) - temp_before
     assert booked == filed["size"], summary
     reads = {t: after.get(t, 0) - before.get(t, 0) for t in SEEN}
     seq_reads = {t: seq_after.get(t, 0) - seq_before.get(t, 0) for t in SEEN}
-    return elapsed, int(booked), reads, seq_reads
+    return elapsed, int(booked), reads, seq_reads, temp
 
 
 def _rmt_pass(
@@ -593,6 +624,17 @@ def _booked(filed: dict[str, Any], day: date) -> tuple[int, int, int, int, int]:
         ).fetchone() or (0, 0, 0, 0, 0)
 
 
+# Review round 3 (M3): the statements of private.post_bank_bookings' re-check over the job's rows
+# (the keys, the facts, the rules) — each handles a few rows per member of a batch line (measured
+# on a 2,000-member line, test_debit_bookings_batch_rules_integration.py: 18 at most), never n²
+RECHECK = (
+    "create temp table _bb_keys",
+    "create temp table _bb on commit",
+    "update pg_temp._bb b set",
+    "with l as materialized",
+)
+RECHECK_ROWS_PER_MEMBER = 40
+
 # a table of a few hundred rows (the 200-payout fixture's, alone in a fresh database) read whole by
 # a sequential scan is the planner's right choice; every servicer's 5,000 transfers never are
 TINY_TABLE = 1_000
@@ -613,12 +655,13 @@ def test_a_batch_line_of_200_members_reads_each_member_a_bounded_number_of_times
     each member's item and transfer a bounded number of times (the batch rule's grouped members
     were re-read once per row of the line: 150 members read 23,250 items, n²)."""
     n = filed_small["size"]
-    elapsed, booked, reads, seq_reads = _batch_pass(filed_small)
+    elapsed, booked, reads, seq_reads, temp = _batch_pass(filed_small)
     print(
         f"\n(P1) a batch line of {n} members: the funds pass {elapsed:.2f}s, reads {reads}"
-        f" (by sequential scans {seq_reads})"
+        f" (by sequential scans {seq_reads}), temporary files {temp} bytes"
     )
     assert booked == n
+    assert temp == 0, temp
     for t, per in PER_MEMBER.items():
         assert reads[t] <= per * n + XACT_SLACK, (t, reads)
     _no_whole_table(seq_reads)
@@ -649,18 +692,40 @@ def test_the_file_s_pmt_inf_as_one_batch_line_books_every_member(filed: dict[str
     """(b) Each PmtInf of the file debited as one batch line (no end-to-end id): one booking per
     member, in one funds pass (one transaction: the set-based settlements, the seq row_number,
     the completeness check on the line's highest seq), timed and counted, then rolled back (the
-    statement's RMT lines, test (a), book the file for real)."""
-    elapsed, booked, reads, seq_reads = _batch_pass(filed)
+    statement's RMT lines, test (a), book the file for real). Review round 3 (M3; round 2's P1):
+    linear in time and memory — no temporary file written by the database meanwhile (the batch
+    rule sorted each of the line's 5,000 rows with the array of its 5,000 transfer ids: 392 MB
+    of temporary files), and, in the same pass run again under auto_explain (rolled back too),
+    each of the re-check's statements over the line's rows handling a bounded number of rows per
+    member (« one kind per line » and « a transfer booked once per call » compared every pair of
+    them: 25 million rows each)."""
+    elapsed, booked, reads, seq_reads, temp = _batch_pass(filed)
     filed["batch_seq_reads"] = seq_reads
     print(
         f"\n(b) {len(filed['payouts'].payment_infos)} batch line(s) of {SIZE} members: the funds"
-        f" pass {elapsed:.1f}s, reads {reads} (by sequential scans {seq_reads})"
+        f" pass {elapsed:.1f}s, reads {reads} (by sequential scans {seq_reads}), temporary files"
+        f" {temp} bytes"
     )
     assert booked == SIZE
     # plan §1.4: within a minute, each member read by key a bounded number of times
     assert elapsed < 60, elapsed
     for t, per in PER_MEMBER.items():
         assert reads[t] <= per * SIZE + XACT_SLACK, (t, reads, seq_reads)
+    assert temp == 0, temp
+    plans: list[dict[str, Any]] = []
+    explained_s, booked, _, _, temp = _batch_pass(filed, plans)
+    rows = sorted(((work(p["Plan"]), statement(p)) for p in plans), reverse=True)
+    print(
+        f"\n(b) again under auto_explain (rows counted): the funds pass {explained_s:.1f}s,"
+        f" {len(plans)} statements over 1 ms, the heaviest (rows handled) {rows[:8]}"
+    )
+    assert booked == SIZE
+    spilled = [(statement(p), temp_blocks(p["Plan"])) for p in plans if temp_blocks(p["Plan"])]
+    assert (temp, spilled) == (0, []), (temp, spilled)
+    recheck = [(r, s) for r, s in rows if s.lower().startswith(RECHECK)]
+    assert len(recheck) >= 5, rows  # (the keys, the facts, the rules: each over 1 ms at 5,000)
+    over = [(r, s) for r, s in recheck if r > RECHECK_ROWS_PER_MEMBER * SIZE + XACT_SLACK]
+    assert over == [], over
 
 
 def test_5000_rmt_debits_booked_by_the_debit_job_then_the_nightly_checks(

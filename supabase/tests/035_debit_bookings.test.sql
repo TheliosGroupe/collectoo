@@ -32,9 +32,13 @@
 -- PmtInf with a member cancelled and not returned (the refund exception's switch-on hole, switch on in a rolled-back
 -- subtransaction); I20's sub-clauses each seeded alone; each remaining last-line rule of the re-check fed a row only it
 -- refuses (the batch rule's « not handed out » and « all booked » arms are shadowed by the row rule: no row reaches them).
+-- Review round 3: a credit carrying our transfers' ids is never relayed as a debtor's payment nor taken as a top-up
+-- (own_transfer_line), a bank charge naming our payout as its original still a fee (the recorded exception); a refund's
+-- cancellation in a downloaded file says what it waits for (its hint); the checks read the running balances by key.
+-- (The batch rule's linear plan: test_debit_bookings_batch_rules_integration.py.)
 -- Cancellation after download stays off (033 and 034 unchanged); some scenarios switch it on in their own subtransaction.
 begin;
-select plan(119);
+select plan(124);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -2259,6 +2263,176 @@ select is(pg_temp.isolated('sc_t4_debit_booked'), '{"why": "transfer_debited_twi
 select is(pg_temp.isolated('sc_t4_review_replaced'),
           '{"why": null, "bookings": ["1 payout 32800"], "before": "batch_partial", "after": null}'::jsonb,
   'T4: a line left to ops then booked: its review deleted');
+
+-- 11. Review round 3 ------------------------------------------------------------------------------------------------------
+-- M1 (round 2's relay of our returned transfer): « Paiement d'un débiteur relayé par le client / par le cabinet »
+-- (public.release_own_credit) refuses a credit carrying one of our transfers' ids — our RMT id on a client's credit, our
+-- SWP id on an own credit, our RMT id as the original a credit returns, one of our PmtInfIds without an end-to-end id —
+-- own_transfer_line, with its hint (a returned payout the feed did not flag as a return is booked from the statement,
+-- never as a debtor's payment); an ordinary relay still becomes a payment
+create or replace function pg_temp.relay(p_key text, p_line uuid) returns text language plpgsql as $$
+declare v text;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v := public.release_own_credit(p_key, p_line, 'versement relayé (test)') ->> 'status';
+  reset role;
+  return v;
+end $$;
+create or replace function pg_temp.sc_relay_own() returns jsonb language plpgsql as $$
+declare v_relay text;
+begin
+  perform pg_temp.stmt('60', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'client_transfer_in', 'amount', 1000,
+                       'e2e', pg_temp.e2e(pg_temp.trid('r2')), 'iban', 'FR1420041010050500013M02606'),
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 1000, 'e2e', pg_temp.e2e(pg_temp.v('s1')),
+                       'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'kind', 'client_transfer_in', 'amount', 1000,
+                       'orig', pg_temp.e2e(pg_temp.trid('r2')), 'iban', 'FR1420041010050500013M02606'),
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 1000, 'pmt', pg_temp.pmt(pg_temp.trid('r1')),
+                       'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'kind', 'client_transfer_in', 'amount', 1000, 'e2e', 'VIR-CLIENT-0001',
+                       'iban', 'FR1420041010050500013M02606')));
+  v_relay := pg_temp.relay('relay-own-0005', pg_temp.ln('60', 5));
+  return jsonb_build_object(
+    'client_rmt', pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 'relay-own-0001', pg_temp.ln('60', 1))),
+    'others', jsonb_build_array(
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 'relay-own-0002', pg_temp.ln('60', 2)))),
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 'relay-own-0003', pg_temp.ln('60', 3)))),
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 'relay-own-0004', pg_temp.ln('60', 4))))),
+    'relay', v_relay,
+    'relayed', (select count(*) from public.payment where bank_transaction_id = pg_temp.ln('60', 5)));
+end $$;
+select is(pg_temp.isolated('sc_relay_own'),
+          jsonb_build_object(
+            'client_rmt', 'own credit release refused: own_transfer_line | Ce crédit est l''un de nos propres virements '
+                          'qui revient (reversement, quote-part du cabinet, lot de notre fichier) : il se comptabilise '
+                          'depuis le relevé, automatiquement quand la banque le signale comme un retour, sinon par '
+                          'l''équipe (écran à venir). Il ne devient jamais le paiement d''un débiteur ni un '
+                          'approvisionnement.',
+            'others', to_jsonb(array_fill('own credit release refused: own_transfer_line'::text, array[3])),
+            'relay', 'unmatched', 'relayed', 1),
+  'M1: a client''s credit carrying our RMT id, an own credit carrying our SWP id, a credit returning our RMT id and one '
+  'naming our PmtInfId are never relayed as a debtor''s payment (own_transfer_line); an ordinary relay still is');
+
+-- M2 (round 2's L4): « Approvisionnement par le compte propre » (link_debit own_credit) and the job's top-up row refuse an
+-- own credit carrying our SWP id, as its own or as the original it returns (own_transfer_line: a sweep back from the own
+-- IBAN, never a top-up); an ordinary own credit is still a top-up
+create or replace function pg_temp.sc_top_up_own() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.stmt('61', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 12000, 'e2e', pg_temp.e2e(pg_temp.v('s1')),
+                       'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 12000, 'orig', pg_temp.e2e(pg_temp.v('s1')),
+                       'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 5000, 'iban', 'FR7610107001011234567890129')));
+  return jsonb_build_object(
+    'own_swp', pg_temp.refusal(pg_temp.attempt(format(
+                 $q$ select pg_temp.link('top-own-0001', %L, 'own_credit', null, null, null) $q$, pg_temp.ln('61', 1)))),
+    'orig_swp', pg_temp.refusal(pg_temp.attempt(format(
+                  $q$ select pg_temp.link('top-own-0002', %L, 'own_credit', null, null, null) $q$, pg_temp.ln('61', 2)))),
+    'job', (select pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('61', 1), 'top_up'))) ->> 'top_ups'),
+    'job_why', pg_temp.skipped(pg_temp.ln('61', 1)),
+    'booked', jsonb_build_array(pg_temp.bookings(pg_temp.ln('61', 1)), pg_temp.bookings(pg_temp.ln('61', 2))),
+    'ordinary', pg_temp.link('top-own-0003', pg_temp.ln('61', 3), 'own_credit', null, null, null),
+    'ordinary_booked', pg_temp.bookings(pg_temp.ln('61', 3)));
+end $$;
+select is(pg_temp.isolated('sc_top_up_own'),
+          '{"own_swp": "bank booking refused: own_transfer_line", "orig_swp": "bank booking refused: own_transfer_line",
+            "job": "0", "job_why": "own_transfer_line", "booked": [[], []], "ordinary": "own_credit",
+            "ordinary_booked": ["1 top_up 5000"]}'::jsonb,
+  'M2: an own credit carrying our SWP id (its own or its original) is never a top-up — by ops or the job '
+  '(own_transfer_line); an ordinary own credit still is');
+-- the fee rule's exception (ADR-0014, round 3): a bank charge naming our payout or sweep as its original id is a charge on
+-- our account, the servicer's cost — booked as a fee, by ops and by the job (as the job books every coded charge)
+create or replace function pg_temp.sc_fee_naming_ours() returns jsonb language plpgsql as $$
+declare v_ops text;
+begin
+  perform pg_temp.stmt('62', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 750, 'kind', 'other_debit', 'orig', pg_temp.e2e(pg_temp.trid('r2'))),
+    jsonb_build_object('amount', 750, 'kind', 'other_debit', 'orig', pg_temp.e2e(pg_temp.v('s1')))));
+  begin
+    v_ops := pg_temp.link('fee-ours-0001', pg_temp.ln('62', 1), 'fee', null, null, null);
+  exception when others then
+    v_ops := sqlerrm;
+    reset role;
+  end;
+  return jsonb_build_object(
+    'ops', v_ops,
+    'job', (select pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('62', 2), 'fee'))) ->> 'fees'),
+    'booked', jsonb_build_array(pg_temp.bookings(pg_temp.ln('62', 1)), pg_temp.bookings(pg_temp.ln('62', 2))),
+    'entries', jsonb_build_array(pg_temp.books(pg_temp.ek('fee:' || pg_temp.ln('62', 1))) ? 'bank_fees',
+                                 pg_temp.books(pg_temp.ek('fee:' || pg_temp.ln('62', 2))) ? 'bank_fees'));
+end $$;
+select is(pg_temp.isolated('sc_fee_naming_ours'),
+          '{"ops": "fee", "job": "1", "booked": [["1 fee 750"], ["1 fee 750"]], "entries": [true, true]}'::jsonb,
+  'M2: a bank charge naming our RMT or SWP id as its original is booked as a fee (ops and job): the recorded exception');
+
+-- M4 (round 2's L6): a refund in a downloaded file is not cancelled, and the refusal's hint says what it waits for — its
+-- debit booked from the statement at its arrival (then the payee bank's return), a transfer refused before execution
+-- leaving no line and staying « en cours », the bank and support — never « son rejet » read from the statement
+create or replace function pg_temp.cancel_rf(p_key text, p_q uuid) returns text language plpgsql as $$
+declare v text;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v := public.cancel_refund(p_key, p_q, 'annulé (test)') ->> 'status';
+  reset role;
+  return v;
+end $$;
+create or replace function pg_temp.sc_refund_cancel_hint() returns jsonb language plpgsql as $$
+declare q uuid; v_hint text; v_msg text;
+begin
+  perform pg_temp.collect('63', 1000, private.paris_today() - 3, false);
+  q := pg_temp.rq('m4-refund-0001', '63');
+  perform pg_temp.handed_out('fm4', 'gen-file-m4');
+  begin
+    perform pg_temp.cancel_rf('m4-cancel-0001', q);
+  exception when others then
+    get stacked diagnostics v_msg = message_text, v_hint = pg_exception_hint;
+    reset role;
+  end;
+  return jsonb_build_object('refusal', v_msg, 'hint', v_hint,
+                            'transfer', (select t.status from public.bank_transfer t
+                                         join public.refund_request r on r.transfer_id = t.id where r.id = q));
+end $$;
+select is(pg_temp.isolated('sc_refund_cancel_hint'),
+          jsonb_build_object(
+            'refusal', 'refund refused: in_downloaded_file',
+            'hint', 'Le virement de ce remboursement est dans un fichier déjà téléchargé : il reste en cours jusqu''à ce '
+                    'que son débit soit comptabilisé depuis le relevé, à son arrivée (de même, ensuite, le retour de la '
+                    'banque du bénéficiaire, si elle le renvoie), et le remboursement ne peut pas être annulé d''ici là '
+                    '(l''annulation après téléchargement n''est pas encore disponible). Un virement que la banque refuse '
+                    'avant son exécution n''apparaît sur aucun relevé : il reste « en cours » jusqu''à ce que '
+                    'l''annulation après téléchargement soit disponible. Gardez le fichier tel quel, vérifiez le relevé, '
+                    'voyez avec la banque et prévenez le support.',
+            'transfer', 'in_file'),
+  'M4: a refund cancelled in a downloaded file: in_downloaded_file, its hint (pg_exception_hint) booked from the '
+  'statement at its debit, then the payee bank''s return; refused before execution: no line, « en cours »; bank, support');
+
+-- M5 (round 2's P3): the nightly checks' I13 and I14 read the servicer's clients' running balances by its key — none of
+-- another servicer's 10,000 read (no sequential scan of private.client_payable_balance), its own read once
+create or replace function pg_temp.sc_balances_keyed() returns jsonb language plpgsql as $$
+declare v_seq bigint; v_idx bigint; v_own bigint;
+begin
+  insert into public.organization (id, kind, servicer_organization_id, legal_name, siren)
+  select ('b2000000-0000-0000-0000-' || lpad(to_hex(k), 12, '0'))::uuid, 'creditor_client',
+         '00000000-0000-0000-0000-0000000000bb', 'Client ' || k, '552100554'
+  from generate_series(1, 10000) k;
+  insert into private.client_payable_balance (organization_id, client_organization_id, currency, balance_minor)
+  select '00000000-0000-0000-0000-0000000000bb', ('b2000000-0000-0000-0000-' || lpad(to_hex(k), 12, '0'))::uuid, 'EUR',
+         -100
+  from generate_series(1, 10000) k;
+  select coalesce(s.seq_tup_read, 0), coalesce(s.idx_tup_fetch, 0) into v_seq, v_idx
+  from pg_stat_xact_user_tables s where s.relid = 'private.client_payable_balance'::regclass;
+  perform private.run_payment_checks('00000000-0000-0000-0000-0000000000aa');
+  select coalesce(s.seq_tup_read, 0) - v_seq, coalesce(s.idx_tup_fetch, 0) - v_idx into v_seq, v_idx
+  from pg_stat_xact_user_tables s where s.relid = 'private.client_payable_balance'::regclass;
+  select count(*) into v_own from private.client_payable_balance where organization_id = '00000000-0000-0000-0000-0000000000aa';
+  return jsonb_build_object('seq_read', v_seq, 'own_read_once', v_own > 0 and v_idx = v_own);
+end $$;
+select is(pg_temp.isolated('sc_balances_keyed'), '{"seq_read": 0, "own_read_once": true}'::jsonb,
+  'M5: I13 and I14 read the servicer''s running balances by its key, once (none of another servicer''s 10,000)');
 
 select * from finish();
 rollback;
