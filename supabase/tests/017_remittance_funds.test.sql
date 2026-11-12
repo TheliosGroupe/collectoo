@@ -650,13 +650,14 @@ select throws_ok(format($$ select public.link_debit('link-fee-0004', %L, 'fee', 
 select throws_ok(format($$ select public.link_debit('link-ret-0002', %L, 'return', %L, null, '10000', 'retour') $$,
   (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 7),
   (select id from public.payment where end_to_end_id = 'E2E-B1')),
-  '23514', 'debit link refused: not_a_return', 'nor a payment''s return');
+  '23514', 'debit link refused: own_transfer_line',
+  'nor a payment''s return (M2c-6b-1 review money-1: our transfers'' lines refuse every link, own_transfer_line)');
 -- M2c-6b-1 (plan §2.4 rule 5; ADR-0014 « M2c-6b-1 »): a debit carrying our RMT/SWP id is only ever booked from the
 -- statement, never explained (M2c-1 explained it « for now, sweeps are booked from M2c-6 »)
 select throws_ok(format($$ select public.link_debit('link-exp-0002', %L, 'explained', null, null, null,
   'virement manuel vers le compte propre (balayage, M2c-6)') $$,
   (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 7)),
-  '23514', 'debit link refused: not_explainable',
+  '23514', 'debit link refused: own_transfer_line',
   'our transfer out (its RMT id) is never explained: M2c-6b books it from the statement');
 select throws_ok(format($$ select public.link_debit('link-fee-0005', %L, 'fee', null, null, null, 'frais') $$,
   (select id from public.bank_transaction where statement_id = 'b0000000-0000-0000-0000-000000000001' and line_no = 7)),
