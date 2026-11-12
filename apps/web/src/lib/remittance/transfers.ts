@@ -1,4 +1,10 @@
-import type { ErrorCode } from "@/lib/boarding/forms";
+import {
+  type ErrorCode,
+  FILE_BOOKED_WHEN,
+  FILE_TRANSFER_NOT_EXECUTED,
+  PAYOUT_BOOKED_WHEN,
+  PAYOUT_NOT_EXECUTED,
+} from "@/lib/boarding/forms";
 import type { Database } from "@/lib/database.types";
 import { money } from "@/lib/payments/statements";
 import { blockerLabel, frenchDate } from "@/lib/remittance/runs";
@@ -845,21 +851,28 @@ export function cancellationAfterDownload(
 /**
  * The file's page while the cancellation after download is off: what happens, and what ops do now. Review round 7
  * (round 6's verifier, N3): its transfers wait for their debits to be booked from the statement — a refund's is once
- * linked; M2c-6b-1: a payout's and the sweep's by the debit job when the statement is imported.
+ * linked; M2c-6b-1: a payout's and the sweep's by the debit job when the statement is imported — review legal-texts#3:
+ * when the line carries their reference or their lot's; a transfer the bank does not execute leaves no line at all.
  */
-export const DOWNLOADED_FILE_NOTE =
-  "Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : ses virements restent « en cours » jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (à l'import du relevé : automatiquement pour les reversements et la quote-part du cabinet, dès son rattachement pour un remboursement). Gardez le fichier tel quel ; si la banque refuse un virement ou si le fichier n'a pas été déposé, vérifiez le relevé et voyez avec la banque.";
+export const DOWNLOADED_FILE_NOTE = `Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : ses virements restent « en cours » jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (${FILE_BOOKED_WHEN}). ${FILE_TRANSFER_NOT_EXECUTED} Gardez le fichier tel quel ; si la banque refuse un virement ou si le fichier n'a pas été déposé, vérifiez le relevé, voyez avec la banque et prévenez le support.`;
 
-/** The run's page, a run whose payout is in a downloaded file (round 5: no cancellation after download; round 7, N3). */
+/**
+ * The run's page, a run whose payout is in a downloaded file (round 5: no cancellation after download; round 7, N3).
+ * Review M2c-6b-1 (legal-texts#3): its debit is booked from the statement, and the return of a payout the payee's bank
+ * sends back; a payout the bank does not execute leaves no line — never « its rejection booked ».
+ */
 export function runPayoutInDownloadedFileNote(fileNumber: string): string {
-  return `Le virement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé bancaire (automatiquement, à l'import du relevé), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.`;
+  return `Le virement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Si la banque du bénéficiaire le renvoie, son retour est comptabilisé de même et le montant est à reverser à nouveau. ${PAYOUT_NOT_EXECUTED} Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`;
 }
 
-/** « Nom non concordant » on a payout of a downloaded file: what follows for that transfer (round 5: off or on). */
+/**
+ * « Nom non concordant » on a payout of a downloaded file: what follows for that transfer (round 5: off or on). Review
+ * M2c-6b-1 (legal-texts#3): the case where the bank not executing it is likeliest — no line shows it.
+ */
 export function payeeMismatchFollowUp(cancellable: boolean): string {
   return cancellable
     ? "Si la banque n'a pas exécuté ce virement, demandez son annulation (une autre personne la confirme, relevé à l'appui), puis annulez le reversement."
-    : "Ce virement reste « en cours » dans le fichier téléchargé jusqu'à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé bancaire (automatiquement, à l'import du relevé) ; l'annulation après téléchargement n'est pas encore disponible : gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.";
+    : `Ce virement reste « en cours » dans le fichier téléchargé jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}), puis, si la banque du bénéficiaire le renvoie, son retour. S'il n'est pas exécuté (refusé par la banque, ou non autorisé après ce nom non concordant), il n'apparaît sur aucun relevé et reste en cours : l'annulation après téléchargement n'est pas encore disponible. Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`;
 }
 
 // ------------------------------------------------------------------------------------------------------------------

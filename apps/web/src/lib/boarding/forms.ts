@@ -230,7 +230,29 @@ export type ErrorCode =
   | "transfer_file_holds_debited"
   | "transfer_bank_booking_required"
   | "transfer_file_executed"
+  // M2c-6b-1 review (money-1, K1): our payouts' and sweeps' lines are booked from the statement, never linked
+  | "own_transfer_line"
   | "unknown";
+
+/**
+ * M2c-6b-1 review (legal-texts#3, with its verifier's qualification): what the statement books by itself. A payout's
+ * debit (and the return of one the payee's bank sends back after it) only when the line carries its RMT reference or
+ * its lot's PmtInfId; a line without them (a CSV export without the « référence de bout en bout » column) waits for
+ * ops, whose booking is M2c-6b-2's. A transfer the bank does not execute (refused, not authorised after « Nom non
+ * concordant », a file never deposited) leaves no line at all: nothing takes it out of « en cours » until the
+ * cancellation after download is available (M2c-6b-3, OQ-81).
+ */
+export const PAYOUT_BOOKED_WHEN =
+  "automatiquement à l'import quand la ligne porte sa référence RMT ou celle de son lot ; sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir";
+/** The same for a file's transfers: payouts and the sweep from the statement, a refund once its line is linked. */
+export const FILE_BOOKED_WHEN =
+  "à l'import du relevé : automatiquement pour un reversement ou la quote-part du cabinet dont la ligne porte la référence RMT ou SWP, ou celle de son lot, sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir ; dès son rattachement pour un remboursement";
+/** A payout the bank does not execute: no line on any statement. */
+export const PAYOUT_NOT_EXECUTED =
+  "Un virement que la banque n'exécute pas (refusé, ou non autorisé après un nom non concordant) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
+/** A file's transfer the bank does not execute (the file not deposited, a transfer refused): no line either. */
+export const FILE_TRANSFER_NOT_EXECUTED =
+  "Un virement que la banque n'exécute pas (fichier non déposé, virement refusé) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
   not_allowed: "Action non autorisée pour votre rôle.",
@@ -448,8 +470,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Seul un reversement validé, dont le virement n'est ni débité ni dans un fichier déjà téléchargé, peut être annulé.",
   // M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is cancelled until M2c-6b books its debits from
   // the statement; round 7 (round 6's verifier, N3): a payout's debit read changes nothing yet — it must be booked
-  run_already_sent:
-    "Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (automatiquement, à l'import du relevé), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
+  // M2c-6b-1 review (legal-texts#3): automatically only for a line carrying its RMT reference or its lot's
+  run_already_sent: `Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.`,
   run_none_selected: "Cochez au moins un reversement à valider.",
   run_busy:
     "Un traitement est en cours sur ce reversement ou pour ce cabinet (préparation, validation, imputation ou établissement du relevé) : réessayez dans un instant.",
@@ -462,10 +484,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Cette facture est déjà entièrement rectifiée : il ne reste rien à créditer.",
   // review round 6: true with cancellation after download off — once its transfer is in a downloaded file, a run can no
   // longer be cancelled; round 7 (N3): it waits for its debit to be booked from the statement, not available yet
-  credit_note_in_flight:
-    "Un reversement validé compense cette facture sur son virement, dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que ce virement n'est dans aucun fichier téléchargé, le reversement peut aussi être annulé ; ensuite il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (automatiquement, à son import).",
-  credit_note_run_in_flight:
-    "Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que son virement n'est dans aucun fichier téléchargé, il peut aussi être annulé (ce qui rectifierait toute la facture) ; ensuite il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (automatiquement, à son import).",
+  credit_note_in_flight: `Un reversement validé compense cette facture sur son virement, dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que ce virement n'est dans aucun fichier téléchargé, le reversement peut aussi être annulé ; ensuite il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`,
+  credit_note_run_in_flight: `Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que son virement n'est dans aucun fichier téléchargé, il peut aussi être annulé (ce qui rectifierait toute la facture) ; ensuite il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`,
   credit_note_file: "Ce dossier n'a plus rien de facturé sur cette facture.",
   credit_note_amount:
     "Indiquez un montant HT positif, au centime près (par exemple 30,00).",
@@ -513,8 +533,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Une demande d'annulation est déjà en cours : une autre personne doit la confirmer. Rechargez la page.",
   transfer_cancel_not_requested:
     "Aucune demande d'annulation n'est en cours (déjà confirmée ou retirée) : rechargez la page.",
-  transfer_cancellation_request_required:
-    "Ce fichier a été téléchargé : il ne se remplace plus d'un clic. Gardez-le tel quel ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (à l'import du relevé : automatiquement pour les reversements et la quote-part du cabinet, dès son rattachement pour un remboursement). Vérifiez le relevé et voyez avec la banque.",
+  transfer_cancellation_request_required: `Ce fichier a été téléchargé : il ne se remplace plus d'un clic. Gardez-le tel quel ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (${FILE_BOOKED_WHEN}). Vérifiez le relevé et voyez avec la banque.`,
   transfer_not_in_downloaded_file:
     "Ce virement n'est plus dans un fichier téléchargé (déjà annulé, débité, ou son fichier remplacé) : rechargez la page.",
   transfer_not_live:
@@ -550,8 +569,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Ce débit porte la référence d'un autre virement ou d'un autre lot (ou, pour un remboursement réémis, ne porte aucune référence) : il ne peut pas exécuter ce remboursement, dont le virement est dans un fichier déjà téléchargé. Ne le rattachez pas à ce remboursement ; gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque (prévenez le support).",
   transfer_file_holds_debited:
     "Un virement de ce fichier a déjà quitté le compte (débité sous la référence du virement qu'il remplace, ou dans une ligne groupée de son lot) : le fichier n'est plus servi — déposé, il le paierait une seconde fois. Ne le déposez pas ; demandez à la banque de ne pas exécuter ce fichier s'il a été déposé, et prévenez le support.",
-  run_payout_in_downloaded_file:
-    "Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé bancaire (automatiquement, à l'import du relevé), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
+  // M2c-6b-1 review (legal-texts#3): a payout's debit is booked from the statement, never a « rejection » no line shows
+  run_payout_in_downloaded_file: `Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). ${PAYOUT_NOT_EXECUTED} Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`,
   // M2c-6a review (T3): a refund the transfer file cannot carry
   refund_payee_name_not_epc:
     "Le nom du bénéficiaire doit contenir au moins une lettre latine ou un chiffre (le format SEPA n'accepte que l'alphabet latin de base).",
@@ -560,11 +579,13 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   refund_in_downloaded_file:
     "Le virement de ce remboursement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire, et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
   // M2c-6a review, round 5 (fail-closed): the cancellation of a downloaded file, or of one of its transfers, is off
-  transfer_bank_booking_required:
-    "Un fichier téléchargé ne peut pas encore être annulé dans Collectoo, ni un de ses virements : ils restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (à l'import du relevé : automatiquement pour les reversements et la quote-part du cabinet, dès son rattachement pour un remboursement). Gardez le fichier tel quel ; si la banque n'a pas exécuté un virement, vérifiez le relevé et voyez avec la banque.",
+  transfer_bank_booking_required: `Un fichier téléchargé ne peut pas encore être annulé dans Collectoo, ni un de ses virements : ils restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (${FILE_BOOKED_WHEN}). ${FILE_TRANSFER_NOT_EXECUTED} Gardez le fichier tel quel ; si la banque n'a pas exécuté un virement, vérifiez le relevé et voyez avec la banque.`,
   // review round 6: a file the bank executed, in full or in part, is not served again (whatever the switch)
   transfer_file_executed:
     "La banque a déjà exécuté ce fichier, en tout ou partie (un relevé montre le débit de l'un de ses virements ou de son lot) : il n'est plus servi. Ne le déposez plus : déposé de nouveau, il paierait une seconde fois.",
+  // M2c-6b-1 review (money-1, K1): the database's hint, in the page's words
+  own_transfer_line:
+    "Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, ligne groupée d'un lot de nos fichiers) : elle se comptabilise depuis le relevé, automatiquement à l'import ou par l'équipe (écran à venir). Elle ne se rattache pas à un paiement ni à un remboursement, et ne se classe pas sans comptabiliser.",
   unknown:
     "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };

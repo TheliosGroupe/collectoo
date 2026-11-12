@@ -54,7 +54,8 @@ type Row = {
   remittance_text: string | null;
   end_to_end_id: string | null;
   original_end_to_end_id: string | null;
-  /** M2c-6b-1: a batch line's PmtInfId (one of our files' when it is ours), if the queue returns it */
+  /** M2c-6b-1: a batch line's PmtInfId (one of our files' when it is ours; debit_queue returns it since the review's
+   * money-1 fix — the page offers no link on our batch lines) */
   payment_info_id?: string | null;
   return_reason: string | null;
   review_reason: string | null;
@@ -408,13 +409,14 @@ function LineActions({
     });
   for (const p of options?.payments ?? [])
     if (!payments.has(p.payment_id)) payments.set(p.payment_id, p);
-  // review M2c-1: no return or refund link on our own transfers and credits (the database refuses them)
+  // review M2c-1: no return or refund link on our own transfers and credits (the database refuses them); review
+  // M2c-6b-1 (money-1): nor on our payouts' and sweeps' lines (own_transfer_line) — the loss below included
   const linkable = offersPaymentLinks(row);
   const refunds = linkable ? (options?.refunds ?? []) : [];
   const isReturn = row.direction === "debit" && row.kind !== "refund_out";
   // M2c-1 (OQ-34): a return naming a payment of which less is left than it takes back
   const beyond =
-    row.direction === "debit" && row.kind === "return"
+    linkable && row.direction === "debit" && row.kind === "return"
       ? [...payments.values()].filter(
           (p) =>
             p.named === true && BigInt(p.left_minor) < BigInt(row.amount_minor),

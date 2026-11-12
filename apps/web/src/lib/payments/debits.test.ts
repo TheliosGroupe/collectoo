@@ -10,10 +10,12 @@ import {
   checkSubjectLink,
   debitErrorCode,
   explainable,
+  isOurTransferLine,
   lineKindLabel,
   linkRefundEffect,
   minorToInput,
   normaliseIban,
+  offersPaymentLinks,
   pendingRefundInstruction,
   refundCancellable,
   refundExecutionMode,
@@ -1095,5 +1097,156 @@ describe("M2c-6a review, round 7 (round 6's verifiers)", () => {
     expect(text).toContain("Ne le rattachez pas à ce remboursement");
     expect(text).not.toContain("seconde fois");
     expect(text).not.toContain("annuler ce fichier");
+  });
+});
+
+describe("M2c-6b-1 review: our payouts' and sweeps' lines are booked, never linked (money-1, K1)", () => {
+  const RMT = "RMT0A1B2C3D4E5F";
+  const SWP = "SWPFEDCBA987654";
+  const PMT_INF = "TF-2026-000001-1";
+  type Line = {
+    direction: string;
+    kind: string;
+    end_to_end_id?: string | null;
+    original_end_to_end_id?: string | null;
+    payment_info_id?: string | null;
+  };
+  const ours: Line[] = [
+    // a debit carrying our payout's or sweep's end-to-end id, whatever kind the statement gives it
+    { direction: "debit", kind: "transfer_out", end_to_end_id: RMT },
+    { direction: "debit", kind: "other_debit", end_to_end_id: SWP },
+    { direction: "debit", kind: "return", end_to_end_id: RMT },
+    // a batch line of one of our PmtInfs: no end-to-end id (NbOfTxs 1 without TxDtls is read as other_debit)
+    {
+      direction: "debit",
+      kind: "other_debit",
+      end_to_end_id: null,
+      payment_info_id: PMT_INF,
+    },
+    {
+      direction: "debit",
+      kind: "batch_unsplit",
+      end_to_end_id: null,
+      payment_info_id: PMT_INF,
+    },
+    // the payee's bank returning our payout or sweep (its original id, or the line's own id when none is given)
+    { direction: "credit", kind: "return", original_end_to_end_id: RMT },
+    {
+      direction: "credit",
+      kind: "return",
+      end_to_end_id: SWP,
+      original_end_to_end_id: null,
+    },
+  ];
+  const others: Line[] = [
+    { direction: "debit", kind: "return", end_to_end_id: "E2E-DEBTOR-1" },
+    {
+      direction: "debit",
+      kind: "refund_out",
+      end_to_end_id: "RFD0123456789AB",
+    },
+    { direction: "debit", kind: "other_debit", end_to_end_id: "FRS-1" },
+    {
+      direction: "debit",
+      kind: "other_debit",
+      end_to_end_id: null,
+      payment_info_id: "LOT-42",
+    },
+    // a PmtInfId of ours on a line that carries an end-to-end id is no batch line (the database's our_batch_line)
+    {
+      direction: "debit",
+      kind: "other_debit",
+      end_to_end_id: "NOTPROVIDED",
+      payment_info_id: PMT_INF,
+    },
+    {
+      direction: "credit",
+      kind: "return",
+      original_end_to_end_id: "RFD0123456789AB",
+    },
+    { direction: "debit", kind: "return" },
+  ];
+
+  it("reads our transfers' lines as the database does (RMT/SWP id, a batch line of our PmtInf, a return of ours)", () => {
+    for (const o of ours)
+      expect(isOurTransferLine(o), JSON.stringify(o)).toBe(true);
+    for (const o of others)
+      expect(isOurTransferLine(o), JSON.stringify(o)).toBe(false);
+  });
+
+  it("offers no payment's return, refund or refund come back on them (« Retour du paiement … », « Remboursement … »)", () => {
+    for (const o of ours)
+      expect(offersPaymentLinks(o), JSON.stringify(o)).toBe(false);
+    // the lines M2b reads as a payment's return, our refund, another debit or a credit undoing a debit keep them
+    for (const o of others)
+      expect(offersPaymentLinks(o), JSON.stringify(o)).toBe(true);
+    // our own transfers out and the credits from our accounts never had them (review M2c-1)
+    for (const kind of ["transfer_out", "own_transfer_in", "client_transfer_in"])
+      for (const direction of ["debit", "credit"])
+        expect(
+          offersPaymentLinks({ direction, kind }),
+          `${direction} ${kind}`,
+        ).toBe(false);
+  });
+
+  it("never offers « Classer sans comptabiliser » on them", () => {
+    for (const o of ours)
+      expect(
+        explainable({
+          direction: o.direction,
+          kind: o.kind,
+          namesPayment: false,
+          endToEndId: o.end_to_end_id,
+          originalEndToEndId: o.original_end_to_end_id,
+          paymentInfoId: o.payment_info_id,
+        }),
+        JSON.stringify(o),
+      ).toBe(false);
+  });
+
+  it("words the database's refusal of such a link (own_transfer_line)", () => {
+    expect(debitErrorCode("debit link refused: own_transfer_line")).toBe(
+      "own_transfer_line",
+    );
+    const text = errorText("own_transfer_line");
+    expect(text).toContain("nos propres virements");
+    expect(text).toContain("se comptabilise depuis le relevé");
+    expect(text).toContain("ne se rattache pas à un paiement");
+    expect(text).not.toMatch(/refused|own_transfer/);
+    // the generic refusal stays for the others
+    expect(debitErrorCode("debit link refused: not_a_return")).toBe(
+      "link_refused",
+    );
+  });
+});
+
+describe("M2c-6b-1 review: the checks' and the reviews' words (legal-texts#2, #4, #7; K5)", () => {
+  it("says an overdue payout's debit is not booked, not that the bank did not debit it (legal-texts#2, K3)", () => {
+    const help = checkLabel("remittance_payout_overdue").help;
+    expect(help).toContain("son débit n'est pas comptabilisé");
+    expect(help).not.toContain("n'est pas débité par la banque");
+    expect(help).toContain("Débits et retours");
+  });
+
+  it("says a pending top-up is what the servicer owes the dedicated account (legal-texts#4)", () => {
+    const help = checkLabel("top_up_pending").help;
+    expect(help).toContain("depuis le compte propre");
+    expect(help).toContain("le cabinet doit");
+    expect(help).not.toContain("Le compte dédié doit");
+    expect(help).not.toMatch(/doit de l'argent au cabinet/);
+  });
+
+  it("says what was owed to the client in French (legal-texts#7)", () => {
+    const help = checkLabel("payout_overrun").help;
+    expect(help).toContain("dû au client");
+    expect(help).not.toContain("ce que le client était dû");
+  });
+
+  it("says why a return of our transfer waits: its debit not booked yet, or dated before its debit (K5)", () => {
+    const text = DEBIT_REVIEW.return_before_debit;
+    expect(text).toContain("repris automatiquement");
+    expect(text).toContain("daté d'avant le débit");
+    expect(text).toContain("rien n'est comptabilisé");
+    expect(debitReviewRank("return_before_debit")).toBe(1);
   });
 });

@@ -98,8 +98,9 @@ describe("refusals and errors (M2c-5b)", () => {
     );
     // review round 6: a run whose transfer is in a downloaded file can no longer be cancelled (it waits for its debit);
     // round 7 (N3): booked from the statement, not « read from » it; M2c-6b-1: automatically at its import
+    // review M2c-6b-1 (legal-texts#3): automatically only for a line carrying its RMT reference or its lot's
     expect(refusalText("in_flight")).toMatch(
-      /une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé \(automatiquement, à son import\)/,
+      /une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé \(automatiquement à l'import quand la ligne porte sa référence RMT ou celle de son lot ; sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir\)/,
     );
     expect(refusalText("run_in_flight")).toMatch(
       /le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là/,
