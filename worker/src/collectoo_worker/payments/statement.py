@@ -238,6 +238,10 @@ class StatementLine:
     batch_entry_ref: str | None = None
     entry_ref: str | None = None  # camt.053: the bank entry's own reference (Ntry/AcctSvcrRef)
     payment_info_id: str | None = None  # camt.053 NtryDtls/Btch/PmtInfId (our file's PmtInf, M2c)
+    # review M2c-6b-1 round 6 (R1): a camt.053 entry kept unsplit (its details cannot be split: its
+    # amount is the entry's total, never one transaction's) records how many of its details name
+    # one of our transfers (`names_our_transfer` on the detail); None for every other line
+    unsplit_ours: int | None = None
 
     @property
     def signed_minor(self) -> int:
@@ -271,6 +275,7 @@ STAGE_COLUMNS = (
     "kind",
     "method",
     "payment_info_id",
+    "unsplit_ours",
 )
 
 

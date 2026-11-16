@@ -275,7 +275,9 @@ def decide_all(
 #     subset » (a PmtInf of one refund alone is the M2b refund link, payments.debits.decide);
 #   * a credit returning our payout or sweep (its original RMT/SWP id) is that transfer's return,
 #     when it was booked and the credit is no more than it (a charge deducted: the SQL books the
-#     difference as a fee on the same line).
+#     difference as a fee on the same line) — review round 6 (R1): for a line of its own only; a
+#     line read from a camt.053 entry kept unsplit (its amount the entry's total) only when exactly
+#     one of its details is ours and its amount is that transfer's exactly.
 # Never automatically (left to ops with why, P0): a debit of a cancelled transfer (or a batch line
 # that can hold one), a second debit, a debit of a transfer never handed out, an id we do not know,
 # a run not in flight, a batch line that does not add up or mixes kinds. Our other transfers and the
@@ -379,6 +381,9 @@ class FundsLine:
     original_end_to_end_id: str | None = None
     payment_info_id: str | None = None
     facts: tuple[TransferFact, ...] = ()
+    # review round 6 (R1): read from a camt.053 entry kept unsplit, how many of its details are ours
+    # (bank_transaction.unsplit_ours, the parser's count); None for a line of its own
+    unsplit_ours: int | None = None
 
     @property
     def returned_id(self) -> str | None:
@@ -548,6 +553,14 @@ def _transfer_return(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one r
     if f.debtor_bank_account_id != line.bank_account_id or f.currency != line.currency:
         return _funds_review(line, TRANSFER_DIFFERS, named)
     if line.amount_minor > f.amount_minor:
+        return _funds_review(line, RETURN_DIFFERS, named)
+    if line.unsplit_ours is not None and (
+        line.unsplit_ours != 1 or line.amount_minor != f.amount_minor
+    ):
+        # review round 6 (R1): an entry the bank kept unsplit carries its total, not this
+        # transfer's return: less than the transfer is never its return with the rest as the
+        # bank's charge (the round-5 verifier's netted entry: our payout's return beside another
+        # payout's debit, or a chargeback), nor any amount with several details of ours
         return _funds_review(line, RETURN_DIFFERS, named)
     if f.debit_date is not None and line.booking_date < f.debit_date:
         # dated before the debit it returns (the SQL re-check's last rule; review T4, K5): never

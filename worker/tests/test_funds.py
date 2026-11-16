@@ -572,3 +572,149 @@ def test_a_camt053_reads_our_unflagged_credits_as_returns(tmp_path: Path) -> Non
     for x in parsed.lines:
         if x.kind == "return":
             assert names_our_transfer(x.end_to_end_id, x.original_end_to_end_id, x.payment_info_id)
+
+
+def test_a_camt053_entry_kept_unsplit_records_how_many_of_its_details_are_ours(
+    tmp_path: Path,
+) -> None:
+    """Review round 6 (R1): a line read from a camt.053 entry kept unsplit (its details cannot be
+    split: a count that disagrees, details that do not add up, a detail of the other direction)
+    carries the entry's total, not one transaction's, so the parser records on it how many of its
+    details name one of our transfers (`unsplit_ours`: their own or original end-to-end id is our
+    RMT/SWP id); a line of its own, a detail of a split batch and a CSV line record nothing (None).
+    The funds pass books such a line as our transfer's return only when exactly one detail is ours
+    and its amount is that transfer's (payments.debits).
+
+    The brief's wording for the original id: set when exactly one detail is ours; when several
+    are, the first (the only field the refusals read), and the count says the line is never
+    booked whatever its amount. The round-5 verifier's netted entry (our payout's return and
+    another payout's debit in one credit entry) counts both."""
+    other = "RMT0123456789AD"
+    entries = [
+        Entry(5000, True, DAY, DAY, ref="NR1", txs=(Tx(5000, ref="R1", end_to_end_id=RMT),)),
+        # split batch: each detail its own line
+        Entry(
+            7000,
+            True,
+            DAY,
+            DAY,
+            ref="NS1",
+            txs=(Tx(5000, ref="S1", end_to_end_id=RMT), Tx(2000, ref="S2", end_to_end_id="E2E-S")),
+        ),
+        # count disagrees: one of ours beside a debtor's
+        Entry(
+            6500,
+            True,
+            DAY,
+            DAY,
+            ref="NB1",
+            batch_count=3,
+            txs=(Tx(1500, ref="B1", end_to_end_id="E2E-B"), Tx(5000, ref="B2", end_to_end_id=SWP)),
+        ),
+        # two of ours
+        Entry(
+            8000,
+            True,
+            DAY,
+            DAY,
+            ref="NB2",
+            batch_count=3,
+            txs=(Tx(4000, ref="C1", end_to_end_id=RMT), Tx(4000, ref="C2", end_to_end_id=other)),
+        ),
+        # netted (the second detail turned DBIT below): our return and another payout's debit
+        Entry(
+            3000,
+            True,
+            DAY,
+            DAY,
+            ref="NB3",
+            txs=(Tx(5000, ref="N1", end_to_end_id=RMT), Tx(2000, ref="N2", end_to_end_id=other)),
+        ),
+        # netted with a debit not ours (a chargeback)
+        Entry(
+            3000,
+            True,
+            DAY,
+            DAY,
+            ref="NB4",
+            txs=(Tx(5000, ref="F1", end_to_end_id=RMT), Tx(2000, ref="F2", end_to_end_id="E2E-CB")),
+        ),
+        # a debtor's batch, and a batch with no detail at all
+        Entry(
+            3000,
+            True,
+            DAY,
+            DAY,
+            ref="NB5",
+            batch_count=3,
+            txs=(Tx(1500, ref="G1", end_to_end_id="E2E-G1"), Tx(1500, ref="G2")),
+        ),
+        Entry(4000, True, DAY, DAY, ref="NB6", batch_count=2),
+        # one detail shown of two (count disagrees): ours, the entry's total
+        Entry(
+            5000,
+            True,
+            DAY,
+            DAY,
+            ref="NB7",
+            batch_count=2,
+            txs=(Tx(5000, ref="H1", end_to_end_id=RMT),),
+        ),
+        # the same transfer of ours named by two details: two details of ours
+        Entry(
+            10000,
+            True,
+            DAY,
+            DAY,
+            ref="NB9",
+            batch_count=3,
+            txs=(Tx(5000, ref="J1", end_to_end_id=RMT), Tx(5000, ref="J2", end_to_end_id=RMT)),
+        ),
+        # an unsplit debit batch of our payouts
+        Entry(
+            9000,
+            False,
+            DAY,
+            DAY,
+            ref="NB8",
+            code="PMNT/ICDT/ESCT",
+            batch_count=3,
+            txs=(Tx(4500, ref="K1", end_to_end_id=RMT), Tx(4500, ref="K2", end_to_end_id=other)),
+        ),
+    ]
+    doc = make_doc(entries, iban=ELSEWHERE, from_date=DAY, to_date=DAY, opening_minor=0)
+    xml = render_camt053(doc, "08")
+    for ref in (b"N2", b"F2"):  # the netted entries' second detail is a debit
+        at = xml.index(b"<AcctSvcrRef>" + ref + b"</AcctSvcrRef>")
+        ind = xml.index(b"<CdtDbtInd>CRDT</CdtDbtInd>", at)
+        xml = xml[:ind] + b"<CdtDbtInd>DBIT</CdtDbtInd>" + xml[ind + 27 :]
+    path = tmp_path / "s.xml"
+    path.write_bytes(xml)
+    parsed = parse_camt053(path, iban=ELSEWHERE, currency="EUR", ibans=IBANS)
+    got = [
+        (x.kind, x.amount_minor, x.end_to_end_id, x.original_end_to_end_id, x.unsplit_ours)
+        for x in parsed.lines
+    ]
+    assert got == [
+        ("return", 5000, RMT, RMT, None),  # a line of its own
+        ("return", 5000, RMT, RMT, None),  # split: its own amount
+        ("debtor_credit", 2000, "E2E-S", None, None),
+        ("return", 6500, None, SWP, 1),  # exactly one of ours: its id
+        ("return", 8000, None, RMT, 2),  # several: the first, never booked
+        ("return", 3000, None, RMT, 2),  # netted with our other payout's debit
+        ("return", 3000, None, RMT, 1),  # netted with a chargeback
+        ("batch_unsplit", 3000, None, None, 0),
+        ("batch_unsplit", 4000, None, None, 0),
+        ("return", 5000, RMT, RMT, 1),
+        ("return", 10000, None, RMT, 2),  # one id, two details
+        ("batch_unsplit", 9000, None, None, 2),
+    ]
+    # a CSV line is always one transaction: nothing recorded
+    csv = tmp_path / "s.csv"
+    csv.write_text(
+        "Date;Libellé;Débit;Crédit;Référence de bout en bout\n"
+        f"10/11/2026;VIR SEPA RECU;;50,00;{RMT}\n",
+        encoding="utf-8",
+    )
+    rows = parse_csv(csv, currency="EUR", ibans=IBANS).lines
+    assert [x.unsplit_ours for x in rows] == [None]

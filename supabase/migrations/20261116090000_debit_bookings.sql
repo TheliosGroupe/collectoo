@@ -72,10 +72,33 @@
 -- every kind) but « Remboursement revenu » of the refund that lot held alone (new private.pmt_inf_refund_back; COMPLIANCE
 -- OQ-84's default), the one refund public.debit_link_options lists there; the M2b pass reads a credit return with
 -- neither id again (private.debit_candidates' filter NULL-safe: its no_candidate review, as on main).
+--
+-- Review round 6: (R1) a line read from a camt.053 entry kept unsplit carries the entry's total, never one transaction's:
+-- the parser records how many of its details are ours (new bank_transaction.unsplit_ours, staged with the line and kept
+-- by private.ingest_statement, redefined from 20261111120000), private.bank_booking_candidates returns it, and the funds
+-- pass books such a line as our transfer's return only when exactly one detail is ours and its amount is that
+-- transfer's (private.post_bank_bookings' re-check, the twin of payments.debits): never less with the rest as the bank's
+-- charge (the round-5 verifier's netted entry), never with several of ours; (R2) a credit naming one of our lots — a
+-- PmtInfId of a file of the line's account handed out (new private.names_our_lot) — whatever its end-to-end id, takes
+-- no explanation and, as « Remboursement revenu », only the refund that lot held alone (private.post_debit_links,
+-- public.debit_link_options; COMPLIANCE OQ-84).
 
 ------------------------------------------------------------------------------------------
 -- Schema
 ------------------------------------------------------------------------------------------
+
+-- Review round 6 (R1): a camt.053 entry the parser keeps as one line because its details cannot be split (a count that
+-- disagrees with its details, details that do not add up to it, a detail of the other direction: payments.camt053) is
+-- the entry's total, not one transaction's. The parser records on that line how many of its details name one of our
+-- transfers (their own or original end-to-end id is our RMT/SWP id); null on every other line (a line of its own, a
+-- detail of a split batch, a CSV line) and on the lines imported before this migration (their details are not kept). The
+-- funds pass reads it (private.post_bank_bookings: a return of our transfer from such a line only with exactly one
+-- detail of ours, for that transfer's amount exactly).
+alter table public.bank_transaction add column unsplit_ours smallint check (unsplit_ours >= 0);
+comment on column public.bank_transaction.unsplit_ours is
+  'camt.053 entry kept unsplit (its amount the entry''s total): how many of its details name one of our transfers '
+  '(RMT/SWP id, own or original); null for any other line (review M2c-6b-1 round 6, R1).';
+alter table private.bank_import_stage add column unsplit_ours smallint;
 
 -- An advance to a client (§6.1, §13): the servicer's money paying what the client was not owed (yet). M2c-6b-1 posts
 -- the booking-time cover of a payout overrun (cause `payout_overrun`); M2c-6b-2 the excess of an unplanned or double
@@ -497,6 +520,27 @@ as $$
   where f.debtor_bank_account_id = p_bank_account_id and f.download_count > 0 and f.status in ('downloaded', 'sent');
 $$;
 
+-- Review round 6 (R2, verdict new:tf-lot-credit-with-foreign-e2e): whether a PmtInfId is one of our lots on this bank
+-- account — the PmtInf of a file of the account handed out (downloaded or sent), as private.pmt_inf_refund_back reads
+-- it. A credit naming it is read as our lot coming back whatever its end-to-end id (private.names_our_transfer's lot arm
+-- reads only a lot with no end-to-end id, by its form): no explanation, and as « Remboursement revenu » only the refund
+-- that lot held alone (private.post_debit_links, public.debit_link_options). Keyed as pmt_inf_refund_back.
+create or replace function private.names_our_lot(p_bank_account_id uuid, p_pmt_inf_id text)
+returns boolean
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select coalesce(p_pmt_inf_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$', false) and exists (
+    select 1
+    from (select i.file_id from public.transfer_file_item i where i.pmt_inf_id = p_pmt_inf_id offset 0) i
+    cross join lateral (select f.debtor_bank_account_id, f.status, f.download_count from public.transfer_file f
+                        where f.id = i.file_id offset 0) f
+    where f.debtor_bank_account_id = p_bank_account_id and f.download_count > 0
+      and f.status in ('downloaded', 'sent'));
+$$;
+
 -- The lines the debit job may book in the funds (redefined from 20261111090000, dropped and created: one row per
 -- (line, transfer fact), plan §2.2), in date order after `p_after`, not booked, not linked, not released as a payment:
 --   * a debit carrying our RMT/SWP id (`own`: the transfer of that id, unique), or to our own IBAN (transfer_out);
@@ -508,7 +552,8 @@ $$;
 --   * a credit carrying our TOP id (`top_up`), from our own account or from a client (as M2c-1);
 --   * a debit coded as the bank's charge (CHRG, FEES: a fee).
 -- Each branch is read by its own partial index, led by the servicer, ordered and limited on its own, then merged
--- (ARCHITECTURE §4: with stale statistics no chunk reads every payer line of the servicer); every fact by key.
+-- (ARCHITECTURE §4: with stale statistics no chunk reads every payer line of the servicer); every fact by key. Review
+-- round 6 (R1): with the line's unsplit_ours (an entry kept unsplit: how many of its details are ours), last.
 drop function private.bank_booking_candidates(uuid, date, uuid, integer);
 create function private.bank_booking_candidates(p_organization_id uuid, p_after_date date, p_after_id uuid,
                                                 p_limit integer)
@@ -520,7 +565,7 @@ returns table (line_id uuid, line_kind text, direction text, bank_account_id uui
                transfer_file_id uuid, file_status text, file_download_count integer, pmt_inf_id text,
                batch_file_id uuid, batch_file_status text, batch_file_download_count integer, run_id uuid,
                run_status text, run_transfer_id uuid, replaces_transfer_id uuid, debit_booked boolean,
-               return_booked boolean, return_seen boolean)
+               return_booked boolean, return_seen boolean, unsplit_ours smallint)
 language plpgsql
 stable
 security definer
@@ -590,7 +635,7 @@ begin
     limit v_limit),
   x as materialized (
     select t.id, coalesce(r.released_kind, t.kind) as kind, t.direction, t.bank_account_id, t.currency, t.amount_minor,
-           t.booking_date, t.bank_tx_code, t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id
+           t.booking_date, t.bank_tx_code, t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id, t.unsplit_ours
     from k
     cross join lateral (select q.* from public.bank_transaction q where q.id = k.id offset 0) t
     left join lateral (select q.decision, q.released_kind from public.bank_duplicate_resolution q
@@ -644,7 +689,7 @@ begin
                                                         where b.transfer_id = (f.tr).id
                                                           and b.kind in ('payout_returned', 'sweep_returned')
                                                         offset 0) end,
-         case when (f.tr).status = 'cancelled' then private.transfer_return_seen((f.tr).id) end
+         case when (f.tr).status = 'cancelled' then private.transfer_return_seen((f.tr).id) end, x.unsplit_ours
   from x
   left join f on f.line_id = x.id
   left join lateral (select q.status, q.download_count from public.transfer_file q
@@ -1112,7 +1157,7 @@ begin
          t.amount_minor as line_minor, t.booking_date as line_date, coalesce(dr.released_kind, t.kind) as line_kind,
          (t.kind = 'suspected_duplicate' and dr.decision is distinct from 'released') as held,
          t.counterparty_iban, t.end_to_end_id, coalesce(t.original_end_to_end_id, t.end_to_end_id) as returned_id,
-         t.payment_info_id,
+         t.payment_info_id, t.unsplit_ours,
          (t.direction = 'debit' and t.end_to_end_id is null and t.payment_info_id is not null) as batch_line,
          -- booked in the funds, or an own credit released as a relayed debtor payment (booked by its cash_in)
          (exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = b.bank_transaction_id offset 0)
@@ -1141,7 +1186,7 @@ begin
   from pg_temp._bank_booking b
   left join lateral (select q.organization_id, q.bank_account_id, q.direction, q.currency, q.amount_minor,
                             q.booking_date, q.kind, q.counterparty_iban, q.end_to_end_id, q.original_end_to_end_id,
-                            q.payment_info_id
+                            q.payment_info_id, q.unsplit_ours
                      from public.bank_transaction q where q.id = b.bank_transaction_id offset 0) t on true
   left join lateral (select q.decision, q.released_kind from public.bank_duplicate_resolution q
                      where q.bank_transaction_id = b.bank_transaction_id offset 0) dr on true
@@ -1248,6 +1293,12 @@ begin
       when b.tr_status <> 'booked' or not b.tr_debit_booked or b.tr_entry is null then 'return_differs'
       when b.tr_debtor is distinct from b.line_bank or b.tr_currency is distinct from b.currency then 'transfer_differs'
       when b.line_minor > b.tr_minor then 'return_differs'
+      -- review round 6 (R1, a regression of round 5): a line read from a camt.053 entry kept unsplit carries the
+      -- entry's total, not this transfer's return — less than the transfer is never its return with the rest as the
+      -- bank's charge (the round-5 verifier's netted entry: our payout's return beside another payout's debit booked
+      -- that debit as our bank fee; or a chargeback), nor any amount with several details of ours (the first one's id
+      -- only what the refusals read): only exactly one detail of ours, for this transfer's amount (payments.debits)
+      when b.unsplit_ours is not null and (b.unsplit_ours <> 1 or b.line_minor <> b.tr_minor) then 'return_differs'
       when b.line_date < b.tr_entry_date then 'return_before_debit' end
     -- the unplanned kinds are ops' (M2c-6b-2: public.book_transfer_line)
     else 'bad_request'
@@ -1791,8 +1842,12 @@ begin
          -- refund such a credit naming our lot may be (the refund that lot held alone, private.pmt_inf_refund_back)
          (t.direction = 'credit'
           and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)) as our_credit,
-         case when t.direction = 'credit' and t.end_to_end_id is null
-                   and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
+         -- review round 6 (R2): a credit naming one of our lots on its account (a file handed out), whatever its
+         -- end-to-end id (one that is not ours included: outside names_our_transfer's lot arm); the refund that lot held
+         -- alone the one it may be, as for a lot with no end-to-end id
+         coalesce(t.direction = 'credit' and private.names_our_lot(t.bank_account_id, t.payment_info_id), false)
+           as our_lot,
+         case when t.direction = 'credit' and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
               then private.pmt_inf_refund_back(t.bank_account_id, t.payment_info_id) end as lot_refund,
          -- M2c-6b-1: a debit with no end-to-end id carrying the PmtInfId of one of our files (a batch line)
          coalesce(t.direction = 'debit' and t.end_to_end_id is null
@@ -1896,11 +1951,15 @@ begin
     -- default): « Remboursement revenu » of the refund that lot held alone (private.pmt_inf_refund_back: a file-mode
     -- refund alone in its PmtInf, executed, coming back with only its lot's reference). Before, such a credit took any
     -- executed refund of its amount (that refund's payment then holding our lot's money, assignable to a debtor's file)
-    -- and « Classer sans comptabiliser ».
+    -- and « Classer sans comptabiliser ». Review round 6 (R2, verdict new:tf-lot-credit-with-foreign-e2e): so is a
+    -- credit naming one of our lots on its account (private.names_our_lot: a file handed out) whatever its end-to-end id
+    -- — the round-5 verifier's n30, a payouts' lot with VIR-X-0030, took an unrelated refund and the explanation; whether
+    -- a bank returns our lot's transfer with our PmtInfId but another end-to-end id is unknown (COMPLIANCE OQ-84) — with
+    -- the same one exception.
     when ((coalesce(d.line_e2e ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
            or coalesce(d.line_returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false) or d.our_batch_line)
           and not (d.kind = 'refund' and d.our_batch_line and d.req_handed_out and not d.pmt_inf_cancelled))
-         or (coalesce(d.our_credit, false)
+         or ((coalesce(d.our_credit, false) or d.our_lot)
              and not (d.kind = 'refund_returned' and d.lot_refund is not null
                       and d.refund_request_id is not distinct from d.lot_refund))
       then 'own_transfer_line'
@@ -2059,7 +2118,8 @@ $$;
 -- cancelled and not returned (switch on); on a line whose own or original id is one of our RMT/SWP ids, nothing; review
 -- round 5 (Q1): on a credit naming one of our lots with no end-to-end id (private.names_our_transfer), the refund that
 -- lot held alone (private.pmt_inf_refund_back) when the line is a `return` of its amount, nothing else; never a
--- payment. Other lines as before. Same settings and grants.
+-- payment; review round 6 (R2): the same on a credit naming one of our lots on its account (private.names_our_lot)
+-- whatever its end-to-end id. Other lines as before. Same settings and grants.
 create or replace function public.debit_link_options(p_bank_transaction_id uuid)
 returns jsonb
 language plpgsql
@@ -2129,8 +2189,10 @@ begin
   -- private.post_debit_links reads it): no payment, and as refund only the one that function accepts there — on a
   -- `return` naming one of our lots with no end-to-end id, the refund that lot held alone
   -- (private.pmt_inf_refund_back), executed, on the line's account and of its amount
+  -- review round 6 (R2): or one naming one of our lots on its account (a file handed out) whatever its end-to-end id
   if t.direction = 'credit'
-     and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id) then
+     and (private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+          or private.names_our_lot(t.bank_account_id, t.payment_info_id)) then
     return jsonb_build_object(
       'payments', '[]'::jsonb,
       'refunds', coalesce((
@@ -2139,7 +2201,7 @@ begin
                                             'status', q.status, 'payee_name', q.payee_name,
                                             'payee_iban_end', right(q.payee_iban, 4), 'requested_at', q.requested_at))
         from public.refund_request q
-        where v_kind = 'return' and t.end_to_end_id is null
+        where v_kind = 'return'
           and q.id = private.pmt_inf_refund_back(t.bank_account_id, t.payment_info_id)
           and q.status = 'executed' and q.bank_account_id = t.bank_account_id and q.amount_minor = t.amount_minor),
         '[]'),
@@ -5733,11 +5795,399 @@ end;
 $$;
 
 ------------------------------------------------------------------------------------------
+-- Review round 6 (R1): the import keeps the parser's count of an unsplit entry's details of ours
+------------------------------------------------------------------------------------------
+
+-- private.ingest_statement, redefined from 20261111120000 (same signature, body and settings; its grants restated below):
+-- bank_transaction.unsplit_ours is copied from the stage with the line, and a line is well formed only with it null, or
+-- not negative on a camt.053 line of an entry (batch_entry_ref). Nothing else changes.
+create or replace function private.ingest_statement(p_statement_id uuid, p_header jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  s public.bank_statement;
+  b public.bank_account;
+  prev public.bank_statement;
+  v_sections jsonb := coalesce(p_header -> 'sections', '[]');
+  v_bad text;
+  v_n bigint;
+  v_new bigint;
+  v_entries bigint := 0;
+  v_cash_in jsonb;
+  v_counts jsonb;
+  v_warnings jsonb := '[]';
+  v_check jsonb;
+  v_from date;
+  v_to date;
+  v_cash bigint;
+  v_unposted record;
+  v_own text[];
+begin
+  select * into s from public.bank_statement where id = p_statement_id for update;
+  if not found then
+    raise exception 'statement_unknown: statement % does not exist', p_statement_id using errcode = '22023';
+  end if;
+  if s.status <> 'uploaded' then
+    return jsonb_build_object('skipped', s.status);  -- a redelivered job: already done
+  end if;
+  -- One import at a time per bank account: dedup, overlaps and suspected duplicates see every earlier line.
+  perform pg_advisory_xact_lock(hashtext('bank_import:' || s.bank_account_id::text));
+  select * into b from public.bank_account where id = s.bank_account_id for share;  -- a closure waits
+  if b.status <> 'active' or b.purpose <> 'client_funds' then
+    raise exception 'bank_account_closed: bank account % is not an active client_funds account', b.id
+      using errcode = '22023';
+  end if;
+  -- A file is the statement of one bank account: imported for another account of the servicer (the
+  -- wrong one chosen first), it is refused, so its money is never booked on two accounts. Imports of
+  -- the same file are serialised across the servicer's accounts.
+  perform pg_advisory_xact_lock(hashtext('bank_import_file:' || s.organization_id::text || ':' || s.file_sha256));
+  select min(p.bank_account_id::text) into v_bad from public.bank_statement p
+  where p.organization_id = s.organization_id and p.file_sha256 = s.file_sha256
+    and p.bank_account_id <> s.bank_account_id and p.status = 'imported';
+  if v_bad is not null then
+    raise exception 'imported_on_other_account: this file was imported for bank account %', v_bad using errcode = '22023';
+  end if;
+  if coalesce(p_header ->> 'format', '') <> s.format or jsonb_typeof(v_sections) <> 'array'
+     or (s.format = 'camt053' and jsonb_array_length(v_sections) = 0)
+     or (s.format = 'csv' and jsonb_array_length(v_sections) <> 0)
+     or coalesce(p_header ->> 'version', '00') !~ '^[0-9]{2}$' then
+    raise exception 'header_invalid: the parsed header does not describe a % statement', s.format using errcode = '22023';
+  end if;
+
+  -- This statement's lines, in a working table of our own (ADR-0012 temp-schema rule), analysed: every
+  -- later query starts from it, so no plan depends on the statistics of the tables loaded below.
+  drop table if exists pg_temp._bi_stage;
+  create temp table _bi_stage on commit drop as
+  select * from private.bank_import_stage where statement_id = p_statement_id;
+  alter table pg_temp._bi_stage add primary key (line_no);
+  analyze pg_temp._bi_stage;
+  -- M2c-1 (§12): our own transfers and credits are classified here whatever the parser knew (the registered own IBANs
+  -- may be newer than the job's list): a credit carrying our TOP id or from a registered own IBAN is ours, never a
+  -- debtor payment; one from a client's payout IBAN goes to ops; a debit carrying our RMT/SWP id or to our own IBAN
+  -- is a transfer out. The stage rows are kept in step (a line held as a duplicate keeps this reading).
+  v_own := array(select o.iban from public.bank_account o
+                 where o.organization_id = s.organization_id and o.purpose = 'own');
+  -- M2c-2: the clients' IBANs in one pass over the lines (private.stage_refined_kinds), never a scan of the servicer's
+  -- whole list per line
+  drop table if exists pg_temp._bi_refined;
+  create temp table _bi_refined on commit drop as
+  select r.line_no, r.kind from private.stage_refined_kinds(s.organization_id, v_own) r;
+  if exists (select 1 from pg_temp._bi_refined) then
+    update pg_temp._bi_stage x set kind = r.kind from pg_temp._bi_refined r where r.line_no = x.line_no;
+    update private.bank_import_stage x set kind = r.kind from pg_temp._bi_refined r
+    where x.statement_id = p_statement_id and x.line_no = r.line_no;
+  end if;
+  select count(*) into v_n from pg_temp._bi_stage;
+  if v_n <> coalesce((p_header ->> 'line_count')::bigint, -1) then
+    raise exception 'header_invalid: % staged lines, % announced', v_n, p_header ->> 'line_count' using errcode = '22023';
+  end if;
+
+  -- Lines are well formed (first offending line named).
+  select min(x.line_no)::text into v_bad from pg_temp._bi_stage x where x.currency <> s.currency;
+  if v_bad is not null then
+    raise exception 'currency_mismatch: line % is not in %', v_bad, s.currency using errcode = '22023';
+  end if;
+  select min(x.line_no)::text into v_bad from pg_temp._bi_stage x where x.booking_date > private.paris_today();
+  if v_bad is not null then
+    raise exception 'future_booking_date: line % is booked after today', v_bad using errcode = '22023';
+  end if;
+  select min(x.line_no)::text into v_bad from pg_temp._bi_stage x
+  where x.direction is null or x.direction not in ('credit', 'debit')
+     or x.amount_minor is null or x.amount_minor <= 0 or x.amount_minor > 1000000000000000
+     or x.booking_date is null or x.dedup_key is null or x.dedup_key !~ '^[tech]:' or length(x.dedup_key) > 300
+     or x.method is null or x.method not in ('sct', 'sdd', 'card', 'cheque', 'other')
+     or x.kind is null or x.kind not in ('debtor_credit', 'return', 'refund_out', 'other_debit', 'batch_unsplit',
+                                         'transfer_out', 'own_transfer_in', 'client_transfer_in')
+     or (x.direction = 'credit' and x.kind not in ('debtor_credit', 'return', 'batch_unsplit', 'own_transfer_in',
+                                                   'client_transfer_in'))
+     or (x.direction = 'debit' and x.kind in ('debtor_credit', 'own_transfer_in', 'client_transfer_in'))
+     or length(x.payment_info_id) not between 1 and 35
+     or (s.format = 'csv' and (x.section_no <> 0 or x.dedup_key !~ '^[ch]:' or x.entry_ref is not null))
+     or (s.format = 'camt053' and (x.section_no < 1 or x.section_no > jsonb_array_length(v_sections)
+                                   or x.dedup_key !~ '^[teh]:'))
+     or length(x.entry_ref) not between 1 and 300
+     -- review M2c-6b-1 round 6 (R1): the count of an unsplit entry's details of ours, on a camt.053 line of an entry only
+     or x.unsplit_ours < 0 or (x.unsplit_ours is not null and (s.format <> 'camt053' or x.batch_entry_ref is null))
+     -- an entry key is e:<the line's entry reference>#<n>, n from 1
+     or (x.dedup_key ~ '^e:' and not coalesce(left(x.dedup_key, length(x.entry_ref) + 3) = 'e:' || x.entry_ref || '#'
+                                              and substr(x.dedup_key, length(x.entry_ref) + 4) ~ '^[1-9][0-9]*$', false));
+  if v_bad is not null then
+    raise exception 'line_invalid: line % is not a well-formed bank line', v_bad using errcode = '22023';
+  end if;
+  select min(d.dedup_key) into v_bad
+  from (select x.dedup_key from pg_temp._bi_stage x group by x.dedup_key having count(*) > 1) d;
+  if v_bad is not null then
+    raise exception 'duplicate_reference_in_file: % appears twice in the file', v_bad using errcode = '22023';
+  end if;
+
+  -- camt.053: per <Stmt>, opening + credits - debits = closing (the parser checked it already).
+  if s.format = 'camt053' then
+    select min(sec.ord)::text into v_bad
+    from jsonb_array_elements(v_sections) with ordinality as sec (v, ord)
+    left join (select x.section_no,
+                      sum(case x.direction when 'credit' then x.amount_minor else -x.amount_minor end) as moved
+               from pg_temp._bi_stage x group by x.section_no) m on m.section_no = sec.ord
+    where sec.v ->> 'opening_minor' is null or sec.v ->> 'closing_minor' is null
+       or (sec.v ->> 'opening_minor')::numeric + coalesce(m.moved, 0) <> (sec.v ->> 'closing_minor')::numeric;
+    if v_bad is not null then
+      raise exception 'unbalanced: statement % of the file: opening + lines <> closing balance', v_bad
+        using errcode = '22023';
+    end if;
+  end if;
+
+  -- 1. Lines this bank account reported already (the same file again, an overlapping statement): skipped,
+  --    but only when the bank tells the same facts. A known reference with another amount, direction or
+  --    date refuses the file: a line is never dropped because its reference was reused.
+  drop table if exists pg_temp._bi_known;
+  create temp table _bi_known on commit drop as
+  select x.line_no, (x.direction, x.amount_minor, x.booking_date) is distinct from
+                    (t.direction, t.amount_minor, t.booking_date) as conflict
+  from pg_temp._bi_stage x
+  join public.bank_transaction t on t.bank_account_id = s.bank_account_id and t.dedup_key = x.dedup_key;
+  select min(k.line_no)::text into v_bad from pg_temp._bi_known k where k.conflict;
+  if v_bad is not null then
+    raise exception 'reference_conflict: line % has the bank reference of an earlier line with another amount, direction or date',
+      v_bad using errcode = '22023';
+  end if;
+  drop table if exists pg_temp._bi_new;
+  create temp table _bi_new on commit drop as
+  select x.* from pg_temp._bi_stage x
+  where not exists (select 1 from pg_temp._bi_known k where k.line_no = x.line_no);
+  alter table pg_temp._bi_new add primary key (line_no);
+  analyze pg_temp._bi_new;
+
+  -- A camt.053 entry (Ntry/AcctSvcrRef) is booked once, at the level of detail of its first import: a new
+  -- line of an entry this bank account already has means the entry comes back split another way (unsplit
+  -- then detailed, or the reverse, or other detail references). Refused: the money would be booked twice.
+  v_bad := private.bank_import_entry_known(s.bank_account_id)::text;
+  if v_bad is not null then
+    raise exception 'entry_detail_differs: line % is part of a bank entry imported earlier with other details', v_bad
+      using errcode = '22023';
+  end if;
+
+  -- 2. CSV safety net (design §8.3 step 5): same day, amount and direction as a line of another import,
+  --    with a similar label -> held as a suspected duplicate (no payment, no cash) until ops decide. Two
+  --    lines that both carry the bank's own id are different transactions by the bank's word.
+  if s.format = 'csv' then
+    -- The same operation on another bank account of the servicer (an export uploaded on the wrong
+    -- account first): with the bank's id and the same day, amount and direction, the bank says it is the
+    -- same operation and the file is refused; with the same fingerprint (no bank id), the line is held.
+    drop table if exists pg_temp._bi_elsewhere;
+    create temp table _bi_elsewhere on commit drop as
+    select * from private.bank_import_lines_elsewhere(s.organization_id, s.bank_account_id);
+    select min(e.line_no)::text into v_bad from pg_temp._bi_elsewhere e where e.dedup_key like 'c:%';
+    if v_bad is not null then
+      raise exception 'imported_on_other_account: line % was imported for another bank account', v_bad
+        using errcode = '22023';
+    end if;
+    update pg_temp._bi_new n set kind = 'suspected_duplicate'
+    from pg_temp._bi_elsewhere e where e.line_no = n.line_no;
+
+    update pg_temp._bi_new n set kind = 'suspected_duplicate'
+    from (select distinct x.line_no
+          from pg_temp._bi_new x
+          join public.bank_transaction t on t.bank_account_id = s.bank_account_id and t.booking_date = x.booking_date
+            and t.amount_minor = x.amount_minor and t.direction = x.direction
+          where not (x.dedup_key like 'c:%' and t.dedup_key like 'c:%')
+            and extensions.similarity(upper(coalesce(t.counterparty_name, '') || ' ' || coalesce(t.remittance_text, '')),
+                                      upper(coalesce(x.counterparty_name, '') || ' ' || coalesce(x.remittance_text, '')))
+                >= 0.5) d
+    where n.line_no = d.line_no;
+  end if;
+
+  -- 3. The facts.
+  drop table if exists pg_temp._bi_ins;
+  create temp table _bi_ins (id uuid primary key, line_no integer not null unique) on commit drop;
+  with ins as (
+    insert into public.bank_transaction (organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+      amount_minor, currency, booking_date, value_date, reversal_indicator, bank_tx_code, acct_svcr_ref, end_to_end_id,
+      tx_id, mandate_ref, counterparty_name, ultimate_counterparty_name, counterparty_iban, remittance_text,
+      creditor_reference, return_reason, original_end_to_end_id, batch_entry_ref, entry_ref, kind, payment_info_id,
+      unsplit_ours)
+    select s.organization_id, s.bank_account_id, s.id, n.line_no, n.dedup_key, n.direction, n.amount_minor, s.currency,
+           n.booking_date, n.value_date, coalesce(n.reversal_indicator, false), n.bank_tx_code, n.acct_svcr_ref,
+           n.end_to_end_id, n.tx_id, n.mandate_ref, n.counterparty_name, n.ultimate_counterparty_name,
+           n.counterparty_iban, n.remittance_text, n.creditor_reference, n.return_reason, n.original_end_to_end_id,
+           n.batch_entry_ref, n.entry_ref, n.kind, n.payment_info_id, n.unsplit_ours
+    from pg_temp._bi_new n
+    order by n.line_no
+    on conflict (bank_account_id, dedup_key) do nothing
+    returning id, line_no
+  )
+  insert into pg_temp._bi_ins select ins.id, ins.line_no from ins;
+  analyze pg_temp._bi_ins;
+  select count(*) into v_new from pg_temp._bi_ins;
+  if v_new <> (select count(*) from pg_temp._bi_new) then
+    -- cannot happen under the per-account lock; retried by the queue if it ever does
+    raise exception 'statement %: lines were imported concurrently', s.id using errcode = '40001';
+  end if;
+
+  -- 4. One payment per credit a debtor paid (bank facts copied; unmatched until M2b-3 matches it).
+  drop table if exists pg_temp._bi_pay;
+  create temp table _bi_pay on commit drop as
+  select i.id as bank_transaction_id, n.line_no, n.booking_date, n.amount_minor
+  from pg_temp._bi_ins i join pg_temp._bi_new n on n.line_no = i.line_no
+  where n.direction = 'credit' and n.kind in ('debtor_credit', 'batch_unsplit');
+  analyze pg_temp._bi_pay;
+  insert into public.payment (organization_id, bank_account_id, bank_transaction_id, channel, method, amount_minor,
+                              currency, booking_date, value_date, payer_name, payer_iban, end_to_end_id,
+                              remittance_text, creditor_reference)
+  select s.organization_id, s.bank_account_id, p.bank_transaction_id, s.format, n.method, n.amount_minor, s.currency,
+         n.booking_date, n.value_date, coalesce(n.counterparty_name, n.ultimate_counterparty_name), n.counterparty_iban,
+         n.end_to_end_id, n.remittance_text, n.creditor_reference
+  from pg_temp._bi_pay p join pg_temp._bi_new n on n.line_no = p.line_no
+  order by p.line_no;
+
+  -- 5. cash_in: one entry per booking date of this statement (design §2 #1), Dr 5120 / Cr 4710 pool.
+  perform private.ledger_post_set_begin();
+  insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key, source_type,
+                                  source_id)
+  select (row_number() over (order by d.booking_date))::integer, s.organization_id, 'cash_in', d.booking_date,
+         'cash_in:' || s.id::text || ':' || d.booking_date::text, 'bank_statement', s.id::text
+  from (select distinct p.booking_date from pg_temp._bi_pay p) d;
+  insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency, bank_account_id)
+  select e.entry_no, l.line_no, l.book, l.sign * t.total, s.currency,
+         case when l.book = 'client_money_cash' then s.bank_account_id end
+  from pg_temp._lps_entry e
+  join (select p.booking_date, sum(p.amount_minor) as total from pg_temp._bi_pay p group by p.booking_date) t
+    on t.booking_date = e.effective_date
+  cross join (values (1, 'client_money_cash', 1), (2, 'unallocated_payment', -1)) as l (line_no, book, sign);
+  if exists (select 1 from pg_temp._lps_entry) then
+    select count(*) into v_entries from private.ledger_post_set() r where r.created;
+  end if;
+
+  -- 6. I11, from the tables: for each booking date, the cash booked for this statement = Σ of its payments.
+  select coalesce(jsonb_agg(jsonb_build_object('date', y.d, 'entry_id', y.entry_id, 'minor', y.total::text)
+                            order by y.d), '[]')
+  into v_cash_in
+  from (select e.effective_date as d, e.id as entry_id, sum(lp.amount_minor) as total
+        from (select distinct p.booking_date from pg_temp._bi_pay p) k
+        join public.ledger_entry e on e.organization_id = s.organization_id
+          and e.idempotency_key = 'cash_in:' || s.id::text || ':' || k.booking_date::text
+        join public.ledger_posting lp on lp.entry_id = e.id
+        join public.ledger_account la on la.id = lp.ledger_account_id and la.book = 'client_money_cash'
+        group by e.effective_date, e.id) y;
+  select min(coalesce(x.d, (y.v ->> 'date')::date)::text) into v_bad
+  from (select p.booking_date as d, sum(p.amount_minor) as total
+        from pg_temp._bi_pay k join public.payment p on p.bank_transaction_id = k.bank_transaction_id
+        group by p.booking_date) x
+  full join jsonb_array_elements(v_cash_in) y (v) on (y.v ->> 'date')::date = x.d
+  where x.total is distinct from (y.v ->> 'minor')::bigint;
+  if v_bad is not null then
+    raise exception 'statement %: the cash booked on % differs from its payments (I11)', s.id, v_bad using errcode = 'LG001';
+  end if;
+
+  -- 7. What the import did (amounts as text).
+  select jsonb_build_object(
+    'lines', v_n,
+    'new_lines', v_new,
+    'known_lines', v_n - v_new,
+    'skipped_not_booked', coalesce((p_header ->> 'skipped_not_booked')::bigint, 0),
+    'credits', jsonb_build_object('lines', count(*) filter (where n.direction = 'credit'),
+                                  'minor', coalesce(sum(n.amount_minor) filter (where n.direction = 'credit'), 0)::text),
+    'debits', jsonb_build_object('lines', count(*) filter (where n.direction = 'debit'),
+                                 'minor', coalesce(sum(n.amount_minor) filter (where n.direction = 'debit'), 0)::text),
+    'payments', jsonb_build_object('count', count(p.line_no), 'minor', coalesce(sum(p.amount_minor), 0)::text),
+    'unposted', jsonb_build_object(
+      'lines', count(*) filter (where p.line_no is null),
+      'minor', coalesce(sum(case n.direction when 'credit' then n.amount_minor else -n.amount_minor end)
+                        filter (where p.line_no is null), 0)::text),
+    'cash_in', v_cash_in,
+    'cash_in_entries', v_entries,
+    'returns', count(*) filter (where n.kind = 'return'),
+    'refunds_out', count(*) filter (where n.kind = 'refund_out'),
+    'other_debits', count(*) filter (where n.kind = 'other_debit'),
+    'batch_unsplit', count(*) filter (where n.kind = 'batch_unsplit'),
+    'suspected_duplicates', count(*) filter (where n.kind = 'suspected_duplicate'),
+    'transfers_out', count(*) filter (where n.kind = 'transfer_out'),
+    'own_transfers_in', count(*) filter (where n.kind = 'own_transfer_in'),
+    'client_transfers_in', count(*) filter (where n.kind = 'client_transfer_in'))
+  into v_counts
+  from pg_temp._bi_new n left join pg_temp._bi_pay p on p.line_no = n.line_no;
+
+  -- 8. Dates and balances of the file; continuity with the previous statement (« relevé manquant »).
+  if s.format = 'camt053' then
+    select min((v ->> 'from_date')::date), max((v ->> 'to_date')::date) into v_from, v_to
+    from jsonb_array_elements(v_sections) v;
+    -- within the file
+    select coalesce(jsonb_agg(jsonb_build_object('code', 'opening_differs', 'stmt_id', cur.v ->> 'stmt_id',
+                                                 'expected_minor', pre.v ->> 'closing_minor',
+                                                 'actual_minor', cur.v ->> 'opening_minor') order by cur.ord), '[]')
+    into v_warnings
+    from jsonb_array_elements(v_sections) with ordinality as cur (v, ord)
+    join jsonb_array_elements(v_sections) with ordinality as pre (v, ord) on pre.ord = cur.ord - 1
+    where (cur.v ->> 'opening_minor')::bigint <> (pre.v ->> 'closing_minor')::bigint;
+    -- with the statement that covers the day before this one: of the imported statements starting before
+    -- it, the one that ends last (an index scan). If it ends on or after this one's first day, the day
+    -- before is covered already (the overlap warning says so): nothing to compare. Only the closing at
+    -- its last day is known, so an older statement is never compared.
+    select * into prev from public.bank_statement p
+    where p.bank_account_id = s.bank_account_id and p.status = 'imported' and p.format = 'camt053'
+      and p.from_date < v_from
+    order by p.to_date desc, p.finished_at desc
+    limit 1;
+    if found and prev.to_date < v_from then
+      if prev.closing_booked_minor is distinct from (v_sections -> 0 ->> 'opening_minor')::bigint then
+        v_warnings := v_warnings || jsonb_build_object('code', 'opening_differs', 'previous_statement_id', prev.id,
+          'expected_minor', prev.closing_booked_minor::text, 'actual_minor', v_sections -> 0 ->> 'opening_minor');
+      end if;
+      if (prev.sections -> -1 ->> 'seq') is not null and (v_sections -> 0 ->> 'seq') is not null
+         and (v_sections -> 0 ->> 'seq')::bigint not in ((prev.sections -> -1 ->> 'seq')::bigint + 1, 1) then
+        v_warnings := v_warnings || jsonb_build_object('code', 'sequence_gap', 'previous_statement_id', prev.id,
+          'previous_seq', prev.sections -> -1 ->> 'seq', 'seq', v_sections -> 0 ->> 'seq');
+      end if;
+    end if;
+  else
+    select min(x.booking_date), max(x.booking_date) into v_from, v_to from pg_temp._bi_stage x;
+  end if;
+  select count(*) into v_n from public.bank_statement p
+  where p.bank_account_id = s.bank_account_id and p.status = 'imported' and p.from_date <= v_to and p.to_date >= v_from;
+  if v_n > 0 then
+    v_warnings := v_warnings || jsonb_build_object('code', 'overlap', 'statements', v_n);
+  end if;
+
+  -- 9. I9 at import: closing balance = 5120[bank] + lines not booked (camt.053 only: a CSV has no balance).
+  if s.format = 'camt053' then
+    select coalesce(sum(lp.amount_minor), 0)::bigint into v_cash
+    from public.ledger_account la
+    join public.ledger_posting lp on lp.ledger_account_id = la.id and lp.effective_date <= v_to
+    where la.bank_account_id = s.bank_account_id and la.book = 'client_money_cash';
+    select * into v_unposted from private.bank_unposted(s.bank_account_id, v_to);
+    v_check := jsonb_build_object(
+      'as_of', v_to,
+      'closing_minor', v_sections -> -1 ->> 'closing_minor',
+      'cash_minor', v_cash::text,
+      'unposted_minor', v_unposted.minor::text,
+      'unposted_lines', v_unposted.lines,
+      'difference_minor', ((v_sections -> -1 ->> 'closing_minor')::bigint - v_cash - v_unposted.minor)::text);
+  end if;
+
+  update public.bank_statement
+  set status = 'imported', finished_at = now(),
+      format_version = case when s.format = 'camt053' then p_header ->> 'version' end,
+      stmt_id = v_sections -> 0 ->> 'stmt_id',
+      electronic_seq_no = (v_sections -> 0 ->> 'seq')::bigint,
+      from_date = v_from, to_date = v_to,
+      opening_booked_minor = (v_sections -> 0 ->> 'opening_minor')::bigint,
+      closing_booked_minor = (v_sections -> -1 ->> 'closing_minor')::bigint,
+      sections = case when s.format = 'camt053' then v_sections end,
+      counts = v_counts, warnings = v_warnings, bank_check = v_check
+  where id = s.id;
+  delete from private.bank_import_stage where statement_id = s.id;
+  return v_counts;
+end;
+$$;
+
+------------------------------------------------------------------------------------------
 -- Privileges (restated for every function redefined here; the new ones internal, or the worker's)
 ------------------------------------------------------------------------------------------
 
 revoke execute on function private.client_advance_guard(), private.pmt_inf_single_refund(uuid, text),
-  private.pmt_inf_refund_back(uuid, text), private.bank_booking_candidates(uuid, date, uuid, integer),
+  private.pmt_inf_refund_back(uuid, text), private.names_our_lot(uuid, text),
+  private.bank_booking_candidates(uuid, date, uuid, integer),
   private.post_run_settlements(uuid[], date[], integer),
   private.bank_line_cash_moved(uuid, uuid), private.batch_line_may_hold(uuid, uuid, text, uuid),
   private.transfer_late_lines(uuid), private.bank_booking_begin(), private.bank_booking_post_rows(uuid),
@@ -5793,6 +6243,9 @@ grant execute on function private.bank_line_refined_kind(text, text, text, text,
   private.bank_line_refined_kind(text, text, text, text, text[], text[]), private.apply_match_results(uuid, text)
   to service_role;
 grant execute on function private.names_our_transfer(text, text, text) to authenticated;
+-- review round 6 (R1): the import, as granted by 20261109120000 (the worker's)
+revoke execute on function private.ingest_statement(uuid, jsonb) from public, anon, authenticated, service_role;
+grant execute on function private.ingest_statement(uuid, jsonb) to service_role;
 revoke execute on function public.assign_payment(text, uuid, jsonb, jsonb, text), public.accept_suggestions(text, jsonb),
   public.resolve_duplicate(text, uuid, boolean, text),
   public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer)

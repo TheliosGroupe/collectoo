@@ -416,6 +416,7 @@ class _Reader:
         code = _code(tx, "BkTxCd/") or entry.code
         family, sub_family = _family(code)
         original = first(tx, "RtrInf/OrgnlEndToEndId")
+        unsplit_ours: int | None = None
         kind = classify(
             entry.direction,
             reversal=entry.reversal,
@@ -432,18 +433,26 @@ class _Reader:
             # undoes an earlier movement (ADR-0013 M2b-2 #2): never a payment. Review M2c-6b-1
             # round 4 (N1): so is a credit batch any of whose details is one of our transfers
             # coming back (our RMT/SWP id as its own or its original): never a debtor's payment.
-            ours = _our_ids(details) if credit else []
+            mine = _our_ids(details)
+            ours = mine if credit else []
             undone = (
                 kind == "return"
                 or any(_family(_code(d, "BkTxCd/"))[1] in RETURN_SUBFAMILIES for d in details)
                 or bool(ours)
             )
             kind = "return" if undone else "batch_unsplit"
-            # Review round 5 (Q2): such a batch keeps that identification on its line — the first
-            # of its details' ids of ours (the file's order) as its original id, unless what the
-            # line carries names one of our transfers already — so every refusal reading
-            # `names_our_transfer` on the stored line sees it (before: no id at all, and the line
-            # took « Classer sans comptabiliser » or any refund that came back).
+            # Review round 6 (R1): the line carries the entry's total, not one transaction's: it
+            # records how many of its details are ours, and the funds pass books it as our
+            # transfer's return only when exactly one is and the amount is that transfer's
+            # (payments.debits; never less with the rest as the bank's charge).
+            unsplit_ours = len(mine)
+            # Review round 5 (Q2), round 6's wording: such a batch keeps that identification on
+            # its line, unless what the line carries names one of our transfers already, so every
+            # refusal reading `names_our_transfer` on the stored line sees it (before round 5: no
+            # id at all, and the line took « Classer sans comptabiliser » or any refund that came
+            # back) — the one detail's id as its original when exactly one is ours; when several
+            # are, the first (the file's order), the only field the refusals read, and the count
+            # says the line is never booked, whatever its amount.
             if ours and not names_our_transfer(e2e, original, entry.payment_info_id):
                 original = ours[0]
         if tx_ref is not None and own_ref and not unsplit:
@@ -494,6 +503,7 @@ class _Reader:
                 batch_entry_ref=(entry.ref or entry.where) if batch else None,
                 entry_ref=entry.ref,
                 payment_info_id=entry.payment_info_id,
+                unsplit_ours=unsplit_ours,
             )
         )
 
@@ -597,9 +607,10 @@ def _return_reason(tx: Flat) -> str | None:
 
 
 def _our_ids(details: list[Flat]) -> list[str]:
-    """The ids of ours an unsplit batch's details carry, in the file's order: each detail that is
-    one of our transfers coming back (`names_our_transfer`: our RMT/SWP id as its own end-to-end id
-    or as the original it returns) gives that id — its original one when that is ours."""
+    """The ids of ours an unsplit batch's details carry, in the file's order: each detail that
+    names one of our transfers (`names_our_transfer`: our RMT/SWP id as its own end-to-end id or as
+    the original it returns; in a credit batch, one coming back) gives that id — its original one
+    when that is ours. One per detail (a detail is never counted twice, an id may be)."""
     out: list[str] = []
     for d in details:
         e2e = _provided(first(d, "Refs/EndToEndId"))

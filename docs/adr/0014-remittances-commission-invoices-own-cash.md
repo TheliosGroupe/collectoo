@@ -1156,7 +1156,11 @@ after download stays **off**; `033` and `034` keep their assertions and TODO mar
   first of them, in the file's order, as its original end-to-end id, unless what it carries already names one of our
   transfers (our lot's PmtInfId: nothing added) — the smallest change that makes `names_our_transfer` true on the
   stored line, so every refusal above sees it. The debit job then reads it as that transfer's return under the flagged
-  return's rules (never more than the transfer, never before its debit, never twice). Tests: `test_funds.py::test_a_camt053_reads_our_unflagged_credits_as_returns`
+  return's rules (never more than the transfer, never before its debit, never twice) — **corrected by round 6 (R1):**
+  those rules also book a return of less than the transfer with the rest as the bank's charge, which is true only for
+  a line of its own, never for an unsplit batch (its amount is the batch's total): round 5 booked the verifier's netted
+  entry that way; since round 6 such a line is booked only with exactly one detail of ours, for the transfer's exact
+  amount. Tests: `test_funds.py::test_a_camt053_reads_our_unflagged_credits_as_returns`
   (the batch of two of our ids now `("return", None, RMT)`; new shapes: one of ours beside a debtor's, our lot's
   PmtInfId already naming it, a debtor's batch unchanged, a detail whose original is ours under another end-to-end id,
   an unsplit debit batch of our ids staying `batch_unsplit`; every `return` it reads carries what the refusals read);
@@ -1196,6 +1200,100 @@ passed); the worker's ruff, format and mypy (167 files), 993 unit tests (5 xfail
 scale files apart); the evals unchanged — mapping 167/167 (threshold 0.980), reconciliation 0.9600 automatic
 (95,997/100,000), 0 wrong, 0 policy violations; the web's lint, types and 326 vitest tests; the E2E's 54 tests (no new
 screenshot: the run's image diffs are dates and ids, not committed). `database.types.ts` regenerated: unchanged.
+
+**Round 6 (2026-11-16).** The verifiers of round 5 found one regression of that round (Q2: the original id an unsplit
+camt.053 credit batch now keeps fed the funds pass's partial-return rule) and two smaller items (a credit naming our lot
+with an end-to-end id that is not ours; a TOP top-up read as a debtor's payment, unrecorded). One branch (`m6b1-fix6`),
+the migration still edited in place (each merged function redefined with `CREATE OR REPLACE`, or dropped and created for
+a new return column, restating `SECURITY DEFINER`, its `SET` clauses and its grants); the cancellation after download
+stays **off**; `033` and `034` keep their assertions and TODO markers.
+
+- **R1 (verdict Q2, regression) — a line of an entry kept unsplit is never a partial return.** Such a line carries the
+  entry's total, not one transaction's: the round-5 verifier's real import and debit job booked a credit entry netting
+  our payout r2's return (4 198,40 €) and our payout r4's debit (328,00 €) as r2's return and the 328,00 € as our bank
+  fee (r4 left in its file though debited); with a chargeback's debit, a fee of 3 000,00 €. The stored line had no mark
+  of what it was (`batch_entry_ref` is set on a split batch's lines too, and an unsplit entry of one detail keeps that
+  detail's end-to-end id), so the parser now records it: `bank_transaction.unsplit_ours` (smallint, ≥ 0), on a line read
+  from a camt.053 entry kept unsplit, how many of its details name one of our transfers (`_our_ids`: their own or
+  original end-to-end id is our RMT/SWP id; one per detail, debit batches counted too); null on every other line (a line
+  of its own, a split batch's detail, a CSV line, a line imported before this round). It is staged with the line
+  (`private.bank_import_stage.unsplit_ours`, `statement.STAGE_COLUMNS`) and kept by `private.ingest_statement`
+  (redefined from 20261111120000: one column copied, and a line is well formed only with it null, or not negative on a
+  camt.053 line of an entry); `private.bank_booking_candidates` returns it last (dropped and created as before), and
+  the funds pass's twins refuse a return from such a line unless exactly one detail is ours and its amount is the
+  transfer's: `payments.debits._transfer_return` (`FundsLine.unsplit_ours`, loaded by `jobs.debits.funds_lines`) and
+  `private.post_bank_bookings`' payout_returned/sweep_returned re-check, both `return_differs`, nothing booked (no
+  `payout_returned`, no fee). The brief's wording for the parser: the one detail's id as the line's original when
+  exactly one is ours; when several are, the first — the only field every refusal reads (`names_our_transfer`: the
+  line's end-to-end id, original and PmtInfId) — and the count keeps the line from being booked whatever its amount (a
+  stored mark was needed: no other field tells one detail of ours from several). Round 5's identification is kept (every
+  refusal still reads the line as ours). « À classer » words `return_differs` for it (« … ou dans un lot de la banque qui
+  ne se détaille pas (son total n'est pas exactement le montant de ce seul virement) … »). COMPLIANCE OQ-84 (b) is
+  corrected and (f) records the default and the residuals (an entry of one detail of ours whose other details net to
+  nothing is booked for its exact amount; lines imported before this round carry no count). Tests that failed before:
+  pgTAP `035` test 138 (`sc_r1_unsplit_return`: the verifier's netted line — two details of ours —, the chargeback's
+  — one —, and two of ours for r2's exact amount refused `return_differs` by the re-check with r4 untouched; a line of
+  its own less 1,50 € still booked with its fee; one detail of ours for the exact amount booked; the candidates return
+  the count) and 139 (`r1_stage`: the import keeps the count; refused on a CSV line, without an entry, negative); worker
+  `test_debit_bookings.py::test_an_unsplit_batch_is_a_return_only_for_its_one_transfer_s_exact_amount`,
+  `::test_an_unsplit_entry_is_booked_only_as_one_transfer_s_exact_return` (Hypothesis) and the worlds property
+  `::test_a_booking_only_when_every_condition_holds` (return lines now drawn unsplit with 0, 1 or 2 of ours);
+  `test_funds.py::test_a_camt053_entry_kept_unsplit_records_how_many_of_its_details_are_ours` (both netted shapes, a
+  split batch, one or two of ours, one id on two details, a debtor's batch, no detail, one detail of two, a debit batch,
+  a CSV line); integration `test_debit_bookings_integration.py::test_an_unsplit_entry_netting_our_return_is_never_booked_as_a_partial_return`
+  (the verifier's netted entry and its chargeback variant through the real import and debit job: `return_differs`
+  twice, no booking, no fee, r4 `in_file`; the same payout's return alone in an entry of one detail shown of two, its
+  exact amount, booked). On round 5's code that integration case booked `payout_returned` and the fees.
+- **R2 (verdict new:tf-lot-credit-with-foreign-e2e).** Whether a bank returns a transfer of our lot with our PmtInfId
+  but another end-to-end id is unknown (COMPLIANCE OQ-84 (g): ask the bank). A new `private.names_our_lot(bank_account,
+  pmt_inf_id)` reads a PmtInfId as one of our lots on the line's account — a file of that account handed out
+  (downloaded or sent), keyed as `private.pmt_inf_refund_back` (revoked from every role). `private.post_debit_links`
+  refuses `own_transfer_line` on a credit it names, whatever its end-to-end id, for every link kind but « Remboursement
+  revenu » of the refund that lot held alone (`lot_refund`, now read whatever the end-to-end id); `public.debit_link_options`
+  lists that refund alone there. A TF-shaped PmtInfId of no file of ours, of a file never handed out or of another
+  account keeps the general rules. The page reads the form (`namesOurLot`: a credit naming one of our files'
+  PmtInfIds): `offersPaymentLinks` and `explainable` refuse it, `offersOwnLotRefundBack` passes the listed refund
+  through on a `return`, and « À classer » shows `OUR_LOT_FOREIGN_E2E_NOTE` with the lone-refund note; the relay and the
+  top-up keep round 3's reading (round 3's integration decided an own credit naming our lot with an end-to-end id not
+  ours is still a top-up: `035`'s `sc_top_up_own_pmt` unchanged). Such a credit is still read at import as a debtor's
+  credit when nothing else marks it (OQ-84's default: ops recognise it by the lot, neither assign nor refund it, tell
+  support; M2c-6b-2). Tests that failed before: pgTAP `035` test 137 (`sc_r2_lot_foreign_e2e`, computed in section 3
+  while q1 is executed, asserted in section 14: the verifier's n30 — a payouts' lot with VIR-X-0030 — lists nothing and
+  refuses the unrelated refund and the explanation; its b3.4 — q1's lone lot with VIR-FOREIGN-1 — lists q1 alone,
+  refuses another refund and the explanation, accepts q1 and bounces it; an own credit of that lot refuses the
+  explanation; a credit of that lot carrying another refund's RFD id refuses that refund; a TF-shaped id of no file, a
+  file never downloaded and a credit of another account keep the general rules); vitest « M2c-6b-1 review round 6: an
+  unsplit entry's return, our lot with an end-to-end id not ours (R1, R2) », first case (the round-5 case's three
+  assertions on an end-to-end id that is not ours now say the opposite, as R2 decides).
+- **R3 (verdict new:csv-top-label-only-unrecorded) — recorded.** A TOP id only in a CSV label outside `/REF`, or in a
+  detail of a camt.053 credit batch kept unsplit beside a debtor's credit, is read as a debtor's payment: COMPLIANCE
+  OQ-84 (e) records it with its default (ops recognise it in « Paiements à traiter », neither assign nor refund it, tell
+  support; booked as the top-up in M2c-6b-2). No parser change: a label rule would misread a debtor's own reference of
+  that shape, and the import's classifier reads only the line's own end-to-end id, which an unsplit batch's line does
+  not have (giving it one detail's TOP id would read the whole batch, the debtor's credit in it, as our top-up). Evals
+  unchanged (below).
+
+Mutants, each killed (SQL redefining one function after `035`'s `begin`, run through `psql` in one transaction on a fresh
+`supabase db reset`, the unmutated copy passing all 139; worker and web each in a scratch copy): SQL 16 of 16 —
+`post_bank_bookings` without the R1 rule, with the count only, the amount only, or « less » for « differs » (138 each);
+`bank_booking_candidates` returning no count (138); `ingest_statement` dropping the count, without its check, or
+checking the format only (139 each); `post_debit_links` without the lot arm, with the lone refund read only with no
+end-to-end id, or with the exception open to any refund (137; the last 135 too); `names_our_lot` by the form only, on
+any account, or on a file never handed out (137 each); `debit_link_options` without the lot arm, or listing the lone
+refund only with no end-to-end id (137 each). Worker 9 of 9 — `_transfer_return` without the rule, with the count only,
+the amount only, or « less » for « differs » (the example and the R1 property, each), the parser without the count, with
+the credits' count only, or counting each id once (the parser test), the loader dropping the count and the stage
+dropping its column (the integration case: the first booked by the worker and refused by the re-check, `changed`; the
+second the count lost at import). Web 8 of 8 — `offersPaymentLinks` or `explainable` without `namesOurLot`, the lone
+refund only with no end-to-end id, `namesOurLot` on debits too or on any PmtInfId, no note, the relay hidden on our lot,
+the old `return_differs` text.
+
+Suites on the final code, after `supabase db reset`: pgTAP 35 files, 2,499 tests (`034`'s TODO markers kept, 16 TODO
+passed); the worker's ruff, format and mypy (167 files), 996 unit tests (5 xfailed) and 179 integration tests (the
+scale files apart); the evals unchanged — mapping 167/167 (threshold 0.980), reconciliation 0.9600 automatic
+(95,997/100,000), 0 wrong, 0 policy violations; the web's lint, types and 328 vitest tests; the E2E's 54 tests (no new
+screenshot: the run's image diffs are dates and ids, not committed). `database.types.ts` regenerated
+(`bank_transaction.unsplit_ours`).
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

@@ -15,12 +15,14 @@ import {
   isOurTransferCredit,
   isOurTransferLine,
   lineKindLabel,
+  namesOurLot,
   linkDebitErrorCode,
   linkOffers,
   linkRefundEffect,
   minorToInput,
   normaliseIban,
   offersOwnBatchRefunds,
+  offersOwnLotRefundBack,
   offersPaymentLinks,
   offersTopUp,
   pendingRefundInstruction,
@@ -1726,11 +1728,13 @@ describe("M2c-6b-1 review round 5: our lots coming back, the held line's release
     expect(note).toContain("Ne le classez pas sans comptabiliser");
     expect(note).toContain("« Remboursement revenu »");
     expect(note).toContain("ne contenait qu'un remboursement");
-    // with an end-to-end id that is not ours, the PmtInfId alone does not make it ours (as the database reads it)
+    // with an end-to-end id that is not ours: since round 6 (R2) still our lot for its links — the refunds listed
+    // (the database lists only the one its lot held alone), never an explanation; not « our transfer » otherwise
     const notOurs = { ...lot, end_to_end_id: "E2E-1" };
-    expect(offersPaymentLinks(notOurs)).toBe(true);
+    expect(isOurTransferCredit(notOurs)).toBe(false);
+    expect(offersPaymentLinks(notOurs)).toBe(false);
     expect(linkOffers(notOurs, [], listed).refunds).toEqual(listed);
-    expect(explainable({ direction: "credit", kind: "return", ...ids, endToEndId: "E2E-1" })).toBe(true);
+    expect(explainable({ direction: "credit", kind: "return", ...ids, endToEndId: "E2E-1" })).toBe(false);
     // a credit return naming nothing of ours: as before
     const plain = { ...lot, payment_info_id: null };
     expect(offersPaymentLinks(plain)).toBe(true);
@@ -1759,5 +1763,74 @@ describe("M2c-6b-1 review round 5: our lots coming back, the held line's release
     // the relay's refusal keeps its words (« À classer »: an own or a client's credit stays there)
     expect(debitErrorCode("own credit release refused: own_transfer_line")).toBe("own_credit_own_transfer_line");
     expect(errorText("own_credit_own_transfer_line")).toContain("« À classer »");
+  });
+});
+
+describe("M2c-6b-1 review round 6: an unsplit entry's return, our lot with an end-to-end id not ours (R1, R2)", () => {
+  const PMT = "TF-2026-000123-2";
+  const lot = {
+    direction: "credit",
+    kind: "return",
+    amount_minor: "5000",
+    end_to_end_id: "VIR-X-0030",
+    original_end_to_end_id: null,
+    payment_info_id: PMT,
+  };
+  const ids = { namesPayment: false, endToEndId: "VIR-X-0030", originalEndToEndId: null, paymentInfoId: PMT };
+
+  it("offers on a credit naming our lot, whatever its end-to-end id, only the refund listed, never an explanation (R2)", () => {
+    expect(namesOurLot(lot)).toBe(true);
+    expect(isOurTransferCredit(lot)).toBe(false); // the relay's and the top-up's reading (round 3) is unchanged
+    expect(offersPaymentLinks(lot)).toBe(false);
+    expect(offersOwnLotRefundBack(lot)).toBe(true);
+    expect(readsLinkOptions(lot)).toBe(true);
+    const listed = [{ refund_request_id: "q1" }];
+    expect(linkOffers(lot, [{ left_minor: "5000", named: true }], listed)).toEqual({
+      returns: [],
+      losses: [],
+      refunds: listed,
+    });
+    expect(linkOffers(lot, [], []).refunds).toEqual([]);
+    expect(explainable({ direction: "credit", kind: "return", ...ids })).toBe(false);
+    // its note: our lot, no explanation, no other refund; the lone refund the exception
+    const note = debitReviewText({ ...lot, review_reason: "no_candidate" });
+    expect(note).toContain("l'un des lots de nos fichiers");
+    expect(note).toContain("Ne le classez pas sans comptabiliser");
+    expect(note).toContain("ne contenait qu'un remboursement");
+    expect(note).not.toContain("sans référence de bout en bout");
+    // an own or a client's credit naming our lot with such an id: no explanation (the database refuses it), its relay
+    // and top-up as round 3 decided them (the database accepts them: COMPLIANCE OQ-84)
+    for (const kind of ["own_transfer_in", "client_transfer_in"]) {
+      const o = { ...lot, kind };
+      expect(explainable({ direction: "credit", kind, ...ids }), kind).toBe(false);
+      expect(readsLinkOptions(o), kind).toBe(false);
+      expect(linkOffers(o, [], listed).refunds, kind).toEqual([]);
+    }
+    expect(offersTopUp({ ...lot, kind: "own_transfer_in" })).toBe(true);
+    expect(relayable({ ...lot, kind: "own_transfer_in" })).toBe(true);
+    expect(clientRelayable({ ...lot, kind: "client_transfer_in" })).toBe(true);
+    // a debit naming our lot with an end-to-end id is no batch line of ours: unchanged
+    const debit = { ...lot, direction: "debit", kind: "other_debit" };
+    expect(namesOurLot(debit)).toBe(false);
+    expect(offersPaymentLinks(debit)).toBe(true);
+    expect(explainable({ direction: "debit", kind: "other_debit", ...ids })).toBe(true);
+    // a look-alike PmtInfId and a credit naming nothing: as before
+    for (const pmt of [null, "TF-26-1-1", "XTF-2026-000123-2"]) {
+      const o = { ...lot, payment_info_id: pmt };
+      expect(namesOurLot(o), String(pmt)).toBe(false);
+      expect(offersPaymentLinks(o), String(pmt)).toBe(true);
+      expect(explainable({ direction: "credit", kind: "return", ...ids, paymentInfoId: pmt }), String(pmt)).toBe(true);
+      expect(debitReviewText({ ...o, review_reason: "no_candidate" }), String(pmt)).toBe(DEBIT_REVIEW.no_candidate);
+    }
+  });
+
+  it("says why a return read from a batch the bank did not detail is not booked (R1)", () => {
+    const text = DEBIT_REVIEW.return_differs;
+    expect(text).toContain("déjà revenu");
+    expect(text).toContain("rien n'est comptabilisé");
+    expect(text).toContain("lot de la banque");
+    expect(text).toContain("exactement");
+    const back = { ...lot, end_to_end_id: null, original_end_to_end_id: "RMT0A1B2C3D4E5F", payment_info_id: null };
+    expect(debitReviewText({ ...back, review_reason: "return_differs" })).toBe(text);
   });
 });

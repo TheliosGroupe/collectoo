@@ -166,9 +166,11 @@ export const DEBIT_REVIEW: Record<string, string> = {
     "Lot débité pour un autre montant que ses virements en cours (un virement manque ou a été rejeté) : rien n'est comptabilisé ; demandez à la banque le détail du lot.",
   batch_mixed:
     "Lot mêlant des virements de natures différentes : rien n'est comptabilisé ; demandez à la banque le détail du lot.",
-  // review round 4 (N1): also a second return of a transfer already returned (the job's `return_differs` either way)
+  // review round 4 (N1): also a second return of a transfer already returned (the job's `return_differs` either way);
+  // review round 6 (R1): and a return read from a camt.053 entry the bank kept unsplit (its total, not this transfer's
+  // return: less than it, with another movement in the batch, or several of our transfers in it)
   return_differs:
-    "Retour d'un virement du cabinet pour plus que son montant, ou d'un virement déjà revenu : rien n'est comptabilisé ; vérifiez dans la banque.",
+    "Retour d'un virement du cabinet pour plus que son montant, d'un virement déjà revenu, ou dans un lot de la banque qui ne se détaille pas (son total n'est pas exactement le montant de ce seul virement) : rien n'est comptabilisé ; vérifiez dans la banque.",
   // review M2c-6b-1 (T4, K5): also a return dated before its debit (the ledger never dates a reversal before its entry)
   return_before_debit:
     "Retour d'un virement du cabinet sans débit comptabilisé avant lui. Si le débit n'est pas encore comptabilisé, le retour est repris automatiquement à l'import d'un relevé, une fois le débit comptabilisé. S'il est daté d'avant le débit, rien n'est comptabilisé : vérifiez les deux lignes dans la banque et prévenez le support.",
@@ -244,7 +246,8 @@ export function offersOwnBatchRefunds(o: {
  * and the credits from our own account or from a client (M2c-1 kinds) never: the database refuses those links
  * (« debit link refused: not_a_return »; review M2c-1). Nor our payouts' and sweeps' lines (review M2c-6b-1 money-1:
  * `own_transfer_line`, isOurTransferLine). Review round 5 (Q1): nor a credit naming one of our lots with no end-to-end id
- * (isOurTransferCredit) — its one link, the refund its lot held alone, is offersOwnLotRefundBack's.
+ * (isOurTransferCredit) — its one link, the refund its lot held alone, is offersOwnLotRefundBack's; review round 6
+ * (R2): whatever its end-to-end id (namesOurLot).
  */
 export function offersPaymentLinks(o: {
   direction: string;
@@ -253,7 +256,7 @@ export function offersPaymentLinks(o: {
   original_end_to_end_id?: string | null;
   payment_info_id?: string | null;
 }): boolean {
-  if (isOurTransferLine(o) || isOurTransferCredit(o)) return false;
+  if (isOurTransferLine(o) || isOurTransferCredit(o) || namesOurLot(o)) return false;
   if (o.direction === "debit")
     return (
       o.kind === "return" || o.kind === "refund_out" || o.kind === "other_debit"
@@ -277,10 +280,11 @@ export function readsLinkOptions(o: {
  * `return` (isOurTransferCredit, not isOurTransferLine: our RMT/SWP lines take none) — « Remboursement revenu » of the
  * refund that lot held alone, executed, of the line's amount (private.pmt_inf_refund_back; COMPLIANCE OQ-84's
  * default), the one refund public.debit_link_options lists there. private.post_debit_links refuses every other link
- * and the explanation on such a credit (`own_transfer_line`).
+ * and the explanation on such a credit (`own_transfer_line`). Review round 6 (R2): whatever its end-to-end id
+ * (namesOurLot: one that is not ours included).
  */
 export function offersOwnLotRefundBack(o: LineIds): boolean {
-  return o.direction === "credit" && o.kind === "return" && isOurTransferCredit(o) && !isOurTransferLine(o);
+  return o.direction === "credit" && o.kind === "return" && namesOurLot(o) && !isOurTransferLine(o);
 }
 
 /**
@@ -355,6 +359,18 @@ export function isOurTransferCredit(o: LineIds): boolean {
 }
 
 /**
+ * Review M2c-6b-1 round 6 (R2, verdict new:tf-lot-credit-with-foreign-e2e): a credit naming one of our files' PmtInfIds
+ * whatever its end-to-end id — our lot, or a transfer of it, coming back, the bank possibly giving it an end-to-end id
+ * that is not ours (whether it does is unknown: COMPLIANCE OQ-84). private.post_debit_links refuses on it the explanation
+ * and « Remboursement revenu » of any refund but the one its lot held alone (it reads the PmtInfId of a file of the
+ * line's account handed out: private.names_our_lot; the page reads the form, and offers only what debit_link_options
+ * lists). The relay and the top-up keep round 3's reading (isOurTransferCredit: with no end-to-end id).
+ */
+export function namesOurLot(o: LineIds): boolean {
+  return o.direction === "credit" && OUR_PMT_INF.test(o.payment_info_id ?? "");
+}
+
+/**
  * Whether « Approvisionnement par le compte propre » is offered (M2c-1): a credit from the own account
  * (`own_transfer_in`). Review M2c-6b-1 round 3 (M2, L4): never on a credit carrying our payout's or sweep's RMT/SWP id,
  * as its own or as the original it returns, nor on one naming our PmtInfId without an end-to-end id
@@ -417,6 +433,14 @@ export const OUR_LOT_CREDIT_NOTE =
   "Crédit portant la référence de l'un des lots de nos fichiers de virements (sans référence de bout en bout) : c'est ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement. Ne le classez pas sans comptabiliser : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
 
 /**
+ * Review M2c-6b-1 round 6 (R2): what « À classer » says of a credit read as a return that names one of our lots with an
+ * end-to-end id that is not ours (namesOurLot, not isOurTransferCredit) — in place of the job's review (no_candidate),
+ * the explanation and every other refund being refused on it (own_transfer_line; COMPLIANCE OQ-84).
+ */
+export const OUR_LOT_FOREIGN_E2E_NOTE =
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements, avec une référence de bout en bout qui n'est pas la nôtre : c'est peut-être ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne le classez pas sans comptabiliser et ne le rattachez à aucun autre remboursement : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+
+/**
  * Review M2c-6b-1 round 5 (Q1): on such a credit read as a return (offersOwnLotRefundBack), the one exception — the
  * refund its lot held alone, which « À classer » then offers (COMPLIANCE OQ-84's default).
  */
@@ -443,6 +467,8 @@ export function debitReviewText(o: LineIds & { review_reason: string | null }): 
   if (o.direction === "credit" && o.kind !== "return" && isOurTransferLine(o)) return OUR_TRANSFER_CREDIT_NOTE;
   if (isOurTransferCredit(o) && !isOurTransferLine(o))
     return offersOwnLotRefundBack(o) ? `${OUR_LOT_CREDIT_NOTE} ${OUR_LOT_REFUND_BACK_NOTE}` : OUR_LOT_CREDIT_NOTE;
+  // review round 6 (R2): a return naming our lot with an end-to-end id that is not ours
+  if (offersOwnLotRefundBack(o)) return `${OUR_LOT_FOREIGN_E2E_NOTE} ${OUR_LOT_REFUND_BACK_NOTE}`;
   if (!o.review_reason) return null;
   const credit = o.direction === "credit" ? CREDIT_REVIEW[o.review_reason] : undefined;
   if (credit) return credit;
@@ -479,7 +505,7 @@ export function explainable(o: {
   // SWP id, or a batch line of one of our PmtInfs) and the return of one are booked from the statement, never explained
   // away — nor any line carrying one of our RMT/SWP ids, whichever way (isOurTransferLine reads both ids, round 2) —
   // nor, review round 5 (Q1), a credit naming one of our lots with no end-to-end id (isOurTransferCredit), whatever its
-  // kind, as OUR_LOT_CREDIT_NOTE says
+  // kind, as OUR_LOT_CREDIT_NOTE says — nor, round 6 (R2), with an end-to-end id that is not ours (namesOurLot)
   const ids = {
     direction: o.direction,
     kind: o.kind,
@@ -487,7 +513,7 @@ export function explainable(o: {
     original_end_to_end_id: o.originalEndToEndId,
     payment_info_id: o.paymentInfoId,
   };
-  if (isOurTransferLine(ids) || isOurTransferCredit(ids)) return false;
+  if (isOurTransferLine(ids) || isOurTransferCredit(ids) || namesOurLot(ids)) return false;
   if (o.direction !== "debit") return true;
   if (o.kind === "refund_out") return false;
   return !(o.kind === "return" && o.namesPayment);

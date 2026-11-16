@@ -1284,3 +1284,133 @@ def test_our_lot_and_an_unsplit_batch_back_unflagged_are_never_linked_nor_explai
                 line,
             )
     _no_violation(tenant)
+
+
+# -- review round 6 (R1): an entry kept unsplit is never a partial return -------------------------
+
+
+def _import_netted(
+    tenant: dict[str, Any], entries: list[Entry], day: date, debit_refs: list[str]
+) -> str:
+    """A one-day camt.053 of these entries whose details named in `debit_refs` are debits (an
+    entry the bank netted: its details cannot be split), imported; the payments queue drained."""
+    opening, _last = _last_closing(tenant)
+    stmt = f"S-{uuid.uuid4().hex[:10]}"
+    doc = make_doc(
+        entries,
+        iban=tenant["iban"],
+        from_date=day,
+        to_date=day,
+        opening_minor=opening,
+        stmt_id=stmt,
+    )
+    xml = render_camt053(doc, "08")
+    for ref in debit_refs:
+        at = xml.index(f"<AcctSvcrRef>{ref}</AcctSvcrRef>".encode())
+        ind = xml.index(b"<CdtDbtInd>CRDT</CdtDbtInd>", at)
+        xml = xml[:ind] + b"<CdtDbtInd>DBIT</CdtDbtInd>" + xml[ind + 27 :]
+    target = upload(tenant, storage(), xml, name=f"{stmt}.xml")
+    drain_payments(storage())
+    return str(target["statement_id"])
+
+
+def _fees(tenant: dict[str, Any]) -> int:
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            """select coalesce(sum(p.amount_minor), 0) from public.ledger_posting p
+               join public.ledger_account a on a.id = p.ledger_account_id
+               join public.ledger_entry e on e.id = p.entry_id
+               where e.organization_id = %s and a.book = 'bank_fees'""",
+            (tenant["servicer"],),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_an_unsplit_entry_netting_our_return_is_never_booked_as_a_partial_return(
+    tmp_path: Path,
+) -> None:
+    """R1 (round-5 verdict Q2, a regression of round 5): a downloaded file of two payouts, the
+    larger one debited (booked). The bank then reports one credit entry it netted: the larger
+    payout's return (its RMT id) beside the other payout's debit (its RMT id, a DBIT detail) — the
+    entry is kept unsplit, its amount the difference. Round 5 read it as the larger payout's return
+    of less than its amount and booked the rest as our bank fee: the other payout's debit hidden as
+    the servicer's charge, that payout left in its file. Now the line records two details of ours
+    and the funds pass reviews it `return_differs`, nothing booked (no payout_returned, no fee), the
+    other payout untouched; the same with a chargeback's debit (one detail of ours). The same
+    payout's return alone in an entry kept unsplit (one detail shown of two), for its exact amount,
+    is still booked as its return."""
+    tenant, _other, _r1, _r2 = _two_runs()
+    _f, data = _downloaded(tenant, tmp_path)
+    (big, n_big), (small, n_small) = sorted(_payouts(data), key=lambda p: -p[1])
+    day = max(paris_today(), _last_closing(tenant)[1])
+    opening, _last = _last_closing(tenant)
+    tag = uuid.uuid4().hex[:6].upper()
+    debit = Entry(
+        n_big,
+        False,
+        day,
+        day,
+        ref=f"ND{tag}",
+        code="PMNT/ICDT/ESCT",
+        txs=(Tx(n_big, ref=f"D{tag}", end_to_end_id=big, name="LILAS FINANCE"),),
+    )
+    sid0 = import_entries(tenant, storage(), [debit], day=day, opening=opening)
+    assert _bookings(sid0) == [("payout", big, n_big)]
+    fees_before = _fees(tenant)
+    chargeback = 30_000
+    netted = [
+        Entry(
+            n_big - n_small,
+            True,
+            day,
+            day,
+            ref=f"NN{tag}",
+            txs=(
+                Tx(n_big, ref=f"N1{tag}", end_to_end_id=big, name="LILAS FINANCE"),
+                Tx(n_small, ref=f"N2{tag}", end_to_end_id=small, name="MARTIN SAS"),
+            ),
+        ),
+        Entry(
+            n_big - chargeback,
+            True,
+            day,
+            day,
+            ref=f"NC{tag}",
+            txs=(
+                Tx(n_big, ref=f"C1{tag}", end_to_end_id=big, name="LILAS FINANCE"),
+                Tx(chargeback, ref=f"C2{tag}", end_to_end_id=f"E2E-CB-{tag}", name="BANQUE"),
+            ),
+        ),
+    ]
+    sid = _import_netted(tenant, netted, day, [f"N2{tag}", f"C2{tag}"])
+    with psycopg.connect(DB) as conn:
+        lines = conn.execute(
+            """select kind, amount_minor, end_to_end_id, original_end_to_end_id, unsplit_ours
+               from public.bank_transaction where statement_id = %s order by line_no""",
+            (sid,),
+        ).fetchall()
+    assert [tuple(r) for r in lines] == [
+        ("return", n_big - n_small, None, big, 2),
+        ("return", n_big - chargeback, None, big, 1),
+    ]
+    assert _payments_of(sid) == 0
+    assert _bookings(sid) == []
+    assert _reviews(sid) == ["return_differs", "return_differs"]
+    assert (_transfer(big)["status"], _transfer(small)["status"]) == ("booked", "in_file")
+    assert _fees(tenant) == fees_before  # no charge booked of the other payout's debit
+    # the payout's return alone in an entry kept unsplit (one detail shown of two), its amount
+    back = Entry(
+        n_big,
+        True,
+        day,
+        day,
+        ref=f"NE{tag}",
+        batch_count=2,
+        txs=(Tx(n_big, ref=f"E1{tag}", end_to_end_id=big, name="LILAS FINANCE"),),
+    )
+    sid2 = _import_netted(tenant, [back], day, [])
+    assert _bookings(sid2) == [("payout_returned", big, n_big)]
+    assert (_transfer(big)["status"], _transfer(small)["status"]) == ("returned", "in_file")
+    assert _fees(tenant) == fees_before
+    _no_violation(tenant)

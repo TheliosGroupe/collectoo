@@ -106,7 +106,12 @@ def batch(
 
 
 def back(
-    amount: int, f: TransferFact, *, orig: str = "RMT0123456789AB", line: str = "R1"
+    amount: int,
+    f: TransferFact,
+    *,
+    orig: str = "RMT0123456789AB",
+    line: str = "R1",
+    unsplit_ours: int | None = None,
 ) -> FundsLine:
     return FundsLine(
         line,
@@ -116,6 +121,7 @@ def back(
         amount,
         DAY,
         original_end_to_end_id=orig,
+        unsplit_ours=unsplit_ours,
         facts=(replace(f, role="return"),),
     )
 
@@ -268,6 +274,31 @@ def test_a_return_dated_before_its_debit_is_never_booked() -> None:
     assert reason(early) == RETURN_BEFORE_DEBIT
 
 
+def test_an_unsplit_batch_is_a_return_only_for_its_one_transfer_s_exact_amount() -> None:
+    """Review round 6 (R1): a line read from a camt.053 batch kept unsplit carries the batch's
+    total, not one transaction's: it is booked as our transfer's return only when exactly one of
+    its details is ours (`unsplit_ours` 1) and its amount is that transfer's exactly — never less
+    with the rest as the bank's charge (the round-5 verifier's netted entry: our payout's return
+    and another debit in one entry), never with several of ours (the first id is only what the
+    refusals read), whatever the amount. A line of its own (None) keeps the charge rule."""
+    booked = fact("T1", 419840, status="booked", debit_booked=True)
+    netted = back(419840 - 32800, booked, unsplit_ours=1)  # our return + another payout's debit
+    assert reason(netted) == RETURN_DIFFERS
+    assert reason(back(419840 - 300000, booked, unsplit_ours=1)) == RETURN_DIFFERS  # a chargeback
+    assert reason(back(419840 + 5000, booked, unsplit_ours=1)) == RETURN_DIFFERS  # a debtor's too
+    assert decide_line(back(419840, booked, unsplit_ours=1)) == [
+        Booking("R1", "payout_returned", "T1")
+    ]
+    assert reason(back(419840, booked, unsplit_ours=2)) == RETURN_DIFFERS  # several of ours
+    assert reason(back(419840, booked, unsplit_ours=0)) == RETURN_DIFFERS
+    assert decide_line(back(419840 - 150, booked)) == [Booking("R1", "payout_returned", "T1")]
+    sweep = fact("S1", 12000, kind="sweep", status="booked", debit_booked=True)
+    assert reason(back(11000, sweep, orig="SWP0123456789AB", unsplit_ours=1)) == RETURN_DIFFERS
+    assert decide_line(back(12000, sweep, orig="SWP0123456789AB", unsplit_ours=1)) == [
+        Booking("R1", "sweep_returned", "S1")
+    ]
+
+
 # -- a pass ----------------------------------------------------------------------------------
 
 
@@ -372,7 +403,10 @@ def worlds(draw: st.DrawFn) -> list[FundsLine]:
             )
         elif t.kind in ("payout", "sweep"):
             orig = ("RMT" if t.kind == "payout" else "SWP") + "0123456789AB"
-            lines.append(back(amount, t, orig=orig, line=f"L{k}"))
+            # review round 6 (R1): a line of its own, or an entry kept unsplit with 0, 1 or 2 of
+            # its details ours
+            unsplit = draw(st.sampled_from([None, None, 0, 1, 1, 2]))
+            lines.append(back(amount, t, orig=orig, line=f"L{k}", unsplit_ours=unsplit))
         day = DAY + timedelta(days=draw(st.integers(0, 2)))
         if lines:
             lines[-1] = replace(lines[-1], booking_date=day)
@@ -415,6 +449,8 @@ def test_a_booking_only_when_every_condition_holds(lines: list[FundsLine]) -> No
             assert b.kind == f"{f.kind}_returned" and f.status == "booked" and f.debit_booked
             assert line.amount_minor <= f.amount_minor and f.id not in returned
             assert f.debit_date is None or line.booking_date >= f.debit_date
+            if line.unsplit_ours is not None:  # R1: one of ours, its exact amount
+                assert line.unsplit_ours == 1 and line.amount_minor == f.amount_minor
             returned.add(f.id)
 
 
@@ -443,6 +479,29 @@ def test_the_decisions_do_not_depend_on_the_lines_order(
     shuffled = lines[:]
     rnd.shuffle(shuffled)
     assert decide_bookings(shuffled) == decide_bookings(lines)
+
+
+@settings(max_examples=300)
+@given(
+    st.integers(1, 10**12),
+    st.one_of(st.just(0), st.integers(-(10**6), 10**6)),
+    st.one_of(st.none(), st.integers(0, 4)),
+    st.sampled_from(["payout", "sweep"]),
+)
+def test_an_unsplit_entry_is_booked_only_as_one_transfer_s_exact_return(
+    amount: int, delta: int, unsplit: int | None, kind: str
+) -> None:
+    """Review round 6 (R1) as a property: a return of our booked transfer is booked from a line of
+    its own when no more than the transfer (the rest the bank's charge), and from a line of an
+    entry kept unsplit only with exactly one detail of ours and the transfer's exact amount —
+    otherwise `return_differs`, nothing booked."""
+    f = fact("T1", amount, kind=kind, status="booked", debit_booked=True)
+    orig = ("RMT" if kind == "payout" else "SWP") + "0123456789AB"
+    line_amount = max(1, amount + delta)
+    (out,) = decide_line(back(line_amount, f, orig=orig, unsplit_ours=unsplit))
+    want = line_amount <= amount if unsplit is None else unsplit == 1 and line_amount == amount
+    assert out.booked == want
+    assert out.booked or out.review_reason == RETURN_DIFFERS
 
 
 @given(st.lists(st.integers(1, 60), max_size=7), st.integers(0, 150))
