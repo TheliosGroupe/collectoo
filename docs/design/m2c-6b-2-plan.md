@@ -11,11 +11,22 @@ concurrency, security and operability (CSO-1–CSO-12). Each finding was re-chec
 folded in below and marked « [critic] » with their id. The rest are in §12 with the reason for rejecting them. §12
 lists every finding and where it went.
 
+**[critic2]** Two critics reviewed this revision against `dd8c6fb` (`main` 0099a11 + the plan; PR #29 merged): money,
+ledger and legal (ML-1–ML-12), and concurrency, security and operability (CSO2-1–CSO2-14). Each finding was re-checked
+against the code at `dd8c6fb`. The real ones are folded in below and marked « [critic2] <id> »; §12.2 lists every
+finding, where it went, and the parts rejected with why. No slice boundary moves; only the order of 2c and 2d is pinned
+(CSO2-5).
+
 **Precondition.** **[critic]** There are four branches, one PR each, in this order (§1.4):
 - `m2c6b-2a`, from `main` once PR #29 is merged (if it is not, stack on its branch and rebase before the PR);
 - `m2c6b-2b`, from `main` once 2a is merged;
 - `m2c6b-2c`, after 2b;
-- `m2c6b-2d`, after 2b (it does not depend on 2c).
+- `m2c6b-2d`, **[critic2] CSO2-5** after 2c. It does not depend on 2c's code, but production applies migrations in the
+  order they merge, and a migration older than the last one applied is refused (`supabase db push`: « Found local
+  migration files to be inserted before the last migration on remote database »). The order is therefore pinned
+  2a → 2b → 2c → 2d. Each slice's migration takes its timestamp when its PR is opened, later than every migration on
+  `main`, and `lib/database.types.ts` is regenerated after rebasing on the slice merged before. 6b-2a adds a CI step
+  to the `db` job that fails when a migration the branch adds sorts before the latest migration on `origin/main`.
 
 The cancellation-after-download switch (`private.feature_switch` `downloaded_file_cancellation`) stays **OFF** in all
 four; 6b-3 switches it on. Some tests need a cancelled member of a live downloaded file, or a payout cancelled after its
@@ -44,21 +55,21 @@ PmtInfId naming nothing of ours; U = an entry the bank kept unsplit.
 
 | Id | Shape (inventory) | Exit in 6b-2 | Parts (§3.4) | Slice |
 |---|---|---|---|---|
-| S01 | RMT debit of a payout cancelled after its file was handed out (switch off: only a file closed while the switch was on, so real cases arrive with 6b-3; the tests switch it on) | **booked** | `unplanned_payout(x)` (+ `fee` on its own line) | 2b |
-| S02 | batch line: live members + a late cancelled member | **booked** (switch on in tests only; real cases arrive with 6b-3) | `payout` × live + `unplanned_payout` × cancelled | 2b |
+| S01 | RMT debit of a payout cancelled after its file was handed out (switch off: only a file closed while the switch was on, so real cases arrive with 6b-3; the tests switch it on) | **booked** when x's run is cancelled or booked. **[critic2] ML-4** x's run still approved or sent (x cancelled alone on evidence, or re-issued as x') → **left** → 6b-3 (`run_still_live`: this debit is the run's own payout, S10's late-predecessor booking) | `unplanned_payout(x)` (+ `fee` on its own line) | 2b |
+| S02 | batch line: live members + a late cancelled member | **booked** (switch on in tests only; real cases arrive with 6b-3), **[critic2] ML-4** only when the cancelled member's run is cancelled or booked | `payout` × live + `unplanned_payout` × cancelled | 2b |
 | S03 | second debit of a booked payout by its RMT id | **booked**, P = 0 | `unplanned_payout(x)` | 2b |
 | S03r | **[critic F2]** a debit of a **returned** payout (its file executed again; or a second execution booked after the return of the first) | **booked**, P = what its return left owed | `unplanned_payout(x)` | 2b |
 | S04 | batch line whose members are all booked/returned | **booked**, P per member (returned: S03r) | `unplanned_payout` × n (`unplanned_sweep` for a sweep PmtInf) | 2b |
 | S05 | batch line = live members' first debit + a booked member's second | **booked** | `payout` × live + `unplanned_payout` | 2b |
 | S06 | debit of a payout never handed out (ordered, or file never downloaded) | **left** → 6b-3 (Q9); **[critic F13]** a client part matching it is refused `payout_not_handed_out_matches` | — | — |
 | S07 | RMT/SWP-shaped id or TF PmtInfId no transfer of ours holds (E∅) | **[critic F13, L12]** **booked** as our transfer by rule 3b (counterparty IBAN required) when exactly one matches; else as the client's or own unplanned when the counterparty IBAN is a client's payout IBAN or ours and nothing of ours matches; else **left** (bank) | as rule 3b, `unplanned_payout(client)` / `unplanned_sweep()` | 2b |
-| S08 | a transfer debited with the bank's charge on its **own** line (class E: N + F) | **booked** | `payout(t)` + `fee` (also beside `sweep`, `unplanned_payout(x)`, `unplanned_sweep(x)`) | 2b |
+| S08 | a transfer debited with the bank's charge on its **own** line (class E: N + F) | **booked**. **[critic2] ML-10** When the statement gives the entry's charges (`Chrgs`, stored at import), the fee must equal them; when it gives none, a fee equal to the amount of a transfer of ours on the account is refused (`fee_unexplained`). **[critic2] ML-6, CSO2-1** The ISO shape — entry N + F, one detail of ours with its own amount N, F in `Chrgs` — is kept unsplit by the parser (class U): booked there as the same parts when F = the stored charges (§3.4.12) | `payout(t)` + `fee` (also beside `sweep`, `unplanned_payout(x)`, `unplanned_sweep(x)`) | 2a stores, 2b |
 | S08b | payout debit for less than N, other account or currency | **left** (bank's detail) | — | — |
 | S09 | batch line short of a member | **booked** when the members executed are the only subset of the PmtInf making the line; **[critic CSO-3]** a PmtInf of more than 500 items is refused `lot_too_large` (support) | `payout` × named | 2b |
 | S10 | payout debit whose run is not in flight with that transfer | **left** → 6b-3 | — | — |
 | S11 | several refunds in one PmtInf line, or legacy payouts+refunds (`batch_mixed`) | **left** (Q5, OQ-83) | — | — |
-| S12 | **[critic F9, F12, L12]** a debit without our reference (N: CSV; O: the bank's own id; E∅) | **booked** by rule 3b when exactly one candidate matches. Candidates: in-flight payouts and sweeps, in-flight refunds, and cancelled or returned payouts whose bytes the bank holds. Several → `line_ambiguous` (exit: §4.2) | `payout(t)` / `sweep(t)` / `unplanned_payout(x)`; a refund candidate: its M2b link | 2b; guards 2c |
-| S13 | debit to a client's registered payout IBAN matching nothing of ours | **booked**, P = 0 (Q8) | `unplanned_payout(client)` | 2b; guards 2c |
+| S12 | **[critic F9, F12, L12]** a debit without our reference (N: CSV; O: the bank's own id; E∅) | **booked** by rule 3b when exactly one candidate matches. Candidates: in-flight payouts and sweeps (**[critic2] ML-4** re-issues included), in-flight refunds, and cancelled or returned payouts whose bytes the bank holds (**[critic2] ML-8** a returned x is not one while its return item is held by the in-flight run whose payout is a candidate at the same amount and IBAN). Several → `line_ambiguous` (exit: §4.2) | `payout(t)` / `sweep(t)` / `unplanned_payout(x)`; a refund candidate: its M2b link | 2b; guards 2c |
+| S13 | debit to a client's registered payout IBAN matching nothing of ours | **booked**, P = 0 (Q8). **[critic2] ML-11** Its flagged return (no reference of ours, from that IBAN) is proposed as its unplanned return | `unplanned_payout(client)` | 2b; guards 2c |
 | S14 | debit to our own IBAN without SWP id nor TF PmtInfId | **booked** | `sweep(t)` (rule 3b) or `unplanned_sweep()` | 2b; explanation refused 2c |
 | S15 | SWP debit of a cancelled sweep, or a second debit of a booked sweep | **booked** | `unplanned_sweep(x)` | 2b |
 | S16 | our payout/sweep returned, unflagged (own/client credit kinds carrying our id) | **booked** at the transfer's exact amount; **[critic L2]** a short one stays (no fee on an unflagged credit, Q10) | `payout_returned(t)` / `sweep_returned(t)` | 2b |
@@ -66,14 +77,14 @@ PmtInfId naming nothing of ours; U = an entry the bank kept unsplit.
 | S18 | `return_before_debit` | no part: booked by the job once ops book its debit. **[critic CSO-11]** The command queues the funds pass whenever it books a payout or sweep part | — | 2b |
 | S19 | short return of a line of its own (booked in full + fee) | unchanged (OQ-84 (j), Q10) | — | — |
 | S20 | credit naming a handed-out lot of ours | **booked** for payout/sweep lots: unique subset of the lot's returnable members. **[critic F1]** Those are the members booked there and not returned, plus the members with an open unplanned booking, which take the unplanned return. Refund lots **left** (Q5); the M2b pass's `changed` gets its own reason | `payout_returned` / `unplanned_payout_returned` × members | 2b (reason 2a) |
-| S21 | unsplit credit entry holding ours | **[critic F8, F7, L11]** **booked only from the details of ours the statement itself gives** (ids, directions, amounts stored at import, 2a) when they make the entry exactly. Anything else inside the entry keeps it unbooked: a debtor's money, a chargeback, a charge, a refund, a top-up. So do a detail without its amount and a line imported before 2a (§1.2) | the stored details' parts, no fee | 2a stores, 2b books |
+| S21 | unsplit credit entry holding ours | **[critic F8, F7, L11]** **booked only from the details of ours the statement itself gives** (ids, directions, amounts stored at import, 2a) when they make the entry exactly **and [critic2] ML-5 every detail of the entry is ours** (the entry's detail count, and its `NbOfTxs` when given, stored at import). Anything else inside the entry keeps it unbooked, even when it nets to zero: a debtor's money, a chargeback, a charge, a refund, a top-up. So do a detail without its amount and a line imported before 2a (§1.2) | the stored details' parts; no fee but S08's (§3.4.12) | 2a stores, 2b books |
 | S22 | unsplit debit entry holding ours | as S21; alert added | as S21 | 2a, 2b |
 | S23 | payments made of our transfers coming back (imported before rounds 4/8) | **left** to M2c-7 (Q13); **[critic L10]** P0 alert `own_transfer_payment`; texts no longer promise a screen | — | 2a |
 | S24 | TOP/RMT/SWP id only in a CSV label outside `/REF` | **left** to M2c-7 (Q13; no alert possible: nothing on the line marks it) | — | 2a texts |
 | S25 | our refund's RFD debit that cannot be linked (OQ-81 (b), Q2) | **left** → 6b-3 with Q2's entries chosen | — | — |
 | S26 | `changed` / `posting_failed` on our lines | retried in strict mode by the command | the underlying shape's | 2b |
-| S27 | return of an unplanned payout or sweep | **booked** (new kinds). **[critic L3]** It must be a credit carrying x's id, or a bank-flagged return from the IBAN the payout went to. An unreferenced credit from the client waits (Q13) | `unplanned_payout_returned` / `unplanned_sweep_returned` (+ `fee` on a flagged return) | 2b |
-| S28 | **[critic F1, L5]** a return of a transfer that has an open unplanned booking (S03 / S01 / S03r, then one copy back) | the job reviews it `unplanned_payout_return` (2a); ops book it as the unplanned booking's return (Q12) | `unplanned_payout_returned` | 2a, 2b |
+| S27 | return of an unplanned payout or sweep | **booked** (new kinds). **[critic L3]** It must be a credit carrying x's id, or a bank-flagged return from the IBAN the payout went to (**[critic2] ML-11** proposed on N/O/E∅ too). An unreferenced credit from the client waits (Q13) | `unplanned_payout_returned` / `unplanned_sweep_returned` (+ `fee` on a flagged return) | 2b |
+| S28 | **[critic F1, L5]** a return of a transfer that has an open unplanned booking (S03 / S01 / S03r, then one copy back) | the job reviews it `unplanned_payout_return` (2a); ops book it as the unplanned booking's return (Q12). **[critic2] ML-3** So does a return of a transfer whose second (or late) debit is on a statement but not booked yet: reviewed `return_debit_pending`, refused `debit_pending` until that debit is booked | `unplanned_payout_returned` | 2a, 2b |
 
 ### 1.2 Left for later, and why
 - **6b-3**:
@@ -81,6 +92,12 @@ PmtInfId naming nothing of ours; U = an entry the bank kept unsplit.
     never downloaded, `FOR UPDATE` on that file (m2c-6b-plan §3.1);
   - S25 needs Q2's entries decided;
   - the switch itself, and real S01/S02 cases;
+  - **[critic2] ML-4** the late debit of a payout cancelled after download whose run is still approved or sent (x
+    cancelled alone on evidence, or re-issued as x'): that run can no longer be cancelled (`transfer_already_debited`),
+    and the debit is its payout's, booked with S10's late-predecessor machinery. 6b-2 refuses it `run_still_live`;
+  - **[critic2] CSO2-4** the download re-check of a generated file's sweep also applies generation's D4 rule
+    (`private.debited_cancelled_sweeps`: a cancelled sweep debited all the same forces the sweep to 0). It matters only
+    with the switch on;
   - rewording « Annulé avant la remise de son virement à la banque » for a cancellation after download.
 - **M2c-7**:
   - recovery of the `double_payout` advances (claw-back, repayment request, `advance_open`, write-off);
@@ -132,6 +149,10 @@ PmtInfId naming nothing of ours; U = an entry the bank kept unsplit.
      advance open with no recovery before M2c-7. That breaks OQ-81's « slower money, never double money ».
    - Now the job reviews a return of a transfer that has an open unplanned booking (`unplanned_payout_return`, §2.3).
      Ops book it as the unplanned booking's return (§3.4.13): nothing is paid again and the advance is closed.
+   - **[critic2] ML-3** The same holds before the second debit is booked. A return of a transfer that has a debit line
+     on a statement not booked beyond its booked debit (`private.transfer_late_lines`) is reviewed
+     `return_debit_pending`, never booked: booked as the planned return, its re-owed item could be paid by a run
+     handed out before ops book that debit, whose P would then be 0.
    - This redefines the job's re-check and its worker twin (6b-2a). Founder Q12.
 7. **« Suivi » lists the events of the client's earlier runs posted in (previous approved run's K, this K]**, not a
    state diff against stored payloads (plan §2.7).
@@ -147,6 +168,9 @@ PmtInfId naming nothing of ours; U = an entry the bank kept unsplit.
    - **[critic F2, F3, F4, F5, L1]** Otherwise P is attributed per item: the items x was meant to pay (a cancelled
      run's released items, or a returned x's return item), net of their reversals, minus what earlier unplanned
      bookings already counted, capped by what the pending queue can net (§3.6.1).
+   - **[critic2] ML-1** The items' cap is their **signed** net, summed before it is floored at 0: a cancelled run's
+     released lines include negative items (a reversal, an earlier advance's pair), and a per-item floor let P net part
+     of a double payout against unrelated collections.
    - Every excess is the servicer's advance. Q4 allows no hold-back without a clause.
 10. **New mis-booking guards** the plan did not foresee (6b-2c, with the screen that replaces them).
     - « Frais bancaires » and « Classer sans comptabiliser » are refused on a debit without our reference that an
@@ -154,6 +178,9 @@ PmtInfId naming nothing of ours; U = an entry the bank kept unsplit.
     - The explanation is refused on a debit to our own IBAN.
     - **[critic L8]** Each of these refusals, and each line no rule can attribute, would otherwise suppress an in-flight
       breach row for good. A bounded wait ends that suppression (§4.2, Q14).
+    - **[critic2] ML-7** The bound applies only to a line that offers no booking containing that transfer. A line ops
+      can book as that payout's debit keeps suppressing and raises `bank_line_unbooked`; its booking writes the true
+      row at its own date. Otherwise every on-time debit of a reference-less feed would get a false breach row.
 11. **`transfer_unknown` is P0 everywhere.** ADR-0014 « M2c-6b-1 » calls it P0 and the web ranks it so; the worker's
     `P0_REVIEWS` and the alerts did not (payments/debits.py l.325-327; l.3341-3350). **[critic L14]** This holds for
     both directions.
@@ -174,10 +201,17 @@ PmtInfId naming nothing of ours; U = an entry the bank kept unsplit.
     (docs/benchmarks/remittances.md l.126). The job books a 5,000-member batch line in 31.3 s (l.444). Lots of more than
     500 items are refused `lot_too_large` and go to support. The 6b plan's « 5,000 members, command < 60 s » target is
     withdrawn.
+    - **[critic2] CSO2-2** 500 is the starting value of one constant, `private.transfer_line_lot_cap()`, read by the
+      parse, the options, the preview, the command and the label's test. The scale run sets it with 2× headroom under
+      8 s; if the run misses, the cap is lowered, never the budget raised. `unique_subset` also gets a deterministic
+      work bound (§2.5), since its partial-sum bound alone does not bound its run time.
 16. **[critic L2, F7] A fee part only on our transfer's own line** (§3.4.10). The draft allowed it on unsplit,
     client-IBAN and own-IBAN lines, where any shortfall could be booked as the firm's bank charge (6270).
-17. **[critic F11, L4] A reversed unplanned remittance's item is never monitored for R124-6** (§3.12). The items its P
-    paid keep their own clocks (Q15), and its A − P is netted by the advance's reversal.
+17. **[critic F11, L4] A reversed unplanned remittance's item is not monitored for R124-6 while the items its P paid
+    are still waiting** (§3.12): they keep their own clocks (Q15), and its A − P is netted by the advance's reversal.
+    **[critic2] ML-2** Once a run has frozen those items (netted by the −A row) their clocks ended at that run; the
+    re-owed item is then held, like a planned return, to the earliest latest execution date of those items' lines,
+    `blocked_reason` `payout_returned`.
 
 ### 1.4 Size estimate and split decision
 Lines of non-test code, counted from the functions they copy (redefinitions are copied whole by house rule; their diff
@@ -191,7 +225,12 @@ against the source is small and reviewed as a diff):
 | Web | ≈ 90 (review reason, download refusal, checks labels, S23 texts) | ≈ 150 (refusal and decision labels) | ≈ 1,100 (sheets, actions, `lib/payments/transfer-lines.ts`, run page, Virements, client space, rewording) | ≈ 20 |
 | **Total** | **≈ 2,180** (≈ 520 new or changed) | **≈ 2,600** (≈ 2,180 new or changed) | **≈ 2,580** (≈ 1,360 new or changed) | **≈ 890** (≈ 460 new or changed) |
 
-**Decision: split in four.** The whole is ≈ 8,250 lines; each slice is shippable alone.
+**[critic2]** The second critique adds about 90 lines to 6b-2a (detail count, charges, the pending-debit fact, the CI
+order check), 200 to 6b-2b (signed cap, `run_still_live`, the S08-on-U rule, the fee check, held-to for the re-owed
+item, the cap constant and work bound), 120 to 6b-2c (`private.transfer_line_offers`, the new proposal, texts) and 20 to
+6b-2d. The split stands; 6b-2b is now ≈ 2,380 new or changed lines, still one cohesive review.
+
+**Decision: split in four.** The whole is ≈ 8,250 lines (≈ 8,680 with [critic2]); each slice is shippable alone.
 - **6b-2a** — foundations, job side:
   - the statement's own detail of an unsplit entry, stored at import;
   - the job reviews a return of a transfer that has an open unplanned booking;
@@ -210,8 +249,9 @@ against the source is small and reviewed as a diff):
 
 pgTAP numbering: `036_transfer_line_foundations` (2a), `037_transfer_line_ops` (2b; 2c appends group P),
 `038_statement_suivi` (2d). **6b-3's switch-on follow-ups become `039`** (m2c-6b-plan §3.2 says 038; updated with
-6b-2a's docs). Migrations: `20261117090000` (2a), `20261117100000` (2b), `20261117110000` (2c), `20261117120000`
-(2d). 6b-3 keeps `20261118090000`.
+6b-2a's docs). Migrations, in the pinned order (**[critic2] CSO2-5**): `20261117090000` (2a), `20261117100000` (2b),
+`20261117110000` (2c), `20261117120000` (2d), as placeholders; each is renamed when its PR opens if `main` has a later
+one by then. 6b-3's comes after 2d's.
 
 ---
 
@@ -225,32 +265,63 @@ switch stays off; 033/034 unchanged.
   before 6b-2b; the job and the alerts read them by name.
 - **[critic F14]** No new index. `bank_line_booking_transfer_idx (transfer_id) where transfer_id is not null` exists
   for every kind (20261111090000 l.2338). Creating it again would stop `supabase db reset`.
-- `public.bank_debit_review.reason` check += two reasons:
+- `public.bank_debit_review.reason` check += three reasons:
   - `own_transfer_line` (the M2b pass's own reason, S20 / OQ-84 (i));
-  - **[critic F1]** `unplanned_payout_return` (the job, §2.3).
+  - **[critic F1]** `unplanned_payout_return` (the job, §2.3);
+  - **[critic2] ML-3** `return_debit_pending` (the job, §2.3).
 - **[critic F8, L11]** `public.bank_transaction.unsplit_details jsonb` and `private.bank_import_stage.unsplit_details`.
   - The value is null, or an array of exactly `unsplit_ours` objects `{id, direction, amount_minor}`, in the file's
     order.
   - `id` is an id we issue (`^(RMT|SWP|RFD|TOP)[0-9A-F]{12}$`), `direction` is `debit` or `credit`, and `amount_minor`
-    is digits as text, or null when the detail gives no amount.
+    is digits as text, or null when the detail gives no amount (or gives it in another currency, CSO2-9).
   - Check: `unsplit_details is null or (unsplit_ours is not null and jsonb_array_length(unsplit_details) =
     unsplit_ours)`; the element shape is checked at import (§2.2).
   - Comment: the details of ours that the statement itself gives for an entry it kept unsplit.
+- **[critic2] ML-5** `unsplit_detail_count smallint` and `unsplit_batch_count integer` on both tables: for an entry kept
+  unsplit, how many `TxDtls` it has in all (ours or not) and its `Btch/NbOfTxs` (null when absent). Check:
+  `unsplit_detail_count is null or (unsplit_ours is not null and unsplit_detail_count >= unsplit_ours)`; both null
+  unless `unsplit_details` is set. Comment: what lets a booking tell an entry made only of our details from one that
+  also holds others, even netting to zero.
+- **[critic2] ML-6, ML-10, CSO2-1** `charges_minor bigint check (charges_minor > 0)` on both tables: the charges the
+  statement itself records for the entry, for a line that is its entry's only line (unsplit, or of one detail). Read
+  from `Ntry/Chrgs` and that one `TxDtls/Chrgs` (`Rcrd/Amt` from v04, `Amt` in v02), debit records in the account's
+  currency included in the entry amount (`ChrgInclInd` absent or true); null when there are none, or when one record
+  cannot be read that way. The ISO 20022 camt.053 message definition (`docs/reference/`) is checked at build for these
+  paths; nothing is inferred beyond what it defines. CSV lines: null. Comment: the bank's own record of its charge,
+  the only fee a booking takes without a third party's doubt.
 
 ### 2.2 The statement's own detail of an unsplit entry (S21/S22; [critic F8, L11])
 - **Parser** (`payments/camt053.py`, the unsplit branch l.470-494). It already lists our details (`mine =
   _our_ids(details)`) and stores only their count. It now also records each one:
   - its id (own or original, as `_our_ids` reads it);
   - its direction (`_direction(d, entry.direction)`);
-  - its own amount (`AmtDtls/TxAmt/Amt`, else `Amt`, when given; otherwise null).
+  - its own amount, **[critic2] CSO2-9, ML-6** read by the rule `split()` and `whole()` already use: the path is
+    `Amt` when present, else `AmtDtls/TxAmt/Amt`; its `@Ccy` must be the statement's currency; otherwise null. (The
+    draft's « `AmtDtls/TxAmt/Amt`, else `Amt` » was the reverse, without the currency check, so the stored detail
+    could differ from what decided the entry was unsplit.)
 
-  The `StatementLine` field is `unsplit_details`. Nothing else changes: the count, the kinds, the original id.
+  **[critic2] ML-5** It also records, for the same entry, `len(txs)` as `unsplit_detail_count` and the parsed
+  `NbOfTxs` (the `batch` it already reads) as `unsplit_batch_count`. **[critic2] ML-6, ML-10** For a line that is its
+  entry's only line it records `charges_minor` (§2.1).
+
+  The `StatementLine` fields are `unsplit_details`, `unsplit_detail_count`, `unsplit_batch_count` and
+  `charges_minor`. **[critic2] CSO2-9** `unsplit_details` is a `tuple[UnsplitDetail, ...] | None` of a frozen, slotted
+  `UnsplitDetail(id, direction, amount_minor)`, so `StatementLine` (frozen, slotted) stays hashable. Nothing else
+  changes: the count, the kinds, the original id.
 - **Import.**
-  - The worker stages the column with the line (COPY list).
-  - `private.ingest_statement` (redefined from 20261116090000 l.5955) copies it and refuses a malformed one,
-    `line_invalid`: a count mismatch, an id not ours, a bad direction or amount, or details without `unsplit_ours`.
-  - On a re-import, a line already stored keeps what it has. The details are neither compared nor filled, so
-    re-importing an older file neither fails nor completes them.
+  - **[critic2] CSO2-9** The worker stages the columns with the line: `payments/statement.STAGE_COLUMNS` gains them,
+    and `jobs/payments.stage()` writes `Jsonb([...])` (psycopg's `psycopg.types.json.Jsonb`, as `jobs/debits.py` does
+    for the candidates) or null for `unsplit_details`. A bare tuple would be dumped as an array and the COPY into
+    `jsonb` would fail every camt import holding such an entry.
+  - `private.ingest_statement` (redefined from 20261116090000 l.5955) copies them and refuses a malformed one,
+    `line_invalid`: a count mismatch, an id not ours, a bad direction or amount, details without `unsplit_ours`, a
+    detail count below `unsplit_ours`, or a non-positive charge.
+  - **[critic2] CSO2-8** On a re-import, a known line (same account and `dedup_key`) is still skipped. When both the
+    stored and the staged `unsplit_details` are non-null and differ (ids, directions, amounts, in order), or the
+    stored and staged detail counts or charges differ, the file is refused `entry_detail_differs`, as for an entry
+    that comes back split another way (`bank_import_entry_known`, l.6135-6139): the bank's corrected statement is
+    never silently ignored. A stored null (a line imported before 6b-2a) is neither compared nor filled, so
+    re-importing an older file neither fails nor completes it.
 - **Residual** (OQ-84 (f)): a line imported before 6b-2a has `unsplit_ours > 0` and no details. It cannot be booked
   here (§3.4.12).
 - **Why.** An unsplit booking then rests on the bank's own file, kept on the line, not on one person's transcription
@@ -263,14 +334,22 @@ switch stays off; 033/034 unchanged.
   - The return branch (l.1348-1370) gets one rule, right after `return_before_debit` (transfer still
     `ordered`/`in_file`) and before `already_returned`: `tr_unplanned_open` → `unplanned_payout_return`. This covers
     a booked or returned x re-executed (S03, S03r) and a cancelled x executed late (S01: until now `return_differs`).
+  - **[critic2] ML-3** `_bb` also gains `tr_debit_pending`: the transfer has a debit line not booked beyond its booked
+    debit (`exists (select 1 from private.transfer_late_lines(x))`: an unbooked, unlinked, non-payment debit carrying
+    its id or naming its PmtInf in a superseded, rejected or — for a cancelled x — downloaded file, l.2546-2590, by key).
+    Right after the `tr_unplanned_open` rule: `tr_debit_pending` → `return_debit_pending`. The job never books such a
+    return: once D2 is booked it becomes the unplanned booking's return (§3.4.13), and the job's next pass reviews it
+    `unplanned_payout_return`. Without this fact, a return arriving between D2's import and its booking was booked as
+    the planned payout's return; its re-owed item could then be paid by a run handed out before ops book D2, whose P
+    would be 0 (the item frozen, and §3.4.6 rule 7 silent once downloaded): the client paid twice.
   - The strict hint text comes from `private.own_transfer_line_hint('bank_booking')` (unchanged wording in 6b-2a).
-- **`private.bank_booking_candidates`** (dropped and created from 20261116090000 l.595: a new column): the return fact
-  `unplanned_open`, keyed the same way.
-- **`private.apply_bank_bookings`** (from l.1551): a skipped row whose `why` is `unplanned_payout_return` is reviewed
-  under that reason, not `changed`.
+- **`private.bank_booking_candidates`** (dropped and created from 20261116090000 l.595: two new columns): the return
+  facts `unplanned_open` and **[critic2] ML-3** `debit_pending`, keyed the same way.
+- **`private.apply_bank_bookings`** (from l.1551): a skipped row whose `why` is `unplanned_payout_return` or
+  `return_debit_pending` is reviewed under that reason, not `changed`.
 - **Worker twin** (`payments/debits.py`):
-  - `TransferFact.unplanned_open`, loaded by `jobs/debits.py`;
-  - `_transfer_return` (l.545-585) has the same rule at the same place.
+  - `TransferFact.unplanned_open` and **[critic2] ML-3** `TransferFact.debit_pending`, loaded by `jobs/debits.py`;
+  - `_transfer_return` (l.545-585) has the same two rules at the same place.
 - Why: a copy that comes back closes the second payout's advance first. Booked as the planned payout's return, it would
   pay the client again (§1.3 item 6). The first return after the unplanned booking is reversed is the planned payout's
   return, as today.
@@ -294,6 +373,12 @@ switch stays off; 033/034 unchanged.
 - **Web**: `lib/remittance/transfers.ts` blocked reasons += `sweep_exceeds_share`: « La quote-part du cabinet de ce
   fichier dépasse ce qui lui revient maintenant (une avance, des frais ou une couverture ont été comptabilisés depuis sa
   génération) : le fichier est remplacé, la quote-part sera recalculée. »
+- **[critic2] CSO2-4** `refusalText('file_blocked')` (`lib/remittance/transfers.ts` l.1025-1026) says « ces virements
+  restent hors du fichier tant que leur motif demeure ». That is false when the only blocked entry is the sweep: the
+  sweep is cancelled and recomputed, and the payouts go back in. `downloadOutcome` already returns `blocked`, so the
+  text is chosen from it: when every blocked entry is `sweep_exceeds_share`, « Le fichier n'a pas été servi et il est
+  remplacé : seule la quote-part du cabinet a changé depuis sa génération. Régénérez-le maintenant : les reversements
+  qu'il contenait y reviennent (leur date limite court toujours). »; otherwise today's text.
 
 ### 2.5 `private.unique_subset` (used by 6b-2b's lots)
 `private.unique_subset(p_amounts bigint[], p_target bigint) returns integer[]` (immutable, parallel safe):
@@ -303,6 +388,19 @@ switch stays off; 033/034 unchanged.
   so the counts are equal. It returns the complement when t' ≠ p_target. Amounts > t' are skipped.
 - Bounds: past **10,000 partial sums** (as `private.amounts_make_up`, 20261115090000 l.1145) or 200,000 stored path
   entries → null.
+- **[critic2] CSO2-2** Those two bounds do not bound the run time: when t' is below 10,000 minor units the set of sums
+  saturates at t' + 1 and never trips them, and each of up to 500 items rebuilds and de-duplicates it (seconds in
+  plpgsql, run by the options, the preview and the command). So:
+  - a **work bound**: Σ over the items visited of the size of the set of sums ≤ **1,000,000**, else null;
+  - more than `private.transfer_line_lot_cap()` amounts → null at once (the caller has already refused
+    `lot_too_large`);
+  - the items are visited in a **pinned order**, the order of the array given (the callers pass the PmtInf's items by
+    `transfer_file_item.seq`, members by their seq), and the Python twin visits them in the same order, so both
+    trip a bound at the same item.
+- `private.transfer_line_lot_cap() returns integer` (immutable): 500, the one constant of §1.3 item 15.
+- Grants (**[critic2] CSO2-11**): `revoke execute on function private.unique_subset(bigint[], bigint),
+  private.transfer_line_lot_cap() from public, anon, authenticated` (PostgreSQL grants EXECUTE to PUBLIC by default);
+  only the `SECURITY DEFINER` callers use them.
 
 A Python twin `payments.debits.unique_subset`, with the same bounds, is the subject of the Hypothesis oracle (§8.2).
 
@@ -323,8 +421,19 @@ A Python twin `payments.debits.unique_subset`, with the same bounds, is the subj
     `unplanned_sweep_returned`;
   - `bank_line_unbooked` also counts, after one business day, each line not booked nor linked of these kinds: an
     unsplit debit holding ours (`batch_unsplit`, `unsplit_ours > 0`), a credit naming our lot, an own or client
-    credit carrying our RMT/SWP id (S16), and a line reviewed `unplanned_payout_return`. The inventory found that
-    l.3393-3407 missed them.
+    credit carrying our RMT/SWP id (S16), and a line reviewed `unplanned_payout_return` or **[critic2] ML-3**
+    `return_debit_pending`. The inventory found that l.3393-3407 missed them.
+- **[critic2] CSO2-14, ML-3** Review labels in 6b-2a and 6b-2b, while no screen books these lines (the command is
+  callable through the API by an aal2 admin, which support may use, so the reviews can exist before 6b-2c):
+  - `unplanned_payout_return`: « Retour d'un virement du cabinet (reversement ou quote-part) qui a aussi été exécuté
+    hors de son ordre (virement annulé exécuté quand même, ou exécuté deux fois) : rien n'est comptabilisé
+    automatiquement. Ce retour est celui du virement exécuté hors ordre, pas du reversement ni de la quote-part :
+    prévenez le support. » One reason covers the payout and the sweep; the wording names both;
+  - `return_debit_pending`: « Retour d'un virement du cabinet dont un autre débit (second débit, ou débit après
+    annulation) figure sur un relevé sans être encore comptabilisé : rien n'est comptabilisé automatiquement. Ce débit
+    se comptabilise d'abord ; prévenez le support. »
+
+  6b-2c rewords both with the screen (§4.3).
 - **Worker**: `P0_REVIEWS` += `TRANSFER_UNKNOWN`.
 - **S23 texts** (Q13's default). `public.assign_payment` and `public.resolve_duplicate` (20261116090000 l.5564,
   l.5486) change their hint only:
@@ -341,7 +450,11 @@ A Python twin `payments.debits.unique_subset`, with the same bounds, is the subj
   - « par l'équipe (écran à venir) » becomes « Collectoo ne peut pas encore le comptabiliser comme le retour de ce
     virement … prévenez le support ».
 - **`private.own_transfer_line_hint(p_where text) returns text`**: the own-line hint text, one place per caller
-  (`bank_booking`, and in 6b-2c `debit_link`, `own_credit`). 6b-2a returns today's wording.
+  (`bank_booking`, and in 6b-2c `debit_link`, `own_credit`). 6b-2a returns today's wording. **[critic2] CSO2-11**
+  Execute revoked from `public, anon, authenticated`.
+- **[critic2] CSO2-5** CI (`.github/workflows/ci.yml`, job `db`): a step that fails when a migration file the branch
+  adds sorts before the latest migration file on `origin/main` (`git diff --name-only --diff-filter=A origin/main...`
+  on `supabase/migrations/`, compared by name).
 
 ---
 
@@ -355,9 +468,18 @@ A Python twin `payments.debits.unique_subset`, with the same bounds, is the subj
   - Keys: primary key `(booking_entry_id, ledger_entry_id)`; index `(ledger_entry_id)`.
   - Append-only (`refuse_change`, enabled always). It is written only by `private.transfer_line_post` (`SECURITY
     DEFINER`); private schema, never exposed.
+  - **[critic2] CSO2-11** As house practice for private tables (`private.remittance_pending`, 20261111090000
+    l.4166-4169): `alter table … enable row level security` with no policy, and `revoke all … from public, anon,
+    authenticated, service_role`. Only the definer functions read or write it. No change-log trigger: like every
+    private table it has none (only public core tables do), and being append-only each row is its own history.
   - An attribution counts while its booking entry is not reversed.
 - `client_advance_cause_idx on public.client_advance (cause_entry_id)`: the advance of an unplanned booking, by key. The
   rules and the reads need it; no index exists (20261116090000 l.154-156).
+- **[critic2] CSO2-13, ML-10** `bank_transfer_filed_amount_idx on public.bank_transfer (debtor_bank_account_id,
+  amount_minor) where transfer_file_id is not null`: every transfer ever put in a file, by account and amount. Rule 3b
+  probes it per line (§3.4.4), and so does the fee check (§3.4.10). The existing indexes do not serve it:
+  `bank_transfer_debtor_idx` holds only `ordered`/`in_file`, `bank_transfer_cancelled_filed_idx` is led by the servicer
+  and holds no amount.
 - Nothing else is new:
   - `client_advance` already allows cause `double_payout`;
   - `private.remittance_pending` already allows kind `unplanned_payout` (20261111090000 l.1238);
@@ -377,6 +499,10 @@ Plan §2.6 [critic]'s signature, unchanged. Steps:
 2. **Replay.**
    - **[critic CSO-12]** Take `pg_advisory_xact_lock(hashtext('cmd:book_transfer_line:' || key))` first, so a double
      tap waits for the first call and gets its stored result, never `already_booked`.
+   - **[critic2] CSO2-6** A call may take up to 4 s, longer than the function's `lock_timeout` of 2 s. So the key lock
+     is taken under `perform set_config('lock_timeout', '7s', true)`, then `set_config('lock_timeout', '2s', true)`
+     restores the function's value for every later lock (the function's `SET` clause restores the caller's on exit).
+     A second tap then waits for the first call (≤ 4 s) and returns its stored result.
    - Then normalise the request `{bank_transaction_id, parts (as given, amounts as text), expected_text, reason
      (trimmed)}` and call `private.command_replay('book_transfer_line', key, request)`.
    - A stored result is returned as is. The same key with another request gets command_replay's own refusal.
@@ -386,8 +512,11 @@ Plan §2.6 [critic]'s signature, unchanged. Steps:
 5. **[critic CSO-5] Tenant filter** (§3.4.1): every named id is checked against the line's servicer before any rule and
    before any lock.
 6. **[critic CSO-3] Before the locks.**
-   - Class B: the PmtInf's items (immutable) are counted (`lot_too_large` above 500) and `private.unique_subset` runs
-     on their amounts (§3.5).
+   - Class B: the PmtInf's items (immutable) are counted (`lot_too_large` above `private.transfer_line_lot_cap()`,
+     **[critic2] CSO2-3** by a keyed count before any other read of them) and `private.unique_subset` runs on their
+     amounts in `seq` order (§3.5).
+   - **[critic2] CSO2-3** Class U and lot credits: the stored details / the returnable members are counted the same
+     way first; above the cap → `lot_too_large` (not `bad_request`).
    - Class N/O/E∅: the rule-3b candidates' keys are read (§3.4.4).
    - No search runs under the allocation lock.
 7. **Locks**: `private.transfer_line_locks(line, parts)` (§3.8).
@@ -405,6 +534,13 @@ Plan §2.6 [critic]'s signature, unchanged. Steps:
       pass: `pgmq.send('payments', {"type": "process_debits", "organization_id": org, "funds_after": null})`, as
       `resolve_duplicate` queues it (l.5548). It is idempotent and cheap on a quiet account. It is S18's exit even when
       a concurrent pass reviewed the return `return_before_debit` after this call's check.
+    - **[critic2] CSO2-7** Also whenever it booked `unplanned_payout_returned` or `unplanned_sweep_returned`. Reversing
+      an unplanned booking changes what the job's rule (§2.3) decides for x's other return lines: one already reviewed
+      `unplanned_payout_return` in the same pass is now the planned payout's return, which the job books. The funds
+      pass re-reads reviewed lines (`bank_booking_candidates` excludes only booked, linked and released lines,
+      l.616-640), so the queued pass books it at once instead of at the next import.
+    - **[critic2] ML-3** Booking the pending debit D2 (an unplanned part, so already covered by the first rule) queues
+      the pass that re-reviews x's return lines from `return_debit_pending` to `unplanned_payout_return`.
 12. **Record**: `command_record`. Return `{bank_transaction_id, bookings: [{seq, kind, transfer_id, client_id,
     amount_minor, entry_id, paid_minor, advance_minor}], drafts_requeued: [run ids], funds_pass_queued,
     expected_text}`, amounts as text.
@@ -431,8 +567,8 @@ the label `timeout` (§3.10). The scale test records how long the allocation loc
 ### 3.4 Part kinds — acceptance rules (evaluated in this order; the first failure is the refusal)
 
 **3.4.0 Parse** (`bad_request`):
-- `p_parts` is an array of **1–500** objects `{kind, transfer_id?, client_id?, returns_line_id?, amount}`
-  (**[critic CSO-3]** the lot bound);
+- `p_parts` is an array of **1 to `private.transfer_line_lot_cap()`** objects `{kind, transfer_id?, client_id?,
+  returns_line_id?, amount}` (**[critic CSO-3]** the lot bound; **[critic2] CSO2-2** one constant, 500 to start);
 - `amount ~ '^[0-9]{1,16}$'` and > 0;
 - `kind` is one of the nine kinds;
 - `transfer_id` is required for `payout`, `sweep`, `payout_returned` and `sweep_returned`;
@@ -484,17 +620,20 @@ another servicer's rows.
    - not `in_file`, or its file never downloaded, or not downloaded/sent → `not_handed_out` (S06: 6b-3).
 5. `t.debtor_bank_account_id` and currency = the line's → `transfer_differs`.
 6. t's run approved or sent with `run.transfer_id = t` → else `run_not_in_flight` (S10: 6b-3).
-7. `amount` = `t.amount_minor` → `amount_differs`. On E the line is t's amount, or t's amount + the `fee` part (S08). A
-   line below t's amount is `amount_differs` (S08b: left).
+7. `amount` = `t.amount_minor` → `amount_differs`. On E the line is t's amount, or t's amount + the `fee` part (S08,
+   §3.4.10 (a) for the fee's own rule). A line below t's amount is `amount_differs` (S08b: left).
 
 **3.4.4 Rule 3b — a debit carrying no reference of ours** ([critic F9, F12, F13, L12]; classes N, O, E∅). It is the
 payout twin of round 7's refund rule (m2c-6b-plan §2.4 3b), with uniqueness over every transfer the line may be.
 
 The line has an account b, a currency, an amount a, a date d and, when it has one, a counterparty IBAN k. Its
-candidates are read by key from the account's few live, cancelled or returned transfers, never by a scan of the
-account's lines:
+candidates are read by key, **[critic2] CSO2-13** driven from the line: one probe of `bank_transfer_filed_amount_idx`
+(§3.1) on (b, a), then each transfer's status, file item, run and payee IBAN by key. It never derives a date range from
+the transfers to scan the account's lines, so its cost does not grow with the account's history of returned payouts:
 - (i) payouts and sweeps `in_file` in a downloaded or sent file of b:
-  - re-issuing none (`replaces_transfer_id is null`);
+  - **[critic2] ML-4** a re-issue included (the draft excluded `replaces_transfer_id is not null`, so a
+    reference-less debit of x' found its cancelled original x as the « only candidate » and booked the run's one
+    real payout as a double payout);
   - for a payout, its run approved or sent with it;
   - amount a;
   - their item's `execution_date` in that file ≤ d;
@@ -505,6 +644,16 @@ account's lines:
   amount a, that item's execution date ≤ d, payee IBAN = k: a late or second execution of bytes the bank holds. A
   booked payout re-executed is not a candidate: its unplanned P is 0, as the client part's, so the two bookings are
   the same money.
+  - **[critic2] ML-4** A cancelled x stays a candidate whatever its run's status, so a debit that may be x or its
+    re-issue x' has both and is `line_ambiguous`. When x is the only candidate and its run is still approved or sent,
+    the part is refused `run_still_live` (§3.4.6 rule 4).
+  - **[critic2] ML-8** A returned x is **not** a candidate while its return item (`x.return_entry_id`) is held by a
+    live line of a run whose payout t2 is a (i) candidate of this line (same amount a, same IBAN k). That run is the
+    re-payment of x's return, and with the IBAN reconfirmed it pays the same amount to the same account: without this
+    rule every reference-less debit of it would be `line_ambiguous` forever. The line books `payout(t2)`. If it was in
+    fact x executed again, t2's own debit arrives later, finds x as (iii) (t2 is booked then) and is booked as x's
+    unplanned payout with P from x's return item as it stands: the end state is the same either way (R2 booked, one
+    unplanned payout, the same advance).
 
 « Payee IBAN = k » applies when the line has k. **On class O and E∅, k is required**: without it there is no candidate,
 and no client or own part either. The verdict:
@@ -532,6 +681,14 @@ S03r, S07, S12, S13).
      - N, O, E∅: **[critic F12]** x is rule 3b's only candidate, as (iii);
      - U: §3.4.12.
   4. x is `cancelled`, `booked` or `returned`, else `not_cancelled_nor_booked` (x `ordered`/`in_file`: S06/S10, 6b-3).
+     **[critic2] ML-4** A cancelled x is accepted only when its run (`x.run_id`) is `cancelled` or `booked`. With the
+     run still `approved` or `sent` (x cancelled alone by `confirm_transfer_cancellation`, 20261116090000
+     l.5015-5077, which leaves the run as it is; or x re-issued as x' by `transfer_file_release`, 20261115090000
+     l.1693-1713, which moves `run.transfer_id` to x'), this debit is that run's single real payout, and the run can no
+     longer be cancelled once it is on a statement (`transfer_already_debited`, l.5143-5148). Booked here, `items(x)`
+     would be empty (no released line), P = 0, and the client paid once would be shown owing the whole amount, the
+     run's items frozen for good. Refused `run_still_live` (detail: the run's number); left to 6b-3 with S10's
+     late-predecessor booking (§1.2).
   5. Account and currency → `transfer_differs`.
   6. `amount` = `x.amount_minor` → `amount_differs` (E: the line is A, or A + the fee part).
   7. **[critic F6]** x is cancelled or returned, and an item of x's pool (§3.6.1) is held by a line of c's approved or
@@ -571,17 +728,32 @@ against the share (§2.4).
 
 **3.4.9 Effects shared by unplanned sweeps**: 4679 may go into debit (`servicer_shortfall`, P0, exists).
 
-**3.4.10 `fee`** ([critic L2, F7, F15]; no transfer). A fee part is allowed in two places only:
+**3.4.10 `fee`** ([critic L2, F7, F15]; no transfer). A fee part is allowed in three places only:
 - (a) on a **class-E debit**, beside the part of the transfer that line names by its own id (`payout(t)`, `sweep(t)`,
   `unplanned_payout(x)`, `unplanned_sweep(x)`), when the line exceeds that transfer's amount: the bank's charge on its
   own line (S08);
 - (b) on a **class-E credit of kind `return`** (the bank flagged it), beside that transfer's return part
-  (`payout_returned`, `sweep_returned`, or x's unplanned return), when the line is short of the amount.
+  (`payout_returned`, `sweep_returned`, or x's unplanned return), when the line is short of the amount;
+- (c) **[critic2] ML-6, CSO2-1** on a **class-U debit** whose entry holds exactly one detail in all, ours, of the
+  entry's direction, at the transfer's exact amount (`unsplit_detail_count = unsplit_ours = 1`, `unsplit_batch_count`
+  null or 1): the ISO shape of S08, where `Ntry/Amt` is N + F and the detail's `TxAmt` is N. The fee is line − detail,
+  and it must equal the stored `charges_minor`; with no stored charges the line stays (`unsplit_detail_missing`). The
+  draft refused every fee on U, so the commonest camt.053 form of S08 was never bookable (`parts_do_not_add_up`),
+  while its RMT id kept suppressing t's breach row.
 
-Everywhere else it is refused `fee_not_allowed`: U, B, N, O, E∅, own and client credits. There the difference cannot be
-told apart from a third party's movement (a chargeback, a payment return, money to or from a client), and booking it to
-6270 would hide it. The amount is whatever makes the line; there is no cap (Q10). A fee alone stays `link_debit`
-« Frais bancaires ».
+**[critic2] ML-10** On (a) and (b) the line is one entry the parser read as one transaction, but a `TxDtls` without
+an amount is read as the whole entry whatever it holds (`whole()`, camt053.py l.406-421). So:
+- when the line has `charges_minor`, the fee must equal it, else `amount_differs`;
+- when it has none (CSV, or no `Chrgs`), a fee equal to the amount of any transfer of ours on the line's account
+  that was put in a file (the line's own transfer included: a double debit in one entry; in flight, booked, cancelled
+  or returned, by `bank_transfer_filed_amount_idx`) is refused `fee_unexplained`. Such a « fee » is far more likely
+  our transfer again than a charge, and booking it to 6270 would hide a double payment or another client's payout;
+- otherwise the fee is accepted with no cap (Q10), and the sheet says « Le relevé n'indique pas de frais pour cette
+  ligne : l'écart n'est pas justifié par le relevé. Vérifiez dans la banque avant de comptabiliser. »
+
+Everywhere else it is refused `fee_not_allowed`: U (but (c)), B, N, O, E∅, own and client credits. There the
+difference cannot be told apart from a third party's movement (a chargeback, a payment return, money to or from a
+client), and booking it to 6270 would hide it. A fee alone stays `link_debit` « Frais bancaires ».
 
 **3.4.11 `payout_returned(t)` / `sweep_returned(t)`** — a return the job did not book (S16, S20, U):
 1. t of kind payout / sweep → `transfer_unknown`.
@@ -596,6 +768,9 @@ told apart from a third party's movement (a chargeback, a payment return, money 
    - t `ordered`/`in_file` → `return_before_debit`;
    - **[critic F1]** t has an `unplanned_payout` / `unplanned_sweep` booking whose entry is not reversed →
      `unplanned_open` (book the unplanned booking's return: §3.4.13);
+   - **[critic2] ML-3** t has a debit line not booked beyond its booked debit (`private.transfer_late_lines(t)`, as
+     the job's fact, §2.3) → `debit_pending` (detail: that line's id). Book that debit first (`unplanned_payout(t)`);
+     this return is then its return;
    - `returned` or a return booking → `already_returned`;
    - `cancelled` → `transfer_cancelled` (its late debit is an unplanned payout: book `unplanned_payout_returned`);
    - `booked` without its debit booking → `return_differs`.
@@ -612,20 +787,31 @@ told apart from a third party's movement (a chargeback, a payment return, money 
 **3.4.12 Unsplit lines (class U, S21/S22)** ([critic F8, F7, L11, L2]). The parts come from the statement's own
 details (§2.2), never from ops:
 - `line.unsplit_details` null (imported before 6b-2a), or a detail without its amount → `unsplit_detail_missing`;
+- **[critic2] ML-5** the entry holds a detail that is not ours (`unsplit_detail_count` ≠ `unsplit_ours`), or its
+  `NbOfTxs` is given and differs (`unsplit_batch_count` not null and ≠ `unsplit_detail_count`) →
+  `unsplit_not_bookable`. A line imported before 6b-2a has no count and is already refused above. The draft relied on
+  the signed Σ alone, which is fooled when the other details net to zero: our payout −1 640 beside a debtor's +250 and
+  a third party's −250 makes the entry exactly, and the debtor's payment would never have been recorded;
 - a detail carrying our refund's RFD or our top-up's TOP id, or one id twice → `unsplit_not_bookable` (refunds are
   M2b's, top-ups M2c-1's; the same transfer debited and returned in one entry is not expressible);
 - the transfer parts are **exactly one per stored detail**, else `unsplit_parts_differ`. Each is:
-  - the transfer whose `end_to_end_id` is the detail's id;
+  - the transfer whose `end_to_end_id` is the detail's id, **[critic2] CSO2-10** looked up by
+    (`organization_id` = the line's, `end_to_end_id`) and then required to have the line's account as its debtor
+    account (a debit detail) or as the account it went from (a credit detail). `end_to_end_id` is unique across
+    servicers (20261111090000 l.1460) and a detail id is bank-supplied data, so a lookup by id alone could show
+    another servicer's transfer. A foreign id, an unknown RMT/SWP-shaped id, or our transfer on another account give
+    `unsplit_not_bookable` with the same `why` and no part listed, and §3.8 never collects or locks such a row;
   - at the detail's amount;
   - of the kind its direction and the transfer's state give. A debit gives `payout(t)` for a live t and
     `unplanned_payout(x)` for a cancelled, booked or returned x (sweeps alike). A credit gives `payout_returned(t)` /
     `sweep_returned(t)`, or x's unplanned return while x has an open unplanned booking.
-- no fee part (`fee_not_allowed`, §3.4.10);
+- no fee part (`fee_not_allowed`, §3.4.10), but **[critic2] ML-6** the S08 shape of §3.4.10 (c): one detail in all,
+  ours, at its transfer's exact amount, the fee = line − detail = the stored charges;
 - each part keeps its own status, account, run and amount rules (4–8 of its kind; the amount is the transfer's exactly);
-- the signed Σ rule of §3.4.2: when the entry holds anything not ours, the details of ours do not make it, and nothing
-  is booked. That covers a debtor's payment or chargeback, a bank charge, a refund and a top-up. **A movement of a third
-  party inside an entry is never booked here, even when a fee would make it add up**: the line stays (M2c-7, the bank;
-  §1.2).
+- the signed Σ rule of §3.4.2: the details of ours (and S08's fee) must make the entry. With the count rule above, the
+  entry holds nothing but our details. **A movement of a third party inside an entry is never booked here, even when
+  it nets to zero or a fee would make it add up**: the line stays (M2c-7, the bank; §1.2).
+- **[critic2] CSO2-3** more stored details than `private.transfer_line_lot_cap()` → `lot_too_large`, checked first.
 
 The options propose exactly that set (§3.11). Ops confirm it with a motif; there is nothing to compose.
 
@@ -667,7 +853,9 @@ own return; an unreferenced credit never gets this far.
   - The subset's member takes `unplanned_payout_returned` (`unplanned_sweep_returned`) while it has an open unplanned
     booking (§3.4.13 rule 4 names which), else `payout_returned` (`sweep_returned`).
   - Two copies of one member returned in one credit cannot be expressed: such a credit makes no unique subset and stays.
-- **Bound** (**[critic CSO-3]**): a PmtInf of more than 500 items → `lot_too_large`.
+- **Bound** (**[critic CSO-3]**): a PmtInf of more than `private.transfer_line_lot_cap()` items (500) →
+  `lot_too_large`. **[critic2] CSO2-3** It is a keyed count, taken first, before the subset and before any read per
+  member, in the options, the preview and the command alike; for a lot credit the count is of its returnable members.
 - **Rule**:
   - the named parts' transfers ⊆ M, else `not_its_line`;
   - their amounts add up to the line (§3.4.2);
@@ -675,8 +863,9 @@ own return; an unreferenced credit never gets this far.
 
   In a debit's subset, live members take `payout`, left and cancelled ones `unplanned_payout` (`unplanned_sweep`).
 - **[critic CSO-3] When.**
-  - A debit lot's items never change, so `unique_subset` runs before the locks (§3.2 step 6). Under the locks only the
-    members' statuses are re-read: a member's kind or rule changing raises `split_changed` or its refusal.
+  - A debit lot's items never change, so `unique_subset` runs before the locks (§3.2 step 6), on the items in
+    `transfer_file_item.seq` order (**[critic2] CSO2-2**, the twin's order). Under the locks only the members'
+    statuses are re-read: a member's kind or rule changing raises `split_changed` or its refusal.
   - A lot credit's universe depends on statuses. It is computed before the locks on the statuses then read, and
     re-computed under the locks only when one of them changed (`split_changed` if the subset or a kind changed).
 - **The options read proposes that subset** (§3.11). Ops confirm it; they never compose a batch line.
@@ -691,26 +880,42 @@ items(x)  = x cancelled: the ledger entries of x's run's released lines
             x booked and never returned, or a client part (Q8): none → P = 0
 eligible  = the items of items(x) with a row in private.remittance_pending (reserved by a draft or not: an item is in
             the queue or in exactly one live line, so an item frozen by a live run is never counted)
+            -- [critic2] ML-1: less the pool's unplanned_payout rows (−A of an earlier unplanned booking) and their
+            -- double_payout advance rows: the attributions below already count what those bookings netted
 net(i)    = Σ remittance_pending.amount_minor of i and of every pending entry in i's reversal chain
             (ledger_entry.reverses_entry_id = i, then that entry, …, each by key through
             ledger_entry_reversed_once_uq; the 4670 trigger queues each reversal as its own row,
-            20261111090000 l.1281-1299), floored at 0
-left(i)   = net(i) − Σ private.unplanned_paid_item.amount_minor of i whose booking entry is not reversed
-                   − what earlier parts of this call attributed to i
+            20261111090000 l.1281-1299) — signed: a negative item (an allocation_reversal, a client_advance
+            reversal) stays negative
+paid(i)   = Σ private.unplanned_paid_item.amount_minor of i whose booking entry is not reversed
+            + what earlier parts of this call attributed to i
+cap(x)    = greatest(0, Σ over eligible i of net(i) − Σ over eligible i of paid(i))   -- [critic2] ML-1: signed sum,
+                                                                                   -- floored once, not per item
+left(i)   = greatest(0, net(i) − paid(i))                     -- what each positive item can still take
 queue(c)  = greatest(0, Σ private.remittance_pending.amount_minor of (c, currency), reserved or not)
             − the P of earlier parts of this call for c            -- under the allocation lock
-P         = greatest(0, least(A, queue(c), Σ over eligible i of left(i)))
-attribute P over the eligible items in (posted_at, ledger_entry_id) order, each up to left(i):
-            one private.unplanned_paid_item row per item it touches
+P         = greatest(0, least(A, queue(c), cap(x)))
+attribute P over the eligible items with left(i) > 0 in (posted_at, ledger_entry_id) order, each up to left(i):
+            one private.unplanned_paid_item row per item it touches  (P ≤ cap(x) ≤ Σ left(i), so P always fits)
 ```
+**[critic2] ML-1** The draft floored `net(i)` at 0 item by item and summed only the positive items. A cancelled run's
+released lines are re-queued signed (`cancel_remittance_run`, 20261112090000 l.2122-2126), so the pool routinely holds
+negative items: an `allocation_reversal`, the `client_advance` +X paired with it by a 6b-1 `payout_overrun` cover
+(`bank_booking_post_rows` step 4). Example: R1 holds a +1 000, r −300 (b bounced after R0's approval) and v +300 (R0's
+cover); R1 is cancelled after download; a bounces (−1 000) and n +2 000 arrives; x (1 000) is executed late. The
+draft's Σ left was 0 + 0 + 300 = 300, so P = 300 netted the double payout against n, a collection unrelated to x. The
+signed net of x's items is 0 + (−300) + 300 = 0, so P = 0 and the advance is 1 000, as F3's rule wants.
+
 What this guarantees:
 - **P ≤ A**.
 - **P ≤ what the queue can net.** The netting happens only in the pending queue, never in a run already approved or
   sent. So the in-flight run's own booking never needs a `payout_overrun` cover for the double payout's excess, which
   stays a `double_payout` advance (F5).
-- **P ≤ the net still owed of the items x was meant to pay, across every unplanned booking.**
+- **P ≤ the signed net still owed of the items x was meant to pay, across every unplanned booking** (**[critic2]
+  ML-1**: signed, reversal chains and negative items included).
   - An item released by two cancelled runs is counted once (F4).
   - An item reversed since its run was cancelled counts net of its reversal (F3).
+  - A negative item of the pool lowers the cap: what the client owes back on x's items is not owed to it.
   - A returned x's re-execution pays its return item, so the client is not paid that item a second time (F2).
 - **Every excess is the servicer's advance.** Q4 and founder #7 allow no hold-back without a claw-back clause (design
   §13.1, OQ-38).
@@ -761,6 +966,9 @@ return, its live run (at most one, `remittance_run_pending_uq`) was locked in st
   `refresh_remittance_run` holds that row and waits for the allocation lock.
 - **Approved or sent**: rule 7 of §3.4.6 decides (`client_run_cancellable`); otherwise nothing. Its items are frozen,
   and P counted only what was still waiting.
+- **[critic2] ML-9** The preview and the booking result carry, per unplanned part, which bound set P: `p_bound` ∈
+  `amount` (P = A), `items` (cap(x)), `queue` (queue(c)), `none` (P = 0 by Q8 or no items). The sheet (§7.3) and the
+  statement (§5) word the advance from it, never from a guess.
 - The run page says why the gross changed from durable data, not from `last_failure`: the unplanned items the draft
   holds (6b-2c, §4.4).
 
@@ -841,7 +1049,8 @@ Then it locks, each set in id order:
 6. `bank_transaction` `FOR NO KEY UPDATE`: the line and the debit lines `returns_line_id` names;
 7. `pg_advisory_xact_lock(hashtext('remit:' || org))`;
 8. `transfer_file` `FOR SHARE`: the transfers' current files, the PmtInf's file, and the file of the live run's payout
-   (F6);
+   (F6); **[critic2] ML-4** the run of a cancelled x named by an unplanned part is locked in step 1 with the
+   transfers' runs, so `run_still_live` is read under the lock;
 9. `bank_transfer` `FOR UPDATE`: every key transfer (all members of a PmtInf, booked or not).
 
 The rules are then read under these locks. Anything stale between the options read and the command gives
@@ -886,9 +1095,12 @@ Raised as `transfer line booking refused: <code>` (check_violation). They are ma
 | `amount_differs` | « Le montant ne correspond pas à celui du virement. » |
 | `line_ambiguous` | « Plusieurs virements du cabinet (reversement, quote-part, remboursement, ou virement annulé que la banque a pu exécuter) ont ce montant vers ce compte : sans notre référence sur la ligne, impossible de savoir lequel la banque a exécuté. Demandez le détail à la banque. » |
 | `batch_ambiguous` | « Plusieurs combinaisons des virements de ce lot font le montant de la ligne : demandez à la banque le détail du lot. » |
-| `lot_too_large` | **[critic CSO-3]** « Ce lot compte trop de virements pour être comptabilisé depuis cet écran : prévenez le support. » |
+| `lot_too_large` | **[critic CSO-3]** « Ce lot compte trop de virements pour être comptabilisé depuis cet écran : prévenez le support. » **[critic2] CSO2-3** Also given for an unsplit entry or a lot credit above the cap; the label says « Ce lot ou cette écriture compte trop de virements … » |
 | `batch_mixed` | « Ce lot contient des remboursements ou des virements de natures différentes : il ne peut pas être comptabilisé ici. Demandez le détail à la banque. » |
 | `not_cancelled_nor_booked` | **[critic L15]** « Ce virement n'est ni annulé, ni débité, ni revenu : comptabilisez la ligne comme « Débit d'un reversement » ; si ce virement n'a jamais été remis à la banque, prévenez le support. » |
+| `run_still_live` | **[critic2] ML-4** « Ce virement a été annulé, mais son reversement est toujours en cours : ce débit est le paiement de ce reversement, pas un virement hors reversement. Il ne peut pas encore être comptabilisé ; ne faites pas annuler ce reversement et prévenez le support. » (the page adds the run's number from the detail) |
+| `debit_pending` | **[critic2] ML-3** « Un autre débit de ce virement (second débit, ou débit après annulation) figure sur un relevé sans être encore comptabilisé : comptabilisez-le d'abord ; ce retour sera alors celui du virement hors reversement, et rien ne sera reversé deux fois. » |
+| `fee_unexplained` | **[critic2] ML-10** « L'écart entre la ligne et le virement a le montant d'un virement du cabinet, et le relevé n'indique aucun frais : ce n'est sans doute pas des frais (virement débité deux fois, ou un autre virement dans la même écriture). Demandez le détail à la banque. » |
 | `client_run_cancellable` | **[critic F6]** « Les sommes que ce virement a payées sont dans un reversement de ce client validé mais pas encore remis à la banque : faites d'abord annuler ce reversement par un administrateur (ces sommes reviennent en attente et ce débit en sera déduit), puis recommencez. » (the page adds the run's number from the detail) |
 | `client_unknown` | « Ce client n'est pas un client du cabinet. » |
 | `client_iban_mismatch` | « Le compte crédité n'est pas un compte de reversement enregistré de ce client. » |
@@ -905,15 +1117,20 @@ Raised as `transfer line booking refused: <code>` (check_violation). They are ma
 | `already_returned` | « Ce virement est déjà revenu. » |
 | `return_differs` | « Ce retour ne correspond pas au virement (montant supérieur, virement sans débit comptabilisé, ou autre virement hors reversement à annuler d'abord). » |
 | `advance_settled` | « L'avance liée à ce virement a déjà été en partie récupérée : ce retour ne peut pas être comptabilisé ici. Prévenez le support. » |
-| `unsplit_detail_missing` | **[critic F8]** « Le relevé ne détaille pas assez cette écriture (un montant manque, ou la ligne a été importée avant que Collectoo garde ce détail) : elle ne peut pas être comptabilisée ici. Demandez le détail à la banque et prévenez le support. » |
-| `unsplit_not_bookable` | « Cette écriture contient un remboursement ou un approvisionnement du cabinet, ou deux fois le même virement : elle ne peut pas être comptabilisée ici. Prévenez le support. » |
+| `unsplit_detail_missing` | **[critic F8]** « Le relevé ne détaille pas assez cette écriture (un montant ou les frais de la banque manquent, ou la ligne a été importée avant que Collectoo garde ce détail) : elle ne peut pas être comptabilisée ici. Demandez le détail à la banque et prévenez le support. » (**[critic2] ML-6** « ou les frais ») |
+| `unsplit_not_bookable` | **[critic2] ML-5, CSO2-10** « Cette écriture contient autre chose que des virements du cabinet sur ce compte (le paiement d'un débiteur, un autre débit, un remboursement ou un approvisionnement du cabinet), ou deux fois le même virement : elle ne peut pas être comptabilisée ici. Demandez le détail à la banque et prévenez le support. » |
 | `unsplit_parts_differ` | « Les virements nommés ne sont pas exactement ceux que le relevé détaille dans cette écriture, à leurs montants. » |
 | `split_changed` | « La situation a changé depuis l'affichage (sommes en attente, brouillon, virements) : rouvrez la ligne pour voir la nouvelle répartition. » |
 | `posting_failed` | « La comptabilisation a été refusée par les contrôles du grand livre : rien n'est enregistré. Prévenez le support. » |
 
 « not allowed » and « a reason is required » keep their existing labels. Two SQLSTATEs get codes of their own:
-- the lock timeout (55P03, `lock_timeout 2s`): `busy`, « La ligne est en cours de traitement ; réessayez dans un
-  instant. »;
+- the lock timeout (55P03, `lock_timeout 2s`): **[critic2] CSO2-6** most waits are not on the line but on the
+  servicer-wide `payments:` or `remit:` lock, held by an allocation chunk (8–9 s per 10k) or an approval job (7.9 s at
+  50k). The command catches 55P03 and re-raises it with the step it was waiting at:
+  - `busy` (the line, its runs, its transfers, its files): « Cette ligne ou un virement qu'elle concerne est en
+    cours de traitement : réessayez dans un instant. »;
+  - `allocation_busy` (the `payments:` or `remit:` advisory lock): « Une imputation ou une validation de reversements
+    est en cours pour ce cabinet : réessayez dans quelques secondes. », as the existing `allocation_busy` hint says;
 - **[critic CSO-3]** the statement timeout (57014): `timeout`, « La comptabilisation a pris trop de temps et n'a rien
   enregistré : réessayez ; si cela se répète, prévenez le support. »
 
@@ -941,21 +1158,41 @@ of a list (§4.1: the list carries a cheap `bookable_as`).
       short of N;
     - **[critic F1]** t with an open unplanned booking → only `unplanned_payout_returned` with `returns_line_id` =
       that booking's line (the largest advance, §3.4.13).
-  - B debit: the unique subset (§3.5), or `refusal: batch_ambiguous` / `lot_too_large` with `members`.
-  - B credit: the unique subset of returnable members (§3.5).
+  - B debit: the unique subset (§3.5), or `refusal: batch_ambiguous` with `members`. **[critic2] CSO2-3** Above the cap:
+    `{refusal: 'lot_too_large', member_count}` with no `members`, answered from the keyed count before any subset or
+    per-member read; `members` is never longer than 50 (the sheet says « … et N autres »).
+  - B credit: the unique subset of returnable members (§3.5); above the cap, as B debit.
   - **[critic F9, F12, F13]** N, O, E∅ debit:
     - the one rule-3b candidate as its part;
     - with no candidate, the client by IBAN (`unplanned_payout(c)`), else our own IBAN (`unplanned_sweep()`);
     - else `refusal` (`line_ambiguous`, or the matching refusal of §3.4.6 rule 4), or nothing.
+    - **[critic2] ML-4** a cancelled x whose run is still approved or sent: `refusal: run_still_live`, no proposal.
+  - **[critic2] ML-3** E credit (or lot credit) of a transfer with a pending debit line: `refusal: debit_pending`, and
+    the proposal shown is that debit line's own proposal (a link to open it), never the return.
+  - **[critic2] ML-11** N, O, E∅ credit of **kind `return`** (bank-flagged, no reference of ours): the unplanned return
+    of the open unplanned booking whose payout went to the line's counterparty IBAN at the line's exact amount
+    (`x.payee_iban`, or the debit line's counterparty for a client part), the largest advance first (ties: the earliest
+    line), as §3.4.13 rule 4; no fee (§3.4.10). This is the only route back for a client part (S13, S07), which never
+    carries our id; without it the advance stayed open « à récupérer auprès du client » although the money came back.
+    No open booking matches → no proposal.
   - **[critic L3]** own or client credit without our id: no proposal (Q13).
   - **[critic F8]** U: the stored details' parts (§3.4.12), or `refusal` (`unsplit_detail_missing`,
-    `unsplit_not_bookable`, `parts_do_not_add_up`). There is no candidates list to compose from.
+    `unsplit_not_bookable`, `parts_do_not_add_up`, **[critic2] CSO2-3** `lot_too_large` above the cap, checked
+    first). There is no candidates list to compose from. **[critic2] CSO2-10** A detail naming nothing of the line's
+    servicer and account is never shown (no id, run or client name of another servicer in the JSON).
+  - **[critic2] ML-10** E debit with a fee part and no stored charges: the proposal carries `fee_unexplained: false`
+    and the sheet's sentence « Le relevé n'indique pas de frais … » (§3.4.10); with `fee_unexplained`, no proposal.
 
   `action` ∈ `payout` (« Débit d'un reversement »), `lot` (« Débit d'un lot de reversements », mixed planned and
   unplanned), `unplanned_payout` (« Virement hors reversement »), `unplanned_sweep` (« Virement au compte propre »),
   `returned` (« Virement revenu »), `detail` (U).
 - **`public.transfer_line_preview(p_bank_transaction_id uuid, p_parts jsonb) returns jsonb`**: `{ok, why, parts: [{…,
-  paid_minor, advance_minor, late}], drafts: [{run_id, number}], expected_text}`.
+  paid_minor, advance_minor, p_bound, late}], drafts: [{run_id, number}], supersedes_file, expected_text}`.
+  - **[critic2] ML-9** `p_bound` per unplanned part (§3.6.5).
+  - **[critic2] CSO2-4** `supersedes_file`: `{file_id, number}` when the booking lowers 4679 (an unplanned payout's
+    advance, a fee, an unplanned sweep, a planned payout's `payout_overrun` cover) and a `generated` file of the
+    servicer holds a sweep that would then exceed the share (§2.4's formula, read with the booking's effect); else
+    null. The sheets say the file will be replaced only then.
   - It runs the same `transfer_line_check` with `strict => false`: it never raises a refusal and returns `why`, takes
     no lock, and filters tenants first (§3.4.1).
   - `late` means the payout part's run has a positive live line whose `latest_execution_date` < the line's date (a
@@ -975,16 +1212,31 @@ of a list (§4.1: the list carries a cheap `bookable_as`).
 - **`private.pending_item_deadlines`** (20261116090000 l.3848) and the worker's `_held_to` (`jobs/remittances.py`
   l.595, parity). **[critic F11, L4]** The `payout_returned` branch (l.3880-3900) is kept only for a transfer's own
   planned remittance: `and bt.entry_id = re.id`.
-  - The item of a reversed **unplanned** remittance is never monitored: no deadline, as an advance's. The items its P
-    paid kept their own clocks throughout (Q15's default), and its A − P is netted by the advance's reversal.
+  - The item of a reversed **unplanned** remittance is not monitored while the items its P paid are still pending: no
+    deadline, as an advance's. Those items kept their own clocks throughout (Q15's default), and its A − P is netted
+    by the advance's reversal.
   - So an S03 returned (P = 0, net 0) writes no breach row « bloqué : virement revenu impayé », raises no
     `remittance_due_critical` and needs no late reason.
+  - **[critic2] ML-2** When the unplanned remittance has `unplanned_paid_item` rows whose items are no longer pending
+    (frozen in a live or booked `remittance_line`, the −A row netting them: their clocks ended at that run), the
+    re-owed item is held like a planned return: a third branch, reached by key (the reversal → the reversed
+    remittance → its `unplanned_paid_item` rows by `booking_entry_id` → each item's live `remittance_line` by
+    `ledger_entry_id`), takes the line with the earliest `latest_execution_date`, its E, mandate and terms version
+    exactly as the planned branch reads them. The nightly check writes its breach row with `blocked_reason`
+    `payout_returned`, the schedule drafts it, and the next approval needs a late reason. Without it: x booked and
+    returned (ρ +1 640), re-executed (P = A on ρ), c's net-0 draft approved late and booked at approval (N = 0,
+    20261112090000 l.1887-1891), then the second copy returned too — the client was owed 1 640 of collections past
+    their deadline with no breach row, no alert and no scheduled run. Reachable with the switch off.
+  - Parity: `_held_to` (`jobs/remittances.py` l.595) gets the same third branch; the parity test covers it.
   - The draft's « released lines included » rule is withdrawn. Recorded in OQ-36 and CPCE-08.
   - Note for 6b-3: a late predecessor booked as its run's payout keeps `entry_id` null (m2c-6b-plan §3.1). Its return
     must then be keyed by its `payout` booking's entry instead.
 - **`private.bank_booking_post_rows`** (20261116090000 l.858). **[critic CSO-1]** A `payout` row's `remittance` entry
   reason is null (the job's), whatever `b.reason`. `b.reason` still goes to `bank_line_booking.reason`. This departs
   from §1.3 item 1's « unchanged »; parity with the job's entries is pinned by pgTAP 037 C.
+- **[critic2] ML-2** `private.pending_item_deadlines` reads `private.unplanned_paid_item` (by its primary key's
+  leading column, `booking_entry_id`) for the third branch above; the function is `SECURITY DEFINER`, so the table's
+  revoked grants (§3.1) do not stop it.
 
 ### 3.13 How a booked line leaves « À classer »
 - Every « À classer » branch of `public.debit_queue` already excludes a line with a booking (l.2416-2431), and the review
@@ -1035,8 +1287,12 @@ of a list (§4.1: the list carries a cheap `bookable_as`).
 
   The page reads `transfer_line_options` only when ops open that line's sheet. « Frais » leaves out the lines with `n`.
   « À classer » lists them with `review_reason` `payout_amount_match` (candidates: the transfers) or
-  `client_payout_iban` (the client), keyed from the account's few in-flight, cancelled and returned transfers to its
-  lines by `(bank_account_id, booking_date)`, as `transfer_debit_may_be_seen` reads them (l.3440). Labels:
+  `client_payout_iban` (the client). **[critic2] CSO2-13** They are found from the lines, never from the transfers:
+  for each unbooked reference-less debit of the queue (bounded by the queue's own page), one probe of
+  `bank_transfer_filed_amount_idx` on (account, amount), then the payee IBAN and execution date by key — the same
+  probe as rule 3b's (§3.4.4). The draft keyed from the account's transfers to its lines by date range, as
+  `transfer_debit_may_be_seen` does for one in-flight transfer; for a returned payout of a year ago that range is
+  every line of the account since. Labels:
   - `payout_amount_match`: « Débit sans notre référence du montant d'un virement du cabinet en cours (ou annulé que la
     banque a pu exécuter) : s'il s'agit de ce virement, comptabilisez-le comme son débit. »
   - `client_payout_iban`: « Débit vers le compte de reversement d'un client, sans référence du cabinet : virement hors
@@ -1053,15 +1309,39 @@ else, the next nightly check writes it ». 6b-2c removes that exit for a referen
 - S08b.
 
 Each would suppress the breach rows of every payout it may be, forever. The fix:
-- **Bound** (Q14's default): such a line counts only while it is younger than **five business days** (its booking date
-  against today, `private.business_days_between`).
+- **[critic2] ML-7 Which lines are bounded.** The draft bounded every line the helper counts. That includes our RMT
+  and batch lines and every reference-less line with a single rule-3b candidate, all of which ops can book. On a
+  reference-less feed (class N: a CSV without the end-to-end column) the job books no payout debit at all (it needs
+  the end-to-end id or a batch line, l.1328-1333), so every payout not booked by ops within five business days would
+  get a permanent breach row although the bank debited it on time. The row is append-only and unique per item, it is
+  the servicer's R124-6 record (CPCE-08) and raises the `remittance_deadline_breached` violation at every check
+  (20261116090000 l.3663), and it would also block the true row if the debit had in fact been late. Now:
+  - a new `private.transfer_line_offers(p_line uuid, p_transfer uuid) returns boolean` (stable, keyed) says whether
+    the line offers a booking containing that transfer, by the rules of §3.4 restricted to it: an E line carrying
+    its id at its amount or above in its account and currency (with a fee the stored charges allow); an N/O/E∅ line
+    of which it is rule 3b's only candidate (and not `run_still_live`); a B line whose unique subset holds it
+    (`unique_subset` on the PmtInf's items, ≤ the cap, else no); a U line whose stored details are bookable (§3.4.12)
+    and name it. It shares those rules' helpers with `transfer_line_check`, so the two cannot drift; pgTAP checks
+    that it is true exactly when the options read has a proposal containing the transfer;
+  - a line that **offers** the transfer keeps suppressing without a bound. It raises `bank_line_unbooked` after one
+    business day (6b-2c extends that alert to a reference-less debit with a rule-3b candidate: P0 when the candidate's
+    latest execution date has passed). Its booking writes the true row at its own date (`bank_booking_post_rows`): a
+    breach only if it was late;
+  - a line that **does not** offer it (`line_ambiguous`, `batch_ambiguous`, `lot_too_large`, `batch_mixed`, the
+    `unsplit_*` refusals, `fee_unexplained`, S08b, a line below the amount) counts only while it is younger than
+    **five business days** (Q14's default; its booking date against today, `private.business_days_between`).
+  - The helper is called once per overdue (run, latest execution date) by the nightly check (l.3527-3534), so the
+    subset runs at most once per such line and night.
 - **The breach row.** After that, `private.run_remittance_runs_checks` (redefined from 20261116090000 l.3478) writes the
   in-flight item's breach row with `blocked_reason` `debit_unbooked` (« bloqué : débit possible non comptabilisé »).
   The check `remittance_deadline_breach_blocked_reason_check` += `debit_unbooked`.
-- If ops later book that line as the payout's on-time debit, the row stays (append-only, unique per item), and its
-  reason says why it was written.
+- If ops later book that line as the payout's on-time debit (possible only once the bank's detail resolves it), the
+  row stays (append-only, unique per item), and its reason says why it was written: the line could not be
+  attributed for five business days.
 - The alternative (Q14 b): a four-eyes classification « ce débit n'est pas celui de ce reversement », with the bank's
-  detail as motif, which the helper then ignores.
+  detail as motif, which the helper then ignores. A « levée » row clearing a breach once such a line is booked on
+  time was considered and not chosen: the register would hold a false breach for days, the violation would fire
+  meanwhile, and every reader of the breach rows would have to learn to read the clearing.
 - Recorded in CPCE-08 and OQ-83.
 
 ### 4.3 Hints and texts reworded now that the screen exists
@@ -1098,7 +1378,11 @@ Each would suppress the breach rows of every payout it may be, forever. The fix:
     détail à la banque et prévenez le support. »
   - `DEBIT_REVIEW` (debit words; the credit words follow):
     - `cancelled_transfer_debited`: « … Rien n'est comptabilisé : vérifiez dans la banque, puis comptabilisez-le comme
-      « Virement hors reversement » (risque de double paiement). »
+      « Virement hors reversement » (risque de double paiement). » **[critic2] ML-4** The sentence is conditional on
+      the row's run status, which `debit_queue` already joins: when the cancelled transfer's run is still approved or
+      sent, « … Rien n'est comptabilisé : le reversement de ce virement est toujours en cours, ce débit est donc son
+      paiement ; il ne peut pas encore être comptabilisé. Ne faites pas annuler ce reversement et prévenez le
+      support. »
     - `transfer_debited_twice`: « … la banque l'a peut-être exécuté deux fois. Vérifiez avec la banque, puis
       comptabilisez ce second débit comme « Virement hors reversement ». »
     - `batch_partial`: « Lot débité pour un autre montant que ses virements en cours (un virement manque, a été rejeté,
@@ -1109,10 +1393,13 @@ Each would suppress the breach rows of every payout it may be, forever. The fix:
     - `own_transfer_out`: « Virement émis vers l'un de nos comptes sans ordre de Collectoo : comptabilisez-le comme
       « Virement au compte propre » après vérification dans la banque. »
     - `own_transfer_line` (M2b pass): 6b-2a's wording is kept.
-    - **[critic F1]** `unplanned_payout_return` (2a's wording, credit words): « Retour d'un virement du cabinet qui a
-      aussi été exécuté hors reversement (virement annulé exécuté quand même, ou exécuté deux fois) : rien n'est
-      comptabilisé automatiquement. Comptabilisez-le avec « Virement revenu » : c'est le retour du virement hors
-      reversement. »
+    - **[critic F1]** `unplanned_payout_return` (credit words; **[critic2] CSO2-14** 2a and 2b keep the « prévenez le
+      support » wording of §2.6, since « Virement revenu » exists only from 2c): « Retour d'un virement du cabinet
+      (reversement ou quote-part) qui a aussi été exécuté hors de son ordre (virement annulé exécuté quand même, ou
+      exécuté deux fois) : rien n'est comptabilisé automatiquement. Comptabilisez-le avec « Virement revenu » : c'est
+      le retour du virement exécuté hors ordre. » A vitest kills 2a's « prévenez le support » words here;
+    - **[critic2] ML-3** `return_debit_pending`: « … Comptabilisez d'abord ce débit (« Virement hors reversement ») ;
+      ce retour se comptabilisera ensuite avec « Virement revenu ». »
 
 ### 4.4 Reads for the run page, « Virements » and the client space ([critic CSO-9, CSO-6, L6])
 - **`public.remittance_run_payout(p_run_id uuid) returns jsonb`**:
@@ -1128,8 +1415,12 @@ Each would suppress the breach rows of every payout it may be, forever. The fix:
   return_line_id, unplanned_on)`**: ≤ 500 ids; keyed; only rows whose `bank_transfer.organization_id =
   any(private.money_staff_org_ids())`. Other ids are ignored, with nothing said about them.
 - **`public.client_remittance_summary`** (redefined from 20261116090000 l.4416; **[critic L6]**) gains `unplanned_runs:
-  [{run_id, executed_on}]`: the client's cancelled runs whose transfer has an unplanned booking, with that booking's
-  date. Same rights as today (whole-client members).
+  [{run_id, executed_on}]`: the client's cancelled runs **[critic2] ML-12** any of whose transfers has an unplanned
+  booking, with that booking's date. « Any of its transfers » is the run's chain: `run.transfer_id`, then each
+  `replaces_transfer_id`, by key (the same set as `bank_transfer.run_id = run`). After a re-issue `run.transfer_id`
+  names x' (`transfer_file_release` l.1712) while the bank may execute the old x; keyed on `run.transfer_id` alone the
+  client space kept « Annulé avant la remise de son virement à la banque », which is false. Same rights as today
+  (whole-client members). `remittance_run_payout` and `transfer_bookings` read the chain the same way.
 - The client space reads `remittance_run.booked_on` with its embed (table grant, RLS rows: no new function).
 
 ---
@@ -1154,9 +1445,11 @@ posted in the window.
     number), else `pending`;
   - `cancelled`: the run cancelled (`cancelled_at` in the window) — `{…, on}`;
   - `executed_after_cancellation` / `debited_again`: an unplanned booking of one of the run's transfers posted in the
-    window (x cancelled / booked or returned) — `{…, unplanned_minor, advance_minor, on, here}`. `here` when this run
-    holds that entry's −A line. A run with both a `cancelled` and an `executed_after_cancellation` event in one window
-    gets the latter only;
+    window (x cancelled / booked or returned) — `{…, unplanned_minor, advance_minor, p_bound, on, here}`. `here` when
+    this run holds that entry's −A line. A run with both a `cancelled` and an `executed_after_cancellation` event in
+    one window gets the latter only. **[critic2] ML-12** « One of the run's transfers » is any transfer of its chain
+    (§4.4), not only `run.transfer_id`: after a re-issue the bank may execute the old x. **[critic2] ML-9**
+    `p_bound` is read from the booking (§3.6.5) so the advance clause is worded by what set P;
   - **[critic L4]** `unplanned_returned`: the return of such an unplanned booking — `{…, executed_on, on, owed_minor
     (P), here}`;
   - **[critic L16]** `executed_outside`: an unplanned payout to the client with no transfer (S13, S07) posted in the
@@ -1167,6 +1460,13 @@ posted in the window.
 - **[critic L9] Late cause.** A line whose item has an `unplanned_paid_item` row of an unreversed booking takes
   `late_cause` `paid_by_unplanned`, with that booking's date: « versé le jj/mm/aaaa par un virement exécuté hors
   reversement ». The date tells whether it was in time (Q15's default keeps the item's own clock).
+  - **[critic2] ML-9** As the rest of « Suivi » (L17), « unreversed » is read as of K: the booking's entry is posted
+    at or before `r.known_at` and has no reversal posted at or before it (by `ledger_entry_reversed_once_uq`, then
+    the reversal's `posted_at`).
+  - The payload carries the attributed amount (`paid_by_unplanned_minor`, Σ of the item's rows of such bookings). When
+    it covers the line, « versé le … par un virement exécuté hors reversement »; when it covers part of it, « dont
+    1 200,00 € versés le … par un virement exécuté hors reversement ». The draft said the whole line was paid so even
+    when the attribution covered part of it.
 
 **Renderer** (`remittance/statement.py`): `_previous_payouts` in place of `_follow_up`; `TEMPLATE_VERSION =
 "releve-reversement-fr-3"`; `TEMPLATE_VERSIONS` = fr-3 only, since stored statements are never re-rendered; a payload
@@ -1185,8 +1485,14 @@ French:
 - `executed_after_cancellation`: « Reversement RV-… annulé le 03/11/2026 : la banque a néanmoins exécuté son virement
   de 1 640,00 € le 05/11/2026 ; ce montant, que vous avez reçu, figure dans le présent reversement (« Virement exécuté
   hors reversement ») ». **[critic F17, L16]** When `advance_minor` > 0 it adds « , et « Avance du cabinet » pour la
-  part qui dépassait les sommes de ce reversement encore à vous reverser (440,00 €) ». It ends « . » (not `here`: « … ;
-  il sera pris en compte dans un prochain reversement. »).
+  part qui n'a pas pu être déduite de vos sommes en attente (440,00 €) », then by `p_bound` (**[critic2] ML-9**: P
+  is also capped by the queue and by earlier attributions, so the draft's « la part qui dépassait les sommes de ce
+  reversement encore à vous reverser » was false when those caps bound):
+  - `items` or `none`: « : elle dépassait ce qui restait à vous reverser des sommes de ce reversement »;
+  - `queue`: « : vos sommes en attente à cette date ne permettaient pas d'en déduire davantage »;
+  - `amount`: no advance, no clause.
+
+  It ends « . » (not `here`: « … ; il sera pris en compte dans un prochain reversement. »).
 - `debited_again` (**[critic L13]**): « Reversement RV-… : la banque a exécuté son virement une seconde fois le
   05/11/2026 (1 640,00 €) ; ce second virement, que vous avez reçu, figure dans le présent reversement (« Virement
   exécuté hors reversement » » + (advance > 0: « , et « Avance du cabinet » pour ce second virement (1 640,00 €) ») +
@@ -1212,19 +1518,28 @@ What else changes:
 ## 6. Worker
 
 - **6b-2a**:
-  - `payments/camt053.py`: the unsplit details (§2.2);
-  - `jobs/statements` staging: the new column;
-  - `payments/debits.py`: `TransferFact.unplanned_open` and the `_transfer_return` rule (§2.3);
-  - `jobs/debits.py`: the fact loaded;
+  - `payments/camt053.py`: the unsplit details, the detail count and `NbOfTxs`, the charges (§2.2);
+  - **[critic2] CSO2-9** staging is `jobs/payments.stage()` over `payments/statement.STAGE_COLUMNS` (the draft named
+    a `jobs/statements` that does not exist): the new columns, `Jsonb([...])` for the details; `StatementLine` gains
+    `unsplit_details: tuple[UnsplitDetail, ...] | None` (a frozen, slotted dataclass), `unsplit_detail_count`,
+    `unsplit_batch_count`, `charges_minor`;
+  - `payments/debits.py`: `TransferFact.unplanned_open`, **[critic2] ML-3** `TransferFact.debit_pending`, and the
+    `_transfer_return` rules (§2.3);
+  - `jobs/debits.py`: the facts loaded;
   - `P0_REVIEWS` += `TRANSFER_UNKNOWN`;
-  - `unique_subset(amounts, target)` (the SQL twin's bounds, pure);
+  - `unique_subset(amounts, target)` (the SQL twin's bounds, **[critic2] CSO2-2** work bound and visiting order, pure);
   - `synth/camt053.py` + `cli.py`:
-    - `--unsplit-details` (entries kept unsplit, with details carrying amounts or not);
-    - `--debit-charge MINOR` (each individual debit booked for N + charge on one entry, the charge in its `Chrgs`);
+    - `--unsplit-details` (entries kept unsplit, with details carrying amounts or not; **[critic2] ML-5** with or
+      without a detail not ours, netting to zero or not);
+    - `--debit-charge MINOR` (each individual debit booked for N + charge on one entry, the charge in its `Chrgs`).
+      **[critic2] ML-6, CSO2-1** By default it writes the ISO shape: the detail's `AmtDtls/TxAmt/Amt` = N and
+      `Ntry/Amt` = N + charge, which the parser keeps unsplit (class U); `--debit-charge-no-detail-amount` writes the
+      detail without an amount (class E);
     - `--unflagged-returns` (returns written without a return code or reversal indicator, from the payee's IBAN);
     - `--csv` with the end-to-end column dropped (`expected_csv(bank_ids=False)` exists);
     - round-trip tests with the parser.
-- **6b-2b**: `jobs/remittances.py` `_held_to`, the change of §3.12 (parity test with `private.pending_item_deadlines`).
+- **6b-2b**: `jobs/remittances.py` `_held_to`, the change of §3.12, **[critic2] ML-2** its third branch (the re-owed
+  item of an unplanned remittance whose items were frozen) included (parity test with `private.pending_item_deadlines`).
 - **6b-2d**: `remittance/statement.py`, `statement_pdf.py`: fr-3 (§5).
 
 ---
@@ -1233,8 +1548,9 @@ What else changes:
 
 ### 7.1 6b-2a
 - Labels:
-  - review reason `unplanned_payout_return`;
-  - `sweep_exceeds_share` (§2.4);
+  - review reasons `unplanned_payout_return` and **[critic2] ML-3** `return_debit_pending`, with **[critic2]
+    CSO2-14** §2.6's « prévenez le support » wording (no « Virement revenu » before 2c);
+  - `sweep_exceeds_share` (§2.4), and **[critic2] CSO2-4** the sweep-only `file_blocked` text;
   - checks `own_transfer_payment` (P0): « Paiement créé à partir d'un de nos virements revenus (il porte la référence
     d'un reversement, d'une quote-part du cabinet ou d'un lot de nos fichiers) : ces sommes ne sont reversées à
     personne tant qu'il n'est pas traité. Ne l'affectez pas, ne le remboursez pas, prévenez le support. »;
@@ -1246,7 +1562,8 @@ What else changes:
 
 ### 7.2 6b-2b
 `lib/payments/transfer-lines.ts` (new, pure): the refusal labels of §3.10 and `transferLineErrorCode` (55P03 → `busy`,
-57014 → `timeout`), and `DECISION_LABEL` += the new kinds.
+57014 → `timeout`; **[critic2] CSO2-6** the re-raised `allocation_busy` → its own label), and `DECISION_LABEL` += the new
+kinds.
 
 ### 7.3 6b-2c — « Débits et retours » (`app/backoffice/encaissements/debits/`)
 - **`lib/payments/transfer-lines.ts`** grows:
@@ -1273,7 +1590,13 @@ What else changes:
       compensation (360,00 €) ; le reversement passe à « Débité ». »;
     - late: « Ce débit est postérieur à la date limite d'exécution du 30/10/2026 : le dépassement du délai est
       enregistré. »;
-    - fee (class E only): « Frais bancaires de 1,20 € prélevés sur la même ligne, à la charge du cabinet. »;
+    - fee (class E, and U in the S08 shape): « Frais bancaires de 1,20 € prélevés sur la même ligne, à la charge du
+      cabinet. » + **[critic2] ML-10** « (frais indiqués par le relevé) » when they equal the stored charges, else « Le
+      relevé n'indique pas de frais pour cette ligne : l'écart n'est pas justifié par le relevé. Vérifiez dans la
+      banque avant de comptabiliser. »;
+    - **[critic2] CSO2-4** when `supersedes_file` is set (a cover or fee lowers the share under a generated file's
+      sweep): « Le fichier FT-… pas encore téléchargé sera remplacé à son téléchargement : sa quote-part dépasserait
+      alors ce qui revient au cabinet. »;
     - classes N/O/E∅: « Cette ligne ne porte pas notre référence : seul ce virement du cabinet (en cours, ou annulé que
       la banque a pu exécuter) a ce montant vers ce compte. Vérifiez dans la banque avant de comptabiliser. »;
     - button « Comptabiliser le débit ».
@@ -1286,12 +1609,17 @@ What else changes:
         RV-… annulé — ou du virement revenu — encore à reverser) ; avance du cabinet : 0,00 €. »;
       - 0 < P < A: « 1 200,00 € déjà reçus par MARTIN SAS seront déduits de son prochain reversement (…) ; avance du
         cabinet de 440,00 € pour le reste, à récupérer selon son mandat — ce recouvrement n'est pas encore géré dans
-        Collectoo. »;
+        Collectoo. » **[critic2] ML-9** « pour le reste » is followed by why, from `p_bound`: `items` « (le reste
+        dépasse ce qui reste dû au client sur ces sommes) », `queue` « (les sommes en attente du client ne permettent
+        pas d'en déduire davantage) »;
       - P = 0: « Rien n'est déduit du prochain reversement de MARTIN SAS ; avance du cabinet de 1 640,00 € : ce virement
         n'est rattaché à aucune somme en attente de ce client, à récupérer selon son mandat — ce recouvrement n'est pas
         encore géré dans Collectoo. »;
     - draft: « Le brouillon RV-… sera recalculé ; sa validation en cours, s'il y en a une, est interrompue. »;
     - **[critic F6]** `client_run_cancellable`: the refusal with the run's number and a link to it;
+    - **[critic2] ML-4** `run_still_live`: the refusal with the run's number; no button;
+    - **[critic2] CSO2-4** the « fichier remplacé » sentence above when `supersedes_file` is set (an advance A − P > 0
+      lowers the share);
     - button « Comptabiliser le virement ».
   - **« Virement au compte propre »**:
     - intro: « Virement du compte dédié vers notre compte propre FR76 •••• 1234 sans ordre de Collectoo (ou exécuté
@@ -1299,8 +1627,9 @@ What else changes:
     - « La quote-part du cabinet en attente sur le compte dédié baisse de 500,00 €. »;
     - when it goes below zero: « Elle devient négative (−120,00 €) : le cabinet doit cette somme au compte dédié ;
       demandez un approvisionnement depuis le compte propre. »;
-    - when a generated file holds a sweep: « Le fichier FT-… pas encore téléchargé sera remplacé à son téléchargement :
-      sa quote-part dépasserait alors ce qui revient au cabinet. »
+    - **[critic2] CSO2-4** only when `supersedes_file` is set (the draft said it whenever a generated file held a
+      sweep, even when the share still covered it): « Le fichier FT-… pas encore téléchargé sera remplacé à son
+      téléchargement : sa quote-part dépasserait alors ce qui revient au cabinet. »
   - **« Virement revenu »**:
     - intro: « La banque du bénéficiaire a renvoyé ce virement du cabinet : il est comptabilisé comme revenu, comme
       l'import le fait quand la banque le signale comme un retour. »;
@@ -1312,7 +1641,12 @@ What else changes:
       (1 640,00 €) revient : l'avance du cabinet de 440,00 € est annulée et 1 200,00 € sont de nouveau dus à MARTIN
       SAS ; son compte de reversement FR76 •••• 1234 est bloqué jusqu'à son remplacement ou sa reconfirmation. »
       (P = 0: « … l'avance du cabinet de 1 640,00 € est annulée ; rien n'est de nouveau dû … »);
-    - fee (a flagged return only): « Frais de la banque déduits du retour : 1,20 €, à la charge du cabinet. »;
+    - fee (a flagged return only): « Frais de la banque déduits du retour : 1,20 €, à la charge du cabinet. » (+ the
+      ML-10 sentence as for a debit);
+    - **[critic2] ML-11** a flagged return without our reference (N/O/E∅): « La banque signale ce crédit comme un
+      retour, sans notre référence, depuis le compte vers lequel le virement hors reversement du 05/11/2026
+      (1 640,00 €) est parti : il est comptabilisé comme son retour. Vérifiez dans la banque avant de comptabiliser. »;
+    - **[critic2] ML-3** `debit_pending`: the refusal and a link to the pending debit's line;
     - button « Comptabiliser le retour ».
   - **« Comptabiliser d'après le détail du relevé »** (U, **[critic F8]**):
     - intro: « La banque a regroupé plusieurs opérations dans cette écriture. Le relevé détaille nos virements qu'elle
@@ -1350,8 +1684,8 @@ What else changes:
   unplannedOn)`.
   - « Virement débité de notre compte le 03/11/2026 »;
   - cancelled: « Annulé avant la remise de son virement à la banque » (switch off; 6b-3 rewords it);
-  - cancelled with an unplanned booking (`unplanned_runs`): « Annulé — la banque a néanmoins exécuté son virement le
-    05/11/2026 (voir le relevé suivant) »;
+  - cancelled with an unplanned booking (`unplanned_runs`, **[critic2] ML-12** keyed on any transfer of the run's
+    chain): « Annulé — la banque a néanmoins exécuté son virement le 05/11/2026 (voir le relevé suivant) »;
   - the returned texts (L2's) are unchanged.
 
 ### 7.5 6b-2c — screenshots (mobile + desktop, `docs/screenshots/`)
@@ -1381,23 +1715,43 @@ I19, I20, `bank_line_booked`.
   - the round-5 netted credit and d03, staged with details, are stored in the file's order with directions and amounts;
   - a count mismatch, an id not ours, a bad amount, or details without `unsplit_ours` → `line_invalid`;
   - a re-import of the same file leaves a stored line untouched.
-- **B. The job's return rule** (F1, L5). An unplanned booking of booked x is seeded as postgres: the remittance entry,
-  the booking and the −A pending row, exactly as 6b-2b posts them.
+  - **[critic2] ML-5** the detail count and `NbOfTxs` are stored (an entry with our detail and two others: count 3,
+    `unsplit_ours` 1); a detail count below `unsplit_ours` → `line_invalid`;
+  - **[critic2] ML-6, ML-10** `charges_minor` stored for a one-line entry with `Chrgs`, null without; a non-positive
+    one → `line_invalid`;
+  - **[critic2] CSO2-8** re-imports: the same details → skipped; different details (another id, direction or
+    amount), detail count or charges for a known line → `entry_detail_differs`; a stored null with staged details →
+    skipped, and the line is not filled.
+- **B. The job's return rule** (F1, L5). **[critic2] CSO2-12** An unplanned booking of booked x is seeded as postgres
+  by a `pg_temp` helper posting what 6b-2b posts for S03 (P = 0): the remittance entry, the booking, the −A pending
+  row, **and the `double_payout` advance** (its entry, its `client_advance` row, the +(A − P) pending row through the
+  trigger). Without the advance, 4670[c] goes into debit: LG008 at `ledger_check_now`, and I13/I14 flagged by the
+  group's own `run_payment_checks` assertion. 037 D checks that the command's rows for S03 equal the helper's.
   - A flagged return of x → reviewed `unplanned_payout_return`; nothing booked; x stays booked; the queue unchanged.
   - The seeded unplanned entry reversed → the next return books `payout_returned(x)` as today.
   - A cancelled x with an open unplanned booking → `unplanned_payout_return`, not `return_differs`.
   - Mutant « open-unplanned check removed » → the return books, and the client's queue shows the amount owed again
     (the next run would pay twice).
+  - **[critic2] ML-3** x booked; a second debit D2 of x imported and reviewed `transfer_debited_twice`, left unbooked;
+    then a flagged return of x → reviewed `return_debit_pending`; nothing booked; x stays booked; no `payout_returned`
+    item queued; the payout account stays active. A cancelled x with its late debit unbooked, then its return → the
+    same. Mutant « pending-debit fact removed » → the return books `payout_returned(x)` and queues +N.
 - **C. The sweep at first download** (CSO-2, F10):
   - generate with sweep S, then a `payout_overrun` cover posted as the job posts it, lowering the share below S → the
     download refuses `file_blocked` with `sweep_exceeds_share`, the file is superseded, the sweep cancelled and the
     payouts `ordered`; regenerating gives the share;
+  - **[critic2] CSO2-4** after that refusal: the payouts are `ordered` with their `requested_execution_date` unchanged,
+    their runs still `approved`, and a same-day regeneration before the account's cut-off needs no late
+    reason;
   - the same with a bank fee posted in between;
   - a share still ≥ S → served;
   - a file in status `pending` → `not_ready` (CSO-10);
   - mutant « re-check removed » → served with S > share.
 - **D. `unique_subset`**: equal amounts → null; the complement side; past each bound → null; a unique subset → its
-  indexes.
+  indexes. **[critic2] CSO2-2** The worst saturating input (500 amounts of 5–90 €, t' = 8 000) trips the work bound
+  and returns null in < 0.5 s; more amounts than the cap → null at once.
+- **[critic2] CSO2-11 Privileges**: `has_function_privilege` false for `anon` and `authenticated` on
+  `private.unique_subset`, `private.transfer_line_lot_cap` and `private.own_transfer_line_hint`.
 - **E. Alerts** (L10, L14):
   - `transfer_unknown` P0 on a debit and on a credit;
   - `double_payout_open` on a seeded `double_payout` advance, gone once its entry is reversed;
@@ -1406,6 +1760,8 @@ I19, I20, `bank_line_booked`.
     gone once the payment is no longer unassigned;
   - the M2b pass reviews a04 `own_transfer_line`.
 - **F. Texts**: the hints of `assign_payment` and `resolve_duplicate` say « ne peut pas encore » and promise no screen.
+- **[critic2] CSO2-5 CI**: the migration-order step is exercised once on a scratch branch adding a migration dated
+  before `origin/main`'s latest (it fails), and passes on the slice's own branch.
 
 **`037_transfer_line_ops` (6b-2b; 6b-2c appends group P):**
 - **A. Roles, request, tenants**:
@@ -1416,7 +1772,12 @@ I19, I20, `bank_line_booked`.
   - **[critic CSO-5]** A's line with B's `transfer_id`, `client_id` and `returns_line_id` → `transfer_unknown` /
     `client_unknown`, with a `why` identical to an absent id's in the preview and the command;
   - options' candidates and members never list B's rows;
-  - `client_ambiguous` only for two clients of the same servicer.
+  - `client_ambiguous` only for two clients of the same servicer;
+  - **[critic2] CSO2-10** a U line of A whose stored detail carries B's RMT id, and one whose detail carries an
+    RMT-shaped id naming nothing: identical options and preview answers (`unsplit_not_bookable`, same `why`), nothing
+    of B in the JSON, and no lock on B's rows (`pg_locks` from a second connection);
+  - **[critic2] CSO2-11** `private.unplanned_paid_item`: `has_table_privilege` false for `anon`, `authenticated` and
+    `service_role`; an insert as `service_role` is refused.
 - **B. Line state and replay**:
   - `held_duplicate`, `already_booked` (a line the job booked), `already_linked`, `line_is_payment`;
   - the same key and request → the same result, nothing posted twice; the same key with another request →
@@ -1425,6 +1786,13 @@ I19, I20, `bank_line_booked`.
 - **C. Planned parts**:
   - S08 `payout + fee` on its E line: remit:<t> N, settle:<run>, fee:<line> F, seqs 1–2, run and transfer booked,
     signed completeness. S08 without the fee part and S08b → `amount_differs`;
+  - **[critic2] ML-6, CSO2-1** S08 in the ISO shape (U: one detail, ours, `TxAmt` N, entry N + F, `Chrgs` F) → the
+    same parts and entries as on E; `Chrgs` absent → `unsplit_detail_missing`; `Chrgs` ≠ F → `amount_differs`. Mutant:
+    the S08-on-U rule removed (the line is `parts_do_not_add_up`);
+  - **[critic2] ML-10** E line with `charges_minor` and a fee part of another amount → `amount_differs`; E line
+    without charges, of 3 280 for t (1 640) → the fee part of 1 640 → `fee_unexplained` and no proposal; the same with
+    the excess equal to another payout of the account (in flight or booked) → `fee_unexplained`; an excess of 1,20 €
+    without charges → booked, the sheet's « pas justifié par le relevé » flag set. Mutant: the check removed;
   - **[critic L2, F7]** `fee_not_allowed` on B, N, O, E∅, U and on own/client credits. Each critic scenario is refused:
     `unplanned_payout(c)` 40 + fee 1 600; `payout_returned(t)` 1 640 + fee 1 590 on a 50 € client credit. Mutant: the
     fee rule widened back;
@@ -1434,8 +1802,14 @@ I19, I20, `bank_line_booked`.
     - one payout candidate → booked;
     - **[critic F9]** plus a refund in flight of the same amount and payee → `line_ambiguous`;
     - **[critic F12]** plus a cancelled payout of the account (switch on) → `line_ambiguous`;
-    - a re-issue (switch on in a subtransaction) → `not_its_line`; another payee's IBAN → `not_its_line`; dated before
-      execution → `not_its_line`;
+    - **[critic2] ML-4** a re-issue x' in flight and its cancelled original x, same amount and IBAN (switch on in a
+      subtransaction) → `line_ambiguous` (the draft gave `not_its_line` for x' and the « only candidate » x); x alone
+      as the candidate while its run is still sent → `run_still_live`; another payee's IBAN → `not_its_line`; dated
+      before execution → `not_its_line`;
+    - **[critic2] ML-8** CSV: x (1 640) returned (MS03), the client's IBAN reconfirmed, R2 drafted for x's return item
+      alone, t2 (1 640, same IBAN) downloaded; t2's reference-less debit → `payout(t2)`, not `line_ambiguous`. A later
+      second line of 1 640 → x as (iii), P from x's return item as it then stands (0: booked in R2), advance 1 640.
+      Mutant: the (iii) exclusion removed;
     - **[critic L12]** class O with the client's IBAN and one candidate → `payout(t)`; class O without an IBAN →
       `not_its_line`;
   - a late ops payout writes its breach rows, an on-time one none; `transfer_cancelled`, `already_debited`,
@@ -1457,12 +1831,22 @@ I19, I20, `bank_line_booked`.
     twice;
   - **[critic F3]** an item reversed after its run's cancellation → P = 0, advance A. Mutant « pool not net of
     reversals »;
+  - **[critic2] ML-1** a pool holding an `allocation_reversal` / `payout_overrun`-advance pair (r −300, v +300) and a
+    positive item a (+1 000) reversed after the cancellation, with an unrelated n +2 000 queued → P = 0, advance
+    1 000, n still fully owed. Mutant « net floored per item » (P = 300). A pool holding an earlier unplanned −A row
+    and its advance → those rows excluded, the earlier attributions counted once;
   - **[critic F4, L1]** two cancelled runs sharing an item, both files executed late → P₁ = 1 000, P₂ = 0, advance
     1 000. Mutant « earlier per run only »;
   - **[critic F5]** an in-flight run plus a negative pending item → P = the queue's net (200), advance 800 of cause
     `double_payout`, then no `payout_overrun` at the in-flight run's booking. Mutant « owed cap »;
   - **[critic F6]** the items frozen in an approved run whose payout is `ordered` → `client_run_cancellable`; after an
     admin cancels it → P = A. Mutant « rule removed » → that run pays twice;
+  - **[critic2] ML-4** (switch on) x cancelled alone on evidence while R1 stays sent, then x's late RMT debit →
+    `run_still_live` (and `cancel_remittance_run` on R1 refuses `transfer_already_debited`); the same after a file
+    cancellation re-issued x as x' → `run_still_live`; after R1 is cancelled first → booked with P. Mutant: the run
+    status rule removed (P = 0, advance A for the run's one real payout);
+  - **[critic2] CSO2-12** S03: the command's rows (entry types, keys, pending kinds, the advance's cause) equal 036 B's
+    seed helper's;
   - **[critic F12]** class N, the late execution of a cancelled x with a downloaded file → `unplanned_payout(x)` with
     P; the client part → `cancelled_payout_matches`;
   - **[critic F13, L12]** the client part on class O and E∅ with an in-flight payout of c of that amount to that IBAN →
@@ -1491,6 +1875,9 @@ I19, I20, `bank_line_booked`.
     part → booked; more → `return_differs`;
   - `return_before_debit` (both causes); `already_returned`;
   - **[critic F1]** a return of t with an open unplanned booking → `unplanned_open`;
+  - **[critic2] ML-3** a return of t whose second debit D2 is imported and unbooked → `debit_pending`; the options
+    propose D2's booking; once D2 is booked unplanned, the return books `unplanned_payout_returned` and nothing is
+    re-owed;
   - S20: a lot of two booked payouts → two reversals on one line (seq 1–2, distinct keys); an ambiguous lot →
     `batch_ambiguous`; a fee on a lot → `fee_not_allowed`;
   - **[critic F1]** the lot variant: a (1 000, client A) and b (700, client B), both booked and both re-executed and
@@ -1503,9 +1890,15 @@ I19, I20, `bank_line_booked`.
     draft's « residual pinned »;
   - **[critic F11, L4]** with P = 0: no breach row, no `remittance_due_critical`, no draft from the schedule, no late
     reason at the next approval; `pending_item_deadlines` gives the +A item no deadline. With P = A, the items keep
-    their own deadlines and the +A item has none;
+    their own deadlines and the +A item has none while they are pending;
+  - **[critic2] ML-2** P = A (x booked, returned, re-executed: P on its return item ρ), then c's net-0 draft approved
+    with a late reason and booked at approval, then the second copy returned → the +A item is held to ρ's line date
+    (`pending_item_deadlines` and `_held_to` agree), the nightly check writes its breach row `payout_returned`, the
+    schedule drafts it. Mutant: the third branch removed (no deadline, no row);
   - **[critic L3]** an unreferenced `client_transfer_in` of A from the client's IBAN → `not_its_line`; a kind-`return`
     credit from that IBAN → booked;
+  - **[critic2] ML-11** an S13 client part (P = 0, advance A) and its flagged return without our reference from that
+    IBAN (class N and O) → the options propose its unplanned return, which books; `double_payout_open` gone;
   - two open unplanned bookings of x: only the one with the largest advance is accepted (`return_differs` otherwise);
   - an advance with a settlement (seeded in a subtransaction) → `advance_settled`; a client-only one by a kind-`return`
     line from its IBAN.
@@ -1516,7 +1909,11 @@ I19, I20, `bank_line_booked`.
   - our return beside a payer's chargeback (credit) → `parts_do_not_add_up`, and with a fee part → `fee_not_allowed`;
   - our payout beside a chargeback in a debit entry → refused;
   - a line imported before 6b-2a (details null) → `unsplit_detail_missing`; a detail without its amount →
-    `unsplit_detail_missing`; an RFD detail → `unsplit_not_bookable`.
+    `unsplit_detail_missing`; an RFD detail → `unsplit_not_bookable`;
+  - **[critic2] ML-5** a debit entry of −1 640 holding our RMT t −1 640, a debtor's +250 and a third party's −250
+    (our detail alone makes the entry) → `unsplit_not_bookable`, no proposal; `NbOfTxs` 3 with two details given →
+    `unsplit_not_bookable`. Mutant: the count check removed (it books payout(t));
+  - **[critic2] CSO2-3** a U line with 501 stored details → `lot_too_large` (options, preview and command).
 - **I. Compare and set**:
   - the preview's text books;
   - a pending change between them (an item frozen by another run's approval) → `split_changed`;
@@ -1534,7 +1931,10 @@ I19, I20, `bank_line_booked`.
   - `payout_returned` on `own_transfer_in` accepted.
 - **L. Alerts and reviews**: every P0 alert is gone once its line is booked.
 - **M. Funds pass** (**[critic CSO-11]**): any call booking a payout or sweep part queues one `process_debits` message
-  with `funds_after` null; a call booking only returns queues none.
+  with `funds_after` null; **[critic2] CSO2-7** so does a call booking `unplanned_payout_returned` or
+  `unplanned_sweep_returned`; a call booking only planned returns queues none. Two return lines of x in one pass, both
+  reviewed `unplanned_payout_return`; ops book the first as the unplanned return; the queued pass books the second as
+  `payout_returned(x)`.
 - **N. Mutants to kill** (listed in the PR):
   - uniqueness check removed (the equal-amount case books);
   - refunds dropped from rule 3b's candidates (F9);
@@ -1550,13 +1950,27 @@ I19, I20, `bank_line_booked`.
   - draft requeue removed (the next run pays twice: its gross);
   - `remit:line` key without the part index (two parts collide);
   - the motif as the entry reason (CSO-1);
-  - the tenant filter after the status rules (CSO-5).
+  - the tenant filter after the status rules (CSO-5);
+  - **[critic2]** net floored per item (ML-1); the third held-to branch removed (ML-2); the pending-debit fact
+    removed, job and command (ML-3); `run_still_live` removed (ML-4); the U count check removed (ML-5); the S08-on-U
+    rule removed (ML-6); the (iii) exclusion of a re-paid returned x removed (ML-8); the fee check removed (ML-10);
+    the U lookup by `end_to_end_id` alone (CSO2-10).
 - **P. (6b-2c)**:
   - `link_debit` `payout_candidate` (fee, explanation and, **[critic F9]**, the refund link when another candidate
     exists), `client_payout_line`, `own_transfer_out_line`;
   - `debit_queue` lists those lines « À classer », not « Frais », with `bookable_as`;
   - **[critic L8]** an ambiguous N line and a `batch_ambiguous` line suppress the in-flight breach row for five business
     days, then the row is written with `debit_unbooked`;
+  - **[critic2] ML-7** a single-candidate N line dated on t's latest execution date, booked by ops on business day 7 →
+    no breach row ever (it suppressed throughout, and its booking is on time); the same line dated after the date →
+    the row written at its booking, not by the nightly check; a single-candidate N line left unbooked raises
+    `bank_line_unbooked` after one business day. `private.transfer_line_offers` is true exactly when
+    `transfer_line_options` has a proposal containing the transfer (every class). Mutant: the bound applied to every
+    line (the false row);
+  - **[critic2] CSO2-13** with 5 000 returned payouts on the account and a 2 000-row queue, « À classer » keyed reads
+    are bounded per line (`pg_stat_xact_user_tables`);
+  - **[critic2] ML-12** (switch on) a file cancelled after download re-issues x as x', the run is then cancelled, and
+    the bank executes x late, booked unplanned → `unplanned_runs` lists the run;
   - **[critic CSO-9]** `remittance_run_payout` and `transfer_bookings`: another servicer's admin, a client admin, a
     collector and an aal1 admin get null / no rows; a mix of own and foreign ids returns only the own ones;
   - `client_remittance_summary`'s `unplanned_runs` for whole-client members only.
@@ -1571,6 +1985,12 @@ I19, I20, `bank_line_booked`.
 - **[critic L4]** `unplanned_returned` with the line's unplanned nature. **[critic L16]** `executed_outside` for an S13
   booking.
 - **[critic L9]** `late_cause` `paid_by_unplanned` on a line covered by an unplanned booking.
+- **[critic2] ML-9** `paid_by_unplanned_minor` on a line covered in part (« dont … versés le … »); an unplanned booking
+  reversed after K still counts at K, one reversed before K does not; the advance clause per `p_bound` (`items`,
+  `queue`), and the queue-bound case (all 1 640 of the run still owed, P = 440 by the queue) never says the advance
+  « dépassait les sommes de ce reversement ».
+- **[critic2] ML-12** (switch on) a run whose x was re-issued as x', then cancelled, x executed late and booked
+  unplanned → `executed_after_cancellation`, not `cancelled`.
 - **[critic L7]** a prepared draft discarded with its RV number is never listed.
 - **[critic L17]** a previous approved run whose statement is not drawn yet still bounds the window; its own statement,
   drawn later, does not repeat this window's events.
@@ -1581,17 +2001,33 @@ I19, I20, `bank_line_booked`.
 - **Unit (6b-2a)**:
   - parser: unsplit details recorded with ids, directions and amounts (absent → None); a whole-entry detail still a line
     of its own; parity with the ingest's shape check;
+  - **[critic2] CSO2-9** a v08 detail with `Amt` 1 640,00 EUR and `AmtDtls/TxAmt` 1 600,00 USD → the stored amount is
+    164 000 (`Amt` first, as `split()`/`whole()`); a detail whose only amount is in another currency → None;
+    `StatementLine` stays hashable; `stage()` writes `Jsonb` (a unit test on the row it builds);
+  - **[critic2] ML-5, ML-6** the detail count and `NbOfTxs`; `charges_minor` from `Ntry/Chrgs` and `TxDtls/Chrgs`
+    (v02 and v08 shapes; a credit record, another currency or `ChrgInclInd` false → not counted, or null as §2.1
+    says);
   - `unique_subset` against brute force on ≤ 12 amounts (Hypothesis: equal amounts, the complement side, the bounds).
-    It is the oracle for SQL parity;
+    It is the oracle for SQL parity. **[critic2] CSO2-2** Also near the bound (13–20 amounts, where 2^n crosses
+    10 000) and on saturating inputs: the null-or-indexes answer and the index at which a bound trips are compared
+    with the SQL twin;
   - `P0_REVIEWS` = the alerts' P0 codes (a test reading both);
-  - `_transfer_return` with `unplanned_open` → `unplanned_payout_return`, never a booking (Hypothesis on `decide_line`).
+  - `_transfer_return` with `unplanned_open` → `unplanned_payout_return`, and **[critic2] ML-3** with `debit_pending`
+    → `return_debit_pending`, never a booking (Hypothesis on `decide_line`).
+- **[critic2] CSO2-12 Integration (6b-2a)**, `test_transfer_line_foundations_integration.py`: with a seeded unplanned
+  booking (036 B's helper), the real `process_debits` job reviews a flagged return `unplanned_payout_return` and books
+  nothing, both when the fact is fresh and when it is stale (the booking seeded between the candidates read and
+  `apply_bank_bookings`: the SQL re-check reviews it). The same for a pending second debit (ML-3).
 - **Hypothesis, `ledger_machine.py` (6b-2b)**:
   - rules: `book_payout`, `return_payout` (with and without an open unplanned booking), `book_sweep`, `return_sweep`,
     `unplanned_payout` (P by §3.6.1), `unplanned_return`, `reverse_item` (an allocation reversed after a cancellation),
     `cancel_run`;
   - invariants: I2′, I8′, I12, I13 (4670 never in debit), I14 (owed = pending + in flight), I19 (oracle bank), I20;
   - **[critic F3]** P ≤ min(A, the queue's net, the net still owed of x's items); Σ attribution per item ≤ its net;
-    the queue moves by −P per unplanned booking;
+    the queue moves by −P per unplanned booking. **[critic2] ML-1** « The net still owed » is the signed sum over x's
+    pending pool items (negative items and reversal chains included, unplanned rows and their advances excluded),
+    less the live attributions, floored once; the model's rules include `reverse_item` on a negative item's pair
+    (`payout_overrun` cover) so the per-item floor is reachable;
   - « over the run, the client receives its net collections less commission plus its open advances »;
   - **[critic F1, F2]** never more than the client is owed plus its open advances after any return.
 - **Integration (6b-2b, `test_transfer_line_ops_integration.py`)**, through the real import, jobs and command as an aal2
@@ -1600,12 +2036,19 @@ I19, I20, `bank_line_booked`.
     proposal → RV-3 unchanged;
   - **[critic F1]** then `--return` of one copy → the job reviews `unplanned_payout_return`; ops book the proposal →
     nothing re-owed, the advance closed;
+  - **[critic2] CSO2-7** then both copies returned on one statement → both reviewed; ops book one as the unplanned
+    return; the queued funds pass books the other as `payout_returned(x)`, and the schedule drafts its run;
+  - **[critic2] ML-3** a `--mode twice` statement left unbooked, then a `--return` of one copy → reviewed
+    `return_debit_pending`, nothing booked; ops book the second debit, then the return → nothing re-owed;
   - (switch on) a run cancelled after its file was handed out, plus its file's late debit → P = A, c's draft requeued,
     prepare + approve jobs, Martin's check (received = collections − commission);
   - `--mode partial` → ops book the proposal; the left-out member's own debit next day is booked by the job;
   - `--csv` without the end-to-end column → rule 3b; **[critic F12]** a cancelled payout's late execution on that CSV
     → `unplanned_payout(x)` with P;
-  - `--debit-charge 120` → payout + fee;
+  - `--debit-charge 120` → payout + fee. **[critic2] ML-6, CSO2-1** Through the real parser, in the ISO shape (detail
+    `TxAmt` N, entry N + 120, `Chrgs` 120): class U, the S08-on-U proposal books payout + fee; with
+    `--debit-charge-no-detail-amount`: class E, the same parts; the ISO shape with `Chrgs` dropped → refused
+    `unsplit_detail_missing`, the line stays unbooked with that reason;
   - `--unflagged-returns` → « Virement revenu » at the exact amount; the schedule drafts the `payout_returned` run
     keeping its deadline;
   - `--unsplit-details` → the U proposal booked; without amounts → refused;
@@ -1626,7 +2069,11 @@ I19, I20, `bank_line_booked`.
   - the M2b pass (`post_debit_links` holding payment `FOR UPDATE`) against a payout part's `FOR KEY SHARE`;
   - `confirm_payout_account` and `retire_payout_account` against `payout_returned` and `unplanned_payout_returned`;
   - the funds pass on the same line;
-  - the same key submitted twice at once → both get the first result;
+  - the same key submitted twice at once → both get the first result; **[critic2] CSO2-6** also when the first call is
+    slow (a 450-member lot, or `pg_sleep` in a test hook beyond 2 s): the second waits on the key lock under its 7 s
+    timeout and returns the first call's result, never `busy`;
+  - **[critic2] CSO2-6** a call waiting on the `payments:` lock held by an allocation chunk → `allocation_busy`, not
+    `busy`;
   - A's command naming B's ids → no lock on B's rows (`pg_locks` read from the second connection).
 
   Mutants:
@@ -1642,6 +2089,11 @@ I19, I20, `bank_line_booked`.
   - a 200-member PmtInf line short of one member: options < 1 s, command < 1 s;
   - 500 members: options < 2 s, command ≤ 4 s, and the time the allocation lock is held recorded;
   - 501 → `lot_too_large` at once;
+  - **[critic2] CSO2-2** the worst saturating input (500 small payouts, short of one 80 € member): `unique_subset`
+    < 0.5 s (its work bound), the command ≤ 4 s; the cap `private.transfer_line_lot_cap()` is then set with 2×
+    headroom under 8 s from these runs, and lowered if they miss;
+  - **[critic2] CSO2-3** options on the 5 000-member line of the payout scale fixture (one member short): < 0.5 s,
+    `unique_subset` never called (`pg_stat_user_functions`), `lot_too_large` with `member_count` and no member list;
   - a requeue of a 50,000-item draft (the remittance scale fixture): command ≤ 4 s, the allocation lock held < 1 s (no
     clear under it);
   - the « À classer » tab with a 2,000-member lot line renders in < 2 s and never calls options;
@@ -1653,10 +2105,14 @@ I19, I20, `bank_line_booked`.
 - **6b-2a**:
   - every new label;
   - the S23 texts say « ne peut pas encore » and promise no screen;
-  - `transfer_unknown`'s check label names both directions (L14).
+  - `transfer_unknown`'s check label names both directions (L14);
+  - **[critic2] CSO2-14** `unplanned_payout_return` and `return_debit_pending` name no « Virement revenu » and say
+    « prévenez le support »;
+  - **[critic2] CSO2-4** `file_blocked` with only `sweep_exceeds_share` blocked → the sweep-only text (« les
+    reversements qu'il contenait y reviennent »); with a payout blocked too → today's text.
 - **6b-2b**:
   - every `transfer line booking refused:` code in the migration has a label (`transferLineErrorCode`);
-  - 55P03 → `busy`, 57014 → `timeout`;
+  - 55P03 → `busy`, 57014 → `timeout`, **[critic2] CSO2-6** the re-raised `allocation_busy` → its label;
   - every `DECISION_LABEL` kind.
 - **6b-2c**:
   - effect sentences for P = A, 0 < P < A and P = 0, the draft, the fee, the late breach, the unplanned return's block
@@ -1668,7 +2124,12 @@ I19, I20, `bank_line_booked`.
   - a requeued draft shows « Préparation en cours », never « Préparation échouée » (CSO-6);
   - the Virements labels;
   - the reworded notes: for each, the mutant carrying the old words is killed;
-  - L15's labels: S06 / ordered transfers.
+  - L15's labels: S06 / ordered transfers;
+  - **[critic2]** the advance's reason by `p_bound` (ML-9); the fee sentence with and without stored charges (ML-10);
+    the flagged-return-without-reference sentence (ML-11); `cancelled_transfer_debited` worded by the run's status
+    (ML-4); the « fichier remplacé » sentence only with `supersedes_file` (CSO2-4); `lot_too_large` with
+    `member_count` and at most 50 members (CSO2-3); 2c's rewording of `unplanned_payout_return` kills 2a's words
+    (CSO2-14).
 
 ### 8.4 E2E (6b-2c; `make e2e`, CI `e2e`)
 - `remittances.spec.ts`:
@@ -1705,21 +2166,29 @@ I19, I20, `bank_line_booked`.
       (M2c-7). A manual payout to the client's IBAN with no transfer is all advance (Q8).
     - **[critic L1]** « P ne dépasse jamais ce qui restait dû au client sur les sommes que ce virement devait payer ; le
       surplus est une avance (pas de retenue sans clause) ».
+    - **[critic2] ML-1** « Ce qui restait dû » is the signed net of those sums: what the client owes back on them (a
+      payment reversed, an earlier advance) lowers it. The draft's per-item floor let a double payout be netted
+      against unrelated collections, a hold-back without a clause.
     - The residual of §3.6.1: an item P counted, reversed afterwards, nets against later collections. M2c-7's
       `cover_remitted_reversals` keys on booked runs.
     - ⚖️ C. civ. 1302-1, 1347, 1348-2, with OQ-38.
   - add **OQ-85** (accountant) **[critic L11]**: the supporting document of ledger entries split out of one bank entry.
     Default: the statement's own per-transaction details, kept on the line at import (§2.2), with the motif; an entry
-    whose detail is not in the statement is not split in Collectoo (it waits for M2c-7 and the bank).
+    whose detail is not in the statement is not split in Collectoo (it waits for M2c-7 and the bank). **[critic2]
+    ML-5** Only an entry every detail of which is ours is split (the detail count kept at import); one holding anything
+    else, even netting to zero, is not. **[critic2] ML-6** The bank's charge split out of one entry rests on the
+    statement's own `Chrgs` record, kept at import.
   - update **OQ-34**: Q2, S25 stays to 6b-3, with the two entry options of §10 Q2 named.
   - update **OQ-36**, **[critic F11, L4, L9]**:
-    - a reversed unplanned remittance's item has no deadline;
+    - a reversed unplanned remittance's item has no deadline while the items its P paid are still pending;
+      **[critic2] ML-2** once a run froze them, it is held to their earliest line date, `payout_returned`;
     - the items an unplanned P paid keep their own deadlines (Q15's default: a breach may be recorded although the
       client had the money at the unplanned debit's date; the statement says when it was paid);
     - the `debit_unbooked` blocked reason (Q14).
   - update **OQ-81 (b)**: open, 6b-3.
   - update **OQ-83**: a batch line short of members is booked by ops when only one subset makes it; `batch_mixed` stays;
-    **[critic L8]** an ambiguous line stops suppressing breach rows after five business days.
+    **[critic L8]** an ambiguous line stops suppressing breach rows after five business days; **[critic2] ML-7** a line
+    ops can book as the payout's debit keeps suppressing, with its alert.
   - update **OQ-84**:
     - unflagged returns booked by ops at their exact amount (a short one stays: Q10); lot credits and unsplit entries
       booked per §3.4;
@@ -1727,12 +2196,17 @@ I19, I20, `bank_line_booked`.
     - (i) closed by the reason `own_transfer_line`;
     - **[critic L10]** (e), (h), round 8 T1 and R3 reworded: the payments made of our credits, and our ids only in a CSV
       label, wait for M2c-7 (Q13), the former with the P0 alert `own_transfer_payment`;
-    - (j) unchanged.
+    - (j) **[critic2] ML-6, ML-10** reworded: a charge on our transfer's own line is booked as the firm's fee when it
+      equals the statement's `Chrgs`, or, with none recorded, when it is not the amount of one of our transfers; the
+      ISO shape (one detail of ours at N, the entry N + F) is booked from the stored charge only. A short line of its own
+      (S19) unchanged.
   - update **CPCE-08**:
     - an ops booking of a late debit writes its breach rows;
     - the members a batch line left out get theirs from the nightly check;
     - **[critic L9, L8, L10]** the date rule of Q15; the bounded suppression of Q14; S23's money has no R124-6 clock
-      until M2c-7 (P0 alert).
+      until M2c-7 (P0 alert);
+    - **[critic2] ML-7** the bound applies only to lines no rule can book as that payout's debit; **[critic2] ML-2**
+      the re-owed item of an unplanned payout returned after a run froze what it paid is held to those items' date.
 - **DOMAIN**: « Virement hors reversement », « Débit d'un reversement (par l'équipe) », « Virement revenu (par
   l'équipe) », « Détail du relevé (écriture non détaillée) », « Suivi de vos reversements précédents », « Avance du
   cabinet » (cause double paiement).
@@ -1761,9 +2235,11 @@ Questions 1–7 are `m2c-6b-plan.md` §5's, still unanswered: 6b-2 uses each def
 3. **Copie d'un fichier déjà exécuté** (OQ-81 (c)). a (défaut) : non, on garde l'empreinte, le contenu et le journal. b :
    oui, téléchargeable pour archive.
 4. **Virement exécuté hors reversement** (§3.6.1, OQ-82). a (défaut) : ce qu'il a payé des sommes encore dues (d'un
-   reversement annulé, ou d'un virement revenu) est déduit du prochain reversement ; le reste est une avance du cabinet,
-   récupérée seulement par la clause de reprise, sinon par une demande de remboursement (M2c-7). b : tout le montant est
-   déduit du prochain reversement (une compensation, à valider par l'avocat).
+   reversement annulé, ou d'un virement revenu) est déduit du prochain reversement ; « encore dues » se compte net de
+   ce que le client doit rendre sur ces mêmes sommes (un paiement annulé depuis, une avance) **[critic2 ML-1]** ; le
+   reste est une avance du cabinet, récupérée seulement par la clause de reprise, sinon par une demande de
+   remboursement (M2c-7). b : tout le montant est déduit du prochain reversement (une compensation, à valider par
+   l'avocat).
 5. **Lignes groupées impossibles à détailler** (plusieurs remboursements, ou une banque qui ignore la demande de
    détail ; OQ-83). a (défaut) : non comptabilisables en 6b, et on demande le détail à la banque. b : en M2c-7,
    comptabilisées par l'équipe d'après le détail de la banque, pièce jointe et seconde validation.
@@ -1777,12 +2253,16 @@ Questions 1–7 are `m2c-6b-plan.md` §5's, still unanswered: 6b-2 uses each def
    le virement de son reversement, et l'ancien fichier est remplacé ; d'ici là, alerte prioritaire, et l'équipe
    vérifie avec la banque. b : virement hors reversement.
 10. **Frais de la banque sur nos virements** (§3.4.10, OQ-84 (j)). a (défaut) : seulement sur la propre ligne du virement
-    (son débit, ou son retour signalé par la banque), sans plafond, à la charge du cabinet ; ailleurs, la ligne attend
-    le détail de la banque. b : un plafond que vous fixez, avec une seconde validation au-delà.
+    (son débit, ou son retour signalé par la banque), à la charge du cabinet ; égaux aux frais que le relevé indique
+    quand il en indique, et, sinon, sans plafond sauf s'ils ont le montant de l'un de nos virements (alors la ligne
+    attend le détail de la banque) **[critic2 ML-10]** ; la forme habituelle du relevé (le virement à son montant, la
+    ligne augmentée des frais indiqués) est comptabilisée de même **[critic2 ML-6]** ; ailleurs, la ligne attend le
+    détail de la banque. b : un plafond que vous fixez, avec une seconde validation au-delà.
 11. **Écriture de la banque qui regroupe nos virements** (S21/S22, §3.4.12). a (défaut) : comptabilisée d'après le
-    détail que le relevé lui-même donne (gardé à l'import), seulement s'il ne contient que nos virements et en fait
-    exactement le montant ; sinon elle attend (banque, M2c-7). b : aussi d'après un détail envoyé par la banque, joint et
-    validé par une seconde personne.
+    détail que le relevé lui-même donne (gardé à l'import), seulement si toutes les opérations de l'écriture sont nos
+    virements (**[critic2 ML-5]** même quand les autres s'annulent entre elles) et en font exactement le montant ;
+    sinon elle attend (banque, M2c-7). b : aussi d'après un détail envoyé par la banque, joint et validé par une
+    seconde personne.
 12. **Virement exécuté deux fois, puis l'un revient** (S28). a (défaut) : l'équipe le comptabilise comme le retour du
     second virement ; rien n'est reversé de nouveau, et l'avance est annulée. b : l'import le comptabilise comme le
     retour du reversement ; le client est payé une seconde fois, nous doit l'avance, et son compte de reversement est
@@ -1793,9 +2273,13 @@ Questions 1–7 are `m2c-6b-plan.md` §5's, still unanswered: 6b-2 uses each def
     remboursement du client, ou le retour défait), avec une alerte prioritaire pour le paiement, et l'équipe prévient le
     support. b : comptabilisé comme retour dès 6b-2, le crédit du client par son IBAN, le paiement défait par le
     support.
-14. **Débit sans référence que Collectoo ne peut pas attribuer** (plusieurs virements possibles, §4.2). a (défaut) :
-    après 5 jours ouvrés, le dépassement de délai des virements concernés est enregistré « bloqué : débit possible non
-    comptabilisé ». b : deux personnes classent la ligne « ce n'est pas ce virement », avec le détail de la banque.
+14. **Débit que Collectoo ne peut attribuer à aucun virement précis** (§4.2) : sans référence avec plusieurs virements
+    possibles, lot dont plusieurs combinaisons font le montant, écriture regroupée non détaillée, débit inférieur au
+    virement. **[critic2 ML-7]** Une ligne que l'équipe peut comptabiliser comme le débit de ce virement n'est pas
+    concernée : elle reste en attente avec une alerte, et sa comptabilisation enregistre le dépassement seulement s'il
+    a eu lieu. a (défaut) : après 5 jours ouvrés, le dépassement de délai des virements concernés est enregistré
+    « bloqué : débit possible non comptabilisé ». b : deux personnes classent la ligne « ce n'est pas ce virement »,
+    avec le détail de la banque.
 15. **Sommes payées par un virement exécuté hors reversement : quelle date pour le délai R124-6 ?** (OQ-36). a
     (défaut) : elles gardent leur date limite ; un dépassement peut alors être enregistré alors que le client avait
     l'argent, et le relevé dit à quelle date il a été versé. b : elles sont payées à la date de ce virement, et un
@@ -1803,6 +2287,10 @@ Questions 1–7 are `m2c-6b-plan.md` §5's, still unanswered: 6b-2 uses each def
 16. **Virement saisi à la main à la banque pour un reversement en cours** (§3.4.4). a (défaut) : comptabilisé comme le
     virement de ce reversement (même montant, IBAN du client exigé, seul candidat). b : virement hors reversement, en
     avance du cabinet.
+
+**[critic2]** No new question: each second-critique fix either follows from a default already asked (Q4, Q10, Q11,
+Q12, Q14, Q15, worded above where they changed) or leaves a shape to 6b-3 (`run_still_live`) without a choice to make.
+The chat report says « 4, 10, 11, 14 : précisés (2e relecture) ».
 
 ---
 
@@ -1813,7 +2301,10 @@ Questions 1–7 are `m2c-6b-plan.md` §5's, still unanswered: 6b-2 uses each def
 | **[critic F8]** An unsplit entry booked to transfers it does not hold | its parts are the statement's own stored details, at their amounts; a line without them is never booked |
 | The next run pays the unplanned money again | pending row −A + advance trigger = net −P; P counts reserved items; c's draft requeued in the same transaction; **[critic F6]** a cancellable approved run holding the items is cancelled first; 037 approves the next run with A = P, A > P, P = 0 |
 | **[critic F1, F2]** A double payout's return, or a returned payout's re-execution, paying the client twice | the job reviews a return of a transfer with an open unplanned booking, and ops book the unplanned booking's return; P of a returned x counts its return item |
-| **[critic F3, F4, F5, L1]** An overpayment netted against unrelated collections (hold-back without a clause) | P per item, net of reversals, counted once across bookings, capped by the queue's net; every excess is an advance |
+| **[critic F3, F4, F5, L1]** An overpayment netted against unrelated collections (hold-back without a clause) | P per item, net of reversals, counted once across bookings, capped by the queue's net; every excess is an advance; **[critic2] ML-1** the items' cap is their signed net, floored once |
+| **[critic2] ML-3, ML-4** A return or a late debit booked before the line that decides it | a return waits while a second debit is unbooked (`return_debit_pending` / `debit_pending`); a cancelled x's late debit is never an unplanned payout while its run is live (`run_still_live`) |
+| **[critic2] ML-5, ML-6, ML-10** A third party's movement or our own transfer booked inside one of our entries | an unsplit entry is booked only when every detail is ours (count stored); a fee equals the statement's `Chrgs`, or is refused when it is the amount of one of our transfers |
+| **[critic2] ML-2, ML-7** R124-6 clocks lost or false breach rows | the re-owed item of an unplanned return is held to the frozen items' date; the five-day bound only for lines no rule can book as the payout's debit |
 | A reference-less line booked to the wrong transfer | **[critic F9, F12]** rule 3b's uniqueness over in-flight payouts, sweeps, refunds and executable cancelled or returned payouts (`line_ambiguous`), with the counterparty IBAN when present and required on O/E∅; the client and own parts refused while any candidate exists, on every class (**[critic F13]**) |
 | **[critic L2, F7]** A third party's movement booked as the firm's bank charge | a fee part only on our transfer's own line (its debit, or its flagged return) |
 | A double payout hidden as a fee or an explanation | 6b-2c refuses both on payout candidates, client-IBAN debits and own-IBAN debits; P0 alerts until booked |
@@ -1822,7 +2313,8 @@ Questions 1–7 are `m2c-6b-plan.md` §5's, still unanswered: 6b-2 uses each def
 | **[critic CSO-2, F10]** Over-sweep | the first download re-checks the file's sweep against the share and supersedes it; `servicer_shortfall` P0 for a sweep already handed out |
 | **[critic CSO-1]** Ops' motif read by a client (another client's name, internal notes) | entry reasons fixed; the motif only on `bank_line_booking`, staff only |
 | **[critic CSO-5]** One servicer probing or locking another's rows | the tenant filter before any rule or lock; the same answer for absent and foreign ids |
-| **[critic CSO-3, CSO-4]** Timeouts, the allocation lock held for seconds, a list page that cannot render | ≤ 4 s at 500 items, `lot_too_large` beyond; the subset before the locks; options per line opened, never per row |
+| **[critic CSO-3, CSO-4]** Timeouts, the allocation lock held for seconds, a list page that cannot render | ≤ 4 s at 500 items, `lot_too_large` beyond; the subset before the locks; options per line opened, never per row; **[critic2] CSO2-2, CSO2-3, CSO2-13** the subset's work bound, the cap checked first by keyed count, rule 3b driven from the lines |
+| **[critic2] CSO2-5** A slice's migration refused or skipped on production | the order 2a → 2b → 2c → 2d pinned, timestamps set at PR time, a CI step against `origin/main` |
 | Regression in the job's reviewed re-check | `post_bank_bookings` redefined in 6b-2a for one rule, its twin with it (parity, Hypothesis); `bank_booking_post_rows` for one expression; parity test ops vs job; 035 and 015–034 re-run |
 | Deadlock | the job's lock order, drafts in the runs step; drafts locked late refused; two-connection tests per writer (**[critic CSO-8]**); mutants |
 | Stale page, wrong split | `p_expected_text` compare-and-set (`split_changed`) |
@@ -1831,6 +2323,8 @@ Questions 1–7 are `m2c-6b-plan.md` §5's, still unanswered: 6b-2 uses each def
 ---
 
 ## 12. The critics' findings: where each went
+
+### 12.1 First critique (against `ab1a1f8`)
 
 Folded findings are marked « [critic] » in the sections named. **Rejected** ones carry the reason.
 
@@ -1883,3 +2377,38 @@ Folded findings are marked « [critic] » in the sections named. **Rejected** on
 | CSO-10 | Folded through CSO-2 (a): a `pending` file is never served and is re-checked when downloaded (036 C) |
 | CSO-11 | Folded: §3.2 step 11, 037 M |
 | CSO-12 | Folded: §3.2 step 2 advisory lock, §3.6.5 drafts locked late refused, 037 I, concurrency |
+
+### 12.2 Second critique (against `dd8c6fb`)
+
+Folded findings are marked « [critic2] <id> » in the sections named. Each was re-checked against the code at `dd8c6fb`
+(the line numbers quoted are that commit's). **Rejected** parts carry the reason. ML-6 and CSO2-1 are one defect, seen
+by both critics; they are folded together.
+
+| Id | Disposition |
+|---|---|
+| ML-1 | Folded: §3.6.1 (eligible excludes unplanned rows and their advances; `net(i)` signed; `cap(x)` floored once; attribution over positive items), §1.3 item 9, OQ-82, Q4, 037 D case + mutant, Hypothesis invariant. Confirmed: `cancel_remittance_run` re-queues `l.amount_minor` signed (20261112090000 l.2122-2126) |
+| ML-2 | Folded: §3.12 third branch of `pending_item_deadlines` / `_held_to` by `unplanned_paid_item`, §1.3 item 17, OQ-36, CPCE-08, §6, 037 G case + mutant, parity. Confirmed: the `payout_returned` branch keys only by the transfer's run lines (20261116090000 l.3874-3910), and an N = 0 run is booked at approval (20261112090000 l.1887-1891); reachable with the switch off |
+| ML-3 | Folded: §2.3 job fact `tr_debit_pending` (`private.transfer_late_lines`, which returns an unbooked RMT debit of a booked x, l.2546-2590) → review `return_debit_pending`, its twin; §3.4.11 rule 5 `debit_pending`; §3.11 options; §2.1 reason; §2.6/§4.3/§7.1 labels; 036 B + mutant, 037 F, integration. A new reason, not `unplanned_payout_return`, because no unplanned booking exists yet and that label would be untrue |
+| ML-4 | Folded: §3.4.6 rule 4 `run_still_live` (x cancelled is accepted only when its run is cancelled or booked), §3.4.4 (i) includes re-issues and (iii) keeps the cancelled original, so x/x' is `line_ambiguous`; S01/S02 rows, §1.2 (6b-3), §3.10, §3.11, §4.3 conditional `cancelled_transfer_debited`, §7.3, 037 C/D + mutant. Confirmed: `confirm_transfer_cancellation` leaves the run (l.5015-5077), `transfer_file_release` moves `run.transfer_id` (20261115090000 l.1693-1713), `cancel_remittance_run` then refuses `transfer_already_debited` (l.5143-5148). Switch-on only, but built and tested now |
+| ML-5 | Folded: §2.1 `unsplit_detail_count`, `unsplit_batch_count`; §2.2 parser and ingest; §3.4.12 count rule → `unsplit_not_bookable`; S21 row, OQ-85, Q11, §3.10 label, 036 A, 037 H + mutant, synth. Confirmed: the parser has every detail (`details = txs`, camt053.py l.359-380) and `split()` returns None on mixed directions, so such an entry is unsplit with `unsplit_ours = 1` |
+| ML-6 | Folded with CSO2-1: §2.1 `charges_minor`, §2.2 detail amount by the parser's own priority, §3.4.10 (c) S08 on U (one detail in all, ours, at N; fee = line − detail = stored charges, required), §3.4.12, S08 row, OQ-84 (j), OQ-85, Q10, synth ISO shape by default, 037 C + mutant, integration through the real parser. Confirmed: `partial_ours` keeps such an entry unsplit (camt053.py l.359-371, `whole()` l.405-420). **Rejected in part:** « the fee must equal Chrgs *when it is given* » (absent allowed). On U the fee is booked only from the stored charges: with nothing recorded, the difference between the entry and its one detail is not the statement's word for a charge (CSO2-1 (a)'s stricter choice; F8/L11: ops compose nothing). The line stays `unsplit_detail_missing` |
+| ML-7 | Folded: §4.2 `private.transfer_line_offers` (the bound only for lines that offer no booking containing the transfer; those that do keep suppressing and raise `bank_line_unbooked`), §1.3 item 10, Q14 reworded, CPCE-08, OQ-83, 037 P + mutant. Of the two remedies the first is chosen; the « levée » row is rejected with its reason in §4.2. Confirmed: the job books no reference-less payout debit (l.1328-1333) and the bound would have applied to every line `transfer_debit_may_be_seen` counts (l.3440-3471) |
+| ML-8 | Folded: §3.4.4 (iii) exclusion of a returned x while its return item is held by a live line of a run whose payout is a (i) candidate at the same amount and IBAN; S12 row, 037 C + mutant. Of the two remedies the exclusion is chosen: a time window would be a banking rule nobody has given |
+| ML-9 | Folded: `p_bound` (§3.6.5, §3.11 preview, §5 payload), the advance clause worded by it (§5) and the 0 < P < A sheet (§7.3); `paid_by_unplanned_minor` with « dont … » for a partial attribution; reversal read as of K (§5); 038, vitest. **Rejected in part:** a single mechanism wording alone (« la part qui n'a pas pu être déduite … ») is kept as the lead, but the cause is added from `p_bound`, since the client is owed the reason |
+| ML-10 | Folded: §3.4.10 (charges equal when stored; `fee_unexplained` when none are stored and the fee is the amount of one of our filed transfers, the line's own included), `bank_transfer_filed_amount_idx` (§3.1), §3.10, §3.11, §7.3 sentence, OQ-84 (j), Q10 (b) kept as the founder's cap, 037 C + mutant. Confirmed: `whole()` returns True for a detail without an amount (camt053.py l.414-415) |
+| ML-11 | Folded: §3.11 N/O/E∅ credit of kind `return` proposes the unplanned return of the open booking to that IBAN at that amount (largest advance first), S13/S27 rows, §7.3 sentence, 037 G. The rules of §3.4.13 already accepted it; only the proposal was missing |
+| ML-12 | Folded: §4.4 `unplanned_runs` (and `remittance_run_payout`, `transfer_bookings`) and §5 `executed_after_cancellation` keyed on the run's transfer chain (`run.transfer_id`, then `replaces_transfer_id`, by key: the set `bank_transfer.run_id = run`, with no new index, since `bank_transfer_run_uq` excludes cancelled rows), §7.4, 037 P, 038. Switch-on only |
+| CSO2-1 | Folded with ML-6 (option (a)); its test points (037 H/C, integration with the detail amount written, the variant without it) are in 037 C and §8.2 |
+| CSO2-2 | Folded: §2.5 work bound (Σ set sizes ≤ 1,000,000), pinned visiting order, `private.transfer_line_lot_cap()`; §1.3 item 15 (cap set from the scale run, lowered if missed); §3.4.0, §3.5; 036 D timing, Hypothesis parity near the bound and at the tripping index, scale worst case |
+| CSO2-3 | Folded: §3.2 step 6, §3.5, §3.4.12 (cap first by keyed count for B, lot credits and U; `lot_too_large`, not `bad_request`), §3.11 (`member_count`, at most 50 members), §3.10 label, 037 H (501 details), scale (5,000-member options, `unique_subset` never called) |
+| CSO2-4 | Folded: §2.4 sweep-only `file_blocked` text (from `blocked`), §3.11 `supersedes_file`, §7.3 sentences only when it is set, §1.2 (6b-3 adds `debited_cancelled_sweeps` to the download re-check), 036 C asserts (payouts `ordered` with their dates, runs approved, same-day regeneration without a late reason), vitest. Confirmed: the text at `lib/remittance/transfers.ts` l.1025-1026 |
+| CSO2-5 | Folded: Precondition and §1.4 (order pinned 2a → 2b → 2c → 2d; timestamps at PR time; types regenerated after rebase), §2.6 CI step in the `db` job, 036 test of the step. No slice boundary moves; 2d now waits for 2c |
+| CSO2-6 | Folded: §3.2 step 2 (key lock under a local 7 s `lock_timeout`, restored to 2 s), §3.10 (`busy` / `allocation_busy` split by the step waited at), §7.2, vitest, concurrency (slow first call; allocation chunk) |
+| CSO2-7 | Folded: §3.2 step 11 (also after `unplanned_payout_returned` / `unplanned_sweep_returned`), 037 M rewritten, integration. Confirmed: `bank_booking_candidates` re-reads reviewed lines (l.616-640) |
+| CSO2-8 | Folded: §2.2 re-import compares stored and staged details, detail counts and charges → `entry_detail_differs`; a stored null is neither compared nor filled; 036 A. Confirmed: `_bi_known` compares direction, amount and date only (l.6114-6124) |
+| CSO2-9 | Folded: §2.2 and §6 (detail amount by the parser's priority with the currency check; `tuple[UnsplitDetail, ...]`; `Jsonb` in `jobs/payments.stage()`; `STAGE_COLUMNS`; the non-existent `jobs/statements` corrected), §8.2 unit tests. **Rejected in part:** « `bench.staging_digest` must handle the new field ». `staging_digest` is the boarding stage's (`boarding/stage.py`, called from `bench.py` l.56-81 on boarding files), not the statements', so a statement field never reaches it |
+| CSO2-10 | Folded: §3.4.12 lookup by (`organization_id`, `end_to_end_id`) then the line's account, one refusal and `why` for foreign, unknown or other-account ids, never collected or locked; §3.11; 037 A (`pg_locks`) + mutant. Confirmed: `end_to_end_id` is unique across servicers (20261111090000 l.1460) |
+| CSO2-11 | Folded: §3.1 (RLS enabled, all privileges revoked from `public, anon, authenticated, service_role`, no change-log trigger: private tables have none, and the table is append-only), §2.5/§2.6 execute revoked on `unique_subset`, `transfer_line_lot_cap`, `own_transfer_line_hint`; 036 and 037 A privilege tests. Confirmed against `private.remittance_pending` (20261111090000 l.4166-4169) |
+| CSO2-12 | Folded: 036 B seed helper posts the `double_payout` advance; 037 D parity of the command's rows with the helper's; a 2a worker integration test of the real job (fresh and stale fact) |
+| CSO2-13 | Folded: §3.1 `bank_transfer_filed_amount_idx`, §3.4.4 candidates driven from the line, §4.1 « À classer » from the lines, 037 P read bound. Confirmed: no index serves (account, amount) for cancelled or returned transfers (`bank_transfer_cancelled_filed_idx` is (organization, account), l.249-250) |
+| CSO2-14 | Folded: §2.6 2a/2b labels (« prévenez le support », both payout and sweep named), §4.3 2c's rewording with a vitest killing 2a's words, §7.1, vitest. One review reason is kept for payout and sweep; the label names both rather than adding `unplanned_sweep_return` |
