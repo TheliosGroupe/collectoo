@@ -6,7 +6,8 @@ one member (class B, the only subset over every member). As an aal2 API session 
 books it — each timed against the plan's budget (options < 2 s, command ≤ 4 s) and written up in
 docs/benchmarks/remittances.md. The same line one member longer than the cap is refused
 lot_too_large at once (before any subset is searched), with its member count and no member
-list."""
+list. First, in a rolled-back transaction, the same booking read from pg_stat_xact_user_tables (CI
+scale fix): every table read once per member read by key, whatever the statistics."""
 
 from __future__ import annotations
 
@@ -39,37 +40,118 @@ def over(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     return _file_payouts(tmp_path_factory, LOT + 1, 0, "over")
 
 
+def _insert_short_line(conn: psycopg.Connection[Any], filed: dict[str, Any]) -> tuple[str, str]:
+    """The file's PmtInf debited as one batch line without one member, in `conn`'s transaction:
+    (line, the left-out member's end-to-end id)."""
+    (pmt,) = filed["payouts"].payment_infos
+    left = random.Random(LOT).choice(pmt.transactions)
+    st = _statement(conn, filed, "lot.xml")
+    line = one(
+        conn,
+        """insert into public.bank_transaction (organization_id, bank_account_id,
+             statement_id, line_no, dedup_key, direction, amount_minor, currency,
+             booking_date, kind, payment_info_id)
+           values (%s, %s, %s, 1, %s, 'debit', %s, 'EUR', private.paris_today(),
+                   'batch_unsplit', %s) returning id""",
+        (
+            filed["org"],
+            filed["tenant"]["bank"],
+            st,
+            f"t:{st}:1",
+            pmt.ctrl_sum_minor - left.amount_minor,
+            pmt.pmt_inf_id,
+        ),
+    )
+    conn.execute(
+        """update public.bank_statement set status = 'imported',
+             from_date = private.paris_today(), to_date = private.paris_today(),
+             opening_booked_minor = 0, closing_booked_minor = 0, counts = '{}',
+             finished_at = now() where id = %s""",
+        (st,),
+    )
+    return str(line), left.end_to_end_id
+
+
 def _short_line(filed: dict[str, Any]) -> tuple[str, str]:
     """The file's PmtInf debited as one batch line without one member (committed): (line, the
     left-out member's end-to-end id)."""
-    (pmt,) = filed["payouts"].payment_infos
-    left = random.Random(LOT).choice(pmt.transactions)
     with psycopg.connect(DB) as conn:
-        st = _statement(conn, filed, "lot.xml")
-        line = one(
+        return _insert_short_line(conn, filed)
+
+
+# The tables the command, its preview and its options read once per member of a lot by their own
+# statements (its runs and their lines, the members, their files and file items): by key, never by
+# a sequential scan. (bank_line_booking and bank_debit_link are also read once per booking by the
+# job's posting and the booking guard, which this fix leaves as they are: while their statistics
+# call them small, a booking may read them whole — ADR-0014 « M2c-6b-2b review fixes ».)
+PER_MEMBER = (
+    "public.remittance_line",
+    "public.remittance_run",
+    "public.bank_transfer",
+    "public.transfer_file",
+    "public.transfer_file_item",
+)
+
+
+def _reads(conn: psycopg.Connection[Any]) -> dict[str, tuple[int, int]]:
+    """This transaction's reads so far (pg_stat_xact_user_tables): table -> (sequential scans,
+    rows read by them or fetched by index)."""
+    rows = conn.execute(
+        """select schemaname || '.' || relname, seq_scan,
+                  seq_tup_read + coalesce(idx_tup_fetch, 0)
+           from pg_stat_xact_user_tables where schemaname in ('public', 'private')"""
+    ).fetchall()
+    return {str(r[0]): (int(r[1]), int(r[2])) for r in rows}
+
+
+def test_the_command_reads_a_lot_by_key(lot: dict[str, Any]) -> None:
+    """CI scale fix (ADR-0014 « M2c-6b-2b review fixes »): this file runs after the 50,000-line
+    runs in the CI order, and two runs then hold almost every remittance line — the analysed
+    statistics say so (n_distinct of run_id 2). Each member's run was read with the run's
+    conditions next to its key: the lock step (the payments of late lines) and the posting's late
+    lines by a sequential scan of remittance_line, the check's late flag by a whole scan of a
+    partial index — 500 times each, past the API's 8 s. In one rolled-back transaction, a lot at
+    the cap short of one member, then the options and the command as the API's session: every
+    per-member table read by key (no sequential scan), the lot's runs' lines a few times each —
+    what they read, not how long they take, whatever the statistics of the moment."""
+    with psycopg.connect(DB) as conn, conn.transaction(force_rollback=True):
+        line, left = _insert_short_line(conn, lot)
+        _as_ops(conn, lot["tenant"])
+        before = _reads(conn)
+        mark = time.monotonic()
+        opts = one(conn, "select public.transfer_line_options(%s)", (line,))
+        options_s = time.monotonic() - mark
+        assert (opts["class"], opts["member_count"], opts["refusal"]) == ("B", LOT, None), opts
+        (proposal,) = opts["proposals"]
+        mark = time.monotonic()
+        res = one(
             conn,
-            """insert into public.bank_transaction (organization_id, bank_account_id,
-                 statement_id, line_no, dedup_key, direction, amount_minor, currency,
-                 booking_date, kind, payment_info_id)
-               values (%s, %s, %s, 1, %s, 'debit', %s, 'EUR', private.paris_today(),
-                       'batch_unsplit', %s) returning id""",
+            "select public.book_transfer_line(%s, %s, %s, %s, %s)",
             (
-                filed["org"],
-                filed["tenant"]["bank"],
-                st,
-                f"t:{st}:1",
-                pmt.ctrl_sum_minor - left.amount_minor,
-                pmt.pmt_inf_id,
+                str(uuid.uuid4()),
+                line,
+                Jsonb(proposal["request"]),
+                proposal["preview"]["expected_text"],
+                REASON,
             ),
         )
-        conn.execute(
-            """update public.bank_statement set status = 'imported',
-                 from_date = private.paris_today(), to_date = private.paris_today(),
-                 opening_booked_minor = 0, closing_booked_minor = 0, counts = '{}',
-                 finished_at = now() where id = %s""",
-            (st,),
-        )
-    return str(line), left.end_to_end_id
+        command_s = time.monotonic() - mark
+        after = _reads(conn)
+    seq = {t: after.get(t, (0, 0))[0] - before.get(t, (0, 0))[0] for t in PER_MEMBER}
+    rows = {t: after.get(t, (0, 0))[1] - before.get(t, (0, 0))[1] for t in PER_MEMBER}
+    print(
+        f"\n{LOT}-member lot short of one (rolled back): transfer_line_options {options_s:.2f}s,"
+        f" book_transfer_line {command_s:.2f}s ({len(res['bookings'])} bookings); sequential"
+        f" scans {seq}, rows read {rows}"
+    )
+    assert len(res["bookings"]) == LOT - 1
+    assert left not in {p["end_to_end_id"] for p in proposal["parts"]}
+    assert seq == dict.fromkeys(PER_MEMBER, 0), seq
+    # each of the lot's runs holds one line, read by the locks, the preview's and the command's
+    # checks and the posting — never the other runs' lines (before the fix: 500 x 101,000 rows)
+    assert rows["public.remittance_line"] <= 10 * LOT, rows
+    assert options_s < 2, options_s
+    assert command_s <= 4, command_s
 
 
 def test_a_lot_at_the_cap_short_of_one_member_is_booked_within_budget(lot: dict[str, Any]) -> None:

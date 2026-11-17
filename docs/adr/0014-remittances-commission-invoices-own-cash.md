@@ -2148,5 +2148,42 @@ the web's lint, types and 360 vitest tests; the E2E's 54 tests — no screenshot
 refusal labels are in `lib/payments/transfer-lines.ts`, which no page imports yet), and the image diffs are dates, ages
 and ids. `database.types.ts` regenerated (`client_advance.p_bound`).
 
+**CI scale fix (2026-11-17).** The dispatched `scale` run of PR #33 failed three cases of
+`test_transfer_line_scale_integration.py` at the API's 8 s, in `private.transfer_line_locks` step 4 (the payments of the
+lot's runs' late lines); the CI order on a third local stack failed the same three, at the same line. Not CPU: plans
+chosen from the statistics the 50,000-line runs leave — two runs hold 100,000 of remittance_line's lines, n_distinct of
+`run_id` 2, so a run's key is estimated at 50,000 rows. Each member's run was read with the run's conditions next to its
+key, three times per member:
+- the lock step's lateral (`amount_minor > 0 and not released … < booking_date` inside it, and the function without
+  `enable_seqscan = off`) by a sequential scan of remittance_line per member — 500 × 101,000 rows, 21 s instrumented;
+- the posting's late lines (`private.bank_booking_post_rows`' `late` CTE, the same lateral) the same — 20.9 s;
+- the check's late flag (`private.transfer_line_check`, enable_seqscan off) by a whole scan of the partial index
+  `remittance_line_account_idx`, its `not released` predicate implied by the condition — 499 × 51,000 rows per check:
+  the options' 1.6 s in CI (the preview's check), 6.5 s instrumented, and as much again in the command's check.
+
+Fix, in place in `20261117100000` (the same rows read, the same locks in the same order and strength — §3.8; CS-1's
+tests unchanged and passing): each of the three reads the run's lines by its key alone, its conditions outside an
+`offset 0` subquery, under enable_seqscan off — the locks now `set enable_seqscan = off`; the posting's late lines through
+`private.remittance_run_late_lines(run, date)` (new, its own `enable_seqscan = off`: `bank_booking_post_rows` keeps its
+callers' settings). The same pass over every other statement of the command, its preview and its options whose plan the
+statistics chose: the id probes of `transfer_line_class`, of the options' classes E and U and of the check's and the
+locks' unsplit details hold the end-to-end id alone, the servicer compared outside (a second condition lets stale
+statistics read the servicer's transfers through `bank_transfer_org_idx`); the options' member list reads a member's
+file items by the member, the PmtInf compared outside; the tenant filter reads each id's row by key in a lateral (as
+`not exists (… and organization_id = p_org)` it hashed every transfer of the servicer on each call);
+`transfer_line_pre` and the tenant filter set enable_seqscan off; the posting's client balances, runs booked and payout
+accounts returned are reached by the arrays of their keys, as its transfers were (P2); the command's copy of the job's
+`pg_temp._bb` build runs in `private.transfer_line_bb` (new) under enable_seqscan off (with bank_line_booking estimated
+small, a lot read it whole about 2,000 times). Left as they are, outside the command's own statements: the booking
+guard's and the posting's `max(seq)` lookups of bank_line_booking and bank_debit_link, once per booking (a booking may
+read them whole while their statistics call them small), the ledger's set-based joins, and the job's own `_bb` build
+and payments lock in `private.post_bank_bookings` (its lateral has the lock step's old shape; the db suite's
+2,000-member batch test reads bank_line_booking per row there when the transfer-line integration tests ran before it,
+at `c581a8b` as now — it passes in the CI order). Test: `test_the_command_reads_a_lot_by_key` (the scale file's first
+case, rolled back): no sequential scan of remittance_line, remittance_run, bank_transfer, transfer_file or
+transfer_file_item, the lot's runs' lines read at most 10 times per member (before the fix, at the failing point, the
+lock step alone scanned remittance_line 500 times). Timings in `docs/benchmarks/remittances.md` (« The ops command »,
+CI scale fix).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

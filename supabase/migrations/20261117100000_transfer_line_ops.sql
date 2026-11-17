@@ -22,8 +22,9 @@
 -- private.transfer_line_class, private.transfer_line_candidates, private.transfer_line_members,
 -- private.transfer_line_returnable, private.transfer_line_parse, private.transfer_line_check,
 -- private.transfer_line_text, private.transfer_line_locks, private.transfer_line_post, private.remittance_draft_requeue,
--- private.unsplit_details_differ, private.transfer_line_preview_of (review CSR-3), public.book_transfer_line,
--- public.transfer_line_preview, public.transfer_line_options.
+-- private.unsplit_details_differ, private.transfer_line_preview_of (review CSR-3), private.remittance_run_late_lines
+-- and private.transfer_line_bb (CI scale fix), public.book_transfer_line, public.transfer_line_preview,
+-- public.transfer_line_options.
 -- Redefined, each copied from its latest definition and changed only as its comment says, with its settings and grants
 -- restated: private.bank_line_booking_guard (20261116090000), private.pending_item_deadlines (20261116090000),
 -- private.bank_booking_post_rows (20261116090000), private.ingest_statement (20261117090000),
@@ -118,7 +119,8 @@ alter table private.bank_import_stage
 -- a PmtInf of a file of the line's account, or a credit naming a handed-out lot of it (private.names_our_lot) whose
 -- ids name nothing of ours; E0 (« E∅ ») an RMT/SWP-shaped id or a TF PmtInfId naming nothing of ours; N neither an
 -- end-to-end id nor a PmtInfId; O anything else. Keyed (bank_transfer's end_to_end_id is unique; the PmtInf's items
--- by transfer_file_item_pmt_inf_idx).
+-- by transfer_file_item_pmt_inf_idx; CI scale fix: each probe of an id holds the id alone, the servicer compared outside
+-- it — a second condition lets stale statistics read every transfer of the servicer through bank_transfer_org_idx).
 create or replace function private.transfer_line_class(p_line_id uuid)
 returns text
 language sql
@@ -130,12 +132,14 @@ as $$
   select case
     when coalesce(t.unsplit_ours, 0) > 0 then 'U'
     when t.direction = 'debit' and t.end_to_end_id is not null
-         and exists (select 1 from public.bank_transfer x where x.end_to_end_id = t.end_to_end_id
-                       and x.organization_id = t.organization_id) then 'E'
+         and exists (select 1 from (select x.organization_id from public.bank_transfer x
+                                    where x.end_to_end_id = t.end_to_end_id offset 0) x
+                     where x.organization_id = t.organization_id) then 'E'
     when t.direction = 'credit' and coalesce(t.original_end_to_end_id, t.end_to_end_id) is not null
-         and exists (select 1 from public.bank_transfer x
-                     where x.end_to_end_id = coalesce(t.original_end_to_end_id, t.end_to_end_id)
-                       and x.organization_id = t.organization_id) then 'E'
+         and exists (select 1 from (select x.organization_id from public.bank_transfer x
+                                    where x.end_to_end_id = coalesce(t.original_end_to_end_id, t.end_to_end_id)
+                                    offset 0) x
+                     where x.organization_id = t.organization_id) then 'E'
     when t.direction = 'debit' and t.end_to_end_id is null and t.payment_info_id is not null
          and exists (select 1
                      from (select i.file_id from public.transfer_file_item i where i.pmt_inf_id = t.payment_info_id
@@ -376,33 +380,31 @@ $$;
 -- The tenant filter (§3.4.1; critic CSO-5, F16), before any rule and any lock, in the command and the preview alike:
 -- every transfer_id a bank_transfer of the line's servicer and every returns_line_id one of its bank lines, else
 -- transfer_unknown; every client_id a client of the servicer, else client_unknown — the same code for an absent id and
--- another servicer's, in part order. Keyed (primary keys).
+-- another servicer's, in part order. Keyed (primary keys; CI scale fix: each id's row by its key alone, in a lateral,
+-- the servicer compared outside it, enable_seqscan off — as `not exists (… and organization_id = p_org)` the planner
+-- hashed every transfer, bank line or client of the servicer, once per call, by its servicer index or a sequential scan).
 create or replace function private.transfer_line_tenant(p_org uuid)
 returns text
 language plpgsql
 stable
 security definer
 set search_path = ''
+set enable_seqscan = off
 as $$
 begin
   return (select case
-    when r.transfer_id is not null
-         and not exists (select 1 from public.bank_transfer x where x.id = r.transfer_id and x.organization_id = p_org)
-      then 'transfer_unknown'
-    when r.returns_line_id is not null
-         and not exists (select 1 from public.bank_transaction x where x.id = r.returns_line_id
-                           and x.organization_id = p_org)
-      then 'transfer_unknown'
+    when r.transfer_id is not null and x.organization_id is distinct from p_org then 'transfer_unknown'
+    when r.returns_line_id is not null and t.organization_id is distinct from p_org then 'transfer_unknown'
     else 'client_unknown' end
   from pg_temp._tl_req r
-  where (r.transfer_id is not null
-         and not exists (select 1 from public.bank_transfer x where x.id = r.transfer_id and x.organization_id = p_org))
-     or (r.returns_line_id is not null
-         and not exists (select 1 from public.bank_transaction x where x.id = r.returns_line_id
-                           and x.organization_id = p_org))
-     or (r.client_id is not null
-         and not exists (select 1 from public.organization o where o.id = r.client_id
-                           and o.servicer_organization_id = p_org))
+  left join lateral (select q.organization_id from public.bank_transfer q where q.id = r.transfer_id offset 0) x on true
+  left join lateral (select q.organization_id from public.bank_transaction q where q.id = r.returns_line_id
+                     offset 0) t on true
+  left join lateral (select q.servicer_organization_id from public.organization q where q.id = r.client_id
+                     offset 0) o on true
+  where (r.transfer_id is not null and x.organization_id is distinct from p_org)
+     or (r.returns_line_id is not null and t.organization_id is distinct from p_org)
+     or (r.client_id is not null and o.servicer_organization_id is distinct from p_org)
   order by r.n
   limit 1);
 end;
@@ -414,12 +416,15 @@ $$;
 -- items in seq order: a debit lot's items never change; a lot credit's universe is read again under the locks and
 -- must be the same, else split_changed); for a debit without our reference, rule 3b's candidates. pg_temp._tl_pre keeps
 -- the members, the subset (in_subset) and the candidates for the check and the lock's key collection; pg_temp._tl_meta
--- the line's class, its member count and whether a subset was found. Returns lot_too_large or null.
+-- the line's class, its member count and whether a subset was found. Returns lot_too_large or null. (CI scale fix:
+-- enable_seqscan off, as every reader it calls: the keyed count of the PmtInf's items never becomes a scan of every
+-- file's items when the statistics say a few PmtInfs hold them all.)
 create or replace function private.transfer_line_pre(p_line_id uuid)
 returns text
 language plpgsql
 security definer
 set search_path = ''
+set enable_seqscan = off
 as $$
 declare
   t public.bank_transaction;
@@ -677,9 +682,12 @@ begin
       select d.o::integer, d.v ->> 'id', d.v ->> 'direction', (d.v ->> 'amount_minor')::bigint,
              x.id, x.kind, x.status, x.debtor_bank_account_id
       from jsonb_array_elements(l.unsplit_details) with ordinality d (v, o)
-      -- (critic2 CSO2-10) by (the line's servicer, the id), then its account: never another servicer's transfer
-      left join lateral (select y.id, y.kind, y.status, y.debtor_bank_account_id from public.bank_transfer y
-                         where y.end_to_end_id = d.v ->> 'id' and y.organization_id = l.organization_id offset 0) x
+      -- (critic2 CSO2-10) by (the line's servicer, the id), then its account: never another servicer's transfer (CI
+      -- scale fix: the probe holds the id alone, the servicer compared outside it)
+      left join lateral (select y.id, y.kind, y.status, y.debtor_bank_account_id
+                         from (select q.id, q.kind, q.status, q.debtor_bank_account_id, q.organization_id
+                               from public.bank_transfer q where q.end_to_end_id = d.v ->> 'id' offset 0) y
+                         where y.organization_id = l.organization_id) x
         on true;
       if exists (select 1 from pg_temp._tl_u u
                  where u.id !~ '^(RMT|SWP)' or u.transfer_id is null or u.tr_debtor <> l.bank_account_id
@@ -837,9 +845,9 @@ begin
     insert into pg_temp._tl_pool (n, ledger_entry_id)
     select distinct t.n, y.ledger_entry_id
     from pg_temp._tl t
-    cross join lateral (select q.ledger_entry_id from public.remittance_line q
-                        where q.run_id = t.tr_run and q.released offset 0) y
-    where t.kind = 'unplanned_payout' and t.tr_status = 'cancelled' and t.tr_run is not null
+    cross join lateral (select q.ledger_entry_id, q.released from public.remittance_line q
+                        where q.run_id = t.tr_run offset 0) y
+    where t.kind = 'unplanned_payout' and t.tr_status = 'cancelled' and t.tr_run is not null and y.released
     union
     select t.n, t.tr_return_entry from pg_temp._tl t
     where t.kind = 'unplanned_payout' and t.tr_status = 'returned' and t.tr_return_entry is not null;
@@ -878,10 +886,14 @@ begin
           v_why := 'run_not_in_flight'; exit rules;
         end if;
         if r.amount <> r.tr_minor then v_why := 'amount_differs'; exit rules; end if;
+        -- (CI scale fix) the run's lines by its key alone, the conditions outside: `not released` inside let a stale
+        -- estimate of the run pick a whole scan of remittance_line_live_uq or remittance_line_account_idx, per part
         update pg_temp._tl t set c = r.tr_client, a = r.amount,
-          late = r.kind = 'payout' and exists (select 1 from public.remittance_line q
-                                               where q.run_id = r.tr_run and q.amount_minor > 0 and not q.released
-                                                 and q.latest_execution_date < l.booking_date)
+          late = r.kind = 'payout' and exists (
+            select 1
+            from (select q.amount_minor, q.released, q.latest_execution_date from public.remittance_line q
+                  where q.run_id = r.tr_run offset 0) q
+            where q.amount_minor > 0 and not q.released and q.latest_execution_date < l.booking_date)
         where t.n = r.n;
 
       elsif r.kind in ('unplanned_payout', 'unplanned_sweep') and r.transfer_id is not null then
@@ -1212,11 +1224,17 @@ $$;
 --   9. bank_transfer FOR UPDATE: every key transfer (every member of a lot, booked or not).
 -- A lock not had within lock_timeout (2 s, 55P03) is re-raised with the step it waited at (critic2 CSO2-6): `busy` for
 -- a row, `allocation_busy` for the servicer-wide `payments:` or `remit:` lock (an allocation chunk or an approval).
+-- CI scale fix (ADR-0014 « M2c-6b-2b review fixes »): every read is keyed whatever the statistics — enable_seqscan off,
+-- each lateral holding its row's key alone and the other conditions outside it. Step 4 held the run's conditions inside
+-- its lateral: after the 50,000-line runs (two runs holding 100,000 of remittance_line's 101,000 lines), each of a
+-- 500-member lot's runs was read by a sequential scan of remittance_line, 500 times, past the API's 8 s. Same rows,
+-- same locks, same order.
 create or replace function private.transfer_line_locks(p_line_id uuid)
 returns void
 language plpgsql
 security definer
 set search_path = ''
+set enable_seqscan = off
 as $$
 declare
   l public.bank_transaction;
@@ -1232,9 +1250,9 @@ begin
   select y.id
   from jsonb_array_elements(case when jsonb_typeof(l.unsplit_details) = 'array' then l.unsplit_details
                                  else '[]'::jsonb end) d
-  cross join lateral (select q.id, q.debtor_bank_account_id from public.bank_transfer q
-                      where q.end_to_end_id = d ->> 'id' and q.organization_id = l.organization_id offset 0) y
-  where y.debtor_bank_account_id = l.bank_account_id
+  cross join lateral (select q.id, q.organization_id, q.debtor_bank_account_id from public.bank_transfer q
+                      where q.end_to_end_id = d ->> 'id' offset 0) y
+  where y.organization_id = l.organization_id and y.debtor_bank_account_id = l.bank_account_id
   on conflict do nothing;
   insert into pg_temp._tl_keys
   select k.transfer_id
@@ -1319,10 +1337,10 @@ begin
           select distinct y.payment_id
           from pg_temp._tl_keys k
           cross join lateral (select q.run_id, q.kind from public.bank_transfer q where q.id = k.transfer_id offset 0) x
-          cross join lateral (select q.payment_id from public.remittance_line q
-                              where q.run_id = x.run_id and q.amount_minor > 0 and not q.released
-                                and q.payment_id is not null and q.latest_execution_date < l.booking_date offset 0) y
-          where x.kind = 'payout' and l.direction = 'debit'))
+          cross join lateral (select q.payment_id, q.amount_minor, q.released, q.latest_execution_date
+                              from public.remittance_line q where q.run_id = x.run_id offset 0) y
+          where x.kind = 'payout' and l.direction = 'debit' and y.amount_minor > 0 and not y.released
+            and y.payment_id is not null and y.latest_execution_date < l.booking_date))
   order by p.id for key share;
   -- 5. the allocation lock
   v_step := 'allocation';
@@ -1370,6 +1388,80 @@ $$;
 -- The posting (plan §3.6, §3.7), the drafts (§3.6.5)
 ------------------------------------------------------------------------------------------
 
+-- The command's pg_temp._bb (private.transfer_line_post, step 2): private.post_bank_bookings' select list
+-- (20261117090000, unchanged by its redefinition below), copied — the same columns in the same order (pgTAP 037) —,
+-- book_minor the part's amount (pg_temp._tl), analysed. CI scale fix (ADR-0014 « M2c-6b-2b review fixes »): built under
+-- enable_seqscan off in this function's own settings, so its lookups by key, once per part (the line's bookings and
+-- debit links, each transfer's bookings), are never a sequential scan per part when the statistics call those tables
+-- small (a lot at the cap read bank_line_booking whole about 2,000 times); the posting that follows keeps its caller's
+-- settings.
+create or replace function private.transfer_line_bb(p_line_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  l public.bank_transaction;
+begin
+  select * into l from public.bank_transaction where id = p_line_id;
+  drop table if exists pg_temp._bb;
+  create temp table _bb on commit drop as
+  select b.*, t.organization_id as line_org, t.bank_account_id as line_bank, t.direction, t.currency,
+         t.amount_minor as line_minor, t.booking_date as line_date, coalesce(dr.released_kind, t.kind) as line_kind,
+         (t.kind = 'suspected_duplicate' and dr.decision is distinct from 'released') as held,
+         t.counterparty_iban, t.end_to_end_id, coalesce(t.original_end_to_end_id, t.end_to_end_id) as returned_id,
+         t.payment_info_id, t.unsplit_ours,
+         (t.direction = 'debit' and t.end_to_end_id is null and t.payment_info_id is not null) as batch_line,
+         (exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = b.bank_transaction_id offset 0)
+          or exists (select 1 from public.bank_own_credit_release c
+                     where c.bank_transaction_id = b.bank_transaction_id offset 0)) as booked,
+         (select l2.kind from public.bank_debit_link l2 where l2.bank_transaction_id = b.bank_transaction_id) as link_kind,
+         coalesce((select -sum(p.amount_minor) from public.bank_debit_link l2
+                   join public.ledger_posting p on p.entry_id = l2.cash_entry_id
+                   where l2.bank_transaction_id = b.bank_transaction_id and l2.kind = 'return'
+                     and (select la.book from public.ledger_account la where la.id = p.ledger_account_id)
+                         = 'client_money_cash'), 0)::bigint as linked_minor,
+         x.organization_id as tr_org, x.kind as tr_kind, x.status as tr_status,
+         x.creditor_bank_account_id as tr_creditor, x.debtor_bank_account_id as tr_debtor,
+         x.amount_minor as tr_minor, x.currency as tr_currency, x.end_to_end_id as tr_e2e,
+         x.transfer_file_id as tr_file, x.run_id as tr_run, x.client_organization_id as tr_client,
+         x.entry_id as tr_entry,
+         f.status as file_status, f.download_count as file_downloads,
+         (select i.pmt_inf_id from public.transfer_file_item i
+          where i.file_id = x.transfer_file_id and i.transfer_id = x.id) as tr_pmt_inf,
+         exists (select 1 from public.bank_line_booking k where k.transfer_id = b.transfer_id
+                   and k.kind in ('payout', 'sweep', 'top_up') offset 0) as tr_debit_booked,
+         exists (select 1 from public.bank_line_booking k where k.transfer_id = b.transfer_id
+                   and k.kind in ('payout_returned', 'sweep_returned') offset 0) as tr_return_booked,
+         case when b.kind in ('payout_returned', 'sweep_returned') and x.organization_id = l.organization_id
+              then private.transfer_unplanned_open(b.transfer_id) end as tr_unplanned_open,
+         case when b.kind in ('payout_returned', 'sweep_returned') and x.organization_id = l.organization_id
+              then exists (select 1 from private.transfer_late_lines(b.transfer_id)) end as tr_debit_pending,
+         (select e.effective_date from public.ledger_entry e where e.id = x.entry_id) as tr_entry_date,
+         ru.status as run_status, ru.transfer_id as run_transfer, ru.payout_account_id as run_payout_account,
+         null::uuid as own_bank, null::bigint as book_minor, null::text as why
+  from pg_temp._bank_booking b
+  left join lateral (select q.organization_id, q.bank_account_id, q.direction, q.currency, q.amount_minor,
+                            q.booking_date, q.kind, q.counterparty_iban, q.end_to_end_id, q.original_end_to_end_id,
+                            q.payment_info_id, q.unsplit_ours
+                     from public.bank_transaction q where q.id = b.bank_transaction_id offset 0) t on true
+  left join lateral (select q.decision, q.released_kind from public.bank_duplicate_resolution q
+                     where q.bank_transaction_id = b.bank_transaction_id offset 0) dr on true
+  left join lateral (select q.organization_id, q.kind, q.status, q.creditor_bank_account_id, q.debtor_bank_account_id,
+                            q.amount_minor, q.currency, q.end_to_end_id, q.transfer_file_id, q.run_id,
+                            q.client_organization_id, q.entry_id, q.id
+                     from public.bank_transfer q where q.id = b.transfer_id offset 0) x on true
+  left join lateral (select q.status, q.download_count from public.transfer_file q where q.id = x.transfer_file_id
+                     offset 0) f on true
+  left join lateral (select q.status, q.transfer_id, q.payout_account_id from public.remittance_run q
+                     where q.id = x.run_id offset 0) ru on true;
+  update pg_temp._bb b set book_minor = t.amount from pg_temp._tl t where t.n = b.ord;
+  analyze pg_temp._bb;
+end;
+$$;
+
 -- Posts pg_temp._tl (checked under the locks), all at the line's booking date, in this order:
 -- 1. what this function posts itself: the unplanned remittances (+4670[c] A / −5120 A, remit:line:<line>:<n>, the
 --    transfer or the line their document) and sweeps (+4679 S / −5120 S ‖ +5122[own] S / −4689 S, sweep:line:<line>:<n>);
@@ -1390,7 +1482,8 @@ $$;
 -- texts, never ops' motif; the motif goes to bank_line_booking.reason (staff only) and — as public.link_debit does
 -- for the fees, top-ups and losses ops book (M2c-1) — is the reason of the servicer's own fee and sweep
 -- entries (bank_fee, servicer_sweep of a planned `fee` or `sweep` part: no client, read by money staff only; review LT-7).
--- The pg_temp._bb build below is private.post_bank_bookings' (its select list unchanged since 20261117090000).
+-- Its pg_temp._bb (private.transfer_line_bb) is private.post_bank_bookings' (its select list unchanged since
+-- 20261117090000).
 create or replace function private.transfer_line_post(p_line_id uuid, p_reason text)
 returns void
 language plpgsql
@@ -1526,61 +1619,8 @@ begin
     insert into pg_temp._bank_booking (ord, bank_transaction_id, kind, transfer_id, method, decided_by, reason)
     select t.n, l.id, t.kind, t.transfer_id, 'ops', auth.uid(), p_reason
     from pg_temp._tl t where t.kind in ('payout', 'sweep', 'fee');
-    -- private.post_bank_bookings' select list (20261117090000, unchanged by its redefinition below), copied: the same
-    -- columns in the same order (pgTAP 037)
-    drop table if exists pg_temp._bb;
-    create temp table _bb on commit drop as
-    select b.*, t.organization_id as line_org, t.bank_account_id as line_bank, t.direction, t.currency,
-           t.amount_minor as line_minor, t.booking_date as line_date, coalesce(dr.released_kind, t.kind) as line_kind,
-           (t.kind = 'suspected_duplicate' and dr.decision is distinct from 'released') as held,
-           t.counterparty_iban, t.end_to_end_id, coalesce(t.original_end_to_end_id, t.end_to_end_id) as returned_id,
-           t.payment_info_id, t.unsplit_ours,
-           (t.direction = 'debit' and t.end_to_end_id is null and t.payment_info_id is not null) as batch_line,
-           (exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = b.bank_transaction_id offset 0)
-            or exists (select 1 from public.bank_own_credit_release c
-                       where c.bank_transaction_id = b.bank_transaction_id offset 0)) as booked,
-           (select l2.kind from public.bank_debit_link l2 where l2.bank_transaction_id = b.bank_transaction_id) as link_kind,
-           coalesce((select -sum(p.amount_minor) from public.bank_debit_link l2
-                     join public.ledger_posting p on p.entry_id = l2.cash_entry_id
-                     where l2.bank_transaction_id = b.bank_transaction_id and l2.kind = 'return'
-                       and (select la.book from public.ledger_account la where la.id = p.ledger_account_id)
-                           = 'client_money_cash'), 0)::bigint as linked_minor,
-           x.organization_id as tr_org, x.kind as tr_kind, x.status as tr_status,
-           x.creditor_bank_account_id as tr_creditor, x.debtor_bank_account_id as tr_debtor,
-           x.amount_minor as tr_minor, x.currency as tr_currency, x.end_to_end_id as tr_e2e,
-           x.transfer_file_id as tr_file, x.run_id as tr_run, x.client_organization_id as tr_client,
-           x.entry_id as tr_entry,
-           f.status as file_status, f.download_count as file_downloads,
-           (select i.pmt_inf_id from public.transfer_file_item i
-            where i.file_id = x.transfer_file_id and i.transfer_id = x.id) as tr_pmt_inf,
-           exists (select 1 from public.bank_line_booking k where k.transfer_id = b.transfer_id
-                     and k.kind in ('payout', 'sweep', 'top_up') offset 0) as tr_debit_booked,
-           exists (select 1 from public.bank_line_booking k where k.transfer_id = b.transfer_id
-                     and k.kind in ('payout_returned', 'sweep_returned') offset 0) as tr_return_booked,
-           case when b.kind in ('payout_returned', 'sweep_returned') and x.organization_id = l.organization_id
-                then private.transfer_unplanned_open(b.transfer_id) end as tr_unplanned_open,
-           case when b.kind in ('payout_returned', 'sweep_returned') and x.organization_id = l.organization_id
-                then exists (select 1 from private.transfer_late_lines(b.transfer_id)) end as tr_debit_pending,
-           (select e.effective_date from public.ledger_entry e where e.id = x.entry_id) as tr_entry_date,
-           ru.status as run_status, ru.transfer_id as run_transfer, ru.payout_account_id as run_payout_account,
-           null::uuid as own_bank, null::bigint as book_minor, null::text as why
-    from pg_temp._bank_booking b
-    left join lateral (select q.organization_id, q.bank_account_id, q.direction, q.currency, q.amount_minor,
-                              q.booking_date, q.kind, q.counterparty_iban, q.end_to_end_id, q.original_end_to_end_id,
-                              q.payment_info_id, q.unsplit_ours
-                       from public.bank_transaction q where q.id = b.bank_transaction_id offset 0) t on true
-    left join lateral (select q.decision, q.released_kind from public.bank_duplicate_resolution q
-                       where q.bank_transaction_id = b.bank_transaction_id offset 0) dr on true
-    left join lateral (select q.organization_id, q.kind, q.status, q.creditor_bank_account_id, q.debtor_bank_account_id,
-                              q.amount_minor, q.currency, q.end_to_end_id, q.transfer_file_id, q.run_id,
-                              q.client_organization_id, q.entry_id, q.id
-                       from public.bank_transfer q where q.id = b.transfer_id offset 0) x on true
-    left join lateral (select q.status, q.download_count from public.transfer_file q where q.id = x.transfer_file_id
-                       offset 0) f on true
-    left join lateral (select q.status, q.transfer_id, q.payout_account_id from public.remittance_run q
-                       where q.id = x.run_id offset 0) ru on true;
-    update pg_temp._bb b set book_minor = t.amount from pg_temp._tl t where t.n = b.ord;
-    analyze pg_temp._bb;
+    -- pg_temp._bb, private.post_bank_bookings' select list copied (private.transfer_line_bb)
+    perform private.transfer_line_bb(l.id);
     perform private.bank_booking_post_rows(l.organization_id);
     update pg_temp._tl t set entry_id = e.entry_id
     from pg_temp._bb_entry e where e.entry_no = t.n and t.kind in ('payout', 'sweep', 'fee');
@@ -1942,8 +1982,10 @@ begin
   if v_pre is not null then
     v_refusal := v_pre;
   elsif v_class = 'E' and l.direction = 'debit' then
-    select * into v_x from public.bank_transfer x
-    where x.end_to_end_id = l.end_to_end_id and x.organization_id = l.organization_id;
+    -- (CI scale fix) the transfer by its id alone, the servicer compared outside the probe
+    select x.* into v_x
+    from (select y.* from public.bank_transfer y where y.end_to_end_id = l.end_to_end_id offset 0) x
+    where x.organization_id = l.organization_id;
     v_action := case when v_x.status in ('cancelled', 'booked', 'returned') then 'unplanned_' || v_x.kind
                      else v_x.kind end;
     v_parts := jsonb_build_array(jsonb_build_object('kind', v_action, 'transfer_id', v_x.id,
@@ -1954,8 +1996,9 @@ begin
     end if;
     v_action := case when v_action like 'unplanned_%' then v_action else 'payout' end;
   elsif v_class = 'E' and l.direction = 'credit' then
-    select * into v_x from public.bank_transfer x
-    where x.end_to_end_id = v_returned and x.organization_id = l.organization_id;
+    select x.* into v_x
+    from (select y.* from public.bank_transfer y where y.end_to_end_id = v_returned offset 0) x
+    where x.organization_id = l.organization_id;
     v_pending := (select x from private.transfer_late_lines(v_x.id) x limit 1);
     if v_pending is not null and not private.transfer_unplanned_open(v_x.id) then
       v_refusal := 'debit_pending';
@@ -1997,9 +2040,13 @@ begin
                'amount', p.amount_minor::text)) order by p.ord), '[]')
       into v_parts
       from pg_temp._tl_pre p
+      -- (CI scale fix) the member's file items by the member alone (a transfer is in a few files), the PmtInf compared
+      -- outside: with both inside, a stale estimate of the PmtInf read its 500 items once per member
       cross join lateral (select y.kind, y.status, y.transfer_file_id,
-                                 (select i.file_id from public.transfer_file_item i
-                                  where i.pmt_inf_id = l.payment_info_id and i.transfer_id = y.id limit 1) as f
+                                 (select i.file_id
+                                  from (select q.file_id, q.pmt_inf_id from public.transfer_file_item q
+                                        where q.transfer_id = y.id offset 0) i
+                                  where i.pmt_inf_id = l.payment_info_id limit 1) as f
                           from public.bank_transfer y where y.id = p.transfer_id offset 0) x
       where p.role in ('member', 'returnable') and p.in_subset;
       v_action := case when l.direction = 'credit' then 'returned' else 'lot' end;
@@ -2022,9 +2069,11 @@ begin
     into v_parts
     from jsonb_array_elements(case when jsonb_typeof(l.unsplit_details) = 'array' then l.unsplit_details
                                    else '[]'::jsonb end) with ordinality d (v, o)
-    left join lateral (select y.id, y.kind, y.status from public.bank_transfer y
-                       where y.end_to_end_id = d.v ->> 'id' and y.organization_id = l.organization_id
-                         and y.debtor_bank_account_id = l.bank_account_id offset 0) x on true;
+    left join lateral (select y.id, y.kind, y.status
+                       from (select q.id, q.kind, q.status, q.organization_id, q.debtor_bank_account_id
+                             from public.bank_transfer q where q.end_to_end_id = d.v ->> 'id' offset 0) y
+                       where y.organization_id = l.organization_id and y.debtor_bank_account_id = l.bank_account_id) x
+      on true;
     -- (critic2 CSO2-10) a detail naming nothing of this servicer and account is never shown: no parts proposed
     if l.unsplit_details is null or jsonb_array_length(v_parts) = 0
        or exists (select 1 from jsonb_array_elements(v_parts) p where p ->> 'transfer_id' is null) then
@@ -2416,10 +2465,34 @@ as $$
 $$;
 
 
+-- A run's lines late at a date (CI scale fix, ADR-0014 « M2c-6b-2b review fixes »): the positive, unreleased lines of
+-- p_run_id whose latest execution date is before p_before — read by the run's key alone (remittance_line_pkey's leading
+-- column) and the conditions outside it, enable_seqscan off in its own settings, so its callers' settings never decide
+-- the plan. Held inside a lateral with the run's key, `not released` let a stale estimate of the run pick a whole scan of
+-- remittance_line_live_uq; without enable_seqscan off, a sequential scan of remittance_line — once per payout booked:
+-- after the 50,000-line runs, 500 of them for a lot at the cap. Read by private.bank_booking_post_rows, once per payout
+-- row. Not inlined (its settings): planned once per calling statement.
+create or replace function private.remittance_run_late_lines(p_run_id uuid, p_before date)
+returns table (ledger_entry_id uuid, payment_id uuid, deadline date, latest_execution_date date, unmeetable boolean,
+               encaissement_date date, kind text)
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select q.ledger_entry_id, q.payment_id, q.deadline, q.latest_execution_date, q.unmeetable, q.encaissement_date, q.kind
+  from (select x.ledger_entry_id, x.payment_id, x.deadline, x.latest_execution_date, x.unmeetable, x.encaissement_date,
+               x.kind, x.amount_minor, x.released
+        from public.remittance_line x where x.run_id = p_run_id offset 0) q
+  where q.amount_minor > 0 and not q.released and q.latest_execution_date < p_before;
+$$;
+
 -- private.bank_booking_post_rows, redefined from 20261116090000 (same signature and settings; its grants restated
 -- below). M2c-6b-2b (plan §3.12; critic CSO-1): a `payout` row's remittance entry reason is null (the job's), whatever
 -- the row's reason — an ops payout's motif (public.book_transfer_line) goes to bank_line_booking.reason only, which
--- staff alone read; parity with the job's entries is pinned by pgTAP 037 C. Nothing else changes.
+-- staff alone read; parity with the job's entries is pinned by pgTAP 037 C. CI scale fix: the late lines of each
+-- payout's run through private.remittance_run_late_lines, and the clients' balances, the runs booked and the payout
+-- accounts returned by the arrays of their keys (the same rows, by key whatever the statistics). Nothing else changes.
 create or replace function private.bank_booking_post_rows(p_organization_id uuid)
 returns void
 language plpgsql
@@ -2519,8 +2592,11 @@ begin
          gen_random_uuid() as advance_id
   from pg_temp._bb b
   join pg_temp._bb_entry e on e.entry_no = b.ord
-  cross join lateral (select q.balance_minor from private.client_payable_balance q
-                      where q.client_organization_id = b.tr_client and q.currency = b.currency) c
+  -- (CI scale fix) the balances by their key, the clients' array its condition: joined to the rows alone, a table
+  -- estimated tiny was scanned once per payout row
+  join (select q.client_organization_id, q.currency, q.balance_minor from private.client_payable_balance q
+        where q.client_organization_id = any (array(select x.tr_client from pg_temp._bb x where x.kind = 'payout'))) c
+    on c.client_organization_id = b.tr_client and c.currency = b.currency
   where b.kind = 'payout' and c.balance_minor > 0
   order by b.tr_client, b.currency, b.ord;
   if exists (select 1 from pg_temp._bb_cover) then
@@ -2580,12 +2656,17 @@ begin
   where x.id = any (array(select b.transfer_id from pg_temp._bb b
                           where b.kind in ('payout_returned', 'sweep_returned') and b.transfer_id is not null))
     and x.id = s.transfer_id;
+  -- (CI scale fix) the runs and the payout accounts by key as the transfers above: the array of their ids the index's
+  -- condition (joined to the rows alone, remittance_run was hashed over a sequential scan of every servicer's runs)
   update public.remittance_run r set status = 'booked', booked_on = b.line_date, version = r.version + 1
   from pg_temp._bb b
-  where b.kind = 'payout' and r.id = b.tr_run and r.status in ('approved', 'sent');
+  where r.id = any (array(select x.tr_run from pg_temp._bb x where x.kind = 'payout' and x.tr_run is not null))
+    and b.kind = 'payout' and r.id = b.tr_run and r.status in ('approved', 'sent');
   update public.client_payout_account a set status = 'returned'
   from pg_temp._bb b
-  where b.kind = 'payout_returned' and a.id = b.run_payout_account and a.status = 'active';
+  where a.id = any (array(select x.run_payout_account from pg_temp._bb x
+                          where x.kind = 'payout_returned' and x.run_payout_account is not null))
+    and b.kind = 'payout_returned' and a.id = b.run_payout_account and a.status = 'active';
 
   -- R124-6 (I21): an item of a booked run debited after the date it is held to (its latest execution date, or one
   -- month for a delay that cannot be met, as private.remittance_late_lines) gets its breach row, once; a returned
@@ -2598,11 +2679,7 @@ begin
     from pg_temp._bb b
     cross join lateral (select q.organization_id, q.client_organization_id, q.requested_execution_date, q.late_reason
                         from public.remittance_run q where q.id = b.tr_run offset 0) ru
-    cross join lateral (select x.ledger_entry_id, x.payment_id, x.deadline, x.latest_execution_date, x.unmeetable,
-                               x.encaissement_date, x.kind
-                        from public.remittance_line x
-                        where x.run_id = b.tr_run and x.amount_minor > 0 and not x.released
-                          and x.latest_execution_date < b.line_date offset 0) l
+    cross join lateral private.remittance_run_late_lines(b.tr_run, b.line_date) l
     where b.kind = 'payout'),
   m as materialized (
     select k.e_date, d.*
@@ -4019,7 +4096,8 @@ revoke execute on function private.transfer_line_class(uuid), private.transfer_l
   private.transfer_line_check(uuid, boolean), private.transfer_line_text(), private.transfer_line_locks(uuid),
   private.transfer_line_post(uuid, text), private.remittance_draft_requeue(uuid), private.transfer_line_parts_json(),
   private.transfer_line_supersedes(uuid), private.unsplit_details_differ(jsonb, jsonb, boolean[]),
-  private.transfer_line_preview_of(uuid, jsonb, boolean)
+  private.transfer_line_preview_of(uuid, jsonb, boolean), private.remittance_run_late_lines(uuid, date),
+  private.transfer_line_bb(uuid)
   from public, anon, authenticated, service_role;
 -- the redefined internals, as granted by 20261116090000 (the worker's: the debit job, the checks, the schedule) and by
 -- 20261117090000 (the funds pass's: called by private.apply_bank_bookings and the commands only)
