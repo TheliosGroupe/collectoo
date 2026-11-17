@@ -313,6 +313,10 @@ describe("returns (founder #13; design §2 #3)", () => {
         "batch_mixed",
         "return_differs",
         "return_before_debit",
+        // M2c-6b-2a: the job's returns it never books, the M2b pass's own reason
+        "unplanned_payout_return",
+        "return_debit_pending",
+        "own_transfer_line",
       ].sort(),
     );
   });

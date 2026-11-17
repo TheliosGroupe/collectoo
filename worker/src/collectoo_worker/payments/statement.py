@@ -230,6 +230,18 @@ def normalise_text(text: str | None) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class UnsplitDetail:
+    """M2c-6b-2a (plan docs/design/m2c-6b-2-plan.md §2.2; critic F8, L11): one detail of ours the
+    statement itself gives for an entry it kept unsplit — the id we issued (its own or the original
+    it returns), its direction, and its own amount in the statement's currency (`Amt`, else
+    `AmtDtls/TxAmt/Amt`, as the split read it), or None when the detail gives none."""
+
+    id: str
+    direction: str  # debit | credit
+    amount_minor: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class StatementLine:
     """One line as the import stores it (`private.bank_import_stage`, then `bank_transaction`)."""
 
@@ -263,6 +275,14 @@ class StatementLine:
     # amount is the entry's total, never one transaction's) records how many of its details name
     # one of our transfers (`names_our_transfer` on the detail); None for every other line
     unsplit_ours: int | None = None
+    # M2c-6b-2a (plan §2.1-§2.2; critic F8, L11; critic2 ML-5, ML-6, ML-10): an entry kept unsplit
+    # keeps the details of ours the statement gives (in the file's order; () when none is ours), how
+    # many details it has in all (ours or not) and its NbOfTxs; a line that is its entry's only line
+    # keeps the charges the statement records for it (`Chrgs`); None for every other line
+    unsplit_details: tuple[UnsplitDetail, ...] | None = None
+    unsplit_detail_count: int | None = None
+    unsplit_batch_count: int | None = None
+    charges_minor: int | None = None
 
     @property
     def signed_minor(self) -> int:
@@ -297,6 +317,10 @@ STAGE_COLUMNS = (
     "method",
     "payment_info_id",
     "unsplit_ours",
+    "unsplit_details",
+    "unsplit_detail_count",
+    "unsplit_batch_count",
+    "charges_minor",
 )
 
 

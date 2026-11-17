@@ -224,6 +224,9 @@ const HOLD_LABEL: Record<string, string> = {
     "Le solde du compte dédié ne couvre plus le fichier (dernier relevé, moins ce qui est déjà en route) : importez le dernier relevé, puis régénérez",
   no_closing_balance:
     "Aucun relevé avec solde de clôture n'est importé pour le compte dédié : importez-en un, puis régénérez",
+  // M2c-6b-2a (plan §2.4; critic CSO-2, F10): the file's sweep re-checked at its first download
+  sweep_exceeds_share:
+    "La quote-part du cabinet de ce fichier dépasse ce qui lui revient maintenant (une avance, des frais ou une couverture ont été comptabilisés depuis sa génération) : le fichier est remplacé, la quote-part sera recalculée.",
   // M2c-6a review, round 2 (D4): a cancelled file executed late after all — filing it again would pay twice
   already_debited:
     "Un relevé montre déjà le débit de ce virement — sous sa référence de bout en bout, celle du virement qu'il remplace, ou dans une ligne groupée d'un fichier annulé depuis (exécuté plus tard malgré tout) : il reste hors des fichiers pour ne pas payer deux fois. Ne le refaites pas ; le débit sera rattaché (prévenez le support)",
@@ -1015,8 +1018,14 @@ export function refusalFromSearch(
   return { code, blocked };
 }
 
-/** What the file's page says after a refused download (`already_downloaded` also opens the warning sheet). */
-export function refusalText(code: DownloadRefusal): string {
+/**
+ * What the file's page says after a refused download (`already_downloaded` also opens the warning sheet). M2c-6b-2a
+ * (critic2 CSO2-4): a file blocked only because its sweep exceeds the servicer's share now is replaced with its payouts
+ * ordered again — the text says they come back in the regenerated file, not that they stay out.
+ */
+export function refusalText(code: DownloadRefusal, blocked: readonly BlockedTransfer[] = []): string {
+  if (code === "file_blocked" && blocked.length > 0 && blocked.every((b) => b.reason === "sweep_exceeds_share"))
+    return "Le fichier n'a pas été servi et il est remplacé : seule la quote-part du cabinet a changé depuis sa génération. Régénérez-le maintenant : les reversements qu'il contenait y reviennent (leur date limite court toujours).";
   switch (code) {
     case "already_downloaded":
       return "Ce fichier a déjà été téléchargé : confirmez l'avertissement pour le télécharger de nouveau, et ne le déposez pas deux fois.";

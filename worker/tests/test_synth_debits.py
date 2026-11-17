@@ -11,8 +11,17 @@ from hypothesis import given, settings
 from test_pain001 import CF_IBAN, _files, mixed_example, worked_example
 
 from collectoo_worker.payments.camt053 import parse_camt053
+from collectoo_worker.payments.csv_import import parse_csv
+from collectoo_worker.payments.statement import KnownIbans, UnsplitDetail
 from collectoo_worker.remittance.pain001 import TransferFile, read, render
-from collectoo_worker.synth.camt053 import debits_of, make_doc, render_camt053
+from collectoo_worker.synth.camt053 import (
+    debits_of,
+    expected_csv,
+    expected_lines,
+    make_doc,
+    render_bank_csv,
+    render_camt053,
+)
 from collectoo_worker.synth.cli import main
 
 
@@ -37,14 +46,18 @@ def test_a_file_we_wrote_reads_back_as_written(f: TransferFile) -> None:
 
 
 def _parse(
-    tmp_path: Path, f: TransferFile, version: str = "02", **kw: object
+    tmp_path: Path,
+    f: TransferFile,
+    version: str = "02",
+    ibans: KnownIbans | None = None,
+    **kw: object,
 ) -> list[dict[str, object]]:
     entries = debits_of(read(render(f)), **kw)  # type: ignore[arg-type]
     days = [e.booking_date for e in entries]
     doc = make_doc(entries, iban=CF_IBAN, from_date=min(days), to_date=max(days))
     path = tmp_path / f"s{version}.xml"
     path.write_bytes(render_camt053(doc, version))
-    parsed = parse_camt053(path, iban=CF_IBAN, currency="EUR")
+    parsed = parse_camt053(path, iban=CF_IBAN, currency="EUR", ibans=ibans or KnownIbans())
     return [
         {
             "kind": x.kind,
@@ -55,6 +68,13 @@ def _parse(
             "pmt": x.payment_info_id,
             "code": x.bank_tx_code,
             "day": x.booking_date,
+            "reason": x.return_reason,
+            "iban": x.counterparty_iban,
+            "unsplit": x.unsplit_ours,
+            "details": x.unsplit_details,
+            "count": x.unsplit_detail_count,
+            "nb": x.unsplit_batch_count,
+            "charges": x.charges_minor,
         }
         for x in parsed.lines
     ]
@@ -159,3 +179,192 @@ def test_the_command(tmp_path: Path) -> None:
         ("return", 163_900),
     ]
     assert (out / "camt053-debits-TF-2026-000001-batch.manifest.json").is_file()
+
+
+# -- M2c-6b-2a (plan docs/design/m2c-6b-2-plan.md §6): the shapes ops book in 6b-2b -------------
+
+A, B = "RMT0A1B2C3D4E5F", "RMT1B2C3D4E5F60"
+
+
+@pytest.mark.parametrize("version", ["02", "08"])
+def test_a_debit_charge_in_the_iso_shape_is_kept_unsplit_with_its_charge(
+    tmp_path: Path, version: str
+) -> None:
+    """ML-6, CSO2-1: by default each debit is booked for N + charge on one entry, its detail
+    carrying N (AmtDtls/TxAmt), the charge in the entry's Chrgs: the parser keeps it unsplit
+    (class U) with its one detail at N and the stored charge."""
+    lines = _parse(tmp_path, worked_example("pain.001.001.09"), version, debit_charge_minor=120)
+    assert [
+        (x["kind"], x["amount"], x["unsplit"], x["details"], x["count"], x["charges"])
+        for x in lines
+    ] == [
+        ("batch_unsplit", 164_120, 1, (UnsplitDetail(A, "debit", 164_000),), 1, 120),
+        ("batch_unsplit", 451_256, 1, (UnsplitDetail(B, "debit", 451_136),), 1, 120),
+    ]
+
+
+def test_a_debit_charge_without_the_detail_s_amount_is_its_transfer_s_line(tmp_path: Path) -> None:
+    """`--debit-charge-no-detail-amount`: the detail has no amount, so it is the whole entry: our
+    transfer's own line (class E) for N + charge, the charge stored."""
+    lines = _parse(
+        tmp_path,
+        worked_example("pain.001.001.09"),
+        "08",
+        debit_charge_minor=120,
+        debit_charge_detail_amount=False,
+    )
+    assert [(x["kind"], x["amount"], x["e2e"], x["unsplit"], x["charges"]) for x in lines] == [
+        ("transfer_out", 164_120, A, None, 120),
+        ("transfer_out", 451_256, B, None, 120),
+    ]
+
+
+def test_unflagged_returns_come_from_the_payee_without_a_return_code(tmp_path: Path) -> None:
+    """`--unflagged-returns`: no return code, no reversal indicator, from the payee's IBAN — read as
+    our transfer coming back (a return by its id), or the client's credit when its IBAN is known."""
+    f = worked_example("pain.001.001.09")
+    payee = f.payment_infos[0].transactions[0].creditor_iban
+    lines = _parse(tmp_path, f, returns=[A], unflagged_returns=True)
+    back = [x for x in lines if x["direction"] == "credit"]
+    assert [(x["kind"], x["amount"], x["original"], x["reason"], x["iban"]) for x in back] == [
+        ("return", 164_000, A, None, payee)
+    ]
+    assert str(back[0]["code"]).split("/")[2] not in ("RRTN", "RPCR", "UPDD", "PRDD")
+    known = KnownIbans(clients=frozenset({payee}))
+    back = [
+        x
+        for x in _parse(tmp_path, f, ibans=known, returns=[A], unflagged_returns=True)
+        if x["direction"] == "credit"
+    ]
+    assert [(x["kind"], x["e2e"]) for x in back] == [("client_transfer_in", A)]
+
+
+def test_unsplit_details_of_ours_netted(tmp_path: Path) -> None:
+    """`--unsplit-details ours-netted` (v08): each PmtInf as one entry of its debits with the first
+    transfer's return netted in — every detail ours, with its amount and direction."""
+    lines = _parse(tmp_path, worked_example("pain.001.001.09"), "08", unsplit_details="ours-netted")
+    assert [
+        (x["kind"], x["direction"], x["amount"], x["unsplit"], x["details"], x["count"], x["nb"])
+        for x in lines
+    ] == [
+        (
+            "batch_unsplit",
+            "debit",
+            451_136,
+            3,
+            (
+                UnsplitDetail(A, "debit", 164_000),
+                UnsplitDetail(B, "debit", 451_136),
+                UnsplitDetail(A, "credit", 164_000),
+            ),
+            3,
+            3,
+        )
+    ]
+
+
+@pytest.mark.parametrize("version", ["02", "08"])
+def test_unsplit_details_without_amounts_or_beside_others(tmp_path: Path, version: str) -> None:
+    """ML-5: details without amounts; ours beside two details not ours netting to zero; ours beside
+    one detail not ours without an amount: each kept unsplit with its count."""
+    f = worked_example("pain.001.001.09")
+    none = _parse(tmp_path, f, version, unsplit_details="no-amounts")
+    assert [(x["amount"], x["unsplit"], x["details"], x["count"], x["nb"]) for x in none] == [
+        (615_136, 2, (UnsplitDetail(A, "debit", None), UnsplitDetail(B, "debit", None)), 2, 2)
+    ]
+    if version == "08":  # (details of both directions: v08's TxDtls/CdtDbtInd)
+        zero = _parse(tmp_path, f, version, unsplit_details="foreign-zero")
+        assert [(x["amount"], x["unsplit"], x["count"]) for x in zero] == [(615_136, 2, 4)]
+    other = _parse(tmp_path, f, version, unsplit_details="foreign")
+    assert [(x["amount"], x["unsplit"], x["count"]) for x in other] == [(620_136, 2, 3)]
+
+
+def test_the_netted_shapes_need_v08(tmp_path: Path) -> None:
+    entries = debits_of(
+        read(render(worked_example("pain.001.001.09"))), unsplit_details="ours-netted"
+    )
+    doc = make_doc(entries, iban=CF_IBAN, from_date=date(2026, 11, 3), to_date=date(2026, 11, 3))
+    with pytest.raises(ValueError, match="08"):
+        render_camt053(doc, "02")
+
+
+def test_a_csv_without_the_references_is_reference_less(tmp_path: Path) -> None:
+    """`--csv-without-references`: the label keeps no /REF, so our debits carry no end-to-end id
+    (rule 3b's lines, 6b-2b)."""
+    entries = debits_of(read(render(worked_example("pain.001.001.09"))))
+    doc = make_doc(entries, iban=CF_IBAN, from_date=date(2026, 11, 3), to_date=date(2026, 11, 3))
+    lines = expected_lines(doc)
+    path = tmp_path / "export.csv"
+    path.write_bytes(render_bank_csv(lines, bank_ids=False, references=False))
+    parsed = parse_csv(path, currency="EUR", today=date(2026, 11, 8))
+    want = expected_csv(lines, bank_ids=False, references=False)
+    assert (
+        [(x.direction, x.amount_minor, x.end_to_end_id, x.kind) for x in parsed.lines]
+        == [(w.direction, w.amount_minor, w.end_to_end_id, w.kind) for w in want]
+        == [("debit", 164_000, None, "other_debit"), ("debit", 451_136, None, "other_debit")]
+    )
+
+
+def test_the_command_writes_the_new_shapes(tmp_path: Path) -> None:
+    source = tmp_path / "TF-2026-000001.xml"
+    source.write_bytes(render(worked_example("pain.001.001.09")))
+    out = tmp_path / "out"
+    assert (
+        main(
+            [
+                "camt053",
+                "--debits-of",
+                str(source),
+                "--debit-charge",
+                "120",
+                "--return",
+                A,
+                "--unflagged-returns",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    parsed = parse_camt053(
+        out / "camt053-debits-TF-2026-000001-individual.xml", iban=CF_IBAN, currency="EUR"
+    )
+    assert [(x.kind, x.amount_minor, x.charges_minor) for x in parsed.lines] == [
+        ("batch_unsplit", 164_120, 120),
+        ("batch_unsplit", 451_256, 120),
+        ("return", 164_000, None),
+    ]
+    assert (
+        main(
+            [
+                "camt053",
+                "--debits-of",
+                str(source),
+                "--mode",
+                "batch",
+                "--unsplit-details",
+                "ours-netted",
+                "--version",
+                "08",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "camt053",
+                "--debits-of",
+                str(source),
+                "--csv",
+                "--csv-without-references",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    text = (out / "camt053-debits-TF-2026-000001-individual.csv").read_bytes().decode("cp1252")
+    assert "/REF" not in text and A not in text

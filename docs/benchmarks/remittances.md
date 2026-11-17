@@ -763,3 +763,22 @@ Round 4 reads a credit's original end-to-end id and PmtInfId in the import's cla
 
 The nested call per credit (a SQL function with `SET search_path` is never inlined) cost the re-import's ingest about
 1 s; the classifier now writes the predicate's arms out (the parity test and pgTAP `035` 127–128 pin both copies).
+
+## Transfer-line foundations (M2c-6b-2a, migration `20261117090000`; 2026-11-17, cloud session VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+6b-2a redefines the import's `private.ingest_statement` (the unsplit details, counts and charges validated, and compared
+on a re-import), the funds pass (`private.bank_booking_candidates`' two return facts, `private.post_bank_bookings`' two
+rules), the first download's sweep re-check and the nightly checks. Each scale test that crosses them, once:
+
+| Test | Result | Measured | Before (M2c-6b-1) |
+|---|---|---|---|
+| `test_debit_bookings_scale_integration.py` | **5 passed** (818 s) | the 5,000-member batch line's funds pass 20.8 s (21.7 s under auto_explain); 5,000 RMT debits imported in 1.2 s, the debit job 19.2 s in chunks of 7.5, 7.7 and 3.7 s; the nightly checks 1.02 s; 200 members 0.44 s; 200 RMT debits 0.72 s | 20.1 s; 1.0 s, 18.6 s (7.5, 7.1, 3.7 s); 1.15 s; 0.51 s; 0.54 s |
+| `test_transfer_files_scale_integration.py` (5,000 refunds in one file) | **1 passed** | generation 2.31 s, job 0.78 s, **download (command) 0.76 s**, cash check 0.10 / 0.08 s, « Virements » 0.12 s, the debit job 9.6 s, the nightly checks 0.22 s | 2.36 s, 0.95 s, 0.75 s |
+| `test_statement_scale_integration.py` (50,000-line camt.053) | **1 passed** | import job 26.1 s, of which ingest 8.8 s; the same lines again 6.7 s (ingest 1.4 s) | 24.3–26.2 s, 8.1–9.3 s; 6.3–7.3 s (1.4–2.3 s) |
+
+The sweep re-check adds one keyed read of the file's sweep and one sum of the servicer's 4679 to the first download; the
+return facts are read for return lines only, by key. `private.unique_subset` (no caller before
+6b-2b), on 500 amounts: the worst saturating input (5–90 €, t' = 8,000, the bit representation) trips the work bound in
+0.07–0.19 s (pgTAP `036` asserts < 0.5 s); 500 lots of 10–4,000 € for 50,000 € answer in 0.35 s; 500 nearly equal
+amounts of about 100,000 € (t'' past 2²³: the row representation) trip the partial-sum bound at item 199 in 1.4 s —
+the figure 6b-2b's command budget reads.
