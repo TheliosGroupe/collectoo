@@ -302,6 +302,13 @@ BATCH_PARTIAL = "batch_partial"  # a batch line its PmtInf's members do not add 
 BATCH_MIXED = "batch_mixed"  # payouts and refunds, or several refunds, in one line
 RETURN_DIFFERS = "return_differs"  # more than the transfer, or of a transfer not booked
 RETURN_BEFORE_DEBIT = "return_before_debit"  # its debit not booked, or booked on a later day
+# M2c-6b-2a (plan docs/design/m2c-6b-2-plan.md §2.3; critic F1, L5; critic2 ML-3): a return the job
+# never books — of a transfer that has an open unplanned booking (a booked or returned transfer
+# executed again, a cancelled one executed late: the copy that comes back is the unplanned payout's,
+# booked by ops as its return, never the planned payout's: that would pay the client twice), or of a
+# transfer whose second or late debit is on a statement and not booked yet (that debit first)
+UNPLANNED_PAYOUT_RETURN = "unplanned_payout_return"
+RETURN_DEBIT_PENDING = "return_debit_pending"
 
 BOOKING_REVIEW_REASONS = frozenset(
     {
@@ -319,11 +326,15 @@ BOOKING_REVIEW_REASONS = frozenset(
         BATCH_MIXED,
         RETURN_DIFFERS,
         RETURN_BEFORE_DEBIT,
+        UNPLANNED_PAYOUT_RETURN,
+        RETURN_DEBIT_PENDING,
     }
 )
-# the reviews that are a P0 (money may have left twice, or for a transfer we never handed out)
+# the reviews that are a P0 (money may have left twice, or for a transfer we never handed out;
+# M2c-6b-2a, critic L14: or a line carrying a reference of ours no transfer of ours has, debit or
+# credit) — the alerts' P0 set (private.run_transfer_checks) and « À classer »'s (P0_DEBIT_REVIEWS)
 P0_REVIEWS = frozenset(
-    {CANCELLED_TRANSFER_DEBITED, TRANSFER_DEBITED_TWICE, TRANSFER_NOT_HANDED_OUT}
+    {CANCELLED_TRANSFER_DEBITED, TRANSFER_DEBITED_TWICE, TRANSFER_NOT_HANDED_OUT, TRANSFER_UNKNOWN}
 )
 CHARGE_SUBFAMILIES = frozenset({"CHRG", "FEES"})
 OUR_ID = re.compile(r"^(RMT|SWP)[0-9A-F]{12}$")  # our payouts' and sweeps' end-to-end ids
@@ -361,6 +372,11 @@ class TransferFact:
     return_seen: bool = False  # (cancelled) the bank returned it: it was paid in its batch
     # (booked) its debit's date: its entry's, as the SQL re-check reads it
     debit_date: date | None = None
+    # M2c-6b-2a (a return's facts, private.bank_booking_candidates): an unplanned booking of it
+    # (unplanned_payout / unplanned_sweep) whose entry is not reversed; a debit line of it on a
+    # statement not booked beyond its booked debit (private.transfer_late_lines)
+    unplanned_open: bool = False
+    debit_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,6 +465,93 @@ def amounts_make_up(amounts: Iterable[int], target: int) -> bool:
         if len(sums) > MAKE_UP_BOUND:
             return True
     return False
+
+
+# -- M2c-6b-2a: the only subset of a lot (plan §2.5; critic2 CSO2-2) -----------------------------
+
+LOT_CAP = 500  # private.transfer_line_lot_cap(): a lot of more items is refused lot_too_large
+SUBSET_SUMS_BOUND = 10_000  # partial sums kept (as amounts_make_up)
+SUBSET_PATHS_BOUND = 200_000  # path entries stored for the sums one subset alone reaches
+SUBSET_WORK_BOUND = 1_000_000  # Σ over the items visited of the number of partial sums
+
+
+@dataclass(frozen=True, slots=True)
+class SubsetTrace:
+    """What unique_subset answered (`indexes`, 1-based, or None) and, when a bound stopped it,
+    which (`cap`, `sums`, `paths`, `work`) and at which item (`tripped_at`; 0 for the cap)."""
+
+    indexes: tuple[int, ...] | None
+    tripped_at: int | None = None
+    bound: str | None = None
+
+
+def unique_subset_trace(  # noqa: PLR0911, PLR0912, PLR0913 - one exit per bound, as the SQL twin's
+    amounts: Sequence[int],
+    target: int,
+    *,
+    sums_bound: int = SUBSET_SUMS_BOUND,
+    paths_bound: int = SUBSET_PATHS_BOUND,
+    work_bound: int = SUBSET_WORK_BOUND,
+    cap: int = LOT_CAP,
+) -> SubsetTrace:
+    """The twin of SQL `private.unique_subset_trace` (pgTAP 036 D; the integration test compares
+    them): the only subset of `amounts` summing to `target`, by a dynamic programme over partial
+    sums with a count capped at 2 and, for a count of 1, its path. It works on the smaller side
+    t' = min(target, Σ - target) (a subset makes t iff its complement makes Σ - t) and answers the
+    complement when t' is not the target. Amounts above t' are skipped; the others are visited in
+    the order given (the callers pass a PmtInf's items by seq), so both twins trip a bound at the
+    same item. None: no subset, several, an amount that is not positive, or past a bound — more
+    amounts than the lot cap (at once), more than `sums_bound` partial sums, more than
+    `paths_bound` path entries stored, or more than `work_bound` (Σ over the items visited of the
+    number of partial sums before it: the bound on the run time)."""
+    n = len(amounts)
+    if n > cap:
+        return SubsetTrace(None, 0, "cap")
+    if target < 0 or any(a <= 0 for a in amounts):
+        return SubsetTrace(None)
+    total = sum(amounts)
+    if target > total:
+        return SubsetTrace(None)
+    t = min(target, total - target)
+    # sum -> (count capped at 2, its path when the count is 1)
+    sums: dict[int, tuple[int, tuple[int, ...] | None]] = {0: (1, ())}
+    work = 0
+    for i, a in enumerate(amounts, start=1):
+        if a > t:
+            continue
+        work += len(sums)
+        if work > work_bound:
+            return SubsetTrace(None, i, "work")
+        new = dict(sums)
+        for s, (count, path) in sums.items():
+            u = s + a
+            if u > t:
+                continue
+            had = sums.get(u, (0, None))
+            reached = min(2, had[0] + count)
+            if reached == 1:
+                new[u] = (1, had[1] if had[0] == 1 else (*(path or ()), i))
+            else:
+                new[u] = (2, None)
+        sums = new
+        if len(sums) > sums_bound:
+            return SubsetTrace(None, i, "sums")
+        if sum(len(p or ()) for c, p in sums.values() if c == 1) > paths_bound:
+            return SubsetTrace(None, i, "paths")
+    count, path = sums.get(t, (0, None))
+    if count != 1 or path is None:
+        return SubsetTrace(None)
+    if t == target:
+        return SubsetTrace(path)
+    chosen = set(path)
+    return SubsetTrace(tuple(k for k in range(1, n + 1) if k not in chosen))
+
+
+def unique_subset(amounts: Sequence[int], target: int) -> list[int] | None:
+    """The 1-based indexes of the only subset of `amounts` summing to `target`, or None
+    (`unique_subset_trace` with the default bounds; SQL `private.unique_subset`)."""
+    out = unique_subset_trace(amounts, target)
+    return None if out.indexes is None else list(out.indexes)
 
 
 def _signal(f: TransferFact) -> dict[str, Any]:
@@ -565,6 +668,12 @@ def _transfer_return(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one r
     f = named[0]
     if f.status in ("ordered", "in_file"):
         return _funds_review(line, RETURN_BEFORE_DEBIT, named)
+    # M2c-6b-2a (critic F1, L5): a copy coming back closes the unplanned payout first (ops); then
+    # (critic2 ML-3) a debit pending on a statement is booked first
+    if f.unplanned_open:
+        return _funds_review(line, UNPLANNED_PAYOUT_RETURN, named)
+    if f.debit_pending:
+        return _funds_review(line, RETURN_DEBIT_PENDING, named)
     if f.status != "booked" or not f.debit_booked or f.return_booked:
         return _funds_review(line, RETURN_DIFFERS, named)
     if f.debtor_bank_account_id != line.bank_account_id or f.currency != line.currency:

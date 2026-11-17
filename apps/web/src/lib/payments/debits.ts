@@ -174,6 +174,18 @@ export const DEBIT_REVIEW: Record<string, string> = {
   // review M2c-6b-1 (T4, K5): also a return dated before its debit (the ledger never dates a reversal before its entry)
   return_before_debit:
     "Retour d'un virement du cabinet sans débit comptabilisé avant lui. Si le débit n'est pas encore comptabilisé, le retour est repris automatiquement à l'import d'un relevé, une fois le débit comptabilisé. S'il est daté d'avant le débit, rien n'est comptabilisé : vérifiez les deux lignes dans la banque et prévenez le support.",
+  // M2c-6b-2a (plan §2.6; critic2 CSO2-14, ML-3): the job's two returns it never books — worded while no screen books
+  // them (6b-2c rewords both with « Virement revenu »)
+  unplanned_payout_return:
+    "Retour d'un virement du cabinet (reversement ou quote-part) qui a aussi été exécuté hors de son ordre (virement annulé exécuté quand même, ou exécuté deux fois) : rien n'est comptabilisé automatiquement. Ce retour est celui du virement exécuté hors ordre, pas du reversement ni de la quote-part : prévenez le support.",
+  // review M2c-6b-2a (M1): that debit may be a copy held in « Doublons possibles » (private.transfer_late_lines counts a
+  // held line, never one decided a duplicate; public.resolve_duplicate then queues the debit job)
+  return_debit_pending:
+    "Retour d'un virement du cabinet dont un autre débit (second débit, ou débit après annulation) figure sur un relevé sans être encore comptabilisé : rien n'est comptabilisé automatiquement. Si ce débit attend dans « Doublons possibles », décidez-le d'abord : reconnu comme doublon, il ne compte plus et le retour est repris automatiquement. Sinon, ce débit se comptabilise d'abord ; prévenez le support.",
+  // M2c-6b-2a (S20, OQ-84 (i)): the M2b pass's own reason — a link it decided, refused because the line is ours; review
+  // M2c-6b-2a (T6): no screen promised while none books these lines
+  own_transfer_line:
+    "Ligne de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : elle ne se rattache à aucun paiement ni remboursement, et rien n'est comptabilisé automatiquement. Collectoo ne peut pas encore la comptabiliser depuis cet écran : prévenez le support.",
 };
 
 /** The reasons that may mean money left twice or without an order (P0, first in « À classer »; plan §2.3). */
@@ -1059,6 +1071,19 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     help: "La part du cabinet reste sur le compte dédié depuis plus de deux jours ouvrés sans virement vers son compte propre : générez le fichier de virements.",
   },
   // review M2c-6b-1 (legal-texts#4): a top-up moves the servicer's own money to the dedicated account (+5120 / −4679)
+  // M2c-6b-2a (plan §2.6, §7.1; critic L14, L10)
+  transfer_unknown: {
+    label: "Référence du cabinet inconnue",
+    help: "Ligne (débit ou crédit) portant une référence de virement du cabinet (RMT, SWP) ou un lot que Collectoo ne connaît pas : vérifiez dans la banque.",
+  },
+  own_transfer_payment: {
+    label: "Paiement créé à partir d'un virement du cabinet revenu",
+    help: "Paiement créé à partir d'un de nos virements revenus (il porte la référence d'un reversement, d'une quote-part du cabinet ou d'un lot de nos fichiers) : ces sommes ne sont reversées à personne tant qu'il n'est pas traité. Ne l'affectez pas, ne le remboursez pas, prévenez le support.",
+  },
+  double_payout_open: {
+    label: "Avance du cabinet après un virement hors reversement",
+    help: "Avance du cabinet après un virement exécuté hors reversement : à récupérer auprès du client — ce recouvrement n'est pas encore géré dans Collectoo.",
+  },
   top_up_pending: {
     label: "Approvisionnement attendu",
     help: "Un approvisionnement du compte dédié depuis le compte propre du cabinet a été demandé il y a plus d'un jour ouvré et son crédit n'apparaît pas encore sur les relevés importés. Vérifiez le virement depuis le compte propre : il couvre ce que le cabinet doit au compte dédié (frais bancaires, avances).",
@@ -1090,6 +1115,9 @@ const TRANSFER_CHECKS = new Set([
   "payout_overrun",
   "servicer_funds_unswept",
   "top_up_pending",
+  // M2c-6b-2a
+  "transfer_unknown",
+  "double_payout_open",
 ]);
 
 /**

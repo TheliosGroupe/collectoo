@@ -2848,12 +2848,14 @@ begin
                                              pg_temp.f('7a'))))),
     'ordinary', pg_temp.assign('n1-assign-0004', p[4], pg_temp.f('7a')) = pg_temp.f('7a')::text);
 end $$;
+-- M2c-6b-2a (plan §2.6, S23): the hint no longer promises a screen — Collectoo cannot book it as that return yet
 select is(pg_temp.isolated('sc_n1_assign'),
           jsonb_build_object(
             'rmt', 'payment assignment refused: own_transfer_line | Ce paiement vient d''une ligne qui porte la référence '
                    'de l''un de nos propres virements (reversement, quote-part du cabinet, lot de notre fichier) : c''est '
-                   'ce virement qui revient, pas le paiement d''un débiteur. Il ne s''affecte à aucun dossier : il se '
-                   'comptabilise depuis le relevé, par l''équipe (écran à venir). Prévenez le support.',
+                   'ce virement qui revient, pas le paiement d''un débiteur. Il ne s''affecte à aucun dossier, et '
+                   'Collectoo ne peut pas encore le comptabiliser comme le retour de ce virement (un paiement '
+                   'enregistré ne se défait pas ; prévu avec M2c-7) : prévenez le support.',
             'others', to_jsonb(array_fill('payment assignment refused: own_transfer_line'::text, array[2])),
             'ordinary', true),
   'N1: assign_payment refuses a payment whose line carries our RMT id, returns our SWP id or names our PmtInfId '
@@ -2959,12 +2961,14 @@ begin
     'payments', (select count(*) from public.payment p
                  where p.bank_transaction_id in (pg_temp.ln('74', 1), pg_temp.ln('74', 2), pg_temp.ln('74', 3))));
 end $$;
+-- M2c-6b-2a (plan §2.6, S23): the hint no longer promises a screen — the line stays in « Doublons possibles »
 select is(pg_temp.isolated('sc_n1_release_dup'),
           jsonb_build_object(
             'recorded', 'duplicate release refused: own_transfer_line | Cette ligne porte la référence de l''un de nos '
                         'propres virements (reversement, quote-part du cabinet, lot de notre fichier) : c''est ce '
-                        'virement qui revient, jamais le paiement d''un débiteur. Elle se comptabilise depuis le relevé, '
-                        'par l''équipe (écran à venir). Prévenez le support.',
+                        'virement qui revient, jamais le paiement d''un débiteur. Lue ainsi avant la correction de '
+                        'l''import, elle ne peut être ni libérée comme un paiement ni encore comptabilisée comme ce '
+                        'retour : elle reste dans « Doublons possibles ». Prévenez le support.',
             'facts', 'return payment=false', 'lot', 'return payment=false', 'funds_pass', 'return:return',
             'ordinary', 'debtor_credit payment=true', 'payments', 1),
   'N1: a held line carrying our ids (our SWP or RMT id, our PmtInfId) is released as a return (no payment; the funds '
@@ -3083,7 +3087,9 @@ begin
                             'r4', pg_temp.status(pg_temp.trid('r4')));
 end $$;
 create or replace function pg_temp.sc_r1_unsplit_return() returns jsonb language plpgsql as $$
-declare v_e2e text := pg_temp.e2e(pg_temp.trid('r2'));
+declare
+  v_e2e text := pg_temp.e2e(pg_temp.trid('r2'));
+  v_pending jsonb;
 begin
   perform pg_temp.stmt('b2', private.paris_today(), jsonb_build_array(
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840 - 32800, 'orig', v_e2e, 'unsplit', 2),
@@ -3094,7 +3100,14 @@ begin
     -- review round 7 (S1): a count of 0 naming r2 all the same (no parser writes it), and a line of its own, exact
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', v_e2e, 'unsplit', 0),
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', v_e2e)));
+  -- M2c-6b-2a (critic2 ML-3): r2's second debit (b4, reviewed transfer_debited_twice above) is still on the statement,
+  -- unbooked: every return of r2 waits for it, the line of its own included
+  v_pending := pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 7)))::jsonb;
+  -- R1's rules read with that debit set aside (stubbed here; the scenario rolls back)
+  create or replace function private.transfer_late_lines(p_transfer_id uuid) returns setof uuid language sql stable
+  set search_path = '' as $f$ select null::uuid where false $f$;
   return jsonb_build_object(
+    'pending', v_pending,
     'read', (select jsonb_agg(c.unsplit_ours order by c.line_id)
              from private.bank_booking_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100000) c
              where c.line_id in (select pg_temp.ln('b2', k) from generate_series(1, 7) k)),
@@ -3107,7 +3120,9 @@ begin
     'own_exact', pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 7)))::jsonb);
 end $$;
 select is(pg_temp.isolated('sc_r1_unsplit_return'),
-          '{"read": [2, 1, 2, null, 1, 0, null],
+          '{"pending": {"why": "return_debit_pending", "review": "return_debit_pending", "bookings": [], "r2": "booked",
+                        "r4": "in_file"},
+            "read": [2, 1, 2, null, 1, 0, null],
             "netted": {"why": "return_differs", "review": "changed:return_differs", "bookings": [], "r2": "booked",
                        "r4": "in_file"},
             "chargeback": {"why": "return_differs", "review": "changed:return_differs", "bookings": [], "r2": "booked",
@@ -3124,7 +3139,8 @@ select is(pg_temp.isolated('sc_r1_unsplit_return'),
                           "r4": "in_file"}}'::jsonb,
   'R1, narrowed by round 7 (S1): a line of an entry kept unsplit is never our transfer''s return, whatever its count and '
   'amount (netted, a chargeback, several of ours, one of ours for the exact amount): refused return_differs, nothing '
-  'booked, r4 untouched; a line of its own is (exact, or less the charges with the fee)');
+  'booked, r4 untouched; a line of its own is (exact, or less the charges with the fee) — M2c-6b-2a: while r2''s second '
+  'debit is unbooked, every return of r2 is reviewed return_debit_pending first');
 -- the count is the parser's (staged with the line, kept by private.ingest_statement), recorded only on a camt.053 line
 -- of an entry (batch_entry_ref), never negative
 create or replace function pg_temp.r1_stage(p_n integer, p_format text, p_unsplit smallint, p_ref text)

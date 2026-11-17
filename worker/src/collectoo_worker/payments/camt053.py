@@ -66,6 +66,7 @@ from collectoo_worker.payments.statement import (
     Section,
     StatementLine,
     StatementRejected,
+    UnsplitDetail,
     check_balanced,
     check_dates,
     classify,
@@ -347,7 +348,8 @@ class _Reader:
             info=first(f, "AddtlNtryInf"),
             payment_info_id=_max35(next(iter(self.q.texts(ntry, "NtryDtls/Btch/PmtInfId")), None)),
         )
-        txs = [self.q.flat(tx) for tx in ntry.findall(self.q.path("NtryDtls/TxDtls"))]
+        tx_elems = ntry.findall(self.q.path("NtryDtls/TxDtls"))
+        txs = [self.q.flat(tx) for tx in tx_elems]
         counts = self.q.texts(ntry, "NtryDtls/Btch/NbOfTxs")
         batch = max((int(c) for c in counts if c.isdigit()), default=0)
         parts = self.split(entry, txs)
@@ -372,14 +374,35 @@ class _Reader:
                 if len(txs) == 1 and _direction(txs[0], entry.direction) == entry.direction
                 else {}
             )
-            self.add(entry, single, amount, 1, unsplit=True, batch=True, details=txs)
+            self.add(
+                entry,
+                single,
+                amount,
+                1,
+                unsplit=True,
+                batch=True,
+                details=txs,
+                batch_count=batch,
+                charges=self.charges(ntry, tx_elems),
+            )
         elif not txs:
-            self.add(entry, {}, amount, 1, unsplit=False, batch=False)
+            self.add(entry, {}, amount, 1, unsplit=False, batch=False, charges=self.charges(ntry))
         else:
             refs = [first(tx, "Refs/AcctSvcrRef") for tx in txs]
             own_refs = None not in refs and len(set(refs)) == len(refs)
+            # M2c-6b-2a: the charges belong to a line only when it is its entry's only line
+            charges = self.charges(ntry, tx_elems) if len(txs) == 1 else None
             for i, (tx, part) in enumerate(zip(txs, parts, strict=True), start=1):
-                self.add(entry, tx, part, i, unsplit=False, batch=len(txs) > 1, own_ref=own_refs)
+                self.add(
+                    entry,
+                    tx,
+                    part,
+                    i,
+                    unsplit=False,
+                    batch=len(txs) > 1,
+                    own_ref=own_refs,
+                    charges=charges,
+                )
 
     def split(self, entry: _Entry, txs: list[Flat]) -> list[int] | None:
         """Amounts of the transactions, or None when they do not add up to the entry."""
@@ -420,6 +443,83 @@ class _Reader:
         except ValueError:
             return False
 
+    def detail_amount(self, tx: Flat) -> int | None:
+        """A detail's own amount as split() and whole() read it (M2c-6b-2a, critic2 CSO2-9, ML-6):
+        `Amt` when present, else `AmtDtls/TxAmt/Amt`, in the statement's currency; None when it
+        gives none, in another currency, or not a positive amount (read leniently, as whole())."""
+        path = "Amt" if "Amt" in tx else "AmtDtls/TxAmt/Amt"
+        text = first(tx, path)
+        if text is None or first(tx, path + "@Ccy") != self.currency:
+            return None
+        try:
+            minor = iso_to_minor(text, self.exponent)
+        except ValueError:
+            return None
+        return minor if minor > 0 else None
+
+    def charges(self, ntry: Element, tx_elems: list[Element] | None = None) -> int | None:
+        """The charges the statement records for an entry that is one line (M2c-6b-2a, plan §2.1;
+        critic2 ML-6, ML-10, CSO2-1): from `Ntry/Chrgs` and, when the entry has one detail, that
+        detail's `Chrgs` — the two must agree when both are given. None when there are none, when a
+        record cannot be read as the bank's debit in the account's currency included in the entry
+        amount, or when the entry has several details and one of them carries a record (not this
+        line's to read). Never a refusal of the file: nothing is inferred."""
+        details = tx_elems or []
+        seen, total = self.charge_records(ntry)
+        if len(details) > 1:
+            if any(d.find(self.q.path("Chrgs")) is not None for d in details):
+                return None
+            return total if seen else None
+        if len(details) == 1:
+            tx_seen, tx_total = self.charge_records(details[0])
+            if seen and tx_seen:
+                return total if total is not None and total == tx_total else None
+            if tx_seen:
+                return tx_total
+        return total if seen else None
+
+    def charge_records(self, elem: Element) -> tuple[bool, int | None]:
+        """(seen, total) of the `Chrgs` of an <Ntry> or a <TxDtls>: the records of camt.053.001.04
+        and later (`Chrgs/Rcrd`). Each must be a debit (`CdtDbtInd` DBIT), in the account's
+        currency, positive, and included in the entry amount (`ChrgInclInd` absent or true); one
+        that is not makes the total None. Review M2c-6b-2a (M3): a `Chrgs` without records — .02's
+        shape, its `Amt` on the block itself with no direction nor inclusion indicator, as we read
+        the message definition (no XSD vendored, COMPLIANCE OQ-84 (j)) — never says the charge is
+        the bank's debit included in the entry: seen, never read (None), whatever else it holds."""
+        q = self.q
+        blocks = elem.findall(q.path("Chrgs"))
+        if not blocks:
+            return False, None
+        total = 0
+        for block in blocks:
+            records = block.findall(q.path("Rcrd"))
+            if not records:
+                return True, None
+            for record in records:
+                amount = self.charge_record(record)
+                if amount is None:
+                    return True, None
+                total += amount
+        return True, total
+
+    def charge_record(self, record: Element) -> int | None:
+        """One charges record in minor units, or None when it is not the bank's debit in the
+        account's currency included in the entry amount."""
+        q = self.q
+        amt = record.find(q.path("Amt"))
+        text = None if amt is None or amt.text is None else amt.text.strip()
+        if amt is None or not text or amt.get("Ccy") != self.currency:
+            return None
+        if q.text(record, "CdtDbtInd") != "DBIT":
+            return None
+        if (q.text(record, "ChrgInclInd") or "true").lower() not in ("true", "1"):  # xs:boolean
+            return None
+        try:
+            minor = iso_to_minor(text, self.exponent)
+        except ValueError:
+            return None
+        return minor if minor > 0 else None
+
     def add(  # noqa: PLR0913 - one line: its entry, its details and how it was split
         self,
         entry: _Entry,
@@ -431,9 +531,13 @@ class _Reader:
         batch: bool,
         own_ref: bool = False,
         details: list[Flat] | None = None,
+        batch_count: int = 0,
+        charges: int | None = None,
     ) -> None:
         """One line. `index` is 1-based within its entry; `details` are every TxDtls of an entry
-        kept as one unsplit line (a return reason or sub-family in any of them counts)."""
+        kept as one unsplit line (a return reason or sub-family in any of them counts), and
+        `batch_count` its NbOfTxs (0: absent); `charges` what the statement records for a line that
+        is its entry's only line (M2c-6b-2a)."""
         details = details or []
         credit = entry.direction == "credit"
         side, other = ("Dbtr", "Cdtr") if credit else ("Cdtr", "Dbtr")
@@ -456,6 +560,7 @@ class _Reader:
         family, sub_family = _family(code)
         original = first(tx, "RtrInf/OrgnlEndToEndId")
         unsplit_ours: int | None = None
+        unsplit_details: tuple[UnsplitDetail, ...] | None = None
         kind = classify(
             entry.direction,
             reversal=entry.reversal,
@@ -492,6 +597,13 @@ class _Reader:
             # records how many of its details are ours; since round 7 (S1, S2) the funds pass never
             # books such a line holding ours, nor does anything link it (payments.debits).
             unsplit_ours = len(mine)
+            # M2c-6b-2a (plan §2.2; critic F8, L11): each of those details as the statement gives it
+            # — its id (as _our_ids reads it), its direction, its own amount — in the file's order
+            unsplit_details = tuple(
+                UnsplitDetail(ours, _direction(d, entry.direction), self.detail_amount(d))
+                for d, ours in ((d, _issued(d)) for d in details)
+                if ours is not None
+            )
             # Review round 5 (Q2), round 6's wording: such a batch keeps that identification on
             # its line, unless what the line carries names one of our transfers already, so every
             # refusal reading `names_our_transfer` on the stored line sees it (before round 5: no
@@ -552,6 +664,11 @@ class _Reader:
                 entry_ref=entry.ref,
                 payment_info_id=entry.payment_info_id,
                 unsplit_ours=unsplit_ours,
+                unsplit_details=unsplit_details,
+                # critic2 ML-5: every detail of the entry (ours or not) and its NbOfTxs
+                unsplit_detail_count=len(details) if unsplit else None,
+                unsplit_batch_count=(batch_count or None) if unsplit else None,
+                charges_minor=charges,
             )
         )
 
@@ -667,10 +784,17 @@ def _our_ids(details: list[Flat]) -> list[str]:
     detail (a detail is never counted twice, an id may be)."""
     out: list[str] = []
     for d in details:
-        ours = issued_id(_provided(first(d, "Refs/EndToEndId")), first(d, "RtrInf/OrgnlEndToEndId"))
+        ours = _issued(d)
         if ours is not None:
             out.append(ours)
     return out
+
+
+def _issued(detail: Flat) -> str | None:
+    """The id we issued a detail carries (its original one when that is ours), else None."""
+    return issued_id(
+        _provided(first(detail, "Refs/EndToEndId")), first(detail, "RtrInf/OrgnlEndToEndId")
+    )
 
 
 def _iso_date(text: str, where: str) -> date:

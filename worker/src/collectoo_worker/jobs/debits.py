@@ -262,6 +262,8 @@ def _fact(row: dict[str, Any]) -> TransferFact | None:
         return_booked=bool(row["return_booked"]),
         return_seen=bool(row["return_seen"]),
         debit_date=row.get("debit_date"),
+        unplanned_open=bool(row.get("unplanned_open")),
+        debit_pending=bool(row.get("debit_pending")),
     )
 
 

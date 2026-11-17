@@ -25,6 +25,7 @@ from collectoo_worker.payments.debits import (
     OWN_TRANSFER_OUT,
     P0_REVIEWS,
     RETURN_BEFORE_DEBIT,
+    RETURN_DEBIT_PENDING,
     RETURN_DIFFERS,
     RUN_NOT_IN_FLIGHT,
     TOP_UP_DIFFERS,
@@ -33,6 +34,7 @@ from collectoo_worker.payments.debits import (
     TRANSFER_DIFFERS,
     TRANSFER_NOT_HANDED_OUT,
     TRANSFER_UNKNOWN,
+    UNPLANNED_PAYOUT_RETURN,
     Booking,
     DebitLine,
     FundsLine,
@@ -67,6 +69,8 @@ def fact(  # noqa: PLR0913 - a transfer's facts
     return_booked: bool = False,
     return_seen: bool = False,
     debit_date: date | None = None,
+    unplanned_open: bool = False,
+    debit_pending: bool = False,
 ) -> TransferFact:
     return TransferFact(
         id=tid,
@@ -88,6 +92,8 @@ def fact(  # noqa: PLR0913 - a transfer's facts
         return_booked=return_booked,
         return_seen=return_seen,
         debit_date=debit_date,
+        unplanned_open=unplanned_open,
+        debit_pending=debit_pending,
     )
 
 
@@ -454,6 +460,12 @@ def worlds(draw: st.DrawFn) -> list[FundsLine]:
                 debit_date=DAY + timedelta(days=draw(st.integers(0, 2)))
                 if status in ("booked", "returned")
                 else None,
+                # M2c-6b-2a (critic F1, critic2 ML-3): an open unplanned booking of a debited or
+                # cancelled transfer, a second or late debit of it on a statement not booked
+                unplanned_open=status in ("booked", "returned", "cancelled")
+                and draw(st.sampled_from([False, False, True])),
+                debit_pending=status in ("booked", "returned", "cancelled")
+                and draw(st.sampled_from([False, False, True])),
             )
         )
     lines: list[FundsLine] = []
@@ -547,6 +559,9 @@ def test_a_booking_only_when_every_condition_holds(lines: list[FundsLine]) -> No
             assert line.amount_minor <= f.amount_minor and f.id not in returned
             assert f.debit_date is None or line.booking_date >= f.debit_date
             assert line.unsplit_ours is None  # R1, S1: a line of its own only
+            # M2c-6b-2a: never the return of a transfer with an open unplanned booking or a debit
+            # pending on a statement (the unplanned booking's return, by ops; its debit first)
+            assert not f.unplanned_open and not f.debit_pending
             returned.add(f.id)
 
 
@@ -659,4 +674,6 @@ def test_the_worlds_book_batch_lines_and_reach_every_review() -> None:
         TRANSFER_NOT_HANDED_OUT,
         RETURN_BEFORE_DEBIT,
         RETURN_DIFFERS,
+        UNPLANNED_PAYOUT_RETURN,
+        RETURN_DEBIT_PENDING,
     } <= seen

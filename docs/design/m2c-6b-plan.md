@@ -406,7 +406,7 @@ downloaded file cancelled since (the round-7 verifier's candidate). Also new at 
   re-asserts every round-5/6 gate (`bank_booking_required` ×5, both guards, run guard as postgres and service_role,
   `payout_in_downloaded_file`, `in_downloaded_file`), so the 26 round-5/6 mutants stay killed; `file_executed` and G2's
   refund rule asserted both ways.
-- New `038_switch_on_followups`: late predecessor booking (allowed, `reissue_in_downloaded_file`), release with a booked
+- New `039_switch_on_followups` (M2c-6b-2 takes `036`–`038`: docs/design/m2c-6b-2-plan.md §1.4): late predecessor booking (allowed, `reissue_in_downloaded_file`), release with a booked
   run, sweep proposals resume after an `unplanned_sweep` booking, S3 created after that booking not held.
   **[critic]** It also covers:
   - the return of a late predecessor;

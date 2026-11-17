@@ -763,3 +763,42 @@ Round 4 reads a credit's original end-to-end id and PmtInfId in the import's cla
 
 The nested call per credit (a SQL function with `SET search_path` is never inlined) cost the re-import's ingest about
 1 s; the classifier now writes the predicate's arms out (the parity test and pgTAP `035` 127–128 pin both copies).
+
+## Transfer-line foundations (M2c-6b-2a, migration `20261117090000`; 2026-11-17, cloud session VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+6b-2a redefines the import's `private.ingest_statement` (the unsplit details, counts and charges validated, and compared
+on a re-import), the funds pass (`private.bank_booking_candidates`' two return facts, `private.post_bank_bookings`' two
+rules), the first download's sweep re-check and the nightly checks. Each scale test that crosses them, once:
+
+| Test | Result | Measured | Before (M2c-6b-1) |
+|---|---|---|---|
+| `test_debit_bookings_scale_integration.py` | **5 passed** (818 s) | the 5,000-member batch line's funds pass 20.8 s (21.7 s under auto_explain); 5,000 RMT debits imported in 1.2 s, the debit job 19.2 s in chunks of 7.5, 7.7 and 3.7 s; the nightly checks 1.02 s; 200 members 0.44 s; 200 RMT debits 0.72 s | 20.1 s; 1.0 s, 18.6 s (7.5, 7.1, 3.7 s); 1.15 s; 0.51 s; 0.54 s |
+| `test_transfer_files_scale_integration.py` (5,000 refunds in one file) | **1 passed** | generation 2.31 s, job 0.78 s, **download (command) 0.76 s**, cash check 0.10 / 0.08 s, « Virements » 0.12 s, the debit job 9.6 s, the nightly checks 0.22 s | 2.36 s, 0.95 s, 0.75 s |
+| `test_statement_scale_integration.py` (50,000-line camt.053) | **1 passed** | import job 26.1 s, of which ingest 8.8 s; the same lines again 6.7 s (ingest 1.4 s) | 24.3–26.2 s, 8.1–9.3 s; 6.3–7.3 s (1.4–2.3 s) |
+
+The sweep re-check adds one keyed read of the file's sweep and one sum of the servicer's 4679 to the first download; the
+return facts are read for return lines only, by key. `private.unique_subset` (no caller before
+6b-2b), on 500 amounts: the worst saturating input of the bit representation (t'' below 2¹⁸ = 262,144; 5–90 €,
+t' = 8,000) trips the work bound in 0.07–0.19 s (pgTAP `036` asserts < 0.5 s).
+
+Corrected by the review fixes (CS-2, T7; 2026-11-17, same VM, `private.unique_subset_trace`, three runs each, in one
+rolled-back transaction): the worst input is the row representation (t'' at or past 2¹⁸) with its partial sums
+saturating just under the 10,000-sum bound, so that only the work bound or the last item stops it.
+
+| 500 amounts | t'' (representation) | Stopped by | Time |
+|---|---|---|---|
+| 5–90 € (pgTAP `036`'s worst), target 80 € | 8,000 (bits) | work, item 423 | 79 / 105 / 107 ms |
+| random 10–4,000 €, target 50,000 € | 5,000,000 (rows) | partial sums, item 14 | 101 / 104 / 115 ms |
+| random 100,000 € ± 10 €, target 2,500,000.01 € | 250,000,001 (rows) | partial sums, item 14 | 65 / 72 / 73 ms |
+| multiples of 10 € (10–200 €), target 26,000.01 € | 2,558,999 (rows) | none: all 500 items | 1,811 / 2,048 / 2,065 ms |
+| multiples of 1 € (1–200 €), target 9,999.99 € | 999,999 (rows) | work, item 151 | 1,812 / 2,113 / 2,520 ms |
+
+The last two rows are the figure 6b-2b's command budget and lot cap read (about 2.5 s at worst here, under half the API's
+8 s), not the 1.4 s this section gave before (500 nearly equal amounts of about 100,000 €, whose sums trip their bound
+early). Default (ADR-0014 « M2c-6b-2a review fixes »): 6b-2b's scale run times the row-mode saturating input.
+
+The review fixes also redefine `private.transfer_late_lines` (a keyed read of `bank_duplicate_resolution` per line it
+looks at), read by the funds pass's return facts and the nightly checks. `test_debit_bookings_scale_integration.py`
+once, on a fresh reset: **5 passed** (842 s) — the 5,000-member batch line's funds pass 20.7 s; 5,000 RMT debits
+imported in 1.2 s, the debit job 20.0 s in chunks of 7.6, 8.2 and 4.1 s; the nightly checks 1.14 s; 200 members
+0.54 s; 200 RMT debits 0.62 s (the build's: 20.8 s; 1.2 s, 19.2 s; 1.02 s; 0.44 s; 0.72 s).
