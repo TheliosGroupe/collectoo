@@ -13,12 +13,17 @@ export function parseEurosToMinor(text: string): bigint | null {
   const match = /^(-?)(\d+)(?:[.,](\d{1,2}))?$/.exec(compact);
   if (!match) return null;
   const [, sign, units, decimals = ""] = match;
-  const minor = BigInt(units) * BigInt(100) + BigInt(decimals.padEnd(2, "0") || "0");
+  const minor =
+    BigInt(units) * BigInt(100) + BigInt(decimals.padEnd(2, "0") || "0");
   if (minor > MAX_BIGINT) return null;
   return sign === "-" ? -minor : minor;
 }
 
-export type Proposal = { file_id: string; source_column: string; target: string | null };
+export type Proposal = {
+  file_id: string;
+  source_column: string;
+  target: string | null;
+};
 
 /** Field name of the select for one proposal in the mapping form. */
 export function mappingField(fileId: string, column: string): string {
@@ -225,7 +230,54 @@ export type ErrorCode =
   | "transfer_file_holds_debited"
   | "transfer_bank_booking_required"
   | "transfer_file_executed"
+  // M2c-6b-1 review (money-1, K1): our payouts' and sweeps' lines are booked from the statement, never linked
+  | "own_transfer_line"
+  // review round 3 (M1, M2): a credit carrying our RMT/SWP id is never a debtor's payment nor a top-up
+  | "own_credit_own_transfer_line"
+  // review round 4 (N2): a credit carrying our TOP id is our top-up, never a debtor's payment
+  | "own_credit_top_up_line"
+  // review round 4 (N1): a payment whose bank line carries one of our transfers' ids is never assigned to a file
+  | "payment_own_transfer_line"
+  // review round 5 (Q4): « Libérer » refuses a held line carrying one of our transfers' ids (public.resolve_duplicate)
+  | "duplicate_own_transfer_line"
   | "unknown";
+
+/**
+ * M2c-6b-1 review (legal-texts#3, with its verifier's qualification): what the statement books by itself. A payout's
+ * debit (and the return of one the payee's bank sends back after it) only when the line carries its RMT reference or
+ * its lot's PmtInfId; a line without them (a CSV export without the « référence de bout en bout » column) waits for
+ * ops, whose booking is M2c-6b-2's. A transfer the bank does not execute (refused, not authorised after « Nom non
+ * concordant », a file never deposited) leaves no line at all: nothing takes it out of « en cours » until the
+ * cancellation after download is available (M2c-6b-3, OQ-81).
+ */
+export const PAYOUT_BOOKED_WHEN =
+  "automatiquement à l'import quand la ligne porte sa référence RMT ou celle de son lot ; sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir";
+/** The same for a file's transfers: payouts and the sweep from the statement, a refund once its line is linked. */
+export const FILE_BOOKED_WHEN =
+  "à l'import du relevé : automatiquement pour un reversement ou la quote-part du cabinet dont la ligne porte la référence RMT ou SWP, ou celle de son lot, sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir ; dès son rattachement pour un remboursement";
+/** A payout the bank does not execute: no line on any statement. */
+export const PAYOUT_NOT_EXECUTED =
+  "Un virement que la banque n'exécute pas (refusé, ou non autorisé après un nom non concordant) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
+/** A file's transfer the bank does not execute (the file not deposited, a transfer refused): no line either. */
+export const FILE_TRANSFER_NOT_EXECUTED =
+  "Un virement que la banque n'exécute pas (fichier non déposé, virement refusé) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
+
+/**
+ * Review round 2 (L6; legal-texts#3's qualification, for the refunds of M2c-6a): a refund in a downloaded file leaves
+ * « en cours » when its debit is booked from the statement — by the debit job when the line carries its RFD reference,
+ * or its lot's PmtInfId when it is that lot's only transfer (private.pmt_inf_single_refund), else when ops link the line
+ * in « Débits et retours » — then the payee's bank's return, if one comes, is booked the same way. A refund the bank does
+ * not execute leaves no line at all: nothing reads its « rejection »; it stays « en cours » until the cancellation after
+ * download is available (M2c-6b-3, OQ-81).
+ */
+export const REFUND_BOOKED_WHEN =
+  "automatiquement à l'import quand la ligne porte sa référence RFD, ou celle de son lot quand il en est le seul virement ; sinon une fois la ligne rattachée au remboursement dans « Débits et retours »";
+/** A refund the payee's bank sends back after its debit: its return credit undoes it (the payment's amount free again). */
+export const REFUND_RETURNED =
+  "Si la banque du bénéficiaire le renvoie, son retour est comptabilisé de même et le montant redevient disponible sur le paiement.";
+/** A refund the bank does not execute: no line on any statement. */
+export const REFUND_NOT_EXECUTED =
+  "Un remboursement que la banque n'exécute pas (refusé avant son exécution, ou fichier jamais déposé) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
   not_allowed: "Action non autorisée pour votre rôle.",
@@ -236,20 +288,26 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Aucun mandat actif ne couvre ce portefeuille (art. R124-3 CPCE) : la confirmation est impossible.",
   duplicate_target: "Deux colonnes d'un même fichier ont la même cible.",
   name_taken: "Un autre fichier porte déjà ce nom dans ce lot : renommez-le.",
-  already_submitted: "Ce lot a déjà été déposé. Ouvrez-le depuis la liste des reprises.",
-  unsupported_type: "Type de fichier non pris en charge (CSV, Excel, largeur fixe ou zip).",
+  already_submitted:
+    "Ce lot a déjà été déposé. Ouvrez-le depuis la liste des reprises.",
+  unsupported_type:
+    "Type de fichier non pris en charge (CSV, Excel, largeur fixe ou zip).",
   missing_upload: "Un fichier n'a pas été envoyé. Réessayez.",
   state_changed: "Le lot a changé d'état entre-temps. Rechargez la page.",
   cut_off_required:
     "La date d'arrêté du portefeuille est obligatoire et ne peut pas être dans le futur : abandonnez ce lot et créez-en un avec une date d'arrêté passée.",
-  cut_off_future: "La date d'arrêté ne peut pas être dans le futur : le fichier décrit le portefeuille à une date passée.",
+  cut_off_future:
+    "La date d'arrêté ne peut pas être dans le futur : le fichier décrit le portefeuille à une date passée.",
   opening_mismatch:
     "Les soldes d'ouverture ne correspondent pas au rapport qualité : abandonnez ce lot et déposez à nouveau le fichier.",
   opening_plan_missing:
     "Ce lot a été intégré avant la comptabilisation des soldes d'ouverture : annulez l'intégration, puis déposez à nouveau le fichier.",
-  ledger_rejected: "La comptabilité a refusé l'opération. Contactez le support.",
-  iban_invalid: "IBAN invalide : vérifiez la saisie (27 caractères pour un compte en France).",
-  close_confirmation: "Pour confirmer la clôture, saisissez les 4 derniers caractères de l'IBAN de ce compte.",
+  ledger_rejected:
+    "La comptabilité a refusé l'opération. Contactez le support.",
+  iban_invalid:
+    "IBAN invalide : vérifiez la saisie (27 caractères pour un compte en France).",
+  close_confirmation:
+    "Pour confirmer la clôture, saisissez les 4 derniers caractères de l'IBAN de ce compte.",
   bic_invalid: "BIC invalide : 8 ou 11 caractères (lettres et chiffres).",
   iban_taken:
     "Cet IBAN est déjà enregistré : dans cette devise, ou pour un autre usage (un IBAN est soit un compte de fonds de tiers, soit le compte propre du cabinet).",
@@ -258,41 +316,55 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   account_holds_money:
     "Ce compte détient encore des fonds de tiers : il ne peut pas être clôturé tant que son solde n'est pas nul.",
   already_closed: "Ce compte est déjà clôturé. Rechargez la page.",
-  already_matched: "Ce paiement est déjà affecté à un dossier : désaffectez-le d'abord. Rechargez la page.",
+  already_matched:
+    "Ce paiement est déjà affecté à un dossier : désaffectez-le d'abord. Rechargez la page.",
   file_not_confirmed:
     "Ce dossier n'est pas encore confirmé : le paiement lui sera rapproché automatiquement à la confirmation du lot.",
   split_not_available:
     "Un paiement est affecté à un seul dossier pour l'instant : la répartition sur plusieurs dossiers viendra avec l'imputation.",
   unknown_file: "Dossier introuvable pour ce servicer.",
   not_matched: "Ce paiement n'est affecté à aucun dossier. Rechargez la page.",
-  payment_allocated: "Une partie de ce paiement est déjà imputée : annulez d'abord l'imputation.",
+  payment_allocated:
+    "Une partie de ce paiement est déjà imputée : annulez d'abord l'imputation.",
   busy: "Ce paiement est en cours de rapprochement automatique : réessayez dans un instant.",
-  designation_invalid: "Les factures désignées doivent appartenir à ce dossier.",
+  designation_invalid:
+    "Les factures désignées doivent appartenir à ce dossier.",
   none_selected: "Cochez au moins un paiement.",
-  allocation_changed: "L'imputation de ce paiement a changé entre-temps : rechargez la page.",
+  allocation_changed:
+    "L'imputation de ce paiement a changé entre-temps : rechargez la page.",
   payment_changed: "Ce paiement a changé entre-temps : rechargez la page.",
-  amount_changed: "Le montant restant de ce paiement a changé entre-temps : rechargez la page.",
-  proposal_changed: "La proposition d'avoir a changé entre-temps : rechargez la page.",
-  authorisation_required: "Choisissez l'autorisation du juge, classée dans ce dossier.",
-  request_required: "Choisissez la demande écrite du débiteur, classée dans l'un des deux dossiers.",
-  not_same_debtor: "L'autre dossier doit être un dossier ouvert du même débiteur, chez le même client.",
+  amount_changed:
+    "Le montant restant de ce paiement a changé entre-temps : rechargez la page.",
+  proposal_changed:
+    "La proposition d'avoir a changé entre-temps : rechargez la page.",
+  authorisation_required:
+    "Choisissez l'autorisation du juge, classée dans ce dossier.",
+  request_required:
+    "Choisissez la demande écrite du débiteur, classée dans l'un des deux dossiers.",
+  not_same_debtor:
+    "L'autre dossier doit être un dossier ouvert du même débiteur, chez le même client.",
   not_forwardable:
     "Ce paiement ne peut pas être reversé au client : seul un paiement sans imputation, sur un dossier rappelé ou antérieur à l'arrêté, peut l'être.",
-  allocation_busy: "Une imputation est en cours pour ce servicer : réessayez dans un instant.",
-  already_reversed: "Cette imputation a déjà été annulée entre-temps : rechargez la page.",
+  allocation_busy:
+    "Une imputation est en cours pour ce servicer : réessayez dans un instant.",
+  already_reversed:
+    "Cette imputation a déjà été annulée entre-temps : rechargez la page.",
   file_held:
     "Le dossier est bloqué (surendettement ou procédure collective) : ni reversement au client ni compensation tant que le blocage est en place. Rechargez la page.",
-  refund_reason_mismatch: "Ce motif de remboursement ne correspond pas à la situation du paiement : rechargez la page.",
+  refund_reason_mismatch:
+    "Ce motif de remboursement ne correspond pas à la situation du paiement : rechargez la page.",
   refund_too_much: "Le montant dépasse ce qui reste du paiement.",
-  refund_iban_required: "La banque n'a pas transmis l'IBAN du payeur : saisissez l'IBAN du bénéficiaire.",
+  refund_iban_required:
+    "La banque n'a pas transmis l'IBAN du payeur : saisissez l'IBAN du bénéficiaire.",
   refund_name_required:
     "La banque n'a pas transmis le nom du payeur : saisissez le nom du bénéficiaire (140 caractères au plus).",
   refund_not_possible:
     "Ce paiement ne peut pas être remboursé depuis ici (il attend son imputation, ou un remboursement est déjà demandé). Rechargez la page.",
-  refund_not_pending: "Ce remboursement n'est plus en attente : rechargez la page.",
-  // review round 6: a refund whose transfer is in a downloaded file can no longer be cancelled
-  refund_pending:
-    "Un remboursement est demandé pour ce paiement : il doit d'abord être annulé (« Annuler » sur sa ligne). Si son virement est dans un fichier déjà téléchargé, il ne peut plus l'être : il reste en cours jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé.",
+  refund_not_pending:
+    "Ce remboursement n'est plus en attente : rechargez la page.",
+  // review round 6: a refund whose transfer is in a downloaded file can no longer be cancelled; M2c-6b-1 review round 2
+  // (L6): it leaves « en cours » when its debit is booked from the statement, never by a « rejection » no line shows
+  refund_pending: `Un remboursement est demandé pour ce paiement : il doit d'abord être annulé (« Annuler » sur sa ligne). Si son virement est dans un fichier déjà téléchargé, il ne peut plus l'être : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${REFUND_BOOKED_WHEN}). ${REFUND_NOT_EXECUTED} Voyez avec la banque et prévenez le support.`,
   already_linked: "Cette ligne a déjà été traitée : rechargez la page.",
   link_amount:
     "Le montant ne convient pas : il dépasse ce qui reste du paiement, ou n'est pas celui du remboursement demandé.",
@@ -304,130 +376,173 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Cette ligne est antérieure à un retour déjà comptabilisé sur ce paiement : elle ne peut pas être liée à sa date.",
   link_payment_returned:
     "Le paiement de ce remboursement a été retourné par la banque : ce montant revenu ne peut pas encore être comptabilisé.",
-  link_posting_failed: "La comptabilisation a été refusée pour cette ligne : vérifiez-la ou signalez-la au support.",
+  link_posting_failed:
+    "La comptabilisation a été refusée pour cette ligne : vérifiez-la ou signalez-la au support.",
   already_decided: "Cette ligne a déjà été traitée : rechargez la page.",
   direct_evidence: "Choisissez le relevé du client, classé dans ce dossier.",
-  direct_date: "La date doit être passée, et postérieure à la reprise du dossier.",
+  direct_date:
+    "La date doit être passée, et postérieure à la reprise du dossier.",
   direct_items: "Les factures désignées doivent appartenir à ce dossier.",
   file_not_open: "Le dossier n'est pas ouvert.",
-  amount_invalid: "Montant invalide : saisissez un montant positif en euros (ex. 120,50).",
+  amount_invalid:
+    "Montant invalide : saisissez un montant positif en euros (ex. 120,50).",
   client_funds_exists:
     "Un compte de fonds de tiers est déjà actif dans cette devise : le cabinet a choisi un seul compte dédié par devise pour recevoir et reverser les fonds des clients.",
   transfers_in_flight:
     "Un virement depuis ou vers ce compte est en cours (approvisionnement non encore crédité) : annulez-le ou attendez son crédit.",
   top_up_accounts:
     "L'approvisionnement part d'un compte propre actif vers le compte de fonds de tiers actif de la même devise.",
-  top_up_not_pending: "Cet approvisionnement n'est plus en attente : rechargez la page.",
+  top_up_not_pending:
+    "Cet approvisionnement n'est plus en attente : rechargez la page.",
   date_past: "La date d'exécution demandée ne peut pas être passée.",
   already_booked: "Cette ligne est déjà comptabilisée : rechargez la page.",
   not_a_fee:
     "Seul un débit classé « Frais ou autre débit » se comptabilise en frais bancaires : un virement émis par le cabinet n'en est pas un.",
-  not_an_own_credit: "Seul un crédit reçu du compte propre du cabinet se comptabilise en approvisionnement.",
+  not_an_own_credit:
+    "Seul un crédit reçu du compte propre du cabinet se comptabilise en approvisionnement.",
   not_own_credit:
     "Seul un crédit reçu du compte propre du cabinet ou d'un compte de reversement d'un client, ni comptabilisé ni classé, peut devenir le paiement d'un débiteur : rechargez la page.",
   own_account_unknown:
     "Ce crédit ne vient d'aucun compte propre enregistré : enregistrez le compte propre, ou classez la ligne avec une explication.",
   top_up_differs:
     "Ce crédit porte la référence d'un approvisionnement d'un autre montant ou d'un autre compte : annulez l'approvisionnement demandé, puis comptabilisez le crédit.",
-  not_a_loss: "Ce retour ne dépasse pas ce qui reste du paiement : liez-le au paiement (retour total ou partiel).",
-  booking_refused: "Cette comptabilisation n'est pas possible pour cette ligne : vérifiez-la et rechargez la page.",
-  changed_since_read: "Les données ont changé depuis leur affichage : rechargez la page et recommencez.",
-  legal_name_required: "La raison sociale est obligatoire (200 caractères au plus).",
+  not_a_loss:
+    "Ce retour ne dépasse pas ce qui reste du paiement : liez-le au paiement (retour total ou partiel).",
+  booking_refused:
+    "Cette comptabilisation n'est pas possible pour cette ligne : vérifiez-la et rechargez la page.",
+  changed_since_read:
+    "Les données ont changé depuis leur affichage : rechargez la page et recommencez.",
+  legal_name_required:
+    "La raison sociale est obligatoire (200 caractères au plus).",
   siren_invalid: "SIREN invalide : 9 chiffres.",
-  address_invalid: "Adresse invalide : ligne d'adresse, code postal (5 chiffres en France), ville et pays.",
+  address_invalid:
+    "Adresse invalide : ligne d'adresse, code postal (5 chiffres en France), ville et pays.",
   capital_invalid: "Capital social invalide : un montant positif en euros.",
-  vat_mismatch: "Le numéro de TVA intracommunautaire ne correspond pas au SIREN.",
+  vat_mismatch:
+    "Le numéro de TVA intracommunautaire ne correspond pas au SIREN.",
   servicer_identity_incomplete:
     "L'identité du cabinet s'enregistre complète : SIREN, forme juridique, capital (SARL, SA, SAS…), ville du RCS, numéro de TVA, professionnel.",
   text_too_long: "Un texte est trop long.",
-  settings_own_account: "Les factures se règlent sur un compte propre actif du cabinet, jamais sur le compte dédié.",
-  cutoff_invalid: "Heure limite invalide : HH:MM, pour un compte de fonds de tiers.",
+  settings_own_account:
+    "Les factures se règlent sur un compte propre actif du cabinet, jamais sur le compte dédié.",
+  cutoff_invalid:
+    "Heure limite invalide : HH:MM, pour un compte de fonds de tiers.",
   prefix_invalid: "Le préfixe des factures compte 2 à 6 lettres majuscules.",
   own_account_in_settings:
     "Ce compte propre reçoit le paiement des factures (paramètres de facturation) : choisissez-en un autre d'abord.",
-  document_invalid: "Fichier refusé : PDF, PNG ou JPEG, avec un nom de fichier simple.",
+  document_invalid:
+    "Fichier refusé : PDF, PNG ou JPEG, avec un nom de fichier simple.",
   document_not_uploaded: "Le fichier n'a pas été envoyé. Réessayez.",
-  rib_required: "Le RIB du client (document « RIB » de ce client) est obligatoire.",
-  holder_required: "Le titulaire, tel qu'il figure sur le RIB, est obligatoire (70 caractères au plus).",
-  payout_pending: "Un IBAN attend déjà sa confirmation pour ce client et cette devise : confirmez-le ou refusez-le d'abord.",
+  rib_required:
+    "Le RIB du client (document « RIB » de ce client) est obligatoire.",
+  holder_required:
+    "Le titulaire, tel qu'il figure sur le RIB, est obligatoire (70 caractères au plus).",
+  payout_pending:
+    "Un IBAN attend déjà sa confirmation pour ce client et cette devise : confirmez-le ou refusez-le d'abord.",
   payout_own_iban: "Cet IBAN est l'un des comptes bancaires du cabinet.",
-  payout_other_client: "Cet IBAN est déjà le compte de reversement d'un autre client.",
-  payout_not_pending: "Cet IBAN n'attend plus de confirmation. Rechargez la page.",
-  payout_same_person: "Vous avez proposé cet IBAN : une autre personne doit le confirmer.",
-  payout_iban_mismatch: "L'IBAN saisi n'est pas celui proposé : vérifiez le RIB et refusez la proposition si elle est fausse.",
-  payout_not_current: "Ce compte n'est plus le compte de reversement en cours. Rechargez la page.",
+  payout_other_client:
+    "Cet IBAN est déjà le compte de reversement d'un autre client.",
+  payout_not_pending:
+    "Cet IBAN n'attend plus de confirmation. Rechargez la page.",
+  payout_same_person:
+    "Vous avez proposé cet IBAN : une autre personne doit le confirmer.",
+  payout_iban_mismatch:
+    "L'IBAN saisi n'est pas celui proposé : vérifiez le RIB et refusez la proposition si elle est fausse.",
+  payout_not_current:
+    "Ce compte n'est plus le compte de reversement en cours. Rechargez la page.",
   event_future: "La date de l'événement ne peut pas être dans le futur.",
-  evidence_required: "Le justificatif (document « Justificatif » de ce client) est obligatoire.",
-  court_account_only: "Seul le compte d'un mandataire de justice (liquidateur) peut être indiqué ici.",
+  evidence_required:
+    "Le justificatif (document « Justificatif » de ce client) est obligatoire.",
+  court_account_only:
+    "Seul le compte d'un mandataire de justice (liquidateur) peut être indiqué ici.",
   payout_court_appointed:
     "Un mandataire de justice est enregistré pour ce client (liquidation judiciaire, ou compte d'un mandataire désigné) : ses comptes de reversement sont confirmés, refusés ou retirés par un second administrateur du cabinet, et non depuis l'espace du client (règle du cabinet ; en liquidation, les droits du client sont exercés par le liquidateur, art. L641-9 C. com.).",
-  terms_past: "Une nouvelle version commence au plus tôt demain : les conditions ne sont jamais rétroactives.",
+  terms_past:
+    "Une nouvelle version commence au plus tôt demain : les conditions ne sont jamais rétroactives.",
   terms_too_early:
     "Une nouvelle version commence au plus tôt demain (heure de Paris) : les encaissements d'aujourd'hui restent aux conditions en vigueur.",
-  terms_start_taken: "Une version en vigueur commence déjà ce jour-là : choisissez une date à venir.",
-  schedule_json: "Le barème n'est pas un JSON lisible : vérifiez les guillemets, virgules et accolades.",
+  terms_start_taken:
+    "Une version en vigueur commence déjà ce jour-là : choisissez une date à venir.",
+  schedule_json:
+    "Le barème n'est pas un JSON lisible : vérifiez les guillemets, virgules et accolades.",
   schedule_invalid:
     "Barème invalide (commission-1) : taux en texte (« 0.15 », 4 décimales au plus, entre 0 et 1), paliers croissants dont seul le dernier est ouvert, identifiants distincts, la dernière règle s'applique à tout.",
   terms_invalid:
     "Conditions de reversement invalides (remittance-1) : fréquence bimensuelle ou hebdomadaire (jour 1 à 5), clauses de compensation et de reprise (ou aucune), délai de paiement des factures de 0 à 45 jours.",
-  clauses_required: "Les références des clauses de rémunération et de reversement sont obligatoires (art. R124-3 3° et 4° CPCE).",
-  terms_document_required: "Le mandat signé (document « Mandat » de ce client) est obligatoire.",
+  clauses_required:
+    "Les références des clauses de rémunération et de reversement sont obligatoires (art. R124-3 3° et 4° CPCE).",
+  terms_document_required:
+    "Le mandat signé (document « Mandat » de ce client) est obligatoire.",
   claim_type_unknown: "Le barème nomme un type de créance inconnu.",
   portfolio_other_mandate: "Le barème nomme un portefeuille d'un autre mandat.",
   max_days_invalid:
     "Le délai de reversement est de 1 à 30 jours : jamais plus d'un mois, engagement du cabinet (l'art. R124-6 CPCE prévoit un mois, sauf convention contraire).",
-  clause_required: "La référence de la clause est obligatoire (200 caractères au plus).",
+  clause_required:
+    "La référence de la clause est obligatoire (200 caractères au plus).",
   not_ready:
     "Le portefeuille n'est pas prêt pour la confirmation : complétez d'abord les éléments listés (identités, conditions du mandat).",
   run_pending:
     "Un reversement de ce client est déjà en cours (brouillon, validé ou transmis) : un seul à la fois par client et par devise.",
-  nothing_pending: "Rien à reverser pour ce client : aucun encaissement n'attend.",
-  run_version_changed: "Le reversement a changé depuis l'affichage de la page : rechargez-la puis recommencez.",
+  nothing_pending:
+    "Rien à reverser pour ce client : aucun encaissement n'attend.",
+  run_version_changed:
+    "Le reversement a changé depuis l'affichage de la page : rechargez-la puis recommencez.",
   run_not_draft: "Ce reversement n'est plus un brouillon.",
-  run_approval_in_progress: "La validation de ce reversement est en cours : attendez son résultat.",
+  run_approval_in_progress:
+    "La validation de ce reversement est en cours : attendez son résultat.",
   // review round 6: nor once its transfer is in a downloaded file (it then waits for its debit, read from the statement)
   run_not_cancellable:
     "Seul un reversement validé, dont le virement n'est ni débité ni dans un fichier déjà téléchargé, peut être annulé.",
   // M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is cancelled until M2c-6b books its debits from
   // the statement; round 7 (round 6's verifier, N3): a payout's debit read changes nothing yet — it must be booked
-  run_already_sent:
-    "Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire, ce qui n'est pas encore disponible pour un reversement, et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible non plus). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
+  // M2c-6b-1 review (legal-texts#3): automatically only for a line carrying its RMT reference or its lot's
+  run_already_sent: `Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.`,
   run_none_selected: "Cochez au moins un reversement à valider.",
   run_busy:
     "Un traitement est en cours sur ce reversement ou pour ce cabinet (préparation, validation, imputation ou établissement du relevé) : réessayez dans un instant.",
-  run_retry: "La date a changé (minuit) pendant l'opération : rien n'a été enregistré. Réessayez.",
-  execution_date_invalid: "La date d'exécution demandée doit être un jour ouvré, à partir d'aujourd'hui.",
+  run_retry:
+    "La date a changé (minuit) pendant l'opération : rien n'a été enregistré. Réessayez.",
+  execution_date_invalid:
+    "La date d'exécution demandée doit être un jour ouvré, à partir d'aujourd'hui.",
   credit_note_on_credit_note: "Un avoir ne se rectifie pas par un autre avoir.",
-  credit_note_nothing_left: "Cette facture est déjà entièrement rectifiée : il ne reste rien à créditer.",
+  credit_note_nothing_left:
+    "Cette facture est déjà entièrement rectifiée : il ne reste rien à créditer.",
   // review round 6: true with cancellation after download off — once its transfer is in a downloaded file, a run can no
   // longer be cancelled; round 7 (N3): it waits for its debit to be booked from the statement, not available yet
-  credit_note_in_flight:
-    "Un reversement validé compense cette facture sur son virement, dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que ce virement n'est dans aucun fichier téléchargé, le reversement peut aussi être annulé ; ensuite il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé, ce qui n'est pas encore disponible pour un reversement.",
-  credit_note_run_in_flight:
-    "Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que son virement n'est dans aucun fichier téléchargé, il peut aussi être annulé (ce qui rectifierait toute la facture) ; ensuite il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé, ce qui n'est pas encore disponible pour un reversement.",
+  credit_note_in_flight: `Un reversement validé compense cette facture sur son virement, dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que ce virement n'est dans aucun fichier téléchargé, le reversement peut aussi être annulé ; ensuite il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`,
+  credit_note_run_in_flight: `Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que son virement n'est dans aucun fichier téléchargé, il peut aussi être annulé (ce qui rectifierait toute la facture) ; ensuite il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`,
   credit_note_file: "Ce dossier n'a plus rien de facturé sur cette facture.",
-  credit_note_amount: "Indiquez un montant HT positif, au centime près (par exemple 30,00).",
-  credit_note_too_much: "Le montant dépasse ce qui reste facturé (sur la facture, ou sur le dossier choisi).",
-  credit_note_changed: "La facture a changé depuis l'affichage de la page (un autre avoir ?) : rechargez-la puis recommencez.",
+  credit_note_amount:
+    "Indiquez un montant HT positif, au centime près (par exemple 30,00).",
+  credit_note_too_much:
+    "Le montant dépasse ce qui reste facturé (sur la facture, ou sur le dossier choisi).",
+  credit_note_changed:
+    "La facture a changé depuis l'affichage de la page (un autre avoir ?) : rechargez-la puis recommencez.",
   credit_note_category: "Choisissez le motif de l'avoir dans la liste.",
-  transfer_nothing_to_file: "Aucun virement à mettre dans un fichier : ceux qui attendent sont retenus (motif affiché).",
+  transfer_nothing_to_file:
+    "Aucun virement à mettre dans un fichier : ceux qui attendent sont retenus (motif affiché).",
   transfer_cash_not_covered:
     "Le solde du compte dédié ne couvre pas ce fichier (solde du dernier relevé, moins ce qui est déjà en route) : importez le dernier relevé, puis recommencez.",
-  transfer_no_closing_balance: "Aucun relevé avec solde de clôture n'est importé pour ce compte : importez-en un d'abord.",
-  transfer_not_paying_account: "Ce compte ne paie pas de fichier de virements (seul le compte dédié actif en euros).",
+  transfer_no_closing_balance:
+    "Aucun relevé avec solde de clôture n'est importé pour ce compte : importez-en un d'abord.",
+  transfer_not_paying_account:
+    "Ce compte ne paie pas de fichier de virements (seul le compte dédié actif en euros).",
   transfer_already_downloaded:
     "Ce fichier a déjà été téléchargé : confirmez l'avertissement pour le télécharger de nouveau, et ne le déposez pas deux fois.",
   transfer_hash_mismatch:
     "Le fichier stocké ne correspond pas à celui qui a été généré : il n'est pas servi. Prévenez le support.",
-  transfer_not_ready: "Le fichier est en cours d'écriture : réessayez dans quelques secondes.",
-  transfer_not_downloaded: "Ce fichier n'a pas été téléchargé : il est simplement remplacé, sans attestation.",
+  transfer_not_ready:
+    "Le fichier est en cours d'écriture : réessayez dans quelques secondes.",
+  transfer_not_downloaded:
+    "Ce fichier n'a pas été téléchargé : il est simplement remplacé, sans attestation.",
   transfer_attestation_required:
     "Le fichier a été téléchargé : son annulation demande l'attestation qu'il n'a pas été déposé, ou que la banque l'a rejeté en entier.",
   transfer_debit_seen:
     "Un relevé montre déjà le débit d'un virement de ce fichier (la banque l'a exécuté) : rien n'est annulé (risque de double paiement).",
   transfer_statement_not_imported:
     "Importez d'abord le relevé du jour d'exécution demandé : il doit montrer que la banque n'a pas débité ce virement.",
-  transfer_version_changed: "Le fichier a changé depuis l'affichage de la page : rechargez-la.",
+  transfer_version_changed:
+    "Le fichier a changé depuis l'affichage de la page : rechargez-la.",
   transfer_already_sent: "Ce fichier est déjà marqué comme transmis.",
   transfer_pain_version: "Choisissez pain.001.001.09 ou pain.001.001.03.",
   payee_check_four_eyes:
@@ -441,14 +556,17 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "L'annulation doit être confirmée par une autre personne que celle qui l'a demandée (deux personnes, chacune avec sa double authentification).",
   transfer_cancel_already_requested:
     "Une demande d'annulation est déjà en cours : une autre personne doit la confirmer. Rechargez la page.",
-  transfer_cancel_not_requested: "Aucune demande d'annulation n'est en cours (déjà confirmée ou retirée) : rechargez la page.",
-  transfer_cancellation_request_required:
-    "Ce fichier a été téléchargé : il ne se remplace plus d'un clic. Gardez-le tel quel ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (celui d'un remboursement l'est dès qu'il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l'être). Vérifiez le relevé et voyez avec la banque.",
+  transfer_cancel_not_requested:
+    "Aucune demande d'annulation n'est en cours (déjà confirmée ou retirée) : rechargez la page.",
+  transfer_cancellation_request_required: `Ce fichier a été téléchargé : il ne se remplace plus d'un clic. Gardez-le tel quel ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (${FILE_BOOKED_WHEN}). Vérifiez le relevé et voyez avec la banque.`,
   transfer_not_in_downloaded_file:
     "Ce virement n'est plus dans un fichier téléchargé (déjà annulé, débité, ou son fichier remplacé) : rechargez la page.",
-  transfer_not_live: "Ce fichier n'est plus en cours (remplacé, rejeté ou en échec) : rechargez la page.",
-  transfer_late_reason_too_long: "Le motif du retard est trop long (2 000 caractères au plus).",
-  payee_check_not_a_payout: "Un nom non concordant se signale sur un reversement (le titulaire de son compte de reversement).",
+  transfer_not_live:
+    "Ce fichier n'est plus en cours (remplacé, rejeté ou en échec) : rechargez la page.",
+  transfer_late_reason_too_long:
+    "Le motif du retard est trop long (2 000 caractères au plus).",
+  payee_check_not_a_payout:
+    "Un nom non concordant se signale sur un reversement (le titulaire de son compte de reversement).",
   // M2c-6a review (T2): the download re-ran the generation's checks and replaced the file
   transfer_file_stale:
     "Date d'exécution dépassée : le fichier n'a pas été servi et il est remplacé. Régénérez-le (nouveau numéro, nouvelle date).",
@@ -476,31 +594,51 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Ce débit porte la référence d'un autre virement ou d'un autre lot (ou, pour un remboursement réémis, ne porte aucune référence) : il ne peut pas exécuter ce remboursement, dont le virement est dans un fichier déjà téléchargé. Ne le rattachez pas à ce remboursement ; gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque (prévenez le support).",
   transfer_file_holds_debited:
     "Un virement de ce fichier a déjà quitté le compte (débité sous la référence du virement qu'il remplace, ou dans une ligne groupée de son lot) : le fichier n'est plus servi — déposé, il le paierait une seconde fois. Ne le déposez pas ; demandez à la banque de ne pas exécuter ce fichier s'il a été déposé, et prévenez le support.",
-  run_payout_in_downloaded_file:
-    "Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit, ou son rejet, soit comptabilisé depuis le relevé bancaire, ce qui n'est pas encore disponible pour un reversement, et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible non plus). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
+  // M2c-6b-1 review (legal-texts#3): a payout's debit is booked from the statement, never a « rejection » no line shows
+  run_payout_in_downloaded_file: `Le virement de ce reversement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). ${PAYOUT_NOT_EXECUTED} Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`,
   // M2c-6a review (T3): a refund the transfer file cannot carry
   refund_payee_name_not_epc:
     "Le nom du bénéficiaire doit contenir au moins une lettre latine ou un chiffre (le format SEPA n'accepte que l'alphabet latin de base).",
   refund_iban_not_sepa:
     "Cet IBAN est hors de la zone SEPA : le remboursement ne peut pas partir dans un fichier de virements. Choisissez « Je l'exécute moi-même ».",
-  refund_in_downloaded_file:
-    "Le virement de ce remboursement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire, et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.",
+  // M2c-6b-1 review round 2 (L6): booked from the statement (its debit, then its return), never a « rejection » read
+  refund_in_downloaded_file: `Le virement de ce remboursement est dans un fichier déjà téléchargé : il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${REFUND_BOOKED_WHEN}), et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). ${REFUND_RETURNED} ${REFUND_NOT_EXECUTED} Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`,
   // M2c-6a review, round 5 (fail-closed): the cancellation of a downloaded file, or of one of its transfers, is off
-  transfer_bank_booking_required:
-    "Un fichier téléchargé ne peut pas encore être annulé dans Collectoo, ni un de ses virements : ils restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (celui d'un remboursement l'est dès qu'il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l'être). Gardez le fichier tel quel ; si la banque n'a pas exécuté un virement, vérifiez le relevé et voyez avec la banque.",
+  transfer_bank_booking_required: `Un fichier téléchargé ne peut pas encore être annulé dans Collectoo, ni un de ses virements : ils restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé bancaire (${FILE_BOOKED_WHEN}). ${FILE_TRANSFER_NOT_EXECUTED} Gardez le fichier tel quel ; si la banque n'a pas exécuté un virement, vérifiez le relevé et voyez avec la banque.`,
   // review round 6: a file the bank executed, in full or in part, is not served again (whatever the switch)
   transfer_file_executed:
     "La banque a déjà exécuté ce fichier, en tout ou partie (un relevé montre le débit de l'un de ses virements ou de son lot) : il n'est plus servi. Ne le déposez plus : déposé de nouveau, il paierait une seconde fois.",
-  unknown: "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
+  // M2c-6b-1 review (money-1, K1): the database's hint, in the page's words (and the one link a batch line takes)
+  own_transfer_line:
+    "Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, ligne groupée d'un lot de nos fichiers) : elle se comptabilise depuis le relevé, automatiquement à l'import ou par l'équipe (écran à venir). Elle ne se rattache pas à un paiement, ni à un remboursement (sauf la ligne groupée d'un lot de remboursements, à un remboursement de ce lot dont le fichier est déjà téléchargé), et ne se classe pas sans comptabiliser.",
+  // review round 3 (M1, M2): public.release_own_credit's and the top-up's refusal of a credit carrying our RMT/SWP id
+  own_credit_own_transfer_line:
+    "Ce crédit porte la référence de l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient, ou celle de l'un des lots de nos fichiers. Il se comptabilise depuis le relevé, automatiquement à l'import quand la banque le signale comme un retour, sinon par l'équipe (écran à venir). Il ne devient ni le paiement d'un débiteur ni un approvisionnement. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.",
+  // review round 4 (N2): public.release_own_credit's refusal of a credit carrying our TOP id
+  own_credit_top_up_line:
+    "Ce crédit porte la référence de l'un de nos approvisionnements (TOP…) : c'est l'argent du cabinet, jamais le paiement d'un débiteur. Il se comptabilise comme « Approvisionnement par le compte propre » : automatiquement quand il correspond à l'approvisionnement demandé, sinon par l'équipe.",
+  // review round 4 (N1): public.assign_payment's refusal of a payment whose bank line carries one of our transfers' ids
+  payment_own_transfer_line:
+    "Ce paiement vient d'une ligne qui porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, pas le paiement d'un débiteur. Il ne s'affecte à aucun dossier : il se comptabilise depuis le relevé, par l'équipe (écran à venir). Prévenez le support.",
+  // review round 5 (Q4): public.resolve_duplicate's refusal (its hint, in the page's words): the line stays held
+  duplicate_own_transfer_line:
+    "Cette ligne porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, jamais le paiement d'un débiteur. Elle ne peut pas être libérée comme un paiement : elle se comptabilise depuis le relevé, par l'équipe (écran à venir), et reste dans « Doublons possibles » d'ici là. Prévenez le support.",
+  unknown:
+    "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };
 
 /** Code for an error raised by a boarding command (order matters: most specific first). */
 export function commandErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
   if (message.includes("cut-off date is required")) return "cut_off_required";
-  if (message.includes("cut-off date cannot be in the future")) return "cut_off_future";
-  if (message.includes("roll it back and board the file again")) return "opening_plan_missing";
-  if (message.includes("opening balances do not reconcile") || message.includes("without an opening plan"))
+  if (message.includes("cut-off date cannot be in the future"))
+    return "cut_off_future";
+  if (message.includes("roll it back and board the file again"))
+    return "opening_plan_missing";
+  if (
+    message.includes("opening balances do not reconcile") ||
+    message.includes("without an opening plan")
+  )
     return "opening_mismatch";
   if (message.includes("do not reconcile")) return "totals_mismatch";
   if (message.includes("reason is required")) return "reason_required";
@@ -508,11 +646,18 @@ export function commandErrorCode(message: string): ErrorCode {
   if (message.includes("not ready for confirmation")) return "not_ready";
   if (message.includes("same target")) return "duplicate_target";
   if (message.includes("another file with this name")) return "name_taken";
-  if (message.includes("only be added to a draft batch") || message.includes("control totals can only change"))
+  if (
+    message.includes("only be added to a draft batch") ||
+    message.includes("control totals can only change")
+  )
     return "already_submitted";
   if (message.includes("unsupported file type")) return "unsupported_type";
   if (message.includes("not uploaded yet")) return "missing_upload";
-  if (message.includes("expected") || message.includes("cannot be abandoned") || message.includes("only a committed"))
+  if (
+    message.includes("expected") ||
+    message.includes("cannot be abandoned") ||
+    message.includes("only a committed")
+  )
     return "state_changed";
   if (message.startsWith("ledger:")) return "ledger_rejected";
   return "unknown";
@@ -527,5 +672,8 @@ export type ActionResult = { ok: true } | { error: ErrorCode };
 
 /** Percentages in French notation: 0.925 -> "92,5 %". */
 export function formatPct(ratio: number): string {
-  return new Intl.NumberFormat("fr-FR", { style: "percent", maximumFractionDigits: 1 }).format(ratio);
+  return new Intl.NumberFormat("fr-FR", {
+    style: "percent",
+    maximumFractionDigits: 1,
+  }).format(ratio);
 }

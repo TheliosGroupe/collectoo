@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { ErrorCode } from "@/lib/boarding/forms";
+import { type ErrorCode, PAYOUT_BOOKED_WHEN } from "@/lib/boarding/forms";
 import type { Database } from "@/lib/database.types";
 import { money } from "@/lib/payments/statements";
 import { frenchDate } from "@/lib/remittance/runs";
@@ -13,8 +13,14 @@ import { frenchDate } from "@/lib/remittance/runs";
 
 /** The reason categories the credit note states (never the staff's free text, which stays with money staff). */
 export const REASON_CATEGORIES: { code: string; label: string }[] = [
-  { code: "terms_error", label: "Erreur de conditions de rémunération (taux, paliers ou minimum)" },
-  { code: "basis_error", label: "Erreur d'assiette (encaissement non commissionnable)" },
+  {
+    code: "terms_error",
+    label: "Erreur de conditions de rémunération (taux, paliers ou minimum)",
+  },
+  {
+    code: "basis_error",
+    label: "Erreur d'assiette (encaissement non commissionnable)",
+  },
   { code: "billing_error", label: "Erreur de facturation" },
 ];
 
@@ -41,7 +47,12 @@ export type InvoiceDetail = {
   remaining_ht: string;
   open_ttc: string;
   pending_vat: string;
-  files: { account_id: string; reference: string | null; open_ht: string; waived_ht: string }[];
+  files: {
+    account_id: string;
+    reference: string | null;
+    open_ht: string;
+    waived_ht: string;
+  }[];
   file_count: number;
   credit_notes: {
     id: string;
@@ -66,7 +77,13 @@ export type InvoiceDetail = {
 };
 
 /** An invoice a credit note rectifies, with the HT and VAT the credit note took off it (negative, minor units). */
-export type CorrectedInvoice = { id: string; number: string; issue_date: string; ht: string; vat: string };
+export type CorrectedInvoice = {
+  id: string;
+  number: string;
+  issue_date: string;
+  ht: string;
+  vat: string;
+};
 
 export type CreditNotePreview = {
   refusal: string | null;
@@ -89,23 +106,26 @@ export type CreditNotePreview = {
 
 const REFUSAL_TEXT: Record<string, string> = {
   credit_note: "Un avoir ne se rectifie pas par un autre avoir.",
-  nothing_left: "Cette facture est déjà entièrement rectifiée : il ne reste rien à créditer.",
+  nothing_left:
+    "Cette facture est déjà entièrement rectifiée : il ne reste rien à créditer.",
   // review round 6: true with cancellation after download off — once its transfer is in a downloaded file, a run can no
-  // longer be cancelled; round 7 (N3): it waits for its debit to be booked from the statement, not available yet (M2c-6b)
-  in_flight:
-    "Un reversement validé compense cette facture sur son virement, dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que ce virement n'est dans aucun fichier téléchargé, le reversement peut aussi être annulé ; une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé, ce qui n'est pas encore disponible pour un reversement.",
+  // longer be cancelled; round 7 (N3): it waits for its debit to be booked from the statement (M2c-6b-1: at its import)
+  // (review M2c-6b-1, legal-texts#3: automatically only when the line carries its RMT reference or its lot's)
+  in_flight: `Un reversement validé compense cette facture sur son virement, dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que ce virement n'est dans aucun fichier téléchargé, le reversement peut aussi être annulé ; une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`,
   // review M2c-5b (ledger-vat#0, F1): the invoice's own run, cancelled, would credit the invoice in full
-  run_in_flight:
-    "Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que son virement n'est dans aucun fichier téléchargé, il peut aussi être annulé (ce qui rectifierait toute la facture) ; une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé, ce qui n'est pas encore disponible pour un reversement.",
+  run_in_flight: `Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que son virement n'est dans aucun fichier téléchargé, il peut aussi être annulé (ce qui rectifierait toute la facture) ; une fois le fichier téléchargé, il ne peut plus l'être et attend que son débit soit comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`,
   file_not_on_invoice: "Ce dossier n'a plus rien de facturé sur cette facture.",
   amount_required: "Indiquez un montant HT positif, au centime près.",
-  more_than_remaining: "Le montant dépasse ce qui reste facturé (sur la facture, ou sur le dossier choisi).",
+  more_than_remaining:
+    "Le montant dépasse ce qui reste facturé (sur la facture, ou sur le dossier choisi).",
   unknown_invoice: "Facture introuvable.",
 };
 
 /** Why the invoice cannot take a manual credit note now (`commission_invoice_detail.refusal`, the plan's). */
 export function refusalText(refusal: string | null): string | null {
-  return refusal ? (REFUSAL_TEXT[refusal] ?? "Avoir impossible pour l'instant.") : null;
+  return refusal
+    ? (REFUSAL_TEXT[refusal] ?? "Avoir impossible pour l'instant.")
+    : null;
 }
 
 /** The refusals of `issue_credit_note` (« credit note refused: … ») and its locks, as codes. */
@@ -128,7 +148,8 @@ const CREDIT_ERRORS: [string, ErrorCode][] = [
 ];
 
 export function creditNoteErrorCode(message: string): ErrorCode {
-  for (const [needle, code] of CREDIT_ERRORS) if (message.includes(needle)) return code;
+  for (const [needle, code] of CREDIT_ERRORS)
+    if (message.includes(needle)) return code;
   return "unknown";
 }
 
@@ -139,37 +160,72 @@ const MINOR = /^-?\d+$/;
  * the refund owed beyond it, and what the invoice still charges and owes after — all as the database computed them.
  * Null when the preview is not one (a refusal, or a field missing).
  */
-export function effectLines(p: CreditNotePreview | null, currency = "EUR"): { label: string; value: string }[] | null {
+export function effectLines(
+  p: CreditNotePreview | null,
+  currency = "EUR",
+): { label: string; value: string }[] | null {
   if (!p || p.refusal) return null;
-  const fields = [p.ht, p.vat, p.ttc, p.applied, p.excess, p.remaining_after, p.open_after, p.vat_pending, p.vat_collected];
+  const fields = [
+    p.ht,
+    p.vat,
+    p.ttc,
+    p.applied,
+    p.excess,
+    p.remaining_after,
+    p.open_after,
+    p.vat_pending,
+    p.vat_collected,
+  ];
   if (fields.some((x) => x === undefined || !MINOR.test(x))) return null;
   const rows = [
     { label: "Avoir HT", value: money(p.ht!, currency) },
-    { label: `TVA ${p.vat_rate ? percent(p.vat_rate) : ""}`.trim(), value: money(p.vat!, currency) },
+    {
+      label: `TVA ${p.vat_rate ? percent(p.vat_rate) : ""}`.trim(),
+      value: money(p.vat!, currency),
+    },
     { label: "Avoir TTC", value: money(p.ttc!, currency) },
-    { label: "Déduit de ce que la facture doit", value: money(p.applied!, currency) },
+    {
+      label: "Déduit de ce que la facture doit",
+      value: money(p.applied!, currency),
+    },
   ];
   if (BigInt(p.excess!) > BigInt(0)) {
     // review M2c-5b (legal#0): a later run pays it with its payout; with none, the servicer transfers it (M2c-7)
     rows.push({
-      label: "À rembourser au client (avec son prochain reversement, sinon par virement du cabinet)",
+      label:
+        "À rembourser au client (avec son prochain reversement, sinon par virement du cabinet)",
       value: money(p.excess!, currency),
     });
   }
   rows.push(
-    { label: "La facture devra encore (TTC)", value: money(p.open_after!, currency) },
-    { label: "Reste facturé après l'avoir (HT)", value: money(p.remaining_after!, currency) },
+    {
+      label: "La facture devra encore (TTC)",
+      value: money(p.open_after!, currency),
+    },
+    {
+      label: "Reste facturé après l'avoir (HT)",
+      value: money(p.remaining_after!, currency),
+    },
   );
   return rows;
 }
 
 /** Where the credit note's VAT comes off: the invoice's pending VAT first (44574), the rest off the VAT already due. */
-export function vatSplitText(p: CreditNotePreview | null, currency = "EUR"): string | null {
+export function vatSplitText(
+  p: CreditNotePreview | null,
+  currency = "EUR",
+): string | null {
   if (!p || p.refusal || !p.vat_pending || !p.vat_collected) return null;
   if (!MINOR.test(p.vat_pending) || !MINOR.test(p.vat_collected)) return null;
   const parts: string[] = [];
-  if (BigInt(p.vat_pending) > BigInt(0)) parts.push(`${money(p.vat_pending, currency)} sur la TVA en attente (44574)`);
-  if (BigInt(p.vat_collected) > BigInt(0)) parts.push(`${money(p.vat_collected, currency)} sur la TVA exigible (44571)`);
+  if (BigInt(p.vat_pending) > BigInt(0))
+    parts.push(
+      `${money(p.vat_pending, currency)} sur la TVA en attente (44574)`,
+    );
+  if (BigInt(p.vat_collected) > BigInt(0))
+    parts.push(
+      `${money(p.vat_collected, currency)} sur la TVA exigible (44571)`,
+    );
   return parts.length > 0 ? `TVA de l'avoir : ${parts.join(", ")}.` : null;
 }
 
@@ -177,9 +233,14 @@ export function vatSplitText(p: CreditNotePreview | null, currency = "EUR"): str
 export function percent(rate: string): string {
   const m = /^(\d+)(?:\.(\d+))?$/.exec(rate);
   if (!m) return rate;
-  const scaled = BigInt(m[1]) * BigInt(10000) + BigInt((m[2] ?? "").padEnd(4, "0").slice(0, 4) || "0");
+  const scaled =
+    BigInt(m[1]) * BigInt(10000) +
+    BigInt((m[2] ?? "").padEnd(4, "0").slice(0, 4) || "0");
   const whole = scaled / BigInt(100);
-  const frac = (scaled % BigInt(100)).toString().padStart(2, "0").replace(/0+$/, "");
+  const frac = (scaled % BigInt(100))
+    .toString()
+    .padStart(2, "0")
+    .replace(/0+$/, "");
   return `${whole}${frac ? `,${frac}` : ""} %`;
 }
 
@@ -192,8 +253,13 @@ export function creditNoteText(
   corrected: { number: string; issue_date: string }[],
 ): string | null {
   if (note.kind !== "credit_note" || corrected.length === 0) return null;
-  const list = corrected.map((c) => `${c.number} du ${frenchDate(c.issue_date)}`).join(", ");
-  const head = corrected.length > 1 ? `rectifie les factures ${list}` : `rectifie la facture ${list}`;
+  const list = corrected
+    .map((c) => `${c.number} du ${frenchDate(c.issue_date)}`)
+    .join(", ");
+  const head =
+    corrected.length > 1
+      ? `rectifie les factures ${list}`
+      : `rectifie la facture ${list}`;
   if (note.reason !== "manual" || !note.designation) return head;
   const why = note.designation.split(" — ").slice(1).join(" — ").trim();
   return why ? `${head} · ${why}` : head;
@@ -218,26 +284,45 @@ export type InvoiceFilesRpc = (
 ) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
 
 /** The paged read from the user's Supabase client (typed by `database.types.ts`). */
-export function invoiceFilesRpc(client: SupabaseClient<Database>): InvoiceFilesRpc {
+export function invoiceFilesRpc(
+  client: SupabaseClient<Database>,
+): InvoiceFilesRpc {
   return (fn, args) => client.rpc(fn, args);
 }
 
 const INTEGER = /^\d+$/;
 
-type FileRow = { file_id: string; file_ref: string | null; open_minor: string; page_key: string };
+type FileRow = {
+  file_id: string;
+  file_ref: string | null;
+  open_minor: string;
+  page_key: string;
+};
 
 function fileRow(x: unknown): FileRow | null {
   if (typeof x !== "object" || x === null) return null;
   const r = x as Record<string, unknown>;
-  const open = typeof r.open_minor === "number" && Number.isSafeInteger(r.open_minor) ? String(r.open_minor) : r.open_minor;
-  if (typeof r.file_id !== "string" || typeof r.page_key !== "string") return null;
+  const open =
+    typeof r.open_minor === "number" && Number.isSafeInteger(r.open_minor)
+      ? String(r.open_minor)
+      : r.open_minor;
+  if (typeof r.file_id !== "string" || typeof r.page_key !== "string")
+    return null;
   if (r.file_ref !== null && typeof r.file_ref !== "string") return null;
   if (typeof open !== "string" || !INTEGER.test(open)) return null;
-  return { file_id: r.file_id, file_ref: r.file_ref, open_minor: open, page_key: r.page_key };
+  return {
+    file_id: r.file_id,
+    file_ref: r.file_ref,
+    open_minor: open,
+    page_key: r.page_key,
+  };
 }
 
 /** Files of `incoming` not yet in `current`, appended in the database's order. */
-export function mergeFiles(current: FileChoice[], incoming: FileChoice[]): FileChoice[] {
+export function mergeFiles(
+  current: FileChoice[],
+  incoming: FileChoice[],
+): FileChoice[] {
   const seen = new Set(current.map((f) => f.account_id));
   const out = [...current];
   for (const f of incoming) {
@@ -268,10 +353,13 @@ export async function invoiceFilesPage(
   const rows = raw.map(fileRow).filter((r): r is FileRow => r !== null);
   const files = mergeFiles(
     [],
-    rows.filter((r) => BigInt(r.open_minor) > BigInt(0)).map((r) => ({ account_id: r.file_id, reference: r.file_ref })),
+    rows
+      .filter((r) => BigInt(r.open_minor) > BigInt(0))
+      .map((r) => ({ account_id: r.file_id, reference: r.file_ref })),
   );
   const last = rows.length > 0 ? rows[rows.length - 1].page_key : null;
-  const next = raw.length >= FILES_PAGE_SIZE && last && last !== after ? last : null;
+  const next =
+    raw.length >= FILES_PAGE_SIZE && last && last !== after ? last : null;
   return { files, next };
 }
 
@@ -279,7 +367,9 @@ export async function invoiceFilesPage(
 export function filterFiles(files: FileChoice[], query: string): FileChoice[] {
   const q = query.replace(/\s+/g, "").toLowerCase();
   if (!q) return files;
-  return files.filter((f) => (f.reference ?? f.account_id).replace(/\s+/g, "").toLowerCase().includes(q));
+  return files.filter((f) =>
+    (f.reference ?? f.account_id).replace(/\s+/g, "").toLowerCase().includes(q),
+  );
 }
 
 /**
@@ -290,9 +380,17 @@ export function creditNoteBack(
   d: { run_id: string | null; run_number: string | null },
   corrected: { id: string; number: string }[],
 ): { href: string; label: string } {
-  if (d.run_id) return { href: `/backoffice/reversements/${d.run_id}`, label: `Reversement ${d.run_number ?? ""}`.trim() };
+  if (d.run_id)
+    return {
+      href: `/backoffice/reversements/${d.run_id}`,
+      label: `Reversement ${d.run_number ?? ""}`.trim(),
+    };
   const first = corrected[0];
-  if (first) return { href: `/backoffice/reversements/factures/${first.id}`, label: `Facture ${first.number}` };
+  if (first)
+    return {
+      href: `/backoffice/reversements/factures/${first.id}`,
+      label: `Facture ${first.number}`,
+    };
   return { href: "/backoffice/reversements", label: "Reversements" };
 }
 
@@ -301,11 +399,20 @@ export function creditNoteBack(
  * the invoices it rectifies (`corrects`) and, a manual one, its category and the staff's reason. Nothing for an invoice.
  */
 export function creditNoteFacts(
-  d: Pick<InvoiceDetail, "kind" | "reason" | "corrects" | "reason_code" | "reason_text">,
-): { corrected: CorrectedInvoice[]; manual: { reason_code: string; reason: string } | null } {
+  d: Pick<
+    InvoiceDetail,
+    "kind" | "reason" | "corrects" | "reason_code" | "reason_text"
+  >,
+): {
+  corrected: CorrectedInvoice[];
+  manual: { reason_code: string; reason: string } | null;
+} {
   if (d.kind !== "credit_note") return { corrected: [], manual: null };
   const corrected = d.corrects ?? [];
-  const manual = d.reason === "manual" && d.reason_code ? { reason_code: d.reason_code, reason: d.reason_text ?? "" } : null;
+  const manual =
+    d.reason === "manual" && d.reason_code
+      ? { reason_code: d.reason_code, reason: d.reason_text ?? "" }
+      : null;
   return { corrected, manual };
 }
 

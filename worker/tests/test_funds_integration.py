@@ -26,9 +26,9 @@ from debit_helpers import API_DB, api, checks, import_entries, line_id, review_o
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from integration_helpers import DB, one, storage
-from statement_helpers import bank_tenant, drain
+from statement_helpers import bank_tenant, drain, upload
 
-from collectoo_worker.payments.statement import KnownIbans, refine_kind
+from collectoo_worker.payments.statement import KnownIbans, names_our_transfer, refine_kind
 from collectoo_worker.synth.camt053 import Entry, Tx
 from collectoo_worker.synth.ids import iban_fr
 
@@ -81,6 +81,62 @@ def test_python_and_sql_classify_our_own_transfers_alike(
     ).fetchone()
     assert row is not None
     assert row[0] == refine_kind(kind, direction, e2e, iban, IBANS)
+
+
+# review M2c-6b-1 round 4 (N1): the classifier also reads the line's original end-to-end id and its
+# PmtInfId — a credit carrying our RMT/SWP id (its own or its original) or naming our lot with no
+# end-to-end id is never a debtor's credit nor an unsplit batch — in Python and SQL alike. Review
+# round 8 (T1): the parity holds for refine_kind without lot knowledge — whether a PmtInfId names a
+# handed-out lot of the line's account is the database's word (private.names_our_lot: the lot's file
+# and its state), so private.ingest_statement overrides the twins' reading after them (a credit
+# naming such a lot, whatever its end-to-end id, is a return), tested on its own (pgTAP 035's
+# `sc_t1_lot_import`, test_debit_bookings_integration's
+# `test_a_credit_naming_our_lot_is_never_a_debtor_s_payment_whatever_its_end_to_end_id`)
+our_ids = st.one_of(
+    st.none(),
+    st.sampled_from(["RMT0123456789AB", "SWP0123456789AC", "RMT0123456789AB\n", "TOP0123456789AB"]),
+    st.from_regex(r"(TOP|RMT|SWP|RFD|E2E|rmt)[0-9A-Fa-f]{10,13}", fullmatch=True),
+    st.text(st.characters(blacklist_characters="\x00", blacklist_categories=["Cs"]), max_size=20),
+)
+pmt_inf_ids = st.one_of(
+    st.none(),
+    st.sampled_from(["TF-2026-000001-1", "TF-2026-000001-1\n", "TF-2026-1-1", "PMTINF-1", ""]),
+    st.from_regex(r"TF-[0-9]{4}-[0-9]{5,8}-[0-9]{1,3}", fullmatch=True),
+)
+
+
+@settings(max_examples=400, deadline=None)
+@given(
+    kind=st.sampled_from(KINDS),
+    direction=st.sampled_from(["credit", "debit"]),
+    e2e=our_ids,
+    original=our_ids,
+    pmt_inf=pmt_inf_ids,
+    iban=st.one_of(st.none(), st.sampled_from([OWN, CLIENT, "FR7630004000031234567890143"])),
+)
+def test_python_and_sql_read_our_transfers_coming_back_alike(  # noqa: PLR0913, PLR0917
+    parity_conn: psycopg.Connection[Any],
+    kind: str,
+    direction: str,
+    e2e: str | None,
+    original: str | None,
+    pmt_inf: str | None,
+    iban: str | None,
+) -> None:
+    row = parity_conn.execute(
+        "select private.bank_line_refined_kind(%s, %s, %s, %s, %s, %s, %s, %s)",
+        (kind, direction, e2e, original, pmt_inf, iban, sorted(IBANS.own), sorted(IBANS.clients)),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == refine_kind(
+        kind, direction, e2e, iban, IBANS, original_end_to_end_id=original, payment_info_id=pmt_inf
+    )
+    # review round 5 (Q1, Q2): the predicate every refusal reads on the stored line, alike
+    ours = parity_conn.execute(
+        "select private.names_our_transfer(%s, %s, %s)", (e2e, original, pmt_inf)
+    ).fetchone()
+    assert ours is not None
+    assert ours[0] is names_our_transfer(e2e, original, pmt_inf)
 
 
 def _own_account(tenant: dict[str, Any]) -> tuple[str, str]:
@@ -172,14 +228,25 @@ def test_5120_is_the_bank_after_fees_and_top_ups() -> None:
     assert payments == (1, 100_000)  # our own credits are never debtor payments
     own_credit, plain, ours = (line_id(tenant, f"A{n}{tag}") for n in (4, 5, 6))
     assert review_of(own_credit) == "top_up_not_found"
-    assert review_of(ours) == "own_transfer_out"
+    # M2c-6b-1 (plan §2.3): an RMT id that names no transfer of ours waits for ops as
+    # `transfer_unknown` (P0), and is never « explained » away (6b-2: `book_transfer_line`)
+    assert review_of(ours) == "transfer_unknown"
     assert review_of(plain) is None  # an other debit waits in « Frais » without a review
 
-    # ops: the credit from the own account is a top-up, the plain debit a fee, ours explained
+    # ops: the credit from the own account is a top-up, the plain debit a fee; ours stays unbooked
+    # (review M2c-6b-1 money-1, K1: whatever the link kind, `own_transfer_line`)
+    with pytest.raises(psycopg.errors.CheckViolation, match="own_transfer_line"):
+        api(
+            tenant,
+            "select public.link_debit(%s, %s, %s, null, null, null, %s)",
+            str(uuid.uuid4()),
+            ours,
+            "explained",
+            "virement manuel",
+        )
     for line, kind, why in (
         (own_credit, "own_credit", "virement du compte propre"),
         (plain, "fee", "frais de tenue de compte"),
-        (ours, "explained", "virement manuel, comptabilisé avec les reversements (M2c-6)"),
     ):
         api(
             tenant,
@@ -192,7 +259,7 @@ def test_5120_is_the_bank_after_fees_and_top_ups() -> None:
     assert _bookings(own_credit) == [("top_up", "servicer_top_up", 3_000)]
     assert _bookings(plain) == [("fee", "bank_fee", 50)]
 
-    # 5120 = the bank's closing balance less the line explained, not booked (I9): fees, top-ups
+    # 5120 = the bank's closing balance less our line not booked (I9): fees, top-ups
     with psycopg.connect(DB) as conn:
         unposted = conn.execute(
             "select minor, lines from private.bank_unposted(%s, %s)", (tenant["bank"], DAY)
@@ -475,3 +542,50 @@ def test_a_top_up_ordered_while_its_own_account_closes_waits_and_is_refused() ->
             (own,),
         )
     assert orders == 0
+
+
+def test_a_csv_without_the_iban_column_makes_no_payment_of_our_transfers_coming_back() -> None:
+    """Review M2c-6b-1 round 4 (N1; the round-3 verifier's `real_import.py`): a CSV export with the
+    « Référence de bout en bout » column and no counterparty IBAN, imported through the payments
+    queue — a credit carrying our payout's RMT id with a label the return words miss, one carrying
+    our sweep's SWP id, and a debtor's credit. Before, the import made two `unmatched` payments of
+    our ids (431,840 to unallocated_payment). Now both are `return` lines, their original id their
+    own; the import makes one payment, the debtor's; the debit job's funds pass finds no transfer of
+    this servicer by those ids and leaves both in « À classer » with why (`transfer_unknown`)."""
+    tenant = bank_tenant(feed="csv")
+    store = storage()
+    tag = uuid.uuid4().hex[:6].upper()
+    rmt = "RMT" + uuid.uuid4().hex[:12].upper()
+    swp = "SWP" + uuid.uuid4().hex[:12].upper()
+    csv = (
+        "Date;Libellé;Débit;Crédit;Référence de bout en bout\n"
+        f"10/11/2026;VIR SEPA RECU /DE LILAS FINANCE /MOTIF RETOUR FONDS {tag};;4198,40;{rmt}\n"
+        f"10/11/2026;VIR SEPA RECU /DE COLLECTOO SAS {tag};;120,00;{swp}\n"
+        f"10/11/2026;VIR SEPA RECU /DE DUPONT /MOTIF FACTURE {tag};;50,00;E2E-{tag}\n"
+    ).encode()
+    target = upload(tenant, store, csv, name=f"releve-{tag}.csv")
+    drain(store)
+    sid = str(target["statement_id"])
+    with psycopg.connect(DB) as conn:
+        lines = conn.execute(
+            """select t.kind, t.end_to_end_id, t.original_end_to_end_id, p.status, r.reason
+               from public.bank_transaction t
+               left join public.payment p on p.bank_transaction_id = t.id
+               left join public.bank_debit_review r on r.bank_transaction_id = t.id
+               where t.statement_id = %s order by t.line_no""",
+            (sid,),
+        ).fetchall()
+        row = conn.execute(
+            "select status, counts from public.bank_statement where id = %s", (sid,)
+        ).fetchone()
+    assert row is not None
+    status, counts = row
+    assert status == "imported"
+    assert [tuple(r) for r in lines] == [
+        ("return", rmt, rmt, None, "transfer_unknown"),
+        ("return", swp, swp, None, "transfer_unknown"),
+        ("debtor_credit", f"E2E-{tag}", None, "unmatched", None),
+    ]
+    assert counts["payments"] == {"count": 1, "minor": "5000"}
+    assert counts["returns"] == 2
+    assert [c["minor"] for c in counts["cash_in"]] == ["5000"]

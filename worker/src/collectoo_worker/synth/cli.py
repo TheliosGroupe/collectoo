@@ -5,6 +5,7 @@ uv run synth civil --kind b2b_invoice --dialect fr_semicolon --rows 500 --seed 1
 uv run synth civil-all --rows 200 --seed 1 --out ../tmp/synth
 uv run synth seed-sql > ../supabase/seed.sql
 uv run synth camt053 --lines 500 --seed 1 --iban FR76... --overlap 2 --out ../tmp/synth/bank
+uv run synth camt053 --debits-of f.xml --mode batch --return RMT... --charges 150 --out ../tmp/s
 """
 
 from __future__ import annotations
@@ -15,8 +16,11 @@ import random
 import sys
 from pathlib import Path
 
+from collectoo_worker.remittance import pain001
 from collectoo_worker.synth.camt053 import (
+    DEBIT_MODES,
     balance_before,
+    debits_of,
     generate_entries,
     make_doc,
     write_statement,
@@ -64,6 +68,15 @@ def main(argv: list[str] | None = None) -> int:
     camt.add_argument("--overlap", type=int, default=0, help="2nd statement overlapping N days")
     camt.add_argument("--csv", action="store_true", help="the CSV export instead of camt.053")
     camt.add_argument("--out", type=Path, required=True)
+    camt.add_argument(
+        "--debits-of", type=Path, help="a pain.001 file we wrote: the statement of its debits"
+    )
+    camt.add_argument("--mode", choices=DEBIT_MODES, default="individual")
+    camt.add_argument("--booking-date", type=dt.date.fromisoformat, help="default: ReqdExctnDt")
+    camt.add_argument("--return", dest="returns", action="append", default=[], metavar="E2E")
+    camt.add_argument("--return-date", type=dt.date.fromisoformat)
+    camt.add_argument("--charges", type=int, default=0, help="deducted from each return, minor")
+    camt.add_argument("--fee", type=int, default=0, help="a bank fee line, minor units")
 
     args = parser.parse_args(argv)
     if args.cmd == "eba":
@@ -83,8 +96,35 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def debit_statement(args: argparse.Namespace) -> list[Path]:
+    """The statement of a pain.001 file's debits (and returns, charges, fee), of its debtor IBAN."""
+    file = pain001.read(args.debits_of.read_bytes())
+    entries = debits_of(
+        file,
+        booking_date=args.booking_date,
+        mode=args.mode,
+        returns=args.returns,
+        return_date=args.return_date,
+        charges_minor=args.charges,
+        fee_minor=args.fee,
+    )
+    days = [e.booking_date for e in entries]
+    doc = make_doc(
+        entries,
+        iban=args.iban or file.payment_infos[0].debtor_iban,
+        from_date=min(days),
+        to_date=max(days),
+        opening_minor=args.opening,
+        stmt_id=f"DEBITS-{file.msg_id}"[:35],
+    )
+    name = f"camt053-debits-{args.debits_of.stem}-{args.mode}"
+    return write_statement(doc, args.out, name, version=args.version, csv=args.csv)
+
+
 def statements(args: argparse.Namespace) -> list[Path]:
     """One statement, or two that overlap by `--overlap` days (the second repeats those lines)."""
+    if args.debits_of:
+        return debit_statement(args)
     iban = args.iban or iban_fr(random.Random(args.seed))
     refs = args.references.read_text("utf-8").split() if args.references else []
     span = args.days * 2 - args.overlap if args.overlap else args.days

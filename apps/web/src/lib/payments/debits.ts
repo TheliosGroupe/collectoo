@@ -1,5 +1,14 @@
-import type { ErrorCode } from "@/lib/boarding/forms";
-import { type Notification, notificationState } from "@/lib/payments/allocation";
+import {
+  type ErrorCode,
+  FILE_BOOKED_WHEN,
+  REFUND_BOOKED_WHEN,
+  REFUND_NOT_EXECUTED,
+  REFUND_RETURNED,
+} from "@/lib/boarding/forms";
+import {
+  type Notification,
+  notificationState,
+} from "@/lib/payments/allocation";
 import type { Tone } from "@/lib/payments/statements";
 
 /**
@@ -11,38 +20,60 @@ import type { Tone } from "@/lib/payments/statements";
  */
 
 /** Why a refund is asked (refund_request.reason_code), with the payment reasons each one fits (the SQL checks it). */
-export const REFUND_REASON: Record<string, { label: string; fits: (status: string, review: string | null) => boolean }> = {
+export const REFUND_REASON: Record<
+  string,
+  { label: string; fits: (status: string, review: string | null) => boolean }
+> = {
   overpayment: {
     label: "Trop-perçu : restitué au payeur",
     fits: (_s, r) => r === "overpayment" || r === "nothing_due",
   },
-  currency_mismatch: { label: "Devise différente de la créance", fits: (_s, r) => r === "currency_mismatch" },
-  no_mandate: { label: "Lot annulé : paiement sans mandat", fits: (_s, r) => r === "no_mandate" },
+  currency_mismatch: {
+    label: "Devise différente de la créance",
+    fits: (_s, r) => r === "currency_mismatch",
+  },
+  no_mandate: {
+    label: "Lot annulé : paiement sans mandat",
+    fits: (_s, r) => r === "no_mandate",
+  },
   unidentified: {
     label: "Paiement non identifié",
-    fits: (s, r) => s === "unmatched" && (r === "no_match" || r === "ambiguous"),
+    fits: (s, r) =>
+      s === "unmatched" && (r === "no_match" || r === "ambiguous"),
   },
   held_file: {
     label: "Dossier bloqué (surendettement, procédure collective)",
     fits: (_s, r) => r === "hold_blocks_allocation",
   },
-  account_closed: { label: "Dossier clos", fits: (_s, r) => r === "account_closed" },
-  partial_return: { label: "Reste d'un retour partiel", fits: (_s, r) => r === "partial_return" },
+  account_closed: {
+    label: "Dossier clos",
+    fits: (_s, r) => r === "account_closed",
+  },
+  partial_return: {
+    label: "Reste d'un retour partiel",
+    fits: (_s, r) => r === "partial_return",
+  },
   other: { label: "Autre motif (précisez)", fits: () => true },
 };
 
 /** The reason codes that fit a payment, the most specific first ("other" last). */
 export function refundReasons(status: string, review: string | null): string[] {
-  return Object.keys(REFUND_REASON).filter((k) => REFUND_REASON[k].fits(status, review));
+  return Object.keys(REFUND_REASON).filter((k) =>
+    REFUND_REASON[k].fits(status, review),
+  );
 }
 
 /** Whether « Rembourser » is offered: something is left, the payment does not wait for its allocation, no refund
  * is pending (one at a time). */
-export function refundable(p: { status: string; review_reason: string | null }, unallocatedMinor: string): boolean {
+export function refundable(
+  p: { status: string; review_reason: string | null },
+  unallocatedMinor: string,
+): boolean {
   if (BigInt(unallocatedMinor) <= BigInt(0)) return false;
   return (
     p.status === "unmatched" ||
-    ((p.status === "matched" || p.status === "partially_allocated") && p.review_reason !== null)
+    ((p.status === "matched" || p.status === "partially_allocated") &&
+      p.review_reason !== null)
   );
 }
 
@@ -74,7 +105,10 @@ export const LINK_KIND: Record<string, string> = {
 
 /** What a line looks like before anyone decided (bank_transaction.kind and direction). */
 export function lineKindLabel(kind: string, direction: string): string {
-  if (kind === "return") return direction === "debit" ? "Retour d'un paiement reçu" : "Crédit annulant un débit";
+  if (kind === "return")
+    return direction === "debit"
+      ? "Retour d'un paiement reçu"
+      : "Crédit annulant un débit";
   if (kind === "refund_out") return "Remboursement émis (référence RFD)";
   if (kind === "other_debit") return "Frais ou autre débit";
   if (kind === "transfer_out") return "Virement émis par le cabinet";
@@ -88,19 +122,24 @@ export function lineKindLabel(kind: string, direction: string): string {
 export const DEBIT_REVIEW: Record<string, string> = {
   no_candidate: "Aucun paiement ni remboursement ne porte ses références.",
   ambiguous: "Plusieurs paiements correspondent : choisissez.",
-  amount_differs: "Le montant ne correspond pas à ce qui reste du paiement ou au remboursement demandé.",
-  partial_return: "Retour partiel : à confirmer (le reste du paiement attendra votre décision).",
+  amount_differs:
+    "Le montant ne correspond pas à ce qui reste du paiement ou au remboursement demandé.",
+  partial_return:
+    "Retour partiel : à confirmer (le reste du paiement attendra votre décision).",
   refund_not_pending: "Le remboursement nommé n'est plus en attente.",
   already_returned: "Le paiement nommé est déjà retourné ou remboursé.",
   changed: "Le paiement a changé pendant l'analyse : nouvel essai automatique.",
   // review M2b-6: a line the posting refused is left to ops with its code
-  payment_changed: "Le paiement a changé pendant l'analyse : nouvel essai automatique.",
+  payment_changed:
+    "Le paiement a changé pendant l'analyse : nouvel essai automatique.",
   payment_returned:
     "Remboursement revenu alors que son paiement a été retourné par la banque : rien n'est comptabilisé, la façon de le comptabiliser reste à décider.",
   before_previous_return:
     "Ligne antérieure à un retour déjà comptabilisé sur ce paiement, à une date plus récente : elle ne peut pas être liée à sa date.",
-  posting_failed: "La comptabilisation a été refusée pour cette ligne : liez-la à un autre paiement ou signalez-la au support.",
-  refund_amount_match: "Débit du montant d'un remboursement demandé sur ce compte : s'il s'agit de ce remboursement, liez-le.",
+  posting_failed:
+    "La comptabilisation a été refusée pour cette ligne : liez-la à un autre paiement ou signalez-la au support.",
+  refund_amount_match:
+    "Débit du montant d'un remboursement demandé sur ce compte : s'il s'agit de ce remboursement, liez-le.",
   // M2c-1: our own transfers and credits
   top_up_not_found:
     "Crédit venant du compte propre sans approvisionnement demandé : approvisionnement du cabinet, ou paiement d'un débiteur reçu par le cabinet et relayé sur ce compte (il devient alors un paiement à affecter). Ne le classez avec une explication que s'il n'est ni l'un ni l'autre.",
@@ -109,37 +148,390 @@ export const DEBIT_REVIEW: Record<string, string> = {
   client_credit:
     "Virement reçu du compte de reversement d'un client : règlement d'une facture du cabinet (à classer, comptabilisé avec les factures à venir), ou paiement d'un débiteur que le client relaie (il devient alors un paiement à affecter).",
   own_transfer_out:
-    "Virement émis par le cabinet (reversement ou balayage) : comptabilisé avec les reversements ; à classer avec une explication d'ici là.",
+    "Virement émis par le cabinet vers l'un de ses comptes sans ordre de Collectoo : à vérifier dans la banque.",
+  // M2c-6b-1 (plan §2.3): our payouts' and sweeps' debits and returns the job does not book
+  cancelled_transfer_debited:
+    "Débit d'un virement annulé dans Collectoo : la banque l'a exécuté. Rien n'est comptabilisé ; vérifiez dans la banque avant tout nouveau virement (risque de double paiement).",
+  transfer_debited_twice:
+    "Second débit d'un virement déjà comptabilisé : la banque l'a peut-être exécuté deux fois. Rien n'est comptabilisé ; voyez avec la banque.",
+  transfer_not_handed_out:
+    "Débit d'un virement dont le fichier n'a jamais été téléchargé : rien n'est comptabilisé ; vérifiez dans la banque d'où vient cet ordre.",
+  transfer_unknown:
+    "Débit portant une référence de virement du cabinet (RMT, SWP) ou un lot que Collectoo ne connaît pas : rien n'est comptabilisé ; vérifiez dans la banque.",
+  transfer_differs:
+    "Débit d'un virement du cabinet, mais d'un autre montant ou sur un autre compte : rien n'est comptabilisé ; vérifiez dans la banque.",
+  run_not_in_flight:
+    "Débit d'un reversement dont le reversement n'est plus en cours dans Collectoo : rien n'est comptabilisé ; vérifiez dans la banque.",
+  batch_partial:
+    "Lot débité pour un autre montant que ses virements en cours (un virement manque ou a été rejeté) : rien n'est comptabilisé ; demandez à la banque le détail du lot.",
+  batch_mixed:
+    "Lot mêlant des virements de natures différentes : rien n'est comptabilisé ; demandez à la banque le détail du lot.",
+  // review round 4 (N1): also a second return of a transfer already returned (the job's `return_differs` either way);
+  // review round 6 (R1): and a return read from a camt.053 entry the bank kept unsplit (its total, not this transfer's
+  // return: less than it, with another movement in the batch, or several of our transfers in it)
+  return_differs:
+    "Retour d'un virement du cabinet pour plus que son montant, d'un virement déjà revenu, ou dans un lot de la banque qui ne se détaille pas (son total n'est pas exactement le montant de ce seul virement) : rien n'est comptabilisé ; vérifiez dans la banque.",
+  // review M2c-6b-1 (T4, K5): also a return dated before its debit (the ledger never dates a reversal before its entry)
+  return_before_debit:
+    "Retour d'un virement du cabinet sans débit comptabilisé avant lui. Si le débit n'est pas encore comptabilisé, le retour est repris automatiquement à l'import d'un relevé, une fois le débit comptabilisé. S'il est daté d'avant le débit, rien n'est comptabilisé : vérifiez les deux lignes dans la banque et prévenez le support.",
+};
+
+/** The reasons that may mean money left twice or without an order (P0, first in « À classer »; plan §2.3). */
+export const P0_DEBIT_REVIEWS = new Set([
+  "cancelled_transfer_debited",
+  "transfer_debited_twice",
+  "transfer_not_handed_out",
+  "transfer_unknown",
+]);
+
+/** « À classer » order: the P0 reasons first, then the others as the database lists them. */
+export function debitReviewRank(reason: string | null): number {
+  return reason !== null && P0_DEBIT_REVIEWS.has(reason) ? 0 : 1;
+}
+
+/** Our payouts' and sweeps' end-to-end ids, and our files' PmtInfIds (as the worker writes them). */
+const OUR_TRANSFER_ID = /^(RMT|SWP)[0-9A-F]{12}$/;
+const OUR_PMT_INF = /^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$/;
+
+/**
+ * M2c-6b-1 (plan §2.4 rule 5; review money-1, K1): a line of our payouts or sweeps, as the database reads it — a line
+ * whose own end-to-end id, or original one, is our RMT/SWP id (whatever its direction and the kind the statement gives
+ * it: a debit of our payout or sweep, the payee's bank's return credit of one, a debit « return » naming one; review
+ * round 2, L4, as private.post_debit_links reads it), and a debit with no end-to-end id carrying one of our files'
+ * PmtInfIds (a batch line: the database also checks the PmtInf is one of that account's files). Such a line is only ever
+ * booked from the statement (the debit job, or ops in M2c-6b-2): never a payment's return or its loss, a refund, a
+ * refund come back or an explanation — the database refuses each (`own_transfer_line`), but on our batch line the
+ * refunds of that PmtInf handed out to the bank (offersOwnBatchRefunds).
+ */
+export function isOurTransferLine(o: {
+  direction: string;
+  kind: string;
+  end_to_end_id?: string | null;
+  original_end_to_end_id?: string | null;
+  payment_info_id?: string | null;
+}): boolean {
+  return (
+    OUR_TRANSFER_ID.test(o.end_to_end_id ?? "") ||
+    OUR_TRANSFER_ID.test(o.original_end_to_end_id ?? "") ||
+    (o.direction === "debit" && !o.end_to_end_id && OUR_PMT_INF.test(o.payment_info_id ?? ""))
+  );
+}
+
+/**
+ * M2c-6b-1 (review money-1, K1 as the database implements it): the one link a batch line of one of our files takes — a
+ * debit with no end-to-end id carrying one of our PmtInfIds. A refund whose transfer is in a file handed out to the
+ * bank (downloaded or sent) is linked there: private.refund_transfer_follow (M2c-6a round 6, G2) executes it only by a
+ * batch line of its own PmtInf in that file (`reissue_in_downloaded_file` otherwise), as ops did from this page in
+ * M2c-6a (a refunds PmtInf's line of one refund's amount); a manual refund, or one whose transfer is not handed out, is
+ * refused (`own_transfer_line`). So « À classer » offers such a line the refunds of its amount (« Remboursement … ») and
+ * nothing else — never a payment's return, its loss or an explanation (a PmtInf of one refund alone is linked by the
+ * job's M2b pass).
+ */
+export function offersOwnBatchRefunds(o: {
+  direction: string;
+  end_to_end_id?: string | null;
+  payment_info_id?: string | null;
+  unsplit_ours?: number | null;
+}): boolean {
+  return (
+    o.direction === "debit" &&
+    !o.end_to_end_id &&
+    OUR_PMT_INF.test(o.payment_info_id ?? "") &&
+    !holdsOursUnsplit(o)
+  );
+}
+
+/**
+ * Review M2c-6b-1 round 7 (S2, verdict new:debit-entry-unsplit-with-our-details-explainable): a line read from a
+ * camt.053 entry the bank kept unsplit holding a detail of ours (`unsplit_ours` > 0 on the row « À classer » loads,
+ * the parser's count — since round 8, T2, of every id we issue: our payouts', sweeps', refunds' and top-ups'), whatever
+ * its direction — the entry's total, not one transaction's (our payout's return netted into an outgoing debit, our
+ * debits in one entry, our payout's debit beside a debtor's credit). It takes no link of any kind and no explanation
+ * (private.post_debit_links, the top-up, the relay: own_transfer_line), is never booked automatically and waits for the
+ * team's booking (M2c-6b-2; COMPLIANCE OQ-84 (h)): « À classer » offers nothing on it and says so (UNSPLIT_OURS_NOTE).
+ * With none of ours (0), the general rules.
+ */
+export function holdsOursUnsplit(o: { unsplit_ours?: number | null }): boolean {
+  return (o.unsplit_ours ?? 0) > 0;
+}
+
+/**
+ * Whether « À classer » offers the M2b links on a line — a payment's return (« Retour du paiement … », and its excess
+ * as the servicer's loss) and our refunds (« Remboursement … », « Remboursement revenu … »): only on the lines M2b reads
+ * as such, a debit read as a return, our refund or another debit, and a credit undoing a debit. Our own transfers out
+ * and the credits from our own account or from a client (M2c-1 kinds) never: the database refuses those links
+ * (« debit link refused: not_a_return »; review M2c-1). Nor our payouts' and sweeps' lines (review M2c-6b-1 money-1:
+ * `own_transfer_line`, isOurTransferLine). Review round 5 (Q1): nor a credit naming one of our lots with no end-to-end id
+ * (isOurTransferCredit) — its one link, the refund its lot held alone, is offersOwnLotRefundBack's; review round 6
+ * (R2): whatever its end-to-end id (namesOurLot). Review round 7 (S2): nor a line of an unsplit entry holding ours
+ * (holdsOursUnsplit).
+ */
+export function offersPaymentLinks(o: LineIds): boolean {
+  if (holdsOursUnsplit(o) || isOurTransferLine(o) || isOurTransferCredit(o) || namesOurLot(o)) return false;
+  if (o.direction === "debit")
+    return (
+      o.kind === "return" || o.kind === "refund_out" || o.kind === "other_debit"
+    );
+  return o.direction === "credit" && o.kind === "return";
+}
+
+/** Whether « À classer » reads public.debit_link_options for a line: only for a line it may offer links on. */
+export function readsLinkOptions(o: LineIds): boolean {
+  return offersPaymentLinks(o) || offersOwnBatchRefunds(o) || offersOwnLotRefundBack(o);
+}
+
+/**
+ * Review M2c-6b-1 round 5 (Q1): the one link a credit naming one of our lots with no end-to-end id takes, read as a
+ * `return` (isOurTransferCredit, not isOurTransferLine: our RMT/SWP lines take none) — « Remboursement revenu » of the
+ * refund that lot held alone, executed, of the line's amount (private.pmt_inf_refund_back; COMPLIANCE OQ-84's
+ * default), the one refund public.debit_link_options lists there. private.post_debit_links refuses every other link
+ * and the explanation on such a credit (`own_transfer_line`). Review round 6 (R2): whatever its end-to-end id
+ * (namesOurLot: one that is not ours included).
+ */
+export function offersOwnLotRefundBack(o: LineIds): boolean {
+  return (
+    o.direction === "credit" && o.kind === "return" && namesOurLot(o) && !isOurTransferLine(o) && !holdsOursUnsplit(o)
+  );
+}
+
+/**
+ * The links « À classer » offers on a line, from the payments the job named and public.debit_link_options listed
+ * (`payments`, a payment the job named marked `named`) and the refunds that function listed (`refunds`):
+ *   - « Retour du paiement … » on a debit M2b reads as a payment's return or another debit: the payments of which at
+ *     least the line's amount is left (5 for a return, 2 for another debit);
+ *   - « Retour au-delà du paiement … (perte du cabinet) » on a debit read as a return: the payments the job named of
+ *     which less is left than the line takes back (M2c-1, OQ-34);
+ *   - « Remboursement … » / « Remboursement revenu … »: the refunds listed.
+ * Review round 2 (L4, money-1 / K1 in depth): on our lines exactly what debit_link_options lists there, which is only
+ * what private.post_debit_links accepts — on our batch line the refunds it lists (that PmtInf's file-mode refunds of the
+ * line's amount handed out to the bank; none while a member is cancelled and not returned), never a payment's return or
+ * its loss, whatever the job named; on our RMT/SWP lines and their returns nothing (their options are not even read).
+ */
+export function linkOffers<
+  P extends { left_minor: string; named?: boolean },
+  R,
+>(
+  row: LineIds & { amount_minor: string },
+  payments: P[],
+  refunds: R[],
+): { returns: P[]; losses: P[]; refunds: R[] } {
+  // review M2c-1: no return or refund link on our own transfers and credits (the database refuses them); review
+  // M2c-6b-1 (money-1): nor on our payouts' and sweeps' lines (own_transfer_line) — the loss included
+  const linkable = offersPaymentLinks(row);
+  const amount = BigInt(row.amount_minor);
+  const isReturn = row.direction === "debit" && row.kind !== "refund_out";
+  return {
+    returns:
+      linkable && row.direction === "debit"
+        ? payments.filter((p) => BigInt(p.left_minor) >= amount).slice(0, isReturn ? 5 : 2)
+        : [],
+    losses:
+      linkable && row.direction === "debit" && row.kind === "return"
+        ? payments.filter((p) => p.named === true && BigInt(p.left_minor) < amount)
+        : [],
+    // … but our batch line takes a refund of its PmtInf in a file handed out (offersOwnBatchRefunds), and a credit
+    // naming our lot the refund that lot held alone (offersOwnLotRefundBack, round 5): what is listed
+    refunds: linkable || offersOwnBatchRefunds(row) || offersOwnLotRefundBack(row) ? refunds : [],
+  };
+}
+
+/**
+ * A line's ids as isOurTransferLine reads them (the credit's own end-to-end id, the original one it returns), and what
+ * the database says of it on the row « À classer » loads (public.debit_queue; review round 7): how many details of
+ * ours the unsplit entry it was read from holds (`unsplit_ours`), and whether a credit names one of our lots of its
+ * account (`names_our_lot`).
+ */
+type LineIds = {
+  direction: string;
+  kind: string;
+  end_to_end_id?: string | null;
+  original_end_to_end_id?: string | null;
+  payment_info_id?: string | null;
+  unsplit_ours?: number | null;
+  names_our_lot?: boolean | null;
 };
 
 /**
- * Whether « À classer » offers the M2b links on a line — a payment's return (« Retour du paiement … ») and our refunds
- * (« Remboursement … »): only on the lines M2b reads as such, a debit read as a return, our refund or another debit, and
- * a credit undoing a debit. Our own transfers out and the credits from our own account or from a client (M2c-1 kinds)
- * never: the database refuses those links (« debit link refused: not_a_return »; review M2c-1).
+ * Review M2c-6b-1 round 3 (M1, M2; integration): a credit that is one of our own transfers coming back, as
+ * public.release_own_credit and private.post_bank_bookings' top-up rule read it — our RMT/SWP id as its own end-to-end
+ * id or as the original it returns (isOurTransferLine), or, with no end-to-end id, one of our files' PmtInfIds (a lot
+ * of one of our files coming back as one line). Neither relayed as a debtor's payment nor booked as a top-up: both
+ * refuse it (`own_transfer_line`).
  */
-export function offersPaymentLinks(o: { direction: string; kind: string }): boolean {
-  if (o.direction === "debit") return o.kind === "return" || o.kind === "refund_out" || o.kind === "other_debit";
-  return o.direction === "credit" && o.kind === "return";
+export function isOurTransferCredit(o: LineIds): boolean {
+  return (
+    o.direction === "credit" &&
+    (isOurTransferLine(o) || (!o.end_to_end_id && OUR_PMT_INF.test(o.payment_info_id ?? "")))
+  );
+}
+
+/**
+ * Review M2c-6b-1 round 6 (R2, verdict new:tf-lot-credit-with-foreign-e2e): a credit naming one of our files' PmtInfIds
+ * whatever its end-to-end id — our lot, or a transfer of it, coming back, the bank possibly giving it an end-to-end id
+ * that is not ours (whether it does is unknown: COMPLIANCE OQ-84). private.post_debit_links refuses on it the explanation
+ * and « Remboursement revenu » of any refund but the one its lot held alone (it reads the PmtInfId of a file of the
+ * line's account handed out: private.names_our_lot), and offers only what debit_link_options lists. Review round 7
+ * (S3, and round 6's minor web edge): the database's word, never the PmtInfId's form — debit_queue's names_our_lot,
+ * computed by private.names_our_lot under the servicer's rights: a TF-shaped id of another account or of no file keeps
+ * the general rules and no lot note. Such an own or a client's credit is neither relayed nor a top-up either
+ * (public.release_own_credit, the top-up rule: own_transfer_line).
+ */
+export function namesOurLot(o: LineIds): boolean {
+  return o.direction === "credit" && o.names_our_lot === true;
+}
+
+/**
+ * Whether « Approvisionnement par le compte propre » is offered (M2c-1): a credit from the own account
+ * (`own_transfer_in`). Review M2c-6b-1 round 3 (M2, L4): never on a credit carrying our payout's or sweep's RMT/SWP id,
+ * as its own or as the original it returns, nor on one naming our PmtInfId without an end-to-end id
+ * (isOurTransferCredit) — one of our own transfers coming back that the feed did not flag as a return (a CSV label
+ * missing RETURN_RE); private.post_bank_bookings' top_up rule refuses it (`own_transfer_line`), it is booked from the
+ * statement (ops in M2c-6b-2). Review round 7: (S3) nor one naming one of our lots of its account whatever its
+ * end-to-end id (namesOurLot); (S2) nor a line of an unsplit entry holding ours (holdsOursUnsplit).
+ */
+export function offersTopUp(o: LineIds): boolean {
+  return (
+    o.direction === "credit" &&
+    o.kind === "own_transfer_in" &&
+    !isOurTransferCredit(o) &&
+    !namesOurLot(o) &&
+    !holdsOursUnsplit(o)
+  );
 }
 
 /**
  * Whether « Paiement d'un débiteur relayé par le cabinet » is offered (review M2c-1): a credit from the own account
  * (`own_transfer_in`) that does not carry our `TOP…` reference — a credit carrying it is our top-up, never a debtor's
- * payment. The database checks the rest (unbooked, unlinked, on a dedicated account).
+ * payment. Review M2c-6b-1 round 3 (M1): nor one carrying our RMT/SWP id, nor one naming our PmtInfId without an
+ * end-to-end id (isOurTransferCredit) — our payout, sweep or lot coming back, never a debtor's payment
+ * (public.release_own_credit refuses it: `own_transfer_line`). The database checks the rest (unbooked, unlinked, on a
+ * dedicated account). Review round 7 (S3, S2): nor one naming one of our lots of its account (namesOurLot), nor a line
+ * of an unsplit entry holding ours (holdsOursUnsplit).
  */
-export function relayable(o: { direction: string; kind: string; end_to_end_id: string | null }): boolean {
-  return o.direction === "credit" && o.kind === "own_transfer_in" && !/^TOP[0-9A-F]{12}$/.test(o.end_to_end_id ?? "");
+export function relayable(o: LineIds & { end_to_end_id: string | null }): boolean {
+  return (
+    o.direction === "credit" &&
+    o.kind === "own_transfer_in" &&
+    !/^TOP[0-9A-F]{12}$/.test(o.end_to_end_id ?? "") &&
+    !isOurTransferCredit(o) &&
+    !namesOurLot(o) &&
+    !holdsOursUnsplit(o)
+  );
 }
 
 /**
  * Review M2c-2: whether « Paiement d'un débiteur relayé par le client » is offered — a credit from a client's confirmed
  * payout IBAN (`client_transfer_in`), e.g. the client forwarding a debtor's payment it received. It is released by
  * public.release_own_credit as an own credit is; the database checks the rest (unbooked, unlinked, on a dedicated
- * account).
+ * account). Review M2c-6b-1 round 3 (M1, pre-existing:relay-of-our-returned-transfer): never one carrying our RMT/SWP
+ * id, nor one naming our PmtInfId without an end-to-end id (isOurTransferCredit) — the client's payout coming back from
+ * its IBAN, unflagged by a CSV feed; relayed, it would credit a debtor's file with money the debtor never paid (and be
+ * remitted again). The database refuses it. Review round 7 (S3, S2): nor one naming one of our lots of its account
+ * (namesOurLot: the client's payout of that lot coming back), nor a line of an unsplit entry holding ours.
  */
-export function clientRelayable(o: { direction: string; kind: string }): boolean {
-  return o.direction === "credit" && o.kind === "client_transfer_in";
+export function clientRelayable(o: LineIds): boolean {
+  return (
+    o.direction === "credit" &&
+    o.kind === "client_transfer_in" &&
+    !isOurTransferCredit(o) &&
+    !namesOurLot(o) &&
+    !holdsOursUnsplit(o)
+  );
+}
+
+/**
+ * Review M2c-6b-1 round 3 (M1): what « À classer » says of a credit carrying our RMT/SWP id that the bank did not flag
+ * as a return (an own or a client's credit, read so by a CSV feed whose label misses RETURN_RE) — in place of the job's
+ * review, which reads it as a top-up or a client's credit (top_up_not_found, top_up_differs, client_credit) and
+ * suggests a relay the database refuses. The return the bank flags (kind `return`) and our debits keep their review.
+ */
+export const OUR_TRANSFER_CREDIT_NOTE =
+  "Crédit portant la référence de l'un de nos virements (reversement ou quote-part du cabinet) : c'est ce virement qui revient, sans que la banque l'ait signalé comme un retour. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement, et ne se classe pas sans comptabiliser. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.";
+
+/**
+ * Review M2c-6b-1 round 4 (N3): what « À classer » says of a credit naming one of our files' PmtInfIds with no
+ * end-to-end id (one of our lots coming back as one line: isOurTransferCredit, not isOurTransferLine) — an own or a
+ * client's credit, or a `return` (the import's reading of such a credit since round 4, N1) — in place of the job's
+ * review, which suggests a top-up, a relay or an explanation (top_up_not_found, client_credit, no_candidate). The
+ * database refuses the relay and the top-up (own_transfer_line); COMPLIANCE OQ-84: ops do not classify it without
+ * booking, they tell support.
+ */
+export const OUR_LOT_CREDIT_NOTE =
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements (sans référence de bout en bout) : c'est ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement. Ne le classez pas sans comptabiliser : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+
+/**
+ * Review M2c-6b-1 round 6 (R2): what « À classer » says of a credit read as a return that names one of our lots with an
+ * end-to-end id (namesOurLot, not isOurTransferCredit) — in place of the job's review (no_candidate, amount_differs,
+ * changed), the explanation and every other refund being refused on it (own_transfer_line; COMPLIANCE OQ-84). Round 8's
+ * verifier: since T1 that end-to-end id can be one of ours (a refund's RFD id), so the note claims nothing of it.
+ */
+export const OUR_LOT_FOREIGN_E2E_NOTE =
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements, quelle que soit sa référence de bout en bout : c'est peut-être ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne le classez pas sans comptabiliser et ne le rattachez à aucun autre remboursement : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+
+/**
+ * Review M2c-6b-1 round 7 (S3): what « À classer » says of an own or a client's credit naming one of our lots of its
+ * account with an end-to-end id that is not ours (namesOurLot) — in place of the job's review, which suggests a top-up
+ * or a relay the database refuses (own_transfer_line; COMPLIANCE OQ-84 (g)).
+ */
+export const OUR_LOT_OWN_CREDIT_NOTE =
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements de ce compte, même s'il vient du compte propre ou du compte d'un client : c'est ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement. Ne le classez pas sans comptabiliser : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+
+/**
+ * Review M2c-6b-1 round 7 (S2): what « À classer » says of a line of an unsplit entry holding a detail of ours
+ * (holdsOursUnsplit) — in place of the job's review (return_differs, batch_partial), after a P0 reason if any.
+ * Review round 8 (T3): only what the code knows, true of every such line — the bank's detail of the entry is incomplete
+ * or does not match it (a count, a direction or an amount), never that other movements sit beside ours (a single detail
+ * of ours whose own amount is not the entry's holds none); (T2) our refunds and top-ups are counted too.
+ */
+export const UNSPLIT_OURS_NOTE =
+  "Ligne d'une écriture de la banque qui contient au moins l'un de nos virements (reversement, quote-part du cabinet, remboursement ou approvisionnement), son débit ou son retour, et dont le détail donné par la banque est incomplet ou ne correspond pas à l'écriture (nombre, sens ou montant des opérations) : son montant est celui de toute l'écriture, rien n'est comptabilisé automatiquement. Elle se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne la classez pas sans comptabiliser et ne la rattachez à aucun paiement ni remboursement : demandez à la banque le détail de l'écriture et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+
+/**
+ * Review M2c-6b-1 round 5 (Q1): on such a credit read as a return (offersOwnLotRefundBack), the one exception — the
+ * refund its lot held alone, which « À classer » then offers (COMPLIANCE OQ-84's default).
+ */
+export const OUR_LOT_REFUND_BACK_NOTE =
+  "Seule exception : si ce lot ne contenait qu'un remboursement, déjà exécuté et du même montant, ce remboursement vous est proposé (« Remboursement revenu ») : c'est lui qui revient.";
+
+/**
+ * Review M2c-6b-1 round 4 (N1): the funds pass's reasons on a credit (the return of our payout or sweep, flagged by the
+ * bank or read so at import) in a credit's words — the debit's ones say « Débit … ».
+ */
+const CREDIT_REVIEW: Record<string, string> = {
+  transfer_unknown:
+    "Crédit portant la référence d'un virement du cabinet (RMT, SWP) que Collectoo ne connaît pas : rien n'est comptabilisé ; vérifiez dans la banque.",
+  transfer_differs:
+    "Crédit revenant d'un virement du cabinet, mais sur un autre compte ou dans une autre devise : rien n'est comptabilisé ; vérifiez dans la banque.",
+};
+
+/**
+ * The review « À classer » shows on a line: the note on our unflagged returned credits (OUR_TRANSFER_CREDIT_NOTE), on a
+ * credit naming only one of our lots (OUR_LOT_CREDIT_NOTE, round 4's N3), else the job's reason — in a credit's words
+ * on a credit. The return of our payout or sweep keeps the funds pass's review, which names it (round 4's N1).
+ */
+export function debitReviewText(o: LineIds & { review_reason: string | null }): string | null {
+  // review round 7 (S2): a line of an unsplit entry holding ours — a P0 first, then why nothing is offered
+  if (holdsOursUnsplit(o))
+    return o.review_reason !== null && P0_DEBIT_REVIEWS.has(o.review_reason)
+      ? `${reviewReasonText(o.direction, o.review_reason)} ${UNSPLIT_OURS_NOTE}`
+      : UNSPLIT_OURS_NOTE;
+  if (o.direction === "credit" && o.kind !== "return" && isOurTransferLine(o)) return OUR_TRANSFER_CREDIT_NOTE;
+  if (isOurTransferCredit(o) && !isOurTransferLine(o))
+    return offersOwnLotRefundBack(o) ? `${OUR_LOT_CREDIT_NOTE} ${OUR_LOT_REFUND_BACK_NOTE}` : OUR_LOT_CREDIT_NOTE;
+  // review round 6 (R2): a return naming our lot with an end-to-end id that is not ours
+  if (offersOwnLotRefundBack(o)) return `${OUR_LOT_FOREIGN_E2E_NOTE} ${OUR_LOT_REFUND_BACK_NOTE}`;
+  // review round 7 (S3): an own or a client's credit naming our lot so, as the database reads it
+  if (namesOurLot(o) && (o.kind === "own_transfer_in" || o.kind === "client_transfer_in"))
+    return OUR_LOT_OWN_CREDIT_NOTE;
+  if (!o.review_reason) return null;
+  return reviewReasonText(o.direction, o.review_reason);
+}
+
+/** The job's reason in French, in a credit's words on a credit. */
+function reviewReasonText(direction: string, reason: string): string {
+  const credit = direction === "credit" ? CREDIT_REVIEW[reason] : undefined;
+  if (credit) return credit;
+  return DEBIT_REVIEW[reason] ?? reason;
 }
 
 /** The button and sheet title of a relayed debtor payment, by who relays it. */
@@ -150,7 +542,8 @@ export const RELAY_LABEL = {
 
 /** What a decided line became, in French: a relayed payment says who relayed it (review M2c-2). */
 export function decisionLabel(decision: string, kind: string): string {
-  if (decision === "relayed_payment" && kind === "client_transfer_in") return RELAY_LABEL.client;
+  if (decision === "relayed_payment" && kind === "client_transfer_in")
+    return RELAY_LABEL.client;
   return LINK_KIND[decision] ?? decision;
 }
 
@@ -159,7 +552,34 @@ export function decisionLabel(decision: string, kind: string): string {
  * account, nor a return whose references name one of our payments (review M2b-6: money out for a payment is always
  * booked; the database refuses it too). A return naming nothing of ours (a fee's direct debit the bank rejected) may be.
  */
-export function explainable(o: { direction: string; kind: string; namesPayment: boolean }): boolean {
+export function explainable(o: {
+  direction: string;
+  kind: string;
+  namesPayment: boolean;
+  endToEndId?: string | null;
+  originalEndToEndId?: string | null;
+  paymentInfoId?: string | null;
+  /** review round 7 (S3): the database's word that a credit names one of our lots of its account (debit_queue) */
+  namesOurLot?: boolean | null;
+  /** review round 7 (S2): the unsplit entry's details of ours (debit_queue's unsplit_ours) */
+  unsplitOurs?: number | null;
+}): boolean {
+  // M2c-6b-1 (plan §2.3; the database's own_transfer_line, review money-1): our payout's or sweep's debit (its RMT or
+  // SWP id, or a batch line of one of our PmtInfs) and the return of one are booked from the statement, never explained
+  // away — nor any line carrying one of our RMT/SWP ids, whichever way (isOurTransferLine reads both ids, round 2) —
+  // nor, review round 5 (Q1), a credit naming one of our lots with no end-to-end id (isOurTransferCredit), whatever its
+  // kind, as OUR_LOT_CREDIT_NOTE says — nor, round 6 (R2), with an end-to-end id that is not ours (namesOurLot, the
+  // database's word since round 7) — nor, round 7 (S2), a line of an unsplit entry holding ours, whatever its direction
+  const ids = {
+    direction: o.direction,
+    kind: o.kind,
+    end_to_end_id: o.endToEndId,
+    original_end_to_end_id: o.originalEndToEndId,
+    payment_info_id: o.paymentInfoId,
+    names_our_lot: o.namesOurLot,
+    unsplit_ours: o.unsplitOurs,
+  };
+  if (holdsOursUnsplit(ids) || isOurTransferLine(ids) || isOurTransferCredit(ids) || namesOurLot(ids)) return false;
   if (o.direction !== "debit") return true;
   if (o.kind === "refund_out") return false;
   return !(o.kind === "return" && o.namesPayment);
@@ -171,12 +591,21 @@ export function explainable(o: { direction: string; kind: string; namesPayment: 
  * whatever was imputed or remitted (a held payment had neither) and records a notification for the client, never
  * « informed » before it is delivered (CPCE-06).
  */
-export function returnEffect(o: { amount: string; left: string; full: boolean; dateFr: string; hasFile: boolean }): string {
+export function returnEffect(o: {
+  amount: string;
+  left: string;
+  full: boolean;
+  dateFr: string;
+  hasFile: boolean;
+}): string {
   const head = o.hasFile
     ? `La banque reprend ${o.amount} sur ce paiement. Ses imputations et reversements, s'il y en a, seront annulés au ${o.dateFr} (date du retour) : les factures retrouvent leur solde. Notification enregistrée pour le client (envoi : à venir).`
     : `La banque reprend ${o.amount} sur ce paiement, rattaché à aucun dossier : le retour est comptabilisé au ${o.dateFr} (date du retour), sans quittance ni information d'un client.`;
-  if (!o.full) return `${head} Il restera ${o.left} du paiement, en attente de votre décision (réimputer ou rembourser).`;
-  return o.hasFile ? `${head} Le paiement sera « retourné » et sa quittance annulée.` : `${head} Le paiement sera « retourné ».`;
+  if (!o.full)
+    return `${head} Il restera ${o.left} du paiement, en attente de votre décision (réimputer ou rembourser).`;
+  return o.hasFile
+    ? `${head} Le paiement sera « retourné » et sa quittance annulée.`
+    : `${head} Le paiement sera « retourné ».`;
 }
 
 /**
@@ -194,18 +623,28 @@ export function returnedNote(
   when: (iso: string) => string,
 ): string {
   const parts = ["La banque a repris ce paiement."];
-  const byReturn = (kind: string) => o.notifications.some((n) => n.kind === kind && n.reason === "bank_return");
+  const byReturn = (kind: string) =>
+    o.notifications.some((n) => n.kind === kind && n.reason === "bank_return");
   if (byReturn("payment_allocation_reversed"))
-    parts.push("Ses imputations sont annulées à la date du retour : les factures retrouvent leur solde.");
-  if (byReturn("payment_forward_reversed")) parts.push("Son reversement au client est annulé à la date du retour.");
+    parts.push(
+      "Ses imputations sont annulées à la date du retour : les factures retrouvent leur solde.",
+    );
+  if (byReturn("payment_forward_reversed"))
+    parts.push("Son reversement au client est annulé à la date du retour.");
   if (!o.hasFile) {
-    parts.push("Il n'est rattaché à aucun dossier : ni quittance, ni information d'un client.");
+    parts.push(
+      "Il n'est rattaché à aucun dossier : ni quittance, ni information d'un client.",
+    );
     return parts.join(" ");
   }
   if (o.latestReceiptKind === "void") parts.push("Sa quittance est annulée.");
-  else if (o.latestReceiptKind !== null) parts.push("L'annulation de sa quittance est en cours.");
-  const told = [...o.notifications].reverse().find((n) => n.kind === "payment_returned");
-  if (told) parts.push(`Information du client : ${notificationState(told, when)}.`);
+  else if (o.latestReceiptKind !== null)
+    parts.push("L'annulation de sa quittance est en cours.");
+  const told = [...o.notifications]
+    .reverse()
+    .find((n) => n.kind === "payment_returned");
+  if (told)
+    parts.push(`Information du client : ${notificationState(told, when)}.`);
   return parts.join(" ");
 }
 
@@ -214,7 +653,12 @@ export function returnedNote(
  * reference (the bank read it as a plain debit, `other_debit`: review M2b-6) is linked on ops' word: the sheet asks
  * them to check the transfer in the bank first.
  */
-export function linkRefundEffect(o: { direction: string; lineRef: string | null; refundRef: string; payee: string }): string {
+export function linkRefundEffect(o: {
+  direction: string;
+  lineRef: string | null;
+  refundRef: string;
+  payee: string;
+}): string {
   if (o.direction !== "debit")
     return `Le virement ${o.refundRef} est revenu impayé : le remboursement sera annulé à la date du crédit, et le montant redeviendra disponible sur le paiement.`;
   if (o.lineRef === o.refundRef)
@@ -238,7 +682,10 @@ export function ownCreditEffect(amount: string): string {
  * becomes a payment, booked on the dedicated account at the line's date as a released duplicate credit is, on no file
  * yet, so it waits in « Paiements à traiter » for ops to assign it. The motif is required and kept.
  */
-export function relayedPaymentEffect(o: { amount: string; dateFr: string }): string {
+export function relayedPaymentEffect(o: {
+  amount: string;
+  dateFr: string;
+}): string {
   return `Le crédit de ${o.amount} deviendra un paiement reçu, comptabilisé sur le compte de fonds de tiers au ${o.dateFr} (date de la ligne), payeur « Versement relayé par le cabinet ». Il attendra dans « Paiements à traiter » d'être affecté au dossier du débiteur, puis sera imputé comme tout paiement. Le motif est conservé : indiquez qui a payé le cabinet, et quand. À ne pas utiliser pour un approvisionnement par le cabinet.`;
 }
 
@@ -248,7 +695,10 @@ export function relayedPaymentEffect(o: { amount: string; dateFr: string }): str
  * waits in « Paiements à traiter ». Not for the client paying one of our invoices, nor for a payment already declared on
  * the file as made to the client directly (it would be counted twice).
  */
-export function clientRelayedPaymentEffect(o: { amount: string; dateFr: string }): string {
+export function clientRelayedPaymentEffect(o: {
+  amount: string;
+  dateFr: string;
+}): string {
   return `Le crédit de ${o.amount} venant du compte de reversement d'un client deviendra un paiement reçu, comptabilisé sur le compte de fonds de tiers au ${o.dateFr} (date de la ligne), payeur « Versement relayé par le client ». Il attendra dans « Paiements à traiter » d'être affecté au dossier du débiteur, puis sera imputé comme tout paiement. Le motif est conservé : indiquez quel débiteur a payé le client, et quand. À ne pas utiliser pour le règlement d'une facture du cabinet par le client, ni pour un paiement déjà déclaré sur la fiche du dossier comme reçu directement par le client.`;
 }
 
@@ -257,9 +707,16 @@ export function clientRelayedPaymentEffect(o: { amount: string; dateFr: string }
  * (its imputations undone at the return date, as any return) and the excess, the servicer's loss — never the client's
  * nor another client's.
  */
-export function lossEffect(o: { amount: string; left: string; excess: string; dateFr: string; noneLeft: boolean }): string {
+export function lossEffect(o: {
+  amount: string;
+  left: string;
+  excess: string;
+  dateFr: string;
+  noneLeft: boolean;
+}): string {
   const loss = `l'excédent de ${o.excess} sera une perte à la charge du cabinet, jamais du client ni d'un autre client (question ouverte OQ-34 : recours contre le payeur).`;
-  if (o.noneLeft) return `La banque reprend ${o.amount} alors que rien ne reste du paiement : ${loss}`;
+  if (o.noneLeft)
+    return `La banque reprend ${o.amount} alors que rien ne reste du paiement : ${loss}`;
   return `La banque reprend ${o.amount}, plus que ce qui reste du paiement (${o.left}). Le retour de ${o.left} sera comptabilisé sur le paiement au ${o.dateFr} (ses imputations et reversements annulés à cette date) ; ${loss}`;
 }
 
@@ -269,7 +726,11 @@ export function lossEffect(o: { amount: string; left: string; excess: string; da
  * read as a return (« RETOUR VIR SEPA … » in its label) books nothing and goes with the debits; a debit too. When the
  * page is not told the reading (`heldKind` null), a credit's sheet says both outcomes rather than promise a payment.
  */
-export function releaseEffect(o: { direction: string; heldKind: string | null; amount: string }): string {
+export function releaseEffect(o: {
+  direction: string;
+  heldKind: string | null;
+  amount: string;
+}): string {
   const payment = `La ligne deviendra un paiement reçu de ${o.amount} : comptabilisé sur le compte de fonds de tiers à la date du relevé, puis rapproché d'un dossier.`;
   const debits =
     "La ligne sera traitée comme un retour ou un remboursement : rapprochée automatiquement si ses références le permettent, sinon listée dans « À classer ». Aucun paiement n'est créé.";
@@ -382,10 +843,13 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     // review M2c-4 (tests-ui#3, C4): also, at once, a draft whose preparation failed (details.prepare_failed)
     help: "Un brouillon de reversement attend sa validation depuis plus d'un jour ouvré, ou sa préparation a échoué et rien ne la relance : validez-le, ou ouvrez-le et cliquez « Actualiser » (ou « Abandonner »).",
   },
-  // review M2c-4 (legal#3): an approved run is not paid until the bank's debit
+  // review M2c-4 (legal#3): an approved run is not paid until the bank's debit; review M2c-6b-1 (legal-texts#2, K3):
+  // what the check knows is that the debit is not booked — the statement may show it on a line the job cannot book;
+  // round 2 (L3): a payout never handed out to the bank (still ordered, or in a file nobody downloaded) is proven unpaid
+  // at once (private.run_remittance_runs_checks' olc.proven), whatever the statements
   remittance_payout_overdue: {
     label: "Reversement validé non débité après la date limite",
-    help: "Le virement d'un reversement validé n'est pas débité par la banque alors que la dernière date d'exécution de certains de ses encaissements est passée (art. R124-6 CPCE) : vérifiez qu'il a été transmis et exécuté.",
+    help: "La dernière date d'exécution de certains encaissements d'un reversement validé est passée (art. R124-6 CPCE) et son débit n'est pas comptabilisé : vérifiez que le virement a été transmis et exécuté. Si le relevé montre ce débit sans sa référence, ou dans une ligne groupée d'un autre montant, la ligne attend dans « Débits et retours ». Le dépassement est enregistré aussitôt pour un virement jamais remis à la banque (encore à mettre dans un fichier, ou dans un fichier jamais téléchargé) ; sinon, une fois les relevés de cette date importés sans aucune ligne qui puisse être ce débit.",
   },
   remittance_payout_not_executed: {
     label: "Reversement non exécuté à la date demandée",
@@ -427,9 +891,11 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Fichier de virements non téléchargé",
     help: "Un fichier généré depuis plus d'un jour ouvré n'a pas été téléchargé : téléchargez-le et déposez-le à la banque (s'il n'est plus à jour, le téléchargement le remplace : régénérez-le), ou annulez-le.",
   },
+  // review M2c-6b-1 (legal-texts#3): automatically only for a line carrying the reference; a file never deposited
+  // leaves no line
   file_not_marked_sent: {
     label: "Fichier téléchargé, non marqué comme transmis",
-    help: "Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis ». Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : s'il ne doit pas partir, gardez-le tel quel, vérifiez le relevé et voyez avec la banque ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé (celui d'un remboursement l'est dès qu'il est rattaché ; ceux des reversements et de la quote-part du cabinet ne peuvent pas encore l'être).",
+    help: `Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis ». Un fichier téléchargé ne peut pas encore être annulé dans Collectoo : s'il ne doit pas partir, gardez-le tel quel, vérifiez le relevé et voyez avec la banque ; ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé (${FILE_BOOKED_WHEN}). Un fichier jamais déposé n'apparaît sur aucun relevé : ses virements restent en cours jusqu'à ce que l'annulation après téléchargement soit disponible.`,
   },
   transfer_not_debited: {
     label: "Virements sans débit sur le relevé",
@@ -498,8 +964,14 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Créances du propriétaire ≠ créances des débiteurs",
     help: "Par portefeuille et composante, la créance du propriétaire ne reflète plus celle des débiteurs.",
   },
-  receipt_missing: { label: "Quittance manquante", help: "Un paiement rattaché à un dossier n'a pas de quittance." },
-  receipt_numbers: { label: "Plusieurs numéros de quittance", help: "Un paiement a plusieurs numéros de quittance." },
+  receipt_missing: {
+    label: "Quittance manquante",
+    help: "Un paiement rattaché à un dossier n'a pas de quittance.",
+  },
+  receipt_numbers: {
+    label: "Plusieurs numéros de quittance",
+    help: "Un paiement a plusieurs numéros de quittance.",
+  },
   receipt_not_void: {
     label: "Quittance non annulée",
     help: "Un paiement retourné par la banque garde une quittance en vigueur.",
@@ -544,6 +1016,53 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Paiements directs non traités",
     help: "Des paiements déclarés par le client attendent leur comptabilisation depuis plus d'une heure.",
   },
+  // M2c-6b-1 (plan §2.5, design §15): the bookings from the statement
+  bank_line_booked: {
+    label: "Ligne bancaire comptabilisée incohérente",
+    help: "Les écritures d'une ligne comptabilisée ne font pas son montant : signalez-la au support.",
+  },
+  transfer_booked_once: {
+    label: "Virement comptabilisé sans débit unique",
+    help: "Un virement « Débité » n'a pas exactement un débit comptabilisé (ou un reversement comptabilisé n'a pas son virement) : signalez-le au support.",
+  },
+  cancelled_transfer_debited: {
+    label: "Virement annulé débité par la banque",
+    help: "La banque a exécuté un virement annulé dans Collectoo : vérifiez avant tout nouveau virement (risque de double paiement).",
+  },
+  transfer_debited_twice: {
+    label: "Virement débité deux fois",
+    help: "Un second débit porte la référence d'un virement déjà comptabilisé : voyez avec la banque.",
+  },
+  transfer_not_handed_out: {
+    label: "Virement débité sans fichier téléchargé",
+    help: "La banque a débité un virement dont le fichier n'a jamais été téléchargé : vérifiez d'où vient l'ordre.",
+  },
+  payout_returned: {
+    label: "Reversement revenu impayé",
+    help: "La banque a rejeté le virement d'un reversement : le compte de reversement du client est bloqué jusqu'à son remplacement ou sa reconfirmation ; le montant est à reverser à nouveau dans le délai.",
+  },
+  sweep_returned: {
+    label: "Virement vers le compte propre revenu",
+    help: "La quote-part du cabinet virée vers son compte propre est revenue : vérifiez le compte propre.",
+  },
+  // review M2c-6b-1 (legal-texts#7): « dû au client »
+  payout_overrun: {
+    label: "Reversement au-delà du dû",
+    help: "Un reversement débité dépassait ce qui restait dû au client : une avance au client est comptabilisée, à récupérer.",
+  },
+  bank_line_unbooked: {
+    label: "Débits du cabinet non comptabilisés",
+    help: "Des débits ou retours portant les références du cabinet attendent depuis plus d'un jour ouvré dans « Débits et retours ».",
+  },
+  servicer_funds_unswept: {
+    label: "Quote-part du cabinet non virée",
+    help: "La part du cabinet reste sur le compte dédié depuis plus de deux jours ouvrés sans virement vers son compte propre : générez le fichier de virements.",
+  },
+  // review M2c-6b-1 (legal-texts#4): a top-up moves the servicer's own money to the dedicated account (+5120 / −4679)
+  top_up_pending: {
+    label: "Approvisionnement attendu",
+    help: "Un approvisionnement du compte dédié depuis le compte propre du cabinet a été demandé il y a plus d'un jour ouvré et son crédit n'apparaît pas encore sur les relevés importés. Vérifiez le virement depuis le compte propre : il couvre ce que le cabinet doit au compte dédié (frais bancaires, avances).",
+  },
 };
 
 export function checkLabel(code: string): { label: string; help: string } {
@@ -562,6 +1081,15 @@ const TRANSFER_CHECKS = new Set([
   "transfer_file_failed",
   "transfer_file_pending",
   "transfer_already_debited",
+  // M2c-6b-1
+  "cancelled_transfer_debited",
+  "transfer_debited_twice",
+  "transfer_not_handed_out",
+  "payout_returned",
+  "sweep_returned",
+  "payout_overrun",
+  "servicer_funds_unswept",
+  "top_up_pending",
 ]);
 
 /**
@@ -569,18 +1097,30 @@ const TRANSFER_CHECKS = new Set([
  * (review M2c-5b F2) the invoice or credit note it is about — `invoice_overdue`, `credit_refund_owed` —, and (M2c-6a)
  * the transfer file, or « Virements ».
  */
-export function checkSubjectLink(r: { code: string; subject_type: string; subject_id: string | null }): string | null {
-  if (r.subject_type === "payment" && r.subject_id) return `/backoffice/encaissements/paiements/${r.subject_id}`;
-  if (r.subject_type === "bank_statement" && r.subject_id) return `/backoffice/encaissements/releves/${r.subject_id}`;
-  if (r.code === "debit_unclassified") return "/backoffice/encaissements/debits";
-  if (r.code === "duplicate_unresolved") return "/backoffice/encaissements/debits?onglet=doublons";
-  if (r.code === "unmatched_ageing" || r.code === "unallocated_ageing") return "/backoffice/encaissements/a-traiter";
+export function checkSubjectLink(r: {
+  code: string;
+  subject_type: string;
+  subject_id: string | null;
+}): string | null {
+  if (r.subject_type === "payment" && r.subject_id)
+    return `/backoffice/encaissements/paiements/${r.subject_id}`;
+  if (r.subject_type === "bank_statement" && r.subject_id)
+    return `/backoffice/encaissements/releves/${r.subject_id}`;
+  if (r.code === "debit_unclassified")
+    return "/backoffice/encaissements/debits";
+  if (r.code === "duplicate_unresolved")
+    return "/backoffice/encaissements/debits?onglet=doublons";
+  if (r.code === "unmatched_ageing" || r.code === "unallocated_ageing")
+    return "/backoffice/encaissements/a-traiter";
   // M2c-4: a run's checks lead to the run, a client's deadlines to « Reversements »
-  if (r.subject_type === "remittance_run" && r.subject_id) return `/backoffice/reversements/${r.subject_id}`;
-  if (r.subject_type === "commission_invoice" && r.subject_id) return `/backoffice/reversements/factures/${r.subject_id}`;
+  if (r.subject_type === "remittance_run" && r.subject_id)
+    return `/backoffice/reversements/${r.subject_id}`;
+  if (r.subject_type === "commission_invoice" && r.subject_id)
+    return `/backoffice/reversements/factures/${r.subject_id}`;
   if (r.code.startsWith("remittance_")) return "/backoffice/reversements";
   // M2c-6a: a file's alert leads to the file, the others of the transfers to « Virements »
-  if (r.subject_type === "transfer_file" && r.subject_id) return `/backoffice/reversements/virements/${r.subject_id}`;
+  if (r.subject_type === "transfer_file" && r.subject_id)
+    return `/backoffice/reversements/virements/${r.subject_id}`;
   if (TRANSFER_CHECKS.has(r.code)) return "/backoffice/reversements/virements";
   return null;
 }
@@ -590,7 +1130,9 @@ export function checkSubjectLink(r: { code: string; subject_type: string; subjec
  * decides — the transfer file when the payment's account is the servicer's active dedicated account in EUR and the IBAN
  * is in the SEPA scheme, by hand otherwise.
  */
-export function refundExecutionMode(value: string): "file" | "manual" | undefined {
+export function refundExecutionMode(
+  value: string,
+): "file" | "manual" | undefined {
   return value === "file" || value === "manual" ? value : undefined;
 }
 
@@ -600,9 +1142,13 @@ export function refundExecutionMode(value: string): "file" | "manual" | undefine
  * the end-to-end reference. With the sheet's default the database chose, so this is where ops read which it is. Its
  * transfer (review round 7): once in a downloaded or sent file, the page names that file instead of « the next one ».
  */
-export function pendingRefundInstruction(inFile: boolean, transfer?: RefundTransfer | null): string {
+export function pendingRefundInstruction(
+  inFile: boolean,
+  transfer?: RefundTransfer | null,
+): string {
   // review round 7 (round 6's verifier, N2): its transfer already in a downloaded or sent file — not « the next file »
-  const file = inFile && refundInDownloadedFile(transfer) ? transfer?.file : null;
+  const file =
+    inFile && refundInDownloadedFile(transfer) ? transfer?.file : null;
   if (file)
     return `il est dans le fichier de virements ${file.number}, déjà téléchargé, avec la référence ci-dessous comme référence de bout en bout ; ne l'exécutez pas dans la banque.`;
   if (inFile)
@@ -613,15 +1159,29 @@ export function pendingRefundInstruction(inFile: boolean, transfer?: RefundTrans
 /** A refund's transfer as the payment's page reads it: its status and the file it is in (none before a file). */
 export type RefundTransfer = {
   status: string;
-  file: { id: string; number: string; status: string; download_count: number } | null;
+  file: {
+    id: string;
+    number: string;
+    status: string;
+    download_count: number;
+  } | null;
 };
 
 /** The refunds' transfers by refund id, from the refund rows (their transfer) and the transfers read with their file. */
 export function refundTransfers(
   refunds: { id: string; transfer_id: string | null }[],
-  transfers: { id: string; status: string; transfer_file: RefundTransfer["file"] }[],
+  transfers: {
+    id: string;
+    status: string;
+    transfer_file: RefundTransfer["file"];
+  }[],
 ): Map<string, RefundTransfer> {
-  const byId = new Map(transfers.map((t) => [t.id, { status: t.status, file: t.transfer_file ?? null }]));
+  const byId = new Map(
+    transfers.map((t) => [
+      t.id,
+      { status: t.status, file: t.transfer_file ?? null },
+    ]),
+  );
   const out = new Map<string, RefundTransfer>();
   for (const r of refunds) {
     const t = r.transfer_id ? byId.get(r.transfer_id) : undefined;
@@ -635,19 +1195,33 @@ export function refundTransfers(
  * still pay it, so the refund is not cancelled until its debit, or its rejection, is read from the statement (the
  * database refuses: `in_downloaded_file`). « Annuler » is not offered then; the page says why (as the run's page).
  */
-export function refundInDownloadedFile(transfer: RefundTransfer | null | undefined): boolean {
-  if (!transfer || transfer.status !== "in_file" || !transfer.file) return false;
-  return transfer.file.download_count > 0 || transfer.file.status === "downloaded" || transfer.file.status === "sent";
+export function refundInDownloadedFile(
+  transfer: RefundTransfer | null | undefined,
+): boolean {
+  if (!transfer || transfer.status !== "in_file" || !transfer.file)
+    return false;
+  return (
+    transfer.file.download_count > 0 ||
+    transfer.file.status === "downloaded" ||
+    transfer.file.status === "sent"
+  );
 }
 
 /** Whether « Annuler » is offered on a refund: requested, and its transfer (if any) not in a downloaded file. */
-export function refundCancellable(status: string, transfer: RefundTransfer | null | undefined): boolean {
+export function refundCancellable(
+  status: string,
+  transfer: RefundTransfer | null | undefined,
+): boolean {
   return status === "requested" && !refundInDownloadedFile(transfer);
 }
 
-/** What the payment's page says in place of « Annuler » for a refund whose transfer is in a downloaded file. */
+/**
+ * What the payment's page says in place of « Annuler » for a refund whose transfer is in a downloaded file. M2c-6b-1
+ * review round 2 (L6): it leaves « en cours » when its debit is booked from the statement (then its return, if one
+ * comes); a refund the bank does not execute leaves no line (REFUND_NOT_EXECUTED).
+ */
 export function refundInDownloadedFileNote(fileNumber: string): string {
-  return `Le virement de ce remboursement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit, ou son rejet, soit lu sur le relevé bancaire, et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque.`;
+  return `Le virement de ce remboursement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${REFUND_BOOKED_WHEN}), et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). ${REFUND_RETURNED} ${REFUND_NOT_EXECUTED} Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`;
 }
 
 /** What the refund sheet says the RFD reference becomes, by the execution chosen (« auto »: the database's default). */
@@ -666,7 +1240,8 @@ export const DIRECT_REFUSAL: Record<string, string> = {
   before_servicing_start: "Date antérieure à la reprise du dossier",
   file_closed: "Dossier clos",
   // the job failed after its retries (review M2b-6: a dead-lettered direct payment is refused, never left « En cours »)
-  failed: "Le traitement a échoué après plusieurs essais : contactez le support",
+  failed:
+    "Le traitement a échoué après plusieurs essais : contactez le support",
 };
 
 export const DIRECT_STATUS: Record<string, { label: string; tone: Tone }> = {
@@ -691,51 +1266,107 @@ export function normaliseIban(text: string): string | null {
 /** Errors of the M2b-6 commands, as codes (order matters: most specific first). */
 export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
-  if (message.includes("reason is required") || message.includes("refused: reason_required")) return "reason_required";
-  if (message.includes("the payment changed") || message.includes("payment_changed")) return "payment_changed";
-  if (message.includes("reason does not match")) return "refund_reason_mismatch";
+  if (
+    message.includes("reason is required") ||
+    message.includes("refused: reason_required")
+  )
+    return "reason_required";
+  if (
+    message.includes("the payment changed") ||
+    message.includes("payment_changed")
+  )
+    return "payment_changed";
+  if (message.includes("reason does not match"))
+    return "refund_reason_mismatch";
   if (message.includes("more than what is left")) return "refund_too_much";
   if (message.includes("IBAN is required")) return "refund_iban_required";
-  if (message.includes("payee's name is required")) return "refund_name_required";
+  if (message.includes("payee's name is required"))
+    return "refund_name_required";
   if (message.includes("invalid IBAN")) return "iban_invalid";
-  if (message.includes("cannot be refunded from here")) return "refund_not_possible";
+  if (message.includes("cannot be refunded from here"))
+    return "refund_not_possible";
   if (message.includes("no longer pending")) return "refund_not_pending";
   // M2c-6a: a refund in a file already downloaded is cancelled once its transfer is (review T1: two people, the
   // statement's evidence); a file mode the account cannot pay
   // M2c-6a review, round 4 (G2): the debit of a re-issued refund's old reference while the re-issue is in a downloaded
   // file (checked before the general « in a downloaded file »)
-  if (message.includes("reissue_in_downloaded_file")) return "refund_reissue_in_downloaded_file";
-  if (message.includes("already downloaded") || message.includes("in_downloaded_file")) return "refund_in_downloaded_file";
+  if (message.includes("reissue_in_downloaded_file"))
+    return "refund_reissue_in_downloaded_file";
+  if (
+    message.includes("already downloaded") ||
+    message.includes("in_downloaded_file")
+  )
+    return "refund_in_downloaded_file";
   // M2c-6a review, round 3 (E2): its transfer, or one it re-issues, was debited already: cancelling it refunds twice
-  if (message.includes("refund refused: already_debited")) return "refund_already_debited";
-  if (message.includes("pays no transfer file")) return "transfer_not_paying_account";
+  if (message.includes("refund refused: already_debited"))
+    return "refund_already_debited";
+  if (message.includes("pays no transfer file"))
+    return "transfer_not_paying_account";
   // M2c-6a review (T3): what a SEPA transfer file cannot carry
-  if (message.includes("payee_name_not_epc")) return "refund_payee_name_not_epc";
+  if (message.includes("payee_name_not_epc"))
+    return "refund_payee_name_not_epc";
   if (message.includes("iban_not_sepa")) return "refund_iban_not_sepa";
-  if (message.includes("a refund is pending") || message.includes("debit link refused: refund_pending"))
+  if (
+    message.includes("a refund is pending") ||
+    message.includes("debit link refused: refund_pending")
+  )
     return "refund_pending";
   if (message.includes("already_linked")) return "already_linked";
   if (message.includes("already_booked")) return "already_booked";
   if (message.includes("not_a_fee")) return "not_a_fee";
   if (message.includes("not_an_own_credit")) return "not_an_own_credit";
-  if (message.includes("own credit release refused: not_own_credit")) return "not_own_credit";
+  if (message.includes("own credit release refused: not_own_credit"))
+    return "not_own_credit";
   if (message.includes("own_account_unknown")) return "own_account_unknown";
-  if (message.includes("transfer_not_pending") || message.includes("bank booking refused: amount_differs"))
+  if (
+    message.includes("transfer_not_pending") ||
+    message.includes("bank booking refused: amount_differs")
+  )
     return "top_up_differs";
   if (message.includes("not_a_loss")) return "not_a_loss";
   if (message.includes("not_explainable")) return "not_explainable";
+  // review M2c-6b-1 round 3 (M1): a credit carrying our RMT/SWP id is our transfer coming back, never a debtor's payment
+  if (message.includes("own credit release refused: own_transfer_line"))
+    return "own_credit_own_transfer_line";
+  // round 4 (N1): nor a held line carrying one, released (public.resolve_duplicate) — round 5 (Q4): its own words, the
+  // line staying in « Doublons possibles »
+  if (message.includes("duplicate release refused: own_transfer_line"))
+    return "duplicate_own_transfer_line";
+  // round 4 (N2): a credit carrying our TOP id is our top-up, never a debtor's payment
+  if (message.includes("own credit release refused: top_up_line"))
+    return "own_credit_top_up_line";
+  // review M2c-6b-1 (money-1, K1): our payouts' and sweeps' lines are booked from the statement, never linked
+  if (message.includes("own_transfer_line")) return "own_transfer_line";
   if (message.includes("before_previous_return")) return "link_before_return";
   if (message.includes("payment_returned")) return "link_payment_returned";
   if (message.includes("posting_failed")) return "link_posting_failed";
-  if (message.includes("amount_exceeds") || message.includes("amount_differs")) return "link_amount";
+  if (message.includes("amount_exceeds") || message.includes("amount_differs"))
+    return "link_amount";
   if (message.includes("debit link refused")) return "link_refused";
-  if (message.includes("bank booking refused") || message.includes("own credit release refused")) return "booking_refused";
+  if (
+    message.includes("bank booking refused") ||
+    message.includes("own credit release refused")
+  )
+    return "booking_refused";
   if (message.includes("already decided")) return "already_decided";
-  if (message.includes("client's statement is required")) return "direct_evidence";
+  if (message.includes("client's statement is required"))
+    return "direct_evidence";
   if (message.includes("before the servicing started")) return "direct_date";
   if (message.includes("invoices of this file only")) return "direct_items";
   if (message.includes("the file is not open")) return "file_not_open";
   if (message.includes("invalid amount")) return "amount_invalid";
-  if (message.includes("lock") || message.includes("canceling statement")) return "allocation_busy";
+  if (message.includes("lock") || message.includes("canceling statement"))
+    return "allocation_busy";
   return "unknown";
+}
+
+/**
+ * Errors of public.link_debit, by the kind ops asked for (review M2c-6b-1 round 3, M2): private.post_bank_bookings
+ * refuses a top-up and a loss on our lines with the same « bank booking refused: own_transfer_line ». On a top-up (kind
+ * `own_credit`) the line is a credit carrying our RMT/SWP id — our transfer coming back — so it gets the credit's words
+ * (as public.release_own_credit's refusal does); every other refusal as debitErrorCode reads it.
+ */
+export function linkDebitErrorCode(message: string, kind: string): ErrorCode {
+  const code = debitErrorCode(message);
+  return code === "own_transfer_line" && kind === "own_credit" ? "own_credit_own_transfer_line" : code;
 }

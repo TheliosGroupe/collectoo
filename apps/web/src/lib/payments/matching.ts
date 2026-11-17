@@ -272,7 +272,37 @@ const SKIP_LABEL: Record<string, string> = {
   suggestion_changed: "suggestion modifiée entre-temps",
   no_suggestion: "plus de suggestion",
   not_waiting: "déjà traité",
+  // review M2c-6b-1 round 4 (N1): a payment whose bank line carries one of our transfers' ids
+  own_transfer_line: "l'un de nos virements qui revient",
 };
+
+/**
+ * Review M2c-6b-1 round 4 (N1, in depth): what « Paiements à traiter » says of a payment whose bank line carries one of
+ * our transfers' ids (public.payment_queue's `own_transfer_line`: our RMT/SWP id as its own or its original, or one of
+ * our lots' PmtInfIds with no end-to-end id) — a payment made of such a credit before round 4 read it as a return. It is
+ * our own money coming back: public.assign_payment refuses it (own_transfer_line), the match job and « Accepter » skip
+ * it, and the page offers no assignment (COMPLIANCE OQ-84).
+ */
+export const OUR_TRANSFER_PAYMENT_NOTE =
+  "Ce paiement vient d'une ligne qui porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, pas le paiement d'un débiteur. Ne l'affectez à aucun dossier : il se comptabilise depuis le relevé, par l'équipe (écran à venir) ; prévenez le support.";
+
+/**
+ * Whether « Paiements à traiter » offers to assign a payment (the suggestion, the candidates, the search): an unmatched
+ * payment the match job left to ops — not one waiting for its file (account_not_confirmed) nor one whose file is gone
+ * (no_mandate) — and never one whose bank line carries one of our transfers' ids (round 4, N1).
+ */
+export function offersAssignment(r: {
+  status: string;
+  review_reason: string | null;
+  own_transfer_line: boolean;
+}): boolean {
+  return (
+    r.status === "unmatched" &&
+    r.review_reason !== null &&
+    !["account_not_confirmed", "no_mandate"].includes(r.review_reason) &&
+    !r.own_transfer_line
+  );
+}
 
 function count(n: number, one: string, many: string): string {
   return `${n} ${n > 1 ? many : one}`;
@@ -300,6 +330,8 @@ export function lastPage(total: number): number {
 export function matchingErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
   if (message.includes("reason is required")) return "reason_required";
+  // review M2c-6b-1 round 4 (N1): our transfer coming back, never a debtor's payment
+  if (message.includes("payment assignment refused: own_transfer_line")) return "payment_own_transfer_line";
   if (message.includes("already matched")) return "already_matched";
   if (message.includes("not confirmed yet")) return "file_not_confirmed";
   if (message.includes("splitting comes with allocation")) return "split_not_available";

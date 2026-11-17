@@ -74,8 +74,12 @@ HELD_REASON = {
     "refund_pending": "à restituer au payeur",
 }
 # why a line was paid after its latest execution date (payload `late_cause`, a category the data
-# supports: review legal#6)
+# supports: review legal#6). M2c-6b-1 review round 2 (L1): a payout of it that came back unpaid,
+# paid again — the line keeps the date of the run line it came from (K2), so its lateness is the
+# return's, never a collection's. A new code only: no payload drawn before carries it, so the
+# template's bytes for them are unchanged (no new template version).
 LATE_CAUSE = {
+    "payout_returned": "virement revenu impayé, reversé à nouveau",
     "unmeetable": "délai contractuel intenable (art. R124-6 : un mois)",
     "identified_late": "encaissement identifié tardivement",
     "approved_late": "validation tardive",

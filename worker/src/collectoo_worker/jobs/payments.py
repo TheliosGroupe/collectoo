@@ -187,7 +187,8 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
                 (Jsonb({"type": "match", "organization_id": str(org), "trigger": "import"}),),
             )
             # M2b-6 (design §8.3 step 7): the debits, returns and refunds of the statement; M2c:
-            # its bank charges, our own transfers out and credits (as the import read them).
+            # its bank charges, our own transfers out and credits (as the import read them);
+            # M2c-6b-1: a batch line of one of our files' PmtInfs.
             seen = dict(counts[0]) if counts and counts[0] else {}
             if any(
                 int(seen.get(k) or 0)
@@ -199,7 +200,12 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
                     "own_transfers_in",
                     "client_transfers_in",
                 )
-            ) or any(line.kind in ("return", "refund_out") for line in parsed.lines):
+            ) or any(
+                line.kind in ("return", "refund_out")
+                # M2c-6b-1: a batch line naming a PmtInf (ours: its payouts or sweep, plan §2.3)
+                or (line.kind == "batch_unsplit" and line.payment_info_id is not None)
+                for line in parsed.lines
+            ):
                 conn.execute(
                     "select pgmq.send('payments', %s)",
                     (Jsonb({"type": "process_debits", "organization_id": str(org)}),),

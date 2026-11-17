@@ -527,6 +527,63 @@ def check(xml: bytes, version: str) -> dict[str, object]:  # noqa: PLR0912, PLR0
     }
 
 
+def _bic_of(agent: etree._Element | None, ns: str, version: str) -> str | None:
+    if agent is None:
+        return None
+    tag = "BICFI" if version == "pain.001.001.09" else "BIC"
+    found = agent.find(f"{{{ns}}}FinInstnId/{{{ns}}}{tag}")
+    return None if found is None or found.text is None else str(found.text)
+
+
+def read(xml: bytes) -> TransferFile:
+    """A file we wrote, read back once `check` passes: each PmtInf with its date, debtor and
+    transactions (the synthetic statement of its debits, `synth camt053 --debits-of`, and tests)."""
+    root = _parse(xml)
+    version = (etree.QName(root).namespace or "").rsplit(":", 1)[-1]
+    ns = namespace(version)
+    check(xml, version)
+    init = root[0]
+    hdr = init[0]
+    when_path = "ReqdExctnDt/Dt" if version == "pain.001.001.09" else "ReqdExctnDt"
+    infos = []
+    for pmt in init.findall(f"{{{ns}}}PmtInf"):
+        txs = []
+        for tx in pmt.findall(f"{{{ns}}}CdtTrfTxInf"):
+            amt = tx.find(f"{{{ns}}}Amt/{{{ns}}}InstdAmt")
+            assert amt is not None and amt.text is not None  # noqa: S101 - checked
+            units, cents = amt.text.split(".")
+            has_ustrd = tx.find(f"{{{ns}}}RmtInf") is not None
+            txs.append(
+                Transaction(
+                    instr_id=_text(tx, "PmtId/InstrId", ns),
+                    end_to_end_id=_text(tx, "PmtId/EndToEndId", ns),
+                    amount_minor=int(units) * 100 + int(cents),
+                    currency=str(amt.get("Ccy")),
+                    creditor_name=_text(tx, "Cdtr/Nm", ns),
+                    creditor_iban=_text(tx, "CdtrAcct/Id/IBAN", ns),
+                    creditor_bic=_bic_of(tx.find(f"{{{ns}}}CdtrAgt"), ns, version),
+                    remittance_info=_text(tx, "RmtInf/Ustrd", ns) if has_ustrd else "",
+                )
+            )
+        infos.append(
+            PaymentInfo(
+                pmt_inf_id=_text(pmt, "PmtInfId", ns),
+                requested_execution_date=date.fromisoformat(_text(pmt, when_path, ns)),
+                debtor_name=_text(pmt, "Dbtr/Nm", ns),
+                debtor_iban=_text(pmt, "DbtrAcct/Id/IBAN", ns),
+                debtor_bic=_bic_of(pmt.find(f"{{{ns}}}DbtrAgt"), ns, version),
+                transactions=tuple(txs),
+            )
+        )
+    return TransferFile(
+        version=version,
+        msg_id=_text(hdr, "MsgId", ns),
+        created_at=_text(hdr, "CreDtTm", ns),
+        initiating_party=_text(hdr, "InitgPty/Nm", ns),
+        payment_infos=tuple(infos),
+    )
+
+
 # -- XSD validation (when the schemas are vendored) ---------------------------------------------
 
 

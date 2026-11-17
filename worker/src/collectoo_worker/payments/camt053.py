@@ -23,7 +23,12 @@ Strd/CdtrRefInf/Ref, RtrInf/Rsn.
 A batch booking becomes one line per TxDtls when the details add up to the entry (same currency
 and direction, as many as NbOfTxs says); otherwise one line of kind `batch_unsplit` with the
 booked amount (a credit is still one payment; ops split it across files), or `return` when the
-entry or any of its details undoes an earlier movement. A single TxDtls takes the booked amount.
+entry or any of its details undoes an earlier movement. A single TxDtls takes the booked amount —
+review M2c-6b-1 round 7 (S1): unless it names one of our transfers and is not the whole entry (its
+CdtDbtInd or its own amount not the entry's): the entry is then kept unsplit, never our transfer's
+line of its own. A line kept unsplit never takes its ids from a detail of the other direction (it
+counts it: `unsplit_ours`). « Ours » is every id we issue (review round 8, T2: our payouts' and
+sweeps' RMT/SWP, our refunds' RFD and our top-ups' TOP ids, `statement.OUR_ISSUED_ID_RE`).
 Zero amounts move nothing and are skipped. The file is refused unless, per <Stmt>, opening +
 credits - debits = closing; nothing is written then.
 
@@ -54,6 +59,7 @@ from collectoo_worker.payments.statement import (
     METHOD_BY_FAMILY,
     NO_IBANS,
     RETURN_SUBFAMILIES,
+    TRANSFER_OUT_ID_RE,
     DedupKeys,
     KnownIbans,
     ParsedStatement,
@@ -64,6 +70,8 @@ from collectoo_worker.payments.statement import (
     check_dates,
     classify,
     iso_to_minor,
+    issued_id,
+    names_our_transfer,
 )
 
 NS_RE = re.compile(rb"urn:iso:std:iso:20022:tech:xsd:camt\.053\.001\.([0-9]{2})")
@@ -343,11 +351,27 @@ class _Reader:
         counts = self.q.texts(ntry, "NtryDtls/Btch/NbOfTxs")
         batch = max((int(c) for c in counts if c.isdigit()), default=0)
         parts = self.split(entry, txs)
+        # Review round 7 (S1, verdict new:unsplit-exact-total-other-details): a detail of ours alone
+        # in its entry is that entry's line of its own only when it is the whole entry — its
+        # direction and its own amount (when given) the entry's, NbOfTxs absent or 1 (read below) —
+        # otherwise its entry is kept unsplit, so the funds pass never books it as our transfer's
+        # return (a detail 50,00 € short of the entry, our payout's debit in a credit entry).
+        partial_ours = len(txs) == 1 and bool(_our_ids(txs)) and not self.whole(entry, txs[0])
         # A batch whose count disagrees with its details cannot be split safely. An entry kept as
         # one line is its line 1, as when one detail comes with it: the same entry keeps its key
         # whatever detail a file gives.
-        if parts is None or (not txs and batch > 1) or (txs and batch and batch != len(txs)):
-            single = txs[0] if len(txs) == 1 else {}
+        if (
+            parts is None
+            or (not txs and batch > 1)
+            or (txs and batch and batch != len(txs))
+            or partial_ours
+        ):
+            # a detail of the other direction never gives the line its ids (round 7, x01)
+            single = (
+                txs[0]
+                if len(txs) == 1 and _direction(txs[0], entry.direction) == entry.direction
+                else {}
+            )
             self.add(entry, single, amount, 1, unsplit=True, batch=True, details=txs)
         elif not txs:
             self.add(entry, {}, amount, 1, unsplit=False, batch=False)
@@ -366,7 +390,7 @@ class _Reader:
         parts: list[int] = []
         for tx in txs:
             path = "Amt" if "Amt" in tx else "AmtDtls/TxAmt/Amt"
-            tx_dir = DIRECTIONS.get(first(tx, "CdtDbtInd") or "", entry.direction)
+            tx_dir = _direction(tx, entry.direction)
             if (
                 path not in tx
                 or first(tx, path + "@Ccy") != self.currency
@@ -378,6 +402,23 @@ class _Reader:
                 return None
             parts.append(part)
         return parts if sum(parts) == entry.amount else None
+
+    def whole(self, entry: _Entry, tx: Flat) -> bool:
+        """Whether a detail alone in its entry is the whole entry (review round 7, S1): its
+        direction the entry's, and its own amount, when it gives one, the entry's in the account's
+        currency (read leniently: a detail's amount that cannot be read is not the entry's)."""
+        if _direction(tx, entry.direction) != entry.direction:
+            return False
+        path = "Amt" if "Amt" in tx else "AmtDtls/TxAmt/Amt"
+        text = first(tx, path)
+        if text is None:
+            return True
+        if first(tx, path + "@Ccy") != self.currency:
+            return False
+        try:
+            return iso_to_minor(text, self.exponent) == entry.amount
+        except ValueError:
+            return False
 
     def add(  # noqa: PLR0913 - one line: its entry, its details and how it was split
         self,
@@ -413,6 +454,8 @@ class _Reader:
         return_reason = _return_reason(tx) or next(filter(None, map(_return_reason, details)), None)
         code = _code(tx, "BkTxCd/") or entry.code
         family, sub_family = _family(code)
+        original = first(tx, "RtrInf/OrgnlEndToEndId")
+        unsplit_ours: int | None = None
         kind = classify(
             entry.direction,
             reversal=entry.reversal,
@@ -421,14 +464,45 @@ class _Reader:
             end_to_end_id=e2e,
             counterparty_iban=rf_normalise(iban) if iban else None,
             ibans=self.ibans,
+            original_end_to_end_id=original,
+            payment_info_id=entry.payment_info_id,
         )
         if unsplit:
             # A batch that cannot be split is still a return when the entry or any of its details
-            # undoes an earlier movement (ADR-0013 M2b-2 #2): never a payment.
-            undone = kind == "return" or any(
-                _family(_code(d, "BkTxCd/"))[1] in RETURN_SUBFAMILIES for d in details
+            # undoes an earlier movement (ADR-0013 M2b-2 #2): never a payment. Review M2c-6b-1
+            # round 4 (N1): so is a credit batch any of whose details is one of our transfers
+            # coming back (our RMT/SWP id as its own or its original): never a debtor's payment.
+            # Round 8 (T2): or carries our refund's RFD or our top-up's TOP id (t1: our top-up shown
+            # alone of two was one debtor's payment, the top-up left ordered).
+            mine = _our_ids(details)
+            ours = mine if credit else []
+            # review round 7 (S1, x01): the ids of ours of the entry's own direction — a debit of
+            # ours netted into a credit entry is counted (every refusal sees the line as ours:
+            # unsplit_ours) but never read as what the line returns
+            alike = _our_ids(
+                [d for d in details if _direction(d, entry.direction) == entry.direction]
+            )
+            undone = (
+                kind == "return"
+                or any(_family(_code(d, "BkTxCd/"))[1] in RETURN_SUBFAMILIES for d in details)
+                or bool(ours)
             )
             kind = "return" if undone else "batch_unsplit"
+            # Review round 6 (R1): the line carries the entry's total, not one transaction's: it
+            # records how many of its details are ours; since round 7 (S1, S2) the funds pass never
+            # books such a line holding ours, nor does anything link it (payments.debits).
+            unsplit_ours = len(mine)
+            # Review round 5 (Q2), round 6's wording: such a batch keeps that identification on
+            # its line, unless what the line carries names one of our transfers already, so every
+            # refusal reading `names_our_transfer` on the stored line sees it (before round 5: no
+            # id at all, and the line took « Classer sans comptabiliser » or any refund that came
+            # back) — the one detail's id as its original when exactly one is ours; when several
+            # are, the first (the file's order), the only field the refusals read, and the count
+            # says the line is never booked, whatever its amount. Round 7: of the entry's direction
+            # only (`alike`). Round 8 (T2): our refunds' and top-ups' ids count too — an RMT/SWP id
+            # is still kept first, the one `names_our_transfer` reads.
+            if credit and alike and not names_our_transfer(e2e, original, entry.payment_info_id):
+                original = next((i for i in alike if TRANSFER_OUT_ID_RE.fullmatch(i)), alike[0])
         if tx_ref is not None and own_ref and not unsplit:
             key = self.keys.claim(f"t:{tx_ref}")
         elif entry.ref is not None:
@@ -473,11 +547,11 @@ class _Reader:
                 remittance_text=remittance,
                 creditor_reference=rf_normalise(creditor_ref) if creditor_ref else None,
                 return_reason=return_reason,
-                original_end_to_end_id=first(tx, "RtrInf/OrgnlEndToEndId")
-                or (e2e if kind == "return" else None),
+                original_end_to_end_id=original or (e2e if kind == "return" else None),
                 batch_entry_ref=(entry.ref or entry.where) if batch else None,
                 entry_ref=entry.ref,
                 payment_info_id=entry.payment_info_id,
+                unsplit_ours=unsplit_ours,
             )
         )
 
@@ -576,8 +650,27 @@ def _family(code: str | None) -> tuple[str | None, str | None]:
     return parts[1] or None, parts[2] or None
 
 
+def _direction(tx: Flat, default: str) -> str:
+    """A detail's CdtDbtInd (credit | debit), else its entry's (`default`)."""
+    return DIRECTIONS.get(first(tx, "CdtDbtInd") or "", default)
+
+
 def _return_reason(tx: Flat) -> str | None:
     return first(tx, "RtrInf/Rsn/Cd") or first(tx, "RtrInf/Rsn/Prtry")
+
+
+def _our_ids(details: list[Flat]) -> list[str]:
+    """The ids of ours an unsplit batch's details carry, in the file's order: each detail carrying
+    an id we issued (`issued_id`: our payout's or sweep's RMT/SWP id, since review round 8 (T2) our
+    refund's RFD and our top-up's TOP too, as its own end-to-end id or as the original it returns;
+    in a credit batch, one coming back) gives that id — its original one when that is ours. One per
+    detail (a detail is never counted twice, an id may be)."""
+    out: list[str] = []
+    for d in details:
+        ours = issued_id(_provided(first(d, "Refs/EndToEndId")), first(d, "RtrInf/OrgnlEndToEndId"))
+        if ours is not None:
+            out.append(ours)
+    return out
 
 
 def _iso_date(text: str, where: str) -> date:

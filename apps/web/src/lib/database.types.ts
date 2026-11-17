@@ -411,14 +411,14 @@ isOneToOne: false
                   ]
                 },"bank_transaction": {
                   Row: {
-                    "acct_svcr_ref": string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code": string | null,"batch_entry_ref": string | null,"booking_date": string,"counterparty_iban": string | null,"counterparty_name": string | null,"created_at": string,"creditor_reference": string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id": string | null,"entry_ref": string | null,"id": string,"kind": string,"line_no": number,"mandate_ref": string | null,"organization_id": string,"original_end_to_end_id": string | null,"payment_info_id": string | null,"remittance_text": string | null,"return_reason": string | null,"reversal_indicator": boolean,"statement_id": string,"tx_id": string | null,"ultimate_counterparty_name": string | null,"value_date": string | null
+                    "acct_svcr_ref": string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code": string | null,"batch_entry_ref": string | null,"booking_date": string,"counterparty_iban": string | null,"counterparty_name": string | null,"created_at": string,"creditor_reference": string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id": string | null,"entry_ref": string | null,"id": string,"kind": string,"line_no": number,"mandate_ref": string | null,"organization_id": string,"original_end_to_end_id": string | null,"payment_info_id": string | null,"remittance_text": string | null,"return_reason": string | null,"reversal_indicator": boolean,"statement_id": string,"tx_id": string | null,"ultimate_counterparty_name": string | null,"unsplit_ours": number | null,"value_date": string | null
                   }
                   ComputedFields: never
                   Insert: {
-                    "acct_svcr_ref"?: string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date": string,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind": string,"line_no": number,"mandate_ref"?: string | null,"organization_id": string,"original_end_to_end_id"?: string | null,"payment_info_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id": string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"value_date"?: string | null
+                    "acct_svcr_ref"?: string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date": string,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind": string,"line_no": number,"mandate_ref"?: string | null,"organization_id": string,"original_end_to_end_id"?: string | null,"payment_info_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id": string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"unsplit_ours"?: number | null,"value_date"?: string | null
                   }
                   Update: {
-                    "acct_svcr_ref"?: string | null,"amount_minor"?: number,"bank_account_id"?: string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date"?: string,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency"?: string,"dedup_key"?: string,"direction"?: string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind"?: string,"line_no"?: number,"mandate_ref"?: string | null,"organization_id"?: string,"original_end_to_end_id"?: string | null,"payment_info_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id"?: string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"value_date"?: string | null
+                    "acct_svcr_ref"?: string | null,"amount_minor"?: number,"bank_account_id"?: string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date"?: string,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency"?: string,"dedup_key"?: string,"direction"?: string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind"?: string,"line_no"?: number,"mandate_ref"?: string | null,"organization_id"?: string,"original_end_to_end_id"?: string | null,"payment_info_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id"?: string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"unsplit_ours"?: number | null,"value_date"?: string | null
                   }
                   Relationships: [
                     {
@@ -698,6 +698,74 @@ isOneToOne: false
                   }
                   Relationships: [
                     
+                  ]
+                },"client_advance": {
+                  Row: {
+                    "amount_minor": number,"bank_transaction_id": string | null,"cause": string,"cause_entry_id": string,"client_organization_id": string,"created_at": string,"currency": string,"entry_id": string,"id": string,"mandate_id": string | null,"organization_id": string,"top_up_transfer_id": string | null,"transfer_id": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "amount_minor": number,"bank_transaction_id"?: string | null,"cause": string,"cause_entry_id": string,"client_organization_id": string,"created_at"?: string,"currency": string,"entry_id": string,"id"?: string,"mandate_id"?: string | null,"organization_id": string,"top_up_transfer_id"?: string | null,"transfer_id"?: string | null
+                  }
+                  Update: {
+                    "amount_minor"?: number,"bank_transaction_id"?: string | null,"cause"?: string,"cause_entry_id"?: string,"client_organization_id"?: string,"created_at"?: string,"currency"?: string,"entry_id"?: string,"id"?: string,"mandate_id"?: string | null,"organization_id"?: string,"top_up_transfer_id"?: string | null,"transfer_id"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "client_advance_bank_transaction_id_fkey"
+      columns: ["bank_transaction_id"]
+isOneToOne: false
+      referencedRelation: "bank_transaction"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_cause_entry_id_fkey"
+      columns: ["cause_entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "client_advance_entry_id_fkey"
+      columns: ["entry_id"]
+isOneToOne: true
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_mandate_id_fkey"
+      columns: ["mandate_id"]
+isOneToOne: false
+      referencedRelation: "mandate"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_top_up_transfer_id_fkey"
+      columns: ["top_up_transfer_id"]
+isOneToOne: false
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_advance_transfer_id_fkey"
+      columns: ["transfer_id"]
+isOneToOne: false
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    }
                   ]
                 },"client_notification": {
                   Row: {
@@ -2744,7 +2812,7 @@ isOneToOne: false
                            },
 "debit_queue":
 { Args: { "p_limit"?: number,"p_offset"?: number,"p_tab"?: string }; Returns: {
-              "age_days": number,"amount_minor": string,"bank_account_id": string,"bank_transaction_id": string,"booking_date": string,"candidates": Json,"counterparty_iban_end": string,"counterparty_name": string,"currency": string,"decided_at": string,"decided_payment_id": string,"decision": string,"direction": string,"end_to_end_id": string,"held_kind": string,"kind": string,"original_end_to_end_id": string,"remittance_text": string,"return_reason": string,"review_reason": string,"statement_id": string,"total": number
+              "age_days": number,"amount_minor": string,"bank_account_id": string,"bank_transaction_id": string,"booking_date": string,"candidates": Json,"counterparty_iban_end": string,"counterparty_name": string,"currency": string,"decided_at": string,"decided_payment_id": string,"decision": string,"direction": string,"end_to_end_id": string,"held_kind": string,"kind": string,"names_our_lot": boolean,"original_end_to_end_id": string,"payment_info_id": string,"remittance_text": string,"return_reason": string,"review_reason": string,"statement_id": string,"total": number,"unsplit_ours": number
             }[]
                            },
 "discard_remittance_run":
@@ -2781,7 +2849,7 @@ isOneToOne: false
                            },
 "payment_queue":
 { Args: { "p_client"?: string,"p_limit"?: number,"p_max_minor"?: number,"p_min_days"?: number,"p_min_minor"?: number,"p_offset"?: number,"p_reason"?: string,"p_tab"?: string }; Returns: {
-              "account_id": string,"age_days": number,"amount_minor": string,"booking_date": string,"candidate_account_id": string,"client_organization_id": string,"creditor_reference": string,"currency": string,"forwarded": boolean,"match_method": string,"matched_at": string,"payer_iban_end": string,"payer_name": string,"payment_id": string,"remittance_text": string,"review_reason": string,"status": string,"total": number
+              "account_id": string,"age_days": number,"amount_minor": string,"booking_date": string,"candidate_account_id": string,"client_organization_id": string,"creditor_reference": string,"currency": string,"forwarded": boolean,"match_method": string,"matched_at": string,"own_transfer_line": boolean,"payer_iban_end": string,"payer_name": string,"payment_id": string,"remittance_text": string,"review_reason": string,"status": string,"total": number
             }[]
                            },
 "payout_accounts":
