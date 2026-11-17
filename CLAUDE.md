@@ -68,6 +68,9 @@ Seeded logins (`make reset`; code in Mailpit at http://127.0.0.1:54324): `admin@
 `lecture@martin.test`, `admin@lilas.test`. `make synth` writes sample tapes to `tmp/synth/`.
 
 CI (`.github/workflows/ci.yml`) runs the same: jobs `py`, `web`, `db` (pgTAP + integration), `scale` (the 50k runs, in parallel), `scale-payouts` (the 5,000-payout bookings, in parallel), `catalogue`, `e2e`.
+`scale` and `scale-payouts` run on pushes to `main` and on manual dispatch, not on pull requests (founder decision 2026-11-17, Actions minutes of the private repo):
+a slice that changes a path they time (import, matching, allocation, receipts, boarding, transfer files, payout bookings) dispatches CI on its branch
+(`workflow_dispatch`) and merges only once that run is green too; a red volume run on `main` is fixed before the next slice.
 Pins: Supabase CLI 2.122.1, Python 3.12, Node 22, Playwright 1.63.0 (matches the browser preinstalled in cloud sessions), vitest 4.0.x (4.1.x crashes npm's resolver).
 
 ## Definition of done (per slice / PR)
