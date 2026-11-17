@@ -5,6 +5,8 @@ import {
   CHECK_LABEL,
   DEBIT_REVIEW,
   DIRECT_REFUSAL,
+  OUR_LOT_FOREIGN_E2E_NOTE,
+  OUR_LOT_REFUND_BACK_NOTE,
   UNSPLIT_OURS_NOTE,
   checkLabel,
   debitReviewRank,
@@ -2014,6 +2016,29 @@ describe("M2c-6b-1 review round 8: the unsplit note is true of every line, our r
       ).toBe(false);
       for (const reason of [null, "return_differs", "batch_partial"])
         expect(debitReviewText({ ...row, review_reason: reason }), `${name} ${reason}`).toBe(UNSPLIT_OURS_NOTE);
+    }
+  });
+});
+
+// Review M2c-6b-1 round 8, verifier's low item new:lot-credit-rfd-e2e-note-says-not-ours: since T1 a credit naming our
+// lot that carries one of our refunds' RFD ids as its end-to-end id is a return listed « À classer » (a02: the lone
+// refund's id, 1 € short; a04: another refund's id; a05: a refund's id on r1's payouts lot). The note must not say that
+// end-to-end id is not ours.
+describe("M2c-6b-1 review round 8: the lot note claims nothing of the end-to-end id", () => {
+  it("is true of a credit naming our lot whatever its end-to-end id, ours included", () => {
+    expect(OUR_LOT_FOREIGN_E2E_NOTE).not.toContain("n'est pas la nôtre");
+    expect(OUR_LOT_FOREIGN_E2E_NOTE).toContain("quelle que soit sa référence de bout en bout");
+    for (const [name, e2e, reason] of [
+      ["a02", "RFD0A1B2C3D4E5F", "amount_differs"],
+      ["a04", "RFD1A1B2C3D4E5F", "changed"],
+      ["a05", "RFD2A1B2C3D4E5F", "changed"],
+      ["foreign", "E2E-OF-THE-BANK", "no_candidate"],
+    ] as const) {
+      const row = { direction: "credit", kind: "return", amount_minor: "900", end_to_end_id: e2e,
+                    original_end_to_end_id: null, payment_info_id: "TF-2026-000001-1", names_our_lot: true,
+                    unsplit_ours: null, review_reason: reason };  // prettier-ignore
+      expect(offersOwnLotRefundBack(row), name).toBe(true);
+      expect(debitReviewText(row), name).toBe(`${OUR_LOT_FOREIGN_E2E_NOTE} ${OUR_LOT_REFUND_BACK_NOTE}`);
     }
   });
 });

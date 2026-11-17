@@ -1520,5 +1520,13 @@ does not touch); the web's lint, types and 331 vitest tests; the E2E's 54 tests 
 page the E2E shows — the unsplit note appears on no line of its fixtures — and the run's image diffs are dates, ages, ids
 and pages earlier slices changed, not committed). `database.types.ts` unchanged (no public signature changed).
 
+Round 8's money verifier: T1, T2 and T3 fixed (lm1–lm5, s3g2, a06–a14, r1q–r7, t1–t3, b01–b13 through the real camt.053
+import, the match, debit and funds jobs; 20,000 random entries through the parser and 450 through the database, no
+violation; the evals unchanged). No medium-or-higher path. Two items recorded in COMPLIANCE OQ-84 (i)–(j): the lot note
+claimed a credit's end-to-end id was not ours, untrue since T1 of one carrying our refund's RFD id — reworded (« quelle
+que soit sa référence de bout en bout »; vitest « M2c-6b-1 review round 8: the lot note claims nothing of the
+end-to-end id », a02, a04, a05 and a foreign id), the M2b pass's `changed` reason on those lines left to M2c-6b-2; and,
+outside round 8, the design's unbounded bank charge on a short return of a line of its own, a founder question.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

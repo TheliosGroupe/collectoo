@@ -461,11 +461,12 @@ export const OUR_LOT_CREDIT_NOTE =
 
 /**
  * Review M2c-6b-1 round 6 (R2): what « À classer » says of a credit read as a return that names one of our lots with an
- * end-to-end id that is not ours (namesOurLot, not isOurTransferCredit) — in place of the job's review (no_candidate),
- * the explanation and every other refund being refused on it (own_transfer_line; COMPLIANCE OQ-84).
+ * end-to-end id (namesOurLot, not isOurTransferCredit) — in place of the job's review (no_candidate, amount_differs,
+ * changed), the explanation and every other refund being refused on it (own_transfer_line; COMPLIANCE OQ-84). Round 8's
+ * verifier: since T1 that end-to-end id can be one of ours (a refund's RFD id), so the note claims nothing of it.
  */
 export const OUR_LOT_FOREIGN_E2E_NOTE =
-  "Crédit portant la référence de l'un des lots de nos fichiers de virements, avec une référence de bout en bout qui n'est pas la nôtre : c'est peut-être ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne le classez pas sans comptabiliser et ne le rattachez à aucun autre remboursement : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements, quelle que soit sa référence de bout en bout : c'est peut-être ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne le classez pas sans comptabiliser et ne le rattachez à aucun autre remboursement : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
 
 /**
  * Review M2c-6b-1 round 7 (S3): what « À classer » says of an own or a client's credit naming one of our lots of its
