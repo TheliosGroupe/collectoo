@@ -51,6 +51,7 @@ from collectoo_worker.payments.statement import (
     STAGE_COLUMNS,
     KnownIbans,
     ParsedStatement,
+    StatementLine,
     StatementRejected,
 )
 from collectoo_worker.runtime.storage import Storage
@@ -261,6 +262,28 @@ def parse_file(  # noqa: PLR0913 - the bank account's settings
     )
 
 
+def stage_row(statement_id: str, line: StatementLine) -> tuple[Any, ...]:
+    """One line as the stage stores it. M2c-6b-2a (critic2 CSO2-9): the details of an entry kept
+    unsplit as JSON (`Jsonb`: a bare tuple would be dumped as an array and the COPY into jsonb would
+    fail), each amount as text or null."""
+    values: list[Any] = [statement_id]
+    for c in STAGE_COLUMNS:
+        value = getattr(line, c)
+        if c == "unsplit_details" and value is not None:
+            value = Jsonb(
+                [
+                    {
+                        "id": d.id,
+                        "direction": d.direction,
+                        "amount_minor": None if d.amount_minor is None else str(d.amount_minor),
+                    }
+                    for d in value
+                ]
+            )
+        values.append(value)
+    return tuple(values)
+
+
 def stage(conn: Conn, statement_id: str, parsed: ParsedStatement) -> None:
     """COPY the lines into private.bank_import_stage (ingest_statement reads them, same tx)."""
     columns = ", ".join(("statement_id", *STAGE_COLUMNS))
@@ -269,7 +292,7 @@ def stage(conn: Conn, statement_id: str, parsed: ParsedStatement) -> None:
         cur.copy(f"copy private.bank_import_stage ({columns}) from stdin") as copy,
     ):
         for line in parsed.lines:
-            copy.write_row((statement_id, *(getattr(line, c) for c in STAGE_COLUMNS)))
+            copy.write_row(stage_row(statement_id, line))
 
 
 def reject(

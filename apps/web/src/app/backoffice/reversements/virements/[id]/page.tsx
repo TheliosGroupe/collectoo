@@ -146,7 +146,7 @@ export default async function TransferFilePage({
 
       {refusal && refusal.code !== "already_downloaded" ? (
         <div className="flex flex-col gap-2 rounded-md border border-red-200 p-3 text-sm dark:border-red-900" data-testid="download-refused">
-          <p className="font-medium text-red-800 dark:text-red-200">{refusalText(refusal.code)}</p>
+          <p className="font-medium text-red-800 dark:text-red-200">{refusalText(refusal.code, refusal.blocked)}</p>
           {refusal.blocked.length > 0 ? (
             <ul className="flex list-disc flex-col gap-1 pl-5" data-testid="download-blocked">
               {refusal.blocked.map((b) => {

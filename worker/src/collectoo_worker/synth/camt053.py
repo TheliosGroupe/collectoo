@@ -14,7 +14,12 @@ Every name, IBAN and reference is synthetic (Faker fr_FR, valid check digits, ra
 `debits_of` (M2c-6b-1, plan docs/design/m2c-6b-plan.md §6) is the statement of a pain.001 file we
 wrote, as the bank would book it: each transfer debited by its own end-to-end id, or one batch line
 per PmtInf (with or without its details), a partial batch, every debit twice, returns (AC04) with
-or without the bank's charges deducted, and a bank fee.
+or without the bank's charges deducted, and a bank fee. M2c-6b-2a (plan docs/design/m2c-6b-2-plan.md
+§6) adds the shapes ops book in 6b-2b: each debit booked for N + the bank's charge on one entry, the
+charge in its `Chrgs` (the ISO shape: the detail at N, or without its amount); returns the bank did
+not flag (no return code, from the payee's IBAN); entries kept unsplit with the details of ours the
+statement gives (netted with a return of ours, without amounts, beside details not ours); and the
+CSV export without its references.
 """
 
 from __future__ import annotations
@@ -58,6 +63,14 @@ class Tx:
     truth: str | None = None
     expect: str | None = None
     scenario: str | None = None
+    # M2c-6b-2a: the instructed amount (AmtDtls/TxAmt/Amt, when there is no booked `Amt`) and the
+    # detail's own direction (CdtDbtInd, camt.053.001.08) when it is not its entry's
+    instructed_minor: int | None = None
+    direction: str | None = None  # credit | debit
+
+    def own_amount(self) -> int | None:
+        """The amount the parser reads first: the booked `Amt`, else the instructed one."""
+        return self.amount_minor if self.amount_minor is not None else self.instructed_minor
 
 
 @dataclass(frozen=True)
@@ -74,6 +87,7 @@ class Entry:
     batch_count: int | None = None  # NtryDtls/Btch/NbOfTxs
     info: str | None = None  # AddtlNtryInf
     payment_info_id: str | None = None  # NtryDtls/Btch/PmtInfId (our file's PmtInf, M2c)
+    charges_minor: int | None = None  # Ntry/Chrgs: the bank's charge in the entry (M2c-6b-2a)
 
     @property
     def signed(self) -> int:
@@ -85,18 +99,21 @@ class Entry:
             return not (self.batch_count or 0) > 1
         if self.batch_count and self.batch_count != len(self.txs):
             return False
+        entry_direction = "credit" if self.credit else "debit"
         if len(self.txs) == 1:  # one transaction: the booked amount
             # review M2c-6b-1 round 7 (S1): unless it is ours and its own amount is not the entry's
             # (the parser keeps that entry unsplit); round 8 (T2): ours is every id we issue
             one = self.txs[0]
-            return (
-                one.amount_minor in (None, self.amount_minor)
-                or issued_id(one.end_to_end_id, None) is None
+            whole = one.own_amount() in (None, self.amount_minor) and one.direction in (
+                None,
+                entry_direction,
             )
-        amounts = [t.amount_minor for t in self.txs]
+            return whole or issued_id(one.end_to_end_id, None) is None
+        amounts = [t.own_amount() for t in self.txs]
         return (
             None not in amounts
             and 0 not in amounts
+            and all(t.direction in (None, entry_direction) for t in self.txs)
             and sum(a or 0 for a in amounts) == self.amount_minor
         )
 
@@ -358,10 +375,11 @@ def generate_entries(  # noqa: PLR0913 - explicit generation parameters read bes
 DEBIT_MODES = ("individual", "batch", "batch-details", "partial", "twice")
 TRANSFER_DEBIT_CODE = "PMNT/ICDT/ESCT"
 TRANSFER_RETURN_CODE = "PMNT/ICDT/RRTN"
+RECEIVED_TRANSFER_CODE = "PMNT/RCDT/ESCT"  # an unflagged return: a credit transfer received
 FEE_CODE = "ACMT/MDOP/CHRG"
 
 
-def debits_of(  # noqa: PLR0913 - what the bank did with the file, one parameter each
+def debits_of(  # noqa: PLR0912, PLR0913 - what the bank did with the file, one parameter each
     file: TransferFile,
     *,
     booking_date: date | None = None,
@@ -371,6 +389,10 @@ def debits_of(  # noqa: PLR0913 - what the bank did with the file, one parameter
     charges_minor: int = 0,
     fee_minor: int = 0,
     ref_prefix: str = "DBT",
+    debit_charge_minor: int = 0,
+    debit_charge_detail_amount: bool = True,
+    unflagged_returns: bool = False,
+    unsplit_details: str | None = None,
 ) -> list[Entry]:
     """The bank's lines for a pain.001 file (`remittance.pain001.read`): its debits on
     `booking_date` (default: each PmtInf's requested execution date), as `mode` says —
@@ -379,11 +401,24 @@ def debits_of(  # noqa: PLR0913 - what the bank did with the file, one parameter
     with each transfer's details: split into one line each), `partial` (a batch line without its
     last transfer), `twice` (every individual debit booked again the next day). Then a return of
     each end-to-end id in `returns` on `return_date` (default: three days later), credited less
-    `charges_minor` (the bank's charge deducted), and a bank fee of `fee_minor` if not zero."""
+    `charges_minor` (the bank's charge deducted), and a bank fee of `fee_minor` if not zero.
+
+    M2c-6b-2a: `debit_charge_minor` books each individual debit for N + that charge on one entry,
+    the charge in its `Chrgs` — by default the ISO shape, the detail carrying N as its instructed
+    amount (`AmtDtls/TxAmt`: kept unsplit by the parser), else (`debit_charge_detail_amount`
+    false) the detail without an amount (our transfer's line of its own); `unflagged_returns`
+    writes the returns without a return code (a received credit transfer) from the payee's IBAN;
+    `unsplit_details` writes each PmtInf as one entry kept unsplit, in place of the mode's debits:
+    `ours-netted` (its debits with the first transfer's return netted in, every detail ours: needs
+    camt.053.001.08), `no-amounts` (its debits without amounts), `foreign-zero` (its debits
+    beside two details not ours netting to zero: .08), `foreign` (its debits beside a detail not
+    ours without an amount)."""
     if mode not in DEBIT_MODES:
         raise ValueError(f"mode {mode!r}: one of {', '.join(DEBIT_MODES)}")
-    if charges_minor < 0 or fee_minor < 0:
+    if charges_minor < 0 or fee_minor < 0 or debit_charge_minor < 0:
         raise ValueError("charges and fee are not negative")
+    if unsplit_details is not None and unsplit_details not in UNSPLIT_SHAPES:
+        raise ValueError(f"unsplit details {unsplit_details!r}: one of {', '.join(UNSPLIT_SHAPES)}")
     entries: list[Entry] = []
     n = 0
 
@@ -409,16 +444,27 @@ def debits_of(  # noqa: PLR0913 - what the bank did with the file, one parameter
         ]
         for p in pmt.transactions:
             by_e2e[p.end_to_end_id] = (p.amount_minor, p.creditor_name, p.creditor_iban)
+        if unsplit_details is not None:
+            entries.append(_unsplit_entry(unsplit_details, txs, day, ref(), pmt.pmt_inf_id))
+            continue
         if mode in ("individual", "twice"):
             for x in txs:
+                charged = x
+                if debit_charge_minor:
+                    charged = replace(
+                        x,
+                        amount_minor=None,
+                        instructed_minor=x.amount_minor if debit_charge_detail_amount else None,
+                    )
                 one = Entry(
-                    x.amount_minor or 0,
+                    (x.amount_minor or 0) + debit_charge_minor,
                     False,
                     day,
                     day,
                     ref=ref(),
                     code=TRANSFER_DEBIT_CODE,
-                    txs=(x,),
+                    txs=(charged,),
+                    charges_minor=debit_charge_minor or None,
                 )
                 entries.append(one)
                 if mode == "twice":
@@ -461,14 +507,14 @@ def debits_of(  # noqa: PLR0913 - what the bank did with the file, one parameter
                 back,
                 back,
                 ref=ref(),
-                code=TRANSFER_RETURN_CODE,
+                code=RECEIVED_TRANSFER_CODE if unflagged_returns else TRANSFER_RETURN_CODE,
                 txs=(
                     Tx(
                         amount,
                         end_to_end_id=e2e,
                         name=name,
                         iban=iban,
-                        return_reason="AC04",
+                        return_reason=None if unflagged_returns else "AC04",
                     ),
                 ),
             )
@@ -480,6 +526,42 @@ def debits_of(  # noqa: PLR0913 - what the bank did with the file, one parameter
             )
         )
     return sorted(entries, key=lambda e: e.booking_date)
+
+
+UNSPLIT_SHAPES = ("ours-netted", "no-amounts", "foreign-zero", "foreign")
+FOREIGN_MINOR = 5_000  # a detail not ours beside them (foreign-zero: ±, foreign: no amount)
+
+
+def _unsplit_entry(shape: str, txs: list[Tx], day: date, ref: str, pmt_inf_id: str) -> Entry:
+    """One PmtInf as one entry the parser keeps unsplit (M2c-6b-2a), its details in the file's
+    order; NbOfTxs their count."""
+    debits = list(txs)
+    amount = sum(x.amount_minor or 0 for x in debits)
+    if shape == "ours-netted":
+        if len(debits) > 1:  # the first transfer's return netted in: a credit detail of ours
+            debits.append(replace(debits[0], direction="credit"))
+            amount -= debits[0].amount_minor or 0
+    elif shape == "no-amounts":
+        debits = [replace(x, amount_minor=None) for x in debits]
+    elif shape == "foreign-zero":
+        debits += [
+            Tx(FOREIGN_MINOR, end_to_end_id="E2E-FOREIGN-IN", direction="credit"),
+            Tx(FOREIGN_MINOR, end_to_end_id="E2E-FOREIGN-OUT", direction="debit"),
+        ]
+    else:  # foreign: a detail not ours, its amount not given
+        debits.append(Tx(None, end_to_end_id="E2E-FOREIGN"))
+        amount += FOREIGN_MINOR
+    return Entry(
+        amount,
+        False,
+        day,
+        day,
+        ref=ref,
+        code=TRANSFER_DEBIT_CODE,
+        txs=tuple(debits),
+        batch_count=len(debits),
+        payment_info_id=pmt_inf_id,
+    )
 
 
 def make_doc(  # noqa: PLR0913 - the statement's identity
@@ -624,6 +706,18 @@ def _party(tag: str, name: str | None, v08: bool) -> str:
     return f"<{tag}>{f'<Pty>{inner}</Pty>' if v08 else inner}</{tag}>"
 
 
+def _charges(minor: int, currency: str, records: bool) -> str:
+    """The bank's charge on the entry: a debit record included in the entry amount (Chrgs/Rcrd
+    from camt.053.001.04); .02's Chrgs carries its Amt itself, with no direction nor inclusion
+    indicator (review M2c-6b-2a M3: which the parser never reads)."""
+    if records:
+        return (
+            f"<Chrgs><Rcrd>{_amt(minor, currency)}<CdtDbtInd>DBIT</CdtDbtInd>"
+            "<ChrgInclInd>true</ChrgInclInd></Rcrd></Chrgs>"
+        )
+    return f"<Chrgs>{_amt(minor, currency)}</Chrgs>"
+
+
 def _tx(t: Tx, e: Entry, currency: str, v08: bool) -> str:
     side = "Dbtr" if e.credit else "Cdtr"
     refs = (
@@ -633,12 +727,18 @@ def _tx(t: Tx, e: Entry, currency: str, v08: bool) -> str:
         + _text("MndtId", t.mandate_ref)
     )
     out = [f"<TxDtls><Refs>{refs}</Refs>"]
-    if t.amount_minor is not None:
-        if v08:
+    tx_side = t.direction or ("credit" if e.credit else "debit")
+    if not v08 and tx_side != ("credit" if e.credit else "debit"):
+        raise ValueError("a detail of the other direction needs camt.053.001.08 (TxDtls/CdtDbtInd)")
+    if v08:
+        if t.amount_minor is not None:
             out.append(_amt(t.amount_minor, currency))
-            out.append(f"<CdtDbtInd>{'CRDT' if e.credit else 'DBIT'}</CdtDbtInd>")
-        else:
-            out.append(f"<AmtDtls><TxAmt>{_amt(t.amount_minor, currency)}</TxAmt></AmtDtls>")
+        if t.amount_minor is not None or t.direction is not None:
+            out.append(f"<CdtDbtInd>{'CRDT' if tx_side == 'credit' else 'DBIT'}</CdtDbtInd>")
+        if t.instructed_minor is not None:
+            out.append(f"<AmtDtls><TxAmt>{_amt(t.instructed_minor, currency)}</TxAmt></AmtDtls>")
+    elif t.own_amount() is not None:
+        out.append(f"<AmtDtls><TxAmt>{_amt(t.own_amount() or 0, currency)}</TxAmt></AmtDtls>")
     parties = _party(side, t.name, v08)
     if t.iban:
         parties += f"<{side}Acct><Id><IBAN>{t.iban}</IBAN></Id></{side}Acct>"
@@ -659,7 +759,7 @@ def _tx(t: Tx, e: Entry, currency: str, v08: bool) -> str:
     return "".join(out)
 
 
-def _entry(e: Entry, currency: str, v08: bool) -> str:
+def _entry(e: Entry, currency: str, v08: bool, records: bool) -> str:
     status = f"<Sts><Cd>{e.status}</Cd></Sts>" if v08 else f"<Sts>{e.status}</Sts>"
     out = [
         "<Ntry>",
@@ -671,6 +771,7 @@ def _entry(e: Entry, currency: str, v08: bool) -> str:
         f"<ValDt><Dt>{e.value_date.isoformat()}</Dt></ValDt>" if e.value_date else "",
         _text("AcctSvcrRef", e.ref),
         _code(e.code),
+        _charges(e.charges_minor, currency, records) if e.charges_minor else "",
     ]
     if e.txs or e.batch_count or e.payment_info_id:
         batch = (
@@ -718,7 +819,7 @@ def render_camt053(doc: Doc, version: str = "02") -> bytes:
         out.append(f"<Acct><Id><IBAN>{st.iban}</IBAN></Id><Ccy>{st.currency}</Ccy></Acct>")
         out.append(_balance("OPBD", st.opening_minor, st.currency, st.from_date))
         out.append(_balance("CLBD", st.closing_minor, st.currency, st.to_date))
-        out.extend(_entry(e, st.currency, v08) for e in st.entries)
+        out.extend(_entry(e, st.currency, v08, int(version) >= 4) for e in st.entries)
         out.append("</Stmt>")
     out.append("</BkToCstmrStmt></Document>\n")
     return "".join(out).encode("utf-8")
@@ -733,8 +834,8 @@ def _fr_amount(minor: int, rng: random.Random) -> str:
     return f"{grouped},{cents:02d}"
 
 
-def _label(x: Expected) -> str:
-    ref = x.creditor_reference or x.end_to_end_id
+def _label(x: Expected, references: bool = True) -> str:
+    ref = (x.creditor_reference or x.end_to_end_id) if references else None
     text = " ".join((x.remittance_text or "").split())
     if x.kind == "return":
         head = "RETOUR VIR SEPA"
@@ -750,10 +851,16 @@ def _label(x: Expected) -> str:
 
 
 def render_bank_csv(
-    lines: Sequence[Expected], *, seed: int = 1, signed: bool = False, bank_ids: bool = True
+    lines: Sequence[Expected],
+    *,
+    seed: int = 1,
+    signed: bool = False,
+    bank_ids: bool = True,
+    references: bool = True,
 ) -> bytes:
     """The documented CSV (semicolons, French dates and amounts, Windows-1252 like most French
-    bank exports). `signed`: one Montant column, else Débit and Crédit columns."""
+    bank exports). `signed`: one Montant column, else Débit and Crédit columns. `references`
+    false (M2c-6b-2a): the labels carry no /REF (an export that drops the end-to-end id)."""
     rng = random.Random(seed)
     head = ["Date opération", "Date de valeur", "Libellé"]
     head += ["Montant"] if signed else ["Débit", "Crédit"]
@@ -766,7 +873,12 @@ def render_bank_csv(
         else:
             money = [amount, ""] if x.direction == "debit" else ["", amount]
         value = x.value_date.strftime("%d/%m/%Y") if x.value_date else ""
-        cells = [x.booking_date.strftime("%d/%m/%Y"), value, _label(x).replace(";", ","), *money]
+        cells = [
+            x.booking_date.strftime("%d/%m/%Y"),
+            value,
+            _label(x, references).replace(";", ","),
+            *money,
+        ]
         cells += [x.bank_ref or ""] if bank_ids else []
         rows.append(";".join(cells))
     return ("\r\n".join(rows) + "\r\n").encode("cp1252", errors="replace")
@@ -779,12 +891,15 @@ def _csv_kind(x: Expected) -> str:
     return "debtor_credit" if x.direction == "credit" else "other_debit"
 
 
-def expected_csv(lines: Sequence[Expected], *, bank_ids: bool = True) -> list[Expected]:
-    """What the CSV parser returns for a CSV rendered from these lines (labels lose structure)."""
+def expected_csv(
+    lines: Sequence[Expected], *, bank_ids: bool = True, references: bool = True
+) -> list[Expected]:
+    """What the CSV parser returns for a CSV rendered from these lines (labels lose structure;
+    without the references, our debits lose the ids that made them ours)."""
     out = []
     for x in lines:
-        label = _label(x).replace(";", ",")
-        ref = x.creditor_reference or x.end_to_end_id
+        label = _label(x, references).replace(";", ",")
+        ref = (x.creditor_reference or x.end_to_end_id) if references else None
         remittance = " ".join(label.split())
         out.append(
             replace(
@@ -796,7 +911,7 @@ def expected_csv(lines: Sequence[Expected], *, bank_ids: bool = True) -> list[Ex
                 counterparty_iban=None,
                 remittance_text=remittance,
                 return_reason=None,
-                kind=_csv_kind(x),
+                kind=_csv_kind(x) if references or x.direction == "credit" else "other_debit",
                 counterparty_name=x.counterparty_name if x.kind != "other_debit" else None,
             )
         )
@@ -834,16 +949,23 @@ def manifest(doc: Doc, lines: Sequence[Expected]) -> dict[str, Any]:
     }
 
 
-def write_statement(
-    doc: Doc, out: Path, name: str, *, version: str = "02", csv: bool = False
+def write_statement(  # noqa: PLR0913 - the file's name, format and shape
+    doc: Doc,
+    out: Path,
+    name: str,
+    *,
+    version: str = "02",
+    csv: bool = False,
+    references: bool = True,
 ) -> list[Path]:
-    """Write the camt.053 file (or the CSV export) and its manifest; returns the paths."""
+    """Write the camt.053 file (or the CSV export, its references dropped when `references` is
+    false) and its manifest; returns the paths."""
     out.mkdir(parents=True, exist_ok=True)
     lines = expected_lines(doc)
     if csv:
         path = out / f"{name}.csv"
-        path.write_bytes(render_bank_csv(lines))
-        lines = expected_csv(lines)
+        path.write_bytes(render_bank_csv(lines, references=references))
+        lines = expected_csv(lines, references=references)
     else:
         path = out / f"{name}.xml"
         path.write_bytes(render_camt053(doc, version))

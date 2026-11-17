@@ -6,6 +6,9 @@ uv run synth civil-all --rows 200 --seed 1 --out ../tmp/synth
 uv run synth seed-sql > ../supabase/seed.sql
 uv run synth camt053 --lines 500 --seed 1 --iban FR76... --overlap 2 --out ../tmp/synth/bank
 uv run synth camt053 --debits-of f.xml --mode batch --return RMT... --charges 150 --out ../tmp/s
+uv run synth camt053 --debits-of f.xml --debit-charge 120 --version 08 --return RMT... ...
+uv run synth camt053 --debits-of f.xml --unsplit-details ours-netted --version 08 --out ../tmp/s
+uv run synth camt053 --debits-of f.xml --csv --csv-without-references --out ../tmp/s
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from pathlib import Path
 from collectoo_worker.remittance import pain001
 from collectoo_worker.synth.camt053 import (
     DEBIT_MODES,
+    UNSPLIT_SHAPES,
     balance_before,
     debits_of,
     generate_entries,
@@ -31,7 +35,7 @@ from collectoo_worker.synth.ids import iban_fr
 from collectoo_worker.synth.seed import seed_sql
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915 - one parser, every option
     parser = argparse.ArgumentParser(prog="synth", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -77,6 +81,35 @@ def main(argv: list[str] | None = None) -> int:
     camt.add_argument("--return-date", type=dt.date.fromisoformat)
     camt.add_argument("--charges", type=int, default=0, help="deducted from each return, minor")
     camt.add_argument("--fee", type=int, default=0, help="a bank fee line, minor units")
+    # M2c-6b-2a (plan docs/design/m2c-6b-2-plan.md §6)
+    camt.add_argument(
+        "--debit-charge",
+        type=int,
+        default=0,
+        metavar="MINOR",
+        help="each individual debit booked for N + this charge on one entry (Chrgs; read from a"
+        " v04+ file only: v02's Chrgs gives no direction, the parser never reads it)",
+    )
+    camt.add_argument(
+        "--debit-charge-no-detail-amount",
+        action="store_true",
+        help="the charged debit's detail without an amount (else the ISO shape: its TxAmt is N)",
+    )
+    camt.add_argument(
+        "--unflagged-returns",
+        action="store_true",
+        help="returns without a return code or reversal indicator, from the payee's IBAN",
+    )
+    camt.add_argument(
+        "--unsplit-details",
+        choices=UNSPLIT_SHAPES,
+        help="each PmtInf as one entry kept unsplit with these details (ours-netted needs 08)",
+    )
+    camt.add_argument(
+        "--csv-without-references",
+        action="store_true",
+        help="with --csv: the labels carry no /REF (no end-to-end id)",
+    )
 
     args = parser.parse_args(argv)
     if args.cmd == "eba":
@@ -107,6 +140,10 @@ def debit_statement(args: argparse.Namespace) -> list[Path]:
         return_date=args.return_date,
         charges_minor=args.charges,
         fee_minor=args.fee,
+        debit_charge_minor=args.debit_charge,
+        debit_charge_detail_amount=not args.debit_charge_no_detail_amount,
+        unflagged_returns=args.unflagged_returns,
+        unsplit_details=args.unsplit_details,
     )
     days = [e.booking_date for e in entries]
     doc = make_doc(
@@ -118,7 +155,14 @@ def debit_statement(args: argparse.Namespace) -> list[Path]:
         stmt_id=f"DEBITS-{file.msg_id}"[:35],
     )
     name = f"camt053-debits-{args.debits_of.stem}-{args.mode}"
-    return write_statement(doc, args.out, name, version=args.version, csv=args.csv)
+    return write_statement(
+        doc,
+        args.out,
+        name,
+        version=args.version,
+        csv=args.csv,
+        references=not args.csv_without_references,
+    )
 
 
 def statements(args: argparse.Namespace) -> list[Path]:
