@@ -1542,7 +1542,7 @@ def test_an_unsplit_entry_holding_our_transfer_is_never_booked_nor_explained(
         ("credit", "return", n_big, big, 1),  # u03
         ("credit", "return", n_big, big, 1),  # u01
         ("credit", "return", n_big, None, 1),  # x01: no id of ours kept, counted
-        ("credit", "return", n_big, big, 1),  # m04
+        ("credit", "return", n_big, big, 2),  # m04 (round 8, T2: our refund's debit counted too)
         ("debit", "batch_unsplit", 500_000 - n_big, None, 1),  # d01
     ]
     assert _payments_of(sid) == 0
@@ -1655,4 +1655,222 @@ def test_an_own_credit_naming_our_lot_is_never_a_top_up_nor_relayed(tmp_path: Pa
     sid2 = import_entries(tenant, storage(), [plain], day=day, opening=opening2)
     assert [k for k, _, _ in _bookings(sid2)] == ["top_up"]
     assert _transfer(top["end_to_end_id"])["status"] == "booked"
+    _no_violation(tenant)
+
+
+# -- review round 8 (T1, T2): our lot named whatever its end-to-end id; our refunds, top-ups unsplit
+
+
+def _lines(statement_id: str) -> list[tuple[Any, ...]]:
+    """Each line: id, direction, kind, end-to-end id, original, unsplit_ours, names_our_lot."""
+    with psycopg.connect(DB) as conn:
+        rows = conn.execute(
+            """select id::text, direction, kind, end_to_end_id, original_end_to_end_id,
+                      unsplit_ours, private.names_our_lot(bank_account_id, payment_info_id)
+               from public.bank_transaction where statement_id = %s order by line_no""",
+            (statement_id,),
+        ).fetchall()
+    return [tuple(r) for r in rows]
+
+
+def _links(statement_id: str) -> list[str]:
+    with psycopg.connect(DB) as conn:
+        rows = conn.execute(
+            """select l.kind from public.bank_debit_link l
+               join public.bank_transaction t on t.id = l.bank_transaction_id
+               where t.statement_id = %s order by t.line_no""",
+            (statement_id,),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _queued(tenant: dict[str, Any], line: str) -> list[Any]:
+    """The line's rows in « À classer »: its kind, names_our_lot, unsplit_ours, the job's review."""
+    return list(
+        staff(
+            tenant,
+            """select coalesce(jsonb_agg(jsonb_build_array(q.kind, q.names_our_lot, q.unsplit_ours,
+                                                          q.review_reason)), '[]')
+               from public.debit_queue('a-classer', 0, 100) q where q.bank_transaction_id = %s""",
+            line,
+        )
+    )
+
+
+def _no_link(tenant: dict[str, Any], line: str, *kinds: str, refund: str | None = None) -> None:
+    """Nothing offered on the line, and each link kind refused own_transfer_line (a refund's kinds
+    naming `refund`)."""
+    options = staff(tenant, "select public.debit_link_options(%s)", line)
+    assert (options["payments"], options["refunds"]) == ([], [])
+    for kind in kinds:
+        named = refund if kind in ("refund", "refund_returned") else None
+        with pytest.raises(psycopg.errors.CheckViolation, match="own_transfer_line"):
+            staff(
+                tenant,
+                "select public.link_debit(%s, %s, %s, null, %s, null, 'vu')",
+                str(uuid.uuid4()),
+                line,
+                kind,
+                named,
+            )
+
+
+def test_a_credit_naming_our_lot_is_never_a_debtor_s_payment_whatever_its_end_to_end_id(
+    tmp_path: Path,
+) -> None:
+    """Review round 8 (T1, verdict new:lot-credit-foreign-e2e-debtor-payment), through the real
+    camt.053 import, the match job and the debit job. A downloaded file of two payouts; a debtor's
+    file with its RF. A credit then names that file's payouts lot with an end-to-end id that is not
+    ours, from no IBAN we know: the verifier's lm1 (with the debtor file's valid RF) and lm2
+    (without). Round 7 made each a debtor's payment — lm1 matched automatically to the debtor's
+    file (rf_structured): our transfer's money credited to a debtor. Now each is a `return` at the
+    import (the database reads the lot: private.ingest_statement), no payment, no match; the M2b
+    pass reviews it (`no_candidate`: never waiting without a reason); « À classer » lists it with
+    `names_our_lot`; no explanation and nothing offered (R2's rules). The same credit with the RF
+    and no lot is the debtor's payment, matched as before."""
+    tenant, _other, _r1, _r2 = _two_runs()
+    _f, data = _downloaded(tenant, tmp_path)
+    lot = pain001.read(data).payment_infos[0].pmt_inf_id
+    debtor = _file(tenant, 100_000)
+    opening, last = _last_closing(tenant)
+    day = max(paris_today(), last)
+    tag = uuid.uuid4().hex[:6].upper()
+
+    def credit(name: str, lot_id: str | None, rf: str | None) -> Entry:
+        tx = Tx(3_000, ref=f"{name}{tag}", end_to_end_id=f"VIR-{name}-{tag}", name="EMETTEUR",
+                creditor_ref=rf)  # fmt: skip
+        return Entry(3_000, True, day, day, ref=f"N{name}{tag}", payment_info_id=lot_id, txs=(tx,))
+
+    entries = [
+        credit("LM1", lot, debtor.rf),
+        credit("LM2", lot, None),
+        credit("LM5", None, debtor.rf),
+    ]
+    sid = import_entries(tenant, storage(), entries, day=day, opening=opening)
+    lines = _lines(sid)
+    assert [(r[1], r[2], r[6]) for r in lines] == [
+        ("credit", "return", True),  # lm1
+        ("credit", "return", True),  # lm2
+        ("credit", "debtor_credit", False),  # the debtor's
+    ]
+    with psycopg.connect(DB) as conn:
+        pays = conn.execute(
+            """select t.line_no, p.status, p.account_id::text, p.match_method from public.payment p
+               join public.bank_transaction t on t.id = p.bank_transaction_id
+               where t.statement_id = %s order by t.line_no""",
+            (sid,),
+        ).fetchall()
+    # the debtor's credit matched to its file by its RF (then allocated), as before
+    assert [(p[0], p[2], p[3]) for p in pays] == [(3, debtor.id, "rf_structured")]
+    assert pays[0][1] in ("matched", "allocated")
+    assert _reviews(sid) == ["no_candidate", "no_candidate"]
+    for line in (lines[0][0], lines[1][0]):
+        assert _queued(tenant, line) == [["return", True, None, "no_candidate"]]
+        _no_link(tenant, line, "explained")
+    _no_violation(tenant)
+
+
+def test_our_refund_or_top_up_in_an_unsplit_entry_is_never_linked_nor_a_payment(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    """Review round 8 (T2, verdict new:unsplit-entry-our-refund-or-top-uncounted), through the real
+    camt.053 import and the debit job. A downloaded file of two payouts and a refund; a top-up of
+    30,00 € ordered from the own account. The bank reports, each shown alone of two (NbOfTxs 2):
+    r1q, our refund's debit — round 7 counted no detail of ours, so the line took « Classer sans
+    comptabiliser »; then (the refund executed by its debit as the whole of its entry) r5, our
+    refund's return — the M2b pass linked it `refund_returned` and set the refund bounced; and t1,
+    our top-up from the own account — a debtor's payment, the top-up left ordered. Now each counts
+    its detail of ours: reviewed (`batch_partial`, `return_differs`), never linked, no explanation,
+    listed « À classer », and t1 makes no payment. Our refund's return and our top-up as the whole
+    of their entry are then linked and booked as before."""
+    tenant, _other, _r1, _r2 = _two_runs()
+    payment = _unidentified(tenant, 10_000)
+    staff(tenant, REQUEST_REFUND, *_refund_args(payment, 10_000))
+    _f, data = _downloaded(tenant, tmp_path)
+    ((rfd, n_rfd),) = [(e, n) for e, n in _payouts(data) if e.startswith("RFD")]
+    with psycopg.connect(DB) as conn:  # the own account _two_runs registered
+        row = conn.execute(
+            """select a.id::text, a.iban from public.servicer_billing_settings s
+               join public.bank_account a on a.id = s.own_bank_account_id
+               where s.organization_id = %s""",
+            (tenant["servicer"],),
+        ).fetchone()
+    assert row is not None
+    own, own_iban = str(row[0]), str(row[1])
+    top = staff(
+        tenant,
+        "select public.request_top_up(%s, %s, %s, '3000', 'couvrir les frais du compte dédié')",
+        str(uuid.uuid4()),
+        own,
+        tenant["bank"],
+    )["end_to_end_id"]
+    day = max(paris_today(), _last_closing(tenant)[1])
+    tag = uuid.uuid4().hex[:6].upper()
+
+    with psycopg.connect(DB) as conn:
+        found = conn.execute(
+            "select id::text from public.refund_request where payment_id = %s", (payment,)
+        ).fetchone()
+    assert found is not None
+    refund = str(found[0])
+
+    def refund_state() -> tuple[str, str]:
+        with psycopg.connect(DB) as conn:
+            r = conn.execute(
+                """select b.status, q.status from public.refund_request q
+                   join public.bank_transfer b on b.id = q.transfer_id where q.id = %s""",
+                (refund,),
+            ).fetchone()
+        assert r is not None
+        return str(r[0]), str(r[1])
+
+    def imported(*entries: Entry) -> str:
+        opening, _last = _last_closing(tenant)
+        return import_entries(tenant, storage(), list(entries), day=day, opening=opening)
+
+    out, back = "PMNT/ICDT/ESCT", "PMNT/RCDT/RRTN"
+    # r1q: our refund's debit shown alone of two
+    sid = imported(Entry(n_rfd, False, day, day, ref=f"Q1{tag}", code=out, batch_count=2,
+                         txs=(Tx(n_rfd, ref=f"Q1A{tag}", end_to_end_id=rfd),)))  # fmt: skip
+    ((line, *facts),) = _lines(sid)
+    assert tuple(facts) == ("debit", "batch_unsplit", rfd, None, 1, False)
+    assert (_reviews(sid), _links(sid)) == (["batch_partial"], [])
+    assert refund_state() == ("in_file", "requested")
+    assert _queued(tenant, line) == [["batch_unsplit", False, 1, "batch_partial"]]
+    _no_link(tenant, line, "explained", "refund", refund=refund)
+    # its debit as the whole of its entry: the refund executed (as before)
+    sid = imported(Entry(n_rfd, False, day, day, ref=f"Q2{tag}", code=out,
+                         txs=(Tx(n_rfd, ref=f"Q2A{tag}", end_to_end_id=rfd),)))  # fmt: skip
+    assert (_links(sid), refund_state()) == (["refund"], ("booked", "executed"))
+    # r5: its return shown alone of two; t1: our top-up shown alone of two
+    sid = imported(
+        Entry(n_rfd, True, day, day, ref=f"R5{tag}", code=back, batch_count=2,
+              txs=(Tx(n_rfd, ref=f"R5A{tag}", end_to_end_id=rfd, return_reason="AC04"),)),
+        Entry(3_000, True, day, day, ref=f"T1{tag}", batch_count=2,
+              txs=(Tx(3_000, ref=f"T1A{tag}", end_to_end_id=top, iban=own_iban),)),
+    )  # fmt: skip
+    (r5, *r5_facts), (t1, *t1_facts) = _lines(sid)
+    assert tuple(r5_facts) == ("credit", "return", rfd, rfd, 1, False)
+    assert tuple(t1_facts) == ("credit", "return", top, top, 1, False)
+    assert _payments_of(sid) == 0
+    assert (_reviews(sid), _links(sid)) == (["return_differs", "return_differs"], [])
+    assert (refund_state(), _transfer(top)["status"]) == (("booked", "executed"), "ordered")
+    assert _queued(tenant, r5) == [["return", False, 1, "return_differs"]]
+    assert _queued(tenant, t1) == [["return", False, 1, "return_differs"]]
+    _no_link(tenant, r5, "explained", "refund_returned", refund=refund)
+    _no_link(tenant, t1, "explained", "own_credit")
+    # a return, never relayed as a debtor's payment
+    with pytest.raises(psycopg.errors.CheckViolation, match="refused: not_own_credit"):
+        staff(tenant, "select public.release_own_credit(%s, %s, 'relayé')", str(uuid.uuid4()), t1)
+    # the refund's return and the top-up as the whole of their entry: linked and booked as before
+    sid = imported(
+        Entry(n_rfd, True, day, day, ref=f"W1{tag}", code=back,
+              txs=(Tx(n_rfd, ref=f"W1A{tag}", end_to_end_id=rfd, return_reason="AC04"),)),
+        Entry(3_000, True, day, day, ref=f"W2{tag}",
+              txs=(Tx(3_000, ref=f"W2A{tag}", end_to_end_id=top, iban=own_iban),)),
+    )  # fmt: skip
+    assert [r[2] for r in _lines(sid)] == ["return", "own_transfer_in"]
+    assert _links(sid) == ["refund_returned"]
+    assert [k for k, _, _ in _bookings(sid)] == ["top_up"]
+    assert (refund_state(), _transfer(top)["status"]) == (("returned", "bounced"), "booked")
     _no_violation(tenant)

@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape, quoteattr
 from faker import Faker
 
 from collectoo_worker.payments.rf import rf_format, rf_make
-from collectoo_worker.payments.statement import classify, minor_to_iso, names_our_transfer
+from collectoo_worker.payments.statement import classify, issued_id, minor_to_iso
 from collectoo_worker.synth.ids import iban_fr
 
 if TYPE_CHECKING:
@@ -87,10 +87,11 @@ class Entry:
             return False
         if len(self.txs) == 1:  # one transaction: the booked amount
             # review M2c-6b-1 round 7 (S1): unless it is ours and its own amount is not the entry's
-            # (the parser keeps that entry unsplit)
+            # (the parser keeps that entry unsplit); round 8 (T2): ours is every id we issue
             one = self.txs[0]
-            return one.amount_minor in (None, self.amount_minor) or not names_our_transfer(
-                one.end_to_end_id, None, None
+            return (
+                one.amount_minor in (None, self.amount_minor)
+                or issued_id(one.end_to_end_id, None) is None
             )
         amounts = [t.amount_minor for t in self.txs]
         return (
@@ -533,10 +534,9 @@ def expected_lines(doc: Doc) -> list[Expected]:
                 )
                 if not e.adds_up():
                     # (review M2c-6b-1 round 4, N1) a credit batch any of whose details is one of
-                    # our transfers coming back is a return, as the parser reads it
-                    ours = e.credit and any(
-                        names_our_transfer(t.end_to_end_id, None, None) for t in e.txs
-                    )
+                    # our transfers coming back is a return, as the parser reads it (round 8, T2:
+                    # any id we issue, our refunds' and top-ups' included)
+                    ours = e.credit and any(issued_id(t.end_to_end_id, None) for t in e.txs)
                     kind = "return" if kind == "return" or ours else "batch_unsplit"
                 out.append(
                     Expected(

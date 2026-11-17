@@ -86,6 +86,11 @@ REFUND_PREFIX = "RFD"  # end-to-end ids of our own refunds (design §6 refund_re
 # (top-up) and 12 upper-case hex digits as their end-to-end id.
 TOP_UP_ID_RE = re.compile(r"TOP[0-9A-F]{12}")
 TRANSFER_OUT_ID_RE = re.compile(r"(RMT|SWP)[0-9A-F]{12}")
+# Review M2c-6b-1 round 8 (T2): every end-to-end id we issue — our payouts' and sweeps' (RMT, SWP),
+# our refunds' (RFD: `refund_request.end_to_end_id`'s check) and our top-ups' (TOP) — as the SQL
+# generators write it. A camt.053 entry kept unsplit counts its details carrying one
+# (`StatementLine.unsplit_ours`); `names_our_transfer` reads RMT/SWP only (below).
+OUR_ISSUED_ID_RE = re.compile(r"(RMT|SWP|RFD|TOP)[0-9A-F]{12}")
 # M2c-6a: the PmtInfId of one of our files' lots (<file number>-<n>), as the SQL reads it
 # ('^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'; fullmatch, never a trailing newline)
 OUR_PMT_INF_RE = re.compile(r"TF-[0-9]{4}-[0-9]{6,}-[0-9]+")
@@ -110,12 +115,28 @@ def names_our_transfer(
 ) -> bool:
     """A line that is one of our transfers (twin of SQL `private.names_our_transfer`): our payout's
     or sweep's RMT/SWP id as its own end-to-end id or as the original one it returns, or — with no
-    end-to-end id — one of our files' PmtInfIds (a lot of ours as one line)."""
+    end-to-end id — one of our files' PmtInfIds (a lot of ours as one line).
+
+    Review round 8 (T2): our refunds' RFD and top-ups' TOP ids are ours too but deliberately not
+    here — this predicate names the lines that are only ever booked (every link refuses them); our
+    refund's debit is linked to its request by the M2b pass, a credit carrying our TOP id is
+    `own_transfer_in` (`refine_kind`) and booked as the top-up. In a camt.053 entry kept unsplit all
+    four are counted (`issued_id`, `unsplit_ours`), which every refusal reads."""
     return (
         TRANSFER_OUT_ID_RE.fullmatch(end_to_end_id or "") is not None
         or TRANSFER_OUT_ID_RE.fullmatch(original_end_to_end_id or "") is not None
         or (end_to_end_id is None and OUR_PMT_INF_RE.fullmatch(payment_info_id or "") is not None)
     )
+
+
+def issued_id(end_to_end_id: str | None, original_end_to_end_id: str | None) -> str | None:
+    """The id we issued (`OUR_ISSUED_ID_RE`: RMT, SWP, RFD, TOP) a transaction carries — the
+    original it returns when that is ours, else its own end-to-end id when that is ours; None
+    otherwise (review round 8, T2)."""
+    for candidate in (original_end_to_end_id, end_to_end_id):
+        if candidate is not None and OUR_ISSUED_ID_RE.fullmatch(candidate) is not None:
+            return candidate
+    return None
 
 
 def refine_kind(  # noqa: PLR0911, PLR0913 - the facts of the line that decide its kind

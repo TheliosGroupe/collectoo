@@ -99,6 +99,15 @@
 -- top-up, by ops or by the job (public.release_own_credit, the top-up rule: own_transfer_line); the funds pass reads it
 -- (private.bank_booking_candidates' names_our_lot) and the page too (public.debit_queue's names_our_lot, under the
 -- servicer's rights). COMPLIANCE OQ-84 (f), (g), (h).
+--
+-- Review round 8: (T1) a credit naming a handed-out lot of the statement's own account (private.names_our_lot),
+-- whatever its end-to-end id, is never a debtor's payment — at import it is a `return` (private.ingest_statement, after
+-- the pure classifier, which has no lot knowledge and keeps its parity with payments.statement.refine_kind), and a
+-- payment made of one before is never assigned, matched, suggested nor accepted and « Paiements à traiter » flags it
+-- (public.assign_payment, public.accept_suggestions, private.apply_match_results, public.payment_queue); (T2) the parser
+-- counts our refunds' RFD and top-ups' TOP details in an entry kept unsplit as it counts RMT/SWP ones, and the import
+-- refuses a line of such an entry carrying one of the ids we issue while counting none (private.ingest_statement:
+-- line_invalid). COMPLIANCE OQ-84 (e), (f), (g), (h).
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -107,14 +116,15 @@
 -- Review round 6 (R1): a camt.053 entry the parser keeps as one line because its details cannot be split (a count that
 -- disagrees with its details, details that do not add up to it, a detail of the other direction: payments.camt053) is
 -- the entry's total, not one transaction's. The parser records on that line how many of its details name one of our
--- transfers (their own or original end-to-end id is our RMT/SWP id); null on every other line (a line of its own, a
--- detail of a split batch, a CSV line) and on the lines imported before this migration (their details are not kept). The
--- funds pass reads it (private.post_bank_bookings: a return of our transfer from such a line only with exactly one
+-- transfers (their own or original end-to-end id is our RMT/SWP id; since round 8, T2, every id we issue: our refund's
+-- RFD and our top-up's TOP id too); null on every other line (a line of its own, a detail of a split batch, a CSV line)
+-- and on the lines imported before this migration (their details are not kept). The funds pass reads it (private.post_bank_bookings: a return of our transfer from such a line only with exactly one
 -- detail of ours, for that transfer's amount exactly).
 alter table public.bank_transaction add column unsplit_ours smallint check (unsplit_ours >= 0);
 comment on column public.bank_transaction.unsplit_ours is
   'camt.053 entry kept unsplit (its amount the entry''s total): how many of its details name one of our transfers '
-  '(RMT/SWP id, own or original); null for any other line (review M2c-6b-1 round 6, R1).';
+  '(an id we issue — RMT, SWP, RFD, TOP — own or original); null for any other line (review M2c-6b-1 round 6, R1; '
+  'round 8, T2).';
 alter table private.bank_import_stage add column unsplit_ours smallint;
 -- Review round 7 (S2): the lines of an entry kept unsplit holding a detail of ours (few), read by the funds pass's own
 -- branch (private.bank_booking_candidates) and « À classer » (public.debit_queue), led by the servicer
@@ -545,7 +555,10 @@ $$;
 -- account — the PmtInf of a file of the account handed out (downloaded or sent), as private.pmt_inf_refund_back reads
 -- it. A credit naming it is read as our lot coming back whatever its end-to-end id (private.names_our_transfer's lot arm
 -- reads only a lot with no end-to-end id, by its form): no explanation, and as « Remboursement revenu » only the refund
--- that lot held alone (private.post_debit_links, public.debit_link_options). Keyed as pmt_inf_refund_back.
+-- that lot held alone (private.post_debit_links, public.debit_link_options). Keyed as pmt_inf_refund_back. Review round
+-- 8 (T1): the import reads it too — such a credit is a `return`, never a payment (private.ingest_statement) — and so do
+-- the payments' commands (public.assign_payment, public.accept_suggestions, private.apply_match_results;
+-- public.payment_queue writes its predicate out under the caller's rights).
 create or replace function private.names_our_lot(p_bank_account_id uuid, p_pmt_inf_id text)
 returns boolean
 language sql
@@ -5544,8 +5557,10 @@ $$;
 
 -- Assigning a payment (redefined from 20261109150000; same settings): ops' assignment refuses a payment whose bank line
 -- carries one of our transfers' ids, « payment assignment refused: own_transfer_line » (23514, with its hint); « Accepter »
--- skips it (`own_transfer_line`); the match job neither matches it nor keeps a candidate for it (no_match). Nothing else
--- changes.
+-- skips it (`own_transfer_line`); the match job neither matches it nor keeps a candidate for it (no_match). Review round 8
+-- (T1, in depth): so is a payment whose line names a handed-out lot of its account whatever its end-to-end id
+-- (private.names_our_lot — read only when the PmtInfId has our form; the import makes no such payment since round 8, one
+-- made before is never assigned). Nothing else changes.
 create or replace function public.assign_payment(p_idempotency_key text, p_payment_id uuid, p_splits jsonb,
                                                  p_designation jsonb, p_reason text)
 returns jsonb
@@ -5584,7 +5599,10 @@ begin
   -- round 4 read such a credit as a return) is our own money coming back, never a debtor's payment
   if exists (select 1 from public.bank_transaction t
              where t.id = p.bank_transaction_id
-               and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)) then
+               and (private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+                    -- review round 8 (T1): a handed-out lot of its account named, whatever its end-to-end id
+                    or case when t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
+                            then private.names_our_lot(t.bank_account_id, t.payment_info_id) else false end)) then
     raise exception 'payment assignment refused: own_transfer_line' using errcode = 'check_violation',
       hint = 'Ce paiement vient d''une ligne qui porte la référence de l''un de nos propres virements (reversement, '
              'quote-part du cabinet, lot de notre fichier) : c''est ce virement qui revient, pas le paiement d''un '
@@ -5708,10 +5726,13 @@ begin
                                        and c.account_id = i.account_id
   join public.account a on a.id = c.account_id and a.organization_id = p.organization_id and a.status <> 'staged'
   where p.status = 'unmatched' and p.account_id is null and p.review_reason = 'no_match'
-    -- review M2c-6b-1 round 4 (N1, in depth): never a payment whose line carries one of our transfers' ids
+    -- review M2c-6b-1 round 4 (N1, in depth): never a payment whose line carries one of our transfers' ids; round 8
+    -- (T1): nor one whose line names a handed-out lot of its account, whatever its end-to-end id
     and not exists (select 1 from public.bank_transaction t
                     where t.id = p.bank_transaction_id
-                      and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id));
+                      and (private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+                           or case when t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
+                                   then private.names_our_lot(t.bank_account_id, t.payment_info_id) else false end));
   -- a designation names invoices of the accepted file only
   update pg_temp._assign g set designation = null
   where g.designation is not null
@@ -5728,8 +5749,11 @@ begin
                case when p.status <> 'unmatched' or p.account_id is not null then 'not_waiting'
                     when exists (select 1 from public.bank_transaction t
                                  where t.id = p.bank_transaction_id
-                                   and private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id,
-                                                                  t.payment_info_id)) then 'own_transfer_line'
+                                   and (private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id,
+                                                                   t.payment_info_id)
+                                        or case when t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
+                                                then private.names_our_lot(t.bank_account_id, t.payment_info_id)
+                                                else false end)) then 'own_transfer_line'
                     when c.account_id is not null and c.account_id <> i.account_id then 'suggestion_changed'
                     else 'no_suggestion' end) order by i.payment_id)
       from jsonb_to_recordset(v_items) i (payment_id uuid, account_id uuid)
@@ -5758,12 +5782,16 @@ begin
   analyze pg_temp._mr_decision;
   drop table if exists pg_temp._mr;
   create temp table _mr on commit drop as
-  select d.*, private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id) as ours
+  select d.*, coalesce(private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+                       -- review round 8 (T1): or a handed-out lot of its account named, whatever its end-to-end id
+                       or case when t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
+                               then private.names_our_lot(t.bank_account_id, t.payment_info_id) else false end,
+                       false) as ours
   from pg_temp._mr_decision d
   join public.payment p on p.id = d.payment_id
   -- (the payment's line by its key, whatever the statistics of the lines just imported: ARCHITECTURE §4)
-  left join lateral (select q.end_to_end_id, q.original_end_to_end_id, q.payment_info_id from public.bank_transaction q
-                     where q.id = p.bank_transaction_id offset 0) t on true
+  left join lateral (select q.end_to_end_id, q.original_end_to_end_id, q.payment_info_id, q.bank_account_id
+                     from public.bank_transaction q where q.id = p.bank_transaction_id offset 0) t on true
   where p.organization_id = p_organization_id and p.status = 'unmatched' and p.account_id is null;
   analyze pg_temp._mr;
   -- review M2c-6b-1 round 4 (N1, in depth): a payment whose bank line carries one of our transfers' ids is never matched
@@ -5801,8 +5829,11 @@ end;
 $$;
 
 -- « Paiements à traiter » (redefined from 20261109190000, dropped and created: a new column): `own_transfer_line`, the
--- payment's bank line carries one of our transfers' ids (the page shows what it is and offers no assignment). The rows,
--- their order and their filters are unchanged.
+-- payment's bank line carries one of our transfers' ids (the page shows what it is and offers no assignment). Review
+-- round 8 (T1, in depth): or names a handed-out lot of its account whatever its end-to-end id — private.names_our_lot's
+-- predicate written out here, under the caller's rights (that function is internal: `authenticated` may not call it,
+-- pgTAP 035's S3 case; transfer_file and transfer_file_item are read by the money staff, the very staff this queue
+-- serves). The rows, their order and their filters are unchanged.
 drop function public.payment_queue(text, text, uuid, bigint, bigint, integer, integer, integer);
 create function public.payment_queue(p_tab text default 'a-traiter', p_reason text default null,
                                      p_client uuid default null, p_min_minor bigint default null,
@@ -5839,6 +5870,13 @@ begin
            p.matched_at, p.account_id, p.candidate_account_id, p.client_organization_id, v_total,
            exists (select 1 from public.ledger_entry f where f.payment_id = p.id and f.entry_type = 'forward'),
            coalesce((select private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+                            -- review round 8 (T1): or a handed-out lot of its account named
+                            or case when t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$' then exists (
+                                 select 1 from public.transfer_file_item i
+                                 join public.transfer_file f on f.id = i.file_id
+                                 where i.pmt_inf_id = t.payment_info_id
+                                   and f.debtor_bank_account_id = t.bank_account_id and f.download_count > 0
+                                   and f.status in ('downloaded', 'sent')) else false end
                      from public.bank_transaction t where t.id = p.bank_transaction_id), false)
     from (select p.* from public.payment p
           where p.organization_id = any (v_orgs) and p.account_id is not null and p.review_reason is null
@@ -5869,6 +5907,13 @@ begin
          p.matched_at, p.account_id, p.candidate_account_id, coalesce(p.client_organization_id, c.client_organization_id),
          v_total, false,  -- a forwarded payment has nothing left to decide: never in this tab
          coalesce((select private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+                          -- review round 8 (T1): or a handed-out lot of its account named
+                          or case when t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$' then exists (
+                               select 1 from public.transfer_file_item i
+                               join public.transfer_file f on f.id = i.file_id
+                               where i.pmt_inf_id = t.payment_info_id
+                                 and f.debtor_bank_account_id = t.bank_account_id and f.download_count > 0
+                                 and f.status in ('downloaded', 'sent')) else false end
                      from public.bank_transaction t where t.id = p.bank_transaction_id), false)
   from (select p.* from public.payment p
         where p.organization_id = any (v_orgs) and (p.status = 'unmatched' or p.review_reason is not null)
@@ -5893,7 +5938,20 @@ $$;
 
 -- private.ingest_statement, redefined from 20261111120000 (same signature, body and settings; its grants restated below):
 -- bank_transaction.unsplit_ours is copied from the stage with the line, and a line is well formed only with it null, or
--- not negative on a camt.053 line of an entry (batch_entry_ref). Nothing else changes.
+-- not negative on a camt.053 line of an entry (batch_entry_ref). Review round 7 (S2): a credit holding ours counted is a
+-- return. Review round 8: (T1, verdict new:lot-credit-foreign-e2e-debtor-payment) a credit read as a debtor's credit or
+-- an unsplit batch that names a handed-out lot of the statement's own account (private.names_our_lot: a file of that
+-- account downloaded or sent), whatever its end-to-end id, is a `return` — never a payment: our outgoing transfer coming
+-- back (COMPLIANCE OQ-84 (g)). Only the database can say it (the lot's file and its state): the classifier's pure twins
+-- (private.bank_line_refined_kind, payments.statement.refine_kind, which the parity test compares) have no lot knowledge
+-- and are unchanged — this override comes after them, here, and pgTAP 035 tests it on its own (`sc_t1_lot_import`). The
+-- M2b pass then reads such a return (no candidate: `no_candidate`), « À classer » lists it with its lot (debit_queue's
+-- names_our_lot) and private.post_debit_links' round-6 rule holds (no explanation; as « Remboursement revenu » only the
+-- refund that lot held alone). (T2, verdict new:unsplit-entry-our-refund-or-top-uncounted) a line of an entry kept
+-- unsplit carrying one of the ids we issue — RMT, SWP, RFD or TOP and 12 upper-case hex digits, as its own end-to-end id
+-- or its original — counts it among its details of ours (`unsplit_ours` > 0; the parser, since round 8, counts our
+-- refunds' and top-ups' details as it counts RMT/SWP ones): a stage saying 0 is refused, `line_invalid`. Nothing else
+-- changes.
 create or replace function private.ingest_statement(p_statement_id uuid, p_header jsonb)
 returns jsonb
 language plpgsql
@@ -5973,6 +6031,20 @@ begin
     update private.bank_import_stage x set kind = r.kind from pg_temp._bi_refined r
     where x.statement_id = p_statement_id and x.line_no = r.line_no;
   end if;
+  -- review M2c-6b-1 round 8 (T1): a credit naming a handed-out lot of this account, whatever its end-to-end id, is our
+  -- transfer coming back — a return, never a payment (the database's reading, after the pure classifier's; the lot read
+  -- only for a credit read as a debtor's credit or an unsplit batch whose PmtInfId has our form)
+  drop table if exists pg_temp._bi_lot;
+  create temp table _bi_lot on commit drop as
+  select x.line_no from pg_temp._bi_stage x
+  where x.direction = 'credit' and x.kind in ('debtor_credit', 'batch_unsplit')
+    and case when x.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
+             then private.names_our_lot(s.bank_account_id, x.payment_info_id) else false end;
+  if exists (select 1 from pg_temp._bi_lot) then
+    update pg_temp._bi_stage x set kind = 'return' from pg_temp._bi_lot l where l.line_no = x.line_no;
+    update private.bank_import_stage x set kind = 'return' from pg_temp._bi_lot l
+    where x.statement_id = p_statement_id and x.line_no = l.line_no;
+  end if;
   select count(*) into v_n from pg_temp._bi_stage;
   if v_n <> coalesce((p_header ->> 'line_count')::bigint, -1) then
     raise exception 'header_invalid: % staged lines, % announced', v_n, p_header ->> 'line_count' using errcode = '22023';
@@ -6006,6 +6078,9 @@ begin
      or x.unsplit_ours < 0 or (x.unsplit_ours is not null and (s.format <> 'camt053' or x.batch_entry_ref is null))
      -- review round 7 (S2): a credit of an entry kept unsplit holding a detail of ours is a return, never a payment
      or (x.direction = 'credit' and x.unsplit_ours > 0 and x.kind <> 'return')
+     -- review round 8 (T2): a line of an entry kept unsplit carrying an id we issue (RMT, SWP, RFD, TOP) counts it
+     or (x.unsplit_ours = 0 and (coalesce(x.end_to_end_id ~ '^(RMT|SWP|RFD|TOP)[0-9A-F]{12}$', false)
+                                 or coalesce(x.original_end_to_end_id ~ '^(RMT|SWP|RFD|TOP)[0-9A-F]{12}$', false)))
      -- an entry key is e:<the line's entry reference>#<n>, n from 1
      or (x.dedup_key ~ '^e:' and not coalesce(left(x.dedup_key, length(x.entry_ref) + 3) = 'e:' || x.entry_ref || '#'
                                               and substr(x.dedup_key, length(x.entry_ref) + 4) ~ '^[1-9][0-9]*$', false));

@@ -856,7 +856,8 @@ def test_a_camt053_detail_of_ours_is_a_line_of_its_own_only_when_it_is_the_whole
         ("return", 5000, None, None, 1),  # the other direction: counted, never its id
         ("return", 5000, None, None, 1),  # x01
         ("return", 5000, None, None, 1),  # x03
-        ("return", 5000, None, RMT, 1),  # m04: our return's id, one detail of ours
+        # m04: our return's id; round 8 (T2): our refund's debit counted too — two details of ours
+        ("return", 5000, None, RMT, 2),
         ("debtor_credit", 7300, "E2E-D1", None, None),  # a debtor's: unchanged
         ("batch_unsplit", 5000, None, None, 1),  # a debit entry: never our payout's debit by it
         ("batch_unsplit", 5000, None, None, 1),  # d01
@@ -870,3 +871,149 @@ def test_a_camt053_detail_of_ours_is_a_line_of_its_own_only_when_it_is_the_whole
     for x in parsed.lines:
         if x.unsplit_ours is not None:
             assert x.batch_entry_ref is not None
+
+
+def _original(xml: bytes, ref: bytes, original: str) -> bytes:
+    """The named detail gains the original end-to-end id it returns (RtrInf/OrgnlEndToEndId)."""
+    at = xml.index(b"<AcctSvcrRef>" + ref + b"</AcctSvcrRef>")
+    end = xml.index(b"</TxDtls>", at)
+    span = xml[at:end]
+    tag = b"<OrgnlEndToEndId>" + original.encode() + b"</OrgnlEndToEndId>"
+    if b"<RtrInf>" in span:
+        span = span.replace(b"<RtrInf>", b"<RtrInf>" + tag, 1)
+    else:
+        span += b"<RtrInf>" + tag + b"</RtrInf>"
+    return xml[:at] + span + xml[end:]
+
+
+def test_our_refunds_and_top_ups_in_a_camt053_entry_count_as_ours(tmp_path: Path) -> None:
+    """Review round 8 (T2, verdict new:unsplit-entry-our-refund-or-top-uncounted): our refunds'
+    RFD ids and our top-ups' TOP ids (ids we issue, as our payouts' RMT and our sweeps' SWP) are
+    counted in a camt.053 entry the way round 7 counts RMT/SWP: a detail of ours is a line of its
+    own only when it is the whole entry, a line kept unsplit counts every detail of ours
+    (`unsplit_ours`) and takes its original id only from one of the entry's direction, and a credit
+    holding ours is a return (no payment). Before, the verifier's r5 (our refund's return shown
+    alone of two: the M2b pass linked it `refund_returned`), r1q, r2q and r4 (our refund's debit
+    shown alone of two, beside a debit with no amounts, netted with a credit: `batch_unsplit`
+    counting 0, explainable) and t1 (our top-up shown alone of two: `batch_unsplit`, one debtor's
+    payment) were outside both. Our refund and our top-up as the whole of their entry keep their
+    line of its own, as before; the ground truth agrees where it can say it."""
+    rfd = "RFD0123456789AB"
+    rtrn = "PMNT/RCDT/RRTN"
+    out = "PMNT/ICDT/ESCT"
+    entries = [
+        # 1: r5 — our refund's return (AC04, its RFD id as its own) shown alone of two
+        Entry(1000, True, DAY, DAY, ref="NR5", code=rtrn, batch_count=2,
+              txs=(Tx(1000, ref="R5", end_to_end_id=rfd, return_reason="AC04"),)),
+        # 2: r5 with the RFD id as the original it returns (inserted below)
+        Entry(1000, True, DAY, DAY, ref="NR6", code=rtrn, batch_count=2,
+              txs=(Tx(1000, ref="R6", end_to_end_id="E2E-R6", return_reason="AC04"),)),
+        # 3: r1q — our refund's debit shown alone of two
+        Entry(1000, False, DAY, DAY, ref="NQ1", code=out, batch_count=2,
+              txs=(Tx(1000, ref="Q1", end_to_end_id=rfd),)),
+        # 4: r2q — our refund's debit beside a foreign debit, no amounts
+        Entry(1500, False, DAY, DAY, ref="NQ2", code=out,
+              txs=(Tx(None, ref="Q2", end_to_end_id=rfd),
+                   Tx(None, ref="Q3", end_to_end_id="E2E-F"))),
+        # 5: r4 — our refund's debit of 10,00 netted with a credit of 3,00 (turned CRDT below)
+        Entry(700, False, DAY, DAY, ref="NQ4", code=out,
+              txs=(Tx(1000, ref="Q4", end_to_end_id=rfd),
+                   Tx(300, ref="Q5", end_to_end_id="E2E-C"))),
+        # 6: r3 — our refund's debit alone, its own amount not the entry's
+        Entry(1500, False, DAY, DAY, ref="NQ6", code=out,
+              txs=(Tx(1000, ref="Q6", end_to_end_id=rfd),)),
+        # 7: t1 — our top-up from the own account shown alone of two
+        Entry(3000, True, DAY, DAY, ref="NT1", batch_count=2,
+              txs=(Tx(3000, ref="T1", end_to_end_id=TOP, iban=OWN),)),
+        # 8: our top-up beside a debtor's credit, no amounts (R3's camt.053 shape)
+        Entry(8000, True, DAY, DAY, ref="NT2",
+              txs=(Tx(None, ref="T2", end_to_end_id="E2E-T2"),
+                   Tx(None, ref="T3", end_to_end_id=TOP))),
+        # 9-11: our refund's debit, its return and our top-up as the whole of their entry: lines of
+        # their own, as before
+        Entry(1000, False, DAY, DAY, ref="NW1", code=out,
+              txs=(Tx(1000, ref="W1", end_to_end_id=rfd),)),
+        Entry(1000, True, DAY, DAY, ref="NW2", code=rtrn,
+              txs=(Tx(1000, ref="W2", end_to_end_id=rfd, return_reason="AC04"),)),
+        Entry(3000, True, DAY, DAY, ref="NW3",
+              txs=(Tx(3000, ref="W3", end_to_end_id=TOP, iban=OWN),)),
+        # 12: a debtor's unsplit batch, none of ours: one payment, as before
+        Entry(4000, True, DAY, DAY, ref="NB1", batch_count=3,
+              txs=(Tx(2000, ref="B1", end_to_end_id="E2E-B1"),
+                   Tx(2000, ref="B2", end_to_end_id="E2E-B2"))),
+        # 13: our top-up, then our payout's return, no amounts: both counted, the RMT id kept as the
+        # original (the one names_our_transfer reads), whatever the file's order
+        Entry(9000, True, DAY, DAY, ref="NM1",
+              txs=(Tx(None, ref="M1", end_to_end_id=TOP), Tx(None, ref="M2", end_to_end_id=RMT))),
+    ]  # fmt: skip
+    doc = make_doc(entries, iban=ELSEWHERE, from_date=DAY, to_date=DAY, opening_minor=100000)
+    xml = _original(_flip(render_camt053(doc, "08"), (b"Q5",)), b"R6", rfd)
+    path = tmp_path / "s.xml"
+    path.write_bytes(xml)
+    parsed = parse_camt053(path, iban=ELSEWHERE, currency="EUR", ibans=IBANS)
+    got = [
+        (x.kind, x.amount_minor, x.end_to_end_id, x.original_end_to_end_id, x.unsplit_ours)
+        for x in parsed.lines
+    ]
+    assert got == [
+        ("return", 1000, rfd, rfd, 1),  # r5: reviewed, never linked by the M2b pass
+        ("return", 1000, "E2E-R6", rfd, 1),
+        ("batch_unsplit", 1000, rfd, None, 1),  # r1q: never explained
+        ("batch_unsplit", 1500, None, None, 1),  # r2q
+        ("batch_unsplit", 700, None, None, 1),  # r4
+        ("batch_unsplit", 1500, rfd, None, 1),  # r3: its own amount is not the entry's
+        ("return", 3000, TOP, TOP, 1),  # t1: no payment, never the top-up
+        ("return", 8000, None, TOP, 1),  # our top-up beside a debtor's: no payment
+        ("refund_out", 1000, rfd, None, None),  # the whole entry: its line
+        ("return", 1000, rfd, rfd, None),
+        ("own_transfer_in", 3000, TOP, None, None),
+        ("batch_unsplit", 4000, None, None, 0),  # none of ours: one payment
+        ("return", 9000, None, RMT, 2),
+    ]
+    # the ground truth says the same where nothing is turned nor inserted: the kind, and whether the
+    # line is its entry's (e:) or its detail's own (t:)
+    truth = [(x.kind, x.key_prefix) for x in expected_lines(doc)]
+    read = [(x.kind, x.dedup_key[0]) for x in parsed.lines]
+    same = (0, 2, 3, 5, 6, 7, 8, 9, 10, 11)
+    assert [truth[i] for i in same] == [read[i] for i in same]
+    assert [read[i] for i in (5, 8)] == [("batch_unsplit", "e"), ("refund_out", "t")]
+
+
+@pytest.mark.parametrize(
+    ("e2e", "issued"),
+    [
+        ("RMT0123456789AB", True),  # a payout
+        ("SWP0123456789AB", True),  # a sweep
+        ("RFD0123456789AB", True),  # a refund
+        ("TOP0123456789AB", True),  # a top-up
+        ("RFD0123456789A", False),  # 11 digits: not one of ours
+        ("rfd0123456789ab", False),  # our ids are upper-case hex
+        ("RFDX-V5-0001", False),
+        ("TOPAZ-2026-1", False),
+        ("E2E-1", False),
+        (None, False),
+    ],
+)
+def test_the_ids_we_issue_are_ours_to_every_reader_of_an_id_s_prefix(
+    tmp_path: Path, e2e: str | None, issued: bool
+) -> None:
+    """Review round 8 (T2): every place that decides « ours » from an id's prefix agrees. The ids
+    we issue (the SQL generators': RMT, SWP, RFD or TOP and 12 upper-case hex digits) are each
+    counted by a camt.053 entry kept unsplit (`unsplit_ours`; its credit then a return). Of them,
+    only our payouts' and sweeps' are `names_our_transfer` (with our lots: lines only ever booked,
+    never linked); our refund's debit stays `refund_out` (the M2b pass links it) and a credit
+    carrying our TOP id `own_transfer_in` (the funds pass books it as the top-up), as before."""
+    entry = Entry(5000, True, DAY, DAY, ref="NI1", batch_count=2,
+                  txs=(Tx(5000, ref="I1", end_to_end_id=e2e),))  # fmt: skip
+    doc = make_doc([entry], iban=ELSEWHERE, from_date=DAY, to_date=DAY, opening_minor=100000)
+    path = tmp_path / "s.xml"
+    path.write_bytes(render_camt053(doc, "08"))
+    (line,) = parse_camt053(path, iban=ELSEWHERE, currency="EUR", ibans=IBANS).lines
+    assert (line.unsplit_ours, line.kind) == ((1, "return") if issued else (0, "batch_unsplit"))
+    prefix = (e2e or "")[:3]
+    assert names_our_transfer(e2e, None, None) is (issued and prefix in ("RMT", "SWP"))
+    if issued and prefix == "RFD":
+        assert classify("debit", reversal=False, return_reason=None, sub_family=None,
+                        end_to_end_id=e2e) == "refund_out"  # fmt: skip
+    if issued and prefix == "TOP":
+        assert refine_kind("debtor_credit", "credit", e2e, None, IBANS) == "own_transfer_in"

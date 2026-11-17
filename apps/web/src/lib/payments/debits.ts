@@ -244,11 +244,12 @@ export function offersOwnBatchRefunds(o: {
 /**
  * Review M2c-6b-1 round 7 (S2, verdict new:debit-entry-unsplit-with-our-details-explainable): a line read from a
  * camt.053 entry the bank kept unsplit holding a detail of ours (`unsplit_ours` > 0 on the row « À classer » loads,
- * the parser's count), whatever its direction — the entry's total, not one transaction's (our payout's return netted
- * into an outgoing debit, our debits in one entry, our payout's debit beside a debtor's credit). It takes no link of
- * any kind and no explanation (private.post_debit_links, the top-up, the relay: own_transfer_line), is never booked
- * automatically and waits for the team's booking (M2c-6b-2; COMPLIANCE OQ-84 (h)): « À classer » offers nothing on it
- * and says so (UNSPLIT_OURS_NOTE). With none of ours (0), the general rules.
+ * the parser's count — since round 8, T2, of every id we issue: our payouts', sweeps', refunds' and top-ups'), whatever
+ * its direction — the entry's total, not one transaction's (our payout's return netted into an outgoing debit, our
+ * debits in one entry, our payout's debit beside a debtor's credit). It takes no link of any kind and no explanation
+ * (private.post_debit_links, the top-up, the relay: own_transfer_line), is never booked automatically and waits for the
+ * team's booking (M2c-6b-2; COMPLIANCE OQ-84 (h)): « À classer » offers nothing on it and says so (UNSPLIT_OURS_NOTE).
+ * With none of ours (0), the general rules.
  */
 export function holdsOursUnsplit(o: { unsplit_ours?: number | null }): boolean {
   return (o.unsplit_ours ?? 0) > 0;
@@ -477,9 +478,12 @@ export const OUR_LOT_OWN_CREDIT_NOTE =
 /**
  * Review M2c-6b-1 round 7 (S2): what « À classer » says of a line of an unsplit entry holding a detail of ours
  * (holdsOursUnsplit) — in place of the job's review (return_differs, batch_partial), after a P0 reason if any.
+ * Review round 8 (T3): only what the code knows, true of every such line — the bank's detail of the entry is incomplete
+ * or does not match it (a count, a direction or an amount), never that other movements sit beside ours (a single detail
+ * of ours whose own amount is not the entry's holds none); (T2) our refunds and top-ups are counted too.
  */
 export const UNSPLIT_OURS_NOTE =
-  "Ligne d'une opération groupée que la banque ne détaille pas et qui contient l'un de nos virements (reversement ou quote-part du cabinet), son débit ou son retour, à côté d'autres mouvements : son montant est le total de l'opération, rien n'est comptabilisé automatiquement. Elle se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne la classez pas sans comptabiliser et ne la rattachez à aucun paiement ni remboursement : demandez à la banque le détail de l'opération et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+  "Ligne d'une écriture de la banque qui contient au moins l'un de nos virements (reversement, quote-part du cabinet, remboursement ou approvisionnement), son débit ou son retour, et dont le détail donné par la banque est incomplet ou ne correspond pas à l'écriture (nombre, sens ou montant des opérations) : son montant est celui de toute l'écriture, rien n'est comptabilisé automatiquement. Elle se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne la classez pas sans comptabiliser et ne la rattachez à aucun paiement ni remboursement : demandez à la banque le détail de l'écriture et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
 
 /**
  * Review M2c-6b-1 round 5 (Q1): on such a credit read as a return (offersOwnLotRefundBack), the one exception — the

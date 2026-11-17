@@ -27,7 +27,8 @@ entry or any of its details undoes an earlier movement. A single TxDtls takes th
 review M2c-6b-1 round 7 (S1): unless it names one of our transfers and is not the whole entry (its
 CdtDbtInd or its own amount not the entry's): the entry is then kept unsplit, never our transfer's
 line of its own. A line kept unsplit never takes its ids from a detail of the other direction (it
-counts it: `unsplit_ours`).
+counts it: `unsplit_ours`). « Ours » is every id we issue (review round 8, T2: our payouts' and
+sweeps' RMT/SWP, our refunds' RFD and our top-ups' TOP ids, `statement.OUR_ISSUED_ID_RE`).
 Zero amounts move nothing and are skipped. The file is refused unless, per <Stmt>, opening +
 credits - debits = closing; nothing is written then.
 
@@ -69,6 +70,7 @@ from collectoo_worker.payments.statement import (
     check_dates,
     classify,
     iso_to_minor,
+    issued_id,
     names_our_transfer,
 )
 
@@ -470,6 +472,8 @@ class _Reader:
             # undoes an earlier movement (ADR-0013 M2b-2 #2): never a payment. Review M2c-6b-1
             # round 4 (N1): so is a credit batch any of whose details is one of our transfers
             # coming back (our RMT/SWP id as its own or its original): never a debtor's payment.
+            # Round 8 (T2): or carries our refund's RFD or our top-up's TOP id (t1: our top-up shown
+            # alone of two was one debtor's payment, the top-up left ordered).
             mine = _our_ids(details)
             ours = mine if credit else []
             # review round 7 (S1, x01): the ids of ours of the entry's own direction — a debit of
@@ -495,9 +499,10 @@ class _Reader:
             # back) — the one detail's id as its original when exactly one is ours; when several
             # are, the first (the file's order), the only field the refusals read, and the count
             # says the line is never booked, whatever its amount. Round 7: of the entry's direction
-            # only (`alike`).
+            # only (`alike`). Round 8 (T2): our refunds' and top-ups' ids count too — an RMT/SWP id
+            # is still kept first, the one `names_our_transfer` reads.
             if credit and alike and not names_our_transfer(e2e, original, entry.payment_info_id):
-                original = alike[0]
+                original = next((i for i in alike if TRANSFER_OUT_ID_RE.fullmatch(i)), alike[0])
         if tx_ref is not None and own_ref and not unsplit:
             key = self.keys.claim(f"t:{tx_ref}")
         elif entry.ref is not None:
@@ -655,18 +660,16 @@ def _return_reason(tx: Flat) -> str | None:
 
 
 def _our_ids(details: list[Flat]) -> list[str]:
-    """The ids of ours an unsplit batch's details carry, in the file's order: each detail that
-    names one of our transfers (`names_our_transfer`: our RMT/SWP id as its own end-to-end id or as
-    the original it returns; in a credit batch, one coming back) gives that id — its original one
-    when that is ours. One per detail (a detail is never counted twice, an id may be)."""
+    """The ids of ours an unsplit batch's details carry, in the file's order: each detail carrying
+    an id we issued (`issued_id`: our payout's or sweep's RMT/SWP id, since review round 8 (T2) our
+    refund's RFD and our top-up's TOP too, as its own end-to-end id or as the original it returns;
+    in a credit batch, one coming back) gives that id — its original one when that is ours. One per
+    detail (a detail is never counted twice, an id may be)."""
     out: list[str] = []
     for d in details:
-        e2e = _provided(first(d, "Refs/EndToEndId"))
-        original = first(d, "RtrInf/OrgnlEndToEndId")
-        if names_our_transfer(e2e, original, None):
-            ours = original if TRANSFER_OUT_ID_RE.fullmatch(original or "") else e2e
-            if ours is not None:
-                out.append(ours)
+        ours = issued_id(_provided(first(d, "Refs/EndToEndId")), first(d, "RtrInf/OrgnlEndToEndId"))
+        if ours is not None:
+            out.append(ours)
     return out
 
 

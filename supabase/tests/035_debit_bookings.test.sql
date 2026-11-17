@@ -48,7 +48,7 @@
 -- (The batch rule's linear plan: test_debit_bookings_batch_rules_integration.py.)
 -- Cancellation after download stays off (033 and 034 unchanged); some scenarios switch it on in their own subtransaction.
 begin;
-select plan(142);
+select plan(145);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -3370,6 +3370,172 @@ select is(pg_temp.isolated('sc_s3_lot_relay_top_up'),
   'S3: an own or a client''s credit naming a handed-out lot of its account, whatever its end-to-end id, is neither '
   'relayed nor a top-up (ops, job: own_transfer_line); a TF-shaped id of no file or of another account keeps the general '
   'rules; debit_queue says which (names_our_lot), to its servicer only');
+
+-- Review round 8. A camt.053 import of p_lines [{dir, kind, amount, e2e, orig, pmt, iban, unsplit}] staged as a parser
+-- would (an entry kept unsplit when `unsplit` is given) on p_account: each line's kind and payment count after the
+-- import, or the import's refusal
+create or replace function pg_temp.t8_stage(p_n integer, p_lines jsonb,
+                                            p_account uuid default '80000000-0000-0000-0000-0000000000cf') returns jsonb
+language plpgsql as $$
+declare s uuid := ('e4000000-0000-0000-0000-0000000008' || lpad(p_n::text, 2, '0'))::uuid;
+begin
+  insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                     size_bytes, storage_path)
+  values (s, '00000000-0000-0000-0000-0000000000aa', p_account, 'EUR', 'camt053', 't8',
+          encode(sha256(convert_to(s::text, 'UTF8')), 'hex'), 1, 'test/' || s);
+  update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = s;
+  insert into private.bank_import_stage (statement_id, line_no, section_no, dedup_key, direction, amount_minor, currency,
+                                         booking_date, batch_entry_ref, entry_ref, kind, method, end_to_end_id,
+                                         original_end_to_end_id, payment_info_id, counterparty_iban, unsplit_ours)
+  select s, l.ord, 1,
+         case when l.v ? 'unsplit' then 'e:NT8-' || p_n || '-' || l.ord || '#1' else 't:T8-' || p_n || '-' || l.ord end,
+         coalesce(l.v ->> 'dir', 'credit'), (l.v ->> 'amount')::bigint, 'EUR', private.paris_today(),
+         case when l.v ? 'unsplit' then 'NT8-' || p_n || '-' || l.ord end, 'NT8-' || p_n || '-' || l.ord,
+         l.v ->> 'kind', 'sct', l.v ->> 'e2e', l.v ->> 'orig', l.v ->> 'pmt', l.v ->> 'iban', (l.v ->> 'unsplit')::smallint
+  from jsonb_array_elements(p_lines) with ordinality l (v, ord);
+  perform private.ingest_statement(s, jsonb_build_object('format', 'camt053', 'version', '08',
+            'line_count', jsonb_array_length(p_lines), 'skipped_not_booked', 0, 'sections', jsonb_build_array(
+              jsonb_build_object('stmt_id', 'T8-' || p_n, 'seq', 1, 'from_date', private.paris_today(),
+                                 'to_date', private.paris_today(), 'opening_minor', '0',
+                                 'closing_minor', (select sum(case coalesce(l.v ->> 'dir', 'credit') when 'credit' then 1
+                                                                   else -1 end * (l.v ->> 'amount')::bigint)
+                                                   from jsonb_array_elements(p_lines) l (v))::text))));
+  return (select jsonb_agg(t.kind || ' ' || (select count(*) from public.payment p where p.bank_transaction_id = t.id)
+                           order by t.line_no) from public.bank_transaction t where t.statement_id = s);
+end $$;
+
+-- T1 (verdict new:lot-credit-foreign-e2e-debtor-payment): a credit naming a handed-out lot of the line's own account
+-- (private.names_our_lot), whatever its end-to-end id, is never a debtor's payment. Round 7 imported the verifier's lm1
+-- (r1's lot, an end-to-end id not ours, no IBAN we know) as a debtor's credit: one payment, matched automatically by a
+-- debtor file's RF. Now the import, where the database can be read (private.ingest_statement), makes such a credit read as
+-- a debtor's credit or an unsplit batch a `return`: no payment; the M2b pass reads it (no candidate: reviewed
+-- no_candidate), « À classer » lists it with names_our_lot, and R2's rules hold (no explanation). The classifier's pure
+-- twin (private.bank_line_refined_kind, the parity test's) has no lot knowledge and is unchanged. A TF-shaped id of no
+-- file, or r6's lot named on another account of the servicer, keeps the general rules (one payment); an own credit naming
+-- the lot keeps its kind (refused everywhere since round 7, S3); a debit naming it is untouched.
+create or replace function pg_temp.sc_t1_lot_import() returns jsonb language plpgsql as $$
+declare
+  v_lot text := pg_temp.pmt(pg_temp.trid('r6'));
+  v_lines jsonb;
+  v_c3 jsonb;
+  v_line uuid;
+begin
+  v_lines := pg_temp.t8_stage(1, jsonb_build_array(
+    jsonb_build_object('kind', 'debtor_credit', 'amount', 3000, 'e2e', 'VIR-T1-0001', 'pmt', v_lot),            -- lm1
+    jsonb_build_object('kind', 'batch_unsplit', 'amount', 3000, 'e2e', 'VIR-T1-0002', 'pmt', v_lot, 'unsplit', 0),
+    jsonb_build_object('kind', 'debtor_credit', 'amount', 3000, 'e2e', 'VIR-T1-0003', 'pmt', 'TF-2099-999999-9'),
+    jsonb_build_object('kind', 'own_transfer_in', 'amount', 3000, 'e2e', 'VIR-T1-0004', 'pmt', v_lot,
+                       'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'debit', 'kind', 'other_debit', 'amount', 1000, 'e2e', 'VIR-T1-0005', 'pmt', v_lot),
+    jsonb_build_object('kind', 'debtor_credit', 'amount', 3000, 'e2e', 'VIR-T1-0006')));
+  -- r6's lot named on a second dedicated account of the servicer (no file of that account)
+  insert into public.bank_account (id, organization_id, purpose, iban, bic, currency, label, feed, opened_on)
+  values ('80000000-0000-0000-0000-0000000000c3', '00000000-0000-0000-0000-0000000000aa', 'client_funds',
+          'FR7630006000011234567890189', 'TESTFRPPXXX', 'EUR', 'Fonds de tiers 3', 'camt053', '2026-01-01');
+  v_c3 := pg_temp.t8_stage(2, jsonb_build_array(
+    jsonb_build_object('kind', 'debtor_credit', 'amount', 3000, 'e2e', 'VIR-T1-0007', 'pmt', v_lot)),
+    '80000000-0000-0000-0000-0000000000c3');
+  select t.id into v_line from public.bank_transaction t
+  where t.statement_id = 'e4000000-0000-0000-0000-000000000801' and t.line_no = 1;
+  return jsonb_build_object(
+    'lines', v_lines, 'other_account', v_c3,
+    'twin', private.bank_line_refined_kind('debtor_credit', 'credit', 'VIR-T1-0001', null, v_lot, null, '{}', '{}'),
+    'm2b_reads', (select jsonb_agg(jsonb_build_array(c.payment_id is null and c.refund_request_id is null, c.line_kind))
+                  from private.debit_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100000) c
+                  where c.line_id = v_line),
+    'listed', (select jsonb_agg(jsonb_build_array(x ->> 'kind', x -> 'names_our_lot'))
+               from jsonb_array_elements(pg_temp.queued('01', array[v_line])) x),
+    'explained', pg_temp.refusal(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, null, null)',
+                                                        't1-explain-1', v_line, 'explained'))),
+    'options', pg_temp.try('01', format('select public.debit_link_options(%L)::text', v_line))::jsonb
+                 - 'kind');
+end $$;
+select is(pg_temp.isolated('sc_t1_lot_import'),
+          '{"lines": ["return 0", "return 0", "debtor_credit 1", "own_transfer_in 0", "other_debit 0", "debtor_credit 1"],
+            "other_account": ["debtor_credit 1"], "twin": "debtor_credit", "m2b_reads": [[true, "return"]],
+            "listed": [["return", true]], "explained": "debit link refused: own_transfer_line",
+            "options": {"refunds": [], "payments": []}}'::jsonb,
+  'T1: at import a credit naming a handed-out lot of its account, whatever its end-to-end id, is a return (no payment), '
+  'read by the M2b pass and listed with names_our_lot, never explained; the pure twin, a TF id of no file, another '
+  'account''s line, an own credit and a debit keep their reading');
+
+-- T1 in depth: a payment whose line names a handed-out lot of its account (made before round 8, or by any other path)
+-- is never assigned to a debtor's file — « Paiements à traiter » flags it (payment_queue.own_transfer_line, read under
+-- the caller's rights), public.assign_payment refuses it (own_transfer_line), the match job neither matches it nor keeps
+-- a candidate for it (no_match), « Accepter » skips it (own_transfer_line); an ordinary payment as before
+create or replace function pg_temp.sc_t1_lot_payments() returns jsonb language plpgsql as $$
+declare p uuid[]; v_lot text := pg_temp.pmt(pg_temp.trid('r6')); v_queue text; v_match jsonb; v_accept jsonb;
+begin
+  perform pg_temp.file('8a', '20000000-0000-0000-0000-0000000000a1', 50000);
+  p := pg_temp.legacy_payments('8a', (select jsonb_agg(jsonb_build_object(
+         'dir', 'credit', 'kind', 'debtor_credit', 'amount', 2300, 'e2e', 'VIR-8A-' || k,
+         'pmt', case when k <= 3 then v_lot else 'TF-2099-999999-9' end) order by k)
+       from generate_series(1, 6) k));
+  v_queue := pg_temp.try('01', $q$
+    select string_agg(q.own_transfer_line::text, ' ' order by q.payment_id)
+    from public.payment_queue('a-traiter', null, null, 2300, 2300, null, 0, 100) q $q$);
+  update public.payment set review_reason = null where id in (p[2], p[5]);   -- waiting for the match job
+  perform private.match_results_begin();
+  insert into pg_temp._mr_decision (payment_id, ord, outcome, rule, method, account_id, rule_version, evidence)
+  values (p[2], 1, 'auto', 'R1', 'rf_structured', pg_temp.f('8a'), 'test', '{}'),
+         (p[5], 2, 'auto', 'R1', 'rf_structured', pg_temp.f('8a'), 'test', '{}');
+  perform private.apply_match_results('00000000-0000-0000-0000-0000000000aa', 'import');
+  insert into public.payment_match_candidate (payment_id, rank, organization_id, account_id, rule, acceptable, signals)
+  select x, 1, '00000000-0000-0000-0000-0000000000aa', pg_temp.f('8a'), 'R5', true, '{}' from unnest(array[p[3], p[6]]) x;
+  v_accept := pg_temp.accept('t1-accept-0001', jsonb_build_array(
+                jsonb_build_object('payment_id', p[3], 'account_id', pg_temp.f('8a')),
+                jsonb_build_object('payment_id', p[6], 'account_id', pg_temp.f('8a'))));
+  -- one matched before round 8 (forged): « Rapprochés » flags it too
+  update public.payment set account_id = pg_temp.f('8a'), status = 'matched', match_method = 'rf_structured',
+                            matched_at = now(), review_reason = null
+  where id = p[1];
+  return jsonb_build_object(
+    'matched_tab', pg_temp.try('01', format($q$ select string_agg(q.own_transfer_line::text, ' ')
+      from public.payment_queue('rapproches', null, null, 2300, 2300, null, 0, 100) q where q.payment_id = %L $q$, p[1])),
+    'queue', (select string_agg(x, ' ' order by x) from unnest(string_to_array(v_queue, ' ')) x),
+    'assign', jsonb_build_array(
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.assign(%L, %L, %L)', 't1-assign-1', p[1], pg_temp.f('8a')))),
+      pg_temp.assign('t1-assign-4', p[4], pg_temp.f('8a')) = pg_temp.f('8a')::text),
+    'match', (select jsonb_agg(jsonb_build_array(x.status, x.review_reason) order by o.n)
+              from unnest(array[p[2], p[5]]) with ordinality o (id, n) join public.payment x on x.id = o.id),
+    'candidates', (select count(*) from public.payment_match_candidate c where c.payment_id = p[2]),
+    'accepted', v_accept -> 'accepted',
+    'skipped', (select jsonb_agg(s ->> 'reason') from jsonb_array_elements(v_accept -> 'skipped') s));
+end $$;
+select is(pg_temp.isolated('sc_t1_lot_payments'),
+          '{"matched_tab": "true", "queue": "false false false true true true",
+            "assign": ["payment assignment refused: own_transfer_line", true],
+            "match": [["unmatched", "no_match"], ["matched", null]], "candidates": 0,
+            "accepted": 1, "skipped": ["own_transfer_line"]}'::jsonb,
+  'T1 in depth: a payment whose line names a handed-out lot of its account is flagged in « Paiements à traiter » (both '
+  'tabs), never assigned, matched, suggested nor accepted (own_transfer_line, no_match); an ordinary payment as before');
+
+-- T2 (verdict new:unsplit-entry-our-refund-or-top-uncounted): the parser now counts our refunds' RFD and our top-ups' TOP
+-- details in an entry kept unsplit as it counts RMT/SWP ones; the import refuses a line of an entry kept unsplit that
+-- carries one of the ids we issue (RMT, SWP, RFD, TOP; its own end-to-end id or its original) while counting no detail of
+-- ours (line_invalid) — the verifier's t1 (our top-up shown alone of two: a debtor's payment), r5 (our refund's return:
+-- linked automatically by the M2b pass), r1q (our refund's debit: explainable). Counting it, the credit is a return with
+-- no payment and the debit an unsplit batch (S2's rules: no link, reviewed); a line of its own and an unsplit batch with
+-- no id of ours are as before
+select is(jsonb_build_array(
+            split_part(pg_temp.attempt($q$ select pg_temp.t8_stage(11, '[{"kind": "batch_unsplit", "amount": 3000,
+                         "e2e": "TOP0123456789AB", "iban": "FR7610107001011234567890129", "unsplit": 0}]')::text $q$),
+                       ':', 1),
+            split_part(pg_temp.attempt($q$ select pg_temp.t8_stage(12, '[{"kind": "return", "amount": 1000,
+                         "e2e": "E2E-R5", "orig": "RFD0123456789AB", "unsplit": 0}]')::text $q$), ':', 1),
+            split_part(pg_temp.attempt($q$ select pg_temp.t8_stage(13, '[{"dir": "debit", "kind": "batch_unsplit",
+                         "amount": 1000, "e2e": "RFD0123456789AB", "unsplit": 0}]')::text $q$), ':', 1),
+            pg_temp.attempt($q$ select (pg_temp.t8_stage(14, '[
+                {"kind": "return", "amount": 3000, "e2e": "TOP0123456789AB", "orig": "TOP0123456789AB", "unsplit": 1},
+                {"kind": "return", "amount": 1000, "e2e": "RFD0123456789AB", "orig": "RFD0123456789AB", "unsplit": 1},
+                {"dir": "debit", "kind": "batch_unsplit", "amount": 1000, "e2e": "RFD0123456789AB", "unsplit": 1},
+                {"kind": "batch_unsplit", "amount": 3000, "e2e": "E2E-B1", "unsplit": 0},
+                {"dir": "debit", "kind": "refund_out", "amount": 1000, "e2e": "RFD0123456789AB"},
+                {"kind": "return", "amount": 1000, "e2e": "RFD0123456789AB", "orig": "RFD0123456789AB"}]'))::text $q$)),
+          '["line_invalid", "line_invalid", "line_invalid",
+            "[\"return 0\", \"return 0\", \"batch_unsplit 0\", \"batch_unsplit 1\", \"refund_out 0\", \"return 0\"]"]'::jsonb,
+  'T2: at import a line of an entry kept unsplit carrying our RFD or TOP id (or RMT, SWP) counts it (else line_invalid): '
+  'the credit a return with no payment; a line of its own and an unsplit batch with none of ours as before');
 
 select * from finish();
 rollback;

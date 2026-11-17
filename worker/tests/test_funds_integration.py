@@ -85,7 +85,13 @@ def test_python_and_sql_classify_our_own_transfers_alike(
 
 # review M2c-6b-1 round 4 (N1): the classifier also reads the line's original end-to-end id and its
 # PmtInfId — a credit carrying our RMT/SWP id (its own or its original) or naming our lot with no
-# end-to-end id is never a debtor's credit nor an unsplit batch — in Python and SQL alike
+# end-to-end id is never a debtor's credit nor an unsplit batch — in Python and SQL alike. Review
+# round 8 (T1): the parity holds for refine_kind without lot knowledge — whether a PmtInfId names a
+# handed-out lot of the line's account is the database's word (private.names_our_lot: the lot's file
+# and its state), so private.ingest_statement overrides the twins' reading after them (a credit
+# naming such a lot, whatever its end-to-end id, is a return), tested on its own (pgTAP 035's
+# `sc_t1_lot_import`, test_debit_bookings_integration's
+# `test_a_credit_naming_our_lot_is_never_a_debtor_s_payment_whatever_its_end_to_end_id`)
 our_ids = st.one_of(
     st.none(),
     st.sampled_from(["RMT0123456789AB", "SWP0123456789AC", "RMT0123456789AB\n", "TOP0123456789AB"]),

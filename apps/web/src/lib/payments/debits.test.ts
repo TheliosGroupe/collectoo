@@ -1901,7 +1901,7 @@ describe("M2c-6b-1 review round 7: our transfers in an unsplit entry, our lot na
     expect(debitReviewText({ ...d04, review_reason: "cancelled_transfer_debited" })).toBe(
       `${DEBIT_REVIEW.cancelled_transfer_debited} ${UNSPLIT_OURS_NOTE}`,
     );
-    expect(UNSPLIT_OURS_NOTE).toContain("ne détaille pas");
+    expect(UNSPLIT_OURS_NOTE).toContain("incomplet ou ne correspond pas");
     expect(UNSPLIT_OURS_NOTE).toContain("rien n'est comptabilisé");
     expect(UNSPLIT_OURS_NOTE).toContain("Ne la classez pas sans comptabiliser");
     expect(UNSPLIT_OURS_NOTE).toContain("prévenez le support");
@@ -1970,5 +1970,50 @@ describe("M2c-6b-1 review round 7: our transfers in an unsplit entry, our lot na
     ).toBe(false);
     // a debit never names our lot this way (its batch line is read by its form: offersOwnBatchRefunds)
     expect(namesOurLot({ ...back, direction: "debit", names_our_lot: true })).toBe(false);
+  });
+});
+
+// Review M2c-6b-1 round 8. T3 (round 7's S2 nit): UNSPLIT_OURS_NOTE is true of every line it shows on — the code knows
+// only that the bank's detail of the entry is incomplet or does not match it (a count, a direction or an amount), not
+// that other movements sit beside ours: a single detail of ours whose own amount differs from the entry (the verifier's
+// a05–a07) holds none. T2 (verdict new:unsplit-entry-our-refund-or-top-uncounted): our refunds' and top-ups' details are
+// now counted too (r5, r1q, t1: the parser's unsplit_ours), so the note names them and nothing is offered on them.
+describe("M2c-6b-1 review round 8: the unsplit note is true of every line, our refunds and top-ups (T2, T3)", () => {
+  const shapes = [
+    // a05–a07: one detail of ours, its own amount (or currency) not the entry's — no other movement in the entry
+    { name: "a05", direction: "credit", kind: "return", end_to_end_id: "RMT0A1B2C3D4E5F",
+      original_end_to_end_id: "RMT0A1B2C3D4E5F", unsplit_ours: 1 },
+    // T2: r5 (our refund's return shown alone of two), r1q (its debit), t1 (our top-up shown alone of two)
+    { name: "r5", direction: "credit", kind: "return", end_to_end_id: "RFD0A1B2C3D4E5F",
+      original_end_to_end_id: "RFD0A1B2C3D4E5F", unsplit_ours: 1 },
+    { name: "r1q", direction: "debit", kind: "batch_unsplit", end_to_end_id: "RFD0A1B2C3D4E5F",
+      original_end_to_end_id: null, unsplit_ours: 1 },
+    { name: "t1", direction: "credit", kind: "return", end_to_end_id: "TOP0A1B2C3D4E5F",
+      original_end_to_end_id: "TOP0A1B2C3D4E5F", unsplit_ours: 1 },
+  ];  // prettier-ignore
+
+  it("says only what the code knows, on a single detail of ours as on our refunds and top-ups", () => {
+    expect(UNSPLIT_OURS_NOTE).not.toContain("à côté d'autres mouvements");
+    expect(UNSPLIT_OURS_NOTE).not.toContain("opération groupée");
+    expect(UNSPLIT_OURS_NOTE).toContain(
+      "dont le détail donné par la banque est incomplet ou ne correspond pas à l'écriture (nombre, sens ou montant des opérations)",
+    );
+    expect(UNSPLIT_OURS_NOTE).toContain("reversement, quote-part du cabinet, remboursement ou approvisionnement");
+    expect(UNSPLIT_OURS_NOTE).toContain("son montant est celui de toute l'écriture");
+    for (const { name, ...shape } of shapes) {
+      const row = { amount_minor: "1000", payment_info_id: null, names_our_lot: false, ...shape };
+      expect(holdsOursUnsplit(row), name).toBe(true);
+      expect(offersPaymentLinks(row), name).toBe(false);
+      expect(readsLinkOptions(row), name).toBe(false);
+      expect(offersTopUp({ ...row, kind: "own_transfer_in" }), name).toBe(false);
+      expect(relayable({ ...row, kind: "own_transfer_in" }), name).toBe(false);
+      expect(
+        explainable({ direction: row.direction, kind: row.kind, namesPayment: false, endToEndId: row.end_to_end_id,
+                      originalEndToEndId: row.original_end_to_end_id, unsplitOurs: row.unsplit_ours }),  // prettier-ignore
+        name,
+      ).toBe(false);
+      for (const reason of [null, "return_differs", "batch_partial"])
+        expect(debitReviewText({ ...row, review_reason: reason }), `${name} ${reason}`).toBe(UNSPLIT_OURS_NOTE);
+    }
   });
 });

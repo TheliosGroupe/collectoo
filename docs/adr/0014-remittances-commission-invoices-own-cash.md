@@ -1412,5 +1412,113 @@ scale files apart); the evals unchanged — mapping 167/167 (threshold 0.980), r
 screenshot: the run's image diffs are dates, ages and row order, not committed). `database.types.ts` regenerated
 (`debit_queue`'s `unsplit_ours` and `names_our_lot`).
 
+**Round 8 (2026-11-17).** The verifiers of round 7 left two items open (a credit naming our lot made a debtor's
+payment; our refunds' and top-ups' details uncounted in an unsplit entry) and a text nit. One branch (`m6b1-fix8`), the
+migration still edited in place (each merged function redefined with `CREATE OR REPLACE`, or dropped and created for a
+new return column, restating `SECURITY DEFINER`, its `SET` clauses and its grants); the cancellation after download stays
+**off**; `033` and `034` keep their assertions and TODO markers. Every change narrows what is booked, linked or made a
+payment automatically; ordinary debtor credits, ordinary returns of a line of their own and ordinary top-ups behave as
+before (the evals unchanged).
+
+- **T1 (verdict new:lot-credit-foreign-e2e-debtor-payment) — a credit naming our lot is never a debtor's payment.**
+  The verifier's lm1 (r1's handed-out payouts lot, an end-to-end id not ours, no IBAN we know, a debtor file's valid RF)
+  went through the real import as `debtor_credit` and was matched to that file automatically (`rf_structured`); lm2
+  (no RF) waited as an unmatched payment, which « Paiements à traiter » offered to assign (`own_transfer_line` false:
+  `payment_queue`, `assign_payment`, `accept_suggestions` and `private.apply_match_results` read only
+  `names_our_transfer`). OQ-84 (g) said ops would recognise it by the lot on that page: untrue (no PmtInfId, no flag).
+  Now `private.ingest_statement`, after the pure classifier, makes a credit read as a debtor's credit or an unsplit
+  batch whose PmtInfId names a handed-out lot of the statement's own account (`private.names_our_lot`, read only when the
+  PmtInfId has our form) a `return`, keeping the stage rows in step: no payment. Only the database can say it (the lot's
+  file and its state), so the twins (`private.bank_line_refined_kind`, `payments.statement.refine_kind`) keep no lot
+  knowledge and their parity test stays true — said in the migration and in the parity test, the SQL override tested on
+  its own. The M2b pass then reads such a return as any credit return — naming no refund of ours, it is reviewed
+  `no_candidate` (it never waits without a reason) — « À classer » lists it with its lot's note (`debit_queue`'s
+  `names_our_lot`, the page's `OUR_LOT_FOREIGN_E2E_NOTE`), and round 6's R2 rules hold (no explanation; « Remboursement
+  revenu » only of the refund that lot held alone: one carrying that refund's own RFD id is read as that refund come
+  back, as a flagged return already was, where round 7 made it a debtor's payment; any other refund refused). In depth, for a payment made
+  of one before: `public.assign_payment` refuses it (`own_transfer_line`), `public.accept_suggestions` skips it
+  (`own_transfer_line`), `private.apply_match_results` neither matches it nor keeps a candidate (`no_match`), and
+  `public.payment_queue` flags it in both tabs — that queue runs under the caller's rights and `private.names_our_lot`
+  is internal (`authenticated` may not call it, S3's assertion), so it writes the predicate out over `transfer_file` and
+  `transfer_file_item`, whose read policy is the money staff's, the queue's own. Own and client credits naming the lot
+  keep their kinds (refused everywhere since S3). COMPLIANCE OQ-84 (g) corrected. Tests that failed before: pgTAP `035`
+  test 143 (`sc_t1_lot_import`, through `pg_temp.t8_stage`, a real `private.ingest_statement`: r6's lot named by a
+  debtor's credit and by an unsplit batch, both `return` with no payment; a TF id of no file, the lot named on another
+  account of the servicer, an own credit, a debit and an ordinary credit keep their reading; the pure twin still
+  `debtor_credit`; the M2b pass reads the return with no candidate; listed with `names_our_lot`; no explanation, no
+  option) and 144 (`sc_t1_lot_payments`: legacy payments naming the lot flagged in « Paiements à traiter » and
+  « Rapprochés », refused by `assign_payment`, left `no_match` with no candidate by the match job, skipped by
+  « Accepter »; ordinary payments assigned, matched and accepted); integration
+  `test_debit_bookings_integration.py::test_a_credit_naming_our_lot_is_never_a_debtor_s_payment_whatever_its_end_to_end_id`
+  (lm1 with the debtor file's RF and lm2 through the real camt.053 import, the match job and the debit job: `return`,
+  no payment, no match, `no_candidate`, listed with the lot, no explanation, nothing offered; the same RF credit without
+  the lot matched to the debtor's file as before).
+- **T2 (verdict new:unsplit-entry-our-refund-or-top-uncounted) — our refunds and top-ups count as ours in an unsplit
+  entry.** `unsplit_ours` and the parser's `_our_ids` counted only RMT/SWP ids: the verifier's r5 (our refund's return
+  shown alone of two) was linked `refund_returned` automatically by the M2b pass; r1q, r2q and r4 (our refund's debit
+  shown alone of two, beside a foreign debit with no amounts, netted with a credit) counted 0, went unreviewed and could be
+  explained away; t1 (our top-up from the own IBAN shown alone of two) was one debtor's payment, the top-up left
+  `ordered`. `payments.statement` now names every id we issue (`OUR_ISSUED_ID_RE`: RMT, SWP, RFD or TOP and 12
+  upper-case hex digits, the SQL generators' form) and `issued_id` reads it (the original first, then the own end-to-end
+  id); `payments.camt053._our_ids` counts by it, so round 7's rules cover our refunds and top-ups — a detail of ours is a
+  line of its own only when it is the whole entry, a line kept unsplit takes its original id only from a detail of the
+  entry's direction (an RMT/SWP id still kept first, the one `names_our_transfer` reads) and counts every detail of ours,
+  and a credit holding ours is a `return`. S1/S2's rules then apply unchanged: reviewed (`return_differs` on a credit,
+  `batch_partial` on a debit), never read by the M2b pass, no link nor explanation (`own_transfer_line`), listed « À
+  classer », no payment. The synthetic ground truth (`synth.camt053`'s `Entry.adds_up` and `expected_lines`) reads the
+  same predicate. Every place deciding « ours » from an id's prefix was checked: `names_our_transfer` (Python and SQL)
+  keeps RMT/SWP and our lots — the lines only ever booked — since our refund's debit is linked by the M2b pass
+  (`classify`: `refund_out`) and a credit carrying our TOP id is `own_transfer_in` (`refine_kind` and its SQL twin),
+  booked as the top-up; the funds twin's `OUR_ID` reads RMT/SWP debits and returns, its top-up by the order's fact; a new
+  unit test pins them together. In depth, `private.ingest_statement` refuses a line of an entry kept unsplit carrying
+  one of the ids we issue (its own end-to-end id or its original) while counting none (`line_invalid`). COMPLIANCE OQ-84
+  (b), (e) with R3's wording (t1's line does carry the TOP end-to-end id; the camt.053 half of R3 is closed), (f) and
+  (h). Tests that failed before: worker `test_funds.py::test_our_refunds_and_top_ups_in_a_camt053_entry_count_as_ours`
+  (r5 with its RFD id as its own and as its original, r1q, r2q, r4, a single RFD detail below its entry, t1, our TOP
+  beside a debtor's credit, TOP then RMT in one entry — the RMT id kept; our refund's debit, its return and our top-up as
+  the whole of their entry, lines of their own; a debtor's unsplit batch, 0; the ground truth's kinds and key prefixes)
+  and `::test_the_ids_we_issue_are_ours_to_every_reader_of_an_id_s_prefix` (10 cases), round 7's
+  `::test_a_camt053_detail_of_ours_is_a_line_of_its_own_only_when_it_is_the_whole_entry` (m04 now counts our refund's
+  debit too: 2); pgTAP `035` test 145 (`t8_stage`: an unsplit TOP credit, an RFD original and an RFD debit counting 0
+  refused `line_invalid`; counted, the credits are returns with no payment, the debit an unsplit batch; a line of its own
+  and a batch with no id of ours as before); integration
+  `test_debit_bookings_integration.py::test_our_refund_or_top_up_in_an_unsplit_entry_is_never_linked_nor_a_payment`
+  (r1q: `batch_partial`, no explanation nor refund, the refund still in its file; r5 after the refund's own debit:
+  `return_differs`, never `refund_returned`, the refund still executed; t1: a `return`, no payment, `return_differs`, the
+  top-up `ordered`, no explanation, top-up nor relay; then the refund's return and the top-up as the whole of their entry
+  linked `refund_returned` and booked `top_up`, as before) and round 7's
+  `::test_an_unsplit_entry_holding_our_transfer_is_never_booked_nor_explained` (m04: 2).
+- **T3 (round 7's S2 nit) — the unsplit note says only what the code knows.** `UNSPLIT_OURS_NOTE` claimed « opération
+  groupée … à côté d'autres mouvements », untrue of a single detail of ours whose own amount differs from the entry
+  (a05–a07). It now reads « Ligne d'une écriture de la banque qui contient au moins l'un de nos virements (reversement,
+  quote-part du cabinet, remboursement ou approvisionnement), son débit ou son retour, et dont le détail donné par la
+  banque est incomplet ou ne correspond pas à l'écriture (nombre, sens ou montant des opérations) … » — true of every
+  line it shows on (a line is kept unsplit only when its details are incomplete or do not add up to it). vitest « M2c-6b-1
+  review round 8: the unsplit note is true of every line, our refunds and top-ups (T2, T3) » (a05, r5, r1q, t1: nothing
+  offered, the note shown; it claims no other movement) and round 7's S2 case (its text assertion follows the new
+  wording).
+
+Mutants, each killed (SQL redefining one function after `035`'s `begin`, run through `psql` in one transaction on a fresh
+`supabase db reset`, the unmutated copy passing all 145; worker and web each in a scratch copy): SQL 17 of 17 —
+`ingest_statement`'s lot override removed, for debtor credits only, by the PmtInfId's form, extended to own credits or to
+debits (143 each); `assign_payment`'s, `accept_suggestions`' (its filter, its skipped reason) and `apply_match_results`'
+lot arms removed, `payment_queue`'s removed in either tab or by the form (144 each); `ingest_statement`'s T2 check removed,
+on the end-to-end id only, for RMT/SWP only, without TOP, without RFD (145 each). Worker 7 of 7 — `_our_ids` back to
+RMT/SWP, `OUR_ISSUED_ID_RE` without RFD or without TOP, `issued_id` blind to the original, the original id taken first in
+the file's order, the ground truth's `adds_up` or `expected_lines` back to RMT/SWP (the parser tests). Web 3 of 3 — round
+7's text back, « à côté d'autres mouvements » re-added, the refunds and top-ups dropped from the note (vitest). The no-op
+control of each passes.
+
+Suites on the final code, after `supabase db reset`: pgTAP 35 files, 2,505 tests (`034`'s TODO markers kept, 16 TODO
+passed); the worker's ruff, format and mypy (167 files), 1,011 unit tests (5 xfailed) and 183 integration tests (the
+scale files apart); the evals unchanged — mapping 167/167 (threshold 0.980), reconciliation 0.9600 automatic
+(95,997/100,000), 0 wrong, 0 policy violations; the payouts scale test once, on a fresh reset, 5 of 5 (the 5,000-member
+batch line's funds pass 20.1 s; 5,000 RMT debits imported in 1.0 s, the debit job 18.6 s in chunks of 7.5, 7.1 and
+3.7 s; the nightly checks 1.15 s; 200 members 0.51 s; 200 RMT debits 0.54 s — run first on a database the integration
+suite had filled, two of its read bounds tripped on other servicers' rows, read by sequential scans in functions round 8
+does not touch); the web's lint, types and 331 vitest tests; the E2E's 54 tests (no new screenshot: round 8 changes no
+page the E2E shows — the unsplit note appears on no line of its fixtures — and the run's image diffs are dates, ages, ids
+and pages earlier slices changed, not committed). `database.types.ts` unchanged (no public signature changed).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
