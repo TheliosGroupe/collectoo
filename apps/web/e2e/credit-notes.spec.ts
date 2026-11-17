@@ -122,7 +122,12 @@ test("an admin issues a manual credit note on an invoice and the client reads it
   await page.goto("/backoffice/reversements");
   const waiting = page.getByTestId("prepare-row").filter({ hasText: tenant.clientName });
   const card = page.getByTestId("run-card").filter({ hasText: tenant.clientName });
-  await expect(waiting.or(card)).toBeVisible({ timeout: 60_000 });
+  // the worker matches and allocates the statement's payments after « Importé »; the page refreshes itself only while
+  // a run is in flight, so reload it until the client's collections are listed (or its run, prepared by the schedule)
+  await expect(async () => {
+    await page.reload();
+    await expect(waiting.or(card)).toBeVisible({ timeout: 5_000 });
+  }).toPass({ timeout: 90_000 });
   if (await waiting.isVisible()) {
     await waiting.getByRole("button", { name: "Préparer maintenant" }).click();
     await card.waitFor({ timeout: 15_000 }).catch(() => page.reload());
