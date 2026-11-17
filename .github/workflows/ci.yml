@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:  # run every job, the volume runs included, on any branch (Actions → CI → Run workflow)
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -101,6 +102,10 @@ jobs:
     name: Scale runs (50k boarding, statement, matching, allocation; 5k receipts)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # the volume runs (about 30 of a run's 48 billed minutes) run on merges to main and on demand, not on pull requests:
+    # founder decision 2026-11-17 (private repository, Actions minutes); a slice that changes a path they time
+    # dispatches this workflow on its branch and waits for them before merging (CLAUDE.md)
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v5
       - uses: supabase/setup-cli@v1
@@ -150,6 +155,10 @@ jobs:
     name: Scale run (5,000 payouts filed, debited and booked; M2c-6b-1)
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # the volume runs (about 30 of a run's 48 billed minutes) run on merges to main and on demand, not on pull requests:
+    # founder decision 2026-11-17 (private repository, Actions minutes); a slice that changes a path they time
+    # dispatches this workflow on its branch and waits for them before merging (CLAUDE.md)
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v5
       - uses: supabase/setup-cli@v1
