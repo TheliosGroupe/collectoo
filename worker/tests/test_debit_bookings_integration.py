@@ -1337,9 +1337,10 @@ def test_an_unsplit_entry_netting_our_return_is_never_booked_as_a_partial_return
     of less than its amount and booked the rest as our bank fee: the other payout's debit hidden as
     the servicer's charge, that payout left in its file. Now the line records two details of ours
     and the funds pass reviews it `return_differs`, nothing booked (no payout_returned, no fee), the
-    other payout untouched; the same with a chargeback's debit (one detail of ours). The same
-    payout's return alone in an entry kept unsplit (one detail shown of two), for its exact amount,
-    is still booked as its return."""
+    other payout untouched; the same with a chargeback's debit (one detail of ours). Round 7 (S1):
+    the same payout's return alone in an entry kept unsplit (one detail shown of two: NbOfTxs 2),
+    for its exact amount, is no longer booked either (round 6 booked it); alone in an entry whose
+    one detail is the whole entry (no count), it is booked as its return."""
     tenant, _other, _r1, _r2 = _two_runs()
     _f, data = _downloaded(tenant, tmp_path)
     (big, n_big), (small, n_small) = sorted(_payouts(data), key=lambda p: -p[1])
@@ -1410,7 +1411,248 @@ def test_an_unsplit_entry_netting_our_return_is_never_booked_as_a_partial_return
         txs=(Tx(n_big, ref=f"E1{tag}", end_to_end_id=big, name="LILAS FINANCE"),),
     )
     sid2 = _import_netted(tenant, [back], day, [])
-    assert _bookings(sid2) == [("payout_returned", big, n_big)]
+    assert _bookings(sid2) == []
+    assert _reviews(sid2) == ["return_differs"]
+    assert (_transfer(big)["status"], _transfer(small)["status"]) == ("booked", "in_file")
+    whole = Entry(
+        n_big,
+        True,
+        day,
+        day,
+        ref=f"NW{tag}",
+        txs=(Tx(n_big, ref=f"W1{tag}", end_to_end_id=big, name="LILAS FINANCE"),),
+    )
+    sid3 = _import_netted(tenant, [whole], day, [])
+    assert _bookings(sid3) == [("payout_returned", big, n_big)]
     assert (_transfer(big)["status"], _transfer(small)["status"]) == ("returned", "in_file")
     assert _fees(tenant) == fees_before
+    _no_violation(tenant)
+
+
+# -- review round 7 (S1, S2): an entry kept unsplit holding our transfer is never booked ----------
+
+
+def _flip(xml: bytes, refs: list[str]) -> bytes:
+    """Each named detail's CdtDbtInd turned to the other direction (an entry the bank netted)."""
+    for ref in refs:
+        at = xml.index(f"<AcctSvcrRef>{ref}</AcctSvcrRef>".encode())
+        end = xml.index(b"</TxDtls>", at)
+        span = xml[at:end]
+        flipped = (
+            span.replace(b"<CdtDbtInd>CRDT</CdtDbtInd>", b"<CdtDbtInd>XXXX</CdtDbtInd>")
+            .replace(b"<CdtDbtInd>DBIT</CdtDbtInd>", b"<CdtDbtInd>CRDT</CdtDbtInd>")
+            .replace(b"<CdtDbtInd>XXXX</CdtDbtInd>", b"<CdtDbtInd>DBIT</CdtDbtInd>")
+        )
+        assert flipped != span
+        xml = xml[:at] + flipped + xml[end:]
+    return xml
+
+
+def _import_turned(
+    tenant: dict[str, Any], entries: list[Entry], day: date, turned: list[str]
+) -> str:
+    """A one-day camt.053 of these entries, the details named in `turned` of the other direction
+    than their entry, imported; the payments queue drained (the M2b pass, then the funds pass)."""
+    opening, _last = _last_closing(tenant)
+    stmt = f"S-{uuid.uuid4().hex[:10]}"
+    doc = make_doc(
+        entries, iban=tenant["iban"], from_date=day, to_date=day, opening_minor=opening,
+        stmt_id=stmt,
+    )  # fmt: skip
+    xml = _flip(render_camt053(doc, "08"), turned)
+    target = upload(tenant, storage(), xml, name=f"{stmt}.xml")
+    drain_payments(storage())
+    return str(target["statement_id"])
+
+
+def test_an_unsplit_entry_holding_our_transfer_is_never_booked_nor_explained(
+    tmp_path: Path,
+) -> None:
+    """Review round 7, through the real camt.053 import and the debit job. A downloaded file of
+    two payouts and a refund; the larger payout debited (booked). The bank then reports, kept
+    unsplit, the verifier's shapes (S1, verdict new:unsplit-exact-total-other-details), each for
+    the booked payout's exact amount: u05 (its detail 50,00 € short beside a debtor's 50,00 €,
+    NbOfTxs 3), u06 (the same with no detail amounts), u03 (its one detail 50,00 € short,
+    NbOfTxs 2), u01 (its one detail exact, one shown of two), x01 (a debtor's credit of twice its
+    amount and the payout's own DBIT detail), m04 (its return, a debtor's credit and our refund's
+    debit netting to zero); and (S2, verdict new:debit-entry-unsplit-with-our-details-explainable)
+    d01, an outgoing debit with the payout's return netted in. Round 6 booked the payout returned
+    from the first of them (u05, u06, u03, u01, x01, m04: the debtor's money, a detail short or our
+    payout's own debit taken as its return) and let ops explain d01 away. Now: no payment, nothing
+    booked, the payout still booked, the other payout and the refund untouched, each line reviewed
+    (return_differs; d01 batch_partial), no link nor explanation on any (own_transfer_line),
+    debit_link_options lists nothing. x01 keeps no id of ours (its detail of ours is a debit), only
+    its count. The payout's return as the whole of its entry is then booked."""
+    tenant, _other, _r1, _r2 = _two_runs()
+    payment = _unidentified(tenant, 10_000)
+    staff(tenant, REQUEST_REFUND, *_refund_args(payment, 10_000))
+    _f, data = _downloaded(tenant, tmp_path)
+    paid = _payouts(data)
+    (big, n_big), (small, _n_small) = sorted(
+        ((e, n) for e, n in paid if e.startswith("RMT")), key=lambda p: -p[1]
+    )
+    ((rfd, n_rfd),) = [(e, n) for e, n in paid if e.startswith("RFD")]
+    day = max(paris_today(), _last_closing(tenant)[1])
+    opening, _last = _last_closing(tenant)
+    tag = uuid.uuid4().hex[:6].upper()
+    debit = Entry(
+        n_big,
+        False,
+        day,
+        day,
+        ref=f"ND{tag}",
+        code="PMNT/ICDT/ESCT",
+        txs=(Tx(n_big, ref=f"D{tag}", end_to_end_id=big, name="LILAS FINANCE"),),
+    )
+    sid0 = import_entries(tenant, storage(), [debit], day=day, opening=opening)
+    assert _bookings(sid0) == [("payout", big, n_big)]
+    fees_before = _fees(tenant)
+
+    def entry(ref: str, *txs: Tx, credit: bool = True, count: int | None = None) -> Entry:
+        amount = n_big if credit else 500_000 - n_big
+        code = "PMNT/RCDT/ESCT" if credit else "PMNT/ICDT/ESCT"
+        return Entry(amount, credit, day, day, ref=f"{ref}{tag}", code=code, txs=txs,
+                     batch_count=count)  # fmt: skip
+
+    entries = [
+        entry("U5", Tx(n_big - 5_000, ref=f"U5A{tag}", end_to_end_id=big),
+              Tx(5_000, ref=f"U5B{tag}", end_to_end_id=f"E2E-U5-{tag}"), count=3),
+        entry("U6", Tx(None, ref=f"U6A{tag}", end_to_end_id=big),
+              Tx(None, ref=f"U6B{tag}", end_to_end_id=f"E2E-U6-{tag}")),
+        entry("U3", Tx(n_big - 5_000, ref=f"U3A{tag}", end_to_end_id=big), count=2),
+        entry("U1", Tx(n_big, ref=f"U1A{tag}", end_to_end_id=big), count=2),
+        entry("X1", Tx(2 * n_big, ref=f"X1A{tag}", end_to_end_id=f"E2E-X1-{tag}"),
+              Tx(n_big, ref=f"X1B{tag}", end_to_end_id=big)),
+        entry("M4", Tx(n_big, ref=f"M4A{tag}", end_to_end_id=big),
+              Tx(n_rfd, ref=f"M4B{tag}", end_to_end_id=f"E2E-M4-{tag}"),
+              Tx(n_rfd, ref=f"M4C{tag}", end_to_end_id=rfd)),
+        entry("D1", Tx(500_000, ref=f"D1A{tag}", end_to_end_id=f"E2E-OUT-{tag}"),
+              Tx(n_big, ref=f"D1B{tag}", end_to_end_id=big), credit=False),
+    ]  # fmt: skip
+    sid = _import_turned(tenant, entries, day, [f"X1B{tag}", f"M4C{tag}", f"D1B{tag}"])
+    with psycopg.connect(DB) as conn:
+        lines = conn.execute(
+            """select id, direction, kind, amount_minor, original_end_to_end_id, unsplit_ours
+               from public.bank_transaction where statement_id = %s order by line_no""",
+            (sid,),
+        ).fetchall()
+    assert [tuple(r[1:]) for r in lines] == [
+        ("credit", "return", n_big, big, 1),  # u05
+        ("credit", "return", n_big, big, 1),  # u06
+        ("credit", "return", n_big, big, 1),  # u03
+        ("credit", "return", n_big, big, 1),  # u01
+        ("credit", "return", n_big, None, 1),  # x01: no id of ours kept, counted
+        ("credit", "return", n_big, big, 1),  # m04
+        ("debit", "batch_unsplit", 500_000 - n_big, None, 1),  # d01
+    ]
+    assert _payments_of(sid) == 0
+    assert _bookings(sid) == []
+    assert _reviews(sid) == [*["return_differs"] * 6, "batch_partial"]
+    assert (_transfer(big)["status"], _transfer(small)["status"], _transfer(rfd)["status"]) == (
+        "booked",
+        "in_file",
+        "in_file",
+    )
+    assert _fees(tenant) == fees_before
+    for line in (str(r[0]) for r in lines):
+        options = staff(tenant, "select public.debit_link_options(%s)", line)
+        assert (options["payments"], options["refunds"]) == ([], [])
+        with pytest.raises(psycopg.errors.CheckViolation, match="own_transfer_line"):
+            staff(
+                tenant,
+                "select public.link_debit(%s, %s, 'explained', null, null, null, 'vu')",
+                str(uuid.uuid4()),
+                line,
+            )
+    # the payout's return as the whole of its entry: its return
+    whole = entry("W1", Tx(n_big, ref=f"W1A{tag}", end_to_end_id=big))
+    sid2 = _import_turned(tenant, [whole], day, [])
+    assert _bookings(sid2) == [("payout_returned", big, n_big)]
+    assert (_transfer(big)["status"], _transfer(small)["status"], _transfer(rfd)["status"]) == (
+        "returned",
+        "in_file",
+        "in_file",
+    )
+    assert _fees(tenant) == fees_before
+    _no_violation(tenant)
+
+
+def test_an_own_credit_naming_our_lot_is_never_a_top_up_nor_relayed(tmp_path: Path) -> None:
+    """Review round 7 (S3, verdict new:own-client-credit-naming-our-lot-relay-top-up), through the
+    real camt.053 import and the debit job. A downloaded file of two payouts on the dedicated
+    account; a top-up of 30,00 € ordered from the own account. A credit from the own account then
+    carries the top-up's TOP id, for its amount, with the PmtInfId of that file's payouts lot (a lot
+    of this dedicated account handed out: our outgoing transfer coming back, never a top-up — a
+    top-up's lot would be a file of the own account). Round 6 booked it as the top-up (the job) and
+    let ops relay it as a debtor's payment or book it. Now the job reviews it `top_up_differs`
+    (it reads names_our_lot from private.bank_booking_candidates), nothing booked, the order still
+    `ordered`; the relay and ops' top-up refused `own_transfer_line`. The same credit without the
+    lot is the top-up."""
+    tenant, _other, _r1, _r2 = _two_runs()
+    _f, data = _downloaded(tenant, tmp_path)
+    lot = pain001.read(data).payment_infos[0].pmt_inf_id
+    with psycopg.connect(DB) as conn:  # the own account _two_runs registered
+        row = conn.execute(
+            """select a.id::text, a.iban from public.servicer_billing_settings s
+               join public.bank_account a on a.id = s.own_bank_account_id
+               where s.organization_id = %s""",
+            (tenant["servicer"],),
+        ).fetchone()
+    assert row is not None
+    own, own_iban = str(row[0]), str(row[1])
+    top = staff(
+        tenant,
+        "select public.request_top_up(%s, %s, %s, '3000', 'couvrir les frais du compte dédié')",
+        str(uuid.uuid4()),
+        own,
+        tenant["bank"],
+    )
+    day = max(paris_today(), _last_closing(tenant)[1])
+    opening, _last = _last_closing(tenant)
+    tag = uuid.uuid4().hex[:6].upper()
+    back = Entry(
+        3_000,
+        True,
+        day,
+        day,
+        ref=f"NL{tag}",
+        payment_info_id=lot,
+        txs=(Tx(3_000, ref=f"L{tag}", end_to_end_id=top["end_to_end_id"], iban=own_iban),),
+    )
+    sid = import_entries(tenant, storage(), [back], day=day, opening=opening)
+    with psycopg.connect(DB) as conn:
+        line = conn.execute(
+            """select id::text, kind, private.names_our_lot(bank_account_id, payment_info_id)
+               from public.bank_transaction where statement_id = %s""",
+            (sid,),
+        ).fetchone()
+    assert line is not None and tuple(line[1:]) == ("own_transfer_in", True)
+    assert _payments_of(sid) == 0
+    assert _bookings(sid) == []
+    assert _reviews(sid) == ["top_up_differs"]
+    assert _transfer(top["end_to_end_id"])["status"] == "ordered"
+    with pytest.raises(psycopg.errors.CheckViolation, match="own_transfer_line"):
+        staff(
+            tenant, "select public.release_own_credit(%s, %s, 'relayé')", str(uuid.uuid4()), line[0]
+        )
+    with pytest.raises(psycopg.errors.CheckViolation, match="own_transfer_line"):
+        staff(
+            tenant,
+            "select public.link_debit(%s, %s, 'own_credit', null, null, null, 'approvisionnement')",
+            str(uuid.uuid4()),
+            line[0],
+        )
+    # the same credit with no PmtInfId of ours: the top-up we ordered
+    plain = Entry(
+        3_000,
+        True,
+        day,
+        day,
+        ref=f"NP{tag}",
+        txs=(Tx(3_000, ref=f"P{tag}", end_to_end_id=top["end_to_end_id"], iban=own_iban),),
+    )
+    opening2, _last2 = _last_closing(tenant)
+    sid2 = import_entries(tenant, storage(), [plain], day=day, opening=opening2)
+    assert [k for k, _, _ in _bookings(sid2)] == ["top_up"]
+    assert _transfer(top["end_to_end_id"])["status"] == "booked"
     _no_violation(tenant)

@@ -82,6 +82,23 @@
 -- PmtInfId of a file of the line's account handed out (new private.names_our_lot) — whatever its end-to-end id, takes
 -- no explanation and, as « Remboursement revenu », only the refund that lot held alone (private.post_debit_links,
 -- public.debit_link_options; COMPLIANCE OQ-84).
+--
+-- Review round 7: (S1) a line read from a camt.053 entry kept unsplit is never booked as our transfer's return, whatever
+-- its count and amount (private.post_bank_bookings' re-check, the twin of payments.debits) — the parser gives a detail
+-- of ours that is the whole entry (NbOfTxs absent or 1, the entry's direction, its own amount absent or the entry's) a
+-- line of its own instead, and never takes a line's original id from a detail of the other direction; (S2) a line of an
+-- entry kept unsplit holding a detail of ours (unsplit_ours > 0), whatever its direction, takes no link of any kind —
+-- the explanation, a payment's return or loss, a refund, a refund come back, a top-up or a relay (private.post_debit_links,
+-- private.post_bank_bookings' top-up and loss rules, public.release_own_credit: own_transfer_line); public.debit_link_options
+-- lists nothing; the M2b pass never reads it (private.debit_candidates) and the funds pass does
+-- (private.bank_booking_candidates, a branch of its own, by the new partial index bank_transaction_unsplit_ours_idx), never
+-- booking it (a payout by the id its one detail gives, or a batch line whose details are given: batch_partial) and
+-- always reviewing it; the import refuses one staged as a credit other than a return (private.ingest_statement: such a
+-- credit makes no payment); « À classer » lists it (public.debit_queue, which returns unsplit_ours); (S3) a credit naming
+-- one of our lots of the line's account (private.names_our_lot), whatever its end-to-end id, is never relayed nor a
+-- top-up, by ops or by the job (public.release_own_credit, the top-up rule: own_transfer_line); the funds pass reads it
+-- (private.bank_booking_candidates' names_our_lot) and the page too (public.debit_queue's names_our_lot, under the
+-- servicer's rights). COMPLIANCE OQ-84 (f), (g), (h).
 
 ------------------------------------------------------------------------------------------
 -- Schema
@@ -99,6 +116,10 @@ comment on column public.bank_transaction.unsplit_ours is
   'camt.053 entry kept unsplit (its amount the entry''s total): how many of its details name one of our transfers '
   '(RMT/SWP id, own or original); null for any other line (review M2c-6b-1 round 6, R1).';
 alter table private.bank_import_stage add column unsplit_ours smallint;
+-- Review round 7 (S2): the lines of an entry kept unsplit holding a detail of ours (few), read by the funds pass's own
+-- branch (private.bank_booking_candidates) and « À classer » (public.debit_queue), led by the servicer
+create index bank_transaction_unsplit_ours_idx on public.bank_transaction (organization_id, booking_date, id)
+  where unsplit_ours > 0;
 
 -- An advance to a client (§6.1, §13): the servicer's money paying what the client was not owed (yet). M2c-6b-1 posts
 -- the booking-time cover of a payout overrun (cause `payout_overrun`); M2c-6b-2 the excess of an unplanned or double
@@ -553,7 +574,10 @@ $$;
 --   * a debit coded as the bank's charge (CHRG, FEES: a fee).
 -- Each branch is read by its own partial index, led by the servicer, ordered and limited on its own, then merged
 -- (ARCHITECTURE §4: with stale statistics no chunk reads every payer line of the servicer); every fact by key. Review
--- round 6 (R1): with the line's unsplit_ours (an entry kept unsplit: how many of its details are ours), last.
+-- round 6 (R1): with the line's unsplit_ours (an entry kept unsplit: how many of its details are ours). Review round 7:
+-- (S2) a line of an entry kept unsplit holding a detail of ours, whatever its kind (never booked: reviewed), by its own
+-- partial index; (S3) whether a credit names one of our lots of its account (private.names_our_lot: never a top-up),
+-- last.
 drop function private.bank_booking_candidates(uuid, date, uuid, integer);
 create function private.bank_booking_candidates(p_organization_id uuid, p_after_date date, p_after_id uuid,
                                                 p_limit integer)
@@ -565,7 +589,7 @@ returns table (line_id uuid, line_kind text, direction text, bank_account_id uui
                transfer_file_id uuid, file_status text, file_download_count integer, pmt_inf_id text,
                batch_file_id uuid, batch_file_status text, batch_file_download_count integer, run_id uuid,
                run_status text, run_transfer_id uuid, replaces_transfer_id uuid, debit_booked boolean,
-               return_booked boolean, return_seen boolean, unsplit_ours smallint)
+               return_booked boolean, return_seen boolean, unsplit_ours smallint, names_our_lot boolean)
 language plpgsql
 stable
 security definer
@@ -630,12 +654,26 @@ begin
          and not exists (select 1 from public.bank_line_booking b where b.bank_transaction_id = t.id offset 0)
          and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id offset 0)
          and not exists (select 1 from public.bank_own_credit_release c where c.bank_transaction_id = t.id offset 0)
+       order by t.booking_date, t.id limit v_limit)
+      union
+      -- review round 7 (S2): a line of an entry kept unsplit holding a detail of ours, whatever its kind and direction
+      -- (never booked, always reviewed: the M2b pass never reads it)
+      (select t.id, t.booking_date from public.bank_transaction t
+       where t.organization_id = p_organization_id and t.unsplit_ours > 0
+         and (p_after_date is null or (t.booking_date, t.id) > (p_after_date, p_after_id))
+         and not exists (select 1 from public.bank_line_booking b where b.bank_transaction_id = t.id offset 0)
+         and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id offset 0)
+         and not exists (select 1 from public.bank_own_credit_release c where c.bank_transaction_id = t.id offset 0)
        order by t.booking_date, t.id limit v_limit)) z
     order by z.booking_date, z.id
     limit v_limit),
   x as materialized (
     select t.id, coalesce(r.released_kind, t.kind) as kind, t.direction, t.bank_account_id, t.currency, t.amount_minor,
-           t.booking_date, t.bank_tx_code, t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id, t.unsplit_ours
+           t.booking_date, t.bank_tx_code, t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id, t.unsplit_ours,
+           -- review round 7 (S3): a credit naming one of our lots of its account (a file handed out), whatever its
+           -- end-to-end id: never a top-up
+           case when t.direction = 'credit' and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
+                then private.names_our_lot(t.bank_account_id, t.payment_info_id) else false end as names_our_lot
     from k
     cross join lateral (select q.* from public.bank_transaction q where q.id = k.id offset 0) t
     left join lateral (select q.decision, q.released_kind from public.bank_duplicate_resolution q
@@ -689,7 +727,8 @@ begin
                                                         where b.transfer_id = (f.tr).id
                                                           and b.kind in ('payout_returned', 'sweep_returned')
                                                         offset 0) end,
-         case when (f.tr).status = 'cancelled' then private.transfer_return_seen((f.tr).id) end, x.unsplit_ours
+         case when (f.tr).status = 'cancelled' then private.transfer_return_seen((f.tr).id) end, x.unsplit_ours,
+         x.names_our_lot
   from x
   left join f on f.line_id = x.id
   left join lateral (select q.status, q.download_count from public.transfer_file q
@@ -1238,9 +1277,15 @@ begin
       -- round 3, as public.release_own_credit reads a credit) a line naming one of our PmtInfIds without an end-to-end
       -- id, whatever its direction: our batch line, or a lot of one of our files coming back as one credit (a top-up is
       -- never in a file: our TOP id, typed in the bank)
+      -- Review round 7: (S3, verdict new:own-client-credit-naming-our-lot-relay-top-up) nor a credit naming one of our
+      -- lots of its account (private.names_our_lot: a file of that account handed out) whatever its end-to-end id — our
+      -- outgoing transfer coming back (a top-up is never in a file of this dedicated account: its lot would be a file of
+      -- the own account); (S2) nor a line of an entry kept unsplit holding a detail of ours
       when coalesce(b.end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
            or coalesce(b.returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
            or (b.end_to_end_id is null and coalesce(b.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$', false))
+           or coalesce(b.unsplit_ours, 0) > 0
+           or (b.direction = 'credit' and private.names_our_lot(b.line_bank, b.payment_info_id))
         then 'own_transfer_line'
       when b.link_kind is not null then 'already_linked'
       when b.direction <> 'credit' or b.line_kind <> 'own_transfer_in' then 'not_an_own_credit'
@@ -1254,9 +1299,11 @@ begin
       -- review round 2 (L4, money-1's defence in depth): never one of our payouts' or sweeps' lines — a line carrying our
       -- RMT/SWP id as its own or as the original it returns, or a batch line of one of our PmtInfIds — whatever kind the
       -- statement gives it: as for every other link (private.post_debit_links), such a line is only booked
+      -- (review round 7, S2: or a line of an entry kept unsplit holding a detail of ours, whose ids are not on its line)
       when coalesce(b.end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
            or coalesce(b.returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
-           or (b.batch_line and b.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$') then 'own_transfer_line'
+           or (b.batch_line and b.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$')
+           or coalesce(b.unsplit_ours, 0) > 0 then 'own_transfer_line'
       when b.direction <> 'debit' or b.line_kind <> 'return' then 'not_a_return'
       when b.link_kind is not null and b.link_kind <> 'return' then 'already_linked'
       when b.transfer_id is not null or b.amount_minor is null or b.amount_minor <= 0 then 'bad_request'
@@ -1279,7 +1326,12 @@ begin
       when b.tr_debtor is distinct from b.line_bank or b.tr_currency is distinct from b.currency then 'transfer_differs'
       when not b.batch_line and b.tr_minor <> b.line_minor then 'transfer_differs'
       when b.kind = 'payout' and (b.run_status is null or b.run_status not in ('approved', 'sent')
-                                  or b.run_transfer is distinct from b.transfer_id) then 'run_not_in_flight' end
+                                  or b.run_transfer is distinct from b.transfer_id) then 'run_not_in_flight'
+      -- review round 7 (S2, verdict new:debit-entry-unsplit-with-our-details-explainable): never from an entry the bank
+      -- kept unsplit holding a detail of ours — by the id its one detail gives (one shown of several: the entry's total)
+      -- nor as a batch line whose details are given but do not add up (payments.debits; COMPLIANCE OQ-84 (h)); a batch
+      -- line the bank sent with no details (a count of 0) keeps the batch rule
+      when coalesce(b.unsplit_ours, 0) > 0 or (not b.batch_line and b.unsplit_ours is not null) then 'batch_partial' end
     when b.kind in ('payout_returned', 'sweep_returned') then case
       when b.amount_minor is not null or b.client_organization_id is not null then 'bad_request'
       when b.link_kind is not null then 'already_linked'
@@ -1297,8 +1349,11 @@ begin
       -- entry's total, not this transfer's return — less than the transfer is never its return with the rest as the
       -- bank's charge (the round-5 verifier's netted entry: our payout's return beside another payout's debit booked
       -- that debit as our bank fee; or a chargeback), nor any amount with several details of ours (the first one's id
-      -- only what the refusals read): only exactly one detail of ours, for this transfer's amount (payments.debits)
-      when b.unsplit_ours is not null and (b.unsplit_ours <> 1 or b.line_minor <> b.tr_minor) then 'return_differs'
+      -- only what the refusals read). Review round 7 (S1, verdict new:unsplit-exact-total-other-details): nor with one
+      -- detail of ours for the transfer's exact amount — the entry's other details (a debtor's credit, netting debits),
+      -- a detail of ours short of the entry or shown alone of several, are not ours to read: never booked
+      -- (payments.debits). A detail of ours that is the whole entry is a line of its own (payments.camt053)
+      when b.unsplit_ours is not null then 'return_differs'
       when b.line_date < b.tr_entry_date then 'return_before_debit' end
     -- the unplanned kinds are ops' (M2c-6b-2: public.book_transfer_line)
     else 'bad_request'
@@ -1696,6 +1751,9 @@ begin
       -- (its pure rule: no_candidate)
       and not coalesce(t.direction = 'credit'
                        and coalesce(t.original_end_to_end_id, t.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+      -- review round 7 (S2): a line of an entry kept unsplit holding a detail of ours is the funds pass's (it takes no
+      -- link: private.post_debit_links)
+      and coalesce(t.unsplit_ours, 0) = 0
       and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id offset 0)
       and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = t.id offset 0)
     union all
@@ -1709,7 +1767,7 @@ begin
                         offset 0) s
     where t.organization_id = p_organization_id and t.direction = 'debit' and t.end_to_end_id is null
       and t.payment_info_id is not null and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
-      and t.kind in ('other_debit', 'batch_unsplit')
+      and t.kind in ('other_debit', 'batch_unsplit') and coalesce(t.unsplit_ours, 0) = 0
       and (p_after_date is null or (t.booking_date, t.id) > (p_after_date, p_after_id))
       and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id offset 0)
       and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = t.id offset 0)
@@ -1847,6 +1905,8 @@ begin
          -- alone the one it may be, as for a lot with no end-to-end id
          coalesce(t.direction = 'credit' and private.names_our_lot(t.bank_account_id, t.payment_info_id), false)
            as our_lot,
+         -- review round 7 (S2): a line of an entry the bank kept unsplit holding a detail of ours, whatever its direction
+         coalesce(t.unsplit_ours, 0) > 0 as unsplit_ours_line,
          case when t.direction = 'credit' and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
               then private.pmt_inf_refund_back(t.bank_account_id, t.payment_info_id) end as lot_refund,
          -- M2c-6b-1: a debit with no end-to-end id carrying the PmtInfId of one of our files (a batch line)
@@ -1900,7 +1960,8 @@ begin
          null::text as why, null::uuid as cash_entry_id
   from pg_temp._debit_link l
   left join lateral (select x.organization_id, x.bank_account_id, x.direction, x.currency, x.amount_minor,
-                            x.booking_date, x.kind, x.end_to_end_id, x.payment_info_id, x.original_end_to_end_id
+                            x.booking_date, x.kind, x.end_to_end_id, x.payment_info_id, x.original_end_to_end_id,
+                            x.unsplit_ours
                      from public.bank_transaction x where x.id = l.bank_transaction_id offset 0) t on true
   left join lateral (select x.decision, x.released_kind from public.bank_duplicate_resolution x
                      where x.bank_transaction_id = l.bank_transaction_id offset 0) dr on true
@@ -1956,6 +2017,13 @@ begin
     -- — the round-5 verifier's n30, a payouts' lot with VIR-X-0030, took an unrelated refund and the explanation; whether
     -- a bank returns our lot's transfer with our PmtInfId but another end-to-end id is unknown (COMPLIANCE OQ-84) — with
     -- the same one exception.
+    -- Review round 7 (S2, verdict new:debit-entry-unsplit-with-our-details-explainable): a line read from a camt.053 entry
+    -- the bank kept unsplit holding a detail of ours (unsplit_ours > 0), whatever its direction and kind, takes no link
+    -- at all, the explanation included, with no exception — the verifier's d01 (our payout's return netted into an
+    -- outgoing debit), d02, d03 (two debits of ours in one debit entry) took « Classer sans comptabiliser », which hid
+    -- our transfers from the funds for good (private.bank_unposted). It waits for ops' booking (M2c-6b-2; COMPLIANCE
+    -- OQ-84 (h)); the funds pass reviews it
+    when d.unsplit_ours_line then 'own_transfer_line'
     when ((coalesce(d.line_e2e ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
            or coalesce(d.line_returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false) or d.our_batch_line)
           and not (d.kind = 'refund' and d.our_batch_line and d.req_handed_out and not d.pmt_inf_cancelled))
@@ -2119,7 +2187,8 @@ $$;
 -- round 5 (Q1): on a credit naming one of our lots with no end-to-end id (private.names_our_transfer), the refund that
 -- lot held alone (private.pmt_inf_refund_back) when the line is a `return` of its amount, nothing else; never a
 -- payment; review round 6 (R2): the same on a credit naming one of our lots on its account (private.names_our_lot)
--- whatever its end-to-end id. Other lines as before. Same settings and grants.
+-- whatever its end-to-end id; review round 7 (S2): nothing on a line of an entry kept unsplit holding a detail of ours.
+-- Other lines as before. Same settings and grants.
 create or replace function public.debit_link_options(p_bank_transaction_id uuid)
 returns jsonb
 language plpgsql
@@ -2141,6 +2210,10 @@ begin
   end if;
   select coalesce(r.released_kind, t.kind) into v_kind
   from (select 1) x left join public.bank_duplicate_resolution r on r.bank_transaction_id = t.id;
+  -- review round 7 (S2): a line of an entry kept unsplit holding a detail of ours takes no link (private.post_debit_links)
+  if coalesce(t.unsplit_ours, 0) > 0 then
+    return jsonb_build_object('payments', '[]'::jsonb, 'refunds', '[]'::jsonb, 'kind', v_kind);
+  end if;
   -- our batch line, read as private.post_debit_links reads it
   v_batch := coalesce(t.direction = 'debit' and t.end_to_end_id is null
                       and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
@@ -2242,7 +2315,10 @@ $$;
 -- « Débits et retours » (redefined from 20261111090000): a batch line of our files is listed « À classer » (the funds
 -- pass's review reasons, M2c-6b-1), never among the fees; each line with its PmtInfId (review money-1: the page offers
 -- no link on our batch lines, as it offers none on a line carrying our RMT/SWP id). Same settings; dropped and created
--- (a column added last).
+-- (a column added last). Review round 7: (S2) « À classer » lists a debit of an entry kept unsplit holding a detail of
+-- ours (the funds pass's review; it takes no link), and each line comes with its unsplit_ours; (S3) with whether a credit
+-- names one of our lots of its account (private.names_our_lot, read here under the servicer's rights: the page never
+-- reads it from the PmtInfId's form), last.
 drop function public.debit_queue(text, integer, integer);
 create function public.debit_queue(p_tab text default 'a-classer', p_offset integer default 0,
                                    p_limit integer default 20)
@@ -2250,7 +2326,8 @@ returns table (bank_transaction_id uuid, statement_id uuid, bank_account_id uuid
                amount_minor text, currency char(3), booking_date date, age_days integer, counterparty_name text,
                counterparty_iban_end text, remittance_text text, end_to_end_id text, original_end_to_end_id text,
                return_reason text, review_reason text, candidates jsonb, decision text, decided_at timestamptz,
-               decided_payment_id uuid, total bigint, held_kind text, payment_info_id text)
+               decided_payment_id uuid, total bigint, held_kind text, payment_info_id text, unsplit_ours smallint,
+               names_our_lot boolean)
 language plpgsql
 security definer
 set search_path = ''
@@ -2331,6 +2408,15 @@ begin
       and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id)
       and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = t.id)
     union all
+    -- review round 7 (S2): a debit of an entry kept unsplit holding a detail of ours, not our batch line (listed above),
+    -- the funds pass reviewed (it takes no link: it waits for ops' booking), by its partial index
+    select t.*, t.kind, null::text, null::jsonb
+    from public.bank_transaction t
+    where t.organization_id = any (v_orgs) and t.unsplit_ours > 0 and t.direction = 'debit' and t.kind = 'batch_unsplit'
+      and not (t.end_to_end_id is null and coalesce(t.payment_info_id, '') ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$')
+      and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = t.id)
+      and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = t.id)
+    union all
     -- an other debit of a pending refund's amount on its bank account: maybe that refund (from the pending requests,
     -- a few, to the lines of their amount); not one booked already (review fix: a fee the job booked stayed listed,
     -- with no action that works)
@@ -2381,7 +2467,9 @@ begin
          v_total,
          -- a held duplicate: how the import read it (the « Libérer » sheet says what it becomes)
          case when t.kind = 'suspected_duplicate' then (select h.kind from private.held_line_kind(t.id) h) end,
-         t.payment_info_id
+         t.payment_info_id, t.unsplit_ours,
+         case when t.direction = 'credit' and t.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$'
+              then private.names_our_lot(t.bank_account_id, t.payment_info_id) else false end
   from (select * from pg_temp._dq x
         order by (case when p_tab = 'traites' then x.created_at end) desc nulls last, x.booking_date, x.id
         offset v_offset limit v_limit) t
@@ -4523,8 +4611,13 @@ begin
   -- return; otherwise by ops, M2c-6b-2's line booking). Released, a payout sent back by the client's bank would credit a
   -- debtor's file with money the debtor never paid, be charged commission and be remitted again.
   -- (review round 4: the predicate as private.names_our_transfer, shared with the import's classifier and the refusals of
-  -- assign_payment, accept_suggestions, the match job and resolve_duplicate)
-  if private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id) then
+  -- assign_payment, accept_suggestions, the match job and resolve_duplicate). Review round 7: (S3, verdict
+  -- new:own-client-credit-naming-our-lot-relay-top-up) nor a credit naming one of our lots of its account
+  -- (private.names_our_lot: a file of that account handed out) whatever its end-to-end id — our outgoing transfer
+  -- coming back, never a debtor's money relayed by us or the client; (S2) nor a line of an entry kept unsplit holding a
+  -- detail of ours (no parser writes one of these kinds: refused all the same)
+  if private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+     or private.names_our_lot(t.bank_account_id, t.payment_info_id) or coalesce(t.unsplit_ours, 0) > 0 then
     raise exception 'own credit release refused: own_transfer_line' using errcode = 'check_violation',
       hint = 'Ce crédit est l''un de nos propres virements qui revient (reversement, quote-part du cabinet, lot de notre '
              'fichier) : il se comptabilise depuis le relevé, automatiquement quand la banque le signale comme un retour, '
@@ -5911,6 +6004,8 @@ begin
      or length(x.entry_ref) not between 1 and 300
      -- review M2c-6b-1 round 6 (R1): the count of an unsplit entry's details of ours, on a camt.053 line of an entry only
      or x.unsplit_ours < 0 or (x.unsplit_ours is not null and (s.format <> 'camt053' or x.batch_entry_ref is null))
+     -- review round 7 (S2): a credit of an entry kept unsplit holding a detail of ours is a return, never a payment
+     or (x.direction = 'credit' and x.unsplit_ours > 0 and x.kind <> 'return')
      -- an entry key is e:<the line's entry reference>#<n>, n from 1
      or (x.dedup_key ~ '^e:' and not coalesce(left(x.dedup_key, length(x.entry_ref) + 3) = 'e:' || x.entry_ref || '#'
                                               and substr(x.dedup_key, length(x.entry_ref) + 4) ~ '^[1-9][0-9]*$', false));

@@ -231,12 +231,27 @@ export function offersOwnBatchRefunds(o: {
   direction: string;
   end_to_end_id?: string | null;
   payment_info_id?: string | null;
+  unsplit_ours?: number | null;
 }): boolean {
   return (
     o.direction === "debit" &&
     !o.end_to_end_id &&
-    OUR_PMT_INF.test(o.payment_info_id ?? "")
+    OUR_PMT_INF.test(o.payment_info_id ?? "") &&
+    !holdsOursUnsplit(o)
   );
+}
+
+/**
+ * Review M2c-6b-1 round 7 (S2, verdict new:debit-entry-unsplit-with-our-details-explainable): a line read from a
+ * camt.053 entry the bank kept unsplit holding a detail of ours (`unsplit_ours` > 0 on the row « À classer » loads,
+ * the parser's count), whatever its direction — the entry's total, not one transaction's (our payout's return netted
+ * into an outgoing debit, our debits in one entry, our payout's debit beside a debtor's credit). It takes no link of
+ * any kind and no explanation (private.post_debit_links, the top-up, the relay: own_transfer_line), is never booked
+ * automatically and waits for the team's booking (M2c-6b-2; COMPLIANCE OQ-84 (h)): « À classer » offers nothing on it
+ * and says so (UNSPLIT_OURS_NOTE). With none of ours (0), the general rules.
+ */
+export function holdsOursUnsplit(o: { unsplit_ours?: number | null }): boolean {
+  return (o.unsplit_ours ?? 0) > 0;
 }
 
 /**
@@ -247,16 +262,11 @@ export function offersOwnBatchRefunds(o: {
  * (« debit link refused: not_a_return »; review M2c-1). Nor our payouts' and sweeps' lines (review M2c-6b-1 money-1:
  * `own_transfer_line`, isOurTransferLine). Review round 5 (Q1): nor a credit naming one of our lots with no end-to-end id
  * (isOurTransferCredit) — its one link, the refund its lot held alone, is offersOwnLotRefundBack's; review round 6
- * (R2): whatever its end-to-end id (namesOurLot).
+ * (R2): whatever its end-to-end id (namesOurLot). Review round 7 (S2): nor a line of an unsplit entry holding ours
+ * (holdsOursUnsplit).
  */
-export function offersPaymentLinks(o: {
-  direction: string;
-  kind: string;
-  end_to_end_id?: string | null;
-  original_end_to_end_id?: string | null;
-  payment_info_id?: string | null;
-}): boolean {
-  if (isOurTransferLine(o) || isOurTransferCredit(o) || namesOurLot(o)) return false;
+export function offersPaymentLinks(o: LineIds): boolean {
+  if (holdsOursUnsplit(o) || isOurTransferLine(o) || isOurTransferCredit(o) || namesOurLot(o)) return false;
   if (o.direction === "debit")
     return (
       o.kind === "return" || o.kind === "refund_out" || o.kind === "other_debit"
@@ -265,13 +275,7 @@ export function offersPaymentLinks(o: {
 }
 
 /** Whether « À classer » reads public.debit_link_options for a line: only for a line it may offer links on. */
-export function readsLinkOptions(o: {
-  direction: string;
-  kind: string;
-  end_to_end_id?: string | null;
-  original_end_to_end_id?: string | null;
-  payment_info_id?: string | null;
-}): boolean {
+export function readsLinkOptions(o: LineIds): boolean {
   return offersPaymentLinks(o) || offersOwnBatchRefunds(o) || offersOwnLotRefundBack(o);
 }
 
@@ -284,7 +288,9 @@ export function readsLinkOptions(o: {
  * (namesOurLot: one that is not ours included).
  */
 export function offersOwnLotRefundBack(o: LineIds): boolean {
-  return o.direction === "credit" && o.kind === "return" && namesOurLot(o) && !isOurTransferLine(o);
+  return (
+    o.direction === "credit" && o.kind === "return" && namesOurLot(o) && !isOurTransferLine(o) && !holdsOursUnsplit(o)
+  );
 }
 
 /**
@@ -304,14 +310,7 @@ export function linkOffers<
   P extends { left_minor: string; named?: boolean },
   R,
 >(
-  row: {
-    direction: string;
-    kind: string;
-    amount_minor: string;
-    end_to_end_id?: string | null;
-    original_end_to_end_id?: string | null;
-    payment_info_id?: string | null;
-  },
+  row: LineIds & { amount_minor: string },
   payments: P[],
   refunds: R[],
 ): { returns: P[]; losses: P[]; refunds: R[] } {
@@ -335,13 +334,20 @@ export function linkOffers<
   };
 }
 
-/** A line's ids as isOurTransferLine reads them (the credit's own end-to-end id, the original one it returns). */
+/**
+ * A line's ids as isOurTransferLine reads them (the credit's own end-to-end id, the original one it returns), and what
+ * the database says of it on the row « À classer » loads (public.debit_queue; review round 7): how many details of
+ * ours the unsplit entry it was read from holds (`unsplit_ours`), and whether a credit names one of our lots of its
+ * account (`names_our_lot`).
+ */
 type LineIds = {
   direction: string;
   kind: string;
   end_to_end_id?: string | null;
   original_end_to_end_id?: string | null;
   payment_info_id?: string | null;
+  unsplit_ours?: number | null;
+  names_our_lot?: boolean | null;
 };
 
 /**
@@ -363,11 +369,14 @@ export function isOurTransferCredit(o: LineIds): boolean {
  * whatever its end-to-end id — our lot, or a transfer of it, coming back, the bank possibly giving it an end-to-end id
  * that is not ours (whether it does is unknown: COMPLIANCE OQ-84). private.post_debit_links refuses on it the explanation
  * and « Remboursement revenu » of any refund but the one its lot held alone (it reads the PmtInfId of a file of the
- * line's account handed out: private.names_our_lot; the page reads the form, and offers only what debit_link_options
- * lists). The relay and the top-up keep round 3's reading (isOurTransferCredit: with no end-to-end id).
+ * line's account handed out: private.names_our_lot), and offers only what debit_link_options lists. Review round 7
+ * (S3, and round 6's minor web edge): the database's word, never the PmtInfId's form — debit_queue's names_our_lot,
+ * computed by private.names_our_lot under the servicer's rights: a TF-shaped id of another account or of no file keeps
+ * the general rules and no lot note. Such an own or a client's credit is neither relayed nor a top-up either
+ * (public.release_own_credit, the top-up rule: own_transfer_line).
  */
 export function namesOurLot(o: LineIds): boolean {
-  return o.direction === "credit" && OUR_PMT_INF.test(o.payment_info_id ?? "");
+  return o.direction === "credit" && o.names_our_lot === true;
 }
 
 /**
@@ -376,10 +385,17 @@ export function namesOurLot(o: LineIds): boolean {
  * as its own or as the original it returns, nor on one naming our PmtInfId without an end-to-end id
  * (isOurTransferCredit) — one of our own transfers coming back that the feed did not flag as a return (a CSV label
  * missing RETURN_RE); private.post_bank_bookings' top_up rule refuses it (`own_transfer_line`), it is booked from the
- * statement (ops in M2c-6b-2).
+ * statement (ops in M2c-6b-2). Review round 7: (S3) nor one naming one of our lots of its account whatever its
+ * end-to-end id (namesOurLot); (S2) nor a line of an unsplit entry holding ours (holdsOursUnsplit).
  */
 export function offersTopUp(o: LineIds): boolean {
-  return o.direction === "credit" && o.kind === "own_transfer_in" && !isOurTransferCredit(o);
+  return (
+    o.direction === "credit" &&
+    o.kind === "own_transfer_in" &&
+    !isOurTransferCredit(o) &&
+    !namesOurLot(o) &&
+    !holdsOursUnsplit(o)
+  );
 }
 
 /**
@@ -388,14 +404,17 @@ export function offersTopUp(o: LineIds): boolean {
  * payment. Review M2c-6b-1 round 3 (M1): nor one carrying our RMT/SWP id, nor one naming our PmtInfId without an
  * end-to-end id (isOurTransferCredit) — our payout, sweep or lot coming back, never a debtor's payment
  * (public.release_own_credit refuses it: `own_transfer_line`). The database checks the rest (unbooked, unlinked, on a
- * dedicated account).
+ * dedicated account). Review round 7 (S3, S2): nor one naming one of our lots of its account (namesOurLot), nor a line
+ * of an unsplit entry holding ours (holdsOursUnsplit).
  */
 export function relayable(o: LineIds & { end_to_end_id: string | null }): boolean {
   return (
     o.direction === "credit" &&
     o.kind === "own_transfer_in" &&
     !/^TOP[0-9A-F]{12}$/.test(o.end_to_end_id ?? "") &&
-    !isOurTransferCredit(o)
+    !isOurTransferCredit(o) &&
+    !namesOurLot(o) &&
+    !holdsOursUnsplit(o)
   );
 }
 
@@ -406,10 +425,17 @@ export function relayable(o: LineIds & { end_to_end_id: string | null }): boolea
  * account). Review M2c-6b-1 round 3 (M1, pre-existing:relay-of-our-returned-transfer): never one carrying our RMT/SWP
  * id, nor one naming our PmtInfId without an end-to-end id (isOurTransferCredit) — the client's payout coming back from
  * its IBAN, unflagged by a CSV feed; relayed, it would credit a debtor's file with money the debtor never paid (and be
- * remitted again). The database refuses it.
+ * remitted again). The database refuses it. Review round 7 (S3, S2): nor one naming one of our lots of its account
+ * (namesOurLot: the client's payout of that lot coming back), nor a line of an unsplit entry holding ours.
  */
 export function clientRelayable(o: LineIds): boolean {
-  return o.direction === "credit" && o.kind === "client_transfer_in" && !isOurTransferCredit(o);
+  return (
+    o.direction === "credit" &&
+    o.kind === "client_transfer_in" &&
+    !isOurTransferCredit(o) &&
+    !namesOurLot(o) &&
+    !holdsOursUnsplit(o)
+  );
 }
 
 /**
@@ -441,6 +467,21 @@ export const OUR_LOT_FOREIGN_E2E_NOTE =
   "Crédit portant la référence de l'un des lots de nos fichiers de virements, avec une référence de bout en bout qui n'est pas la nôtre : c'est peut-être ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne le classez pas sans comptabiliser et ne le rattachez à aucun autre remboursement : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
 
 /**
+ * Review M2c-6b-1 round 7 (S3): what « À classer » says of an own or a client's credit naming one of our lots of its
+ * account with an end-to-end id that is not ours (namesOurLot) — in place of the job's review, which suggests a top-up
+ * or a relay the database refuses (own_transfer_line; COMPLIANCE OQ-84 (g)).
+ */
+export const OUR_LOT_OWN_CREDIT_NOTE =
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements de ce compte, même s'il vient du compte propre ou du compte d'un client : c'est ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement. Ne le classez pas sans comptabiliser : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+
+/**
+ * Review M2c-6b-1 round 7 (S2): what « À classer » says of a line of an unsplit entry holding a detail of ours
+ * (holdsOursUnsplit) — in place of the job's review (return_differs, batch_partial), after a P0 reason if any.
+ */
+export const UNSPLIT_OURS_NOTE =
+  "Ligne d'une opération groupée que la banque ne détaille pas et qui contient l'un de nos virements (reversement ou quote-part du cabinet), son débit ou son retour, à côté d'autres mouvements : son montant est le total de l'opération, rien n'est comptabilisé automatiquement. Elle se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne la classez pas sans comptabiliser et ne la rattachez à aucun paiement ni remboursement : demandez à la banque le détail de l'opération et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+
+/**
  * Review M2c-6b-1 round 5 (Q1): on such a credit read as a return (offersOwnLotRefundBack), the one exception — the
  * refund its lot held alone, which « À classer » then offers (COMPLIANCE OQ-84's default).
  */
@@ -464,15 +505,28 @@ const CREDIT_REVIEW: Record<string, string> = {
  * on a credit. The return of our payout or sweep keeps the funds pass's review, which names it (round 4's N1).
  */
 export function debitReviewText(o: LineIds & { review_reason: string | null }): string | null {
+  // review round 7 (S2): a line of an unsplit entry holding ours — a P0 first, then why nothing is offered
+  if (holdsOursUnsplit(o))
+    return o.review_reason !== null && P0_DEBIT_REVIEWS.has(o.review_reason)
+      ? `${reviewReasonText(o.direction, o.review_reason)} ${UNSPLIT_OURS_NOTE}`
+      : UNSPLIT_OURS_NOTE;
   if (o.direction === "credit" && o.kind !== "return" && isOurTransferLine(o)) return OUR_TRANSFER_CREDIT_NOTE;
   if (isOurTransferCredit(o) && !isOurTransferLine(o))
     return offersOwnLotRefundBack(o) ? `${OUR_LOT_CREDIT_NOTE} ${OUR_LOT_REFUND_BACK_NOTE}` : OUR_LOT_CREDIT_NOTE;
   // review round 6 (R2): a return naming our lot with an end-to-end id that is not ours
   if (offersOwnLotRefundBack(o)) return `${OUR_LOT_FOREIGN_E2E_NOTE} ${OUR_LOT_REFUND_BACK_NOTE}`;
+  // review round 7 (S3): an own or a client's credit naming our lot so, as the database reads it
+  if (namesOurLot(o) && (o.kind === "own_transfer_in" || o.kind === "client_transfer_in"))
+    return OUR_LOT_OWN_CREDIT_NOTE;
   if (!o.review_reason) return null;
-  const credit = o.direction === "credit" ? CREDIT_REVIEW[o.review_reason] : undefined;
+  return reviewReasonText(o.direction, o.review_reason);
+}
+
+/** The job's reason in French, in a credit's words on a credit. */
+function reviewReasonText(direction: string, reason: string): string {
+  const credit = direction === "credit" ? CREDIT_REVIEW[reason] : undefined;
   if (credit) return credit;
-  return DEBIT_REVIEW[o.review_reason] ?? o.review_reason;
+  return DEBIT_REVIEW[reason] ?? reason;
 }
 
 /** The button and sheet title of a relayed debtor payment, by who relays it. */
@@ -500,20 +554,27 @@ export function explainable(o: {
   endToEndId?: string | null;
   originalEndToEndId?: string | null;
   paymentInfoId?: string | null;
+  /** review round 7 (S3): the database's word that a credit names one of our lots of its account (debit_queue) */
+  namesOurLot?: boolean | null;
+  /** review round 7 (S2): the unsplit entry's details of ours (debit_queue's unsplit_ours) */
+  unsplitOurs?: number | null;
 }): boolean {
   // M2c-6b-1 (plan §2.3; the database's own_transfer_line, review money-1): our payout's or sweep's debit (its RMT or
   // SWP id, or a batch line of one of our PmtInfs) and the return of one are booked from the statement, never explained
   // away — nor any line carrying one of our RMT/SWP ids, whichever way (isOurTransferLine reads both ids, round 2) —
   // nor, review round 5 (Q1), a credit naming one of our lots with no end-to-end id (isOurTransferCredit), whatever its
-  // kind, as OUR_LOT_CREDIT_NOTE says — nor, round 6 (R2), with an end-to-end id that is not ours (namesOurLot)
+  // kind, as OUR_LOT_CREDIT_NOTE says — nor, round 6 (R2), with an end-to-end id that is not ours (namesOurLot, the
+  // database's word since round 7) — nor, round 7 (S2), a line of an unsplit entry holding ours, whatever its direction
   const ids = {
     direction: o.direction,
     kind: o.kind,
     end_to_end_id: o.endToEndId,
     original_end_to_end_id: o.originalEndToEndId,
     payment_info_id: o.paymentInfoId,
+    names_our_lot: o.namesOurLot,
+    unsplit_ours: o.unsplitOurs,
   };
-  if (isOurTransferLine(ids) || isOurTransferCredit(ids) || namesOurLot(ids)) return false;
+  if (holdsOursUnsplit(ids) || isOurTransferLine(ids) || isOurTransferCredit(ids) || namesOurLot(ids)) return false;
   if (o.direction !== "debit") return true;
   if (o.kind === "refund_out") return false;
   return !(o.kind === "return" && o.namesPayment);

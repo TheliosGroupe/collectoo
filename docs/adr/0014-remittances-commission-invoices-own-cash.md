@@ -1295,5 +1295,122 @@ scale files apart); the evals unchanged — mapping 167/167 (threshold 0.980), r
 screenshot: the run's image diffs are dates and ids, not committed). `database.types.ts` regenerated
 (`bank_transaction.unsplit_ours`).
 
+**Round 7 (2026-11-17).** The verifiers of round 6 found three gaps that round's rules left (each needing an amount
+coincidence or an unusual bank shape) and a minor web edge. One branch (`m6b1-fix7`), the migration still edited in
+place (each merged function redefined with `CREATE OR REPLACE`, or dropped and created for a new return column,
+restating `SECURITY DEFINER`, its `SET` clauses and its grants); the cancellation after download stays **off**; `033`
+and `034` keep their assertions and TODO markers. Every change narrows what is booked or linked automatically.
+
+- **S1 (verdict new:unsplit-exact-total-other-details) — a line of an entry kept unsplit is never our transfer's
+  return.** Round 6 booked one detail of ours for the transfer's exact amount whatever the entry's other details: the
+  verifier's real imports booked our payout returned with a debtor's 50,00 € in it (u05, u06), with its detail 50,00 €
+  short (u03), with our refund's debit netted in (m04), and from our payout's own DBIT detail beside a debtor's credit
+  (x01, x03: a payout the bank had just debited, set `returned`). The parser stored a single-detail entry with
+  NbOfTxs absent or 1 as a line of its own already, and an entry kept unsplit had a « sole consistent detail » only in
+  name: so the simplest encoding is the parser's. `payments.camt053` gives a detail of ours a line of its own only when
+  it is the whole entry (`_Reader.whole`: the entry's direction, its own Amt absent or the entry's; NbOfTxs absent or 1
+  as before) and keeps the entry unsplit otherwise; a line kept unsplit takes its line ids from its one detail only
+  when that detail is of the entry's direction, and its original id only from a detail of ours of that direction
+  (`alike`), counting every detail of ours (`unsplit_ours`, so every refusal still sees it). The synthetic ground truth
+  agrees (`Entry.adds_up`). Both twins then refuse every such line: `payments.debits._transfer_return` and
+  `private.post_bank_bookings`' payout_returned/sweep_returned re-check, `unsplit_ours` not null → `return_differs`
+  (after the clearer reasons, as before). The brief's two wordings disagree on the verifier's u01 (one detail of ours,
+  exact, but NbOfTxs 2): its rule (« NbOfTxs absent or 1 ») is followed — u01 and u10 are reviewed; « u01 still booked »
+  is the single exact detail with NbOfTxs absent or 1, a line of its own. COMPLIANCE OQ-84 (f) records the default and
+  the residuals that remain. Tests that failed before: worker `test_funds.py::test_a_camt053_detail_of_ours_is_a_line_of_its_own_only_when_it_is_the_whole_entry`
+  (the whole entry with no count or a count of 1; u01; u03 with no count; a lone DBIT detail; x01; x03; m04; a
+  debtor's single detail below its entry, unchanged; a lone CRDT detail of ours and d01 in debit entries; the ground
+  truth's kinds and key prefixes); `test_debit_bookings.py::test_an_unsplit_batch_is_never_our_transfer_s_return`
+  (round 6's `…_is_a_return_only_for_its_one_transfer_s_exact_amount`, narrowed) and the Hypothesis property
+  `::test_an_unsplit_entry_is_never_booked_as_a_return` (round 6's `…_is_booked_only_as_one_transfer_s_exact_return`);
+  the worlds property `::test_a_booking_only_when_every_condition_holds` (no booking from an entry kept unsplit);
+  pgTAP `035` test 138 (`sc_r1_unsplit_return`: one detail of ours for r2's exact amount, and a count of 0 naming r2,
+  now refused `return_differs`; a line of its own exact, and less with its fee, booked); integration
+  `test_debit_bookings_integration.py::test_an_unsplit_entry_holding_our_transfer_is_never_booked_nor_explained` (u05,
+  u06, u03, u01, x01, m04 and d01 through the real import and debit job: no payment, nothing booked, the payout still
+  booked, the other payout and the refund `in_file`, `return_differs` six times and `batch_partial`, no explanation, no
+  option; then the return as the whole of its entry booked) and round 6's
+  `::test_an_unsplit_entry_netting_our_return_is_never_booked_as_a_partial_return` (its last case, one detail shown of
+  two, now reviewed; the whole entry booked).
+- **S2 (verdict new:debit-entry-unsplit-with-our-details-explainable) — a line of an entry kept unsplit holding ours
+  takes no link and is always reviewed.** The verifier's d01 (r2's return netted into an outgoing debit), d02, d03 took
+  « Classer sans comptabiliser », hiding our transfers from the funds for good. On any line with `unsplit_ours` > 0,
+  either direction: `private.post_debit_links` refuses every link kind with no exception (`own_transfer_line`, the
+  explanation included); `public.debit_link_options` lists nothing; `private.post_bank_bookings`' loss and top-up rules
+  refuse it (`own_transfer_line`) and its payout/sweep re-check never books it (`batch_partial`: by the id its one
+  detail gives, or a batch line whose details are given — a batch line with no details, count 0, keeps its rule);
+  `public.release_own_credit` refuses it (no parser writes such a kind: a forged line); the M2b pass never reads it
+  (`private.debit_candidates`); the funds pass does — `private.bank_booking_candidates` gains a branch of its own, by the
+  new partial index `bank_transaction_unsplit_ours_idx` (organization, booking date, id where `unsplit_ours` > 0) — and
+  its twin `payments.debits.decide_line` reviews it (`_own_debit`, `_batch`: `batch_partial` after the P0 and member
+  reasons; any other such line: `return_differs` on a credit, `batch_partial` on a debit), so it never waits without a
+  reason. At import such a credit is a `return` (the parser's reading) and makes no payment: `private.ingest_statement`
+  refuses a stage giving it another kind (`line_invalid`). `assign_payment`, `accept_suggestions`, the match job and
+  `resolve_duplicate` cannot take it (no payment is made of it; a held duplicate is a CSV line, whose count is always
+  null). « À classer » lists such a debit (`public.debit_queue`, a branch for a `batch_unsplit` debit holding ours,
+  not our batch line; each row now returns `unsplit_ours`) and the page offers nothing on it (`holdsOursUnsplit`:
+  `offersPaymentLinks`, `offersOwnBatchRefunds`, `offersOwnLotRefundBack`, `readsLinkOptions`, `offersTopUp`,
+  `relayable`, `clientRelayable` and `explainable` all refuse it) and shows `UNSPLIT_OURS_NOTE`, after a P0 reason's
+  text. COMPLIANCE OQ-84 (h) records the default: an unsplit entry of the bank holding our transfers waits for ops'
+  booking in M2c-6b-2; ops tell support. Tests that failed before: pgTAP `035` test 140 (`sc_s2_unsplit_ours`: d01,
+  d02, d03, d04, x01, a debit return holding ours and a forged own credit refuse the explanation, a refund, a refund
+  come back, a payment's return, a loss, the top-up and the relay; no option; never the M2b pass's, always the funds
+  pass's; d04's payout row refused `batch_partial`, r4 `in_file`; listed « À classer » with their count; an ordinary
+  unsplit batch with no detail of ours still explained) and 141 (`s2_stage`: a credit holding ours staged as an unsplit
+  batch or a debtor's credit refused `line_invalid`; as a return, no payment; a batch with none of ours, one payment);
+  worker `test_debit_bookings.py::test_a_line_holding_our_transfer_unsplit_is_reviewed_and_never_booked` and the
+  Hypothesis property `::test_a_line_holding_ours_unsplit_is_always_reviewed_never_booked` (the worlds now draw own-id
+  debits and batch lines of entries kept unsplit too; the batch guard's search allowed 8,000 examples, as its rate of
+  finding a booked batch line fell); vitest « M2c-6b-1 review round 7 … (S2, S3) », first case.
+- **S3 (verdict new:own-client-credit-naming-our-lot-relay-top-up, and round 6's minor web edge) — a credit naming our
+  lot is never relayed nor a top-up.** A top-up's lot would be a file of the own account: a credit on the dedicated
+  account naming a handed-out file of that same account (`private.names_our_lot`, true) is our outgoing transfer coming
+  back, whatever its end-to-end id. `public.release_own_credit` (the servicer's relay and the client's) and
+  `private.post_bank_bookings`' top-up rule (`link_debit` « own_credit », and the job's row) refuse it
+  `own_transfer_line`; the job's twin reads `names_our_lot` from `private.bank_booking_candidates` (a new last column)
+  and reviews such an own credit `top_up_differs` (it carries a TOP id) or `top_up_not_found`, never booking it.
+  Round 3's `sc_top_up_own_pmt` « with an end-to-end id not ours » case is inverted after confirming its PmtInfId is r1's
+  payouts lot in a handed-out file of the dedicated account (`client_funds`; the case now asserts it). The page no
+  longer decides « our lot » from the id's form: `public.debit_queue` returns `names_our_lot` (`private.names_our_lot`,
+  computed in that security-definer function under the servicer's rights — another servicer's staff read none of these
+  lines), `namesOurLot` reads it, `offersTopUp`, `relayable` and `clientRelayable` refuse it, and « À classer » shows
+  `OUR_LOT_OWN_CREDIT_NOTE` on an own or a client's credit naming our lot; a TF-shaped id of another account or of no
+  file keeps the general rules and no lot note. Rounds 5 and 6's vitest rows carry the database's flag; round 6's
+  relay and top-up assertions are inverted, as S3 decides. COMPLIANCE OQ-84 (g) updated. Tests that failed before:
+  pgTAP `035` test 125 (`sc_top_up_own_pmt`, inverted) and 142 (`sc_s3_lot_relay_top_up`: an own and a client's credit
+  naming r6's handed-out payouts lot refuse the relay, ops' top-up and the job's; a TF-shaped id of no file, and r6's
+  lot named on another account of the servicer, keep the general rules; `debit_queue` says which, to its servicer only;
+  `private.names_our_lot` not callable by `authenticated`; the funds pass's candidates carry it); worker
+  `test_debit_bookings.py::test_an_own_credit_naming_our_lot_is_never_a_top_up`; integration
+  `::test_an_own_credit_naming_our_lot_is_never_a_top_up_nor_relayed` (a credit from the own account carrying a
+  pending top-up's TOP id, for its amount, with the downloaded file's payouts lot: reviewed `top_up_differs`, nothing
+  booked, the order `ordered`, relay and ops' top-up refused; the same credit without the lot booked as the top-up);
+  vitest round-7 second case.
+
+Mutants, each killed (SQL redefining one function after `035`'s `begin`, run through `psql` in one transaction on a fresh
+`supabase db reset`, the unmutated copy passing all 142; worker and web each in a scratch copy): SQL 19 of 19 —
+`post_bank_bookings`' return rule back to round 6's, removed, or for a count above 0 only (138 each); its payout/sweep
+rule removed, its loss rule's or its top-up rule's unsplit arm removed (140 each), its top-up rule's lot arm removed (125,
+142); `post_debit_links`' unsplit rule removed or on credits only (140); `debit_link_options`' unsplit return removed
+(140); `debit_candidates`' exclusion removed (140); `bank_booking_candidates`' new branch emptied (140) or its
+`names_our_lot` always false (142); `ingest_statement`'s new check removed (141); `release_own_credit`'s lot arm (142) or
+unsplit arm (140) removed; `debit_queue`'s new branch emptied (140), its `names_our_lot` by the form (142), its
+`unsplit_ours` null (140). Worker 15 of 15 — `_transfer_return`'s rule back to round 6's or removed (the example; the
+first also through the integration case), `_own_debit`'s, `_batch`'s and `decide_line`'s unsplit rules and its lot rule
+removed (the examples), the loader dropping `names_our_lot` (the S3 integration case: the job's top-up refused,
+`changed`), the parser's whole-entry test off, its Amt or its direction ignored, its single detail taken whatever its
+direction, its original from any direction (the parser test; the last also through the integration case), the ground
+truth left as round 6's (the parser test's key prefixes). Web 12 of 12 — `holdsOursUnsplit` never true; it removed from
+`offersPaymentLinks`, `offersOwnBatchRefunds` or `explainable`; no unsplit note; the P0 text not first; `namesOurLot` by
+the form; it removed from `offersTopUp`, `relayable` or `clientRelayable`; no own-credit lot note; `explainable` blind
+to the row's flag.
+
+Suites on the final code, after `supabase db reset`: pgTAP 35 files, 2,502 tests (`034`'s TODO markers kept, 16 TODO
+passed); the worker's ruff, format and mypy (167 files), 1,000 unit tests (5 xfailed) and 181 integration tests (the
+scale files apart); the evals unchanged — mapping 167/167 (threshold 0.980), reconciliation 0.9600 automatic
+(95,997/100,000), 0 wrong, 0 policy violations; the web's lint, types and 330 vitest tests; the E2E's 54 tests (no new
+screenshot: the run's image diffs are dates, ages and row order, not committed). `database.types.ts` regenerated
+(`debit_queue`'s `unsplit_ours` and `names_our_lot`).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

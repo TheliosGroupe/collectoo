@@ -86,7 +86,12 @@ class Entry:
         if self.batch_count and self.batch_count != len(self.txs):
             return False
         if len(self.txs) == 1:  # one transaction: the booked amount
-            return True
+            # review M2c-6b-1 round 7 (S1): unless it is ours and its own amount is not the entry's
+            # (the parser keeps that entry unsplit)
+            one = self.txs[0]
+            return one.amount_minor in (None, self.amount_minor) or not names_our_transfer(
+                one.end_to_end_id, None, None
+            )
         amounts = [t.amount_minor for t in self.txs]
         return (
             None not in amounts

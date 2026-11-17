@@ -27,6 +27,8 @@ from collectoo_worker.payments.debits import (
     RETURN_BEFORE_DEBIT,
     RETURN_DIFFERS,
     RUN_NOT_IN_FLIGHT,
+    TOP_UP_DIFFERS,
+    TOP_UP_NOT_FOUND,
     TRANSFER_DEBITED_TWICE,
     TRANSFER_DIFFERS,
     TRANSFER_NOT_HANDED_OUT,
@@ -90,18 +92,42 @@ def fact(  # noqa: PLR0913 - a transfer's facts
 
 
 def debit(
-    amount: int, *facts: TransferFact, e2e: str | None = "RMT0123456789AB", line: str = "L1"
+    amount: int,
+    *facts: TransferFact,
+    e2e: str | None = "RMT0123456789AB",
+    line: str = "L1",
+    unsplit_ours: int | None = None,
 ) -> FundsLine:
     return FundsLine(
-        line, "transfer_out", "debit", BANK, amount, DAY, end_to_end_id=e2e, facts=tuple(facts)
+        line,
+        "batch_unsplit" if unsplit_ours is not None else "transfer_out",
+        "debit",
+        BANK,
+        amount,
+        DAY,
+        end_to_end_id=e2e,
+        unsplit_ours=unsplit_ours,
+        facts=tuple(facts),
     )
 
 
 def batch(
-    amount: int, *members: TransferFact, kind: str = "batch_unsplit", line: str = "B1"
+    amount: int,
+    *members: TransferFact,
+    kind: str = "batch_unsplit",
+    line: str = "B1",
+    unsplit_ours: int | None = None,
 ) -> FundsLine:
     return FundsLine(
-        line, kind, "debit", BANK, amount, DAY, payment_info_id=PMT, facts=tuple(members)
+        line,
+        kind,
+        "debit",
+        BANK,
+        amount,
+        DAY,
+        payment_info_id=PMT,
+        unsplit_ours=unsplit_ours,
+        facts=tuple(members),
     )
 
 
@@ -274,29 +300,94 @@ def test_a_return_dated_before_its_debit_is_never_booked() -> None:
     assert reason(early) == RETURN_BEFORE_DEBIT
 
 
-def test_an_unsplit_batch_is_a_return_only_for_its_one_transfer_s_exact_amount() -> None:
-    """Review round 6 (R1): a line read from a camt.053 batch kept unsplit carries the batch's
-    total, not one transaction's: it is booked as our transfer's return only when exactly one of
-    its details is ours (`unsplit_ours` 1) and its amount is that transfer's exactly — never less
-    with the rest as the bank's charge (the round-5 verifier's netted entry: our payout's return
-    and another debit in one entry), never with several of ours (the first id is only what the
-    refusals read), whatever the amount. A line of its own (None) keeps the charge rule."""
+def test_an_unsplit_batch_is_never_our_transfer_s_return() -> None:
+    """Review round 6 (R1), narrowed by round 7 (S1, verdict new:unsplit-exact-total-other-details):
+    a line read from a camt.053 entry kept unsplit carries the entry's total, not one
+    transaction's — whatever its count of details of ours and its amount, it is never booked as our
+    transfer's return: `return_differs`. Round 6 still booked exactly one detail of ours for the
+    transfer's exact amount, and the verifier booked a debtor's 50,00 € (u05, u06) or a detail 50,00
+    € short (u03) into our return that way. The parser gives a detail that is the whole entry a line
+    of its own (payments.camt053), which keeps the rules: the transfer's amount, or less with the
+    rest as the bank's charge."""
     booked = fact("T1", 419840, status="booked", debit_booked=True)
     netted = back(419840 - 32800, booked, unsplit_ours=1)  # our return + another payout's debit
     assert reason(netted) == RETURN_DIFFERS
     assert reason(back(419840 - 300000, booked, unsplit_ours=1)) == RETURN_DIFFERS  # a chargeback
     assert reason(back(419840 + 5000, booked, unsplit_ours=1)) == RETURN_DIFFERS  # a debtor's too
-    assert decide_line(back(419840, booked, unsplit_ours=1)) == [
-        Booking("R1", "payout_returned", "T1")
-    ]
+    assert reason(back(419840, booked, unsplit_ours=1)) == RETURN_DIFFERS  # u05, u06, u03, u01
     assert reason(back(419840, booked, unsplit_ours=2)) == RETURN_DIFFERS  # several of ours
     assert reason(back(419840, booked, unsplit_ours=0)) == RETURN_DIFFERS
+    assert decide_line(back(419840, booked)) == [Booking("R1", "payout_returned", "T1")]
     assert decide_line(back(419840 - 150, booked)) == [Booking("R1", "payout_returned", "T1")]
     sweep = fact("S1", 12000, kind="sweep", status="booked", debit_booked=True)
     assert reason(back(11000, sweep, orig="SWP0123456789AB", unsplit_ours=1)) == RETURN_DIFFERS
-    assert decide_line(back(12000, sweep, orig="SWP0123456789AB", unsplit_ours=1)) == [
+    assert reason(back(12000, sweep, orig="SWP0123456789AB", unsplit_ours=1)) == RETURN_DIFFERS
+    assert decide_line(back(12000, sweep, orig="SWP0123456789AB")) == [
         Booking("R1", "sweep_returned", "S1")
     ]
+    # the clearer reasons first, as before: not booked yet, or returned already
+    assert reason(back(419840, fact("T1", 419840), unsplit_ours=1)) == RETURN_BEFORE_DEBIT
+
+
+def test_a_line_holding_our_transfer_unsplit_is_reviewed_and_never_booked() -> None:
+    """Review round 7 (S2, verdict new:debit-entry-unsplit-with-our-details-explainable): a line of
+    a camt.053 entry the bank kept unsplit holding a detail of ours (`unsplit_ours` > 0), whatever
+    its direction, is never booked automatically and always reviewed — it waits for ops' booking
+    (M2c-6b-2; COMPLIANCE OQ-84). The P0 reasons keep their place: a cancelled transfer's id first.
+    A debit by the id its one detail gives (d04), a batch line of our lot whose details are given
+    but do not add up: `batch_partial`; a debit holding ours with no id (d01, d02, d03), a debit
+    return holding ours: `batch_partial`; a credit whose only detail of ours is of the other
+    direction (x01: no id of ours kept): `return_differs`. With no detail of ours (0), a batch line
+    of our lot keeps its rules (the bank sent no details: booked), and a line of its own too."""
+    t = fact("T1", 32800)
+    assert reason(debit(32800, t, unsplit_ours=1)) == BATCH_PARTIAL  # d04
+    assert decide_line(debit(32800, t)) == [Booking("L1", "payout", "T1")]
+    gone = fact("T1", 32800, status="cancelled")
+    assert reason(debit(32800, gone, unsplit_ours=1)) == CANCELLED_TRANSFER_DEBITED
+    a, b = fact("T1", 82000, role="member"), fact("T2", 50000, role="member")
+    assert reason(batch(132000, a, b, unsplit_ours=2)) == BATCH_PARTIAL
+    assert decide_line(batch(132000, a, b, unsplit_ours=0)) == [
+        Booking("B1", "payout", "T1"),
+        Booking("B1", "payout", "T2"),
+    ]
+    assert reason(batch(132000, replace(a, status="cancelled"), b, unsplit_ours=2)) == (
+        CANCELLED_TRANSFER_DEBITED
+    )
+    for amount, kind, ours in ((80160, "batch_unsplit", 1), (61800, "batch_unsplit", 2),
+                               (4000, "return", 1)):  # fmt: skip
+        line = FundsLine("D1", kind, "debit", BANK, amount, DAY, unsplit_ours=ours)
+        assert reason(line) == BATCH_PARTIAL
+        assert decide_line(replace(line, unsplit_ours=0)) == []  # not ours: ops classify it
+    x01 = FundsLine("X1", "return", "credit", BANK, 50000, DAY, unsplit_ours=1)
+    assert reason(x01) == RETURN_DIFFERS
+    assert decide_line(replace(x01, unsplit_ours=0)) == []  # (the M2b pass's)
+
+
+def test_an_own_credit_naming_our_lot_is_never_a_top_up() -> None:
+    """Review round 7 (S3, verdict new:own-client-credit-naming-our-lot-relay-top-up): a credit
+    from our own account naming a handed-out lot of its own account (`names_our_lot`, read by
+    private.bank_booking_candidates) is our outgoing transfer coming back, whatever its end-to-end
+    id — even one carrying the TOP id of a pending top-up of its amount: never booked as the top-up
+    (the SQL re-check refuses it, own_transfer_line), reviewed. A top-up's lot would be a file of
+    the own account, never of this dedicated one."""
+    line = FundsLine(
+        "C1",
+        "own_transfer_in",
+        "credit",
+        BANK,
+        5000,
+        DAY,
+        transfer_id="TOP1",
+        transfer_status="ordered",
+        transfer_amount_minor=5000,
+        transfer_creditor=BANK,
+        end_to_end_id="TOP0123456789AB",
+        payment_info_id=PMT,
+    )
+    assert decide_line(line) == [Booking("C1", "top_up", "TOP1")]
+    assert reason(replace(line, names_our_lot=True)) == TOP_UP_DIFFERS
+    no_order = replace(line, transfer_id=None, end_to_end_id="VIR-CABINET-1", names_our_lot=True)
+    assert reason(no_order) == TOP_UP_NOT_FOUND
 
 
 # -- a pass ----------------------------------------------------------------------------------
@@ -370,9 +461,13 @@ def worlds(draw: st.DrawFn) -> list[FundsLine]:
         shape = draw(st.sampled_from(["own", "batch", "return"]))
         t = draw(st.sampled_from(transfers))
         amount = draw(st.sampled_from([t.amount_minor, t.amount_minor - 1, *AMOUNTS]))
+        # review round 7 (S2): a line of its own, or of an entry kept unsplit with 0, 1 or 2 of its
+        # details ours
+        unsplit = draw(st.sampled_from([None, None, 0, 1, 1, 2]))
         if shape == "own":
             e2e = ("RMT" if t.kind == "payout" else "SWP") + "0123456789AB"
-            lines.append(debit(amount, t, e2e=e2e, line=f"L{k}"))
+            ours = None if unsplit is None else max(unsplit, 1)  # its one detail is ours
+            lines.append(debit(amount, t, e2e=e2e, line=f"L{k}", unsplit_ours=ours))
         elif shape == "batch":
             members = draw(
                 st.lists(
@@ -399,13 +494,13 @@ def worlds(draw: st.DrawFn) -> list[FundsLine]:
                         for m in members
                     ),
                     line=f"L{k}",
+                    # (a batch line of an entry kept unsplit holding ours less often: the guard
+                    # below must still find a booked batch line)
+                    unsplit_ours=None if unsplit == 1 else unsplit,
                 )
             )
         elif t.kind in ("payout", "sweep"):
             orig = ("RMT" if t.kind == "payout" else "SWP") + "0123456789AB"
-            # review round 6 (R1): a line of its own, or an entry kept unsplit with 0, 1 or 2 of
-            # its details ours
-            unsplit = draw(st.sampled_from([None, None, 0, 1, 1, 2]))
             lines.append(back(amount, t, orig=orig, line=f"L{k}", unsplit_ours=unsplit))
         day = DAY + timedelta(days=draw(st.integers(0, 2)))
         if lines:
@@ -437,6 +532,8 @@ def test_a_booking_only_when_every_condition_holds(lines: list[FundsLine]) -> No
                 assert f.run_status in ("approved", "sent") and f.run_transfer_id == f.id
             assert b.transfer_id not in debited  # booked once
             debited.add(f.id)
+            # S2: never from an entry kept unsplit holding a detail of ours
+            assert not line.unsplit_ours
             if line.end_to_end_id is not None:
                 assert f.role == "own" and f.amount_minor == line.amount_minor
             else:  # a batch line: exactly its in_file members, one kind, adding up, none cancelled
@@ -449,8 +546,7 @@ def test_a_booking_only_when_every_condition_holds(lines: list[FundsLine]) -> No
             assert b.kind == f"{f.kind}_returned" and f.status == "booked" and f.debit_booked
             assert line.amount_minor <= f.amount_minor and f.id not in returned
             assert f.debit_date is None or line.booking_date >= f.debit_date
-            if line.unsplit_ours is not None:  # R1: one of ours, its exact amount
-                assert line.unsplit_ours == 1 and line.amount_minor == f.amount_minor
+            assert line.unsplit_ours is None  # R1, S1: a line of its own only
             returned.add(f.id)
 
 
@@ -488,20 +584,38 @@ def test_the_decisions_do_not_depend_on_the_lines_order(
     st.one_of(st.none(), st.integers(0, 4)),
     st.sampled_from(["payout", "sweep"]),
 )
-def test_an_unsplit_entry_is_booked_only_as_one_transfer_s_exact_return(
+def test_an_unsplit_entry_is_never_booked_as_a_return(
     amount: int, delta: int, unsplit: int | None, kind: str
 ) -> None:
-    """Review round 6 (R1) as a property: a return of our booked transfer is booked from a line of
-    its own when no more than the transfer (the rest the bank's charge), and from a line of an
-    entry kept unsplit only with exactly one detail of ours and the transfer's exact amount —
-    otherwise `return_differs`, nothing booked."""
+    """Review round 6 (R1) as a property, narrowed by round 7 (S1): a return of our booked transfer
+    is booked from a line of its own when no more than the transfer (the rest the bank's charge),
+    and never from a line of an entry kept unsplit, whatever its count and amount —
+    `return_differs`, nothing booked."""
     f = fact("T1", amount, kind=kind, status="booked", debit_booked=True)
     orig = ("RMT" if kind == "payout" else "SWP") + "0123456789AB"
     line_amount = max(1, amount + delta)
     (out,) = decide_line(back(line_amount, f, orig=orig, unsplit_ours=unsplit))
-    want = line_amount <= amount if unsplit is None else unsplit == 1 and line_amount == amount
+    want = unsplit is None and line_amount <= amount
     assert out.booked == want
     assert out.booked or out.review_reason == RETURN_DIFFERS
+
+
+@settings(max_examples=400)
+@given(worlds())
+def test_a_line_holding_ours_unsplit_is_always_reviewed_never_booked(
+    lines: list[FundsLine],
+) -> None:
+    """Review round 7 (S2) as a property of a pass: a line of an entry kept unsplit holding a detail
+    of ours (or, a return, any line of an entry kept unsplit) never gets a booking and always gets
+    a review — or waits for the next pass when its transfer's debit is booked by this one."""
+    out = decide_bookings(lines)
+    later = set(deferred_returns(lines, out))
+    for line in lines:
+        if line.unsplit_ours or (line.direction == "credit" and line.unsplit_ours is not None):
+            mine = [b for b in out if b.line_id == line.id]
+            assert all(not b.booked for b in mine)
+            assert len(mine) == 1 or (not mine and line.id in later)
+            assert not mine or mine[0].review_reason in BOOKING_REVIEW_REASONS
 
 
 @given(st.lists(st.integers(1, 60), max_size=7), st.integers(0, 150))
@@ -521,7 +635,8 @@ def _booked_batch(lines: list[FundsLine]) -> bool:
 def test_the_worlds_book_batch_lines_and_reach_every_review() -> None:
     """Review T2: the generator must reach the batch rules (a booked batch line), or the
     properties check nothing of them; and every reason a transfer line can be reviewed for."""
-    world = find(worlds(), _booked_batch, settings=settings(max_examples=2000, database=None))
+    # (review round 7: more examples allowed — the worlds draw lines of unsplit entries too)
+    world = find(worlds(), _booked_batch, settings=settings(max_examples=8000, database=None))
     assert _booked_batch(world)
     seen: set[str] = set()
 

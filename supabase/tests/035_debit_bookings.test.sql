@@ -42,10 +42,13 @@
 -- Review round 6: a line of a camt.053 entry kept unsplit is our transfer's return only with exactly one detail of ours
 -- and its exact amount (the import keeps the parser's count, unsplit_ours); a credit naming our lot with an end-to-end id
 -- that is not ours takes no explanation and, as « Remboursement revenu », only the refund its lot held alone.
+-- Review round 7: a line of an entry kept unsplit is never our transfer's return (S1); holding a detail of ours, it takes
+-- no link of any kind, is never the M2b pass's, never booked, listed « À classer » (S2); a credit naming a handed-out lot
+-- of its account is neither relayed nor a top-up, and debit_queue says so to its servicer (S3).
 -- (The batch rule's linear plan: test_debit_bookings_batch_rules_integration.py.)
 -- Cancellation after download stays off (033 and 034 unchanged); some scenarios switch it on in their own subtransaction.
 begin;
-select plan(139);
+select plan(142);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -2694,14 +2697,30 @@ begin
     'job', (select pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('64', 1), 'top_up'))) ->> 'top_ups'),
     'job_why', pg_temp.skipped(pg_temp.ln('64', 1)),
     'booked', pg_temp.bookings(pg_temp.ln('64', 1)),
-    'with_e2e', pg_temp.link('top-pmt-0002', pg_temp.ln('64', 2), 'own_credit', null, null, null),
+    -- review round 7 (S3): the lot named is r1's payouts PmtInf, in a file of the line's own account (the dedicated
+    -- one, not the own account a top-up is ordered from) handed out
+    'lot', (select jsonb_build_object('account', a.purpose, 'handed_out', f.download_count > 0
+                                      and f.status in ('downloaded', 'sent'),
+                                      'names_our_lot', private.names_our_lot(t.bank_account_id, t.payment_info_id))
+            from public.bank_transaction t
+            join public.transfer_file_item i on i.pmt_inf_id = t.payment_info_id
+            join public.transfer_file f on f.id = i.file_id and f.debtor_bank_account_id = t.bank_account_id
+            join public.bank_account a on a.id = f.debtor_bank_account_id
+            where t.id = pg_temp.ln('64', 2) limit 1),
+    'with_e2e', pg_temp.refusal(pg_temp.attempt(format(
+                  $q$ select pg_temp.link('top-pmt-0002', %L, 'own_credit', null, null, null) $q$, pg_temp.ln('64', 2)))),
+    'with_e2e_job', (select pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('64', 2), 'top_up'))) ->> 'top_ups'),
+    'with_e2e_job_why', pg_temp.skipped(pg_temp.ln('64', 2)),
     'with_e2e_booked', pg_temp.bookings(pg_temp.ln('64', 2)));
 end $$;
 select is(pg_temp.isolated('sc_top_up_own_pmt'),
           '{"ops": "bank booking refused: own_transfer_line", "job": "0", "job_why": "own_transfer_line", "booked": [],
-            "with_e2e": "own_credit", "with_e2e_booked": ["1 top_up 5000"]}'::jsonb,
-  'M1/M2: an own credit naming our PmtInfId without an end-to-end id is never a top-up (ops or job: own_transfer_line), '
-  'as it is never relayed; with an end-to-end id not ours it still is one');
+            "lot": {"account": "client_funds", "handed_out": true, "names_our_lot": true},
+            "with_e2e": "bank booking refused: own_transfer_line", "with_e2e_job": "0",
+            "with_e2e_job_why": "own_transfer_line", "with_e2e_booked": []}'::jsonb,
+  'M1/M2, narrowed by round 7 (S3): an own credit naming our PmtInfId without an end-to-end id is never a top-up (ops '
+  'or job: own_transfer_line), as it is never relayed; nor with an end-to-end id not ours, its lot being a handed-out '
+  'file of this dedicated account (our payouts coming back, never a top-up)');
 
 -- Integration of round 3 (M3; computed in section 2, before r6 is settled): the settlements posted p_chunk runs per
 -- ledger_post_set call post what post_run_settlement posts run by run, in either order; no chunk below 1
@@ -3071,19 +3090,24 @@ begin
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840 - 300000, 'orig', v_e2e, 'unsplit', 1),
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', v_e2e, 'unsplit', 2),
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840 - 150, 'orig', v_e2e),
-    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', v_e2e, 'unsplit', 1)));
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', v_e2e, 'unsplit', 1),
+    -- review round 7 (S1): a count of 0 naming r2 all the same (no parser writes it), and a line of its own, exact
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', v_e2e, 'unsplit', 0),
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', v_e2e)));
   return jsonb_build_object(
     'read', (select jsonb_agg(c.unsplit_ours order by c.line_id)
              from private.bank_booking_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100000) c
-             where c.line_id in (select pg_temp.ln('b2', k) from generate_series(1, 5) k)),
+             where c.line_id in (select pg_temp.ln('b2', k) from generate_series(1, 7) k)),
     'netted', pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 1)))::jsonb,
     'chargeback', pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 2)))::jsonb,
     'several_exact', pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 3)))::jsonb,
     'own_partial', pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 4)))::jsonb,
-    'one_exact', pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 5)))::jsonb);
+    'one_exact', pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 5)))::jsonb,
+    'zero_exact', pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 6)))::jsonb,
+    'own_exact', pg_temp.attempt(format('select pg_temp.r1_book(%L)::text', pg_temp.ln('b2', 7)))::jsonb);
 end $$;
 select is(pg_temp.isolated('sc_r1_unsplit_return'),
-          '{"read": [2, 1, 2, null, 1],
+          '{"read": [2, 1, 2, null, 1, 0, null],
             "netted": {"why": "return_differs", "review": "changed:return_differs", "bookings": [], "r2": "booked",
                        "r4": "in_file"},
             "chargeback": {"why": "return_differs", "review": "changed:return_differs", "bookings": [], "r2": "booked",
@@ -3092,11 +3116,15 @@ select is(pg_temp.isolated('sc_r1_unsplit_return'),
                               "r2": "booked", "r4": "in_file"},
             "own_partial": {"why": null, "review": null, "bookings": ["1 payout_returned 419840", "2 fee 150"],
                             "r2": "returned", "r4": "in_file"},
-            "one_exact": {"why": null, "review": null, "bookings": ["1 payout_returned 419840"], "r2": "returned",
+            "one_exact": {"why": "return_differs", "review": "changed:return_differs", "bookings": [],
+                          "r2": "booked", "r4": "in_file"},
+            "zero_exact": {"why": "return_differs", "review": "changed:return_differs", "bookings": [],
+                           "r2": "booked", "r4": "in_file"},
+            "own_exact": {"why": null, "review": null, "bookings": ["1 payout_returned 419840"], "r2": "returned",
                           "r4": "in_file"}}'::jsonb,
-  'R1: a line of an entry kept unsplit is our transfer''s return only with one detail of ours and its exact amount; '
-  'netted (our other payout''s debit, a chargeback) or several of ours: refused return_differs, nothing booked, r4 '
-  'untouched; a line of its own less the charges still books the fee');
+  'R1, narrowed by round 7 (S1): a line of an entry kept unsplit is never our transfer''s return, whatever its count and '
+  'amount (netted, a chargeback, several of ours, one of ours for the exact amount): refused return_differs, nothing '
+  'booked, r4 untouched; a line of its own is (exact, or less the charges with the fee)');
 -- the count is the parser's (staged with the line, kept by private.ingest_statement), recorded only on a camt.053 line
 -- of an entry (batch_entry_ref), never negative
 create or replace function pg_temp.r1_stage(p_n integer, p_format text, p_unsplit smallint, p_ref text)
@@ -3130,6 +3158,218 @@ select is(jsonb_build_array(
           '["2", "null", "line_invalid", "line_invalid", "line_invalid"]'::jsonb,
   'R1: the import keeps the parser''s count of an unsplit entry''s details of ours; only on a camt.053 line of an entry, '
   'never negative');
+
+-- 15. Review round 7 ------------------------------------------------------------------------------------------------------
+-- S2 (verdict new:debit-entry-unsplit-with-our-details-explainable): a line read from a camt.053 entry the bank kept
+-- unsplit holding a detail of ours (unsplit_ours > 0), whatever its direction, takes no link of any kind — the
+-- explanation, a payment's return, its loss, a refund, a refund come back, a top-up or a relay included
+-- (own_transfer_line); debit_link_options lists nothing; the M2b pass never reads it and the funds pass does (it reviews
+-- it); the re-check never books it (a payout by the id its one detail gives: batch_partial); « À classer » lists it. The
+-- verifier's d01 (r2's return netted into an outgoing debit), d02 (r4's debit netted with a debtor's credit), d03 (two
+-- debits of ours), d04 (r4's debit, one detail shown of two), x01 (a credit holding our payout's debit detail beside a
+-- debtor's credit: no id of ours kept, counted), a debit return holding ours; an ordinary unsplit batch (no detail of
+-- ours) keeps the general rules
+create or replace function pg_temp.s2_loss(p_line uuid, p_amount bigint) returns text language plpgsql as $$
+begin
+  perform private.bank_booking_begin();
+  insert into pg_temp._bank_booking (ord, bank_transaction_id, kind, amount_minor, method, decided_by, reason)
+  values (1, p_line, 'loss', p_amount, 'ops', '10000000-0000-0000-0000-000000000001', 'motif de test');
+  return (private.post_bank_bookings('00000000-0000-0000-0000-0000000000aa', true) ->> 'losses');
+end $$;
+-- « À classer » as user p_user, every page: the rows of these lines
+create or replace function pg_temp.queued(p_user text, p_lines uuid[]) returns jsonb language plpgsql as $$
+declare v jsonb := '[]'; k integer := 0; r jsonb; n integer;
+begin
+  perform pg_temp.as_user(p_user);
+  set local role authenticated;
+  loop
+    select coalesce(jsonb_agg(to_jsonb(q)), '[]'), count(*) into r, n from public.debit_queue('a-classer', k, 100) q;
+    v := v || coalesce((select jsonb_agg(x) from jsonb_array_elements(r) x
+                        where (x ->> 'bank_transaction_id')::uuid = any (p_lines)), '[]');
+    exit when n < 100;
+    k := k + 100;
+  end loop;
+  reset role;
+  return v;
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+create or replace function pg_temp.sc_s2_unsplit_ours() returns jsonb language plpgsql as $$
+declare
+  v_q1 uuid := (select (v ->> 'refund_request_id')::uuid from j where k = 'q1');
+  v_r4 text := pg_temp.e2e(pg_temp.trid('r4'));
+  v_lines uuid[];
+begin
+  perform pg_temp.stmt('c2', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('kind', 'batch_unsplit', 'amount', 80160, 'unsplit', 1),                       -- d01
+    jsonb_build_object('kind', 'batch_unsplit', 'amount', 27800, 'unsplit', 1),                       -- d02
+    jsonb_build_object('kind', 'batch_unsplit', 'amount', 61800, 'unsplit', 2),                       -- d03
+    jsonb_build_object('kind', 'batch_unsplit', 'amount', 32800, 'e2e', v_r4, 'unsplit', 1),          -- d04
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 50000, 'unsplit', 1),             -- x01
+    jsonb_build_object('kind', 'batch_unsplit', 'amount', 3000, 'unsplit', 0),                        -- not ours
+    jsonb_build_object('kind', 'return', 'amount', 4000, 'unsplit', 1),                               -- a debit return
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 1000, 'unsplit', 1,      -- (forged: no
+                       'iban', 'FR7610107001011234567890129')));                                     -- parser writes it)
+  v_lines := array(select pg_temp.ln('c2', k) from generate_series(1, 8) k);
+  return jsonb_build_object(
+    'explained', (select jsonb_agg(pg_temp.refusal(pg_temp.attempt(format(
+                    'select pg_temp.link(%L, %L, %L, null, null, null)', 's2-explain-' || k, pg_temp.ln('c2', k),
+                    'explained'))) order by k) from generate_series(1, 8) k),
+    'refund', pg_temp.refusal(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, %L, null)', 's2-refund-1',
+                                                     pg_temp.ln('c2', 1), 'refund', v_q1))),
+    'refund_returned', pg_temp.refusal(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, %L, null)',
+                                                              's2-refund-back-5', pg_temp.ln('c2', 5), 'refund_returned', v_q1))),
+    'return', pg_temp.refusal(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, %L, null, %L)', 's2-return-7',
+                                                     pg_temp.ln('c2', 7), 'return', pg_temp.pay('10'), '4000'))),
+    'loss', pg_temp.refusal(pg_temp.attempt(format('select pg_temp.s2_loss(%L, 4000)', pg_temp.ln('c2', 7)))),
+    'top_up', pg_temp.refusal(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, null, null)', 's2-top-up-8',
+                                                     pg_temp.ln('c2', 8), 'own_credit'))),
+    'relay', pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 's2-relay-8', pg_temp.ln('c2', 8)))),
+    'options', (select jsonb_agg(jsonb_build_array(jsonb_array_length(o -> 'payments') > 0,
+                                                   jsonb_array_length(o -> 'refunds')) order by k)
+                from (select k, pg_temp.try('01', format('select public.debit_link_options(%L)::text',
+                                                         pg_temp.ln('c2', k)))::jsonb as o
+                      from generate_series(1, 8) k) x),
+    'm2b_reads', (select coalesce(jsonb_agg(distinct right(c.line_id::text, 1)::int), '[]')
+                  from private.debit_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100000) c
+                  where c.line_id = any (v_lines)),
+    'funds_reads', (select coalesce(jsonb_agg(distinct right(c.line_id::text, 1)::int), '[]')
+                    from private.bank_booking_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100000) c
+                    where c.line_id = any (v_lines)),
+    'd04_payout', pg_temp.attempt(format(
+                    $q$ select coalesce(pg_temp.book(jsonb_build_array(pg_temp.row(%L, 'payout', %L))) ->> 'payouts', '0')
+                               || ' ' || coalesce(pg_temp.skipped(%L), '-') $q$,
+                                         pg_temp.ln('c2', 4), pg_temp.trid('r4'), pg_temp.ln('c2', 4))),
+    'listed', (select coalesce(jsonb_agg(jsonb_build_array(right(x ->> 'bank_transaction_id', 1)::int,
+                                                           x -> 'unsplit_ours')
+                                         order by x ->> 'bank_transaction_id'), '[]')
+               from jsonb_array_elements(pg_temp.queued('01', v_lines)) x),
+    'r4', pg_temp.status(pg_temp.trid('r4')));
+end $$;
+select is(pg_temp.isolated('sc_s2_unsplit_ours'),
+          '{"explained": ["debit link refused: own_transfer_line", "debit link refused: own_transfer_line",
+                          "debit link refused: own_transfer_line", "debit link refused: own_transfer_line",
+                          "debit link refused: own_transfer_line", "explained",
+                          "debit link refused: own_transfer_line", "debit link refused: own_transfer_line"],
+            "refund": "debit link refused: own_transfer_line",
+            "refund_returned": "debit link refused: own_transfer_line",
+            "return": "debit link refused: own_transfer_line", "loss": "bank booking refused: own_transfer_line",
+            "top_up": "bank booking refused: own_transfer_line", "relay": "own credit release refused: own_transfer_line",
+            "options": [[false, 0], [false, 0], [false, 0], [false, 0], [false, 0], [true, 0], [false, 0], [false, 0]],
+            "m2b_reads": [], "funds_reads": [1, 2, 3, 4, 5, 7, 8], "d04_payout": "0 batch_partial",
+            "listed": [[1, 1], [2, 1], [3, 2], [4, 1], [5, 1], [7, 1], [8, 1]], "r4": "in_file"}'::jsonb,
+  'S2: a line of an entry kept unsplit holding a detail of ours takes no link of any kind (explanation, return, loss, '
+  'refund, refund come back, top-up, relay: own_transfer_line), lists nothing, is the funds pass''s (never the M2b '
+  'pass''s) and never booked (batch_partial), listed « À classer »; an ordinary unsplit batch keeps the general rules');
+
+-- S2: at import, a credit of an entry kept unsplit holding a detail of ours is a return, never a payment — the import
+-- refuses one staged as anything else (line_invalid); as a return it imports with no payment
+create or replace function pg_temp.s2_stage(p_n integer, p_kind text, p_unsplit smallint) returns text
+language plpgsql as $$
+declare s uuid := ('e4000000-0000-0000-0000-0000000002' || lpad(p_n::text, 2, '0'))::uuid;
+begin
+  insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                     size_bytes, storage_path)
+  values (s, '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf', 'EUR', 'camt053', 's2',
+          encode(sha256(convert_to(s::text, 'UTF8')), 'hex'), 1, 'test/' || s);
+  update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = s;
+  insert into private.bank_import_stage (statement_id, line_no, section_no, dedup_key, direction, amount_minor, currency,
+                                         booking_date, batch_entry_ref, entry_ref, kind, method, unsplit_ours)
+  values (s, 1, 1, 'e:NS2-' || p_n || '#1', 'credit', 1000, 'EUR', private.paris_today(), 'NS2-' || p_n,
+          'NS2-' || p_n, p_kind, 'sct', p_unsplit);
+  perform private.ingest_statement(s, jsonb_build_object('format', 'camt053', 'version', '08', 'line_count', 1,
+            'skipped_not_booked', 0, 'sections', jsonb_build_array(
+              jsonb_build_object('stmt_id', 'S2', 'seq', 1, 'from_date', private.paris_today(),
+                                 'to_date', private.paris_today(), 'opening_minor', '0', 'closing_minor', '1000'))));
+  return (select t.kind || ' ' || (select count(*) from public.payment p where p.bank_transaction_id = t.id)
+          from public.bank_transaction t where t.statement_id = s);
+end $$;
+select is(jsonb_build_array(
+            split_part(pg_temp.attempt('select pg_temp.s2_stage(1, ''batch_unsplit'', 1::smallint)'), ':', 1),
+            split_part(pg_temp.attempt('select pg_temp.s2_stage(2, ''debtor_credit'', 2::smallint)'), ':', 1),
+            pg_temp.attempt('select pg_temp.s2_stage(3, ''return'', 1::smallint)'),
+            pg_temp.attempt('select pg_temp.s2_stage(4, ''batch_unsplit'', 0::smallint)')),
+          '["line_invalid", "line_invalid", "return 0", "batch_unsplit 1"]'::jsonb,
+  'S2: at import a credit of an entry kept unsplit holding a detail of ours is a return (no payment): staged as a '
+  'debtor''s credit or an unsplit batch it is refused (line_invalid); a batch with none of ours is still one payment');
+
+-- S3 (verdict new:own-client-credit-naming-our-lot-relay-top-up): a credit naming one of our lots of the line's account
+-- (private.names_our_lot: a file of that account handed out), whatever its end-to-end id, is our outgoing transfer coming
+-- back — never relayed as a debtor's payment, by the servicer or a client (public.release_own_credit), nor a top-up, by
+-- ops or by the job (private.post_bank_bookings: own_transfer_line). A top-up's lot would be a file of the own account:
+-- never one of this dedicated account. A TF-shaped id of no file of ours, or naming a file of another account, keeps the
+-- general rules. « Débits et retours » reads it from the database (debit_queue's names_our_lot, under the servicer's
+-- rights: another servicer reads none of these lines)
+create or replace function pg_temp.sc_s3_lot_relay_top_up() returns jsonb language plpgsql as $$
+declare
+  v_payouts text := pg_temp.pmt(pg_temp.trid('r6'));
+  v_s3 uuid := 'e5000000-0000-0000-0000-0000000000c3';
+  v_lines uuid[];
+begin
+  perform pg_temp.stmt('c3', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 5000, 'pmt', v_payouts,
+                       'e2e', 'VIR-S3-0001', 'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'kind', 'client_transfer_in', 'amount', 5000, 'pmt', v_payouts,
+                       'e2e', 'VIR-S3-0002', 'iban', 'FR1420041010050500013M02606'),
+    jsonb_build_object('dir', 'credit', 'kind', 'own_transfer_in', 'amount', 5000, 'pmt', 'TF-2099-999999-9',
+                       'e2e', 'VIR-S3-0003', 'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'kind', 'client_transfer_in', 'amount', 5000, 'pmt', 'TF-2099-999999-9',
+                       'e2e', 'VIR-S3-0004', 'iban', 'FR1420041010050500013M02606')));
+  -- r6's lot named on an own credit of a second dedicated account of the servicer (not a file of that account)
+  insert into public.bank_account (id, organization_id, purpose, iban, bic, currency, label, feed, opened_on)
+  values ('80000000-0000-0000-0000-0000000000c3', '00000000-0000-0000-0000-0000000000aa', 'client_funds',
+          'FR7630006000011234567890189', 'TESTFRPPXXX', 'EUR', 'Fonds de tiers 3', 'camt053', '2026-01-01');
+  insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                     size_bytes, storage_path)
+  values (v_s3, '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000c3', 'EUR', 'camt053',
+          'o.xml', encode(sha256(convert_to(v_s3::text, 'UTF8')), 'hex'), 1, 'test/' || v_s3);
+  update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = v_s3;
+  insert into public.bank_transaction (id, organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+                                       amount_minor, currency, booking_date, kind, end_to_end_id, payment_info_id,
+                                       counterparty_iban)
+  values (v_s3, '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000c3', v_s3, 1, 't:' || v_s3,
+          'credit', 5000, 'EUR', private.paris_today(), 'own_transfer_in', 'VIR-S3-0005', v_payouts,
+          'FR7610107001011234567890129');
+  update public.bank_statement set status = 'imported', from_date = private.paris_today(),
+    to_date = private.paris_today(), opening_booked_minor = 0, closing_booked_minor = 5000, counts = '{}',
+    finished_at = clock_timestamp()
+  where id = v_s3;
+  v_lines := array[pg_temp.ln('c3', 1), pg_temp.ln('c3', 2), pg_temp.ln('c3', 3), pg_temp.ln('c3', 4), v_s3];
+  return jsonb_build_object(
+    'relay', jsonb_build_array(
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 's3-relay-1', pg_temp.ln('c3', 1)))),
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 's3-relay-2', pg_temp.ln('c3', 2)))),
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 's3-relay-3', pg_temp.ln('c3', 3)))),
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 's3-relay-4', pg_temp.ln('c3', 4)))),
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.relay(%L, %L)', 's3-relay-5', v_s3)))),
+    'top_up', jsonb_build_array(
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, null, null)', 's3-top-up-1',
+                                             pg_temp.ln('c3', 1), 'own_credit'))),
+      pg_temp.refusal(pg_temp.attempt(format('select pg_temp.link(%L, %L, %L, null, null, null)', 's3-top-up-3',
+                                             pg_temp.ln('c3', 3), 'own_credit')))),
+    'job', pg_temp.attempt(format($q$ select (pg_temp.book(jsonb_build_array(pg_temp.row(%L, 'top_up'))) ->> 'top_ups')
+                                             || ' ' || coalesce(pg_temp.skipped(%L), '-') $q$,
+                                  pg_temp.ln('c3', 1), pg_temp.ln('c3', 1))),
+    'listed', (select coalesce(jsonb_agg(jsonb_build_array(x ->> 'bank_transaction_id' = v_s3::text,
+                                                           right(x ->> 'bank_transaction_id', 1), x -> 'names_our_lot')
+                                         order by x ->> 'bank_transaction_id'), '[]')
+               from jsonb_array_elements(pg_temp.queued('01', v_lines)) x),
+    'other_servicer', jsonb_array_length(pg_temp.queued('05', v_lines)),
+    'callable', has_function_privilege('authenticated', 'private.names_our_lot(uuid, text)', 'execute'),
+    -- the funds pass reads it too (never a top-up: payments.debits)
+    'funds_reads', (select jsonb_agg(c.names_our_lot order by c.line_id)
+                    from private.bank_booking_candidates('00000000-0000-0000-0000-0000000000aa', null, null, 100000) c
+                    where c.line_id in (pg_temp.ln('c3', 1), pg_temp.ln('c3', 3))));
+end $$;
+select is(pg_temp.isolated('sc_s3_lot_relay_top_up'),
+          '{"relay": ["own credit release refused: own_transfer_line", "own credit release refused: own_transfer_line",
+                      "unmatched", "unmatched", "unmatched"],
+            "top_up": ["bank booking refused: own_transfer_line", "own_credit"], "job": "0 own_transfer_line",
+            "listed": [[false, "1", true], [false, "2", true], [false, "3", false], [false, "4", false],
+                       [true, "3", false]],
+            "other_servicer": 0, "callable": false, "funds_reads": [true, false]}'::jsonb,
+  'S3: an own or a client''s credit naming a handed-out lot of its account, whatever its end-to-end id, is neither '
+  'relayed nor a top-up (ops, job: own_transfer_line); a TF-shaped id of no file or of another account keeps the general '
+  'rules; debit_queue says which (names_our_lot), to its servicer only');
 
 select * from finish();
 rollback;

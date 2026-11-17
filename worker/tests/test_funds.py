@@ -718,3 +718,155 @@ def test_a_camt053_entry_kept_unsplit_records_how_many_of_its_details_are_ours(
     )
     rows = parse_csv(csv, currency="EUR", ibans=IBANS).lines
     assert [x.unsplit_ours for x in rows] == [None]
+
+
+def _flip(xml: bytes, refs: tuple[bytes, ...]) -> bytes:
+    """Each named detail's CdtDbtInd turned to the other direction (a netted entry)."""
+    for ref in refs:
+        at = xml.index(b"<AcctSvcrRef>" + ref + b"</AcctSvcrRef>")
+        end = xml.index(b"</TxDtls>", at)
+        span = xml[at:end]
+        flipped = (
+            span.replace(b"<CdtDbtInd>CRDT</CdtDbtInd>", b"<CdtDbtInd>XXXX</CdtDbtInd>")
+            .replace(b"<CdtDbtInd>DBIT</CdtDbtInd>", b"<CdtDbtInd>CRDT</CdtDbtInd>")
+            .replace(b"<CdtDbtInd>XXXX</CdtDbtInd>", b"<CdtDbtInd>DBIT</CdtDbtInd>")
+        )
+        assert flipped != span
+        xml = xml[:at] + flipped + xml[end:]
+    return xml
+
+
+def test_a_camt053_detail_of_ours_is_a_line_of_its_own_only_when_it_is_the_whole_entry(
+    tmp_path: Path,
+) -> None:
+    """Review round 7 (S1, verdict new:unsplit-exact-total-other-details): a camt.053 entry holding
+    exactly one detail is an ordinary line (its own amount the entry's) only when that detail is
+    the whole entry — NbOfTxs absent or 1, the entry's direction, its own Amt absent or the
+    entry's. A detail of ours that is not (its Amt differs from the entry's, it is of the other
+    direction) now keeps its entry unsplit, so the funds pass never books it as our transfer's
+    return; the verifier's u01 (one detail shown of two: NbOfTxs 2) was unsplit already. And a
+    detail of the other direction is never read as what the line returns (x01, x03: our payout's
+    DBIT detail in a credit entry beside a debtor's credit: no original id, still counted), nor
+    gives the line its own end-to-end id. A debtor's single detail keeps the booked amount (the
+    bank's charges), as before. The synthetic ground truth agrees where it can say it."""
+    other = "RMT0123456789AD"
+    rfd = "RFD0123456789AB"
+    entries = [
+        # 1-2: the whole entry: no count, or a count of 1 — a line of its own
+        Entry(5000, True, DAY, DAY, ref="NS1", txs=(Tx(5000, ref="S1", end_to_end_id=RMT),)),
+        Entry(
+            5000,
+            True,
+            DAY,
+            DAY,
+            ref="NS2",
+            batch_count=1,
+            txs=(Tx(5000, ref="S2", end_to_end_id=RMT),),
+        ),
+        # 3: u01, one detail shown of two
+        Entry(
+            5000,
+            True,
+            DAY,
+            DAY,
+            ref="NS3",
+            batch_count=2,
+            txs=(Tx(5000, ref="S3", end_to_end_id=RMT),),
+        ),
+        # 4: u03 with no count: its own amount 50,00 below the entry's
+        Entry(10000, True, DAY, DAY, ref="NS4", txs=(Tx(5000, ref="S4", end_to_end_id=RMT),)),
+        # 5: our payout's debit detail alone in a credit entry (turned DBIT below)
+        Entry(5000, True, DAY, DAY, ref="NS5", txs=(Tx(5000, ref="S5", end_to_end_id=RMT),)),
+        # 6-7: x01, x03 — a debtor's credit of 100,00 and our payout's debit of 50,00 (turned DBIT)
+        Entry(
+            5000,
+            True,
+            DAY,
+            DAY,
+            ref="NX1",
+            txs=(
+                Tx(10000, ref="X1", end_to_end_id="E2E-X1"),
+                Tx(5000, ref="X2", end_to_end_id=RMT),
+            ),
+        ),
+        Entry(
+            5000,
+            True,
+            DAY,
+            DAY,
+            ref="NX3",
+            txs=(
+                Tx(5000, ref="X3", end_to_end_id=RMT),
+                Tx(10000, ref="X4", end_to_end_id="E2E-X4"),
+            ),
+        ),
+        # 8: m04 — our return, a debtor's credit and our refund's debit (turned DBIT) netting to 0
+        Entry(
+            5000,
+            True,
+            DAY,
+            DAY,
+            ref="NM4",
+            txs=(
+                Tx(5000, ref="M1", end_to_end_id=RMT),
+                Tx(1000, ref="M2", end_to_end_id="E2E-M2"),
+                Tx(1000, ref="M3", end_to_end_id=rfd),
+            ),
+        ),
+        # 9: a debtor's single detail below the entry: the booked amount, a line of its own
+        Entry(7300, True, DAY, DAY, ref="ND1", txs=(Tx(7000, ref="D1", end_to_end_id="E2E-D1"),)),
+        # 10: our payout's return detail alone in a debit entry (turned CRDT below)
+        Entry(
+            5000,
+            False,
+            DAY,
+            DAY,
+            ref="NR1",
+            code="PMNT/ICDT/ESCT",
+            txs=(Tx(5000, ref="R1", end_to_end_id=other),),
+        ),
+        # 11: d01 — an outgoing debit with our payout's return netted in (turned CRDT)
+        Entry(
+            5000,
+            False,
+            DAY,
+            DAY,
+            ref="NR2",
+            code="PMNT/ICDT/ESCT",
+            txs=(
+                Tx(10000, ref="R2", end_to_end_id="E2E-OUT"),
+                Tx(5000, ref="R3", end_to_end_id=RMT),
+            ),
+        ),
+    ]
+    doc = make_doc(entries, iban=ELSEWHERE, from_date=DAY, to_date=DAY, opening_minor=100000)
+    xml = _flip(render_camt053(doc, "08"), (b"S5", b"X2", b"X3", b"M3", b"R1", b"R3"))
+    path = tmp_path / "s.xml"
+    path.write_bytes(xml)
+    parsed = parse_camt053(path, iban=ELSEWHERE, currency="EUR", ibans=IBANS)
+    got = [
+        (x.kind, x.amount_minor, x.end_to_end_id, x.original_end_to_end_id, x.unsplit_ours)
+        for x in parsed.lines
+    ]
+    assert got == [
+        ("return", 5000, RMT, RMT, None),  # the whole entry: its line
+        ("return", 5000, RMT, RMT, None),
+        ("return", 5000, RMT, RMT, 1),  # u01: unsplit (never booked)
+        ("return", 10000, RMT, RMT, 1),  # its own amount is not the entry's: unsplit
+        ("return", 5000, None, None, 1),  # the other direction: counted, never its id
+        ("return", 5000, None, None, 1),  # x01
+        ("return", 5000, None, None, 1),  # x03
+        ("return", 5000, None, RMT, 1),  # m04: our return's id, one detail of ours
+        ("debtor_credit", 7300, "E2E-D1", None, None),  # a debtor's: unchanged
+        ("batch_unsplit", 5000, None, None, 1),  # a debit entry: never our payout's debit by it
+        ("batch_unsplit", 5000, None, None, 1),  # d01
+    ]
+    # the ground truth says the same where no detail is turned (entries 1-4 and 9): the kind, and
+    # whether the line is its entry's (e:) or its detail's own (t:)
+    truth = [(x.kind, x.key_prefix) for x in expected_lines(doc)]
+    read = [(x.kind, x.dedup_key[0]) for x in parsed.lines]
+    assert [truth[i] for i in (0, 1, 2, 3, 8)] == [read[i] for i in (0, 1, 2, 3, 8)]
+    assert read[3] == ("return", "e")
+    for x in parsed.lines:
+        if x.unsplit_ours is not None:
+            assert x.batch_entry_ref is not None

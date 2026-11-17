@@ -294,6 +294,7 @@ def funds_lines(rows: list[dict[str, Any]]) -> list[FundsLine]:
                 original_end_to_end_id=r["original_end_to_end_id"],
                 payment_info_id=r["payment_info_id"],
                 unsplit_ours=r["unsplit_ours"],
+                names_our_lot=bool(r["names_our_lot"]),
             )
         f = _fact(r)
         if f is not None:

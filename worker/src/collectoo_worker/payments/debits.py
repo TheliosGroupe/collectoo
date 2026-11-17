@@ -275,13 +275,18 @@ def decide_all(
 #     subset » (a PmtInf of one refund alone is the M2b refund link, payments.debits.decide);
 #   * a credit returning our payout or sweep (its original RMT/SWP id) is that transfer's return,
 #     when it was booked and the credit is no more than it (a charge deducted: the SQL books the
-#     difference as a fee on the same line) — review round 6 (R1): for a line of its own only; a
-#     line read from a camt.053 entry kept unsplit (its amount the entry's total) only when exactly
-#     one of its details is ours and its amount is that transfer's exactly.
+#     difference as a fee on the same line) — review round 6 (R1), round 7 (S1): for a line of its
+#     own only, never a line read from a camt.053 entry kept unsplit (its amount the entry's total),
+#     whatever its count and amount (a detail of ours that is the whole entry is a line of its own:
+#     payments.camt053).
 # Never automatically (left to ops with why, P0): a debit of a cancelled transfer (or a batch line
 # that can hold one), a second debit, a debit of a transfer never handed out, an id we do not know,
-# a run not in flight, a batch line that does not add up or mixes kinds. Our other transfers and the
-# credits from a client wait for ops. Other debits are classified by ops (« Frais bancaires »).
+# a run not in flight, a batch line that does not add up or mixes kinds; review round 7 (S2) any
+# line of an entry kept unsplit holding a detail of ours (`unsplit_ours` > 0), whatever its
+# direction — reviewed, it waits for ops' booking (M2c-6b-2; COMPLIANCE OQ-84 (h)); (S3) a credit
+# from our own account naming one of our lots of its account (`names_our_lot`): never a top-up.
+# Our other transfers and the credits from a client wait for ops. Other debits are classified by ops
+# (« Frais bancaires »).
 
 TOP_UP_NOT_FOUND = "top_up_not_found"  # a credit from our own account no order matches
 TOP_UP_DIFFERS = "top_up_differs"  # it carries our TOP id, for another amount or account
@@ -384,6 +389,9 @@ class FundsLine:
     # review round 6 (R1): read from a camt.053 entry kept unsplit, how many of its details are ours
     # (bank_transaction.unsplit_ours, the parser's count); None for a line of its own
     unsplit_ours: int | None = None
+    # review round 7 (S3): a credit naming one of our lots of its account (a file of that account
+    # handed out: private.names_our_lot), whatever its end-to-end id
+    names_our_lot: bool = False
 
     @property
     def returned_id(self) -> str | None:
@@ -496,6 +504,10 @@ def _own_debit(line: FundsLine) -> list[Booking]:
     why = _transfer_refusal(line, f)
     if why is None and f.amount_minor != line.amount_minor:
         why = TRANSFER_DIFFERS
+    if why is None and line.unsplit_ours is not None:
+        # review round 7 (S2): its id given by the one detail shown of an entry kept unsplit (the
+        # verifier's d04: NbOfTxs 2) — the entry's total, never booked as that transfer's debit
+        why = BATCH_PARTIAL
     if why is not None:
         return _funds_review(line, why, own)
     return [Booking(line.id, expected, transfer_id=f.id)]
@@ -536,6 +548,11 @@ def _batch(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one outcome per
         why = _transfer_refusal(line, m)
         if why is not None:
             return _funds_review(line, why, members)
+    if line.unsplit_ours:
+        # review round 7 (S2): its details given but not adding up (an entry kept unsplit
+        # holding ours): never booked, whatever the members' sum; a batch line with no details
+        # keeps the rule
+        return _funds_review(line, BATCH_PARTIAL, members)
     return [Booking(line.id, m.kind, transfer_id=m.id) for m in live]
 
 
@@ -554,13 +571,12 @@ def _transfer_return(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one r
         return _funds_review(line, TRANSFER_DIFFERS, named)
     if line.amount_minor > f.amount_minor:
         return _funds_review(line, RETURN_DIFFERS, named)
-    if line.unsplit_ours is not None and (
-        line.unsplit_ours != 1 or line.amount_minor != f.amount_minor
-    ):
+    if line.unsplit_ours is not None:
         # review round 6 (R1): an entry the bank kept unsplit carries its total, not this
         # transfer's return: less than the transfer is never its return with the rest as the
         # bank's charge (the round-5 verifier's netted entry: our payout's return beside another
-        # payout's debit, or a chargeback), nor any amount with several details of ours
+        # payout's debit, or a chargeback), nor any amount with several details of ours; round 7
+        # (S1): nor its exact amount with one of ours (a debtor's credit beside it, a detail short)
         return _funds_review(line, RETURN_DIFFERS, named)
     if f.debit_date is not None and line.booking_date < f.debit_date:
         # dated before the debit it returns (the SQL re-check's last rule; review T4, K5): never
@@ -576,10 +592,6 @@ def decide_line(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one rule p
         return _own_debit(line)
     if line.batch:
         return _batch(line)
-    if line.direction == "debit" and line.kind == "other_debit":
-        return [Booking(line.id, "fee")] if charge_code(line.bank_tx_code) else []
-    if line.direction == "debit" and line.kind == "transfer_out":
-        return _funds_review(line, OWN_TRANSFER_OUT)
     if (
         line.direction == "credit"
         and line.kind == "return"
@@ -587,9 +599,25 @@ def decide_line(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one rule p
         and OUR_ID.match(line.returned_id)
     ):
         return _transfer_return(line)
+    if line.unsplit_ours:
+        # review round 7 (S2): an entry kept unsplit holding a detail of ours that no rule above
+        # reads (a debit netting or holding ours with no id: d01-d03; a credit whose detail of ours
+        # is a debit: x01): never booked, never waiting without a reason
+        return _funds_review(
+            line, RETURN_DIFFERS if line.direction == "credit" else BATCH_PARTIAL, line.facts
+        )
+    if line.direction == "debit" and line.kind == "other_debit":
+        return [Booking(line.id, "fee")] if charge_code(line.bank_tx_code) else []
+    if line.direction == "debit" and line.kind == "transfer_out":
+        return _funds_review(line, OWN_TRANSFER_OUT)
     if line.direction == "credit" and line.kind == "client_transfer_in":
         return _funds_review(line, CLIENT_CREDIT)
     if line.direction == "credit" and line.kind == "own_transfer_in":
+        if line.names_our_lot:
+            # review round 7 (S3): naming one of our lots of this account, our outgoing transfer
+            # coming back (a top-up is never in a file of this dedicated account): never the
+            # top-up, whatever its end-to-end id (the SQL re-check refuses it: own_transfer_line)
+            return _funds_review(line, TOP_UP_DIFFERS if line.transfer_id else TOP_UP_NOT_FOUND)
         if line.transfer_id is None:
             return _funds_review(line, TOP_UP_NOT_FOUND)
         if (

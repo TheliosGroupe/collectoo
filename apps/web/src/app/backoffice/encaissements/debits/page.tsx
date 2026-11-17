@@ -59,6 +59,11 @@ type Row = {
   /** M2c-6b-1: a batch line's PmtInfId (one of our files' when it is ours; debit_queue returns it since the review's
    * money-1 fix — on our batch lines the page offers only the refunds debit_link_options lists, linkOffers) */
   payment_info_id?: string | null;
+  /** review round 7 (S2): read from a camt.053 entry kept unsplit, how many of its details are ours (offers nothing
+   * when any is: holdsOursUnsplit) */
+  unsplit_ours?: number | null;
+  /** review round 7 (S3): the database's word that a credit names one of our lots of its account (namesOurLot) */
+  names_our_lot?: boolean | null;
   return_reason: string | null;
   review_reason: string | null;
   candidates: Candidate[];
@@ -523,6 +528,8 @@ function LineActions({
         endToEndId: row.end_to_end_id,
         originalEndToEndId: row.original_end_to_end_id,
         paymentInfoId: row.payment_info_id ?? null,
+        namesOurLot: row.names_our_lot ?? false,
+        unsplitOurs: row.unsplit_ours ?? null,
       }) ? (
         <Explain
           lineId={row.bank_transaction_id}
