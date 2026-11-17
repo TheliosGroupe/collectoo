@@ -55,6 +55,7 @@ from collectoo_worker.remittance.statement import (
     PDF_FILE_ROWS_MAX,
     TEMPLATE_VERSION,
     line_records,
+    nature,
     statement_text,
 )
 from collectoo_worker.remittance.statement_csv import (
@@ -605,6 +606,55 @@ def test_a_returned_payout_paid_again_late_states_the_return_as_its_cause() -> N
         assert collection_cause not in row["hors_delai"]
     pdf = render_statement_pdf(p, "0" * 64)
     assert pdf.startswith(b"%PDF") and render_statement_pdf(p, "0" * 64) == pdf
+
+
+def test_an_unplanned_payout_s_return_is_never_said_paid_again() -> None:
+    """M2c-6b-2b review LT-2 (plan §5, critic L4, brought forward): the item an unplanned payout's
+    return re-owes (nature_reason `unplanned` on a payout_returned line, pgTAP 037 G) is « Virement
+    exécuté hors reversement revenu » in the CSV and the PDF's nature total; late, its cause is the
+    unplanned payout come back — never « reversé à nouveau »; a planned return keeps its words."""
+    from document_cases import COLUMNS  # noqa: PLC0415
+
+    p = statement_payload()
+    line = list(p["lines"][1])
+    for column, value in (
+        ("nature", "payout_returned"),
+        ("nature_reason", "unplanned"),
+        ("file", None),
+        ("debtor", None),
+        ("items", []),
+        ("components", []),
+        ("rules", []),
+        ("rates", []),
+        ("basis_minor", "0"),
+        ("commission_minor", "0"),
+        ("commission_state", "none"),
+        ("invoice", None),
+        ("receipt", None),
+        ("late", True),
+        ("late_cause", "unplanned_payout_returned"),
+    ):
+        line[COLUMNS.index(column)] = value
+    p["lines"][1] = line
+    p["natures"] = [
+        *p["natures"],
+        {
+            "kind": "payout_returned",
+            "reason": "unplanned",
+            "count": "1",
+            "amount_minor": line[COLUMNS.index("amount_minor")],
+            "commission_minor": "0",
+        },
+    ]
+    row = _csv_rows(p)[1]
+    assert row["nature"] == "Virement exécuté hors reversement revenu"
+    assert row["hors_delai"] == "oui \u2013 virement exécuté hors reversement revenu impayé"
+    text = statement_text(p, "0" * 64)
+    assert "Virement exécuté hors reversement revenu (1)" in text
+    assert "reversé à nouveau" not in text and "reversé à nouveau" not in json.dumps(row)
+    assert nature("payout_returned", None, None) == "Virement revenu impayé — reversé à nouveau"
+    pdf = render_statement_pdf(p, "0" * 64)
+    assert pdf.startswith(b"%PDF")
 
 
 def test_the_indemnity_is_stated_to_every_professional_buyer() -> None:

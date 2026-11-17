@@ -411,14 +411,14 @@ isOneToOne: false
                   ]
                 },"bank_transaction": {
                   Row: {
-                    "acct_svcr_ref": string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code": string | null,"batch_entry_ref": string | null,"booking_date": string,"charges_minor": number | null,"counterparty_iban": string | null,"counterparty_name": string | null,"created_at": string,"creditor_reference": string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id": string | null,"entry_ref": string | null,"id": string,"kind": string,"line_no": number,"mandate_ref": string | null,"organization_id": string,"original_end_to_end_id": string | null,"payment_info_id": string | null,"remittance_text": string | null,"return_reason": string | null,"reversal_indicator": boolean,"statement_id": string,"tx_id": string | null,"ultimate_counterparty_name": string | null,"unsplit_batch_count": number | null,"unsplit_detail_count": number | null,"unsplit_details": Json | null,"unsplit_ours": number | null,"value_date": string | null
+                    "acct_svcr_ref": string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code": string | null,"batch_entry_ref": string | null,"booking_date": string,"charges_minor": number | null,"charges_read": boolean | null,"counterparty_iban": string | null,"counterparty_name": string | null,"created_at": string,"creditor_reference": string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id": string | null,"entry_ref": string | null,"id": string,"kind": string,"line_no": number,"mandate_ref": string | null,"organization_id": string,"original_end_to_end_id": string | null,"payment_info_id": string | null,"remittance_text": string | null,"return_reason": string | null,"reversal_indicator": boolean,"statement_id": string,"tx_id": string | null,"ultimate_counterparty_name": string | null,"unsplit_batch_count": number | null,"unsplit_detail_count": number | null,"unsplit_details": Json | null,"unsplit_direction_given": (boolean)[] | null,"unsplit_ours": number | null,"value_date": string | null
                   }
                   ComputedFields: never
                   Insert: {
-                    "acct_svcr_ref"?: string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date": string,"charges_minor"?: number | null,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind": string,"line_no": number,"mandate_ref"?: string | null,"organization_id": string,"original_end_to_end_id"?: string | null,"payment_info_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id": string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"unsplit_batch_count"?: number | null,"unsplit_detail_count"?: number | null,"unsplit_details"?: Json | null,"unsplit_ours"?: number | null,"value_date"?: string | null
+                    "acct_svcr_ref"?: string | null,"amount_minor": number,"bank_account_id": string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date": string,"charges_minor"?: number | null,"charges_read"?: boolean | null,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency": string,"dedup_key": string,"direction": string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind": string,"line_no": number,"mandate_ref"?: string | null,"organization_id": string,"original_end_to_end_id"?: string | null,"payment_info_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id": string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"unsplit_batch_count"?: number | null,"unsplit_detail_count"?: number | null,"unsplit_details"?: Json | null,"unsplit_direction_given"?: (boolean)[] | null,"unsplit_ours"?: number | null,"value_date"?: string | null
                   }
                   Update: {
-                    "acct_svcr_ref"?: string | null,"amount_minor"?: number,"bank_account_id"?: string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date"?: string,"charges_minor"?: number | null,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency"?: string,"dedup_key"?: string,"direction"?: string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind"?: string,"line_no"?: number,"mandate_ref"?: string | null,"organization_id"?: string,"original_end_to_end_id"?: string | null,"payment_info_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id"?: string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"unsplit_batch_count"?: number | null,"unsplit_detail_count"?: number | null,"unsplit_details"?: Json | null,"unsplit_ours"?: number | null,"value_date"?: string | null
+                    "acct_svcr_ref"?: string | null,"amount_minor"?: number,"bank_account_id"?: string,"bank_tx_code"?: string | null,"batch_entry_ref"?: string | null,"booking_date"?: string,"charges_minor"?: number | null,"charges_read"?: boolean | null,"counterparty_iban"?: string | null,"counterparty_name"?: string | null,"created_at"?: string,"creditor_reference"?: string | null,"currency"?: string,"dedup_key"?: string,"direction"?: string,"end_to_end_id"?: string | null,"entry_ref"?: string | null,"id"?: string,"kind"?: string,"line_no"?: number,"mandate_ref"?: string | null,"organization_id"?: string,"original_end_to_end_id"?: string | null,"payment_info_id"?: string | null,"remittance_text"?: string | null,"return_reason"?: string | null,"reversal_indicator"?: boolean,"statement_id"?: string,"tx_id"?: string | null,"ultimate_counterparty_name"?: string | null,"unsplit_batch_count"?: number | null,"unsplit_detail_count"?: number | null,"unsplit_details"?: Json | null,"unsplit_direction_given"?: (boolean)[] | null,"unsplit_ours"?: number | null,"value_date"?: string | null
                   }
                   Relationships: [
                     {
@@ -701,14 +701,14 @@ isOneToOne: false
                   ]
                 },"client_advance": {
                   Row: {
-                    "amount_minor": number,"bank_transaction_id": string | null,"cause": string,"cause_entry_id": string,"client_organization_id": string,"created_at": string,"currency": string,"entry_id": string,"id": string,"mandate_id": string | null,"organization_id": string,"top_up_transfer_id": string | null,"transfer_id": string | null
+                    "amount_minor": number,"bank_transaction_id": string | null,"cause": string,"cause_entry_id": string,"client_organization_id": string,"created_at": string,"currency": string,"entry_id": string,"id": string,"mandate_id": string | null,"organization_id": string,"p_bound": string | null,"top_up_transfer_id": string | null,"transfer_id": string | null
                   }
                   ComputedFields: never
                   Insert: {
-                    "amount_minor": number,"bank_transaction_id"?: string | null,"cause": string,"cause_entry_id": string,"client_organization_id": string,"created_at"?: string,"currency": string,"entry_id": string,"id"?: string,"mandate_id"?: string | null,"organization_id": string,"top_up_transfer_id"?: string | null,"transfer_id"?: string | null
+                    "amount_minor": number,"bank_transaction_id"?: string | null,"cause": string,"cause_entry_id": string,"client_organization_id": string,"created_at"?: string,"currency": string,"entry_id": string,"id"?: string,"mandate_id"?: string | null,"organization_id": string,"p_bound"?: string | null,"top_up_transfer_id"?: string | null,"transfer_id"?: string | null
                   }
                   Update: {
-                    "amount_minor"?: number,"bank_transaction_id"?: string | null,"cause"?: string,"cause_entry_id"?: string,"client_organization_id"?: string,"created_at"?: string,"currency"?: string,"entry_id"?: string,"id"?: string,"mandate_id"?: string | null,"organization_id"?: string,"top_up_transfer_id"?: string | null,"transfer_id"?: string | null
+                    "amount_minor"?: number,"bank_transaction_id"?: string | null,"cause"?: string,"cause_entry_id"?: string,"client_organization_id"?: string,"created_at"?: string,"currency"?: string,"entry_id"?: string,"id"?: string,"mandate_id"?: string | null,"organization_id"?: string,"p_bound"?: string | null,"top_up_transfer_id"?: string | null,"transfer_id"?: string | null
                   }
                   Relationships: [
                     {
@@ -2733,6 +2733,9 @@ isOneToOne: false
 "boarding_batch_readiness":
 { Args: { "p_batch_id": string }; Returns: (string)[]
                            },
+"book_transfer_line":
+{ Args: { "p_bank_transaction_id": string,"p_expected_text": string,"p_idempotency_key": string,"p_parts": Json,"p_reason": string }; Returns: Json
+                           },
 "cancel_refund":
 { Args: { "p_idempotency_key": string,"p_reason": string,"p_refund_request_id": string }; Returns: Json
                            },
@@ -2974,6 +2977,12 @@ isOneToOne: false
                            },
 "transfer_file_download":
 { Args: { "p_acknowledged"?: boolean,"p_file_id": string,"p_sha256": string }; Returns: Json
+                           },
+"transfer_line_options":
+{ Args: { "p_bank_transaction_id": string }; Returns: Json
+                           },
+"transfer_line_preview":
+{ Args: { "p_bank_transaction_id": string,"p_parts": Json }; Returns: Json
                            },
 "transfer_overview":
 { Args: Record<PropertyKey, never>; Returns: Json

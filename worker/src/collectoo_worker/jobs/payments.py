@@ -280,6 +280,8 @@ def stage_row(statement_id: str, line: StatementLine) -> tuple[Any, ...]:
                     for d in value
                 ]
             )
+        if c == "unsplit_direction_given" and value is not None:
+            value = list(value)  # a bool[] (M2c-6b-2b, OQ-84 (j))
         values.append(value)
     return tuple(values)
 

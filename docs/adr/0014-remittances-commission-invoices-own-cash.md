@@ -1794,5 +1794,359 @@ not, so the transfer-files and statement scale tests were not run again; the web
 the E2E's 54 tests — no screenshot committed: the reworded labels appear only on lines the fixtures do not hold, and
 the image diffs are dates, ages and ids. `database.types.ts` unchanged (regenerated: identical).
 
+## M2c-6b-2b: the ops command — ops book our transfer lines (plan docs/design/m2c-6b-2-plan.md §3, §6, §7.2, §8, §9)
+
+Migration `20261117100000_transfer_line_ops.sql` (forward-only; every redefinition copied from the migration its comment
+names, its settings and grants restated), pgTAP `037`, the worker's `_held_to` third branch, the parser's two « given »
+flags (COMPLIANCE OQ-84 (j)), the pure twin of P, and the web's refusal and decision labels. **No page books a line in
+this slice** (6b-2c): the command, its preview and its options are reachable by the API only;
+`lib/payments/transfer-lines.ts` is imported by no page yet, but `lib/payments/debits.ts`'s `decisionLabel`, changed here,
+is rendered by « Traités » (`app/backoffice/encaissements/debits/page.tsx`): the job's own bookings now read
+« Débit d'un reversement », « Reversement revenu » and the other `DECISION_LABEL` texts (review LT-8). The cancellation after download stays **off**; `033` and `034` are unchanged. The founder
+answered none of the plan's §10 questions: each default is built and stays open. Decisions:
+
+- **One command, three reads** (plan §3.2, §3.9, §3.11). `public.book_transfer_line(p_idempotency_key, p_bank_transaction_id,
+  p_parts, p_expected_text, p_reason)` (`security definer`, `search_path = ''`, `lock_timeout = '2s'`; executable by
+  `authenticated`, the role checked inside: admin or ops manager of the line's servicer). Its order: the role; the
+  command key's advisory lock under 7 s (a second call with the same key waits beyond the command's 2 s and replays the
+  first result: critic2 CSO2-6); `private.command_replay`; the motif (1–2,000 characters); the parts' shape
+  (`private.transfer_line_parse`: kinds, amounts ≤ 10¹⁵, no transfer twice, at most one fee, at most one part without
+  a transfer); the expected text; the tenant filter (`private.transfer_line_tenant`: any id of another servicer, or none,
+  is `transfer_unknown` / `client_unknown`, the same code whatever the id names: critic CSO-5); the pre-read of the
+  line's lot (`private.transfer_line_pre`, `lot_too_large` above `private.transfer_line_lot_cap()` before any subset);
+  the locks (below); the check under the locks (`private.transfer_line_check(line, true)`); the compare-and-set of the
+  expected text against the text the check builds now (`split_changed` when it moved); the posting
+  (`private.transfer_line_post`; a ledger refusal → `posting_failed`, nothing kept); the drafts re-prepared; the funds
+  pass queued when the line moved what it may net (`funds_after` null); `private.command_record`. `public.transfer_line_preview(line,
+  parts)` runs the same check without the locks and returns `{ok, why, detail, parts, drafts, supersedes_file,
+  expected_text}`; `public.transfer_line_options(line)` gives the line's class, its proposals (each with its request and
+  its preview), the lot's members (at most 50 listed, `member_count` always) and the refusal when none can be proposed.
+- **Line classes, read under the lock** (plan §3.3): U (an entry kept unsplit holding ours, booked only from the
+  statement's own details), E (our end-to-end id on the line, of a transfer of the servicer: on another account it is
+  `transfer_differs`, never a line without reference), B (the line names our lot: a debit with no end-to-end id by its
+  `payment_info_id`, a PmtInf of a file of the line's account; a credit by `names_our_lot` when its ids name nothing of
+  ours), E0 (an RMT/SWP-shaped id, or a TF PmtInfId, naming nothing of ours), N (neither an end-to-end id nor a
+  PmtInfId: a CSV feed without the reference column; its counterparty IBAN, when given, is read by rule 3b), O
+  (anything else: a foreign end-to-end id or PmtInfId). `private.transfer_line_class` (wording corrected, review
+  LT-8).
+- **Part kinds and their acceptance rules in the plan's order** (§3.4; the first failure is the refusal): `payout`,
+  `sweep`, `unplanned_payout`, `unplanned_sweep`, `payout_returned`, `sweep_returned`, `unplanned_payout_returned`,
+  `unplanned_sweep_returned`, `fee`. Rule 3b (`private.transfer_line_candidates`): a line without our reference is a
+  transfer's only when that transfer is the only candidate of its amount to that IBAN among (i) live transfers handed
+  out to the bank, (ii) refunds in a file, (iii) cancelled or returned payouts (ML-8: a returned payout is not a
+  candidate while its return item is held by a live line of a run whose payout is a (i) candidate of this line — that
+  run re-pays it to the same IBAN), its execution date not after the line, an IBAN required on class O; several →
+  `line_ambiguous`. A client part (an unplanned payout to a client's registered payout IBAN with no transfer, Q8) is
+  refused while a transfer of that amount to that IBAN is in flight (`payout_in_flight_matches`), cancelled or returned
+  (`cancelled_payout_matches`), or not yet handed out (`payout_not_handed_out_matches`; critic F12, F13). A fee only on
+  our transfer's own line (its debit, class E, or the ISO shape on U; its flagged return), equal to the statement's
+  `Chrgs` when it records one, and, with none, never the amount of one of our transfers (`fee_unexplained`; critic L2,
+  critic2 ML-6, ML-10).
+- **The only subset** (§3.5): a lot line books exactly the members of the only subset of its lot (every member, whatever
+  its status) that makes its amount (`private.unique_subset`, 6b-2a); several or none → `batch_ambiguous`; a lot
+  holding refunds or transfers of several kinds → `batch_mixed`; a lot credit re-reads the lot's credit universe under the lock (`split_changed`).
+- **P per item** (§3.6.1; Q4's default, COMPLIANCE OQ-82; critic F2–F5, L1; critic2 ML-1, ML-9). The pool of an
+  unplanned payout of x: x cancelled → its run's released lines; x returned → its return item; otherwise none (P = 0).
+  Eligible: the pool's items with a pending row, less the pool's own unplanned rows and their advances
+  (`private.unplanned_own_item`), a reversal folded into the item it reverses (one level: a reversal is never
+  reversed). net = pending + its reversal's pending, signed; paid = what unreversed unplanned bookings attributed
+  (`private.unplanned_paid_item`) + what earlier parts of the call did; cap = greatest(0, Σ net − Σ paid), floored
+  once; queue = greatest(0, Σ the client's pending) − the earlier parts' P; P = greatest(0, least(A, queue, cap)),
+  attributed in (posted_at, id) order, each item up to what it can still take; `p_bound` ∈ none / amount / items /
+  queue. Since the review fixes (money-2, LT-1), the cap is also at most A less what the earlier unreversed unplanned
+  bookings of the same transfer netted (« M2c-6b-2b review fixes » below). The Python
+  twin `payments.transfer_lines.unplanned_p` has the same rules; its properties (Hypothesis) bound P by A, the queue and
+  the cap, the attribution by each item's net, and the queue's move by −P.
+- **The entries** (§3.6.2–§3.7, all at the line's booking date): an unplanned payout posts its remittance
+  (+4670[c] A / −5120 A, key `remit:line:<line>:<n>`, reason « Virement exécuté hors reversement (relevé du …) ») and,
+  when A − P > 0, the client advance (+4679 X / −4670[c] X ‖ +4112[c] X / −4689 X, `adv:line:<line>:<n>`, cause
+  `double_payout`) after it (LG008 at `private.ledger_check_now()`); a −A pending row (the 4670 trigger skips remittance
+  entries), so the queue moves by −P; one `private.unplanned_paid_item` row per attributed item. An unplanned sweep
+  posts `servicer_sweep` (`sweep:line:<line>:<n>`). A return reverses the planned remittance (`return:<line>:<transfer>`)
+  or the unplanned one (`return:<line>:<n>`, and its advance `return:adv:<line>:<n>`; the reason of an unplanned
+  sweep's return, « Virement au compte propre hors ordre de Collectoo revenu », is ours — the plan names none). The
+  planned parts go through `private.bank_booking_begin` and `private.bank_booking_post_rows` with the job's own
+  `pg_temp._bb` columns (CSO-1, parity: a payout's remittance entry has no reason; the motif is on the booking row,
+  and — as `public.link_debit`'s fees, top-ups and losses — the reason of the servicer's own fee and sweep entries,
+  which no client reads: review LT-7).
+  `private.unplanned_paid_item` is append-only, RLS on, every privilege revoked.
+- **Locks, the job's order plus the drafts** (§3.8; `private.transfer_line_locks`): the runs of the named transfers
+  and the clients' live runs `FOR UPDATE` → the payout accounts a return marks → the bank accounts `FOR SHARE` → the
+  payments the payout parts' breach rows may name `FOR KEY SHARE` → `payments:` → the bank lines `FOR NO KEY UPDATE` →
+  `remit:` → the files `FOR SHARE` → the transfers `FOR UPDATE`. A 55P03 is re-raised with the step it waited at:
+  `allocation_busy` on the servicer-wide advisory locks, `busy` elsewhere (critic2 CSO2-6). A live run found under the
+  locks that step 1 did not lock is `split_changed`, never locked late (critic CSO-12).
+- **The draft re-prepared, not cleared** (§3.6.5; critic CSO-6, CSO-7): `private.remittance_draft_requeue(run)` reserves
+  the client's unreserved items, sets a new prepare token (`known_at`, `service_to`, `prepared_at`/`inputs_hash`/
+  `line_count` null, `item_count` recounted, the approval's request and `last_failure` null, `version + 1`) and queues
+  the prepare job; the job's `remittance_prepare_begin` clears the old draft under the run lock.
+- **Redefinitions** (§3.12): `private.bank_line_booking_guard` (the fee on our debits, the returns on own and client
+  credits, the unsplit lines in either direction, the two unplanned return kinds on a reversal of an unplanned booking's
+  entry); `private.pending_item_deadlines` (the planned `payout_returned` branch for a transfer's own planned remittance
+  only — `bt.entry_id` = the reversed entry, critic F11, L4 — and a third branch, critic2 ML-2: the item re-owed when an
+  unplanned payout comes back after a run froze the items its P paid is held to the earliest latest execution date of
+  those items' live lines; the worker's `jobs/remittances.py` `_held_to` has the same branches);
+  `private.bank_booking_post_rows` (a payout's remittance entry carries no reason); `private.ingest_statement` (OQ-84
+  (j), below).
+- **OQ-84 (j), the 6b-2a known limit, fixed**: `bank_transaction` and the stage gain `charges_read` (for a line that is
+  its entry's only line: true when the statement had no charges or every record was read, false when a block was seen
+  and not read; checked: never false beside a charge) and `unsplit_direction_given` (per detail of ours, whether its
+  `CdtDbtInd` was given; its length that of the details). The parser sets both (its `charges` returns `(read, charges)`;
+  `jobs.payments.stage_row` writes them). A re-import compares the stored values with every value the new file
+  gives, and only with those (`private.unsplit_details_differ`; the charges when the new file read them — corrected by
+  the review fixes, CSR-4: the build compared a value only when both files gave it); a stored null flag (a line
+  imported before) is read as « given ».
+- **The pg-safeupdate guard** (found by the integration test through the API session): two `UPDATE`s of the check's
+  temporary tables had no `WHERE`; an API session (the `authenticator` role preloads `safeupdate`) refuses them (`UPDATE requires a WHERE
+  clause`), which pgTAP does not load. Both carry `where true`; the test that books through `debit_helpers.api` kills
+  the mutant that drops it.
+- **Web (pure, no page)**: `lib/payments/transfer-lines.ts` — the French label of every refusal of §3.10, `busy`,
+  `allocation_busy` and `timeout`; `transferLineErrorCode` (the command's code, 55P03 → `busy`, 57014 → `timeout`, « not
+  allowed », the motif); `lib/payments/debits.ts` `DECISION_LABEL` (the booking kinds of §3.13; `decisionLabel` says each
+  part of a line booked in several, joined by « + »).
+
+**Deviations from the plan, with why**:
+- A client part with a fee is refused `bad_request` at parse (at most one part without a transfer: the fee is one),
+  not `fee_not_allowed` — §3.4.0's shape rule comes first.
+- Class E is any transfer of the line's servicer named by its id; on another account it is `transfer_differs` (the plan
+  leaves the case open between E and E0). A lot credit whose ids name nothing of ours is class B by `names_our_lot`.
+- `client_ambiguous` counts every registered payout account of the IBAN, proposed or active (the plan says
+  « registered »).
+- A U line (an entry kept unsplit) is exempt from the line-kind checks (`wrong_direction`, `not_a_transfer_line`): its
+  direction is the net of its details, and its parts are the statement's own details.
+- The reason of an unplanned sweep's return is ours (above).
+- The stateful `ledger_machine` rules of §8.2 are replaced by the pure twin's properties (P's bounds, the attribution,
+  the queue's move, each entry's balance) and the SQL scenarios of `037`; the stateful machine over a bank model
+  (`test_transfer_line_machine_integration.py`) is not built.
+- pgTAP `037` covers groups A–L of §8.1, not every case. The first build left F5, ML-1's signed pool in SQL and ML-8
+  to the review, saying the twin covered the first two — it did not (the twin never runs against the SQL): since the
+  review fixes they are SQL cases of `037` (« M2c-6b-2b review fixes »). S02/S04, the lot variant of F1, M (the funds
+  pass after an ops booking, CSO-11, CSO2-7, beyond G's and the sweeps') and J (every read's tenant isolation beyond
+  A's) are still left.
+- `exec_on` (test only) disables `transfer_file_item`'s append-only trigger inside the test's transaction to move a
+  file's execution dates back (a file generated today executes on the next business day, and a statement line is never
+  dated in the future).
+- `DECISION_LABEL` is a new constant beside `LINK_KIND` (none existed under that name); the fee keeps M2c-1's label
+  « Frais bancaires (à la charge du cabinet) ».
+
+**Tests** (each red before its code): pgTAP `037_transfer_line_ops.test.sql` (51 assertions, groups A roles, refusals,
+tenants, privileges and OQ-84 (j); B the line's state and replay; C planned payouts, rule 3b, fees, lots, late, parity;
+D unplanned payouts and P; E sweeps; F returns; G unplanned returns and ML-2; H unsplit entries; I compare-and-set; K the
+guard; L alerts); worker `tests/test_transfer_line_ops.py` (P's examples and properties, the entries' balance, the
+parser's flags and the stage), `tests/test_transfer_line_ops_integration.py`
+(`test_a_payout_returned_then_executed_again_then_returned_again` through the real camt.053 import, the debit job, the
+command as an aal2 API session, the prepare and approval jobs and `_held_to`; `test_a_second_debit_booked_by_ops_is_the_servicer_s_advance`;
+`test_cs1_the_download_waits_on_its_run_holding_nothing`; `test_cs1_the_command_waits_on_the_client_s_draft_holding_nothing`;
+`test_the_same_key_twice_at_once_returns_the_first_result`; `test_a_command_waiting_on_the_allocation_lock_is_allocation_busy`),
+`tests/test_transfer_line_scale_integration.py` (the lot cap); web `lib/payments/transfer-lines.test.ts`.
+
+**CS-1, the interleaved order** (review M2c-6b-2a, left to this slice): the first connection holds only the run row the
+second needs, then calls its own command. The download waits on its run holding nothing and the cancellation commits;
+the command waits on the client's draft holding nothing and the draft's refresh commits. Mutants: the download taking
+`payments:`/`remit:` before its runs, and the command taking `payments:` before its runs — each deadlocks, 40P01, the
+named test fails; both controls pass.
+
+**Mutants** (each a scratch redefinition of one function, killed by the named test; a no-op control passes `037`):
+the only subset removed (C S09); P's reversal fold (D F2/F3); P = 0 for a returned x (D F2, G ML-2); earlier bookings'
+attributions ignored (D S01, F4: another collection waiting); `client_run_cancellable` (D F6); `unplanned_open` (F F1);
+the fee rule widened (C L2, F S20, H); the unsplit identity by count only (H); the pending row −P instead of −A (B, D,
+C); the draft requeue removed (D S01); the key without the part index (E, B, D); the motif as the payout's entry reason
+(C CSO-1); the tenant filter after the status rules (A CSO-5, CSO2-10); the third held-to branch (G ML-2); the planned
+return branch on any remittance (G F11); `debit_pending` (F ML-3); `run_still_live` (D ML-4); the U count (H ML-5);
+S08-on-U (C ML-6); the fee check and the charges compare (C ML-10); the re-import comparing every stored value, or
+ignoring the directions given (A OQ-84 (j)); rule 3b's IBAN on class O and its execution date (C); the client part's
+in-flight refusal (C F13); `client_ambiguous` (D); `advance_settled` and the largest-advance rule (G); an unreferenced
+credit as an unplanned return (G L3); the funds pass not queued (G); the guard's unplanned return on any reversal and
+payout on any credit (K); the key lock under 2 s, the allocation wait as `busy`, the `UPDATE` without `WHERE` (the
+integration tests); the attribution of earlier parts of the same call dropped (D F4: one item released by two
+cancelled runs, both payouts executed late in one entry kept unsplit). None survives. The plan's « the line not locked → booked twice » is equivalent here: the servicer-wide `payments:` lock serialises two
+commands on one line, and the check re-reads the line under the locks (`already_booked`).
+
+Suites on the final code, after `supabase db reset`: pgTAP 37 files, 2,600 tests (`037` 51; `034`'s TODO markers
+kept); the worker's ruff, format and mypy (174 files), 1,055 unit tests passed (5 xfailed) and 202 integration tests
+(the scale files apart); the evals unchanged — mapping 167/167 (threshold 0.980), reconciliation 0.9600 automatic
+(95,997/100,000), 0 wrong, 0 policy violations; on a fresh reset, the payouts scale test once (5 of 5) and the new
+lot-cap test (2 of 2; timings in `docs/benchmarks/remittances.md`) — the download did not change, so the transfer-files
+scale test was not run again; the web's lint, types and 358 vitest tests; the E2E's 54 tests — no screenshot
+committed: no page the E2E shows changed (the decision labels appear in « Traités » only for bookings the fixtures do
+not hold), and the image diffs are dates, ages and ids. `database.types.ts` regenerated (the command, its two reads,
+`charges_read`, `unsplit_direction_given`).
+
+## M2c-6b-2b review fixes (2026-11-17)
+
+**Round 1.** The review of 6b-2b (four lenses: money, legal texts, concurrency and security, tests; 23 findings — money-1,
+TESTS-1 to TESTS-4 medium, the rest low) checked against the build `1f8ea8f`; each finding below was confirmed on the
+stack (none rejected). The migration `20261117100000_transfer_line_ops.sql`, not merged yet, is edited in place (its
+redefinitions copied from the latest definition, settings and grants restated); `20261117090000` and every earlier file
+unchanged; the cancellation after download stays **off**; `033`/`034` unchanged. No §10 question answered: each default
+stays open. Every fix only narrows what is booked or netted.
+
+- **money-1 (medium) — an entry kept unsplit holding none of ours was booked as one movement.** `transfer_line_class`
+  reads a line as U only when `unsplit_ours > 0`; an entry the parser kept unsplit with no detail of ours (two `TxDtls`
+  that do not add up, or one detail under an `NbOfTxs` of 2) fell to N, O or E0, and rule 3b's only candidate, the
+  client part (S13) and the IBAN-matched unplanned return (ML-11) each took the entry's total — one ops confirmation of
+  the proposal booked a run paid, a 50 000 double-payout advance, or an advance reversed and a payout account marked
+  returned, where the job says `batch_partial`. Fix (`private.transfer_line_check`, after the line-state rules): a line
+  kept unsplit (`unsplit_ours` not null) that is neither U nor B is refused `unsplit_not_bookable` (the options inherit it
+  through their preview); our lot kept unsplit (B) is booked only when the count of transactions the statement gives —
+  `NbOfTxs` (`unsplit_batch_count`), or its details' count when it has details — is the only subset's (deviation, the
+  narrower side: the review asked for `NbOfTxs` only). Tests: pgTAP `037` H « (review money-1): an entry kept unsplit
+  holding no detail of ours is never booked as one movement … » (the reviewer's three shapes: x2's payout, a client
+  part, an unplanned return; options and command; x2 stays `in_file`) and « (review money-1): our lot kept unsplit whose
+  NbOfTxs, or whose details' count, is not its only subset's → unsplit_not_bookable … » (equal: booked).
+- **money-2, LT-1 (low) — a second late execution of one payout netted the commission share.** P counted a cancelled
+  run's released item at its gross, so once a first execution of x (24 600) had paid the 30 000 item's net, a second
+  got P = 5 400 — the commission the run had set off, which the next run then takes on the item from the client's
+  unrelated collections: a hold-back without a claw-back clause (Q4, founder #7, OQ-38). Fix (the reviewer's
+  alternative, per transfer): the cap is also at most A less what the earlier unreversed unplanned bookings of the same
+  transfer netted (their amount less their advance) — x's amount is all its run would have paid the client of its
+  items, their gross less the commission. The twin's `UnplannedAsk.prior` has the same rule. Known limit, recorded in
+  COMPLIANCE OQ-82 with its default: an item released by **two** cancelled runs whose two payouts are both executed late
+  can still be netted twice up to its gross (each transfer is bounded by its own A) — unreachable while the switch is
+  off; before 6b-3 turns it on, P must count a released item net of the commission its cancelled run set off on it.
+  Tests: `037` D « (S01, Q4; F4, CSO-6, CSO-7; review money-2, LT-1) … » (second execution `["0", "24600", "items"]`,
+  was `["5400", "19200", "items"]`); worker `test_money2_bookings_of_one_transfer_never_net_more_than_its_amount` and
+  the property `test_p_bounds_and_attribution` (`prior`). Deviation: no case with a real commission invoice (the bound
+  reads only x's amount and the earlier bookings, never the run's documents; `037`'s 24 600 on a 30 000 item stands
+  for the 18 % set-off, as the reviewer's reproduction).
+- **LT-2 (low) — the return of an unplanned payout read « reversé à nouveau ».** Brought forward from 6b-2d (plan §5,
+  critic L4): `private.remittance_statement_build` (redefined from `20261116090000`, settings and grants restated)
+  marks a `payout_returned` line whose reversed entry is an `unplanned_payout` booking's (`nature_reason` `unplanned`,
+  late cause `unplanned_payout_returned`); the renderer's `NATURE` reads « Virement exécuté hors reversement revenu »
+  and `LATE_CAUSE` « virement exécuté hors reversement revenu impayé ». New codes only: no stored payload carries them,
+  so no template version. 6b-2d must copy the statement build from `20261117100000`, not from `20261116090000`. Tests:
+  `037` G « (review LT-2, L4): the item an unplanned payout's return re-owes is marked unplanned on the client's
+  statement … » (a planned return keeps no reason); worker
+  `test_statement_docs.py::test_an_unplanned_payout_s_return_is_never_said_paid_again`.
+- **LT-3 (low) — a fee on a line whose charges were not read was taken as « no charge recorded ».** Fix: on class E, a
+  fee on a line with `charges_read` false is refused `unsplit_detail_missing` (« les frais de la banque manquent ») and
+  none is proposed. `037` C « (review LT-3): a fee on a line whose charges block was not read → unsplit_detail_missing,
+  no proposal … » (the same line at the payout's exact amount is its debit). COMPLIANCE OQ-84 (j) says so.
+- **LT-4 (low) — the bound that set P was not kept.** `client_advance.p_bound` (`items`, `queue`, `none`; checked: a
+  `double_payout` advance only), written by `private.transfer_line_post`; `book_transfer_line`'s result carries
+  `p_bound` on each unplanned payout booking. `037` B « (review LT-4): the booking result carries each unplanned
+  part's p_bound … and its double_payout advance keeps it »; the integration tests read it from the result.
+  `database.types.ts` regenerated (the column).
+- **LT-5 (low)** — COMPLIANCE OQ-36 now says « the statement will say when it was paid, 6b-2d's late cause
+  `paid_by_unplanned` », as CPCE-08 does.
+- **LT-6 (low) — two refusals said what was not checked.** The line's direction is checked first (a debit part on a
+  credit line — our payout's flagged return among them — or a return part on a debit line: `wrong_direction`), then
+  its kind (`not_a_transfer_line`, `not_a_return`); a part whose kind is not its transfer's (a sweep part naming one of
+  our payouts, an unplanned return naming a sweep for a payout) is the new `transfer_kind_differs` (« Ce virement du
+  cabinet n'est pas de ce type … »); `transfer_unknown`'s label also covers its remaining case (the debit line named
+  holds no unplanned booking of the transfer). `037` A « (review LT-6): a debit part on our payout's flagged return, or
+  a return part on its debit → wrong_direction; … → transfer_kind_differs; … → not_a_return »; vitest « the direction
+  and the transfer's kind have labels true of what is checked (review LT-6) ».
+- **LT-7 (low) — texts corrected, not the code.** As `public.link_debit` does for the fees, top-ups and losses ops book
+  (M2c-1), the motif is the reason of the servicer's own fee and sweep entries (no client reads them); never of an entry
+  a client reads (remittance, advance, reversal: CSO-1). `transfer_line_post`'s header, the 6b-2b section above and
+  DOMAIN say so. Default: kept (one rule for every booking ops make on the servicer's own lines).
+- **LT-8 (low)** — the 6b-2b section above and DOMAIN corrected: `decisionLabel` is live in « Traités »; the classes
+  and ML-8 as coded; S08 (payout + fee) among the ops bookings.
+- **CSR-1 (low) — a sweep-return-only batch took `payments:` last.** `private.post_bank_bookings` (redefined from
+  `20261117090000`, settings and grants restated; the diff is one list) takes `payments:` whenever the batch holds a
+  `sweep_returned` row too, before its lines and `remit:` — the command's order. The web maps 40P01 and 40001 to
+  `busy` (nothing recorded, retry). Tests: integration `test_cs1_the_job_s_sweep_return_and_the_command_never_deadlock`
+  (H holds only the command's line; the command, as an aal2 API session, takes `payments:` and waits on it; the funds
+  pass on a batch holding only the sweep's flagged return waits on the command; H commits: both book, no 40P01 — with
+  `20261117090000`'s definition committed, 40P01); vitest « a deadlock or a serialisation failure is busy … (review
+  CSR-1) ».
+- **CSR-2 (low) — the key lock shared the one-key space of the servicers' locks.** The idempotency key's lock is the
+  two-key form `pg_advisory_xact_lock(hashtext('cmd:book_transfer_line'), hashtext(key))` (lock tag objsubid 2: never
+  equal to a one-key lock), still keyed on the key alone (`command_log` is keyed on the command and the key, so two
+  servicers' same key still serialise, as before). `037` B « (review CSR-2): a key whose hash is another servicer's
+  allocation lock books without taking that lock … » (a key found offline whose old hash was `payments:` of BB).
+- **CSR-3 (low) — the options ran the lot's subset search twice.** `private.transfer_line_preview_of(line, parts, pre)`
+  is the preview's body; `public.transfer_line_preview` calls it with the pre-read, `public.transfer_line_options`
+  without (its own pre-read of the same call built `_tl_pre` and `_tl_meta`), so `private.unique_subset` runs once per
+  options call. `037` C « (review CSR-3): the options of a lot line search its only
+  subset once — the preview of their proposal reuses their own pre-read — and the preview alone searches once » (a
+  counting `private.unique_subset` redefined inside the rolled-back scenario: options 1, preview 1; the build's
+  options, 2). The saturating inputs at the cap:
+  `test_transfer_line_scale_integration.py::test_a_saturating_lot_at_the_cap_runs_its_search_once_within_budget` (the
+  lot's 500 payouts re-amounted, in a rolled-back transaction, to multiples of 10 € or of 1 € under an amount no
+  subset makes, then as the API's session): options 1.89–2.42 s, the command 2.16–2.40 s (four runs, this VM;
+  `docs/benchmarks/remittances.md`). **Known limit (low), with its default:** at these two inputs the plan's options
+  budget (< 2 s) is missed by up to 0.42 s — one search alone takes about 2 s, set by the search's work bound, not by
+  the cap (the 1 € input stops at item 151 whatever the cap, so a lower cap does not help it), while the rule the cap
+  is set from, 2× headroom under the API's 8 s, holds. Default: the cap stays 500; the scale test asserts ≤ 4 s for
+  the options and the command at the saturating inputs and keeps < 2 s for an ordinary lot; if CI hardware misses
+  4 s, the lever is the search's work bound (6b-2a's `private.unique_subset_trace` and its twin, lowered together).
+  The saturating inputs have no subset, so no proposal is previewed there: the double search the review measured
+  (3.3–3.9 s) is pinned by the `037` count, not by these timings.
+- **CSR-4 (low) — a re-import dropped a value the new file gave.** `private.unsplit_details_differ` compares a detail's
+  direction whenever the new file gave its `CdtDbtInd`, and its amount whenever the new file gives one (a stored null
+  counting as different); `private.ingest_statement` compares the charges whenever the new file read them (against a
+  stored charge, « none read » or « not read »; a stage row without the flag, written before M2c-6b-2b, still reads as
+  « read », as 6b-2a compared it — `036` A « (CSO2-8) … » unchanged, which caught a first version of this fix reading
+  it as « not read »). Such a re-import refuses `entry_detail_differs` as 6b-2a did. `037` A
+  « (OQ-84 (j); review CSR-4): a re-import compares a stored value with every value the new file gives … »; COMPLIANCE
+  OQ-84 (j) and DOMAIN state the rule.
+- **TESTS-1 (medium) — P's queue bound had no SQL test.** `037` D « (review TESTS-1, F5): a returned payout executed
+  again while the client's queue nets less than its item … » (P 31 000 `queue`, an advance of 10 000) and « (review
+  TESTS-1): two unplanned parts of one client in one call share its queue … »; integration
+  `test_p_is_the_twin_s_when_the_client_s_queue_binds` (a new collection allocated, then the collection x's run
+  remitted bounces: 0 < P < A, `queue`, as the twin gives it on the SQL facts). The `037` header and
+  the section above no longer say the twin covers them.
+- **TESTS-2 (medium)** — `037` D « (review TESTS-2, F13): a debit of a client's payout not handed out yet, to that
+  client's IBAN, is never booked as the client's unplanned payout (class N, E0 and O; options and command) … ».
+- **TESTS-3 (medium)** — `037` C « (review TESTS-3, F9): a reference-less debit a payout and a refund in flight of its
+  amount may both be is line_ambiguous — without an IBAN, and with the IBAN they share … ».
+- **TESTS-4 (medium) — `_held_to`'s F11 key had no test that fails without it.** `HELD_TO_SQL` is a module constant of
+  `jobs/remittances.py`; integration `test_a_returned_second_debit_s_item_has_no_deadline_in_the_worker_nor_the_sql`
+  (S03 booked by ops, P = 0, its copy back and booked: the item it re-owes is in the next draft with no deadline in
+  `_held_to` nor `private.pending_item_deadlines`, the two agree on every `payout_returned` item of the draft, and the
+  query gives one row per item); the ML-2 test also asserts one row per item.
+- **TESTS-5 (low)** — `037` D « (review TESTS-5, ML-1): a cancelled run's released lines holding an earlier unplanned
+  booking's −A row … P = A », « (review TESTS-5, ML-1): the cap is the signed net … floored once … P = 0 … n is still
+  owed », « (review TESTS-5): once an unplanned booking's copy has come back, the items it paid are owed again … ».
+- **TESTS-6 (low)** — `test_p_bounds_and_attribution` asserts P exactly, from the raw facts (pending, own, reverses,
+  the queue, the earlier bookings), its bound independently, and the attribution's spread; its strategy is biased to
+  one client's parts and items owed in part, so the queue binds across parts.
+- **TESTS-7 (low)** — `037` E « E, F, G (review TESTS-7; CSO2-7): a sweep debited twice, both copies back as own
+  credits carrying its SWP id … » (`unplanned_sweep_returned` then `sweep_returned` through the command: their keys,
+  books, the sweep's status and the funds pass queued or not).
+- **TESTS-8 (low)** — `037` F « (review TESTS-8): a return dated before its payout's debit entry → return_before_debit
+  … », G « (review TESTS-8, §3.4.13 rule 5): an unplanned booking's return dated before its unplanned entry → … », C
+  « (review TESTS-8): … run_not_in_flight; … batch_mixed … », C, D « (review TESTS-8, ML-8): … the returned one is not a
+  candidate ». Not added: ML-4's re-issue x' among the (i) candidates (a re-issue of a downloaded file needs 033's
+  two-person cancellation with the switch on; the candidates read no `replaces_transfer_id` for (i), so there is no
+  exclusion to regress). Default: 6b-3's switch-on tests, which build re-issues, add it.
+- **TESTS-9 (low)** — `test_oq84j_the_line_says_whether_its_charges_were_read` covers an entry kept unsplit of two
+  details in the three variants (a detail carrying `Chrgs`; readable entry-level `Chrgs` only; an unreadable
+  entry-level record).
+
+**Mutants (round 1; SQL: one function redefined after `037`'s `begin`, through `psql` in one rolled-back transaction,
+the no-op control 71 of 71; the integration tests' with the definition committed, then restored; worker: the source
+edited in place, the named tests run, restored).** Killed, each by the test named above: the money-1 guard dropped
+(H, three shapes), the B count rule dropped (H, lot), the per-transfer bound dropped (D S01), the charges-not-read
+refusal dropped (C LT-3), the direction refusal back to `not_a_transfer_line` and `transfer_kind_differs` back to
+`transfer_unknown` (A LT-6), the queue bound dropped (D F5 and the call's queue), the earlier parts' P not taken from
+the queue (D, the call's queue), `payout_not_handed_out_matches` dropped (D TESTS-2), refunds dropped from rule 3b's
+candidates (C F9), the pool's own rows counted (D ML-1), the pool's net floored per item (D ML-1), a reversed booking's
+attributions still counted (D TESTS-5), the two `return_before_debit` dates dropped (F, G), `run_not_in_flight` and
+`batch_mixed` dropped (C TESTS-8), ML-8's exclusion dropped (C, D ML-8), the funds pass not queued after an unplanned
+sweep's return (E, F, G TESTS-7), the re-import's three comparisons weakened (A CSR-4: a direction compared one way
+only, a stored null amount taken as equal, a stored « not read » not compared), `p_bound` not stored (B LT-4), the key
+lock back in the one-key space (B CSR-2), the statement's unplanned reason and its natures grouping (G LT-2), the
+options searching twice (C CSR-3); `post_bank_bookings` as in `20261117090000`
+(`test_cs1_the_job_s_sweep_return_and_the_command_never_deadlock`: 40P01 on the job's side); `_held_to` without its
+key (`test_a_returned_second_debit_s_item_has_no_deadline_in_the_worker_nor_the_sql`: the item held 30 days); the
+statement's unplanned nature branch and its late cause back to « reversé à nouveau »
+(`test_an_unplanned_payout_s_return_is_never_said_paid_again`); the twin without `prior`
+(`test_money2_bookings_of_one_transfer_never_net_more_than_its_amount`); the twin's attribution order reversed
+(`test_p_bounds_and_attribution`; it survived the build's strategy, killed by the biased one). None survives; the
+options searching twice is not seen by the saturating scale case (no proposal there), only by `037`.
+
+Suites on the final code, after `supabase db reset`: pgTAP 37 files, 2,620 tests (`037` 71; `034`'s TODO markers
+kept, 16 TODO passed); the worker's ruff, format and mypy (174 files), 1,057 unit tests passed (5 xfailed) and 205
+integration tests (the scale files apart); the evals unchanged — mapping 167/167 (threshold 0.980), reconciliation
+0.9600 automatic (95,997/100,000), 0 wrong, 0 policy violations; on a fresh reset, the payouts scale test once (5 of 5),
+and the lot-cap file (4 of 4 on its last run; the saturating case's four runs above; timings in
+`docs/benchmarks/remittances.md`) — the download did not change, so the transfer-files scale test was not run again;
+the web's lint, types and 360 vitest tests; the E2E's 54 tests — no screenshot committed: no page changed (the reworded
+refusal labels are in `lib/payments/transfer-lines.ts`, which no page imports yet), and the image diffs are dates, ages
+and ids. `database.types.ts` regenerated (`client_advance.p_bound`).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

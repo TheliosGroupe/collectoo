@@ -48,6 +48,12 @@ NATURE = {
     "payout_returned": "Virement revenu impayé — reversé à nouveau",
     "unplanned_payout": "Virement exécuté hors reversement",
 }
+# M2c-6b-2b (review LT-2; plan §5, critic L4, brought forward from 6b-2d): the item an unplanned
+# payout's return re-owes (payload nature_reason `unplanned` on a payout_returned line) — its money
+# came back unpaid and is owed again, never « reversé à nouveau ». A new code only: no payload
+# drawn before carries it (no template version).
+UNPLANNED_RETURN = "Virement exécuté hors reversement revenu"
+
 FORWARD_REASON = {
     "file_recalled": "dossier rappelé",
     "before_servicing_start": "antérieur à la reprise",
@@ -80,6 +86,9 @@ HELD_REASON = {
 # template's bytes for them are unchanged (no new template version).
 LATE_CAUSE = {
     "payout_returned": "virement revenu impayé, reversé à nouveau",
+    # M2c-6b-2b (review LT-2): an unplanned payout's return, its item held to the date of the
+    # items it paid (critic2 ML-2); a new code only, as above
+    "unplanned_payout_returned": "virement exécuté hors reversement revenu impayé",
     "unmeetable": "délai contractuel intenable (art. R124-6 : un mois)",
     "identified_late": "encaissement identifié tardivement",
     "approved_late": "validation tardive",
@@ -208,6 +217,8 @@ def nature(kind: str, reason: Any, from_run: Any) -> str:
         return "Commission sur des encaissements de relevés précédents"
     if reason == "bank_return" and kind in BANK_RETURN:
         return BANK_RETURN[kind]
+    if kind == "payout_returned" and reason == "unplanned":
+        return UNPLANNED_RETURN
     base = NATURE.get(kind, kind)
     if kind == "forward" and reason in FORWARD_REASON:
         return f"{base} ({FORWARD_REASON[str(reason)]})"
