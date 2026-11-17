@@ -51,7 +51,7 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - `docs/LOCAL_SETUP.md` (2026-11-10, founder ask): run Collectoo on your own machine (tools, `make setup/up/reset`, `.env.local`, worker + web, seeded logins and Mailpit, sample tapes and a camt.053 that pays seeded RF references). Commands checked against the local stack.
 
 ## In progress
-- **M2c-6b-2 build plan** (`docs/design/m2c-6b-2-plan.md`, branch `m6b2-plan`, from PR #29's head): every line shape 6b-1 left to ops booked or kept with why. Revised after three critics (money, legal/texts, concurrency): 46 of 47 findings folded (3 of them in part), 1 rejected, all listed in its §12. It is now **four PRs**:
+- **M2c-6b-2 build plan** (`docs/design/m2c-6b-2-plan.md`, branch `m6b2`, from main after PR #30): every line shape 6b-1 left to ops booked or kept with why. Revised after three critics (money, legal/texts, concurrency): 46 of 47 findings folded (3 of them in part), 1 rejected, all listed in its §12. It is now **four PRs**:
   - **6b-2a** foundations: unsplit entries' own details stored at import; the job reviews a return of a transfer with an open unplanned booking; a generated file's sweep re-checked at first download (a 6b-1 gap); `unique_subset`; P0 alerts; S23 texts; pgTAP 036.
   - **6b-2b** ops command `public.book_transfer_line`: P per item (attribution, net of reversals, capped by the queue); rule 3b over every candidate; fees only on our transfer's own line; tenant filter first; ≤ 4 s, lots ≤ 500; pgTAP 037.
   - **6b-2c** pages: guards with a five-business-day bound on suppressed breach rows; client space; E2E.
