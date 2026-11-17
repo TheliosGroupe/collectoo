@@ -18,9 +18,13 @@
 --      own_transfer_payment (P0), the M2b pass's own reason own_transfer_line;
 --   F. the S23 texts: « ne peut pas encore », no screen promised.
 -- run_payment_checks is asserted free of violations after each group (I8′, I12, I13, I14, I19, I20, bank_line_booked).
+-- Review M2c-6b-2a (ADR-0014 « M2c-6b-2a review fixes »): a debit held as a suspected duplicate and decided a duplicate is
+-- no pending debit (M1, B); a held credit released as a return is counted by bank_line_unbooked (M2, T1, E); the
+-- unplanned_sweep arm (T2), the order of the two return rules (T4), the newer-sweep clause (T5), the charges' stored null
+-- and a CSV charge (T3), the helpers' privileges (CS-4).
 -- Cancellation after download stays off (033 and 034 unchanged).
 begin;
-select plan(39);
+select plan(44);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -795,6 +799,13 @@ language sql as $$
            'count', p_count, 'nb', p_nb, 'details', jsonb_build_array(p_detail)))) $$;
 create or replace function pg_temp.a_again(p_lines jsonb) returns text language sql as $$
   select split_part(pg_temp.attempt(format('select pg_temp.imp(%L, %L::jsonb)', '04', p_lines)), ':', 1) $$;
+-- an import kept when it passes (its refusal's code otherwise, the file going on)
+create or replace function pg_temp.a_kept_imp(p_n text, p_lines jsonb) returns text language plpgsql as $$
+begin
+  return pg_temp.imp(p_n, p_lines);
+exception when others then
+  return split_part(sqlerrm, ':', 1);
+end $$;
 create or replace function pg_temp.a_reimport() returns jsonb language plpgsql as $$
 declare
   d jsonb := '{"id": "RMT0000000000C1", "direction": "debit", "amount_minor": "20000"}';
@@ -802,7 +813,9 @@ declare
 begin
   perform pg_temp.imp('03', pg_temp.a_nc1(d) || '[{"ref": "NC2", "kind": "transfer_out", "e2e": "RMT0000000000C2",
                                                    "amount": 32920, "charges": 120},
-                                                  {"ref": "NC3", "amount": 40000, "unsplit": 1}]'::jsonb);
+                                                  {"ref": "NC3", "amount": 40000, "unsplit": 1},
+                                                  {"ref": "NC4", "kind": "transfer_out", "e2e": "RMT0000000000C4",
+                                                   "amount": 32920}]'::jsonb);
   v := jsonb_build_object(
     'same', pg_temp.a_again(pg_temp.a_nc1(d) || '[{"ref": "NC2", "kind": "transfer_out", "e2e": "RMT0000000000C2",
                                                    "amount": 32920, "charges": 120}]'::jsonb),
@@ -815,20 +828,42 @@ begin
                                   "charges": 130}]'),
     'charges_dropped', pg_temp.a_again('[{"ref": "NC2", "kind": "transfer_out", "e2e": "RMT0000000000C2",
                                           "amount": 32920}]'));
-  -- NC3 imported with no details (as before 6b-2a): the details of a re-import are not compared, nor kept
+  -- NC3 imported with no details (as before 6b-2a): the details of a re-import are not compared, nor kept; review
+  -- M2c-6b-2a (T3): nor are the charges of NC4, a line of its own imported with none (every line before 6b-2a)
   return v || jsonb_build_object(
-    'filled', pg_temp.imp('05', '[{"ref": "NC3", "amount": 40000, "unsplit": 1, "count": 1,
-                                   "details": [{"id": "RMT0000000000C3", "direction": "debit",
-                                                "amount_minor": "40000"}]}]'),
-    'nc3', pg_temp.kept('03') -> 'NC3');
+    'filled', pg_temp.a_kept_imp('05', '[{"ref": "NC3", "amount": 40000, "unsplit": 1, "count": 1,
+                                          "details": [{"id": "RMT0000000000C3", "direction": "debit",
+                                                       "amount_minor": "40000"}]}]'),
+    'nc3', pg_temp.kept('03') -> 'NC3',
+    'charges_added', pg_temp.a_kept_imp('06', '[{"ref": "NC4", "kind": "transfer_out", "e2e": "RMT0000000000C4",
+                                                 "amount": 32920, "charges": 120}]'),
+    'nc4', pg_temp.kept('03') -> 'NC4');
 end $$;
 select is(pg_temp.isolated('a_reimport'),
   '{"same": "0", "id": "entry_detail_differs", "direction": "entry_detail_differs", "amount": "entry_detail_differs",
     "count": "entry_detail_differs", "nb": "entry_detail_differs", "charges": "entry_detail_differs",
-    "charges_dropped": "entry_detail_differs", "filled": "0", "nc3": [null, null, null, null, 1]}'::jsonb,
+    "charges_dropped": "entry_detail_differs", "filled": "0", "nc3": [null, null, null, null, 1],
+    "charges_added": "0", "nc4": [null, null, null, null, null]}'::jsonb,
   'A (CSO2-8): a known line with the same details is skipped; with another id, direction or amount of a detail of ours, '
   'another detail count or NbOfTxs, other or no charges, the file is refused entry_detail_differs; a line imported '
-  'without details is neither compared nor filled');
+  'without details, or without charges, is neither compared nor filled');
+-- review M2c-6b-2a (T3): a CSV export never stages a charge (the bank's record is the camt.053's): line_invalid
+create or replace function pg_temp.a_csv_charge() returns text language plpgsql as $$
+declare s uuid := pg_temp.imp_id('07');
+begin
+  insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                     size_bytes, storage_path)
+  values (s, '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf', 'EUR', 'csv', 'a.csv',
+          encode(sha256(convert_to(s::text, 'UTF8')), 'hex'), 1, 'test/' || s);
+  update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = s;
+  insert into private.bank_import_stage (statement_id, line_no, section_no, dedup_key, direction, amount_minor, currency,
+                                         booking_date, kind, method, charges_minor)
+  values (s, 1, 0, 'h:' || s, 'debit', 1000, 'EUR', private.paris_today(), 'other_debit', 'other', 120);
+  return private.ingest_statement(s, jsonb_build_object('format', 'csv', 'line_count', 1, 'skipped_not_booked', 0,
+                                                        'sections', '[]'::jsonb)) ->> 'new_lines';
+end $$;
+select is(split_part(pg_temp.attempt('select pg_temp.a_csv_charge()'), ':', 1), 'line_invalid',
+  'A (T3): a CSV line staging a charge refuses the file line_invalid');
 
 
 -- D. private.unique_subset (plan §2.5; critic2 CSO2-2) ------------------------------------------------------------------
@@ -885,9 +920,17 @@ select is(array[has_function_privilege('anon', 'private.unique_subset(bigint[], 
                 has_function_privilege('anon', 'private.transfer_line_lot_cap()', 'execute'),
                 has_function_privilege('authenticated', 'private.transfer_line_lot_cap()', 'execute'),
                 has_function_privilege('anon', 'private.own_transfer_line_hint(text)', 'execute'),
-                has_function_privilege('authenticated', 'private.own_transfer_line_hint(text)', 'execute')],
-          array_fill(false, array[8]),
-  'neither anon nor authenticated may execute unique_subset, its trace, the lot cap or the own-line hint');
+                has_function_privilege('authenticated', 'private.own_transfer_line_hint(text)', 'execute'),
+                -- review M2c-6b-2a (CS-4): the two other new helpers, and transfer_late_lines (redefined, M1)
+                has_function_privilege('anon', 'private.unsplit_details_valid(jsonb, integer)', 'execute'),
+                has_function_privilege('authenticated', 'private.unsplit_details_valid(jsonb, integer)', 'execute'),
+                has_function_privilege('anon', 'private.transfer_unplanned_open(uuid)', 'execute'),
+                has_function_privilege('authenticated', 'private.transfer_unplanned_open(uuid)', 'execute'),
+                has_function_privilege('anon', 'private.transfer_late_lines(uuid)', 'execute'),
+                has_function_privilege('authenticated', 'private.transfer_late_lines(uuid)', 'execute')],
+          array_fill(false, array[14]),
+  'neither anon nor authenticated may execute unique_subset, its trace, the lot cap, the own-line hint, the details''s '
+  'shape check, the unplanned-open fact or the late lines');
 
 
 -- C. A generated file's sweep re-checked at its first download (plan §2.4; critic CSO-2, F10, CSO-10; critic2 CSO2-4) ---
@@ -1182,6 +1225,128 @@ select is(array[pg_temp.status(pg_temp.v('x7')), pg_temp.skipped(pg_temp.ln('b9'
 select pg_temp.book('[]', jsonb_build_array(jsonb_build_object('line', pg_temp.ln('b9', 1),
                                                                'reason', 'return_debit_pending')));
 select is(pg_temp.review(pg_temp.ln('b9', 1)), 'return_debit_pending', 'B: the reason the twin writes is accepted');
+
+-- Review M2c-6b-2a (M1): a CSV export overlapping FA's debits holds Petit's debit (x8) as a suspected duplicate (same
+-- day, amount and direction, a similar label, another fingerprint). While held it may be a second movement: the return
+-- of x8 waits (return_debit_pending). Once ops decide it is a duplicate it is no movement: x8's return is booked as
+-- before 6b-2a (x8 returned, its item queued again). The other servicer's ops cannot decide it.
+create or replace function pg_temp.b_duplicate() returns jsonb language plpgsql as $$
+declare
+  v jsonb;
+  v_x8 uuid := pg_temp.trid('r8');
+  v_d8 uuid;
+  v_q bigint;
+begin
+  perform pg_temp.statement('d1', private.paris_today() - 1, 0, jsonb_build_array(
+    jsonb_build_object('e2e', pg_temp.e2e(v_x8), 'amount', 82000, 'kind', 'suspected_duplicate')), p_format => 'csv');
+  select id into v_d8 from public.bank_transaction where statement_id = 'e2000000-0000-0000-0000-0000000000d1';
+  perform pg_temp.stmt('ba', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 82000, 'orig', pg_temp.e2e(v_x8))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('ba', 1), 'payout_returned', v_x8)));
+  v := jsonb_build_object('held', jsonb_build_object(
+    'late', array(select private.transfer_late_lines(v_x8)) = array[v_d8],
+    'facts', pg_temp.return_facts(pg_temp.ln('ba', 1)), 'review', pg_temp.review(pg_temp.ln('ba', 1))));
+  v := v || jsonb_build_object('other_servicer', pg_temp.try('05', format(
+    $q$ select public.resolve_duplicate('dup-b-05', %L, true, 'même débit') ->> 'decision' $q$, v_d8)));
+  select coalesce(max(q.msg_id), 0) into v_q from pgmq.q_payments q;
+  v := v || jsonb_build_object('decision', pg_temp.try('01', format(
+    $q$ select public.resolve_duplicate('dup-b-d8', %L, true, 'même débit que le relevé camt') ->> 'decision' $q$,
+    v_d8)));
+  -- the decision queues the debit job (its return read again at once)
+  v := v || jsonb_build_object('queued', (select jsonb_agg(q.message order by q.msg_id) from pgmq.q_payments q
+                                           where q.msg_id > v_q));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('ba', 1), 'payout_returned', v_x8)));
+  return v || jsonb_build_object('decided', jsonb_build_object(
+    'late', array(select private.transfer_late_lines(v_x8)), 'facts', pg_temp.return_facts(pg_temp.ln('ba', 1)),
+    'bookings', pg_temp.bookings(pg_temp.ln('ba', 1)), 'x8', pg_temp.status(v_x8),
+    'returned_items', pg_temp.returned_items('a8')));
+end $$;
+select is(pg_temp.isolated('b_duplicate'),
+  '{"held": {"late": true, "facts": {"role": "return", "unplanned_open": false, "debit_pending": true},
+             "review": "return_debit_pending"},
+    "other_servicer": "not allowed", "decision": "duplicate",
+    "queued": [{"type": "process_debits", "organization_id": "00000000-0000-0000-0000-0000000000aa"}],
+    "decided": {"late": [], "facts": null, "bookings": ["1 payout_returned 82000"], "x8": "returned",
+                "returned_items": 1}}'::jsonb,
+  'B (review M1): a debit held as a suspected duplicate keeps a return waiting (return_debit_pending); decided a '
+  'duplicate, it is no movement and the debit job is queued — the return is booked payout_returned as before 6b-2a; '
+  'another servicer''s ops may not decide it');
+
+-- Review M2c-6b-2a (T4): the order of the two rules. Both facts true (an open unplanned booking and a debit pending):
+-- unplanned_payout_return first. A transfer returned, executed again and that copy booked by ops (S03r), then the copy
+-- returned: unplanned_payout_return, never already_returned.
+create or replace function pg_temp.b_both() returns jsonb language plpgsql as $$
+begin
+  perform pg_temp.stmt('bb', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 164000, 'e2e', pg_temp.e2e(pg_temp.v('x1')))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('b3', 1), 'payout_returned', pg_temp.v('x1'))));
+  return jsonb_build_object('facts', pg_temp.return_facts(pg_temp.ln('b3', 1)), 'why', pg_temp.skipped(pg_temp.ln('b3', 1)),
+                            'bookings', pg_temp.bookings(pg_temp.ln('b3', 1)));
+end $$;
+create or replace function pg_temp.b_returned_again() returns jsonb language plpgsql as $$
+declare v_status text;
+begin
+  perform private.ledger_reverse(pg_temp.ek('adv:line:' || pg_temp.ln('b2', 1) || ':1'), 'test-rev-adv-u1',
+                                 'Avance annulée (test)', private.paris_today());
+  perform private.ledger_reverse(pg_temp.v('u1'), 'test-rev-u1', 'Virement hors reversement revenu (test)',
+                                 private.paris_today());
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('b3', 1), 'payout_returned', pg_temp.v('x1'))));
+  v_status := pg_temp.status(pg_temp.v('x1'));
+  perform pg_temp.stmt('bc', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 164000, 'e2e', pg_temp.e2e(pg_temp.v('x1')))));
+  perform pg_temp.unplanned(pg_temp.ln('bc', 1), pg_temp.v('x1'), 'a1');
+  perform pg_temp.stmt('bd', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 164000, 'orig', pg_temp.e2e(pg_temp.v('x1')))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('bd', 1), 'payout_returned', pg_temp.v('x1'))));
+  return jsonb_build_object('returned', v_status, 'facts', pg_temp.return_facts(pg_temp.ln('bd', 1)),
+                            'why', pg_temp.skipped(pg_temp.ln('bd', 1)), 'bookings', pg_temp.bookings(pg_temp.ln('bd', 1)),
+                            'x1', pg_temp.status(pg_temp.v('x1')));
+end $$;
+select is(jsonb_build_array(pg_temp.isolated('b_both'), pg_temp.isolated('b_returned_again')),
+  '[{"facts": {"role": "return", "unplanned_open": true, "debit_pending": true}, "why": "unplanned_payout_return",
+     "bookings": []},
+    {"returned": "returned", "facts": {"role": "return", "unplanned_open": true, "debit_pending": false},
+     "why": "unplanned_payout_return", "bookings": [], "x1": "returned"}]'::jsonb,
+  'B (review T4): an open unplanned booking comes before a pending debit, and before already_returned (S03r: a returned '
+  'transfer executed again, that copy booked by ops, then returned)');
+
+-- Review M2c-6b-2a (T2): the unplanned_sweep arm — FA's booked sweep executed again, that copy booked by ops as an
+-- unplanned sweep (seeded: its servicer_sweep entry and booking), then a flagged return of the sweep: reviewed, never
+-- booked by the job, the sweep still booked
+create or replace function pg_temp.b_sweep_again() returns jsonb language plpgsql as $$
+declare v_entry uuid;
+begin
+  perform pg_temp.stmt('be', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 12000, 'e2e', pg_temp.e2e(pg_temp.v('sa')), 'iban', 'FR7610107001011234567890129')));
+  perform private.ledger_post_set_begin();
+  insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key, source_type,
+                                  source_id, reason)
+  values (1, '00000000-0000-0000-0000-0000000000aa', 'servicer_sweep', private.paris_today(), 'test-unplanned-sweep-b',
+          'bank_transfer', pg_temp.v('sa')::text, 'Quote-part exécutée deux fois (test)');
+  insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency, bank_account_id) values
+    (1, 1, 'due_to_servicer', 12000, 'EUR', null),
+    (1, 2, 'client_money_cash', -12000, 'EUR', '80000000-0000-0000-0000-0000000000cf'),
+    (1, 3, 'own_cash', 12000, 'EUR', '80000000-0000-0000-0000-0000000000c0'),
+    (1, 4, 'due_from_client_funds', -12000, 'EUR', null);
+  perform private.ledger_post_set();
+  v_entry := pg_temp.ek('test-unplanned-sweep-b');
+  insert into public.bank_line_booking (bank_transaction_id, seq, organization_id, bank_account_id, kind, transfer_id,
+                                        entry_id, amount_minor, method, reason, decided_by)
+  values (pg_temp.ln('be', 1), 1, '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf',
+          'unplanned_sweep', pg_temp.v('sa'), v_entry, 12000, 'ops', 'motif de test',
+          '10000000-0000-0000-0000-000000000001');
+  perform pg_temp.stmt('bf', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 12000, 'orig', pg_temp.e2e(pg_temp.v('sa')))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('bf', 1), 'sweep_returned', pg_temp.v('sa'))));
+  return jsonb_build_object('facts', pg_temp.return_facts(pg_temp.ln('bf', 1)), 'why', pg_temp.skipped(pg_temp.ln('bf', 1)),
+                            'review', pg_temp.review(pg_temp.ln('bf', 1)), 'bookings', pg_temp.bookings(pg_temp.ln('bf', 1)),
+                            'sweep', pg_temp.status(pg_temp.v('sa')));
+end $$;
+select is(pg_temp.isolated('b_sweep_again'),
+  '{"facts": {"role": "return", "unplanned_open": true, "debit_pending": false}, "why": "unplanned_payout_return",
+    "review": "unplanned_payout_return", "bookings": [], "sweep": "booked"}'::jsonb,
+  'B (review T2): a return of a sweep with an open unplanned sweep booking is reviewed unplanned_payout_return, never '
+  'booked by the job, the sweep still booked');
 select is(pg_temp.dirty(), '{}'::text[], 'B: clean (I8′, I12, I13, I14, I19, I20, bank_line_booked)');
 
 
@@ -1351,20 +1516,78 @@ begin
           '10000000-0000-0000-0000-000000000001');
   v_after := pg_temp.alerts('payout_returned');
   v_safter := pg_temp.alerts('sweep_returned');
+  -- review M2c-6b-2a (T5): once the share is ordered swept again (a newer sweep, not cancelled), that return is no
+  -- longer alerted (the sweep's row seeded as the generation writes it, created after the return was booked)
+  insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id, creditor_bank_account_id, currency,
+                                    amount_minor, payee_name, payee_iban, end_to_end_id, remittance_info,
+                                    requested_execution_date, created_at)
+  values ('00000000-0000-0000-0000-0000000000aa', 'sweep', '80000000-0000-0000-0000-0000000000cf',
+          '80000000-0000-0000-0000-0000000000c0', 'EUR', 12000, 'Collectoo SAS', 'FR7610107001011234567890129',
+          'SWP0000000000E9', 'VIREMENT AU COMPTE PROPRE (test)', private.paris_today(), clock_timestamp());
   return jsonb_build_object(
     'payout_returned', (select coalesce(jsonb_agg(x), '[]') from jsonb_array_elements(v_after) x
                         where not v_before @> jsonb_build_array(x)),
     'payout_returned_gone', (select coalesce(jsonb_agg(x), '[]') from jsonb_array_elements(v_before) x
                              where not v_after @> jsonb_build_array(x)),
     'sweep_returned', (select coalesce(jsonb_agg(x), '[]') from jsonb_array_elements(v_safter) x
-                       where not v_sweeps @> jsonb_build_array(x)));
+                       where not v_sweeps @> jsonb_build_array(x)),
+    'swept_again', pg_temp.alerts('sweep_returned') @> jsonb_build_array(jsonb_build_array(pg_temp.ln('e9', 1), 12000)));
 end $$;
 select is(pg_temp.isolated('e_unplanned_returns'),
           jsonb_build_object('payout_returned', jsonb_build_array(jsonb_build_array(pg_temp.ln('b3', 1), 164000)),
                              'payout_returned_gone', '[]'::jsonb,
-                             'sweep_returned', jsonb_build_array(jsonb_build_array(pg_temp.ln('e9', 1), 12000))),
+                             'sweep_returned', jsonb_build_array(jsonb_build_array(pg_temp.ln('e9', 1), 12000)),
+                             'swept_again', false),
   'E: the return of an unplanned payout (seeded as 6b-2b books it) is alerted payout_returned once, by its line — never '
-  'also as its transfer''s planned return —, and the return of an unplanned sweep sweep_returned, by its line');
+  'also as its transfer''s planned return —, and the return of an unplanned sweep sweep_returned, by its line, until '
+  'the share is ordered swept again');
+-- Review M2c-6b-2a (M2, T1): a line held as a suspected duplicate keeps that kind; released by ops, the job reads it as
+-- the kind it was released as (a credit returning x2 is reviewed return_debit_pending: x2's second debit is still
+-- unbooked). bank_line_unbooked counts it after one business day, as the identical camt return b7, by that kind
+create or replace function pg_temp.e_released_return() returns jsonb language plpgsql as $$
+declare v jsonb; v_later jsonb;
+begin
+  -- ea: a second copy of x2's return; eb: a return carrying an id no transfer of ours has; ec: a copy of x2's debit;
+  -- ed: a credit carrying x2's id from Lilas' payout IBAN — each held, then released by ops as what it is
+  perform pg_temp.stmt('ea', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'suspected_duplicate', 'amount', 419840,
+                       'orig', pg_temp.e2e(pg_temp.v('x2'))),
+    jsonb_build_object('dir', 'credit', 'kind', 'suspected_duplicate', 'amount', 7700, 'orig', 'RMT0000000000E5'),
+    jsonb_build_object('kind', 'suspected_duplicate', 'amount', 419840, 'e2e', pg_temp.e2e(pg_temp.v('x2'))),
+    jsonb_build_object('dir', 'credit', 'kind', 'suspected_duplicate', 'amount', 7800, 'e2e', pg_temp.e2e(pg_temp.v('x2')),
+                       'iban', 'FR1420041010050500013M02606')));
+  v := jsonb_build_object('released', jsonb_build_array(
+    pg_temp.try('01', format($q$ select public.resolve_duplicate('dup-e-ea', %L, false, 'second retour') ->> 'kind' $q$,
+                             pg_temp.ln('ea', 1))),
+    pg_temp.try('01', format($q$ select public.resolve_duplicate('dup-e-eb', %L, false, 'un retour') ->> 'kind' $q$,
+                             pg_temp.ln('ea', 2))),
+    pg_temp.try('01', format($q$ select public.resolve_duplicate('dup-e-ec', %L, false, 'second débit') ->> 'kind' $q$,
+                             pg_temp.ln('ea', 3))),
+    pg_temp.try('01', format($q$ select public.resolve_duplicate('dup-e-ed', %L, false, 'crédit du client') ->> 'kind' $q$,
+                             pg_temp.ln('ea', 4)))));
+  -- the job: ea's return reviewed under its re-check; the others' reviews as the job writes them
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.ln('ea', 1), 'payout_returned', pg_temp.v('x2'))),
+                       jsonb_build_array(jsonb_build_object('line', pg_temp.ln('ea', 2), 'reason', 'transfer_unknown'),
+                                         jsonb_build_object('line', pg_temp.ln('ea', 3), 'reason', 'transfer_debited_twice'),
+                                         jsonb_build_object('line', pg_temp.ln('ea', 4), 'reason', 'client_credit')));
+  v_later := pg_temp.unbooked_at(pg_temp.bd_after(2));
+  return v || jsonb_build_object(
+    'reviews', jsonb_build_array(pg_temp.review(pg_temp.ln('ea', 1)), pg_temp.review(pg_temp.ln('ea', 2)),
+                                 pg_temp.review(pg_temp.ln('ea', 3)), pg_temp.review(pg_temp.ln('ea', 4))),
+    'today', pg_temp.unbooked_at(private.paris_today()) ?| array[pg_temp.ln('ea', 1)::text, pg_temp.ln('ea', 2)::text,
+                                                               pg_temp.ln('ea', 3)::text, pg_temp.ln('ea', 4)::text],
+    'later', jsonb_build_array(v_later ? pg_temp.ln('ea', 1)::text, v_later ? pg_temp.ln('ea', 2)::text,
+                               v_later ? pg_temp.ln('ea', 3)::text, v_later ? pg_temp.ln('ea', 4)::text),
+    'b7_later', v_later ? pg_temp.ln('b7', 1)::text);
+end $$;
+select is(pg_temp.isolated('e_released_return'),
+  '{"released": ["return", "return", "transfer_out", "client_transfer_in"],
+    "reviews": ["return_debit_pending", "transfer_unknown", "transfer_debited_twice", "client_credit"],
+    "today": false, "later": [true, true, true, true], "b7_later": true}'::jsonb,
+  'E (review M2, T1): a held line released by ops is read as the kind it was released as — a return (reviewed '
+  'return_debit_pending or transfer_unknown), our transfer''s debit, a client''s credit carrying our id: '
+  'bank_line_unbooked counts each after one business day, as the same lines imported as what they are');
+
 -- the M2b pass: a link on one of our lines refused under its locks is reviewed own_transfer_line (S20, OQ-84 (i)), not
 -- `changed`
 select pg_temp.stmt('e3', private.paris_today(), jsonb_build_array(

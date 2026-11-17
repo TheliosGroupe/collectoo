@@ -778,7 +778,27 @@ rules), the first download's sweep re-check and the nightly checks. Each scale t
 
 The sweep re-check adds one keyed read of the file's sweep and one sum of the servicer's 4679 to the first download; the
 return facts are read for return lines only, by key. `private.unique_subset` (no caller before
-6b-2b), on 500 amounts: the worst saturating input (5–90 €, t' = 8,000, the bit representation) trips the work bound in
-0.07–0.19 s (pgTAP `036` asserts < 0.5 s); 500 lots of 10–4,000 € for 50,000 € answer in 0.35 s; 500 nearly equal
-amounts of about 100,000 € (t'' past 2²³: the row representation) trip the partial-sum bound at item 199 in 1.4 s —
-the figure 6b-2b's command budget reads.
+6b-2b), on 500 amounts: the worst saturating input of the bit representation (t'' below 2¹⁸ = 262,144; 5–90 €,
+t' = 8,000) trips the work bound in 0.07–0.19 s (pgTAP `036` asserts < 0.5 s).
+
+Corrected by the review fixes (CS-2, T7; 2026-11-17, same VM, `private.unique_subset_trace`, three runs each, in one
+rolled-back transaction): the worst input is the row representation (t'' at or past 2¹⁸) with its partial sums
+saturating just under the 10,000-sum bound, so that only the work bound or the last item stops it.
+
+| 500 amounts | t'' (representation) | Stopped by | Time |
+|---|---|---|---|
+| 5–90 € (pgTAP `036`'s worst), target 80 € | 8,000 (bits) | work, item 423 | 79 / 105 / 107 ms |
+| random 10–4,000 €, target 50,000 € | 5,000,000 (rows) | partial sums, item 14 | 101 / 104 / 115 ms |
+| random 100,000 € ± 10 €, target 2,500,000.01 € | 250,000,001 (rows) | partial sums, item 14 | 65 / 72 / 73 ms |
+| multiples of 10 € (10–200 €), target 26,000.01 € | 2,558,999 (rows) | none: all 500 items | 1,811 / 2,048 / 2,065 ms |
+| multiples of 1 € (1–200 €), target 9,999.99 € | 999,999 (rows) | work, item 151 | 1,812 / 2,113 / 2,520 ms |
+
+The last two rows are the figure 6b-2b's command budget and lot cap read (about 2.5 s at worst here, under half the API's
+8 s), not the 1.4 s this section gave before (500 nearly equal amounts of about 100,000 €, whose sums trip their bound
+early). Default (ADR-0014 « M2c-6b-2a review fixes »): 6b-2b's scale run times the row-mode saturating input.
+
+The review fixes also redefine `private.transfer_late_lines` (a keyed read of `bank_duplicate_resolution` per line it
+looks at), read by the funds pass's return facts and the nightly checks. `test_debit_bookings_scale_integration.py`
+once, on a fresh reset: **5 passed** (842 s) — the 5,000-member batch line's funds pass 20.7 s; 5,000 RMT debits
+imported in 1.2 s, the debit job 20.0 s in chunks of 7.6, 8.2 and 4.1 s; the nightly checks 1.14 s; 200 members
+0.54 s; 200 RMT debits 0.62 s (the build's: 20.8 s; 1.2 s, 19.2 s; 1.02 s; 0.44 s; 0.72 s).

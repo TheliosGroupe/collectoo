@@ -192,14 +192,16 @@ def test_a_debit_charge_in_the_iso_shape_is_kept_unsplit_with_its_charge(
 ) -> None:
     """ML-6, CSO2-1: by default each debit is booked for N + charge on one entry, its detail
     carrying N (AmtDtls/TxAmt), the charge in the entry's Chrgs: the parser keeps it unsplit
-    (class U) with its one detail at N and the stored charge."""
+    (class U) with its one detail at N and the stored charge. Review M2c-6b-2a (M3): a v02 file
+    carries the charge as v02 does (`Chrgs/Amt`, no direction), which the parser never reads."""
     lines = _parse(tmp_path, worked_example("pain.001.001.09"), version, debit_charge_minor=120)
+    charge = 120 if version == "08" else None
     assert [
         (x["kind"], x["amount"], x["unsplit"], x["details"], x["count"], x["charges"])
         for x in lines
     ] == [
-        ("batch_unsplit", 164_120, 1, (UnsplitDetail(A, "debit", 164_000),), 1, 120),
-        ("batch_unsplit", 451_256, 1, (UnsplitDetail(B, "debit", 451_136),), 1, 120),
+        ("batch_unsplit", 164_120, 1, (UnsplitDetail(A, "debit", 164_000),), 1, charge),
+        ("batch_unsplit", 451_256, 1, (UnsplitDetail(B, "debit", 451_136),), 1, charge),
     ]
 
 
@@ -320,6 +322,9 @@ def test_the_command_writes_the_new_shapes(tmp_path: Path) -> None:
                 "--return",
                 A,
                 "--unflagged-returns",
+                # review M2c-6b-2a (M3): a v02 file's Chrgs is never read
+                "--version",
+                "08",
                 "--out",
                 str(out),
             ]

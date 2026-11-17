@@ -6,7 +6,7 @@ uv run synth civil-all --rows 200 --seed 1 --out ../tmp/synth
 uv run synth seed-sql > ../supabase/seed.sql
 uv run synth camt053 --lines 500 --seed 1 --iban FR76... --overlap 2 --out ../tmp/synth/bank
 uv run synth camt053 --debits-of f.xml --mode batch --return RMT... --charges 150 --out ../tmp/s
-uv run synth camt053 --debits-of f.xml --debit-charge 120 --return RMT... --unflagged-returns ...
+uv run synth camt053 --debits-of f.xml --debit-charge 120 --version 08 --return RMT... ...
 uv run synth camt053 --debits-of f.xml --unsplit-details ours-netted --version 08 --out ../tmp/s
 uv run synth camt053 --debits-of f.xml --csv --csv-without-references --out ../tmp/s
 """
@@ -87,7 +87,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915 - one parser, e
         type=int,
         default=0,
         metavar="MINOR",
-        help="each individual debit booked for N + this charge on one entry (Chrgs)",
+        help="each individual debit booked for N + this charge on one entry (Chrgs; read from a"
+        " v04+ file only: v02's Chrgs gives no direction, the parser never reads it)",
     )
     camt.add_argument(
         "--debit-charge-no-detail-amount",

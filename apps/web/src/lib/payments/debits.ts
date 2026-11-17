@@ -178,11 +178,14 @@ export const DEBIT_REVIEW: Record<string, string> = {
   // them (6b-2c rewords both with « Virement revenu »)
   unplanned_payout_return:
     "Retour d'un virement du cabinet (reversement ou quote-part) qui a aussi été exécuté hors de son ordre (virement annulé exécuté quand même, ou exécuté deux fois) : rien n'est comptabilisé automatiquement. Ce retour est celui du virement exécuté hors ordre, pas du reversement ni de la quote-part : prévenez le support.",
+  // review M2c-6b-2a (M1): that debit may be a copy held in « Doublons possibles » (private.transfer_late_lines counts a
+  // held line, never one decided a duplicate; public.resolve_duplicate then queues the debit job)
   return_debit_pending:
-    "Retour d'un virement du cabinet dont un autre débit (second débit, ou débit après annulation) figure sur un relevé sans être encore comptabilisé : rien n'est comptabilisé automatiquement. Ce débit se comptabilise d'abord ; prévenez le support.",
-  // M2c-6b-2a (S20, OQ-84 (i)): the M2b pass's own reason — a link it decided, refused because the line is ours
+    "Retour d'un virement du cabinet dont un autre débit (second débit, ou débit après annulation) figure sur un relevé sans être encore comptabilisé : rien n'est comptabilisé automatiquement. Si ce débit attend dans « Doublons possibles », décidez-le d'abord : reconnu comme doublon, il ne compte plus et le retour est repris automatiquement. Sinon, ce débit se comptabilise d'abord ; prévenez le support.",
+  // M2c-6b-2a (S20, OQ-84 (i)): the M2b pass's own reason — a link it decided, refused because the line is ours; review
+  // M2c-6b-2a (T6): no screen promised while none books these lines
   own_transfer_line:
-    "Ligne de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : elle ne se rattache à aucun paiement ni remboursement, et rien n'est comptabilisé automatiquement. Elle se comptabilise depuis le relevé, par l'équipe (écran à venir) ; prévenez le support.",
+    "Ligne de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : elle ne se rattache à aucun paiement ni remboursement, et rien n'est comptabilisé automatiquement. Collectoo ne peut pas encore la comptabiliser depuis cet écran : prévenez le support.",
 };
 
 /** The reasons that may mean money left twice or without an order (P0, first in « À classer »; plan §2.3). */

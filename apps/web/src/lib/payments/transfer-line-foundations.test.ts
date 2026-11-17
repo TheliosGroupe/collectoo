@@ -19,16 +19,31 @@ describe("the job's reviews of a return it does not book (critic F1, L5; critic2
   it("return_debit_pending says the other debit is booked first, and to tell support", () => {
     const text = DEBIT_REVIEW.return_debit_pending;
     expect(text).toContain("figure sur un relevé sans être encore comptabilisé");
-    expect(text).toContain("Ce débit se comptabilise d'abord");
+    expect(text).toContain("ce débit se comptabilise d'abord");
     expect(text).toContain("prévenez le support");
     expect(text).not.toContain("Virement revenu");
+  });
+  // review M2c-6b-2a (M1): a held copy of the debit decided a duplicate no longer counts, and the decision queues the
+  // job that takes the return up again (private.transfer_late_lines, public.resolve_duplicate); while it is held the
+  // label says to decide it first, never to book it
+  it("return_debit_pending says a held copy is decided first in « Doublons possibles », never booked", () => {
+    const text = DEBIT_REVIEW.return_debit_pending;
+    expect(text).toContain(
+      "Si ce débit attend dans « Doublons possibles », décidez-le d'abord : reconnu comme doublon, il ne compte plus et le retour est repris automatiquement.",
+    );
+    expect(text).not.toContain("Ce débit se comptabilise d'abord");
   });
   it("neither is a P0 of « À classer » (the money did not leave twice: it came back)", () => {
     expect(debitReviewRank("unplanned_payout_return")).toBe(1);
     expect(debitReviewRank("return_debit_pending")).toBe(1);
   });
-  it("the M2b pass's own reason on our lines has a label", () => {
-    expect(DEBIT_REVIEW.own_transfer_line).toContain("nos propres virements");
+  it("the M2b pass's own reason on our lines has a label that promises no screen (review M2c-6b-2a T6)", () => {
+    const text = DEBIT_REVIEW.own_transfer_line;
+    expect(text).toContain("nos propres virements");
+    expect(text).toContain("rien n'est comptabilisé automatiquement");
+    expect(text).toContain("Collectoo ne peut pas encore la comptabiliser");
+    expect(text).toContain("prévenez le support");
+    expect(text).not.toContain("écran à venir");
   });
 });
 

@@ -126,10 +126,12 @@ def _chrgs(
     ccy: str = "EUR",
     v02: bool = False,
 ) -> str:
-    """One charges record: v04 and later wrap it in Rcrd (with ChrgInclInd); v02's has none."""
-    side = f"<CdtDbtInd>{ind}</CdtDbtInd>" if ind else ""
+    """One charges record: v04 and later wrap it in Rcrd (with CdtDbtInd and ChrgInclInd). v02's
+    `Chrgs` carries its `Amt` itself, with no direction nor inclusion indicator (review M2c-6b-2a
+    M3: the shape a v02 file gives, as we read the message definition)."""
     if v02:
-        return f"<Chrgs>{_amt(amount, ccy)}{side}</Chrgs>"
+        return f"<Chrgs>{_amt(amount, ccy)}</Chrgs>"
+    side = f"<CdtDbtInd>{ind}</CdtDbtInd>" if ind else ""
     included = f"<ChrgInclInd>{incl}</ChrgInclInd>" if incl else ""
     return f"<Chrgs><Rcrd>{_amt(amount, ccy)}{side}{included}</Rcrd></Chrgs>"
 
@@ -282,10 +284,9 @@ def test_ml6_the_iso_shape_of_a_charged_transfer_is_unsplit_with_its_charge(
 
 
 def test_charges_are_read_from_the_entry_and_its_one_detail(tmp_path: Path) -> None:
-    """ML-6, ML-10: v02 (`Chrgs/Amt`) and v04+ (`Chrgs/Rcrd/Amt`), on the entry or on its one
-    detail, several records summed; both levels must agree."""
+    """ML-6, ML-10: v04+ (`Chrgs/Rcrd/Amt`), on the entry or on its one detail, several records
+    summed; both levels must agree."""
     cases = [
-        ("02", _ntry("10.00", charges=_chrgs("1.20", v02=True)), 120),
         ("08", _ntry("10.00", charges=_chrgs("1.20")), 120),
         ("08", _ntry("10.00", charges=_chrgs("1.20") + _chrgs("0.30", incl=None)), 150),
         ("08", _ntry("10.00", _tx(RMT_A, charges=_chrgs("1.20"))), 120),
@@ -296,6 +297,31 @@ def test_charges_are_read_from_the_entry_and_its_one_detail(tmp_path: Path) -> N
     for version, entry, want in cases:
         (line,) = _parse(tmp_path, _xml([entry], version)).lines
         assert line.charges_minor == want, (version, entry)
+
+
+def test_a_v02_charges_block_is_never_read(tmp_path: Path) -> None:
+    """Review M2c-6b-2a (M3): camt.053.001.02's `Chrgs` gives its `Amt` with no direction nor
+    inclusion indicator (the v04 record's `CdtDbtInd` and `ChrgInclInd`), so it never says the
+    charge is the bank's debit included in the entry: the line keeps none, on the entry or on its
+    one detail, whatever the block carries beside its amount (a `CdtDbtInd` the message does not
+    define included) — never a guess, never a refusal of the file (COMPLIANCE OQ-84 (j))."""
+    for entry in (
+        _ntry("10.00", charges=_chrgs("1.20", v02=True)),
+        _ntry("10.00", charges=f"<Chrgs>{_amt('1.20')}<CdtDbtInd>DBIT</CdtDbtInd></Chrgs>"),
+        _ntry("10.00", _tx(RMT_A, charges=_chrgs("1.20", v02=True))),
+        # the v02 shape of S08: the entry N + F, its one detail of ours at N (TxAmt), F in Chrgs
+        _ntry("101.20", _tx(RMT_A, tx_amt="100.00"), charges=_chrgs("1.20", v02=True)),
+    ):
+        (line,) = _parse(tmp_path, _xml([entry], "02")).lines
+        assert line.charges_minor is None, entry
+    # the same S08 entry in v08 (`Chrgs/Rcrd`) keeps its charge
+    (line,) = _parse(
+        tmp_path, _xml([_ntry("101.20", _tx(RMT_A, tx_amt="100.00"), charges=_chrgs("1.20"))])
+    ).lines
+    assert (line.unsplit_details, line.charges_minor) == (
+        (UnsplitDetail(RMT_A, "debit", 10000),),
+        120,
+    )
 
 
 def test_charges_that_cannot_be_read_as_the_bank_s_debit_are_none(tmp_path: Path) -> None:

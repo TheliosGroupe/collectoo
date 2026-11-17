@@ -24,7 +24,8 @@
 -- private.transfer_line_lot_cap, private.unique_subset_trace, private.unique_subset.
 -- Redefined, each copied from its latest definition and changed only as its comment says, with its settings and grants
 -- restated: private.ingest_statement, private.post_bank_bookings, private.apply_bank_bookings,
--- private.run_transfer_checks, public.assign_payment, public.resolve_duplicate (20261116090000),
+-- private.run_transfer_checks, public.assign_payment, public.resolve_duplicate, private.transfer_late_lines (review
+-- M2c-6b-2a M1: a line decided a duplicate is no late debit) (20261116090000),
 -- private.bank_booking_candidates (20261116090000, dropped and created: two new columns), public.transfer_file_download
 -- (20261115090000), private.apply_debit_decisions (20261111090000).
 
@@ -61,8 +62,10 @@ alter table public.bank_debit_review drop constraint bank_debit_review_reason_ch
 -- unsplit_details: null, or the array of exactly unsplit_ours details of ours {id, direction, amount_minor} in the
 -- file's order (amount_minor digits as text, or null when the detail gives no amount in the statement's currency; the
 -- element shape is checked at import, private.unsplit_details_valid). unsplit_detail_count and unsplit_batch_count: how
--- many TxDtls the entry has in all (ours or not) and its Btch/NbOfTxs, only beside the details (integer: an entry may
--- hold more than 32,767 details, and an import must never fail on a count). charges_minor: the charges the statement
+-- many TxDtls the entry has in all (ours or not) and its Btch/NbOfTxs, only beside the details (integer: the count of
+-- every detail never overflows; review M2c-6b-2a CS-3: unsplit_ours, 6b-1's smallint, still bounds an entry kept
+-- unsplit to 32,767 details of ours — past it the stage's COPY refuses the file, a known limit, COMPLIANCE OQ-85).
+-- charges_minor: the charges the statement
 -- records for a line that is its entry's only line (Ntry/Chrgs and its one TxDtls/Chrgs: debit records in the
 -- account's currency included in the entry amount, else null). Lines imported before this migration keep none.
 alter table public.bank_transaction
@@ -810,6 +813,66 @@ $$;
 ------------------------------------------------------------------------------------------
 -- The job: a return of a transfer that has an open unplanned booking, or a debit pending (plan §2.3)
 ------------------------------------------------------------------------------------------
+
+-- private.transfer_late_lines, redefined from 20261116090000 (same signature and settings; its grants restated below).
+-- Review M2c-6b-2a (M1): a line held as a suspected duplicate that ops decided is a duplicate of another line
+-- (bank_duplicate_resolution, by its key) is no movement — it is never booked, linked nor paid — so it is never a late
+-- debit of the transfer. Without this, `debit_pending` (the job's return rule, its candidates and its SQL re-check) read
+-- it as a debit waiting to be booked, and reviewed the transfer's every return `return_debit_pending` for good: the
+-- client's returned payout was never owed nor paid again; and the P0 cancelled_transfer_debited named it for good. A
+-- held line not decided yet is still counted (it may be released as a second debit): its return waits, and the review's
+-- label says to decide it first. Nothing else changes.
+create or replace function private.transfer_late_lines(p_transfer_id uuid)
+returns setof uuid
+language plpgsql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  t public.bank_transfer;
+  v_account uuid;
+  v_depth integer := 0;
+begin
+  select * into t from public.bank_transfer where id = p_transfer_id;
+  v_account := t.debtor_bank_account_id;
+  while t.id is not null and v_depth < 1000 loop
+    return query
+    select x.id
+    from (select q.id, q.bank_account_id, q.direction from public.bank_transaction q
+          where q.end_to_end_id = t.end_to_end_id offset 0) x
+    where x.bank_account_id = v_account and x.direction = 'debit'
+      and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = x.id offset 0)
+      and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = x.id and l.kind <> 'explained'
+                      offset 0)
+      and not exists (select 1 from public.payment p where p.bank_transaction_id = x.id offset 0)
+      -- review M2c-6b-2a (M1): never a line decided a duplicate (by its key)
+      and not exists (select 1 from public.bank_duplicate_resolution r
+                      where r.bank_transaction_id = x.id and r.decision = 'duplicate' offset 0);
+    return query
+    select x.id
+    from public.transfer_file_item i
+    cross join lateral (select f.download_count, f.status from public.transfer_file f where f.id = i.file_id offset 0) f
+    cross join lateral (select q.id, q.booking_date from public.bank_transaction q
+                        where q.bank_account_id = v_account and q.payment_info_id = i.pmt_inf_id
+                          and q.direction = 'debit' and q.end_to_end_id is null offset 0) x
+    where i.transfer_id = t.id and f.download_count > 0
+      and (f.status in ('superseded', 'rejected')
+           or (t.status = 'cancelled' and f.status in ('downloaded', 'sent')
+               and x.booking_date > private.next_business_day(i.execution_date)))
+      and private.batch_line_may_hold(x.id, i.file_id, i.pmt_inf_id, t.id)
+      and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = x.id offset 0)
+      and not exists (select 1 from public.bank_debit_link l where l.bank_transaction_id = x.id and l.kind <> 'explained'
+                      offset 0)
+      -- review M2c-6b-2a (M1): never a line decided a duplicate (by its key)
+      and not exists (select 1 from public.bank_duplicate_resolution r
+                      where r.bank_transaction_id = x.id and r.decision = 'duplicate' offset 0);
+    exit when t.replaces_transfer_id is null;
+    select * into t from public.bank_transfer where id = t.replaces_transfer_id;
+    v_depth := v_depth + 1;
+  end loop;
+end;
+$$;
 
 -- private.bank_booking_candidates, redefined from 20261116090000 (dropped and created: two new columns; same settings,
 -- its grants restated below): a return's facts, `unplanned_open` (private.transfer_unplanned_open: an unplanned booking
@@ -1685,8 +1748,9 @@ $$;
 -- payout's return (its item waiting), sweep_returned for an unplanned sweep's (the share not swept again) — the planned
 -- payout_returned branch now only for the transfer's own payout; bank_line_unbooked also counts an entry kept unsplit
 -- holding ours, a credit naming our lot, an own or client credit carrying our RMT/SWP id (the inventory: they were
--- missed; the lines reviewed unplanned_payout_return or return_debit_pending are return credits carrying our id, which
--- it counted already). Nothing else changes.
+-- missed), and the lines reviewed unplanned_payout_return or return_debit_pending; review M2c-6b-2a (M2, T1): it reads a
+-- held line released by ops as the kind it was released as (a released line keeps the kind suspected_duplicate: a
+-- released return was not counted before). Nothing else changes.
 create or replace function private.run_transfer_checks(p_check_run_id uuid, p_organization_id uuid,
                                                        p_today date default null)
 returns void
@@ -1977,18 +2041,23 @@ begin
                               'reasons', to_jsonb(array_agg(distinct v.reason)))
     from public.bank_debit_review v
     cross join lateral (select q.* from public.bank_transaction q where q.id = v.bank_transaction_id offset 0) x
+    -- review M2c-6b-2a (M2, T1): a line held as a suspected duplicate and released is read as the kind it was released
+    -- as (bank_duplicate_resolution, by its key), as the job reads it (coalesce(released_kind, kind))
+    left join lateral (select r.released_kind from public.bank_duplicate_resolution r
+                       where r.bank_transaction_id = x.id and r.decision = 'released' offset 0) dr on true
     where v.organization_id = p_organization_id and x.booking_date < v_bd2
-      and (x.kind = 'transfer_out'
+      and (coalesce(dr.released_kind, x.kind) = 'transfer_out'
            or (x.direction = 'debit' and x.end_to_end_id is null and x.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$')
-           or (x.direction = 'credit' and x.kind = 'return'
+           or (x.direction = 'credit' and coalesce(dr.released_kind, x.kind) = 'return'
                and coalesce(x.original_end_to_end_id, x.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$')
            -- M2c-6b-2a (plan §2.6; the inventory): an entry kept unsplit holding ours, a credit naming our lot, an own or
-           -- a client's credit carrying our RMT/SWP id (S16). The returns the job leaves for ops' booking (reviewed
-           -- unplanned_payout_return or return_debit_pending) are return credits carrying our id: counted above
+           -- a client's credit carrying our RMT/SWP id (S16), and (review M2, T1: the plan's clause, restored — a held
+           -- line released as a return is no `return` by its own kind) the returns the job leaves for ops' booking
            or x.unsplit_ours > 0
            or (x.direction = 'credit' and private.names_our_lot(x.bank_account_id, x.payment_info_id))
-           or (x.kind in ('own_transfer_in', 'client_transfer_in')
-               and coalesce(x.original_end_to_end_id, x.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$'))
+           or (coalesce(dr.released_kind, x.kind) in ('own_transfer_in', 'client_transfer_in')
+               and coalesce(x.original_end_to_end_id, x.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$')
+           or v.reason in ('unplanned_payout_return', 'return_debit_pending'))
       and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = x.id offset 0)
       and not exists (select 1 from public.bank_debit_link k where k.bank_transaction_id = x.id and k.kind <> 'explained'
                       offset 0)
@@ -2136,7 +2205,10 @@ $$;
 -- public.resolve_duplicate, redefined from 20261116090000 (same signature, settings and body; its grants restated below):
 -- its own_transfer_line hint only. Build check (plan §2.6): « Libérer » cannot release such a held line as a return —
 -- its reading recorded before round 4 says debtor_credit (private.held_line_kind keeps a recorded reading), and the
--- command takes no other kind — so the line stays in « Doublons possibles »; the hint says so.
+-- command takes no other kind — so the line stays in « Doublons possibles »; the hint says so. Review M2c-6b-2a (M1): a
+-- debit decided a duplicate queues the debit job (`process_debits`), as a release as a return already does: a return of
+-- our transfer it kept waiting (`return_debit_pending`, private.transfer_late_lines) is read again at once, not at the
+-- next import that queues the job. Nothing else changes.
 create or replace function public.resolve_duplicate(p_idempotency_key text, p_bank_transaction_id uuid,
                                                     p_is_duplicate boolean, p_reason text)
 returns jsonb
@@ -2177,6 +2249,11 @@ begin
     insert into public.bank_duplicate_resolution (bank_transaction_id, organization_id, bank_account_id, decision,
                                                   reason, decided_by)
     values (t.id, t.organization_id, t.bank_account_id, 'duplicate', v_reason, auth.uid());
+    -- review M2c-6b-2a (M1): a debit decided a duplicate is no late debit of our transfer any more
+    -- (private.transfer_late_lines): a return it kept waiting (return_debit_pending) is read again now
+    if t.direction = 'debit' then
+      perform pgmq.send('payments', jsonb_build_object('type', 'process_debits', 'organization_id', t.organization_id));
+    end if;
     v_result := jsonb_build_object('bank_transaction_id', t.id, 'decision', 'duplicate');
   else
     select * into k from private.held_line_kind(t.id);
@@ -2224,7 +2301,7 @@ revoke execute on function private.unsplit_details_valid(jsonb, integer), privat
 -- the redefined internals as granted by 20261116090000 (the funds pass's: the worker's)
 revoke execute on function private.bank_booking_candidates(uuid, date, uuid, integer),
   private.post_bank_bookings(uuid, boolean), private.apply_bank_bookings(uuid),
-  private.run_transfer_checks(uuid, uuid, date)
+  private.run_transfer_checks(uuid, uuid, date), private.transfer_late_lines(uuid)
   from public, anon, authenticated, service_role;
 grant execute on function private.bank_booking_candidates(uuid, date, uuid, integer), private.apply_bank_bookings(uuid)
   to service_role;

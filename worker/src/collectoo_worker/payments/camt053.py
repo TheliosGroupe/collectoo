@@ -480,9 +480,12 @@ class _Reader:
 
     def charge_records(self, elem: Element) -> tuple[bool, int | None]:
         """(seen, total) of the `Chrgs` of an <Ntry> or a <TxDtls>: the records of camt.053.001.04
-        and later (`Chrgs/Rcrd`), or of .02 (`Chrgs` itself, its `Amt`). Each must be a debit
-        (`CdtDbtInd` DBIT), in the account's currency, positive, and included in the entry amount
-        (`ChrgInclInd` absent or true); one that is not makes the total None."""
+        and later (`Chrgs/Rcrd`). Each must be a debit (`CdtDbtInd` DBIT), in the account's
+        currency, positive, and included in the entry amount (`ChrgInclInd` absent or true); one
+        that is not makes the total None. Review M2c-6b-2a (M3): a `Chrgs` without records — .02's
+        shape, its `Amt` on the block itself with no direction nor inclusion indicator, as we read
+        the message definition (no XSD vendored, COMPLIANCE OQ-84 (j)) — never says the charge is
+        the bank's debit included in the entry: seen, never read (None), whatever else it holds."""
         q = self.q
         blocks = elem.findall(q.path("Chrgs"))
         if not blocks:
@@ -490,8 +493,6 @@ class _Reader:
         total = 0
         for block in blocks:
             records = block.findall(q.path("Rcrd"))
-            if not records and block.find(q.path("Amt")) is not None:
-                records = [block]
             if not records:
                 return True, None
             for record in records:

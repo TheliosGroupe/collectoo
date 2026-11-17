@@ -708,13 +708,14 @@ def _party(tag: str, name: str | None, v08: bool) -> str:
 
 def _charges(minor: int, currency: str, records: bool) -> str:
     """The bank's charge on the entry: a debit record included in the entry amount (Chrgs/Rcrd
-    from camt.053.001.04; .02's Chrgs carries its Amt itself)."""
+    from camt.053.001.04); .02's Chrgs carries its Amt itself, with no direction nor inclusion
+    indicator (review M2c-6b-2a M3: which the parser never reads)."""
     if records:
         return (
             f"<Chrgs><Rcrd>{_amt(minor, currency)}<CdtDbtInd>DBIT</CdtDbtInd>"
             "<ChrgInclInd>true</ChrgInclInd></Rcrd></Chrgs>"
         )
-    return f"<Chrgs>{_amt(minor, currency)}<CdtDbtInd>DBIT</CdtDbtInd></Chrgs>"
+    return f"<Chrgs>{_amt(minor, currency)}</Chrgs>"
 
 
 def _tx(t: Tx, e: Entry, currency: str, v08: bool) -> str:

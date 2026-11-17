@@ -12,7 +12,11 @@
 * private.unique_subset_trace = the Python twin (the answer, the bound and the item it trips at);
 * a generated file's sweep re-checked at its first download under the remit lock: a bank charge
   booked by the funds pass while the download waits makes it refuse `sweep_exceeds_share`; the
-  download raced against the file's regeneration and its run's cancellation never deadlocks.
+  download and the file's regeneration or its run's cancellation, either holding its locks first:
+  the other waits for its commit (a serial shape — it shows the wait and each outcome, not the
+  lock order: review M2c-6b-2a CS-1, ADR-0014);
+* review M2c-6b-2a (M1): a debit held as a suspected duplicate keeps a return waiting until ops
+  decide it is a duplicate; the decision queues the job, which books the return.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from debit_helpers import api
 from integration_helpers import DB, as_user, storage
 from remittance_helpers import drain as drain_remittances
 from remittance_helpers import paris_today, run_row
@@ -140,14 +145,15 @@ def test_the_statement_s_own_details_are_stored_at_import(tmp_path: Path) -> Non
     sid2 = _statement(tenant, netted)
     assert _lines(sid2) == []
     assert _lines(sid) == [line]
-    # ML-6: the ISO shape of a charged debit (detail at N, entry N + charge, Chrgs) keeps its charge
+    # ML-6: the ISO shape of a charged debit (detail at N, entry N + charge, Chrgs/Rcrd) keeps its
+    # charge (review M2c-6b-2a M3: a v02 file's Chrgs is never read, so v08 here)
     charged = debits_of(
         pain001.read(data),
         booking_date=day,
         debit_charge_minor=120,
         ref_prefix=f"C{uuid.uuid4().hex[:6].upper()}",
     )
-    sid3 = _statement(tenant, charged, version="02")
+    sid3 = _statement(tenant, charged, version="08")
     got = _lines(sid3)
     assert [
         (x["kind"], x["amount_minor"], x["unsplit_ours"], x["unsplit_details"], x["charges_minor"])
@@ -488,6 +494,70 @@ def test_the_job_reviews_a_return_while_a_second_debit_is_pending(tmp_path: Path
     assert queued == (0,) and account == ("active",)
 
 
+def _csv_export(tenant: dict[str, Any], rows: list[tuple[date, str, int, str]]) -> str:
+    """A CSV export of the account (`(day, label, signed minor, end-to-end id)`), imported; the
+    queue drained: its statement."""
+    lines = ["Date;Libellé;Débit;Crédit;Référence de bout en bout"]
+    for day, label, signed, e2e in rows:
+        euros = f"{abs(signed) // 100},{abs(signed) % 100:02d}"
+        debit, credit = (euros, "") if signed < 0 else ("", euros)
+        lines.append(f"{day:%d/%m/%Y};{label};{debit};{credit};{e2e}")
+    target = upload(
+        tenant,
+        storage(),
+        ("\n".join(lines) + "\n").encode(),
+        name=f"releve-{uuid.uuid4().hex[:8]}.csv",
+    )
+    drain_payments(storage())
+    return str(target["statement_id"])
+
+
+def test_a_return_waits_while_its_debit_is_held_as_a_duplicate_then_is_booked(
+    tmp_path: Path,
+) -> None:
+    """Review M2c-6b-2a (M1): an export overlapping the booked debit of our payout holds that
+    debit again as a suspected duplicate (the CSV safety net: same day, amount and direction, a
+    similar label, another fingerprint). While it is held it may be a second debit: the return of
+    the payout waits (return_debit_pending). Once ops decide it is a duplicate it is no movement:
+    the decision queues the debit job, which books the return (payout_returned) as before 6b-2a.
+    The account's statements are CSV exports from the overlap on (its feed set as postgres: no
+    command changes a feed), so the overlap meets the camt.053 lines the payouts were booked
+    from."""
+    tenant, _other, _r1, _r2 = _two_runs()
+    _data, paid = _booked(tenant, tmp_path)
+    (e2e, n), _ = paid
+    with psycopg.connect(DB) as conn:
+        row = conn.execute(
+            """select booking_date, coalesce(counterparty_name, '') || ' ' ||
+                      coalesce(remittance_text, '')
+               from public.bank_transaction where end_to_end_id = %s and direction = 'debit'""",
+            (e2e,),
+        ).fetchone()
+        assert row is not None
+        day, label = row
+        conn.execute("update public.bank_account set feed = 'csv' where id = %s", (tenant["bank"],))
+    overlap = _csv_export(tenant, [(day, f"VIR SEPA EMIS {label}".strip(), -n, e2e)])
+    with psycopg.connect(DB) as conn:
+        held = conn.execute(
+            "select id::text, kind from public.bank_transaction where statement_id = %s",
+            (overlap,),
+        ).fetchall()
+    assert [k for _id, k in held] == ["suspected_duplicate"]
+    back = _csv_export(tenant, [(day, f"RETOUR VIR SEPA {label}".strip(), n, e2e)])
+    assert _bookings(back) == [] and _reviews(back) == ["return_debit_pending"]
+    out = api(
+        tenant,
+        "select public.resolve_duplicate(%s, %s, true, 'même débit que le relevé camt')",
+        str(uuid.uuid4()),
+        held[0][0],
+    )
+    assert out["decision"] == "duplicate"
+    # the decision queued the job: the return is the payout's, booked
+    drain_payments(storage())
+    assert _bookings(back) == [("payout_returned", e2e, n)]
+    assert _transfer(e2e)["status"] == "returned"
+
+
 def test_a_pending_debit_landing_after_the_decision_is_seen_by_the_re_check(tmp_path: Path) -> None:
     tenant, _other, _r1, _r2 = _two_runs()
     data, paid = _booked(tenant, tmp_path)
@@ -649,12 +719,15 @@ def test_a_charge_booked_while_the_download_waits_is_seen_by_its_re_check(tmp_pa
 
 @pytest.mark.parametrize("other", ["generate", "cancel"])
 @pytest.mark.parametrize("first", ["download", "other"])
-def test_the_download_and_a_regeneration_or_a_cancellation_never_deadlock(
+def test_the_download_and_a_regeneration_or_a_cancellation_one_waits_for_the_other(
     tmp_path: Path, other: str, first: str
 ) -> None:
-    """The first download (its re-check under the generation's locks) raced against the file's
-    regeneration and its run's cancellation, either holding first: one waits, none deadlocks, each
-    gets the outcome its turn gives."""
+    """The first download (its re-check under the generation's locks) beside the file's
+    regeneration and its run's cancellation, either holding its locks first: the other waits for
+    its commit, raises no deadlock, and gets the outcome its turn gives. The first command runs to
+    its end before the second starts, so this shows the wait, not the lock order: an inversion
+    between them would pass it too (review M2c-6b-2a CS-1; ADR-0014 records the interleaved test
+    as left to 6b-2b, whose command adds locks to this order)."""
     tenant, _client, r1, _r2 = _two_runs()
     res = _generate(tenant)
     drain_remittances()
