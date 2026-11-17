@@ -264,7 +264,9 @@ jobs:
         run: |
           eval "$(./scripts/local-env.sh)"
           cd worker && uv sync --frozen
-          LLM_PROVIDER=mock ADDRESS_NORMALISER=mock nohup uv run collectoo-worker consume boarding payments remittances > ../worker.log 2>&1 &
+          # the synced entry point, not `uv run`: a `uv run` left in the background holds uv's cache lock until the
+          # runner kills it, and setup-uv's post step (`uv cache prune --ci`, run on a cache miss) then times out
+          LLM_PROVIDER=mock ADDRESS_NORMALISER=mock nohup .venv/bin/collectoo-worker consume boarding payments remittances > ../worker.log 2>&1 &
       - run: npm run build
         working-directory: apps/web
       - run: npm run e2e
