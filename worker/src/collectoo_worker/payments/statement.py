@@ -283,6 +283,12 @@ class StatementLine:
     unsplit_detail_count: int | None = None
     unsplit_batch_count: int | None = None
     charges_minor: int | None = None
+    # M2c-6b-2b (COMPLIANCE OQ-84 (j)): whether those charges were read (false: a block seen, not
+    # read; None on every other line), and, for an entry kept unsplit, per detail of ours whether
+    # its CdtDbtInd was given — a re-import compares a stored value only against one the new file
+    # gives (private.ingest_statement)
+    charges_read: bool | None = None
+    unsplit_direction_given: tuple[bool, ...] | None = None
 
     @property
     def signed_minor(self) -> int:
@@ -321,6 +327,8 @@ STAGE_COLUMNS = (
     "unsplit_detail_count",
     "unsplit_batch_count",
     "charges_minor",
+    "charges_read",
+    "unsplit_direction_given",
 )
 
 

@@ -457,26 +457,33 @@ class _Reader:
             return None
         return minor if minor > 0 else None
 
-    def charges(self, ntry: Element, tx_elems: list[Element] | None = None) -> int | None:
-        """The charges the statement records for an entry that is one line (M2c-6b-2a, plan §2.1;
-        critic2 ML-6, ML-10, CSO2-1): from `Ntry/Chrgs` and, when the entry has one detail, that
-        detail's `Chrgs` — the two must agree when both are given. None when there are none, when a
-        record cannot be read as the bank's debit in the account's currency included in the entry
-        amount, or when the entry has several details and one of them carries a record (not this
-        line's to read). Never a refusal of the file: nothing is inferred."""
+    def charges(
+        self, ntry: Element, tx_elems: list[Element] | None = None
+    ) -> tuple[bool, int | None]:
+        """(read, charges): the charges the statement records for an entry that is one line
+        (M2c-6b-2a, plan §2.1; critic2 ML-6, ML-10, CSO2-1): from `Ntry/Chrgs` and, when the entry
+        has one detail, that detail's `Chrgs` — the two must agree when both are given. None when
+        there are none, when a record cannot be read as the bank's debit in the account's currency
+        included in the entry amount, or when the entry has several details and one of them
+        carries a record (not this line's to read). Never a refusal of the file: nothing is
+        inferred. M2c-6b-2b (COMPLIANCE OQ-84 (j)): `read` says whether the statement's charges
+        were read — true when it has none or every record was read, false when a block was seen and
+        not read (the line keeps none) — so a re-import compares the charges whenever the new file
+        read them (review CSR-4)."""
         details = tx_elems or []
         seen, total = self.charge_records(ntry)
         if len(details) > 1:
             if any(d.find(self.q.path("Chrgs")) is not None for d in details):
-                return None
-            return total if seen else None
+                return False, None
+            return (total is not None, total) if seen else (True, None)
         if len(details) == 1:
             tx_seen, tx_total = self.charge_records(details[0])
             if seen and tx_seen:
-                return total if total is not None and total == tx_total else None
+                agreed = total is not None and total == tx_total
+                return (True, total) if agreed else (False, None)
             if tx_seen:
-                return tx_total
-        return total if seen else None
+                return tx_total is not None, tx_total
+        return (total is not None, total) if seen else (True, None)
 
     def charge_records(self, elem: Element) -> tuple[bool, int | None]:
         """(seen, total) of the `Chrgs` of an <Ntry> or a <TxDtls>: the records of camt.053.001.04
@@ -532,12 +539,12 @@ class _Reader:
         own_ref: bool = False,
         details: list[Flat] | None = None,
         batch_count: int = 0,
-        charges: int | None = None,
+        charges: tuple[bool, int | None] | None = None,
     ) -> None:
         """One line. `index` is 1-based within its entry; `details` are every TxDtls of an entry
         kept as one unsplit line (a return reason or sub-family in any of them counts), and
         `batch_count` its NbOfTxs (0: absent); `charges` what the statement records for a line that
-        is its entry's only line (M2c-6b-2a)."""
+        is its entry's only line (M2c-6b-2a), with whether they were read (M2c-6b-2b, OQ-84 (j))."""
         details = details or []
         credit = entry.direction == "credit"
         side, other = ("Dbtr", "Cdtr") if credit else ("Cdtr", "Dbtr")
@@ -561,6 +568,7 @@ class _Reader:
         original = first(tx, "RtrInf/OrgnlEndToEndId")
         unsplit_ours: int | None = None
         unsplit_details: tuple[UnsplitDetail, ...] | None = None
+        given: tuple[bool, ...] | None = None
         kind = classify(
             entry.direction,
             reversal=entry.reversal,
@@ -599,11 +607,14 @@ class _Reader:
             unsplit_ours = len(mine)
             # M2c-6b-2a (plan §2.2; critic F8, L11): each of those details as the statement gives it
             # — its id (as _our_ids reads it), its direction, its own amount — in the file's order
+            mine_details = [(d, oid) for d in details if (oid := _issued(d)) is not None]
             unsplit_details = tuple(
-                UnsplitDetail(ours, _direction(d, entry.direction), self.detail_amount(d))
-                for d, ours in ((d, _issued(d)) for d in details)
-                if ours is not None
+                UnsplitDetail(oid, _direction(d, entry.direction), self.detail_amount(d))
+                for d, oid in mine_details
             )
+            # M2c-6b-2b (COMPLIANCE OQ-84 (j)): whether each one's CdtDbtInd was given (else its
+            # entry's was taken): a re-import compares a direction whenever the new file gave it
+            given = tuple((first(d, "CdtDbtInd") or "") in DIRECTIONS for d, _ in mine_details)
             # Review round 5 (Q2), round 6's wording: such a batch keeps that identification on
             # its line, unless what the line carries names one of our transfers already, so every
             # refusal reading `names_our_transfer` on the stored line sees it (before round 5: no
@@ -668,7 +679,9 @@ class _Reader:
                 # critic2 ML-5: every detail of the entry (ours or not) and its NbOfTxs
                 unsplit_detail_count=len(details) if unsplit else None,
                 unsplit_batch_count=(batch_count or None) if unsplit else None,
-                charges_minor=charges,
+                charges_minor=None if charges is None else charges[1],
+                charges_read=None if charges is None else charges[0],
+                unsplit_direction_given=given,
             )
         )
 

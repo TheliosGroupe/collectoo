@@ -592,6 +592,73 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
     )
 
 
+# The query of _held_to (review M2c-6b-2b TESTS-4: a module constant, so the integration test
+# checks it returns at most one row per item, the dict below keeping the last of several).
+HELD_TO_SQL = """select q.ledger_entry_id, rl.encaissement_date, coalesce(t.id, ti.id),
+           coalesce(t.days, ti.days, 30)
+    from private.remittance_pending q
+    cross join lateral (select le.reverses_entry_id from public.ledger_entry le
+                        where le.id = q.ledger_entry_id offset 0) e
+    cross join lateral (select re.source_id from public.ledger_entry re
+                        where re.id = e.reverses_entry_id and re.entry_type = 'remittance'
+                          and re.source_type = 'bank_transfer' offset 0) re
+    cross join lateral (select bt.run_id from public.bank_transfer bt
+                        where bt.id = case when pg_input_is_valid(re.source_id, 'uuid')
+                                           then re.source_id::uuid end
+                          and bt.entry_id = e.reverses_entry_id
+                        offset 0) bt
+    cross join lateral (select l.encaissement_date, l.mandate_id, l.mandate_terms_id
+                        from public.remittance_line l
+                        where l.run_id = bt.run_id and l.amount_minor > 0
+                          and not l.released and l.latest_execution_date is not null
+                          and l.encaissement_date is not null
+                        order by l.latest_execution_date, l.line_no limit 1) rl
+    left join lateral (select mt.id, mt.remittance_max_days as days
+                       from public.mandate_terms mt
+                       where mt.mandate_id = rl.mandate_id
+                         and mt.valid_from <= rl.encaissement_date
+                         and (mt.valid_to is null or rl.encaissement_date < mt.valid_to)
+                       limit 1) t on true
+    left join lateral (select mt.id, mt.remittance_max_days as days
+                       from public.mandate_terms mt
+                       where rl.mandate_id is null and mt.id = rl.mandate_terms_id
+                       offset 0) ti on true
+    where q.draft_run_id = %s and q.kind = 'payout_returned' and q.amount_minor > 0
+    union all
+    select q.ledger_entry_id, rl.encaissement_date, coalesce(t.id, ti.id),
+           coalesce(t.days, ti.days, 30)
+    from private.remittance_pending q
+    cross join lateral (select le.reverses_entry_id from public.ledger_entry le
+                        where le.id = q.ledger_entry_id offset 0) e
+    cross join lateral (select re.id from public.ledger_entry re
+                        where re.id = e.reverses_entry_id and re.entry_type = 'remittance'
+                        offset 0) re
+    cross join lateral (
+      select l.encaissement_date, l.mandate_id, l.mandate_terms_id
+      from (select u.ledger_entry_id from private.unplanned_paid_item u
+            where u.booking_entry_id = re.id offset 0) u
+      cross join lateral (select x.encaissement_date, x.mandate_id, x.mandate_terms_id,
+                                 x.latest_execution_date, x.run_id, x.line_no,
+                                 x.amount_minor
+                          from public.remittance_line x
+                          where x.ledger_entry_id = u.ledger_entry_id and not x.released
+                          offset 0) l
+      where l.amount_minor > 0 and l.latest_execution_date is not null
+        and l.encaissement_date is not null
+      order by l.latest_execution_date, l.run_id, l.line_no limit 1) rl
+    left join lateral (select mt.id, mt.remittance_max_days as days
+                       from public.mandate_terms mt
+                       where mt.mandate_id = rl.mandate_id
+                         and mt.valid_from <= rl.encaissement_date
+                         and (mt.valid_to is null or rl.encaissement_date < mt.valid_to)
+                       limit 1) t on true
+    left join lateral (select mt.id, mt.remittance_max_days as days
+                       from public.mandate_terms mt
+                       where rl.mandate_id is null and mt.id = rl.mandate_terms_id
+                       offset 0) ti on true
+    where q.draft_run_id = %s and q.kind = 'payout_returned' and q.amount_minor > 0"""
+
+
 def _held_to(conn: Conn, run: str) -> dict[str, tuple[date, str | None, int]]:
     """Each payout that came back in the draft: the R124-6 basis it keeps (design §9.2, Q7; M2c-6b-1
     review legal-texts#1, money-2) — by the key chain private.pending_item_deadlines follows while
@@ -599,39 +666,15 @@ def _held_to(conn: Conn, run: str) -> dict[str, tuple[date, str | None, int]]:
     positive, live, dated line with the earliest latest execution date): that line's E, the terms
     version of its mandate on E and its delay (one month without one). A line that is itself a
     re-proposed payout has no mandate: its own terms version (the one it was held to) gives the
-    delay. Keyed laterals (ARCHITECTURE §4); an item with no dated line is left out (no date)."""
-    rows = conn.execute(
-        """select q.ledger_entry_id, rl.encaissement_date, coalesce(t.id, ti.id),
-                  coalesce(t.days, ti.days, 30)
-           from private.remittance_pending q
-           cross join lateral (select le.reverses_entry_id from public.ledger_entry le
-                               where le.id = q.ledger_entry_id offset 0) e
-           cross join lateral (select re.source_id from public.ledger_entry re
-                               where re.id = e.reverses_entry_id and re.entry_type = 'remittance'
-                                 and re.source_type = 'bank_transfer' offset 0) re
-           cross join lateral (select bt.run_id from public.bank_transfer bt
-                               where bt.id = case when pg_input_is_valid(re.source_id, 'uuid')
-                                                  then re.source_id::uuid end
-                               offset 0) bt
-           cross join lateral (select l.encaissement_date, l.mandate_id, l.mandate_terms_id
-                               from public.remittance_line l
-                               where l.run_id = bt.run_id and l.amount_minor > 0
-                                 and not l.released and l.latest_execution_date is not null
-                                 and l.encaissement_date is not null
-                               order by l.latest_execution_date, l.line_no limit 1) rl
-           left join lateral (select mt.id, mt.remittance_max_days as days
-                              from public.mandate_terms mt
-                              where mt.mandate_id = rl.mandate_id
-                                and mt.valid_from <= rl.encaissement_date
-                                and (mt.valid_to is null or rl.encaissement_date < mt.valid_to)
-                              limit 1) t on true
-           left join lateral (select mt.id, mt.remittance_max_days as days
-                              from public.mandate_terms mt
-                              where rl.mandate_id is null and mt.id = rl.mandate_terms_id
-                              offset 0) ti on true
-           where q.draft_run_id = %s and q.kind = 'payout_returned' and q.amount_minor > 0""",
-        (run,),
-    ).fetchall()
+    delay. Keyed laterals (ARCHITECTURE §4); an item with no dated line is left out (no date).
+
+    M2c-6b-2b (plan §3.12, critic F11, L4; critic2 ML-2), as private.pending_item_deadlines: the
+    planned branch follows a transfer's own planned remittance only (`bt.entry_id` = the reversed
+    entry); the re-owed item of a reversed unplanned remittance is held, once a run froze the items
+    its P paid, to the earliest latest execution date of those items' live lines (the reversed
+    remittance → private.unplanned_paid_item → each item's live line, by key); while those items
+    are still pending it has no line (left out, as an advance's)."""
+    rows = conn.execute(HELD_TO_SQL, (run, run)).fetchall()
     return {str(r[0]): (r[1], _uuid(r[2]), int(r[3])) for r in rows}
 
 

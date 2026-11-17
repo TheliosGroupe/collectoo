@@ -802,3 +802,94 @@ looks at), read by the funds pass's return facts and the nightly checks. `test_d
 once, on a fresh reset: **5 passed** (842 s) — the 5,000-member batch line's funds pass 20.7 s; 5,000 RMT debits
 imported in 1.2 s, the debit job 20.0 s in chunks of 7.6, 8.2 and 4.1 s; the nightly checks 1.14 s; 200 members
 0.54 s; 200 RMT debits 0.62 s (the build's: 20.8 s; 1.2 s, 19.2 s; 1.02 s; 0.44 s; 0.72 s).
+
+## The ops command (M2c-6b-2b, migration `20261117100000`; 2026-11-17, cloud session VM: 4 vCPU, 16 GB RAM, the main stack alone)
+
+`public.book_transfer_line` and its reads (`transfer_line_options`, `transfer_line_preview`) run as an aal2 API session
+(the authenticator, then `authenticated` and the JWT claims, `statement_timeout = 8s`: `debit_helpers.api`). The plan's
+budget (§8.2 « Scale », critic CSO-3): options < 2 s and the command ≤ 4 s at the lot cap, the refusal of a lot above
+it at once. `tests/test_transfer_line_scale_integration.py`, its fixtures through the jobs (clients, collections, runs
+requested, prepared and approved, the file generated, written and downloaded), each lot one PmtInf debited as one batch
+line short of one member (a random member left out: class B, the only subset over every member):
+
+| Lot | `transfer_line_options` | `book_transfer_line` | Result | Fixture |
+|---|---|---|---|---|
+| 500 members (`private.transfer_line_lot_cap()`), short of one | **0.35 s** (the subset proposed: 499 parts) | **1.17 s** (499 bookings) | passed | 500 runs requested/prepared/approved 61.5 s, « Générer le fichier » 0.27 s |
+| 501 members | **0.04 s** (`lot_too_large`, `member_count` 501, no member list, no proposal) | — | passed | 501 runs 69.0 s, generation 0.33 s |
+
+The lot above the cap is refused by `private.transfer_line_pre` before any subset is searched. Not measured here (left
+to the review): the worst saturating input of the command (500 small payouts short of one 80 € member, the row
+representation's 1.8–2.5 s of `unique_subset` above), the requeue of a 50,000-item draft, and the time the allocation
+lock is held; the 2× headroom of the cap under 8 s therefore rests on 6b-2a's `unique_subset` measurement plus this
+run's 1.17 s for a 500-member booking.
+
+Review fixes (CSR-3; 2026-11-17, same VM): the options no longer search the lot's subset twice (their pre-read serves
+the preview of their proposal: `private.transfer_line_preview_of`; pgTAP `037` counts one search). The same test file
+(the last run end to end, 4 passed in 155.5 s): the lot short of one member 0.21 / 0.26 s (options) and 1.45 / 1.39 s
+(499 bookings); the lot above the cap 0.02 s; and
+the saturating inputs at the cap (`test_a_saturating_lot_at_the_cap_runs_its_search_once_within_budget`: the lot's 500
+payouts re-amounted in a rolled-back transaction, its PmtInf debited by an amount no subset makes, then as the API's
+session):
+
+| 500 amounts (row representation) | Stopped by | `transfer_line_options` (`batch_ambiguous`) | `book_transfer_line` (`parts_do_not_add_up`, after the search) |
+|---|---|---|---|
+| multiples of 10 € (10–200 €), target 26,000.01 € | none: all 500 items | 2.05 / 1.99 / 1.89 / 2.05 s | 2.16 / 2.24 / 2.39 / 2.29 s |
+| multiples of 1 € (1–200 €), target 9,999.99 € | the work bound | 2.14 / 2.31 / 2.20 / 2.42 s | 2.16 / 2.27 / 2.17 / 2.40 s |
+
+The cap's rule (2× headroom under the API's 8 s) holds; the options' < 2 s budget is missed by up to 0.42 s at these
+two inputs, where one search alone takes about 2 s — set by the work bound, not by the cap (ADR-0014 « M2c-6b-2b
+review fixes », CSR-3: known limit and default; the test asserts ≤ 4 s there, < 2 s for the ordinary lot).
+
+The review fixes also redefine `private.post_bank_bookings` (`payments:` taken for a batch holding a sweep's return:
+one more list member, no read) and add the per-transfer bound to P (a keyed read of the transfer's unplanned bookings
+and their advances). `test_debit_bookings_scale_integration.py` once, on a fresh reset: **5 passed** — the fixture's
+approval jobs 526.1 s; the 5,000-member batch line's funds pass 20.1 s (21.0 s under auto_explain); 5,000 RMT debits
+imported in 1.3 s, the debit job 18.6 s in chunks of 7.3, 7.7 and 3.3 s; the nightly checks 0.96 s; 200 members
+0.57 s; 200 RMT debits 0.74 s (the build's: 21.1 s; 1.3 s, 21.0 s; 1.13 s; 0.69 s; 0.70 s). The download did not
+change: the transfer-files scale test was not run again.
+
+The command adds two `UPDATE … where true` and a third branch to `private.pending_item_deadlines` (keyed: the reversed
+remittance, then `private.unplanned_paid_item` by its booking, then each item's live line) and keys its planned branch
+on the transfer's own remittance. `test_debit_bookings_scale_integration.py` once, on a fresh reset: **5 passed**
+(830.7 s) — the fixture's approval jobs 521.9 s (552.1 s before); the 5,000-member batch line's funds pass 21.1 s;
+5,000 RMT debits imported in 1.3 s, the debit job 21.0 s in chunks of 8.4, 8.2 and 4.2 s; the nightly checks 1.13 s;
+200 members 0.69 s; 200 RMT debits 0.70 s (6b-2a's: 20.7 s; 1.2 s, 20.0 s; 1.14 s; 0.54 s; 0.62 s). The download did
+not change: the transfer-files scale test was not run again.
+
+### CI scale fix — the command after the 50,000-line runs (2026-11-17)
+
+PR #33's dispatched `scale` run failed the lot-cap file's three booking cases: `transfer_line_options` 1.60 / 1.68 s,
+`book_transfer_line` cancelled at the API's 8 s in `private.transfer_line_locks` step 4 (the GitHub runner). The CI
+order (one fresh database; the allocation, matching, receipts, 50,000-item remittance, boarding, statement and
+transfer-file scale tests, then this file) on a third local stack of the cloud session VM (4 vCPU, two other stacks
+running beside it: the receipts ran at 17.9 ms each against CI's 9.3) failed the same three, at the same line
+(saturating inputs: options 2.35 / 2.56 s, the command 8.00 s). What the 50,000-line runs leave: remittance_line
+101,000 rows, two runs holding 100,000 of them (n_distinct of `run_id` 2 once analysed), so each run's key is estimated
+at 50,000 rows and each member's run was read whole-table (ADR-0014 « M2c-6b-2b review fixes », CI scale fix). At the
+failing point (the lot's committed line), each call rolled back:
+
+| The lot of 500, short of one, after the 50k runs | `transfer_line_options` | `book_transfer_line` |
+|---|---|---|
+| before, as the API's session (8 s) | — | cancelled at 8 s (lock step 4) |
+| before, under EXPLAIN ANALYZE (no timeout) | 6.52 s: the check's late flag, 494 × 13 ms (a whole scan of `remittance_line_account_idx`, 51,000 rows, per part) | 53.97 s: lock step 4 21.1 s (500 sequential scans of remittance_line, 101,000 rows each), the posting's late lines 20.9 s (499 more) |
+| after, the fixed functions applied in place, as the API (five calls) | 0.19 – 0.27 s | 1.42 – 1.72 s (instrumented: the lock step 26 ms, the rest the posting — the settlements 0.73 s, the remittances 0.36 s) |
+
+Then the CI order again from `supabase db reset`, with the fix: **12 passed** in 1,684 s (the eleven of the failed run
+and `test_the_command_reads_a_lot_by_key`):
+
+| Lot-cap file, after the 50k runs | `transfer_line_options` | `book_transfer_line` |
+|---|---|---|
+| short of one, rolled back (the new case: no sequential scan of remittance_line, remittance_run, bank_transfer, transfer_file, transfer_file_item; 1,997 remittance_line rows read) | 0.29 s | 1.84 s (499 bookings) |
+| short of one (`test_a_lot_at_the_cap_short_of_one_member_is_booked_within_budget`) | 0.29 s | 1.76 s (499 bookings) |
+| saturating, multiples of 10 € | 2.08 s (`batch_ambiguous`) | 2.36 s (`parts_do_not_add_up`) |
+| saturating, multiples of 1 € | 3.40 s (`batch_ambiguous`) | 2.37 s (`parts_do_not_add_up`) |
+| 501 members | 0.03 s (`lot_too_large`) | — |
+
+On a fresh database alone (CI's « 1.4–2.4 s ») the lot's runs' lines were read by key before the fix too, each run's
+key estimated at its one line: the fix makes those plans independent of the statistics, not a fresh database faster.
+The saturating options are the subset search's CPU (1.9–2.4 s on a quiet VM above; 3.40 s here, two other stacks
+loading the VM), under the test's 4 s. The posting the job shares (`private.bank_booking_post_rows`) changed with
+the fix, so `test_debit_bookings_scale_integration.py` ran once on a fresh reset of the same stack: **5 passed**
+(1,066.8 s) — the 5,000-member batch line's funds pass 22.5 s (23.5 s under auto_explain), 5,000 RMT debits imported in
+1.6 s and booked by the debit job in 20.9 s (chunks of 9.1, 7.6 and 3.9 s), 200 members 0.46 s, 200 RMT debits 0.90 s
+(the loaded VM's; the quiet VM's above: 21.1 s, 1.3 s, 21.0 s, 0.69 s, 0.70 s).

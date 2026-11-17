@@ -552,11 +552,34 @@ export const RELAY_LABEL = {
   client: "Paiement d'un débiteur relayé par le client",
 } as const;
 
-/** What a decided line became, in French: a relayed payment says who relayed it (review M2c-2). */
+/**
+ * What a line booked from the statement became (bank_line_booking.kind; M2c-6b-2b, plan §3.13): the job's bookings
+ * (6b-1) and ops' (`book_transfer_line`). « Traités » shows a line's bookings joined by `+` (public.debit_queue). The
+ * fee keeps the label it has had since M2c-1.
+ */
+export const DECISION_LABEL: Record<string, string> = {
+  payout: "Débit d'un reversement",
+  sweep: "Débit de la quote-part du cabinet",
+  unplanned_payout: "Virement hors reversement",
+  unplanned_sweep: "Virement au compte propre",
+  payout_returned: "Reversement revenu",
+  sweep_returned: "Quote-part revenue",
+  unplanned_payout_returned: "Virement hors reversement revenu",
+  unplanned_sweep_returned: "Virement au compte propre revenu",
+  fee: LINK_KIND.fee,
+};
+
+/**
+ * What a decided line became, in French: a relayed payment says who relayed it (review M2c-2); a line booked in
+ * several parts says each (« Débit d'un reversement + Frais bancaires … », M2c-6b-2b).
+ */
 export function decisionLabel(decision: string, kind: string): string {
   if (decision === "relayed_payment" && kind === "client_transfer_in")
     return RELAY_LABEL.client;
-  return LINK_KIND[decision] ?? decision;
+  return decision
+    .split("+")
+    .map((d) => DECISION_LABEL[d] ?? LINK_KIND[d] ?? d)
+    .join(" + ");
 }
 
 /**
