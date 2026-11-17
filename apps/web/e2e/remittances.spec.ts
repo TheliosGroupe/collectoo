@@ -184,7 +184,12 @@ test("ops prepare, read and approve a client's remittance run", async ({
   const card = page
     .getByTestId("run-card")
     .filter({ hasText: tenant.clientName });
-  await expect(waiting.or(card)).toBeVisible({ timeout: 60_000 });
+  // the worker matches and allocates the statement's payments after « Importé »; the page refreshes itself only while
+  // a run is in flight, so reload it until the client's collections are listed (or its run, prepared by the schedule)
+  await expect(async () => {
+    await page.reload();
+    await expect(waiting.or(card)).toBeVisible({ timeout: 5_000 });
+  }).toPass({ timeout: 90_000 });
   if (await waiting.isVisible()) {
     await expect(waiting).toContainText("800,01");
     await waiting.getByRole("button", { name: "Préparer maintenant" }).click();
