@@ -104,7 +104,21 @@ export function DownloadLink({ href, label, testId, className }: { href: string;
 }
 
 /** « Annuler le fichier » before download: it is replaced, its transfers wait for the next one. */
-export function CancelFile({ fileId, version, idempotencyKey }: { fileId: string; version: number; idempotencyKey: string }) {
+export function CancelFile({
+  fileId,
+  version,
+  idempotencyKey,
+  cancellationAfterDownload = false,
+}: {
+  fileId: string;
+  version: number;
+  idempotencyKey: string;
+  /**
+   * M2c-6b-3a review round 1 (tests-1): the flag the page read — a file downloaded between the page's load and the click
+   * is refused cancellation_request_required with the switch on, whose « on » words offer the two-step cancellation
+   */
+  cancellationAfterDownload?: boolean;
+}) {
   return (
     <ConfirmSheet label="Annuler le fichier" title="Annuler le fichier" buttonClassName={dangerButtonClass} testId="cancel-file">
       {(close) => (
@@ -113,7 +127,13 @@ export function CancelFile({ fileId, version, idempotencyKey }: { fileId: string
             Le fichier n&apos;a pas été téléchargé : il est remplacé. Ses virements reviennent « à mettre dans un fichier » ; la
             quote-part du cabinet est recalculée au prochain fichier.
           </p>
-          <ActionForm onDone={close} action={cancelFile} submitLabel="Annuler le fichier" buttonClassName={dangerButtonClass}>
+          <ActionForm
+            onDone={close}
+            action={cancelFile}
+            submitLabel="Annuler le fichier"
+            buttonClassName={dangerButtonClass}
+            cancellationAfterDownload={cancellationAfterDownload}
+          >
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />
             <input type="hidden" name="file_id" value={fileId} />
             <input type="hidden" name="expected_version" value={version} />

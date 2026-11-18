@@ -2748,6 +2748,9 @@ isOneToOne: false
 "cancel_transfer_file":
 { Args: { "p_attestation"?: string,"p_expected_version": number,"p_file_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
                            },
+"cancellation_after_download":
+{ Args: Record<PropertyKey, never>; Returns: boolean
+                           },
 "clear_payee_name_mismatch":
 { Args: { "p_check_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
                            },

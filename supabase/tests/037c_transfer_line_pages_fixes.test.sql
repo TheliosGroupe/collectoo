@@ -19,7 +19,7 @@
 -- stays off (033 and 034 unchanged): the scenario that needs a payout cancelled after its file was handed out switches
 -- it on inside its own rolled-back subtransaction.
 begin;
-select plan(9);
+select plan(10);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -1129,6 +1129,7 @@ select is(pg_temp.isolated('r_returned_twin'),
 -- that amount stays refused payout_candidate; the run cancelled, the payout is (iii) only and the refund link is taken
 create or replace function pg_temp.r_cancelled_live() returns jsonb language plpgsql as $$
 declare v_t uuid; v_r uuid; v_line uuid := pg_temp.l2('cf8', 1); v_live jsonb; v_runs jsonb; v jsonb;
+        v_cancel text := 'cancelled';
 begin
   v_t := pg_temp.cancelled_late('a6', '06', 100000, 'r-live', false);   -- 82 000, its run still sent
   perform pg_temp.exec_on(pg_temp.v('file-r-live'), private.paris_today() - 2);
@@ -1137,9 +1138,16 @@ begin
     jsonb_build_object('amount', 82000, 'kind', 'other_debit')));
   v_live := pg_temp.r_reads(v_line, v_r);
   v_runs := jsonb_build_array((select r.status from public.remittance_run r where r.id = pg_temp.v('run-r-live')));
-  perform pg_temp.cancel_run(pg_temp.v('run-r-live'), 'r-live');
+  -- M2c-6b-3a (L): refused while that reference-less debit, at the cancelled payout's amount, may be its late
+  -- execution (its items would be paid again)
+  begin
+    perform pg_temp.cancel_run(pg_temp.v('run-r-live'), 'r-live');
+  exception when others then
+    reset role;
+    v_cancel := sqlerrm;
+  end;
   v := jsonb_build_object(
-    'runs', v_runs || jsonb_build_array((select r.status from public.remittance_run r
+    'cancel', v_cancel, 'runs', v_runs || jsonb_build_array((select r.status from public.remittance_run r
                                          where r.id = pg_temp.v('run-r-live'))),
     'transfer', pg_temp.status(v_t), 'live', v_live, 'ended', pg_temp.r_reads(v_line, v_r),
     'linked', pg_temp.lk(v_line, 'refund', v_r));
@@ -1147,15 +1155,42 @@ begin
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.isolated('r_cancelled_live'),
-  '{"runs": ["sent", "cancelled"], "transfer": "cancelled",
+  '{"cancel": "remittance run refused: transfer_already_debited", "runs": ["sent", "sent"], "transfer": "cancelled",
     "live": {"candidates": ["ii", "iii"], "listed": false, "refund": "payout_candidate", "fee": "payout_candidate",
              "explained": "payout_candidate", "options": "line_ambiguous"},
-    "ended": {"candidates": ["ii", "iii"], "listed": true, "refund": "ok", "fee": "payout_candidate",
+    "ended": {"candidates": ["ii", "iii"], "listed": false, "refund": "payout_candidate", "fee": "payout_candidate",
               "explained": "payout_candidate", "options": "line_ambiguous"},
-    "linked": "ok", "refund_status": "executed"}'::jsonb,
+    "linked": "payout_candidate", "refund_status": "requested"}'::jsonb,
   'R (6b-2d; critic2 ML-4): beside a cancelled payout of its amount whose run is still sent, a refund''s reference-less '
-  'debit is refused that refund''s link (the debit may be the run''s payout); once the run is cancelled, it is listed '
-  'and linked');
+  'debit is refused that refund''s link (the debit may be the run''s payout); M2c-6b-3a (L): nor can the run be '
+  'cancelled while that debit, carrying none of our references at the payout''s amount, may be its late execution');
+-- M2c-6b-3a: the same, the run cancelled before that debit arrives (nothing then held it): the payout is (iii) only;
+-- review round 1 (DP-2): a payout cancelled after download may still be executed late — linked as the refund, the line
+-- would no longer be its open late debit (the client's next payout released) — so the refund link stays refused
+-- (payout_candidate), not listed; OQ-86's exemption stays for a payout only returned (r_returned_twin above)
+create or replace function pg_temp.r_cancelled_ended() returns jsonb language plpgsql as $$
+declare v_t uuid; v_r uuid; v_line uuid := pg_temp.l2('cf8', 1); v jsonb;
+begin
+  v_t := pg_temp.cancelled_late('a6', '06', 100000, 'r-live', false);   -- 82 000, its run still sent
+  perform pg_temp.exec_on(pg_temp.v('file-r-live'), private.paris_today() - 2);
+  v_r := pg_temp.r_refund('cf', 82000, 'r-live-refund');
+  perform pg_temp.cancel_run(pg_temp.v('run-r-live'), 'r-live');
+  perform pg_temp.stmt2('cf8', private.paris_today() - 1, jsonb_build_array(
+    jsonb_build_object('amount', 82000, 'kind', 'other_debit')));
+  v := jsonb_build_object(
+    'runs', jsonb_build_array((select r.status from public.remittance_run r where r.id = pg_temp.v('run-r-live'))),
+    'transfer', pg_temp.status(v_t), 'ended', pg_temp.r_reads(v_line, v_r), 'linked', pg_temp.lk(v_line, 'refund', v_r));
+  return v || jsonb_build_object('refund_status', (select q.status from public.refund_request q where q.id = v_r));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('r_cancelled_ended'),
+  '{"runs": ["cancelled"], "transfer": "cancelled",
+    "ended": {"candidates": ["ii", "iii"], "listed": false, "refund": "payout_candidate", "fee": "payout_candidate",
+              "explained": "payout_candidate", "options": "line_ambiguous"},
+    "linked": "payout_candidate", "refund_status": "requested"}'::jsonb,
+  'R (6b-2d; critic2 ML-4; M2c-6b-3a, review round 1 DP-2): the run cancelled before that debit arrived, the payout is '
+  '(iii) only, cancelled after download: the refund''s reference-less debit is neither listed nor linked (it may be that '
+  'payout''s late execution)');
 
 -- Two refunds of 5 300, each in a file handed out (ii, ii): a reference-less debit of that amount may be
 -- either — each refund's link stays refused payout_candidate (another refund in a file), neither listed

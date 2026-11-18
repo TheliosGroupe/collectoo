@@ -204,6 +204,8 @@ export type ErrorCode =
   | "transfer_not_downloaded"
   | "transfer_attestation_required"
   | "transfer_debit_seen"
+  // M2c-6b-3a (N): a debit carrying none of our references may be the file's (or the transfer's) execution
+  | "transfer_unreferenced_debit_open"
   | "transfer_statement_not_imported"
   | "transfer_version_changed"
   | "transfer_already_sent"
@@ -231,6 +233,8 @@ export type ErrorCode =
   | "run_transfer_already_debited"
   | "refund_already_debited"
   | "refund_reissue_in_downloaded_file"
+  // M2c-6b-3a review round 1 (DP-1, DP-2): a debit without our references that a transfer cancelled after download may be
+  | "refund_cancelled_transfer_matches"
   | "transfer_file_holds_debited"
   | "transfer_bank_booking_required"
   | "transfer_file_executed"
@@ -267,6 +271,33 @@ export const FILE_TRANSFER_NOT_EXECUTED =
   "Un virement que la banque n'exécute pas (fichier non déposé, virement refusé) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
 
 /**
+ * M2c-6b-3a (plan §4, T1–T2): the same sentences once cancellation after download is on (6b-3b's switch) — the
+ * statements of its execution day and the next business day imported, with no debit of it, its cancellation (or its
+ * file's) may be asked, on that evidence, and confirmed by a second person; « may »: the database may still refuse it
+ * (a batch line that could hold it, a debit without our references at its amount, a file the bank executed nothing of).
+ */
+export const PAYOUT_NOT_EXECUTED_ON =
+  "Un virement que la banque n'exécute pas (refusé, ou non autorisé après un nom non concordant) n'apparaît sur aucun relevé : une fois importés les relevés de son jour d'exécution et du jour ouvré suivant, sans son débit, son annulation, ou celle de son fichier, peut être demandée, relevés à l'appui, puis confirmée par une autre personne.";
+export const FILE_TRANSFER_NOT_EXECUTED_ON =
+  "Un virement que la banque n'exécute pas (fichier non déposé, virement refusé) n'apparaît sur aucun relevé : une fois importés les relevés de son jour d'exécution et du jour ouvré suivant, sans son débit, l'annulation du fichier, ou de ce virement, peut être demandée, relevés à l'appui, puis confirmée par une autre personne.";
+/**
+ * M2c-6b-3a (N): the cancellation evidence refuses while a debit carrying none of our references (a CSV export without
+ * the reference column, a camt.053 entry without references) at a transfer's amount, from its execution date, is not
+ * booked nor classified: it may be that transfer's execution.
+ */
+export const UNREFERENCED_DEBIT_OPEN =
+  "Le relevé montre un débit sans nos références du montant d'un virement de ce fichier, pas encore comptabilisé : il peut en être l'exécution. Comptabilisez-le ou classez-le d'abord dans « Débits et retours » ; si cette page ne permet pas de le comptabiliser (plusieurs virements possibles), demandez à la banque le détail de ce débit et prévenez le support. Rien n'est annulé d'ici là.";
+/**
+ * M2c-6b-3a review round 1 (LD-3, pages-texts-3, tests-6): « debited before » once cancellation after download is on —
+ * a debit carrying none of our references at the amount of the transfer a payout or refund replaces, not booked nor
+ * classified, only may be its late execution; its exit is that debit's classification or booking, else the bank's detail.
+ */
+export const UNREFERENCED_PREDECESSOR =
+  "ou un débit sans nos références de son montant, pas encore comptabilisé ni classé, peut être l'exécution tardive du virement qu'il remplace";
+export const UNREFERENCED_EXIT =
+  "Voyez ce débit dans « Débits et retours » : classez-le ou comptabilisez-le si la page le propose ; sinon demandez à la banque le détail de ce débit et prévenez le support.";
+
+/**
  * Review round 2 (L6; legal-texts#3's qualification, for the refunds of M2c-6a): a refund in a downloaded file leaves
  * « en cours » when its debit is booked from the statement — by the debit job when the line carries its RFD reference,
  * or its lot's PmtInfId when it is that lot's only transfer (private.pmt_inf_single_refund), else when ops link the line
@@ -282,6 +313,9 @@ export const REFUND_RETURNED =
 /** A refund the bank does not execute: no line on any statement. */
 export const REFUND_NOT_EXECUTED =
   "Un remboursement que la banque n'exécute pas (refusé avant son exécution, ou fichier jamais déposé) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
+/** M2c-6b-3a (T3): the same once cancellation after download is on. */
+export const REFUND_NOT_EXECUTED_ON =
+  "Un remboursement que la banque n'exécute pas (refusé avant son exécution, ou fichier jamais déposé) n'apparaît sur aucun relevé : une fois importés les relevés de son jour d'exécution et du jour ouvré suivant, sans son débit, l'annulation de son virement, ou de son fichier, peut être demandée, relevés à l'appui, puis confirmée par une autre personne ; le remboursement est ensuite annulé ou réémis.";
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
   not_allowed: "Action non autorisée pour votre rôle.",
@@ -543,6 +577,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Le fichier a été téléchargé : son annulation demande l'attestation qu'il n'a pas été déposé, ou que la banque l'a rejeté en entier.",
   transfer_debit_seen:
     "Un relevé montre déjà le débit d'un virement de ce fichier (la banque l'a exécuté) : rien n'est annulé (risque de double paiement).",
+  // M2c-6b-3a (N): raised only with cancellation after download on (the commands refuse bank_booking_required before)
+  transfer_unreferenced_debit_open: UNREFERENCED_DEBIT_OPEN,
   transfer_statement_not_imported:
     "Importez d'abord le relevé du jour d'exécution demandé : il doit montrer que la banque n'a pas débité ce virement.",
   transfer_version_changed:
@@ -596,6 +632,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   // what the line carries, never « refunded a second time » (not so while nothing is re-issued)
   refund_reissue_in_downloaded_file:
     "Ce débit porte la référence d'un autre virement ou d'un autre lot (ou, pour un remboursement réémis, ne porte aucune référence) : il ne peut pas exécuter ce remboursement, dont le virement est dans un fichier déjà téléchargé. Ne le rattachez pas à ce remboursement ; gardez le fichier tel quel, vérifiez le relevé et voyez avec la banque (prévenez le support).",
+  // M2c-6b-3a review round 1 (DP-1, DP-2): raised only once cancellation after download is on
+  refund_cancelled_transfer_matches:
+    "Ce débit ne porte aucune de nos références, et un virement de ce montant annulé après téléchargement (le remboursement d'un autre paiement, un reversement ou une quote-part du cabinet) peut en être l'exécution tardive : il ne peut pas être rattaché à ce remboursement. Demandez à la banque le détail de ce débit et prévenez le support ; le remboursement reste en attente d'ici là.",
   transfer_file_holds_debited:
     "Un virement de ce fichier a déjà quitté le compte (débité sous la référence du virement qu'il remplace, ou dans une ligne groupée de son lot) : le fichier n'est plus servi — déposé, il le paierait une seconde fois. Ne le déposez pas ; demandez à la banque de ne pas exécuter ce fichier s'il a été déposé, et prévenez le support.",
   // M2c-6b-1 review (legal-texts#3): a payout's debit is booked from the statement, never a « rejection » no line shows
@@ -680,7 +719,45 @@ export function commandErrorCode(message: string): ErrorCode {
   return "unknown";
 }
 
-export function errorText(code: ErrorCode): string {
+/**
+ * M2c-6b-3a (plan §4, T6), review round 1 (LD-4, pages-texts-8): a run whose payout is in a downloaded file is cancelled
+ * only once that transfer is cancelled on evidence; once its debit is booked the run is « Comptabilisé » (no longer
+ * cancellable) and the credit note becomes possible.
+ */
+export const CREDIT_NOTE_IN_FLIGHT_ON = `Un reversement validé compense cette facture sur son virement, dont le débit n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que ce virement n'est dans aucun fichier téléchargé, le reversement peut aussi être annulé ; ensuite il ne peut l'être qu'une fois son virement annulé, relevés à l'appui (deux personnes). Sinon l'avoir est possible dès que son débit est comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`;
+export const CREDIT_NOTE_RUN_IN_FLIGHT_ON = `Le reversement qui a émis cette facture est validé, mais le débit de son virement n'est pas encore comptabilisé : pas d'avoir d'ici là. Tant que son virement n'est dans aucun fichier téléchargé, il peut aussi être annulé (ce qui rectifierait toute la facture) ; ensuite il ne peut l'être qu'une fois son virement annulé, relevés à l'appui (deux personnes). Sinon l'avoir est possible dès que son débit est comptabilisé depuis le relevé (${PAYOUT_BOOKED_WHEN}).`;
+
+/**
+ * M2c-6b-3a (plan §4, T4–T7, T19): the refusals whose words depend on cancellation after download — true once 6b-3b
+ * switches it on (the pages read the flag: public.cancellation_after_download). The texts above stay those of the
+ * switch off, unchanged.
+ */
+const ERROR_TEXT_ON: Partial<Record<ErrorCode, string>> = {
+  run_already_sent: `Le virement de ce reversement est dans un fichier déjà téléchargé : pour annuler le reversement, faites d'abord annuler ce virement depuis la page du fichier (« Virement refusé par la banque » ou l'annulation du fichier, relevés à l'appui, confirmée par une autre personne) ; sinon il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}).`,
+  run_payout_in_downloaded_file: `Le virement de ce reversement est dans un fichier déjà téléchargé : pour annuler le reversement, faites d'abord annuler ce virement depuis la page du fichier (« Virement refusé par la banque » ou l'annulation du fichier, relevés à l'appui, confirmée par une autre personne) ; sinon il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}). ${PAYOUT_NOT_EXECUTED_ON}`,
+  refund_in_downloaded_file: `Le virement de ce remboursement est dans un fichier déjà téléchargé : pour annuler le remboursement, faites d'abord annuler ce virement depuis la page du fichier (« Virement refusé par la banque » ou l'annulation du fichier, relevés à l'appui, confirmée par une autre personne) ; sinon il reste en cours jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${REFUND_BOOKED_WHEN}). ${REFUND_RETURNED} ${REFUND_NOT_EXECUTED_ON}`,
+  // review round 1 (LD-4, pages-texts-8): once the payout's debit is booked the run is « Comptabilisé » and can no longer
+  // be cancelled — only the credit note becomes possible then
+  credit_note_in_flight: CREDIT_NOTE_IN_FLIGHT_ON,
+  credit_note_run_in_flight: CREDIT_NOTE_RUN_IN_FLIGHT_ON,
+  // review round 1 (LD-3, pages-texts-3): a debit without our references only may be the earlier transfer's execution
+  run_transfer_already_debited: `Un relevé montre déjà le débit du virement de ce reversement (sous sa référence, celle du virement qu'il remplace, ou dans une ligne groupée de son lot : la banque l'a exécuté plus tard malgré tout), ${UNREFERENCED_PREDECESSOR} : ne l'annulez pas, ses encaissements seraient reversés une seconde fois. ${UNREFERENCED_EXIT}`,
+  refund_already_debited: `Un relevé montre déjà le débit de ce remboursement (sous sa référence, celle du virement qu'il remplace, ou dans une ligne groupée de son lot : la banque l'a exécuté plus tard malgré tout), ${UNREFERENCED_PREDECESSOR} : ne l'annulez pas, il serait remboursé une seconde fois. ${UNREFERENCED_EXIT}`,
+  // review round 1 (pages-texts-4): D's reason too (a transfer of that amount cancelled after download may be the line)
+  refund_reissue_in_downloaded_file:
+    "Ce débit porte la référence d'un autre virement ou d'un autre lot, ou ne porte aucune de nos références alors que ce remboursement en remplace un autre ou qu'un virement de ce montant annulé après téléchargement (remboursement, reversement ou quote-part du cabinet) peut en être l'exécution tardive : il ne peut pas exécuter ce remboursement, dont le virement est dans un fichier déjà téléchargé. Ne le rattachez pas à ce remboursement : attendez la ligne qui porte sa référence RFD ou celle de son lot (relevé camt.053) ; sinon demandez à la banque le détail de ce débit et prévenez le support.",
+  transfer_cancellation_request_required:
+    "Ce fichier a été téléchargé : il ne se remplace plus d'un clic. Demandez son annulation, relevés à l'appui ; une autre personne la confirme.",
+  transfer_file_holds_debited:
+    "Un virement de ce fichier a peut-être déjà quitté le compte (débité sous la référence du virement qu'il remplace, dans une ligne groupée de son lot ou sans référence), ou un virement annulé du même client ou du même paiement a été débité en retard, ou la quote-part du cabinet de ce fichier a déjà été virée par une quote-part annulée exécutée en retard : le fichier n'est plus servi — déposé, il paierait une seconde fois. Ne le déposez pas ; demandez à la banque de ne pas exécuter ce fichier s'il a été déposé, et comptabilisez le débit en cause dans « Débits et retours ».",
+};
+
+/** The page's words for a refusal; `cancellationAfterDownload` (the flag the page read) picks the « on » variant. */
+export function errorText(code: ErrorCode, opts?: { cancellationAfterDownload?: boolean }): string {
+  if (opts?.cancellationAfterDownload) {
+    const on = ERROR_TEXT_ON[code];
+    if (on) return on;
+  }
   return ERROR_TEXT[code] ?? ERROR_TEXT.unknown;
 }
 

@@ -4,6 +4,9 @@ import {
   FILE_TRANSFER_NOT_EXECUTED,
   PAYOUT_BOOKED_WHEN,
   PAYOUT_NOT_EXECUTED,
+  UNREFERENCED_DEBIT_OPEN,
+  UNREFERENCED_EXIT,
+  UNREFERENCED_PREDECESSOR,
 } from "@/lib/boarding/forms";
 import type { Database } from "@/lib/database.types";
 import { money } from "@/lib/payments/statements";
@@ -230,6 +233,24 @@ const HOLD_LABEL: Record<string, string> = {
   // M2c-6a review, round 2 (D4): a cancelled file executed late after all — filing it again would pay twice
   already_debited:
     "Un relevé montre déjà le débit de ce virement — sous sa référence de bout en bout, celle du virement qu'il remplace, ou dans une ligne groupée d'un fichier annulé depuis (exécuté plus tard malgré tout) : il reste hors des fichiers pour ne pas payer deux fois. Ne le refaites pas ; le débit sera rattaché (prévenez le support)",
+  // M2c-6b-3a (A, M): raised only once cancellation after download is on (a transfer cancelled out of a downloaded file)
+  // review round 1 (pages-texts-1, pages-texts-7): the button the sheet shows; true of both arms of A (the late debit
+  // still open, or booked after this sweep was made)
+  cancelled_sweep_debited:
+    "La quote-part du cabinet de ce fichier a été calculée alors qu'une quote-part annulée, exécutée en retard par la banque, avait déjà viré cette somme : le fichier est remplacé, la quote-part est recalculée au prochain fichier d'après ce que le cabinet a déjà reçu. Si le débit de la quote-part annulée n'est pas encore comptabilisé, comptabilisez-le d'abord dans « Débits et retours » (« Comptabiliser… », puis « Virement au compte propre » de cette quote-part)",
+  // review round 1 (LD-3, pages-texts-3): a debit without our references only may be the cancelled payout's
+  client_payout_debited_late:
+    "Retenu : un virement annulé de ce client a peut-être été débité en retard (un débit de son montant, sous sa référence, dans une ligne groupée de son lot ou sans nos références, n'est pas encore comptabilisé) ; voyez ce débit dans « Débits et retours » d'abord, après avoir annulé ce reversement s'il reprend les mêmes encaissements",
+  payment_refund_debited_late:
+    "Retenu : un remboursement annulé de ce paiement a peut-être été exécuté en retard (relevé) ; rattachez ce débit d'abord, ou annulez ce remboursement",
+};
+
+/**
+ * M2c-6b-3a review round 1 (LD-3, pages-texts-3, tests-6): `already_debited` once cancellation after download is on — L
+ * raises it on a debit carrying none of our references, which only may be the replaced transfer's execution.
+ */
+const HOLD_LABEL_ON: Record<string, string> = {
+  already_debited: `Un relevé montre déjà le débit de ce virement — sous sa référence de bout en bout, celle du virement qu'il remplace, ou dans une ligne groupée d'un fichier annulé depuis —, ${UNREFERENCED_PREDECESSOR} : il reste hors des fichiers pour ne pas payer deux fois. Ne le refaites pas. ${UNREFERENCED_EXIT}`,
 };
 
 /** Why the sweep a file would carry is not proposed (review round 2, D4). */
@@ -237,11 +258,21 @@ const SWEEP_HOLD_LABEL: Record<string, string> = {
   cancelled_sweep_debited:
     "Quote-part du cabinet non proposée : un virement de quote-part annulé a quand même été débité (relevé) sans être revenu. Aucune nouvelle quote-part ne part tant que ce débit n'est pas rattaché (prévenez le support)",
 };
+/**
+ * M2c-6b-3a (B): once cancellation after download is on, ops book that debit themselves (« Comptabiliser… », then
+ * « Virement au compte propre » of the cancelled sweep, in « Débits et retours »); the share is proposed again then —
+ * until a further late line.
+ */
+const SWEEP_HOLD_LABEL_ON: Record<string, string> = {
+  // review round 1 (pages-texts-1): the button the sheet shows; the exit when the line cannot be booked
+  cancelled_sweep_debited:
+    "Quote-part du cabinet non proposée : un virement de quote-part annulé a été débité en retard (relevé) sans être revenu, ou un débit sans nos références de son montant peut l'être, et ce débit n'est pas encore comptabilisé. Comptabilisez-le dans « Débits et retours » (« Comptabiliser… », puis « Virement au compte propre » de cette quote-part) : la quote-part est ensuite proposée de nouveau. Si la page ne permet pas de le comptabiliser (plusieurs virements possibles), demandez à la banque le détail de ce débit",
+};
 
-/** The words for a sweep held back, or null when none is. */
-export function sweepHoldLabel(code: string | null | undefined): string | null {
+/** The words for a sweep held back, or null when none is; `cancellationAfterDownload` picks the « on » variant. */
+export function sweepHoldLabel(code: string | null | undefined, cancellationAfterDownload = false): string | null {
   if (!code) return null;
-  return SWEEP_HOLD_LABEL[code] ?? code;
+  return (cancellationAfterDownload ? SWEEP_HOLD_LABEL_ON[code] : undefined) ?? SWEEP_HOLD_LABEL[code] ?? code;
 }
 
 /** The same reasons under the names the review's findings used (pain001#2, pain001#4), should the database send them. */
@@ -251,11 +282,12 @@ const HOLD_ALIAS: Record<string, string> = {
 };
 
 /** Why a transfer is held out of a file generated today (null: it goes in). */
-export function holdLabel(code: string | null): string | null {
+export function holdLabel(code: string | null, cancellationAfterDownload = false): string | null {
   if (code === null) return null;
   if (code.startsWith("payout_blocked:"))
     return `Virement bloqué — ${payoutBlockerLabel(code.slice("payout_blocked:".length))}`;
-  return HOLD_LABEL[HOLD_ALIAS[code] ?? code] ?? code;
+  const key = HOLD_ALIAS[code] ?? code;
+  return (cancellationAfterDownload ? HOLD_LABEL_ON[key] : undefined) ?? HOLD_LABEL[key] ?? code;
 }
 
 /** The payout blockers of runs (M2c-4), and the payee check of M2c-6a. */
@@ -464,6 +496,8 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
   // review round 2 (D2, D3): one transfer only from an executed file; a batch debit that does not single it out
   ["file_not_executed", "transfer_file_not_executed"],
   ["batch_ambiguous", "transfer_batch_ambiguous"],
+  // M2c-6b-3a (N): a debit without our references may be the file's (or the transfer's) execution
+  ["unreferenced_debit_open", "transfer_unreferenced_debit_open"],
   ["same_person", "transfer_same_person"],
   ["already_requested", "transfer_cancel_already_requested"],
   ["not_requested", "transfer_cancel_not_requested"],
@@ -558,6 +592,9 @@ export type CancelEvidence = {
   batch_ambiguous: boolean;
   /** review round 2 (D2): for one transfer, whether the bank executed something of its file (null: not decided) */
   file_executed: boolean | null;
+  /** M2c-6b-3a (N): a debit carrying none of our references may be its execution, from that day */
+  unreferenced_debit?: boolean;
+  unreferenced_from?: string | null;
   /** the database's verdict, when it gives one */
   refusal: string | null;
 };
@@ -612,6 +649,10 @@ export function cancellationOf(x: unknown): Cancellation {
         file_executed:
           typeof e.file_executed === "boolean" ? e.file_executed : null,
         refusal: typeof e.refusal === "string" ? e.refusal : null,
+        // M2c-6b-3a (N): only when the database says (an evidence read before it carries neither)
+        ...(e.unreferenced_debit !== undefined
+          ? { unreferenced_debit: e.unreferenced_debit === true, unreferenced_from: dateOrNull(e.unreferenced_from) }
+          : {}),
       }
     : null;
   return { request, evidence };
@@ -648,6 +689,14 @@ export function evidenceStatus(
     return {
       ready: false,
       text: `Un relevé montre un débit ${of} : la banque l'a exécuté, il ne peut pas être annulé (risque de double paiement).`,
+    };
+  // M2c-6b-3a (N): a debit without our references, not booked nor classified, may be its execution
+  if (e.unreferenced_debit || e.refusal === "unreferenced_debit_open")
+    return {
+      ready: false,
+      text: e.unreferenced_from
+        ? `Depuis le ${frenchDate(e.unreferenced_from)}, le relevé montre un débit sans nos références du montant ${what === "file" ? "d'un virement de ce fichier" : "de ce virement"}, pas encore comptabilisé : il peut en être l'exécution. Comptabilisez-le ou classez-le d'abord dans « Débits et retours » ; si cette page ne permet pas de le comptabiliser (plusieurs virements possibles), demandez à la banque le détail de ce débit et prévenez le support. Rien n'est annulé d'ici là.`
+        : UNREFERENCED_DEBIT_OPEN,
     };
   // review round 2 (D3): the bank debited the lot as one line, which other transfers of it could make up
   if (e.batch_ambiguous || e.refusal === "batch_ambiguous")
@@ -864,7 +913,10 @@ export const DOWNLOADED_FILE_NOTE = `Un fichier téléchargé ne peut pas encore
  * Review M2c-6b-1 (legal-texts#3): its debit is booked from the statement, and the return of a payout the payee's bank
  * sends back; a payout the bank does not execute leaves no line — never « its rejection booked ».
  */
-export function runPayoutInDownloadedFileNote(fileNumber: string): string {
+export function runPayoutInDownloadedFileNote(fileNumber: string, cancellationAfterDownload = false): string {
+  // M2c-6b-3a (plan §4, T9): once cancellation after download is on, the run is cancelled once its transfer is
+  if (cancellationAfterDownload)
+    return `Le virement est dans le fichier ${fileNumber}, déjà téléchargé : pour annuler ce reversement, faites d'abord annuler ce virement depuis la page du fichier (relevés à l'appui, confirmée par une autre personne). S'il est exécuté, son débit est comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}), puis, si la banque du bénéficiaire le renvoie, son retour.`;
   return `Le virement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${PAYOUT_BOOKED_WHEN}), et le reversement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). Si la banque du bénéficiaire le renvoie, son retour est comptabilisé de même et le montant est à reverser à nouveau. ${PAYOUT_NOT_EXECUTED} Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`;
 }
 
@@ -1023,7 +1075,15 @@ export function refusalFromSearch(
  * (critic2 CSO2-4): a file blocked only because its sweep exceeds the servicer's share now is replaced with its payouts
  * ordered again — the text says they come back in the regenerated file, not that they stay out.
  */
-export function refusalText(code: DownloadRefusal, blocked: readonly BlockedTransfer[] = []): string {
+export function refusalText(
+  code: DownloadRefusal,
+  blocked: readonly BlockedTransfer[] = [],
+  cancellationAfterDownload = false,
+): string {
+  // M2c-6b-3a (plan §4, T19): once cancellation after download is on, a transfer of the file may have left already
+  // without our references, or a cancelled one of its client or payment, or the servicer's share by a cancelled sweep
+  if (code === "holds_debited_transfer" && cancellationAfterDownload)
+    return "Un virement de ce fichier a peut-être déjà quitté le compte (débité sous la référence du virement qu'il remplace, dans une ligne groupée de son lot ou sans référence), ou un virement annulé du même client ou du même paiement a été débité en retard, ou la quote-part du cabinet de ce fichier a déjà été virée par une quote-part annulée exécutée en retard : le fichier n'est plus servi, ne le déposez pas ; s'il l'a été, demandez à la banque de ne pas l'exécuter. Comptabilisez le débit en cause dans « Débits et retours ».";
   if (code === "file_blocked" && blocked.length > 0 && blocked.every((b) => b.reason === "sweep_exceeds_share"))
     return "Le fichier n'a pas été servi et il est remplacé : seule la quote-part du cabinet a changé depuis sa génération. Régénérez-le maintenant : les reversements qu'il contenait y reviennent (leur date limite court toujours).";
   switch (code) {

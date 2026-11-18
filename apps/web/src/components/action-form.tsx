@@ -20,6 +20,7 @@ export function ActionForm<R extends ActionResult = ActionResult>({
   resetOnSuccess = false,
   id,
   testId,
+  cancellationAfterDownload,
   children,
 }: {
   action: (formData: FormData) => Promise<R>;
@@ -34,6 +35,8 @@ export function ActionForm<R extends ActionResult = ActionResult>({
   /** Fields elsewhere on the page join this form with `form={id}` (bulk selection). */
   id?: string;
   testId?: string;
+  /** M2c-6b-3a: the flag the page read (public.cancellation_after_download): picks a refusal's « on » words */
+  cancellationAfterDownload?: boolean;
   children?: ReactNode;
 }) {
   const router = useRouter();
@@ -48,7 +51,7 @@ export function ActionForm<R extends ActionResult = ActionResult>({
     setError(null);
     startTransition(async () => {
       const result = await action(formData);
-      if ("error" in result) setError(errorText(result.error));
+      if ("error" in result) setError(errorText(result.error, { cancellationAfterDownload }));
       else {
         if (resetOnSuccess) form.reset();
         onDone?.(result as Extract<R, { ok: true }>);

@@ -60,6 +60,9 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   const { id } = await params;
   const back = { href: "/backoffice/encaissements/a-traiter", label: "Paiements à traiter" };
   const { supabase } = await staffSession();
+  // M2c-6b-3a: the cancellation-after-download switch, for the texts worded both ways
+  const { data: cancellationOn } = await supabase.rpc("cancellation_after_download");
+  const cancellationAfterDownload = cancellationOn === true;
   const { data } = UUID.test(id) ? await supabase.rpc("payment_detail", { p_payment_id: id }) : { data: null };
   const d = data as unknown as PaymentDetail | null;
   if (!d) {
@@ -351,13 +354,24 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
                   <span className="block text-xs text-zinc-600 dark:text-zinc-400">Motif interne : {r.reason}</span>
                 </span>
                 {refundCancellable(r.status, refundTransfer.get(r.id)) ? (
-                  <CancelRefund paymentId={p.id} refundId={r.id} reference={r.end_to_end_id} idempotencyKey={randomUUID()} />
+                  <CancelRefund
+                    paymentId={p.id}
+                    refundId={r.id}
+                    reference={r.end_to_end_id}
+                    idempotencyKey={randomUUID()}
+                    cancellationAfterDownload={cancellationAfterDownload}
+                  />
                 ) : r.status === "requested" && refundInDownloadedFile(refundTransfer.get(r.id)) ? (
                   <span
                     className="flex max-w-md flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400"
                     data-testid="refund-in-downloaded-file"
                   >
-                    <span>{refundInDownloadedFileNote(refundTransfer.get(r.id)?.file?.number ?? "")}</span>
+                    <span>
+                      {refundInDownloadedFileNote(
+                        refundTransfer.get(r.id)?.file?.number ?? "",
+                        cancellationAfterDownload,
+                      )}
+                    </span>
                     <Link
                       href={`/backoffice/reversements/virements/${refundTransfer.get(r.id)?.file?.id ?? ""}`}
                       className="underline underline-offset-4"

@@ -68,6 +68,7 @@ export function LinkRefund({
   label,
   effect,
   idempotencyKey,
+  cancellationAfterDownload = false,
 }: {
   lineId: string;
   refundId: string;
@@ -75,6 +76,8 @@ export function LinkRefund({
   label: string;
   effect: string;
   idempotencyKey: string;
+  /** M2c-6b-3a review round 1 (pages-texts-4): the refusal's « on » words (the flag the page read) */
+  cancellationAfterDownload?: boolean;
 }) {
   return (
     <ConfirmSheet label={label} title="Remboursement" buttonClassName={buttonClass} testId="link-refund">
@@ -83,7 +86,13 @@ export function LinkRefund({
           <p className="text-sm" data-testid="sheet-effect">
             {effect}
           </p>
-          <ActionForm onDone={close} action={linkDebit} submitLabel="Confirmer" buttonClassName={buttonClass}>
+          <ActionForm
+            onDone={close}
+            action={linkDebit}
+            submitLabel="Confirmer"
+            buttonClassName={buttonClass}
+            cancellationAfterDownload={cancellationAfterDownload}
+          >
             <input type="hidden" name="bank_transaction_id" value={lineId} />
             <input type="hidden" name="kind" value={kind} />
             <input type="hidden" name="refund_request_id" value={refundId} />

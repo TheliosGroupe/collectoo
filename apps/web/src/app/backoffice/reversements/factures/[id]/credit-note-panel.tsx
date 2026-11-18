@@ -35,6 +35,7 @@ export function CreditNotePanel({
   nextFiles,
   filesPartial,
   currency,
+  cancellationAfterDownload = false,
 }: {
   invoiceId: string;
   invoiceNumber: string;
@@ -46,6 +47,8 @@ export function CreditNotePanel({
   /** The paged read failed: the list holds the 200 files the invoice's detail lists. */
   filesPartial: boolean;
   currency: string;
+  /** M2c-6b-3a: the switch the page read, for the refusals' words */
+  cancellationAfterDownload?: boolean;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -71,7 +74,7 @@ export function CreditNotePanel({
     setError(null);
     startLoading(async () => {
       const result = await loadInvoiceFiles(invoiceId, after);
-      if ("error" in result) setError(errorText(result.error));
+      if ("error" in result) setError(errorText(result.error, { cancellationAfterDownload }));
       else {
         setFiles((current) => mergeFiles(current, result.files));
         setCursor(result.next);
@@ -89,7 +92,7 @@ export function CreditNotePanel({
       const result = await previewCreditNote(formData);
       if ("error" in result) {
         setPreview(null);
-        setError(errorText(result.error));
+        setError(errorText(result.error, { cancellationAfterDownload }));
       } else {
         setPreview(result.preview);
         setKey(crypto.randomUUID());
@@ -105,7 +108,7 @@ export function CreditNotePanel({
     setError(null);
     startTransition(async () => {
       const result = await issueCreditNote(formData);
-      if ("error" in result) setError(errorText(result.error));
+      if ("error" in result) setError(errorText(result.error, { cancellationAfterDownload }));
       else {
         setIssued(result.number);
         setPreview(null);

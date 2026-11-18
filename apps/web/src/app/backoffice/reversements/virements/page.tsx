@@ -32,8 +32,17 @@ import { clearPayeeMismatch, markSent, setPainVersion } from "./actions";
 import { DownloadLink, GenerateFile } from "./file-actions";
 
 /** One transfer waiting for a file: what, to whom, and why it would be held out today. */
-function TransferRow({ t, currency }: { t: TransferCard; currency: string }) {
-  const hold = holdLabel(t.hold);
+function TransferRow({
+  t,
+  currency,
+  cancellationAfterDownload = false,
+}: {
+  t: TransferCard;
+  currency: string;
+  /** M2c-6b-3a review round 1 (tests-6): the flag « Virements » read — the hold's « on » words */
+  cancellationAfterDownload?: boolean;
+}) {
+  const hold = holdLabel(t.hold, cancellationAfterDownload);
   return (
     <li className="flex flex-col gap-1 py-3" data-testid="transfer-row">
       <span className="flex flex-wrap items-center justify-between gap-2">
@@ -172,7 +181,12 @@ function Account({ a, overview }: { a: PayingAccount; overview: TransferOverview
           ) : (
             <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
               {a.to_file.map((t) => (
-                <TransferRow key={t.transfer_id} t={t} currency={a.currency} />
+                <TransferRow
+                  key={t.transfer_id}
+                  t={t}
+                  currency={a.currency}
+                  cancellationAfterDownload={overview.cancellation_after_download === true}
+                />
               ))}
             </ul>
           )}
@@ -185,9 +199,9 @@ function Account({ a, overview }: { a: PayingAccount; overview: TransferOverview
               {overview.own_account ? ` (…${overview.own_account.iban_last4})` : " — aucun compte propre renseigné"}.
             </p>
           ) : null}
-          {sweepHoldLabel(a.sweep_hold) ? (
+          {sweepHoldLabel(a.sweep_hold, overview.cancellation_after_download === true) ? (
             <p className="mt-2 text-sm text-red-800 dark:text-red-200" data-testid="sweep-hold">
-              {sweepHoldLabel(a.sweep_hold)}.
+              {sweepHoldLabel(a.sweep_hold, overview.cancellation_after_download === true)}.
             </p>
           ) : null}
         </div>

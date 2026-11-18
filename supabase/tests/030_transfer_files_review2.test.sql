@@ -600,8 +600,10 @@ insert into j select 'd4', pg_temp.download('01', pg_temp.v('f4'));
 select results_eq($$ select v ->> 'refused', (select array_agg((b ->> 'transfer_id') || ' ' || (b ->> 'reason'))
                                               from jsonb_array_elements(v -> 'blocked') b),
                             (pg_temp.fl(pg_temp.v('f4'))).status from j where k = 'd4' $$,
-  $$ values ('file_blocked'::text, array[pg_temp.trid('r2') || ' already_debited'], 'superseded'::text) $$,
-  'D4: the file holding it, generated before the debit was imported, is superseded at download, not served');
+  $$ values ('file_blocked'::text, array[pg_temp.trid('r2') || ' already_debited',
+                                         (pg_temp.sweep(pg_temp.v('f4'))).id || ' cancelled_sweep_debited'],
+             'superseded'::text) $$,
+  'D4: the file holding it, generated before the debit was imported, is superseded at download, not served (M2c-6b-3a: its sweep, made after the cancelled one that was debited since, held too)');
 insert into j select 'g5', pg_temp.gen('01', 'r2-gen-0005');
 insert into t select 'f5', (v ->> 'file_id')::uuid from j where k = 'g5';
 select results_eq($$ select (v ->> 'nb_of_txs')::int, v ->> 'ctrl_sum_minor', v ->> 'sweep_minor', v ->> 'sweep_hold',

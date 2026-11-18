@@ -139,11 +139,14 @@ export function CancelRefund({
   refundId,
   reference,
   idempotencyKey,
+  cancellationAfterDownload = false,
 }: {
   paymentId: string;
   refundId: string;
   reference: string;
   idempotencyKey: string;
+  /** M2c-6b-3a: the switch the page read, for the refusals' words */
+  cancellationAfterDownload?: boolean;
 }) {
   return (
     <ConfirmSheet label="Annuler" title="Annuler ce remboursement" buttonClassName={dangerButtonClass} testId="cancel-refund">
@@ -153,7 +156,13 @@ export function CancelRefund({
             Confirmez que le virement {reference} n&apos;a pas été exécuté dans la banque. Le paiement retrouvera la
             situation qu&apos;il avait avant la demande.
           </p>
-          <ActionForm onDone={close} action={cancelRefund} submitLabel="Confirmer l'annulation" buttonClassName={buttonClass}>
+          <ActionForm
+            onDone={close}
+            action={cancelRefund}
+            submitLabel="Confirmer l'annulation"
+            buttonClassName={buttonClass}
+            cancellationAfterDownload={cancellationAfterDownload}
+          >
             <input type="hidden" name="payment_id" value={paymentId} />
             <input type="hidden" name="refund_request_id" value={refundId} />
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />

@@ -79,6 +79,9 @@ export const TRANSFER_LINE_REFUSAL: Record<string, string> = {
   own_account_unknown: "Le compte crédité n'est pas l'un de nos comptes propres enregistrés.",
   sweep_in_flight_matches:
     "Une quote-part du cabinet en cours de ce montant peut être ce débit : comptabilisez-la comme son débit.",
+  // M2c-6b-3a (K): rule 3b's (iv), raised only once cancellation after download is on
+  cancelled_transfer_matches:
+    "Ce débit peut être l'exécution tardive d'un remboursement ou d'une quote-part annulés après téléchargement : il ne peut pas être comptabilisé comme un autre virement. Demandez à la banque le détail de ce débit.",
   // critic L2, L15
   fee_not_allowed:
     "Des frais bancaires ne se comptabilisent ici que sur la ligne même d'un virement du cabinet (son débit, ou son retour signalé par la banque) : ailleurs, ils ne se distinguent pas de l'argent d'un tiers.",

@@ -39,11 +39,14 @@ export default async function CommissionInvoicePage({ params }: { params: Promis
   const { id } = await params;
   if (!/^[0-9a-f-]{36}$/.test(id)) notFound();
   const { supabase } = await staffSession();
+  // M2c-6b-3a: the cancellation-after-download switch, for the texts worded both ways
+  const { data: cancellationOn } = await supabase.rpc("cancellation_after_download");
+  const cancellationAfterDownload = cancellationOn === true;
   const { data, error } = await supabase.rpc("commission_invoice_detail", { p_invoice_id: id });
   if (error || !data) notFound();
   const d = data as unknown as InvoiceDetail;
   const invoice = d.kind === "invoice";
-  const refusal = refusalText(d.refusal);
+  const refusal = refusalText(d.refusal, cancellationAfterDownload);
   const title = `${invoice ? "Facture" : "Avoir"} ${d.number}`;
 
   // the file choice: the first page of the paged read; if it fails, the 200 files the detail lists (said so)
@@ -106,6 +109,7 @@ export default async function CommissionInvoicePage({ params }: { params: Promis
               nextFiles={nextFiles}
               filesPartial={filesPartial}
               currency="EUR"
+              cancellationAfterDownload={cancellationAfterDownload}
             />
           ) : (
             <InfoNote>Seul un administrateur du cabinet, en double authentification, émet un avoir.</InfoNote>
