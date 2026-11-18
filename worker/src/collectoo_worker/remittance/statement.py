@@ -11,7 +11,10 @@ No wording says « payé » or « réglé » before the bank's debit (M2c-6 book
 « ordonné », a set-off « à régler par compensation » — « compensé le … » only when the run transfers
 nothing (N = 0: the settlement is posted at approval). A run cancelled before its statement is drawn
 says so, and sets nothing off. A late line states a cause the data supports, never the approver's
-free text (review legal#6).
+free text (review legal#6). Since M2c-6b-2d (template fr-3, migration 20261117120000) « Suivi »
+words the events of the client's earlier runs' payouts posted in the window from the previous
+approved run's K to this K (`previous_payouts`), each one sentence from the payload's amounts and
+dates; a payload of another template is refused (`StatementPayloadError`, `payload_version`).
 """
 
 from __future__ import annotations
@@ -34,7 +37,10 @@ from collectoo_worker.payments.receipts import (
 )
 from collectoo_worker.remittance.run import percent
 
-TEMPLATE_VERSION = "releve-reversement-fr-2"  # M2c-5 review (fr-1 never left the slice)
+# M2c-6b-2d (plan §5): « Suivi » words the events of the earlier runs' payouts as of K
+# (`previous_payouts`); fr-2 drew M2c-5's `follow_up`. Stored statements are never re-rendered
+# (their bytes are kept), so fr-3 alone is drawn; a payload built for another template is refused.
+TEMPLATE_VERSION = "releve-reversement-fr-3"
 TEMPLATE_VERSIONS = (TEMPLATE_VERSION,)
 PDF_FILE_ROWS_MAX = 2000  # above this, the PDF names the CSV for the detail (design §10)
 
@@ -92,6 +98,11 @@ LATE_CAUSE = {
     "unmeetable": "délai contractuel intenable (art. R124-6 : un mois)",
     "identified_late": "encaissement identifié tardivement",
     "approved_late": "validation tardive",
+    # M2c-6b-2d (critic L9, critic2 ML-9; Q15's default: the item keeps its own clock): an unplanned
+    # payout's P paid all of the line, as of K — worded with that payout's date (« versé le … »);
+    # review round 1 (legal-texts-3): one it paid in part keeps its own cause, the attribution
+    # added after it (« … ; dont … versés le … »): `_late`
+    "paid_by_unplanned": "par un virement exécuté hors reversement",
 }
 REFUND_REASON = {
     "overpayment": "trop-perçu",
@@ -154,9 +165,29 @@ class StatementLine:
     late: str
 
 
+class StatementPayloadError(ValueError):
+    """A payload this template cannot draw (code `payload_version`): built for another template
+    (M2c-5's `follow_up`, no `previous_payouts`), or holding a fact it does not word. Never drawn
+    with a section missing; the documents job records the failure and retries the statement."""
+
+    code = "payload_version"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"{self.code}: {detail}")
+
+
+def check_payload(payload: Mapping[str, Any]) -> None:
+    """The payload is the one `releve-reversement-fr-3` draws (M2c-6b-2d, migration
+    20261117120000): its « Suivi » is `previous_payouts`, never M2c-5's `follow_up`."""
+    if "follow_up" in payload or not isinstance(payload.get("previous_payouts"), Mapping):
+        raise StatementPayloadError(f"not a {TEMPLATE_VERSION} payload (« Suivi »)")
+
+
 def line_records(payload: Mapping[str, Any]) -> list[StatementLine]:
     """The payload's lines, worded (same order)."""
+    check_payload(payload)
     cols = {name: i for i, name in enumerate(payload["line_columns"])}
+    money = money_of(payload)
     out = []
     for row in payload["lines"]:
         v = {name: row[i] for name, i in cols.items()}
@@ -181,7 +212,7 @@ def line_records(payload: Mapping[str, Any]) -> list[StatementLine]:
                 commission_minor=int(v["commission_minor"]),
                 invoice=str(v["invoice"] or ""),
                 receipt=str(v["receipt"] or ""),
-                late=_late(v["late"], v.get("late_cause")),
+                late=_late(v, money),
             )
         )
     return out
@@ -202,11 +233,38 @@ def _rules(v: Mapping[str, Any]) -> str:
     return " ; ".join(str(r) for r in v["rules"] or ())
 
 
-def _late(late: Any, cause: Any) -> str:
-    if not late:
+def _late(v: Mapping[str, Any], money: Callable[[int | str], str]) -> str:
+    if not v["late"]:
         return ""
+    cause = v.get("late_cause")
+    if cause == "paid_by_unplanned":
+        return f"oui {DASH} {_paid_by_unplanned(v)}"
     label = LATE_CAUSE.get(str(cause)) if cause else None
-    return f"oui {DASH} {label}" if label else "oui"
+    text = f"oui {DASH} {label}" if label else "oui"
+    if v.get("paid_by_unplanned_minor") is not None:
+        # review round 1 (legal-texts-3): an unplanned payout paid part of the line — the line's
+        # own cause stays (it is the remainder's), the attribution follows it
+        on = v.get("paid_by_unplanned_on")
+        if not on:
+            raise StatementPayloadError("paid_by_unplanned_minor without its date")
+        text += (
+            f"{' ;' if label else f' {DASH}'} dont {money(v['paid_by_unplanned_minor'])} versés "
+            f"le {format_date(on)} {LATE_CAUSE['paid_by_unplanned']}"
+        )
+    return text
+
+
+def _paid_by_unplanned(v: Mapping[str, Any]) -> str:
+    """critic L9, critic2 ML-9: « versé le … » when the amount an unplanned payout's P attributed
+    to the line (as of K) is all of it — the payload's cause `paid_by_unplanned` says so (review
+    round 1, legal-texts-3: a part keeps the line's own cause, `_late`); without the amount and the
+    date, or with an amount short of the line, the cause cannot be worded truthfully."""
+    paid, on = v.get("paid_by_unplanned_minor"), v.get("paid_by_unplanned_on")
+    if paid is None or not on:
+        raise StatementPayloadError("paid_by_unplanned without its amount or date")
+    if int(paid) < int(v["amount_minor"]):
+        raise StatementPayloadError("paid_by_unplanned for part of the line")
+    return f"versé le {format_date(on)} {LATE_CAUSE['paid_by_unplanned']}"
 
 
 def nature(kind: str, reason: Any, from_run: Any) -> str:
@@ -267,7 +325,9 @@ def _paris(at: datetime) -> str:
 
 
 def statement_view(payload: Mapping[str, Any], csv_sha256: str) -> StatementView:
-    """The locked French template `releve-reversement-fr-2` filled from the payload."""
+    """The locked French template `releve-reversement-fr-3` filled from the payload (one it draws:
+    `check_payload`)."""
+    check_payload(payload)
     money = money_of(payload)
     k = known_at(payload)
     number = str(payload["number"])
@@ -294,7 +354,7 @@ def statement_view(payload: Mapping[str, Any], csv_sha256: str) -> StatementView
             _collected(payload, money, csv_sha256),
             _deductions(payload, money),
             _payout(payload, money),
-            _follow_up(payload, money),
+            _previous_payouts(payload, money),
             _not_remitted(payload),
             _position(payload, money, k),
         ),
@@ -605,33 +665,191 @@ def _payout(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Section:
     )
 
 
-def _follow_up(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Section:
-    texts = []
-    for f in p.get("follow_up") or ():
-        status = f.get("transfer_status")
-        if status is None:
-            texts.append(f"Relevé {f['number']} : aucun virement (montant net nul).")
-        elif status == "booked":
-            texts.append(
-                f"Relevé {f['number']} : virement de {money(f['amount_minor'])} débité de notre "
-                f"compte dédié le {format_date(f.get('debited_on'))}."
-            )
-        elif status == "returned":
-            texts.append(
-                f"Relevé {f['number']} : virement de {money(f['amount_minor'])} revenu impayé le "
-                f"{format_date(f.get('returned_on'))} ; il vous est proposé à nouveau."
-            )
-        elif status == "cancelled":
-            texts.append(f"Relevé {f['number']} : virement annulé avant son exécution.")
-        else:
-            texts.append(
-                f"Relevé {f['number']} : virement de {money(f['amount_minor'])} ordonné, exécution "
-                f"demandée le {format_date(f.get('requested_execution_date'))} ; son débit n'est "
-                "pas encore constaté sur notre relevé bancaire."
-            )
+# « Suivi » (M2c-6b-2d, plan §5): one sentence per event of `previous_payouts` (the SQL's order:
+# its date, then the run number), each from the payload's amounts and dates alone. An event this
+# run does not hold (`here` false: it was booked after this run's items were taken, or this run was
+# cancelled since) is « pris en compte dans un prochain reversement ».
+SUIVI_TITLE = "Suivi de vos reversements précédents"
+NEXT_RUN = " ; il sera pris en compte dans un prochain reversement."
+# why the advance could not be deducted from the client's waiting sums, by the bound that set P
+# (critic F17, L16, critic2 ML-9: the booking recorded it; `amount`: no advance, no clause)
+ADVANCE_CAUSE = {
+    "items": " : elle dépassait ce qui restait à vous reverser des sommes de ce reversement",
+    "none": " : elle dépassait ce qui restait à vous reverser des sommes de ce reversement",
+    "queue": " : vos sommes en attente à cette date ne permettaient pas d'en déduire davantage",
+}
+
+
+def masked_iban_end(last4: Any) -> str:
+    """An IBAN by its last four characters, as the pages print one (review 6b-2c T1, pages-2:
+    « IBAN …1234 », never a country code or check digits assumed)."""
+    return f"IBAN …{last4}" if last4 else ""
+
+
+def _previous_payouts(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Section:
+    pp = p["previous_payouts"]
+    texts = [_event_text(e, money) for e in pp.get("events") or ()]
     if not texts:
-        texts.append("Aucun reversement précédent à suivre.")
-    return Section("Suivi de vos reversements précédents", texts=tuple(texts))
+        since = pp.get("since")
+        if since:
+            at = _paris(datetime.fromisoformat(str(since["known_at"]).replace("Z", "+00:00")))
+            texts.append(
+                "Rien à signaler sur vos reversements précédents depuis le relevé "
+                f"{since['number']} (encaissements connus au {at})."
+            )
+        else:
+            texts.append("Aucun reversement précédent à suivre.")
+    return Section(SUIVI_TITLE, texts=tuple(texts))
+
+
+def _event_text(e: Mapping[str, Any], money: Callable[[int | str], str]) -> str:  # noqa: PLR0911
+    kind, run, on = e.get("kind"), e.get("run_number"), format_date(e.get("on"))
+    if kind == "debited":
+        return (
+            f"Reversement {run} : virement de {money(e['amount_minor'])} (référence "
+            f"{e['end_to_end_id']}) débité de notre compte dédié le {on}."
+        )
+    if kind == "returned":
+        head = (
+            f"Reversement {run} : virement de {money(e['amount_minor'])} débité le "
+            f"{format_date(e.get('debited_on'))}, revenu impayé le {on}"
+        )
+        if e.get("repaid") == "here":
+            return (
+                f"{head} ; son montant figure dans le présent reversement "
+                f"(« {NATURE['payout_returned']} »)."
+            )
+        if e.get("repaid") == "run" and e.get("repaid_by"):
+            return f"{head} ; reversé à nouveau par le reversement {e['repaid_by']}."
+        return f"{head} ; son montant vous sera reversé par un prochain reversement."
+    if kind == "cancelled":
+        return f"Reversement {run} annulé le {on}, avant que son virement soit remis à la banque."
+    if kind == "executed_after_cancellation":
+        head = _after_cancellation_head(e, money, run, on)
+        if not e.get("here"):
+            return head + NEXT_RUN
+        return (
+            f"{head} ; ce montant, que vous avez reçu, figure dans le présent reversement "
+            f"(« {NATURE['unplanned_payout']} »){_advance_clause(e, money)}."
+        )
+    if kind == "debited_again":
+        head, this = _debited_again_head(e, money, run, on)
+        if not e.get("here"):
+            return head + NEXT_RUN
+        advance = int(e.get("advance_minor") or 0)
+        extra = (
+            f", et « {NATURE['client_advance']} » pour {this} ({money(advance)})"
+            if advance > 0
+            else ""
+        )
+        return (
+            f"{head} ; {this}, que vous avez reçu, figure dans le présent reversement "
+            f"(« {NATURE['unplanned_payout']} »{extra})."
+        )
+    if kind == "unplanned_returned":
+        return _unplanned_returned(e, money, on)
+    if kind == "executed_outside":
+        iban = masked_iban_end(e.get("iban_last4"))
+        head = (
+            f"Virement de {money(e['amount_minor'])} vers votre compte{' ' + iban if iban else ''} "
+            f"le {on}, exécuté hors de tout reversement"
+        )
+        if not e.get("here"):
+            return head + NEXT_RUN
+        with_advance = (
+            f" et « {NATURE['client_advance']} »" if int(e.get("advance_minor") or 0) else ""
+        )
+        return (
+            f"{head} : il figure dans le présent reversement (« {NATURE['unplanned_payout']} »"
+            f"{with_advance})."
+        )
+    raise StatementPayloadError(f"« Suivi » event {kind!r}")
+
+
+def _execution_no(e: Mapping[str, Any]) -> int:
+    """The execution's rank among its transfer chain's executions booked by K (review round 1:
+    legal-texts-1), as the SQL gave it; a payload without it cannot be worded truthfully."""
+    n = e.get("execution_no")
+    if n is None or int(n) < 1:
+        raise StatementPayloadError(f"« Suivi » event {e.get('kind')!r} without its execution rank")
+    return int(n)
+
+
+def _after_cancellation_head(
+    e: Mapping[str, Any], money: Callable[[int | str], str], run: Any, on: str
+) -> str:
+    """A cancelled run's payout executed all the same: « néanmoins » the first time, « de nouveau »
+    (with its rank) for each later execution — never the same sentence twice (review round 1)."""
+    cancelled = f"Reversement {run} annulé le {format_date(e.get('cancelled_on'))} : la banque a "
+    amount = money(e["unplanned_minor"])
+    n = _execution_no(e)
+    if n == 1:
+        return f"{cancelled}néanmoins exécuté son virement de {amount} le {on}"
+    return f"{cancelled}de nouveau exécuté son virement de {amount} le {on} ({n}e exécution)"
+
+
+def _debited_again_head(
+    e: Mapping[str, Any], money: Callable[[int | str], str], run: Any, on: str
+) -> tuple[str, str]:
+    """A booked (or returned) payout executed again, and how the rest of its sentence names it
+    (review round 1: statement-money, legal-texts-1). « une seconde fois » only of the second
+    execution; a later one « de nouveau » with its rank; one the bank made before the planned debit
+    (booked after it) is neither: it was executed « en plus de son débit du … »."""
+    amount = money(e["unplanned_minor"])
+    debited_on = e.get("debited_on")
+    if not debited_on:
+        raise StatementPayloadError("debited_again without the debit it repeats")
+    n = _execution_no(e)
+    if e.get("before_debit"):
+        return (
+            f"Reversement {run} : la banque a exécuté son virement le {on} ({amount}), en plus de "
+            f"son débit du {format_date(debited_on)}",
+            "ce virement en plus",
+        )
+    if n < 2:
+        raise StatementPayloadError("debited_again ranked first but not before its debit")
+    if n == 2:
+        return (
+            f"Reversement {run} : la banque a exécuté son virement une seconde fois le {on} "
+            f"({amount})",
+            "ce second virement",
+        )
+    return (
+        f"Reversement {run} : la banque a exécuté son virement de nouveau le {on} ({amount} ; "
+        f"{n}e exécution)",
+        "ce nouveau virement",
+    )
+
+
+def _advance_clause(e: Mapping[str, Any], money: Callable[[int | str], str]) -> str:
+    """The servicer's advance of an execution after cancellation (critic F17, L16) and why it could
+    not be deducted, by the bound that set P (critic2 ML-9): none when P = A."""
+    advance = int(e.get("advance_minor") or 0)
+    if advance <= 0:
+        return ""
+    return (
+        f", et « {NATURE['client_advance']} » pour la part qui n'a pas pu être déduite de vos "
+        f"sommes en attente ({money(advance)}){ADVANCE_CAUSE.get(str(e.get('p_bound')), '')}"
+    )
+
+
+def _unplanned_returned(e: Mapping[str, Any], money: Callable[[int | str], str], on: str) -> str:
+    """The return of an unplanned payout (critic L4): its advance reversed, P owed again — each
+    said only when the payload's amount for it is not nil."""
+    parts = []
+    if int(e.get("advance_minor") or 0) > 0:
+        parts.append("l'avance du cabinet correspondante est annulée")
+    if int(e.get("owed_minor") or 0) > 0:
+        parts.append(f"{money(e['owed_minor'])} vous sont de nouveau dus")
+    text = (
+        f"Le virement de {money(e['unplanned_minor'])} exécuté hors reversement le "
+        f"{format_date(e.get('executed_on'))} est revenu le {on}"
+    )
+    if parts:
+        text += " : " + " et ".join(parts)
+    if e.get("here"):
+        text += f" ; voir « {UNPLANNED_RETURN} » dans le présent reversement"
+    return text + "."
 
 
 def _not_remitted(p: Mapping[str, Any]) -> Section:

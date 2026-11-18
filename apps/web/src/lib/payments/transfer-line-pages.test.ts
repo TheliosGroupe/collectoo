@@ -193,12 +193,12 @@ describe("the effect sentences of « Débit d'un reversement » (§7.3)", () => 
   it("the run, its client, the debit's date, the set-off and the run's new status", () => {
     const text = effects(options({ action: "payout", parts: [{ settlement_minor: "36000" }] }));
     expect(text).toContain(
-      `RV-2026-000012 (MARTIN SAS) : ${money("164000", EUR)} débités le 05/11/2026 ; ses factures sont réglées par compensation (${money("36000", EUR)}) ; le reversement passe à « Débité ».`,
+      `RV-2026-000012 (MARTIN SAS) : ${money("164000", EUR)} débités le 05/11/2026 ; ses factures sont réglées par compensation (${money("36000", EUR)}) ; son virement passe à « Débité » et le reversement à « Comptabilisé ».`,
     );
   });
   it("no set-off sentence when the run set nothing off", () => {
     const text = effects(options({ action: "payout", parts: [{ settlement_minor: "0" }] }));
-    expect(text).toContain(`${money("164000", EUR)} débités le 05/11/2026 ; le reversement passe à « Débité ».`);
+    expect(text).toContain(`${money("164000", EUR)} débités le 05/11/2026 ; son virement passe à « Débité » et le reversement à « Comptabilisé ».`);
     expect(text).not.toContain("compensation");
   });
   it("late: the breach is recorded, with the date the database gives", () => {
@@ -490,9 +490,23 @@ describe("the texts reworded now that the screen exists (§4.3): each old wordin
   });
   it("UNSPLIT_OURS_NOTE offers « Comptabiliser d'après le détail du relevé »", () => {
     expect(UNSPLIT_OURS_NOTE).toContain(
-      "son montant est celui de toute l'écriture, rien n'est comptabilisé automatiquement. Si le relevé détaille nos virements dans cette écriture et qu'ils en font exactement le montant, « Comptabiliser d'après le détail du relevé » les propose ; sinon (le paiement d'un débiteur, des frais, un remboursement ou un approvisionnement dans l'écriture, ou un détail incomplet), elle ne peut pas être comptabilisée ici : demandez le détail à la banque et prévenez le support.",
+      "son montant est celui de toute l'écriture, rien n'est comptabilisé automatiquement. Si le relevé détaille nos virements dans cette écriture et qu'ils en font exactement le montant, ou s'il n'y détaille que l'un de nos virements et que les frais qu'il indique pour l'écriture font la différence, « Comptabiliser d'après le détail du relevé » les propose ; sinon (le paiement d'un débiteur, un remboursement ou un approvisionnement dans l'écriture, des frais que le relevé n'indique pas, ou un détail incomplet), elle ne peut pas être comptabilisée ici : demandez le détail à la banque et prévenez le support.",
     );
     expect(UNSPLIT_OURS_NOTE).not.toContain("écran à venir");
+  });
+  it("review 6b-2d round 1 (pages-e2e-1): the unsplit note and the sheet's intro never refuse the charges the statement records (S08)", () => {
+    // the command books one detail of ours plus the statement's charges for the entry (fee part): the texts say so
+    expect(UNSPLIT_OURS_NOTE).not.toMatch(/sinon \(le paiement d'un débiteur, des frais,/);
+    expect(UNSPLIT_OURS_NOTE).toContain("les frais qu'il indique pour l'écriture font la différence");
+    expect(UNSPLIT_OURS_NOTE).toContain("des frais que le relevé n'indique pas");
+    expect(TRANSFER_LINE_ACTION.detail.intro).toBe(
+      "La banque a regroupé plusieurs opérations dans cette écriture. Le relevé détaille nos virements qu'elle contient : s'ils en font exactement le montant, ou si l'écriture ne détaille que l'un de nos virements et que les frais indiqués par le relevé font la différence, ils sont comptabilisés chacun (débit ou retour), avec ces frais.",
+    );
+  });
+  it("review 6b-2d round 1 (pages-e2e-4): a payout's effect names each status as its page shows it", () => {
+    const text = effects(options({ action: "payout", parts: [{ settlement_minor: "0" }] }));
+    expect(text).toContain("son virement passe à « Débité » et le reversement à « Comptabilisé »");
+    expect(text).not.toContain("le reversement passe à « Débité »");
   });
   it("the debit reviews name the action that books them", () => {
     expect(DEBIT_REVIEW.transfer_debited_twice).toContain(

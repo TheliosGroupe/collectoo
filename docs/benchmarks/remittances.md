@@ -1011,3 +1011,82 @@ volume runs time changed.
   0.28 to 0.32 s, booking 1.07 to 1.26 s (499 bookings, the allocation lock held 1.09 s); the saturating lots at the
   cap: options 1.91 / 1.92 s, the command 1.74 / 1.91 s (`parts_do_not_add_up`); 501 and 5,000 members 0.01 to 0.03 s
   (`lot_too_large`); the 50,000-item draft: options 0.06 s, command 0.20 s, lock 0.15 s.
+
+### 6b-2c carry-overs, in 6b-2d (2026-11-18, same VM: 4 vCPU, 16 GB RAM, the main stack beside 6b-2d's second stack `collectoo_t`, load average 2.5 to 3.8; each run right after `supabase db reset`)
+
+ADR-0014 « M2c-6b-2c carry-overs (in 6b-2d) », migration `20261117113000`. The nightly check's suppression reads one
+more condition on the lines its legal-deadlines-1 branch keeps (whether a debit's PmtInfId names another lot of the
+account: `private.pmt_inf_names_account_lot`, keyed, read last); the command's pre-read checks, on a class-E0 debit
+only, each rule-3b candidate's item by key; « Lier »'s refund link reads the run of a cancelled candidate as the return
+already did. The lot and unsplit paths these runs time are unchanged; the slower figures than round 3's follow the
+shared VM (the second stack up, the load average 2.5 to 3.8 while they ran).
+
+- `test_debit_bookings_scale_integration.py` once: **5 passed** (896.5 s) — the fixture's approval jobs 555.2 s; the
+  5,000-member batch line's funds pass 23.4 s (24.7 s under auto_explain); 5,000 RMT debits imported in 1.4 s, the
+  debit job 22.4 s in chunks of 8.8, 9.3 and 4.1 s; the nightly checks 1.20 s (1.24 s warm with row counts on); 200
+  members 0.54 s; 200 RMT debits imported in 0.3 s and booked in 0.73 s.
+- `test_transfer_line_scale_integration.py` alone: **7 passed** (181.7 s) — the 500-member lot short of one: options
+  0.41 to 0.43 s, booking 1.51 to 1.65 s (499 bookings, the allocation lock held 1.39 s); the saturating lots at the
+  cap: options 2.28 / 2.36 s, the command 2.23 / 2.39 s (`parts_do_not_add_up`); 501 and 5,000 members 0.02 to 0.03 s
+  (`lot_too_large`); the 50,000-item draft: options 0.11 s, command 0.20 s, lock 0.15 s.
+
+## « Suivi » with the carry-overs (M2c-6b-2d integration, migrations `20261117113000` and `20261117120000`; 2026-11-18, cloud session VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+Branch `m6b2d-int`: 6b-2d's « Suivi » (ADR-0014 « M2c-6b-2d ») merged with the 6b-2c carry-overs (« M2c-6b-2c
+carry-overs (in 6b-2d) »). The two migrations redefine disjoint functions. What the volume runs time and the merge
+changes: the statement build (`private.remittance_statement_build` with `private.remittance_statement_previous_payouts`
+and the late cause's `private.remittance_statement_paid_by_unplanned`), drawn by the approval's documents job; the nightly
+check's suppression (`private.transfer_debit_suppression`) and the command's pre-read (`private.transfer_line_pre`, its
+new read on class-E0 lines only). The second stack `collectoo_t` was down: these runs had the VM to themselves. Paths
+neither migration touches are slower than at 6b-2c's integration as well (boarding 109 s against 100 s, allocation
+73.6 s against 69.3 s, the statement's import job 27.2 s against 26.1 s; the 5,000-member funds pass 23.1 s against
+19.1 s in round 3); every budget held.
+
+- `test_debit_bookings_scale_integration.py` once: **5 passed** (768.5 s) — the fixture's approval jobs 476.0 s; the
+  5,000-member batch line's funds pass 23.1 s (24.8 s under auto_explain); 5,000 RMT debits imported in 1.1 s, the
+  debit job 21.7 s in chunks of 8.4, 8.8 and 4.3 s; the nightly checks 1.02 s (1.13 s warm with row counts on); 200
+  members 0.60 s; 200 RMT debits imported in 0.3 s and booked in 0.70 s.
+- `test_transfer_line_scale_integration.py` alone: **7 passed** (165.4 s) — the 500-member lot short of one: options
+  0.36 to 0.48 s, booking 1.50 to 1.60 s (499 bookings, the allocation lock held 1.35 s); the saturating lots at the
+  cap: options 2.33 / 2.65 s, the command 2.23 / 2.23 s (`parts_do_not_add_up`); 501 and 5,000 members 0.01 to 0.02 s
+  (`lot_too_large`); the 50,000-item draft: options 0.06 s, command 0.25 s, lock 0.19 s.
+
+CI's `scale` job as `.github/workflows/ci.yml` runs it — `supabase db reset`, auto_explain at 60 s (the job's
+`alter system` settings, reset afterwards on this stack), `RECEIPT_FILES=5000`, `pytest -m integration -s` over
+`tests/*scale_integration.py` but the payouts file, in `ls` order, one database (the 50,000-line runs first, the
+transfer-line file last): **14 passed** in 1,356.8 s (1,239.5 s at 6b-2c's integration), no statement over 60 s logged:
+
+| File | Timings |
+|---|---|
+| allocation | 50,000 files boarded 93 s; 50,000 credits imported and matched 29.9 s; allocated 73.6 s (5 chunks of 10,000, post 11.4 to 12.0 s); 1,000 returns imported and linked 26.1 s; nightly checks 4.1 s |
+| matching | 50,000 files boarded 93 s; history 13,500 credits 10.8 s; the statement's 50,000 credits imported and matched 41.1 s (48,423 automatic, 0 wrong) |
+| receipts | 5,000 files boarded, credited, matched and allocated 27 s; 25 receipt jobs 68.0 s (13.6 ms a receipt) |
+| remittance | nightly checks 5.39 s; 50,000 items reserved 1.31 s, prepared 12.3 s; approval command 0.02 s, job and documents 16.5 s (the statement build 6.56 s, CSV 1.81 s, PDF 1.53 s; the re-run's statement build 6.78 s); nightly checks 4.5 s (the draft waiting 4.2 s); transfer file 0.04 s; cancellation 3.97 s; 6b-1's re-run prepared and approved 30.0 s, its payout filed, downloaded, debited and booked 0.8 s; nightly checks with the run booked 5.4 s (5.77 s warm) |
+| boarding | 50,000 loans 109 s (commit 29.2 s, confirm job 32.6 s); 50,000 references backfilled 4.0 s |
+| statement | 50,000-line camt.053 (35 MB): parse 4.8 s, import job 27.2 s (ingest 9.3 s); the same lines again 6.9 s |
+| transfer files | 5,000 refunds asked 17.7 s; generation 2.74 s, job 0.92 s, check 0.49 s, download 0.85 s; cash check 0.12 / 0.09 s; « Virements » 0.13 s; the debit job booking the 5,000 debits 11.8 s; nightly checks 0.32 s (0.32 s warm) |
+| transfer lines, after the 50k runs (lot fixtures' approval jobs 145.9 s and 141.5 s) | the lot read by key (rolled back): options 0.38 s, command 2.05 s, no sequential scan of the per-member tables, 1,997 remittance_line rows read; short of one: 0.47 s and 2.26 s (499 bookings), the allocation lock held 2.01 s; saturating, multiples of 10 €: 2.36 s and 2.45 s, of 1 €: 2.40 s and 2.68 s (`parts_do_not_add_up`); 501 members 0.02 s; 5,000 members 0.014 s and 0.014 s (`lot_too_large`); the 50,000-item draft: options 0.07 s, command 0.16 s, lock 0.12 s |
+
+The statement build on the 50,000-line run, 6.56 s here (6.78 s for the re-run's), was 6.10 to 6.24 s before « Suivi »
+(« Manual credit note (M2c-5b) » above, an earlier day on this VM); 6b-2d's track timed both builds alternately on one
+run of its second stack (4.8 to 5.5 s against 4.8 to 5.3 s for `20261117100000`'s, ADR-0014 « M2c-6b-2d »), and pgTAP
+`038`'s second R asserts that no late-cause helper call is made for a line that is not late.
+
+### Review fixes, round 1 (2026-11-18, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+What the round changes on a timed path: the statement build (`private.remittance_statement_previous_payouts` reads
+the earlier runs' chain bookings posted by K and ranks their executions; the late cause's test) and the documents
+job's record step (one guard). The funds pass, the debit job, the nightly checks and the command are unchanged.
+
+- `test_debit_bookings_scale_integration.py` once: **5 passed** (844.9 s) — the fixture's approval jobs 525.2 s; the
+  5,000-member batch line's funds pass 26.4 s (27.6 s under auto_explain); 5,000 RMT debits imported in 1.4 s, the
+  debit job 24.2 s in chunks of 9.7, 9.8 and 4.4 s; the nightly checks 1.18 s (1.35 s warm with row counts on); 200
+  members 0.62 s; 200 RMT debits imported in 0.3 s and booked in 0.79 s (no path of these changed; the VM is slower
+  than at the integration's run throughout, the fixture's approval jobs too).
+- `test_transfer_line_scale_integration.py` alone: **7 passed** (177.4 s) — the 500-member lot short of one: options
+  0.38 to 0.41 s, booking 1.42 to 1.54 s (499 bookings, the allocation lock held 1.30 s); the saturating lots: options
+  2.15 / 2.45 s, the command 2.35 / 2.40 s (`parts_do_not_add_up`); 501 and 5,000 members 0.014 to 0.02 s
+  (`lot_too_large`); the 50,000-item draft: options 0.06 s, command 0.18 s, lock 0.14 s.
+- `test_remittance_scale_integration.py` alone: **1 passed** (322.2 s) — 50,000 items reserved 1.27 s, prepared 9.4 s;
+  approval job and documents 15.9 s, the statement build **6.05 s** (6.56 s at the integration), CSV 1.46 s, PDF 1.73 s;
+  the re-run's build 6.02 s; cancellation 4.06 s; nightly checks 5.63 s (5.57 s warm).

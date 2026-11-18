@@ -41,6 +41,10 @@ export const TRANSFER_LINE_REFUSAL: Record<string, string> = {
     "Plusieurs virements du cabinet (reversement, quote-part, remboursement, ou virement annulé que la banque a pu exécuter) ont ce montant vers ce compte : sans notre référence sur la ligne, impossible de savoir lequel la banque a exécuté. Demandez le détail à la banque.",
   batch_ambiguous:
     "Plusieurs combinaisons des virements de ce lot font le montant de la ligne : demandez à la banque le détail du lot.",
+  // 6b-2d (suppression-e0-names-our-other-lot): a line with an end-to-end id that is not ours and the PmtInfId of one of
+  // our lots, while a transfer of ours outside that lot has its amount to its account
+  names_other_lot:
+    "Cette ligne porte l'identifiant d'un autre lot de nos fichiers de virements que celui du virement du cabinet de ce montant vers ce compte : sans le détail de la banque, impossible de savoir si c'est son débit ou une nouvelle exécution d'un virement de cet autre lot. Elle ne peut pas être comptabilisée ici. Demandez le détail à la banque.",
   // critic CSO-3, critic2 CSO2-3: also an unsplit entry or a lot credit above the cap
   lot_too_large:
     "Ce lot ou cette écriture compte trop de virements pour être comptabilisé depuis cet écran : prévenez le support.",
@@ -378,7 +382,8 @@ export const TRANSFER_LINE_ACTION: Record<string, { label: string; button: strin
     label: "Comptabiliser d'après le détail du relevé",
     button: "Comptabiliser",
     intro:
-      "La banque a regroupé plusieurs opérations dans cette écriture. Le relevé détaille nos virements qu'elle contient : s'ils en font exactement le montant, ils sont comptabilisés chacun (débit ou retour).",
+      // review M2c-6b-2d round 1 (pages-e2e-1): the only detail of ours with the charges the statement records (S08)
+      "La banque a regroupé plusieurs opérations dans cette écriture. Le relevé détaille nos virements qu'elle contient : s'ils en font exactement le montant, ou si l'écriture ne détaille que l'un de nos virements et que les frais indiqués par le relevé font la différence, ils sont comptabilisés chacun (débit ou retour), avec ces frais.",
   },
 };
 
@@ -470,7 +475,8 @@ function partEffects(
           ? ` ; ses factures sont réglées par compensation (${m(p.settlement_minor)})`
           : "";
       const out = [
-        `${p.run_number ?? "Le reversement"} (${client}) : ${m(p.amount_minor)} débités le ${lineDate}${setoff} ; le reversement passe à « Débité ».`,
+        // review M2c-6b-2d round 1 (pages-e2e-4): each status by the label its page shows (transfers.ts, runs.ts)
+        `${p.run_number ?? "Le reversement"} (${client}) : ${m(p.amount_minor)} débités le ${lineDate}${setoff} ; son virement passe à « Débité » et le reversement à « Comptabilisé ».`,
       ];
       if (p.late && p.latest_execution_date)
         out.push(

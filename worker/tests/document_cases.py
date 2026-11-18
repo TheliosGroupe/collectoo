@@ -50,11 +50,13 @@ BUYER: dict[str, Any] = {
     "invoice_acceptance_ref": "art. 11 du mandat",
     "entrepreneur_individuel": False,
 }
+# the statement fixture's previous approved run (M2c-6b-2d: « Suivi »'s window starts at its K)
+SINCE: dict[str, Any] = {"number": "RV-2026-000001", "known_at": "2026-10-20T15:30:00Z"}
 COLUMNS = [
     "line_no", "mandate", "portfolio", "file", "debtor", "items", "components", "nature",
     "nature_reason", "from_run", "encaissement_date", "effective_date", "deadline", "amount_minor",
     "rules", "rates", "basis_minor", "commission_minor", "commission_state", "invoice", "receipt",
-    "late", "late_cause",
+    "late", "late_cause", "paid_by_unplanned_minor", "paid_by_unplanned_on",
 ]  # fmt: skip
 
 
@@ -85,6 +87,8 @@ def _line(  # noqa: PLR0913, PLR0917 - a fixture row
         "receipt": f"Q-2026-{no:06d}",
         "late": False,
         "late_cause": None,
+        "paid_by_unplanned_minor": None,
+        "paid_by_unplanned_on": None,
     }
     v.update(kw)
     return [v[c] for c in COLUMNS]
@@ -356,19 +360,20 @@ def statement_payload() -> dict[str, Any]:
             "status": "ordered",
         },
         "requested_execution_date": "2026-11-03",
-        "follow_up": [
-            {
-                "number": "RV-2026-000001",
-                "status": "booked",
-                "net_minor": "100000",
-                "transfer_status": "booked",
-                "requested_execution_date": "2026-10-21",
-                "amount_minor": "100000",
-                "debited_on": "2026-10-21",
-                "returned_on": None,
-                "booked_on": "2026-10-21",
-            },
-        ],
+        # M2c-6b-2d (template fr-3): what became of the earlier runs' payouts in the window from
+        # the previous approved run's K to this K (plan §5)
+        "previous_payouts": {
+            "since": dict(SINCE),
+            "events": [
+                {
+                    "kind": "debited",
+                    "run_number": "RV-2026-000001",
+                    "amount_minor": "100000",
+                    "end_to_end_id": "RMT0Z9Y8X7W6V5U",
+                    "on": "2026-10-21",
+                },
+            ],
+        },
         "not_remitted": {
             "held": [
                 {
@@ -665,3 +670,118 @@ def proceeding_invoice_payload() -> dict[str, Any]:
             "proceeding": {"kind": "proceeding_opened", "effective_date": "2026-10-01"},
         },
     )
+
+
+def _event(kind: str, **kw: Any) -> dict[str, Any]:
+    return {"kind": kind, **kw}
+
+
+# M2c-6b-2d: one event of each kind « Suivi » words (plan §5), in the order the SQL sorts them (its
+# date, then the run number): the shapes private.remittance_statement_previous_payouts returns
+SUIVI_EVENTS: list[dict[str, Any]] = [
+    _event(
+        "debited",
+        run_number="RV-2026-000001",
+        amount_minor="164000",
+        end_to_end_id="RMT0A1B2C3D4E5F",
+        on="2026-11-03",
+    ),
+    _event("cancelled", run_number="RV-2026-000004", on="2026-11-03"),
+    _event(
+        "returned",
+        run_number="RV-2026-000001",
+        amount_minor="164000",
+        end_to_end_id="RMT0A1B2C3D4E5F",
+        debited_on="2026-11-03",
+        on="2026-11-05",
+        repaid="here",
+        repaid_by=None,
+    ),
+    _event(
+        "executed_after_cancellation",
+        run_number="RV-2026-000005",
+        cancelled_on="2026-11-03",
+        unplanned_minor="164000",
+        advance_minor="44000",
+        p_bound="queue",
+        execution_no=1,
+        on="2026-11-05",
+        here=True,
+    ),
+    _event(
+        "debited_again",
+        run_number="RV-2026-000006",
+        unplanned_minor="164000",
+        advance_minor="164000",
+        p_bound="none",
+        execution_no=2,
+        debited_on="2026-11-03",
+        before_debit=False,
+        on="2026-11-05",
+        here=True,
+    ),
+    # review round 1 (legal-texts-1, statement-money): a later execution of each, and one the bank
+    # made before the planned debit but booked after it
+    _event(
+        "executed_after_cancellation",
+        run_number="RV-2026-000005",
+        cancelled_on="2026-11-03",
+        unplanned_minor="164000",
+        advance_minor="164000",
+        p_bound="queue",
+        execution_no=2,
+        on="2026-11-06",
+        here=True,
+    ),
+    _event(
+        "debited_again",
+        run_number="RV-2026-000006",
+        unplanned_minor="164000",
+        advance_minor="164000",
+        p_bound="none",
+        execution_no=3,
+        debited_on="2026-11-03",
+        before_debit=False,
+        on="2026-11-06",
+        here=True,
+    ),
+    _event(
+        "debited_again",
+        run_number="RV-2026-000007",
+        unplanned_minor="82000",
+        advance_minor="82000",
+        p_bound="none",
+        execution_no=1,
+        debited_on="2026-11-09",
+        before_debit=True,
+        on="2026-11-06",
+        here=True,
+    ),
+    _event(
+        "executed_outside",
+        run_number=None,
+        amount_minor="164000",
+        advance_minor="164000",
+        iban_last4="4350",
+        on="2026-11-06",
+        here=True,
+    ),
+    _event(
+        "unplanned_returned",
+        run_number="RV-2026-000005",
+        unplanned_minor="164000",
+        advance_minor="44000",
+        owed_minor="120000",
+        executed_on="2026-11-05",
+        on="2026-11-10",
+        here=True,
+    ),
+]
+
+
+def suivi_statement_payload() -> dict[str, Any]:
+    """The statement fixture with one « Suivi » event of each kind (M2c-6b-2d, template fr-3): its
+    golden PDF pins every sentence's bytes."""
+    p = statement_payload()
+    p["previous_payouts"] = {"since": dict(SINCE), "events": copy.deepcopy(SUIVI_EVENTS)}
+    return p

@@ -100,6 +100,9 @@ function Sheet({
       {o.proposals.length === 0 && !o.refusal ? (
         <p className="text-sm">Collectoo ne trouve rien à comptabiliser pour cette ligne : demandez le détail à la banque.</p>
       ) : null}
+      {/* review M2c-6b-2d round 1 (pages-e2e-5): the lot's members before the proposals — ops see which member the
+          line does not debit before they reach « Comptabiliser » */}
+      {o.members ? <Members options={o} currency={currency} /> : null}
       {o.proposals.map((p, i) => (
         <Proposal
           key={`${p.action}-${i}`}
@@ -111,12 +114,20 @@ function Sheet({
           close={close}
         />
       ))}
-      {o.members ? <Members options={o} currency={currency} /> : null}
     </div>
   );
 }
 
-/** A lot's members (at most 50 listed, the rest counted) and what this line does of each (critic F6, critic2 CSO2-3). */
+// the members' columns (plan §7.3: Reversement, Client, Référence, Montant, Dans cette ligne): two rows on a phone (the
+// run and its amount, then the reference and what the line does of it), one aligned row from `sm` up
+const MEMBER_COLS =
+  "grid-cols-[minmax(0,1fr)_auto] gap-x-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1.4fr)_7rem_minmax(0,1.6fr)]";
+
+/**
+ * A lot's members (at most 50 listed, the rest counted) and what this line does of each (critic F6, critic2 CSO2-3).
+ * Review M2c-6b-2d round 1 (pages-e2e-5): fixed columns, the amounts right-aligned, with each member's end-to-end
+ * reference.
+ */
 function Members({ options, currency }: { options: TransferLineOptions; currency: string }) {
   const parts = options.proposals[0]?.parts ?? [];
   const more = membersMore(options);
@@ -125,15 +136,30 @@ function Members({ options, currency }: { options: TransferLineOptions; currency
   return (
     <div className="flex flex-col gap-1 text-sm" data-testid="transfer-line-members">
       <p className="font-medium">Virements du lot</p>
+      <div className={`hidden ${MEMBER_COLS} text-xs text-zinc-600 sm:grid dark:text-zinc-400`} aria-hidden="true">
+        <span>Reversement</span>
+        <span>Référence</span>
+        <span className="text-right">Montant</span>
+        <span>Dans cette ligne</span>
+      </div>
       <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
         {(options.members ?? []).map((m) => (
-          <li key={m.transfer_id} className="flex flex-wrap justify-between gap-2 py-1">
-            <span>
-              {m.run_number ?? m.end_to_end_id ?? "Virement"}
+          <li key={m.transfer_id} className={`grid ${MEMBER_COLS} gap-y-0.5 py-1`}>
+            <span className="order-1 min-w-0 break-words sm:order-none">
+              {m.run_number ?? "Virement"}
               {m.client_name ? ` (${m.client_name})` : ""}
             </span>
-            <span className="tabular-nums">{m.amount_minor ? money(m.amount_minor, currency) : ""}</span>
-            <span className="text-zinc-600 dark:text-zinc-400">Dans cette ligne : {memberInLine(m, parts, line)}</span>
+            <span className="order-3 col-span-2 min-w-0 break-all text-zinc-600 sm:order-none sm:col-span-1 dark:text-zinc-400">
+              <span className="sm:sr-only">Référence : </span>
+              {m.end_to_end_id ?? "—"}
+            </span>
+            <span className="order-2 text-right tabular-nums sm:order-none">
+              {m.amount_minor ? money(m.amount_minor, currency) : ""}
+            </span>
+            <span className="order-4 col-span-2 text-zinc-600 sm:order-none sm:col-span-1 dark:text-zinc-400">
+              <span className="sm:sr-only">Dans cette ligne : </span>
+              {memberInLine(m, parts, line)}
+            </span>
           </li>
         ))}
       </ul>

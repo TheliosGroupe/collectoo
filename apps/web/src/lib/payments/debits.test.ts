@@ -282,6 +282,9 @@ describe("returns (founder #13; design §2 #3)", () => {
     expect(lineKindLabel("return", "debit")).toBe("Retour d'un paiement reçu");
     expect(lineKindLabel("return", "credit")).toBe("Crédit annulant un débit");
     expect(lineKindLabel("refund_out", "debit")).toContain("RFD");
+    // review 6b-2d round 1 (pages-e2e-2): an entry kept unsplit is never shown by its code
+    expect(lineKindLabel("batch_unsplit", "debit")).toBe("Écriture groupée de la banque (non ventilée)");
+    expect(lineKindLabel("batch_unsplit", "credit")).toBe("Remise groupée non ventilée");
     expect(Object.keys(DEBIT_REVIEW).sort()).toEqual(
       [
         "already_returned",
@@ -754,6 +757,18 @@ describe("the remittances' nightly checks (M2c-4 and its review)", () => {
         subject_id: "a1",
       }),
     ).toBeNull();
+  });
+
+  it("review 6b-2d round 1 (pages-e2e-3): a statement line's alert leads to its row on « Débits et retours »", () => {
+    const base = { currency: "EUR", amount: "4500", count: 1, oldest_days: 3, id: "r", severity: "alert" };
+    for (const code of ["transfer_unknown", "transfer_debited_twice", "transfer_not_handed_out"])
+      expect(
+        checkSubjectLink({ ...base, code, subject_type: "bank_transaction", subject_id: "l1" }),
+        code,
+      ).toBe("/backoffice/encaissements/debits#ligne-l1");
+    expect(
+      checkSubjectLink({ ...base, code: "bank_line_unbooked", subject_type: "bank_account", subject_id: "cf" }),
+    ).toBe("/backoffice/encaissements/debits");
   });
 });
 

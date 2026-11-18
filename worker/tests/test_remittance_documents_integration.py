@@ -116,7 +116,7 @@ def test_an_approved_run_has_its_statement_and_its_invoice() -> None:  # noqa: P
     st = _statement(run)
     payload = st["payload"]
     assert st["number"] == r["number"] and st["line_count"] == 1 and st["file_count"] == 1
-    assert st["template_version"] == "releve-reversement-fr-2"
+    assert st["template_version"] == "releve-reversement-fr-3"
     assert (st["gross_minor"], st["net_minor"], st["drawn_status"]) == (
         200_000,
         164_000,
@@ -553,6 +553,62 @@ def test_a_reversal_names_the_credit_note_that_credits_it() -> None:
     reversal = next(x for x in p["lines"] if int(x[cols["amount_minor"]]) < 0)
     assert int(reversal[cols["commission_minor"]]) < 0
     assert reversal[cols["invoice"]] == credit
+
+
+def test_the_next_statement_follows_the_previous_payout_as_of_k() -> None:
+    """M2c-6b-2d (plan §5, template fr-3; critic L17): RV-1's statement, drawn at its approval,
+    has nothing to follow; RV-1's debit, booked after its K through the real path, is in RV-2's
+    « Suivi » (the window from RV-1's K to RV-2's), with the debit's date and RV-1's reference; the
+    stored PDF is the payload's rendering; RV-1's statement drawn again later keeps its bytes (its
+    window ended at its K)."""
+    tenant = remittance_tenant()
+    paid_file(tenant, 200_000)
+    rv1 = request_run(tenant)
+    approve(tenant, rv1)
+    drain()
+    first = _statement(rv1)
+    assert first["template_version"] == "releve-reversement-fr-3"
+    assert first["payload"]["previous_payouts"] == {"since": None, "events": []}
+    assert "Aucun reversement précédent à suivre." in statement_text(
+        first["payload"], first["csv_sha256"]
+    )
+    book_payout(rv1)
+    paid_file(tenant, 40_000)
+    rv2 = request_run(tenant)
+    approve(tenant, rv2)
+    drain()
+    r1 = run_row(rv1)
+    st = _statement(rv2)
+    payload = st["payload"]
+    assert "follow_up" not in payload
+    with psycopg.connect(DB) as conn:
+        debit = conn.execute(
+            """select t.end_to_end_id, e.effective_date
+               from public.bank_transfer t join public.ledger_entry e on e.id = t.entry_id
+               where t.id = %s""",
+            (r1["transfer_id"],),
+        ).fetchone()
+    assert debit is not None
+    pp = payload["previous_payouts"]
+    assert pp["since"]["number"] == r1["number"]
+    assert pp["events"] == [
+        {
+            "kind": "debited",
+            "run_number": r1["number"],
+            "amount_minor": "164000",
+            "end_to_end_id": debit[0],
+            "on": debit[1].isoformat(),
+        }
+    ]
+    words = statement_text(payload, st["csv_sha256"])
+    assert (
+        f"Reversement {r1['number']} : virement de 1\u202f640,00\u00a0€ (référence {debit[0]}) "
+        f"débité de notre compte dédié le {debit[1]:%d/%m/%Y}." in words
+    )
+    assert render_statement_pdf(payload, st["csv_sha256"]) == _download(st["pdf_path"])
+    with psycopg.connect(DB) as conn:
+        again = one(conn, "select private.remittance_statement_build(%s)", (rv1,))
+    assert again["previous_payouts"] == first["payload"]["previous_payouts"]
 
 
 def test_the_next_run_day_matches_the_schedule() -> None:

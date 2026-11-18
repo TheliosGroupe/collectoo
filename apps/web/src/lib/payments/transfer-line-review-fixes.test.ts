@@ -133,8 +133,10 @@ describe("a debit of an ended payout's amount (round 3, other-debit-return-block
       expect(text, status).toContain("« Comptabiliser… »");
       expect(text, status).not.toContain("Retour du paiement");
     }
-    // the return offered: the text says so
-    expect(debitReviewText(row({}), { return_guard: null })).toContain("« Retour du paiement … »");
+    // the return offered: the text says so (6b-2d, ended-twin-return-sentence-without-payment: offered means a payment
+    // the line can take back is listed — with none, transfer-line-carry.test.ts)
+    const listed = { ...p02, amount_minor: "512000", booking_date: "2026-11-10", payer_name: null, file_reference: null };
+    expect(debitReviewText(row({}), { return_guard: null, payments: [listed] })).toContain("« Retour du paiement … »");
     // a payout in flight among the candidates, or a cancelled payout whose run is still sent (that run's payout, ML-4):
     // « en cours »
     const inFlight = debitReviewText(row({ candidates: [{ ...ended("in_file"), run_status: "sent" }, ended("returned")] }));
