@@ -1,5 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { type ErrorCode, PAYOUT_BOOKED_WHEN } from "@/lib/boarding/forms";
+import {
+  CREDIT_NOTE_IN_FLIGHT_ON,
+  CREDIT_NOTE_RUN_IN_FLIGHT_ON,
+  type ErrorCode,
+  PAYOUT_BOOKED_WHEN,
+} from "@/lib/boarding/forms";
 import type { Database } from "@/lib/database.types";
 import { money } from "@/lib/payments/statements";
 import { frenchDate } from "@/lib/remittance/runs";
@@ -122,9 +127,18 @@ const REFUSAL_TEXT: Record<string, string> = {
 };
 
 /** Why the invoice cannot take a manual credit note now (`commission_invoice_detail.refusal`, the plan's). */
-export function refusalText(refusal: string | null): string | null {
+/** M2c-6b-3a (plan §4, T6): once cancellation after download is on, a run in a downloaded file can be cancelled */
+// review round 1 (LD-4, pages-texts-8): the run's debit booked makes the credit note possible, never the run cancellable
+const REFUSAL_TEXT_ON: Record<string, string> = {
+  in_flight: CREDIT_NOTE_IN_FLIGHT_ON,
+  run_in_flight: CREDIT_NOTE_RUN_IN_FLIGHT_ON,
+};
+
+export function refusalText(refusal: string | null, cancellationAfterDownload = false): string | null {
   return refusal
-    ? (REFUSAL_TEXT[refusal] ?? "Avoir impossible pour l'instant.")
+    ? ((cancellationAfterDownload ? REFUSAL_TEXT_ON[refusal] : undefined) ??
+        REFUSAL_TEXT[refusal] ??
+        "Avoir impossible pour l'instant.")
     : null;
 }
 

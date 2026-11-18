@@ -3,6 +3,7 @@ import {
   FILE_BOOKED_WHEN,
   REFUND_BOOKED_WHEN,
   REFUND_NOT_EXECUTED,
+  REFUND_NOT_EXECUTED_ON,
   REFUND_RETURNED,
 } from "@/lib/boarding/forms";
 import {
@@ -222,6 +223,31 @@ export const PAYOUT_AMOUNT_MATCH_ENDED =
   "Débit sans notre référence du montant d'un reversement annulé ou revenu dont la banque a reçu le fichier : s'il s'agit de ce virement, exécuté par la banque malgré son annulation ou de nouveau après son retour, comptabilisez-le avec « Comptabiliser… ».";
 export const PAYOUT_AMOUNT_MATCH_RETURN =
   "Ce peut aussi être le paiement d'un débiteur que sa banque reprend sans que le relevé le signale comme un retour (chèque impayé, contre-passation) : après vérification dans la banque, liez-le à ce paiement avec « Retour du paiement … ».";
+
+/**
+ * M2c-6b-3a (K): a debit without our reference whose only candidate is a sweep cancelled out of a downloaded file
+ * (« Comptabiliser… » proposes it as that sweep's late debit), or a refund cancelled so (nothing to book yet: S25).
+ */
+export const CANCELLED_SWEEP_MATCH =
+  "Débit sans notre référence du montant d'une quote-part du cabinet annulée après téléchargement : la banque l'a peut-être exécutée en retard. Après vérification dans la banque, comptabilisez-le comme le débit de cette quote-part (« Comptabiliser… », puis « Virement au compte propre » de cette quote-part) : aucune nouvelle quote-part n'est virée d'ici là.";
+export const CANCELLED_REFUND_MATCH =
+  "Débit sans notre référence du montant d'un remboursement (ou d'une quote-part) annulé après téléchargement : la banque l'a peut-être exécuté en retard. Il ne peut pas encore être comptabilisé ; ne refaites pas ce remboursement, demandez à la banque le détail de ce débit et prévenez le support.";
+/** Review round 1 (pages-texts-9): only cancelled sweeps, several of them — the line cannot be told apart. */
+export const CANCELLED_SWEEPS_MATCH =
+  "Débit sans notre référence du montant de plusieurs quotes-parts du cabinet annulées après téléchargement : la banque a peut-être exécuté l'une d'elles en retard, sans qu'on sache laquelle. Il ne peut pas être comptabilisé tel quel ; demandez à la banque le détail de ce débit : aucune nouvelle quote-part n'est virée d'ici là.";
+/**
+ * Review round 1 (pages-texts-2): a sweep's own late debit (its SWP id, or the job's review naming a cancelled sweep) —
+ * « Comptabiliser… » proposes it as that sweep's, never « Virement hors reversement ».
+ */
+export const CANCELLED_SWEEP_DEBITED =
+  "Débit d'une quote-part du cabinet annulée dans Collectoo : la banque l'a exécutée en retard. Rien n'est comptabilisé : vérifiez dans la banque, puis comptabilisez-le comme le débit de cette quote-part (« Comptabiliser… », puis « Virement au compte propre » de cette quote-part) ; aucune nouvelle quote-part n'est virée d'ici là.";
+/**
+ * Review round 1 (pages-texts-4): a debit without our reference at a requested refund's amount that « Lier » does not
+ * offer — another transfer of ours of that amount may be that debit: one in flight (link_debit_guard's payout_candidate,
+ * the switch off or on) or, once cancellation after download is on, one cancelled after download (H-PAY, review round 1).
+ */
+export const REFUND_AMOUNT_MATCH_BARRED =
+  "Débit sans notre référence du montant d'un remboursement demandé, mais un autre virement du cabinet de ce montant — en cours, ou annulé après téléchargement et peut-être exécuté en retard — peut être ce débit : il ne peut pas être lié à ce remboursement. Attendez la ligne portant sa référence RFD ou celle de son lot (relevé camt.053) ; sinon demandez à la banque le détail de ce débit et prévenez le support.";
 
 /** critic2 ML-4: a cancelled transfer whose run is still approved or sent — this debit is that run's payout. */
 export const CANCELLED_TRANSFER_LIVE_RUN =
@@ -619,11 +645,57 @@ export function debitReviewText(
     amount_minor?: string;
     bookable_as?: string | null;
   },
-  linkOptions?: { return_guard?: string | null; payments?: LinkPayment[] | null } | null,
+  linkOptions?: {
+    return_guard?: string | null;
+    payments?: LinkPayment[] | null;
+    refunds?: { refund_request_id: string }[] | null;
+  } | null,
 ): string | null {
   // review 6b-2c round 3: a reference-less debit whose only candidates are payouts returned, or cancelled with their run
   // ended (iii; a cancelled payout whose run is still approved or sent may be that run's payout: still « en cours »)
   const cands = o.candidates ?? [];
+  // M2c-6b-3a (K, rule 3b's (iv)): its only candidates a refund or a sweep cancelled out of a downloaded file — raised
+  // only once cancellation after download is on
+  if (
+    o.review_reason === "payout_amount_match" &&
+    cands.length > 0 &&
+    cands.every((c) => c.status === "cancelled" && (c.kind === "refund" || c.kind === "sweep"))
+  )
+    return cands.every((c) => c.kind === "sweep")
+      ? cands.length === 1
+        ? CANCELLED_SWEEP_MATCH
+        : CANCELLED_SWEEPS_MATCH
+      : // review round 1 (pages-texts-9): a payment's return the row still offers (OQ-86) is named
+        o.amount_minor !== undefined &&
+          linkOffers(
+            { ...o, amount_minor: o.amount_minor },
+            linkPayments(cands, linkOptions?.payments),
+            [],
+            linkOptions?.return_guard,
+          ).returns.length > 0
+        ? `${CANCELLED_REFUND_MATCH} ${PAYOUT_AMOUNT_MATCH_RETURN}`
+        : CANCELLED_REFUND_MATCH;
+  // review round 1 (pages-texts-4): a refund of its amount the link options do not offer (a cancelled transfer may be
+  // the line: the trigger would refuse it)
+  if (
+    o.review_reason === "refund_amount_match" &&
+    linkOptions?.refunds != null &&
+    cands.length > 0 &&
+    cands.every(
+      (c) =>
+        typeof c.refund_request_id === "string" &&
+        !linkOptions.refunds!.some((r) => r.refund_request_id === c.refund_request_id),
+    )
+  )
+    return REFUND_AMOUNT_MATCH_BARRED;
+  // review round 1 (pages-texts-2): a sweep's own late debit is booked as that sweep's, not « Virement hors reversement »
+  if (
+    o.review_reason === "cancelled_transfer_debited" &&
+    (/^SWP/.test(o.end_to_end_id ?? "") ||
+      /^SWP/.test(o.original_end_to_end_id ?? "") ||
+      (cands.length > 0 && cands.every((c) => c.kind === "sweep")))
+  )
+    return CANCELLED_SWEEP_DEBITED;
   if (
     o.review_reason === "payout_amount_match" &&
     cands.length > 0 &&
@@ -1244,8 +1316,43 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
 };
 
-export function checkLabel(code: string): { label: string; help: string } {
-  return CHECK_LABEL[code] ?? { label: code, help: "" };
+/**
+ * M2c-6b-3a (plan §4, T12, T15): the checks' help once cancellation after download is on (6b-3b's switch) — a file
+ * not deposited is cancelled on evidence by two people; an alert of a transfer debited although cancelled says, by its
+ * case (its row's details: kind, status, reason), what ops book or ask. The help of the switch off is unchanged.
+ */
+function checkHelpOn(code: string, details: Record<string, unknown> | null | undefined): string | null {
+  if (code === "file_not_marked_sent")
+    return `Un fichier a été téléchargé mais personne n'a indiqué l'avoir déposé à la banque, et l'heure limite de dépôt de son jour d'exécution est passée (contrôlé toutes les heures) : déposez-le, puis « Marquer comme transmis ». S'il ne doit pas partir, demandez son annulation depuis sa page, relevés à l'appui (deux personnes) ; d'ici là ses virements restent en cours jusqu'à ce que leurs débits soient comptabilisés depuis le relevé (${FILE_BOOKED_WHEN}). Un fichier jamais déposé n'apparaît sur aucun relevé : son annulation peut être demandée une fois importés les relevés de son jour d'exécution et du jour ouvré suivant.`;
+  if (code !== "transfer_already_debited") return null;
+  const kind = typeof details?.kind === "string" ? details.kind : null;
+  const status = typeof details?.status === "string" ? details.status : null;
+  const reason = typeof details?.reason === "string" ? details.reason : null;
+  if (reason === "client_payout_debited_late")
+    return "Un virement annulé de ce client a peut-être été débité en retard (relevé, sous sa référence, dans une ligne groupée de son lot ou sans nos références) : ce reversement reste hors des fichiers pour ne pas payer deux fois les mêmes encaissements — s'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter. Comptabilisez d'abord ce débit dans « Débits et retours » (« Virement hors reversement »), après avoir annulé ce reversement s'il reprend les mêmes encaissements : la retenue cesse ensuite ; si la page ne permet pas de le comptabiliser, demandez à la banque le détail de ce débit et prévenez le support.";
+  if (reason === "payment_refund_debited_late")
+    return "Un remboursement annulé de ce paiement a peut-être été exécuté en retard (relevé) : ce remboursement reste hors des fichiers pour que le payeur ne soit pas remboursé deux fois — s'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter. Rattachez d'abord ce débit (« Débits et retours »), ou annulez ce remboursement.";
+  if (kind === "sweep" && status === "cancelled")
+    return "Une quote-part du cabinet annulée a été virée malgré tout (relevé) : aucune nouvelle quote-part n'est mise dans un fichier tant que son débit n'est ni comptabilisé ni revenu. Comptabilisez-le dans « Débits et retours » (« Comptabiliser… », puis « Virement au compte propre » de cette quote-part).";
+  if (kind === "sweep")
+    return "Cette quote-part du cabinet a été calculée alors qu'une quote-part annulée, exécutée en retard par la banque, avait déjà viré cette somme : son fichier n'est plus servi. S'il n'a pas été déposé, faites-le annuler depuis sa page, relevés à l'appui (deux personnes) : la quote-part sera recalculée ; s'il l'a été, demandez à la banque de ne pas l'exécuter.";
+  if (status === "cancelled")
+    return kind === "refund"
+      ? "Un remboursement annulé après téléchargement a été débité malgré tout (relevé, sous sa référence, dans une ligne groupée de son lot ou sans référence) : il ne peut pas encore être comptabilisé. Ne refaites pas ce remboursement, voyez avec la banque et prévenez le support."
+      : "Un reversement dont le virement a été annulé après téléchargement a été débité malgré tout (relevé, sous sa référence, dans une ligne groupée de son lot ou sans référence) : ne refaites aucun virement. Son reversement terminé, comptabilisez ce débit dans « Débits et retours » (« Virement hors reversement ») : l'alerte cesse ensuite ; son reversement encore en cours, prévenez le support.";
+  // review round 1 (pages-texts-3, pages-texts-6): a debit without our references only may be the replaced transfer's;
+  // dated on or after this one's execution in its downloaded file, it may be this one's too — booked as its debit then
+  // (« Comptabiliser… » proposes it) — and its file's cancellation is refused while it is open
+  return "Un relevé montre le débit, ou un débit sans nos références qui peut l'être, du virement qu'il remplace (exécuté plus tard malgré tout) : ce virement reste hors des fichiers pour ne pas payer deux fois. Ne refaites aucun virement. S'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter : un débit sans nos références de son montant peut aussi être sa propre exécution — « Comptabiliser… » le propose alors comme son débit —, et l'annulation de ce fichier est refusée tant que ce débit n'est ni comptabilisé ni classé. Sinon, voyez ce débit dans « Débits et retours » ; s'il ne peut pas y être comptabilisé, demandez à la banque le détail de ce débit et prévenez le support.";
+}
+
+export function checkLabel(
+  code: string,
+  opts?: { cancellationAfterDownload?: boolean; details?: Record<string, unknown> | null },
+): { label: string; help: string } {
+  const l = CHECK_LABEL[code] ?? { label: code, help: "" };
+  const on = opts?.cancellationAfterDownload ? checkHelpOn(code, opts.details) : null;
+  return on ? { label: l.label, help: on } : l;
 }
 
 /** The checks of the transfers and their files (M2c-6a, design §15; its review's T3 and T6). */
@@ -1407,7 +1514,10 @@ export function refundCancellable(
  * review round 2 (L6): it leaves « en cours » when its debit is booked from the statement (then its return, if one
  * comes); a refund the bank does not execute leaves no line (REFUND_NOT_EXECUTED).
  */
-export function refundInDownloadedFileNote(fileNumber: string): string {
+export function refundInDownloadedFileNote(fileNumber: string, cancellationAfterDownload = false): string {
+  // M2c-6b-3a (plan §4, T11): once cancellation after download is on, the refund is cancelled once its transfer is
+  if (cancellationAfterDownload)
+    return `Le virement de ce remboursement est dans le fichier ${fileNumber}, déjà téléchargé : pour annuler le remboursement, faites d'abord annuler ce virement depuis la page du fichier (relevés à l'appui, confirmée par une autre personne) ; sinon il reste « en cours » jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${REFUND_BOOKED_WHEN}). ${REFUND_RETURNED} ${REFUND_NOT_EXECUTED_ON}`;
   return `Le virement de ce remboursement est dans le fichier ${fileNumber}, déjà téléchargé : il reste « en cours » jusqu'à ce que son débit soit comptabilisé depuis le relevé bancaire (${REFUND_BOOKED_WHEN}), et le remboursement ne peut pas être annulé d'ici là (l'annulation après téléchargement n'est pas encore disponible). ${REFUND_RETURNED} ${REFUND_NOT_EXECUTED} Gardez le fichier tel quel, vérifiez le relevé, voyez avec la banque et prévenez le support.`;
 }
 
@@ -1479,6 +1589,9 @@ export function debitErrorCode(message: string): ErrorCode {
   // file (checked before the general « in a downloaded file »)
   if (message.includes("reissue_in_downloaded_file"))
     return "refund_reissue_in_downloaded_file";
+  // review round 1 (DP-1, DP-2): a refund not handed out, a cancelled transfer that bars it possibly the line
+  if (message.includes("refund refused: cancelled_transfer_matches"))
+    return "refund_cancelled_transfer_matches";
   if (
     message.includes("already downloaded") ||
     message.includes("in_downloaded_file")

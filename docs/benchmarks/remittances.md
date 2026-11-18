@@ -1090,3 +1090,58 @@ job's record step (one guard). The funds pass, the debit job, the nightly checks
 - `test_remittance_scale_integration.py` alone: **1 passed** (322.2 s) — 50,000 items reserved 1.27 s, prepared 9.4 s;
   approval job and documents 15.9 s, the statement build **6.05 s** (6.56 s at the integration), CSV 1.46 s, PDF 1.73 s;
   the re-run's build 6.02 s; cancellation 4.06 s; nightly checks 5.63 s (5.57 s warm).
+
+### M2c-6b-3a: switch-on prerequisites, the switch off (2026-11-18, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+What the slice changes on a timed path: the holds read at generation and at a generated file's first download (M's
+`private.transfer_sibling_debited_late` per payout and refund, A's sweep hold), the re-download's re-check, the nightly
+`run_transfer_checks` (a shared set of the cancelled filed transfers, two new branches), `private.transfer_debited_before`
+(L's arm, for chain members and cancelled transfers only), rule 3b's candidates (K) and the cancellation evidence (N).
+The funds pass, the debit job and the command's booking path are unchanged.
+
+- `test_transfer_files_scale_integration.py` (5,000 refunds in one file): **1 passed** — generation (command) **2.83 s**,
+  job 0.88 s, download (command) **1.14 s**, cash check 0.14 / 0.09 s, « Virements » 0.13 s, the debit job 10.2 s, the
+  nightly checks 0.28 s (0.27 s warm), every row read by index (was 2.31 s, 0.78 s, 0.76 s, …, 0.22 s). Its first run
+  showed M's lookup of a refund's request quadratic — generation 7.98 s, download 6.27 s; then, on a fresh reset, past
+  the API's 8 s (`statement timeout`) — with the servicer and the status beside the key a fresh table's statistics read
+  every waiting refund by `refund_request_waiting_idx`, once per refund (4.6 s for the 5,000 holds alone): the probe
+  holds its key alone (the 5,000 sibling holds 0.16 s, the 5,000 holds 1.19 s). *Review round 1 (CSC-2) corrects this
+  paragraph:* the build also added `refund_request_transfer_idx`, believing no index was led by
+  `refund_request.transfer_id`; `refund_request_transfer_id_key` (the column's unique index) already was, and the probe
+  uses it once the duplicate is dropped — the index is removed (timings below).
+- `test_transfer_line_scale_integration.py` (with the scale file above, before that fix; neither path touched by it):
+  **8 passed** — the 500-member lot short of one: options 0.36 to 0.42 s, booking 1.53 to 1.56 s (499 bookings, the
+  allocation lock held 1.33 s); the saturating lots: options 2.33 / 2.42 s, the command 2.46 / 2.58 s
+  (`parts_do_not_add_up`); 501 and 5,000 members 0.014 to 0.02 s (`lot_too_large`); the 50,000-item draft: options
+  0.09 s, command 0.16 s, lock 0.13 s.
+- `test_debit_bookings_scale_integration.py` once (before that fix, which touches refunds only): **5 passed** (782.2 s)
+  — the fixture's approval jobs 482.8 s, « Générer le fichier » for 5,000 payouts (+50 cancelled) 3.56 s; the
+  5,000-member batch line's funds pass 24.1 s (24.7 s under auto_explain); 5,000 RMT debits imported in 1.4 s, the debit
+  job 22.7 s in chunks of 9.0, 9.3 and 4.1 s; the nightly checks 1.13 s (1.13 s warm with row counts on); 200 members
+  0.64 s; 200 RMT debits imported in 0.3 s and booked in 0.79 s.
+
+### M2c-6b-3a review fixes, round 1 (2026-11-18, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+What the round changes on a timed path: rule 3b's candidates (two exclusions over the candidates already read: a
+cancelled payout beside the payout re-issuing it or re-paying its run's items, a cancelled sweep beside the sweep made
+after it — each keyed, the run's lines by its key, an item's live line by `remittance_line_live_uq`), the refund link's
+guard, D's helper (`private.refund_line_barred_by`: the request by its key, the payment's requests by
+`refund_request_payment_idx`), `private.debited_cancelled_sweeps` (CSC-1: by `bank_transfer_cancelled_filed_idx`'s own
+key), « Virements »' sweep hold (once per currency) and `refund_request_transfer_idx` removed (CSC-2). The funds pass and
+the debit job are unchanged.
+
+- `test_transfer_files_scale_integration.py` (5,000 refunds in one file), without `refund_request_transfer_idx`:
+  **1 passed** — generation (command) **2.88 s**, job 0.90 s, download (command) **1.01 s**, cash check 0.12 / 0.07 s,
+  « Virements » 0.12 s, the debit job 9.7 s, the nightly checks 0.23 s (0.24 s warm), every row read by index but the
+  payments' known sequential read (as before: 2.83 s, 1.14 s, 0.13 s, 0.28 s with the duplicate index) — the probe by
+  `refund_request_transfer_id_key` keeps the plan linear.
+- `test_transfer_line_scale_integration.py`: **7 passed** (156.1 s) — the 500-member lot short of one: options 0.32 /
+  0.33 s, booking 1.42 / 1.55 s (499 bookings, the allocation lock held 1.35 s); the saturating lots: options 2.27 /
+  2.37 s, the command 2.13 / 2.39 s (`parts_do_not_add_up`); 501 and 5,000 members 0.012 to 0.02 s (`lot_too_large`);
+  the 50,000-item draft: options 0.09 s, command 0.16 s, lock 0.12 s.
+- `test_debit_bookings_scale_integration.py`: **5 passed** (793.0 s) — « Générer le fichier » of 5,000 payouts 3.66 s;
+  the batch line of 5,000 members: the funds pass 24.2 s (27.1 s under auto_explain); 5,000 RMT debits: import 1.3 s,
+  the debit job 23.0 s; the nightly checks 1.29 s (1.32 s warm).
+- Not timed here (tests-7, ADR-0014 « M2c-6b-3a review fixes » round 1, left to 6b-3a-2): the nightly checks,
+  generation's holds and the cancellation evidence over tens of transfers cancelled out of a downloaded file and
+  re-issued — the scale fixtures' only cancelled transfers are runs cancelled before any file.

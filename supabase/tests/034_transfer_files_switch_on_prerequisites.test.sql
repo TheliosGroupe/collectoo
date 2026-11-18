@@ -9,19 +9,20 @@
 --     refund while the re-issue sits in its downloaded file (`reissue_in_downloaded_file`), the re-issue stays alerted;
 --     nor does a line naming no reference at all (round 7, the founder's decision on round 6's N1: such a line executes a
 --     refund in a downloaded file only while its transfer re-issues none — 033), and the refusals say why;
---   * SW2 / SW3, a second sweep (todo: fails today): a file holding the sweep cancelled whole, the next file's new sweep
+--   * SW2 / SW3, a second sweep (met in M2c-6b-3a, passes; no todo): a file holding the sweep cancelled whole, the next file's new sweep
 --     downloaded (SW2) or only generated (SW3), then the cancelled sweep debited late under its own id — the new sweep's
 --     file is refused at a re-download (`holds_debited_transfer`) and the sweep alerted (SW2), or superseded at its first
 --     download with a blocked row `cancelled_sweep_debited` (SW3);
---   * G1c, a refused payout executed late (todo: fails today): a payout cancelled alone out of a live downloaded file,
+--   * G1c, a refused payout executed late (met in M2c-6b-3a, passes; no todo): a payout cancelled alone out of a live downloaded file,
 --     its run cancelled, then a later batch line of its PmtInf that can be it — alerted although its run is cancelled
 --     (the G1 alert not keyed on live runs) and raised `cancelled_transfer_debited` (M2c-6b's P0, covering batch lines).
---   * H-PAY, a second refund of the same payment (todo: fails today; round 7's verifier): the first refund's file
+--   * H-PAY, a second refund of the same payment (met in M2c-6b-3a, passes; no todo; round 7's verifier): the first refund's file
 --     cancelled whole and that refund cancelled, a second refund of the payment (re-issuing none) in a downloaded file —
 --     the old file's late line with no reference does not execute it (`reissue_in_downloaded_file`).
 -- Definition of done for switching it on (M2c-6b): every test of this file passes with its todo() lines removed — the
 -- scenarios may gain the debit bookings M2c-6b adds, never lose an assertion — and 033 turned into the switch-on test.
--- pgTAP's TODO failures do not fail `supabase test db`.
+-- M2c-6b-3a removed the todo() lines (every assertion kept, no booking added); the follow-ups are pgTAP 039's.
+-- 6b-3b's one-line migration switches the flag on.
 begin;
 select plan(18);
 
@@ -725,7 +726,6 @@ select results_eq($$ select v ->> 'request', v ->> 'confirm', v ->> 's1', v ->> 
                      from j where k = 'sw2' $$,
   $$ values ('requested'::text, 'superseded'::text, 'cancelled'::text, 'in_file 12000'::text, true) $$,
   'SW2: the file holding the sweep cancelled whole, a new sweep in the next file, downloaded; then the cancelled one debited');
-select todo('M2c-6b prerequisite (ADR-0014 M2c-6a review fixes, round 5 (2): SW2)', 2);
 select is((select v ->> 'redownload' from j where k = 'sw2'), 'transfer file refused: holds_debited_transfer',
   'SW2: the new sweep''s file is not served again (uploaded, the servicer''s share would leave twice)');
 select ok((select v -> 'alerts' from j where k = 'sw2') @> '["sweep 12000 in_file"]'::jsonb,
@@ -765,7 +765,6 @@ select results_eq($$ select v ->> 'request', v ->> 'confirm', v ->> 'f2', v ->> 
                      from j where k = 'sw3' $$,
   $$ values ('requested'::text, 'superseded'::text, 'generated'::text, '12000'::text, true) $$,
   'SW3: the file holding the sweep cancelled whole, a new sweep in the next file, generated; then the cancelled one debited');
-select todo('M2c-6b prerequisite (ADR-0014 M2c-6a review fixes, round 5 (2): SW3)', 2);
 select results_eq($$ select v #>> '{first_download,refused}',
                             coalesce(v #> '{first_download,blocked}', '[]') @> '[{"reason": "cancelled_sweep_debited"}]'
                      from j where k = 'sw3' $$,
@@ -810,7 +809,6 @@ select results_eq($$ select v ->> 'request', v ->> 'confirm', v ->> 'cancel_run'
                             (v ->> 'debited_before')::boolean from j where k = 'g1c' $$,
   $$ values ('requested'::text, 'cancelled'::text, 'cancelled'::text, 1, true) $$,
   'G1c: the refused payout cancelled alone, its run cancelled (its collection back in the queue); then a later batch line can be it');
-select todo('M2c-6b prerequisite (ADR-0014 M2c-6a review fixes, round 5 (3): G1c)', 2);
 select ok((select v -> 'alerts' from j where k = 'g1c') @> '["payout 164000 cancelled"]'::jsonb,
   'G1c: alerted although its run is cancelled (the G1 alert not keyed on live runs and refunds)');
 select ok((select v -> 'cancelled_transfer_debited' from j where k = 'g1c') @> '[164000]'::jsonb,
@@ -855,7 +853,6 @@ select results_eq($$ select v ->> 'request', v ->> 'confirm', v ->> 'r2_replaces
                      from j where k = 'hpay' $$,
   $$ values ('requested'::text, 'superseded'::text, null::text, 'downloaded'::text, true) $$,
   'H-PAY: the first refund''s file cancelled whole; a second refund of the same payment, re-issuing none, in a downloaded file');
-select todo('M2c-6b prerequisite (ADR-0014 M2c-6a review fixes, round 7: H-PAY)', 1);
 select results_eq($$ select v ->> 'link' ~ 'refund refused: reissue_in_downloaded_file', v ->> 'r2', v ->> 'r2_transfer'
                      from j where k = 'hpay' $$,
   $$ values (true, 'requested'::text, 'in_file'::text) $$,

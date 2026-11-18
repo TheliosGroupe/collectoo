@@ -154,7 +154,7 @@ export default async function TransferFilePage({
 
       {refusal && refusal.code !== "already_downloaded" ? (
         <div className="flex flex-col gap-2 rounded-md border border-red-200 p-3 text-sm dark:border-red-900" data-testid="download-refused">
-          <p className="font-medium text-red-800 dark:text-red-200">{refusalText(refusal.code, refusal.blocked)}</p>
+          <p className="font-medium text-red-800 dark:text-red-200">{refusalText(refusal.code, refusal.blocked, cancellable)}</p>
           {refusal.blocked.length > 0 ? (
             <ul className="flex list-disc flex-col gap-1 pl-5" data-testid="download-blocked">
               {refusal.blocked.map((b) => {
@@ -162,7 +162,7 @@ export default async function TransferFilePage({
                 return (
                   <li key={`${b.transfer_id ?? "fichier"}:${b.reason}`}>
                     {t ? `${TRANSFER_KIND[t.kind] ?? t.kind}${t.client_name ? ` — ${t.client_name}` : ""} (${money(t.amount_minor, t.currency)}) : ` : ""}
-                    {holdLabel(b.reason)}
+                    {holdLabel(b.reason, cancellable)}
                   </li>
                 );
               })}
@@ -203,7 +203,12 @@ export default async function TransferFilePage({
           </ActionForm>
         ) : null}
         {f.status === "pending" || f.status === "generated" ? (
-          <CancelFile fileId={f.id} version={f.version} idempotencyKey={randomUUID()} />
+          <CancelFile
+            fileId={f.id}
+            version={f.version}
+            idempotencyKey={randomUUID()}
+            cancellationAfterDownload={cancellable}
+          />
         ) : null}
       </div>
       {executed && cancellable ? (
@@ -301,7 +306,7 @@ export default async function TransferFilePage({
             {f.held.map((h) => (
               <li key={h.transfer_id}>
                 {TRANSFER_KIND[h.kind] ?? h.kind}
-                {h.client_name ? ` — ${h.client_name}` : ""} : {money(h.amount_minor, f.currency)} — {holdLabel(h.reason)}
+                {h.client_name ? ` — ${h.client_name}` : ""} : {money(h.amount_minor, f.currency)} — {holdLabel(h.reason, cancellable)}
               </li>
             ))}
           </ul>

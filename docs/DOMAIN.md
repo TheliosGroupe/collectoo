@@ -1505,6 +1505,32 @@ stateDiagram-v2
 - **Re-issue** (review round 3; off until M2c-6b (ADR-0014 M2c-6a round 5; OQ-81): `bank_booking_required`): a payout or refund of a downloaded file cancelled whole is never filed again under its id — it is `cancelled` and a new transfer (a fresh id, the same order) replaces it; the replaces chain is read whenever « débité déjà » is asked (`private.transfer_debited_before`), so a late debit of any id in the chain, or a batch line of the cancelled file that can contain it, holds the newest one, alerts it, and refuses cancelling its run or refund.
 - The **two-step cancellation of one transfer** in a downloaded or sent file (review T1, pain001#1; off until M2c-6b (ADR-0014 M2c-6a round 5; OQ-81): `bank_booking_required`): `request_transfer_cancellation` then `confirm_transfer_cancellation` by another person, each with the evidence for that transfer (no debit carrying its end-to-end id — nor a batch debit of its PmtInf that only its siblings explain, and that no other of its siblings could explain instead (`batch_ambiguous`) —, or its return, over the same window once over), and only from a file the bank executed in part (`file_not_executed` otherwise: the file's own cancellation is the exit; review round 2). The rest of the file is unchanged. Then its run (`cancel_remittance_run`, refused with `payout_in_downloaded_file` before) or its refund (`cancel_refund`) can be cancelled; a sweep is recomputed at the next file.
 
+- **Débit sans nos références** (M2c-6b-3a, L; COMPLIANCE OQ-80 (p); meaningful once cancellation after download is on):
+  a debit of a dedicated account carrying neither our end-to-end id nor our PmtInfId (a CSV export without the
+  reference column, a camt.053 entry without references), or a reference that is not ours to the payee's IBAN, at the
+  amount of a transfer that was in a downloaded file, from its execution date there, not booked nor linked
+  (`private.transfer_unreferenced_lines`). For a transfer cancelled since, it is its **possible late execution**: its
+  re-issue is held (`already_debited`), its run's or refund's cancellation refused, the client's other payouts
+  (`client_payout_debited_late`) or the payment's other refunds (`payment_refund_debited_late`) held, the file's
+  cancellation on evidence refused (`unreferenced_debit_open`) — until ops book it (« Comptabiliser… ») or classify it.
+- **Quote-part retenue** (M2c-6b-3a, A): a sweep made while the servicer's share had already left once — by a sweep
+  cancelled out of a downloaded file that the bank executed late, its debit still open or booked by ops only after this
+  sweep was made (`private.sweep_after_debited_cancelled`, servicer-wide): held `cancelled_sweep_debited` (generation's
+  D4, the file's first download, its re-download, the nightly alert). Once ops book the cancelled sweep's debit as its
+  own (« Comptabiliser… », then « Virement au compte propre » of it: review round 1, pages-texts-1), the next sweep is
+  proposed again from what 4679 then shows.
+- **Rule 3b's (iv)** (M2c-6b-3a, K): a refund or a sweep cancelled out of a downloaded file is a candidate of a debit
+  without our reference at its amount: beside another candidate the line is ambiguous; alone, a sweep's late debit is
+  booked as that sweep's, a refund's is refused `cancelled_transfer_matches` (no booking kind yet: OQ-81 (b)).
+  Review round 1 (LD-1, LD-2; COMPLIANCE OQ-80 (q)): never beside the in-flight transfer that replaces it — a
+  cancelled payout (iii) beside the in-flight payout re-issuing it or re-paying its run's collections, a cancelled
+  sweep (iv) beside the in-flight sweep made after its cancellation: the line is that transfer's own debit.
+- **Refund barred by a cancelled transfer** (M2c-6b-3a, D; review round 1, DP-1, DP-2): a debit carrying neither an
+  end-to-end id nor a PmtInf never executes a refund while rule 3b finds a transfer cancelled out of a downloaded
+  file that it may be (`private.refund_line_barred_by`): a payout (cancelled, not only returned) or a sweep, any
+  refund for a refund in a downloaded file, a refund of another payment for one not handed out yet; « Lier » does
+  not list it (`payout_candidate`, `reissue_in_downloaded_file`, `cancelled_transfer_matches`).
+
 ## 5. Open questions (❓ founder)
 
 **Answered by the founder on 2026-11-07** (see `docs/PHASE0_REVIEW.md` §D): Q1 one account per (client, debtor) with invoices as items; Q2 components + balancing line up to `3.12`; Q4 deceased → collect against heirs, insolvency hold only on proof of the Banque de France admissibility decision (or court judgment); Q5 receive and forward; Q7 10 days, per client; Q8 one dossier per loan; Q3 no outbound until the batch is confirmed; Q6 5 business days, silence = proposal expires. Gap-analysis questions: our plans are **not** exported as forbearance (seller's measures only); percentages exported as ratios (`0.05`).

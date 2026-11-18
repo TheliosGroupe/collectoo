@@ -3,7 +3,21 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
-- PR #35 **M2c-6b-2d** (2026-11-18; « Suivi »; plan `docs/design/m2c-6b-2-plan.md` §5; ADR-0014 « M2c-6b-2c carry-overs (in 6b-2d) », « M2c-6b-2d » and « M2c-6b-2d review fixes »):
+- PR #36 **M2c-6b-3a** (2026-11-18; the switch-on prerequisites, part 1; the cancellation-after-download switch stays **OFF**; plan `docs/design/m2c-6b-3-plan.md`; ADR-0014 « M2c-6b-3a » and « M2c-6b-3a review fixes »):
+  - **Migration** `20261118090000_switch_on_prerequisites.sql`. Every rule bites only in states that need a downloaded file to be cancelled, so nothing changes while the switch is off (033 unchanged).
+    - SW2/SW3: a sweep made after a cancelled sweep that was debited since is held, superseded at download, alerted (servicer-wide).
+    - G1c: a cancelled payout or refund of a downloaded file executed late is alerted whatever its run's state.
+    - H-PAY (D): a debit without our references does not execute a refund while a cancelled refund of the same account and amount was in a downloaded file.
+    - K: rule 3b counts cancelled refunds and sweeps as candidates; a cancelled share alone is booked as its own late debit.
+    - L, N: a debit without our references at a cancelled transfer's amount counts as its possible late execution (holds its replacement, the run's cancellation, refuses the file's cancellation).
+    - M: while a cancelled payout or refund shows an open late debit, the client's other payouts and the payment's other refunds are held.
+    - Sweep proposals resume after an `unplanned_sweep` booking.
+  - **Web:** every page reads `cancellation_after_download`; the « on » texts are written and tested (vitest `switch-on-texts`), the « off » texts unchanged.
+  - **Tests:** pgTAP `034` passes with no `todo()` (18/18, every assertion kept), new `039_switch_on_followups` (68); 030 #27 and one 037c case updated (justified in the ADR).
+  - **Review:** five lenses (4 medium, 21 low), one fix round; the verifier found nothing medium or higher open.
+    - The four medium, all with the switch on: a refund not yet handed out executed by a cancelled refund's late debit (DP-1); the refund link not refused beside a cancelled payout or sweep (DP-2); a re-issued payout or re-made sweep unbookable on a CSV feed (LD-1, LD-2).
+  - **Results:** pgTAP 2,773 PASS; worker unit 1,092 + 5 xfail, integration 237; evals 1.000 and 96.0 % / 0 wrong; scale (transfer files, transfer lines, payouts) passed; vitest 462; E2E 56.
+- PR #35 **M2c-6b-2d merged 2026-11-18** (main green; « Suivi »; plan `docs/design/m2c-6b-2-plan.md` §5; ADR-0014 « M2c-6b-2c carry-overs (in 6b-2d) », « M2c-6b-2d » and « M2c-6b-2d review fixes »):
   - **Statement « Suivi »** (`20261117120000_statement_suivi.sql`, template `releve-reversement-fr-3`). The payload drops `follow_up` and adds `previous_payouts`: the client's earlier approved runs' events, posted between the previous approved run's K and this run's K, on each run's whole transfer chain.
     - Events: debited; returned (`here` / `run` / `pending`); cancelled; executed after cancellation; executed again (ranked: second, third…, or before the planned debit); the return of an unplanned payout; an unplanned payout outside any run.
     - A late line paid by an unplanned payout says when and how much (« versé le … » or « dont … versés le … »), as of K, and keeps its own cause beside it.
@@ -108,10 +122,13 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
   - **6b-2a** foundations: merged (PR #32).
   - **6b-2b** the ops command: merged (PR #33).
   - **6b-2c** pages: merged (PR #34).
-  - **6b-2d** « Suivi »: PR #35 (above), merging once its PR jobs and a dispatched volume run are green.
-  - Then 6b-3 (needs founder question 1 of the 6b plan).
+  - **6b-2d** « Suivi »: merged (PR #35).
+- **M2c-6b-3** (plan `docs/design/m2c-6b-3-plan.md`; switch on cancellation after download):
+  - **6b-3a** prerequisites, part 1: PR #36 (above), merging once its PR jobs and a dispatched volume run are green.
+  - **6b-3a-2** next: plan items E–J (the late predecessor booked through `book_transfer_line`, every reader of « t is booked », its return, `transfer_file_release` with booked runs and refunds, R124-6 rows of a re-issue, OQ-82's P across transfers), texts T13/T14/T16–T18, the switch-on E2E project and its screenshots, the scale fixture of tests-7.
+  - **6b-3b** then: the one-line migration that switches the flag on, 033 turned into the switch-on test, OQ-81 closed — after the founder answers Q1.
 - **M3 design (M3-01..M3-15)**: panel (legal-, engine-, ops-first, a critique each, a judge) → `docs/design/m3-calculation.md`: rule packs as versioned YAML citing read texts, one pure replay engine (exact integers, half-up per economic segment), interest posted at payment dates and a monthly close, late facts corrected by reversal at their dates (automatic only when no payment's total changes), judgments/surendettement measures/variable rates « hors calcul », receipts show « reste dû » only for validated packs. 15 founder decisions pending (§20); OQ-51..68 added to COMPLIANCE, notes on OQ-3..27. Legal flags to apply with M3a-1: a new INT row for C. conso L722-14, INT-08 wording, INT-04 test, CALCULATION_RULES §4.1 caveat; worked examples change under the conservative day rule (all TO VALIDATE until the founder's golden cases).
-- **M2c design (M2-12..M2-15)**: panel (compliance-, ledger-, ops-first designs, a critique each, a judge) → `docs/design/m2c-remittances.md` (two funds with a 4679/4689 mirror, remittance runs per client and currency, commission from the mandate's versioned schedule, invoices and credit notes in one gapless yearly series, pain.001 for ops, nothing leaves 5120 before the bank's debit, servicer advances for returns after remittance). 15 founder decisions accepted 2026-11-09 (§24); M2c-1 merged (PR #22); M2c-2 merged (PR #23); M2c-3 merged (PR #24); M2c-4 merged (PR #25); M2c-5 merged (PR #26); M2c-5b merged (PR #27); M2c-6a merged (PR #28, fail-closed); M2c-6b-1 merged (PR #29); M2c-6b-2a merged (PR #32); M2c-6b-2b merged (PR #33); M2c-6b-2c merged (PR #34); M2c-6b-2d in PR #35; then 6b-3 the statement's « Suivi » next, then 6b-3 (switching on cancellation after download once pgTAP `034` passes) (`docs/design/m2c-6b-plan.md`); OQ-35..50 added to COMPLIANCE (biggest: OQ-45, CMF L314-1 payment-service authorisation, before go-live).
+- **M2c design (M2-12..M2-15)**: panel (compliance-, ledger-, ops-first designs, a critique each, a judge) → `docs/design/m2c-remittances.md` (two funds with a 4679/4689 mirror, remittance runs per client and currency, commission from the mandate's versioned schedule, invoices and credit notes in one gapless yearly series, pain.001 for ops, nothing leaves 5120 before the bank's debit, servicer advances for returns after remittance). 15 founder decisions accepted 2026-11-09 (§24); M2c-1 merged (PR #22); M2c-2 merged (PR #23); M2c-3 merged (PR #24); M2c-4 merged (PR #25); M2c-5 merged (PR #26); M2c-5b merged (PR #27); M2c-6a merged (PR #28, fail-closed); M2c-6b-1 merged (PR #29); M2c-6b-2a merged (PR #32); M2c-6b-2b merged (PR #33); M2c-6b-2c merged (PR #34); M2c-6b-2d merged (PR #35); M2c-6b-3a in PR #36, then 6b-3a-2 and 6b-3b the statement's « Suivi » next, then 6b-3 (switching on cancellation after download once pgTAP `034` passes) (`docs/design/m2c-6b-plan.md`); OQ-35..50 added to COMPLIANCE (biggest: OQ-45, CMF L314-1 payment-service authorisation, before go-live).
 
 ## Next
 - Performance before production volumes: RLS on `account` / `party` (and tables keyed by them) calls `can_read_portfolio()` per row; with 157k accounts locally a client's `count(*)` took 41 s. Apply the ledger's pattern (`= any ((select private.readable_portfolio_ids())::uuid[])`, evaluated once per query) and add a scale check.
@@ -159,6 +176,15 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
   - **Known limits (low):**
     - the nightly suppression reads `transfer_line_offers` once per member, up to 500;
     - cs-1's queue bound is asserted by timing.
+- M2c-6b-3 founder questions (`docs/design/m2c-6b-3-plan.md` §8; each default built, all open):
+  1. Switch on cancellation after download (6b-3b, OQ-81 (a))? Default yes, once 6b-3a and 6b-3a-2 are merged; S06, S25 and its twins and the stuck states on feeds without our references stay held or alerted, never booked.
+  2. H-PAY (OQ-80 (n)): default — a cancelled refund of the same account and amount, from any payment, blocks.
+  3. The same sums repaid by two late transfers (OQ-82, in 6b-3a-2): default — not deducted twice; the second is the firm's advance.
+  4. A debit without a reference that may be a cancelled refund or share (K): default — never booked as another payout.
+  5. A debit without our references at a cancelled transfer's amount (L, N; OQ-80 (p)): default — a possible late execution until classified; no date bound until the bank answers founder #15.
+  6. Holds beyond the transfer's own replacement (M): default — the client's other payouts and the payment's other refunds held.
+  7. Next to a payout cancelled after download, may a return or a loss still take the reference-less debit (OQ-86 (b))? Default — allowed; only the refund link is refused.
+- M2c-6b-3a known limits (low; ADR-0014 « M2c-6b-3a review fixes »): a manual refund (no transfer) link is not refused by the database beside a cancelled refund's late debit; the « déjà débité » text names only one of two possible transfers; the cancel_remittance_run hint; a cancelled sweep's batch line review text; the scale timings of the new checks (tests-7, before 6b-3b); `test_a_batch_line_of_2000_members_is_re_checked_in_linear_time_and_memory` hit its time bound in 2 of 3 full local runs on the shared 4-vCPU box (not weakened; green in CI so far).
 - M2c-6b-2d questions and known limits (COMPLIANCE):
   - **OQ-87 (new, counsel and founder):** is the statement's « Suivi » an adequate account (C. civ. 1993, OQ-75), event by event as of each run's K, and are its wordings true enough? Defaults (a)–(h) are built (window, cancelled runs, executions ranked, unplanned payouts outside a run).
   - **OQ-86:** now also covers the refund link accepted beside a returned payout twin.

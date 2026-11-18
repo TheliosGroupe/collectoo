@@ -171,6 +171,9 @@ export default async function DebitsPage({
       </WidePage>
     );
   }
+  // M2c-6b-3a review round 1 (pages-texts-4): the flag the refund link's refusal is worded by
+  const { data: cancellationOn } = await supabase.rpc("cancellation_after_download");
+  const cancellationAfterDownload = cancellationOn === true;
   const { data, error: queueError } = await supabase.rpc("debit_queue", {
     p_tab: tab,
     p_offset: (page - 1) * PAGE_SIZE,
@@ -330,6 +333,7 @@ export default async function DebitsPage({
                   <LineActions
                     row={r}
                     options={options.get(r.bank_transaction_id)}
+                    cancellationAfterDownload={cancellationAfterDownload}
                   />
                 ) : null}
                 {tab === "frais" && r.direction === "debit" ? (
@@ -411,9 +415,11 @@ export default async function DebitsPage({
 function LineActions({
   row,
   options,
+  cancellationAfterDownload = false,
 }: {
   row: Row;
   options: Options | undefined;
+  cancellationAfterDownload?: boolean;
 }) {
   const cur = row.currency;
   // the job's named payments, then those debit_link_options listed (one list with the queue's text: linkPayments)
@@ -519,6 +525,7 @@ function LineActions({
           lineId={row.bank_transaction_id}
           refundId={q.refund_request_id}
           kind={row.direction === "debit" ? "refund" : "refund_returned"}
+          cancellationAfterDownload={cancellationAfterDownload}
           label={`${row.direction === "debit" ? "Remboursement" : "Remboursement revenu"} ${q.end_to_end_id} · ${money(q.amount_minor, cur)}`}
           effect={linkRefundEffect({
             direction: row.direction,

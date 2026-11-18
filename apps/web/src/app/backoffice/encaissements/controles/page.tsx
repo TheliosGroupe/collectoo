@@ -17,6 +17,7 @@ type Result = {
   amount: string | null;
   count: number | null;
   oldest_days: number | null;
+  details: Record<string, unknown> | null;
 };
 
 function frenchDateTime(iso: string): string {
@@ -33,6 +34,9 @@ function frenchDateTime(iso: string): string {
  */
 export default async function ChecksPage() {
   const { supabase, claims } = await staffSession();
+  // M2c-6b-3a: the cancellation-after-download switch, for the texts worded both ways
+  const { data: cancellationOn } = await supabase.rpc("cancellation_after_download");
+  const cancellationAfterDownload = cancellationOn === true;
   const back = { href: "/backoffice/encaissements", label: "Relevés bancaires" };
   const { data: memberships } = await supabase
     .from("membership")
@@ -58,7 +62,9 @@ export default async function ChecksPage() {
   const { data: resultRows } = run
     ? await supabase
         .from("payment_check_result")
-        .select("id, code, severity, subject_type, subject_id, currency, amount:amount_minor::text, count, oldest_days")
+        .select(
+          "id, code, severity, subject_type, subject_id, currency, amount:amount_minor::text, count, oldest_days, details",
+        )
         .eq("run_id", run.id)
         .order("severity", { ascending: false })
         .order("code")
@@ -102,7 +108,7 @@ export default async function ChecksPage() {
           ) : (
             <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
               {results.map((r) => {
-                const l = checkLabel(r.code);
+                const l = checkLabel(r.code, { cancellationAfterDownload, details: r.details });
                 const to = checkSubjectLink(r);
                 return (
                   <li key={r.id} className="flex flex-col gap-1 py-3" data-testid="check-row" data-code={r.code}>

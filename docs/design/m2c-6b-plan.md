@@ -37,6 +37,14 @@ in **6b-1** (§4.2). Every line number below is m6a-fix6's: re-read them on main
 | **6b-2** Ops bookings, pages, « Suivi » | migration `20261117090000_transfer_line_ops.sql`: `public.book_transfer_line` (batch split, unplanned payout/sweep, manual returns), reads for pages, `remittance_statement_build` + template `releve-reversement-fr-3`; « Débits et retours », « Virements », run page, client space texts; E2E + screenshots | pgTAP `036`; E2E debit → « Débité » on run/Virements/client space; unplanned payout leaves the next run correct (no double pay); statement « Suivi » golden PDF; vitest labels sweep |
 | **6b-3** Switch on | migration `20261118090000_switch_on_cancellation.sql`: SW2/SW3 fix, G1c alert, late-predecessor booking, release rules with booked runs, switch on; texts reworded; 033 inverted; OQ-81 closed | `034` with no `todo()` (DoD); `033` = switch-on test with a switch-off subtransaction keeping the round-5/6 gates killed; new mutants killed; founder answer to Q1 recorded |
 
+*As built (M2c-6b-3a, 2026-11-18):* 6b-3 is split. **6b-3a** (`20261118090000_switch_on_prerequisites.sql`, the switch
+still off) builds the prerequisites of docs/design/m2c-6b-3-plan.md §2 A–D and K–N (SW2/SW3 servicer-wide, B, G1c,
+H-PAY, rule 3b's cancelled refunds and sweeps, debits without our references, the client's and payment's other
+transfers held, the evidence's `unreferenced_debit_open`) and the texts' « on » variants: `034` passes with no
+`todo()`, `039` holds the follow-ups; **6b-3a-2** builds E–J (the late predecessor and its readers, its return, the
+release's defence, the R124-6 rows of a re-issue, P across two transfers): the migration passed the plan's 2,500-line
+split point with the first group; **6b-3b** is the one-line switch and `033` inverted, after the founder's Q1.
+
 Why three: 6b-1 is the money path and must be reviewed alone (M2c-6a needed 6 rounds on less); 6b-3 changes a
 founder-level safety decision and needs Q1 answered — if its review drags, bookings still ship; 6b-3 needs 6b-2's ops
 booking of a late debit (the exit for `cancelled_transfer_debited` once cancellations exist).
@@ -339,6 +347,14 @@ golden PDF hash regenerated; stored statements never rebuilt.
 ## 3. Switching on cancellation after download (6b-3)
 
 ### 3.1 What makes `034`'s TODO tests pass
+*As built (6b-3a; docs/design/m2c-6b-3-plan.md §2 A, C, D, L):* `private.sweep_after_debited_cancelled` reads the
+cancelled sweeps of **every** dedicated account of the servicer in the currency, whatever their status (A′), and its gate
+is not `transfer_debited_before(c)` but `private.transfer_late_debit_open(c)` (a late line of c not booked nor linked —
+its SWP id, its PmtInf's batch line, or one carrying none of our references) or an `unplanned_sweep` booking of c whose
+**entry's `posted_at`** (a clock time) is at or after t's creation; the new sweep's `created_at` is generation's clock
+time under the remit lock. The G1 alert reads the cancelled transfers of downloaded files, excluded only while the live
+end of their chain is alerted. H-PAY is account-wide (any payment's cancelled refund at the line's amount, rule 3b's
+(iv)), not the payment-only form below; a refund whose transfer is ordered is still executed by the line.
 **SW2/SW3 (second sweep after a cancelled sweep debited late).** New `private.sweep_after_debited_cancelled(p_sweep
 uuid) returns boolean`: t is a sweep `ordered|in_file`, and some sweep c of the same paying account was cancelled
 **before t was created** (`c.cancelled_at < t.created_at`), was in a file downloaded at least once,
@@ -424,7 +440,10 @@ facts. They help in two places only: (1) a member booked by its own line is know
 `batch_debit_may_hold`/`batch_ambiguous` (fewer stuck payouts) but is a **relaxation** of a rule six review rounds
 narrowed: defer until a real statement with batch lines (R5, founder #15). Also considered and not done: requiring every
 debit line touching the file to be resolved before a cancellation (subsumed by D3/E2/G1 today; would force fixture
-bookings across 028–032).
+bookings across 028–032). *Corrected in 6b-3a (N):* « subsumed » held only for lines carrying our references — a debit
+without them (a CSV export, a camt.053 entry without references) at an in-file transfer's amount, or at a PmtInf's sum,
+from its execution date and not booked nor linked, now refuses the cancellation `unreferenced_debit_open`; no rule is
+removed.
 
 ### 3.4 Turn it on in 6b-3? Recommendation: **yes, in 6b-3, after 6b-1 and 6b-2 are merged.**
 Risk accepted: a bank executing a cancelled file after the D+1 window (OQ-80) and after its re-issue is now *detected

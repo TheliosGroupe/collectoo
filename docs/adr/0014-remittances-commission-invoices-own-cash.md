@@ -3272,5 +3272,408 @@ ledger read-back, an embed PostgREST has no relation for, read in two queries si
 `m2c-debits-reversement`, `m2c-debits-detail-releve` and `m2-payment-checks` (mobile and desktop); the other images'
 diffs (dates, ids, order, random IBANs) reverted.
 
+## M2c-6b-3a: switch-on prerequisites, the switch still off (2026-11-18)
+
+Plan: docs/design/m2c-6b-3-plan.md (revised after its critics; its §10 records each finding). Migration
+`20261118090000_switch_on_prerequisites.sql`. **The switch stays off**: no statement writes `private.feature_switch`;
+6b-3b flips `downloaded_file_cancellation` with a one-line migration once the founder answers Q1 (COMPLIANCE OQ-81
+(a)). Every rule below bites only in states that need a downloaded file's transfer to be cancelled — production has
+none, and pgTAP `033` (the switch-off test) is byte for byte unchanged. The three partial indexes are the only change
+that is not inert (the plan named two: `refund_request_transfer_idx` was added after the 5,000-refund scale file showed
+M's lookup of a refund's request quadratic — generation 2.3 s → 8.0 s, download 0.8 s → 6.3 s — with no index led by
+`refund_request.transfer_id`). *Review round 1 (CSC-2) corrects this:* `refund_request_transfer_id_key` (the column's
+unique index since `20261115090000`) already led by it; the quadratic plan came from the probe holding the servicer and
+the status beside the key, and the probe holding its key alone is the fix — the duplicate index is removed (two partial
+indexes now). `034` passes with its four `todo()` lines removed (every assertion kept, no booking added); `039` holds
+the follow-ups, each scenario switching the flag on inside its own subtransaction, the file asserting at its end that
+it is off.
+
+### Decisions
+
+- **L — a debit carrying none of our references is a cancelled transfer's possible late execution.**
+  `private.transfer_unreferenced_lines(t)`: for a transfer that was an item of a file downloaded at least once, the
+  debits of its paying account of its currency and amount, from the earliest execution date of such an item, with no
+  end-to-end id nor PmtInfId (class N) to its payee's IBAN or none, or with a reference that is not ours (O, E0) to its
+  payee's IBAN — never an E0 naming another lot of ours on the account, never a line of an unsplit entry nor a debit the
+  bank flags as a return —, not booked, not linked but as `explained`, not a payment, not decided a duplicate. It never
+  reads the options nor rule 3b's candidates (a line that offers nothing still counts). `private.transfer_debited_before`
+  counts it for a chain member deeper than the transfer, and for the transfer itself once cancelled — never the
+  transfer's own execution out of the live downloaded file it is in. Every guard inherits it: the holds, the
+  re-download, `cancel_remittance_run`, the refund's cancellation, the alerts. Unlike the own-id arm (any line, booked or
+  not), this arm counts unresolved lines only: once ops book or classify the line it has a meaning. **Deviation from
+  round 4's « final statement » default** (a batch line imported after the cancellation's window is not read as a late
+  execution): a line without our references cannot be told apart, so it counts whenever it is imported, and N refuses
+  the cancellation while it is open. `private.transfer_late_debit_open(t)` = an open late line of t (its own id, its
+  PmtInf's batch line — `transfer_late_lines`, its chain's — or one without our references) and no return seen.
+  `transfer_late_lines` is unchanged: the job's return rule and the P0 `cancelled_transfer_debited` keep reading our
+  references only (a debit without them is never booked automatically: no worker twin).
+- **K — rule 3b's (iv).** `private.transfer_line_candidates` also gives a refund or a sweep cancelled out of a file
+  downloaded at least once (its current file), at the line's amount, its execution date there on or before the line's,
+  to the line's IBAN when it has one, its return not seen. Beside another candidate the line is `line_ambiguous`; alone,
+  a sweep's line is proposed and booked as that sweep's late debit (`unplanned_sweep` of it) — the unplanned sweep with
+  no transfer keeps `sweep_in_flight_matches` —, a refund's is proposed nothing (`cancelled_transfer_matches`: S25's
+  twin, no booking kind yet); an unplanned payout or sweep with no transfer is refused `cancelled_transfer_matches`
+  beside such a candidate. `link_debit_guard` is unchanged: the fee and the explanation are refused on every candidate,
+  the return and the loss keep OQ-86's rule (iv never refuses them), the refund link is D's.
+- **N — the evidence sees debits without our references.** `private.transfer_cancel_evidence` refuses
+  `unreferenced_debit_open` (after `debit_seen`, before `batch_ambiguous`): for a file, an in-file transfer's
+  `transfer_unreferenced_lines`, or a line with no reference at the sum of a PmtInf's in-file transfers (two or more)
+  from the file's first execution date (a bank ignoring `BtchBookg false`, OQ-83); for one transfer, its own. The card
+  carries `unreferenced_debit` and `unreferenced_from`; the confirmations recompute it. Not
+  `transfer_debit_suppression` (critic 1-1's suggestion): its reference-less arm ignores the IBAN and its `'waiting'`
+  depends on the options and a day bound. The m2c-6b-plan §3.3 « subsumed » sentence is corrected there.
+- **A, A′ — a sweep made after a cancelled sweep the bank debited late.** `private.sweep_after_debited_cancelled(t)`:
+  t a sweep ordered or in a file, and a sweep c of the same servicer and currency — on any of its dedicated accounts,
+  whatever its status (A′: a sweep of an account closed since can still be executed late) —, in a downloaded file,
+  `c.cancelled_at < t.created_at`, its return not seen, and its late debit open or booked (`unplanned_sweep` of c) by an
+  entry whose `posted_at` is at or after t's creation. Not `transfer_debited_before(c)`: once c's line without our
+  references is booked it no longer counts there, and t, made before that booking, would be released. **Timestamp
+  rule:** the new sweep's `created_at` is generation's clock time read under the remit lock (`v_now`), never `now()` (a
+  generation that waited for the lock behind a cancellation would otherwise be « earlier » than it), and the booking is
+  compared by its entry's `posted_at` (a clock time), never `decided_at` (`now()`). Held `cancelled_sweep_debited` by
+  `private.transfer_hold_reason` (generation never asks for its own new sweep; the download's generated re-check now
+  runs over the sweep), refused `holds_debited_transfer` at a re-download, alerted by a new `transfer_already_debited`
+  branch (`kind` sweep, its status). Generation's D4 and « Virements »' sweep preview read every dedicated account of
+  the servicer in the currency (`private.debited_cancelled_sweeps` stays per account).
+- **B — the share proposed again.** `private.debited_cancelled_sweeps` keeps a cancelled sweep while its late debit is
+  open (no longer once ops booked it: 4679 then shows the share left); a second late line stops the next sweep again.
+- **C — G1c.** The G1 branch reads the servicer's cancelled payouts and refunds that were in a downloaded file (a
+  materialized set shared with the P0 `cancelled_transfer_debited` branch), `transfer_debited_before` and
+  `transfer_late_debit_open`, whatever their run's or refund's state — excluded only while the live end of their chain
+  (their run's transfer, approved or sent, ordered or in a file; their requested refund's) is alerted instead by the
+  ordered/in-file branch (critic 2-8: not « re-issued by no transfer »). The alert stops once ops book or link the line.
+- **D — H-PAY, account-wide.** `private.refund_transfer_follow`'s reference-less arm (a refund in a downloaded or sent
+  file, re-issuing none) also requires `private.cancelled_refund_line_may_be(line, request)` null (review round 1: renamed
+  `private.refund_line_barred_by` and widened, below): no refund of the
+  account cancelled out of a downloaded file at the line's amount (rule 3b's (iv)), of any payment, outside the
+  request's own chain. Else `reissue_in_downloaded_file`, its hint by the account's feed (camt.053: wait for the RFD or
+  lot reference, see the bank; CSV: ask the bank for the detail, tell support). A refund whose transfer is ordered is
+  still executed by the line and its transfer booked (the right outcome if the line is the earlier one's execution; M's
+  exit). `public.debit_link_options` no longer lists such a refund; `link_debit_guard` unchanged.
+- **M — holds beyond the chain.** `private.transfer_sibling_debited_late(t)`: a payout is held
+  `client_payout_debited_late` while a cancelled payout of its client and currency, outside its chain, in a downloaded
+  file, its run ended, shows an open late debit; a refund `payment_refund_debited_late` while another refund request of
+  its payment has a transfer in its chain cancelled out of a downloaded file with an open late debit. In
+  `transfer_hold_reason` after `already_debited`, in the download's two re-checks (the detail names each transfer with
+  its reason), in a new `transfer_already_debited` branch (`reason`). Index `bank_transfer_client_cancelled_idx`.
+- **`public.cancellation_after_download()`** answers the flag to any member of a servicer organisation (any role, any
+  aal: a collector reads the payment page), false to anyone else; granted to authenticated, revoked from public and anon.
+- **Texts.** `errorText(code, {cancellationAfterDownload})` and the « on » variants (T1–T7, T9, T11, T12, T15 by case,
+  T19, the sweep's hold, the credit-note refusals); the run page, the payment page, the credit-note page, the file page,
+  « Virements » and « Contrôles » pass the flag; the new codes (`cancelled_transfer_matches`,
+  `client_payout_debited_late`, `payment_refund_debited_late`, `cancelled_sweep_debited` as a transfer's hold,
+  `unreferenced_debit_open` and the card's date) have words; « À classer » says, on a debit whose only candidates are
+  a cancelled sweep or refund (K), that the sweep's late debit is booked as that sweep's, a refund's not yet. Every
+  « off » text is unchanged.
+
+### Founder questions (each default built, each open; COMPLIANCE OQ-80, OQ-81, OQ-82)
+
+1. Switch cancellation after download on (6b-3b)? Default **a**: yes, by its one-line migration once 6b-3a and
+   6b-3a-2 are merged; S06, S25 and its twins, and the feed-without-references stuck states (D, N) stay open, held or
+   alerted, never booked. (b) no: refused payouts stay « en cours » beyond R124-6's month.
+2. A debit without our references and a refund still in a downloaded file (H-PAY)? Default **a**: refused while a
+   cancelled refund of the same account and amount, of any payment, was in a downloaded file (built); (b) the same
+   payment only.
+3. The same sums repaid by two late transfers (J, 6b-3a-2)? Default **a**: not deducted again (an advance).
+4. A debit without reference that may be a cancelled refund's or share's late execution (K)? Default **a**: never booked
+   as another payout; a cancelled share alone is booked as that share's late debit (built).
+5. A debit without our references at a cancelled or in-file transfer's amount (L, N)? Default **a**: it counts as a
+   possible late execution until classified (built; OQ-80 (p)).
+6. Holds beyond the transfer's own replacement (M)? Default **a**: the client's other payouts and the payment's other
+   refunds held (built); (b) alert only.
+
+### Deviations from the plan
+
+- **E–J and their texts are 6b-3a-2's** (the plan's §5 split point): the migration passed 2,500 lines (2,755) with A–D
+  and K–N, each redefinition copied whole (`transfer_line_check` alone is 650 lines). Not built here: the late
+  predecessor's booking (E) and its readers (F), its return (G), the release's defence in depth (H), the R124-6 rows of
+  a re-issue and of a run whose payout was cancelled alone (I), P across two transfers (J); the texts T13, T14, T16's LP
+  wording, T17 (the client's cancelled-run text: F redefines `client_remittance_summary` anyway), T18; the worker twins
+  and the LP integration file; the switch-on E2E project (it builds an LP). §3.3's changes of 037 D (F4, F6), 037b and
+  038 are E's and J's: unchanged here. 6b-3b needs both slices.
+- **M3 is not reachable**: a client has at most one live run (`remittance_run_pending_uq`: draft, approved, sent), so a
+  payout of another run cannot be in flight while the refused payout's run is still sent. The run-live exclusion is
+  kept as written (defence; no mutant can be killed by a reachable state).
+- **D's helper is rule 3b's (iv)** (`transfer_line_candidates`), as the plan's « K is the base of D », not a separate
+  probe; D5's « cancelled alone » arm is the same read (any file status), killed by its own mutant.
+- **`transfer_overview`** (« Virements ») is redefined too, its sweep hold servicer-wide like generation's D4 (A′), so
+  the page never proposes a sweep generation refuses.
+- **T15** is worded by the row's case from its `details` (« Contrôles » now reads them); **T12** and **T15** have no
+  change with the switch off.
+- **037c** gains one assertion, and one expected value changes (below).
+
+### Assertions whose expected value changed (house rule R3), each a switch-on test state
+
+| Test | Before | After | Why |
+|---|---|---|---|
+| `030` #27 (D4) | the blocked array of `f4`'s download holds Lilas's payout | it also holds `<f4's sweep> cancelled_sweep_debited` | A: that sweep was made after `f3`'s sweep was cancelled, and `f3`'s sweep was debited since (its SWP id) — the SW3 fix applied to 030's own state |
+| `037c` R `r_cancelled_live` | the run cancelled, the refund then listed and linked | the run's cancellation refused `transfer_already_debited`, nothing else changes (key `cancel` added) | L: the reference-less debit at the cancelled payout's amount may be its late execution — cancelling the run would pay its items again |
+| `037c` (new) R `r_cancelled_ended` | — | the run cancelled before that debit arrives: listed and linked | keeps 6b-2d's rule (iii with its run ended never refuses the refund link, OQ-86) pinned |
+
+No other assertion of 015–038 changed; 033 unchanged; 034's four `todo()` lines removed.
+
+### Tests
+
+pgTAP `039_switch_on_followups` (53): A1–A4, A′1–A′3, A (batch line), B1–B4, C1–C4, D1–D9, K1–K3, L1–L6, M1, M2,
+M4 (generated, downloaded), M5 (RFD id, no reference), M6, N1–N7, the helpers' privileges, the flag's read, the switch
+off at the end. vitest `switch-on-texts.test.ts` (11; review round 1, tests-8: it said 10): every « on » text, the « off » texts unchanged, no « on » text
+saying « pas encore disponible », « ne peut pas être annulé d'ici là », « pas encore être annulé » or « ne peut pas
+encore être comptabilisé » where the switch makes it false. All of them were seen failing on `b795713` first (pgTAP on
+the base stack; vitest against the base libraries).
+
+### Mutants (SQL redefined inside the test file's rolled-back transaction; each killed by the named test)
+
+| Mutant | Killed by |
+|---|---|
+| L's arm removed from `transfer_debited_before` | 039 L1, L3, C3 (and D9, L2) |
+| the depth/cancelled condition dropped | 039 L6 |
+| the date bound dropped | 039 L5, N3 |
+| the IBAN filter dropped | 039 L5 |
+| the duplicate exclusion dropped | 039 L2 |
+| (iv) removed from the candidates | 039 K1, K2, K3 |
+| (iv) alone refused for a sweep too (options) | 039 K3 |
+| the check's (iv) refusal of an unplanned payout removed | 039 K2 |
+| N's refusal removed | 039 N1, N4, N5, N6, N7, D9 |
+| N's PmtInf-sum arm removed | 039 N5 |
+| `<` → `>` on `cancelled_at`/`created_at` | 034 SW2, SW3 |
+| the booking arm removed | 039 A1 |
+| the booking arm blind to time | 039 A2 |
+| the open-late-debit half removed | 039 A3, A′2 |
+| the sweep dropped from the generated re-check | 034 SW3 |
+| the sweep dropped from `holds_debited_transfer` | 034 SW2 (re-download) |
+| the sweep alert branch removed | 034 SW2 (alert) |
+| the sweep's `created_at` back to `now()` | 034 SW2, SW3 |
+| c read on the sweep's own account | 039 A′2 |
+| D4 per account | 039 A′1 |
+| D4 over active accounts only | 039 A′3 |
+| `transfer_late_debit_open` replaced by `transfer_own_debit_seen` | 039 A (batch line) |
+| B: `debited_cancelled_sweeps` back to `transfer_debited_before` | 039 B1, B2 |
+| C: G1 re-keyed on live runs and waiting refunds | 034 G1c |
+| C: the live-end exclusion removed | 034 G2 (q0 alerted beside q1) |
+| C: the open-late-debit condition removed | 039 C1 |
+| C: the exclusion back to « re-issued by no transfer » | 039 C2 |
+| D: the H-PAY clause removed | 034 H-PAY |
+| D: scoped to the same payment | 039 D4 |
+| D: the options filter removed | 039 D2 |
+| D: (iv) only for files superseded or rejected (« cancelled alone » dropped) | 039 D5 |
+| M: the payout rule removed | 039 M1, M2, M4 |
+| M: keyed on the servicer | 039 M6 |
+| M: the refund rule removed | 039 M5 |
+| M: the downloaded-branch re-check left out | 039 M4 (downloaded) |
+
+35 mutants, all killed; the no-op control (the migration's bodies unchanged as the prelude) passes 034 18/18 and 039
+53/53. Web: each library put back alone at `b795713` fails `switch-on-texts.test.ts` (transfers.ts 4, debits.ts 2,
+credit-notes.ts 1, transfer-lines.ts 1; forms.ts does not compile).
+
+### Suites
+
+- `supabase test db`: **Files=41, Tests=2,758, PASS** — `034` 18/18 with no `todo()`, `033` 44/44 unchanged, `039` 53/53.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (177 files) clean; unit pytest 1,092 passed, 5 xfailed; the
+  integration tests but the scale files (`-m integration --ignore-glob='*scale_integration.py'`): 237 passed; `make
+  eval`: mapping top-1 1.000 (167/167), reconciliation 96.0 % automatic, 0 wrong. No worker code changed (a debit
+  without our references is never booked automatically: no twin).
+- Scale (each right after `supabase db reset`; docs/benchmarks/remittances.md « M2c-6b-3a »): the 5,000-refund file
+  (generation 2.83 s, download 1.14 s, nightly checks 0.28 s, after `refund_request_transfer_idx`), the transfer-line
+  file (8 passed), the 5,000 payouts' bookings (5 passed, 782.2 s).
+- Web: `lint`, `typecheck` (database types regenerated: `cancellation_after_download`), vitest 453 passed (11 new).
+- E2E `./scripts/e2e.sh`: **56 passed** (desktop and mobile); no page of the switch off changed (no screenshot retaken; the diffs of dates,
+  ids, order and random IBAN digits reverted). The switch-on E2E project of plan §3.7 builds a late predecessor: 6b-3a-2's.
+
+## M2c-6b-3a review fixes (2026-11-18)
+
+### Round 1
+
+Five lenses reviewed `m6b3a` (`fd5556b`): four medium items and nineteen low ones. Each was checked on the main stack
+first: the four medium items reproduced (the reviewers' scenarios, inside `BEGIN … ROLLBACK` with the switch on in the
+transaction); every low one is real, but L's payment exclusion (tests-2) is unreachable (below). Every medium item is
+fixed at its root, tests first; every low one that is a text, a test, a layout fix or a one-line guard is fixed; the
+rest is left open below with its default. The migration `20261118090000` is unmerged and was edited in place; one more
+function is redefined there, `private.link_debit_guard`, copied from its latest definition (`20261117113000:265`),
+`SECURITY DEFINER`, its `SET` clauses, `search_path` and grants restated. **The switch stays off** (no statement writes
+`private.feature_switch`); `033` is unchanged; `034` keeps its 18 assertions with no `todo()`. Every fix only narrows
+what is linked or booked, but LD-1 and LD-2, where the review shows rule 3b wrongly refusing the ordinary booking of a
+re-issue's own debit (plan §3: the re-issue is booked from its line).
+
+**Medium.**
+- **DP-1 (a reference-less line executing another payment's refund not handed out).** D tested H-PAY only for a refund
+  in a downloaded or sent file; an ordered refund of another payment at the amount was listed and executed by a line
+  that may be a cancelled refund's late execution — that payer shown refunded, the first payment's re-issue released
+  (L's line no longer open once linked) and its payer refunded twice. Fix: D's reader is now
+  `private.refund_line_barred_by(line, request)` (it replaces `private.cancelled_refund_line_may_be`): for a refund
+  whose transfer is not handed out (ordered, or in a file not downloaded) a refund cancelled out of a downloaded file
+  (rule 3b's (iv)) bars the line unless it is in the chain of a request **of the same payment** (D7, M's exit:
+  that payment's money); `private.refund_transfer_follow` refuses `refund refused: cancelled_transfer_matches` (a new
+  code, its hint by the cancelled transfer's kind) and `public.debit_link_options` no longer lists such a refund. For a
+  refund in a downloaded or sent file the rule is D's (any payment); the request's-own-chain clause is gone — a
+  re-issue's own predecessor is refused there by round 7's rule already (mutant DP1_chain: equivalent). S1b (each
+  refund to its payer's IBAN, the line naming the first one's) is the same rule: the line's IBAN makes the cancelled
+  refund the candidate. The reviewer's « when the line has an IBAN, require the refund's payee IBAN » is not added: a
+  general link rule of M2b, beyond this fix (no state it would change here).
+- **DP-2 (the refund link beside a payout or a sweep cancelled after download).** `private.link_debit_guard` let the
+  refund link through beside a cancelled payout whose run had ended (iii, OQ-86) and beside a cancelled sweep (iv: the
+  sweep exemption of round 7), and D read cancelled refunds only: linked as a refund, the line closed that transfer's
+  late debit and released M's hold (the client's next payout: paid twice) or A's and B's (the next share). Fix: the
+  refund link is refused `payout_candidate` while rule 3b finds a payout cancelled (not only returned) out of a
+  downloaded file, whatever its run's state, or a sweep cancelled so (round 7's sweep exemption stays for a sweep in
+  flight); `private.refund_line_barred_by` bars them too, so the trigger refuses (`reissue_in_downloaded_file` for a
+  refund in a downloaded file, its hint naming « un reversement » or « un virement au compte propre »;
+  `cancelled_transfer_matches` for one not handed out) and the options do not list the refund. OQ-86's exemption stays
+  for a payout only returned (`037c` `r_returned_twin`). The return and the loss keep OQ-86's rule beside such a
+  candidate (COMPLIANCE OQ-86 (b): refused, a debtor's payment taken back by a debit the bank does not flag would stay
+  allocated for good; founder Q7 below). The review's S3 shape — the new sweep S2 in the same downloaded file as the
+  refund — is LD-2's: S1 is then no candidate beside S2 and the refund link stays allowed beside the sweep in flight
+  (round 7's decision; whichever transfer the line is, the other two lines that follow are booked to the others).
+  `039` RF3 pins the shape where no sweep was made since.
+- **LD-1 (a re-issue's own execution on a CSV feed, ambiguous for good).** On a feed without the end-to-end column the
+  re-issued payout's own line had two candidates, the re-issue (i) and its cancelled predecessor (iii): never booked,
+  its file not cancellable (N), the run « en cours » past R124-6 (`debit_unbooked` breach rows, every later run
+  `run_pending`). Likewise a re-run payout at the same amount after « Virement refusé par la banque ». Fix:
+  `private.transfer_line_candidates` leaves out a cancelled payout (iii) beside an in-flight payout (i) that has it in
+  its replaces chain, or whose run holds, not released, an item the cancelled payout's run released — as it already
+  left out a returned payout whose item such a run re-pays. The line is proposed and booked as the in-flight payout's
+  debit. If it was in fact the predecessor's late execution, the re-issue's own execution comes as a second line with
+  the predecessor alone, booked « Virement hors reversement » of it (an advance, OQ-82). COMPLIANCE OQ-80 (q).
+- **LD-2 (a re-made sweep's own execution on a CSV feed).** K's (iv) made the sweep D4 re-made at a cancelled sweep's
+  amount ambiguous with it, its own line unbookable, A holding it and B stopping the next share. Fix: a cancelled sweep
+  (iv) is no candidate beside an in-flight sweep (i) created after its cancellation (same servicer, account, currency
+  and amount: rule 3b's); the line books as the in-flight sweep, and the share is proposed again. If it was in fact the
+  cancelled sweep's late execution, the in-flight sweep's own line comes with (iv) alone and is booked « Virement au
+  compte propre » of the cancelled sweep, A's booked arm then holding the next share.
+
+**Low, fixed.**
+- **CSC-1.** `private.debited_cancelled_sweeps` probes the account's cancelled filed transfers by
+  `bank_transfer_cancelled_filed_idx`'s own key (the servicer, the account), the kind outside the probe, each one's
+  current file by its key; « Virements » reads the servicer-wide hold once per currency (`held`), not once per account
+  row. Same answers (`039` A′1–A′4, B).
+- **CSC-2.** `refund_request_transfer_idx` removed (it duplicated `refund_request_transfer_id_key`); the migration's
+  comments and the benchmarks paragraph say what fixed the quadratic plan (the probe's key alone).
+- **LD-3, pages-texts-3, tests-6.** « on » words, picked by the page's flag: `run_transfer_already_debited`,
+  `refund_already_debited` (« … ou un débit sans nos références de son montant, pas encore comptabilisé ni classé, peut
+  être l'exécution tardive du virement qu'il remplace … Voyez ce débit dans « Débits et retours » : classez-le ou
+  comptabilisez-le si la page le propose ; sinon demandez à la banque le détail de ce débit et prévenez le support »),
+  and `holdLabel(code, cancellationAfterDownload)` with an « on » `already_debited`, passed by « Virements » and the
+  file page; `client_payout_debited_late` (raised only with the switch on) says « a peut-être été débité »;
+  `refund_transfer_follow`'s `already_debited` hint names the reference-less line too. The « off » texts are unchanged.
+- **LD-4, pages-texts-8.** The credit-note « on » refusals: « … ensuite il ne peut l'être qu'une fois son virement
+  annulé, relevés à l'appui (deux personnes). Sinon l'avoir est possible dès que son débit est comptabilisé depuis le
+  relevé » — a booked debit makes the run « Comptabilisé », never cancellable.
+- **pages-texts-1.** The button the sheet shows: « Comptabiliser… », puis « Virement au compte propre » de cette
+  quote-part — in `CANCELLED_SWEEP_MATCH`, « Contrôles », « Virements »' sweep hold and the file page's hold; DOMAIN,
+  the plan and `039`'s descriptions alike; the vitest pins the label of `TRANSFER_LINE_ACTION.unplanned_sweep`.
+- **pages-texts-2.** `debitReviewText` words a `cancelled_transfer_debited` line carrying a SWP id (own or original), or
+  whose candidates are sweeps, as the sweep's late debit (`CANCELLED_SWEEP_DEBITED`), not « Virement hors reversement ».
+- **pages-texts-4.** « À classer » says why a refund of the line's amount is not offered (`REFUND_AMOUNT_MATCH_BARRED`,
+  when `debit_link_options` lists none of the row's refunds: another transfer of ours of that amount — in flight, or
+  cancelled after download — may be the debit; true with the switch off too, where the guard's in-flight candidate is the
+  only cause); `refund_reissue_in_downloaded_file` gains an « on »
+  variant naming D's reason; « Débits et retours » reads the flag and passes it to the refund link's form; the new
+  `refund_cancelled_transfer_matches` has words.
+- **pages-texts-5.** The evidence card and `UNREFERENCED_DEBIT_OPEN` give the exit when « Débits et retours » cannot
+  book the line (several transfers possible: ask the bank for the detail, tell support); one transfer's card says « du
+  montant de ce virement ».
+- **pages-texts-6.** « Contrôles »' help for a re-issue alerted `transfer_already_debited`: a reference-less debit of its
+  amount may be its own execution (« Comptabiliser… » proposes it), and its file's cancellation is refused while that
+  debit is open; else the bank's detail and support.
+- **pages-texts-7.** `HOLD_LABEL.cancelled_sweep_debited` is true of both arms of A (still open, or booked after the new
+  sweep was made): the share is recalculated at the next file; book the cancelled sweep's debit first if it is not.
+- **pages-texts-9.** `CANCELLED_REFUND_MATCH` adds `PAYOUT_AMOUNT_MATCH_RETURN` when the row offers « Retour du
+  paiement … » (OQ-86's return); several cancelled sweeps only: `CANCELLED_SWEEPS_MATCH` (ambiguous, ask the bank).
+- **tests-1.** `CancelFile` takes `cancellationAfterDownload` and passes it to its `ActionForm`; the file page passes its
+  flag. A vitest source guard checks the file page's, « Virements »' and « Débits et retours »' forms and labels get it
+  (the project has no component renderer).
+- **tests-2…tests-5.** `039` gains the cases below; each named mutant is killed.
+- **tests-8.** `034`'s header says SW2/SW3, G1c and H-PAY are met (no todo); the build's ADR count of
+  `switch-on-texts.test.ts` corrected to 11.
+
+**Left open (low), with its default.**
+- **LD-3, `cancel_remittance_run`'s hint.** Its `transfer_already_debited` hint (`20261116090000:5148`) still says « son
+  débit se comptabilise depuis le relevé ». No page shows a hint (the run page shows the refusal's « on » text, fixed);
+  redefining that 260-line command for an unshown hint in a review round is not done: 6b-3a-2's E redefines the run's
+  cancellation path anyway and words it then.
+- **pages-texts-2, a cancelled sweep's batch line.** A `cancelled_transfer_debited` line naming the sweep's PmtInf (no
+  SWP id) keeps the payout wording: the queue's candidates carry no kind (`debit_queue`'s enrichment adds the run's
+  status only). The sheet still proposes « Virement au compte propre » of the sweep. 6b-3a-2 (which redefines the
+  queue's readers for E) adds the kind.
+- **tests-4, the unplanned-sweep branch's (iv) refusal** (`cancelled_transfer_matches` in the check's no-transfer
+  branch): reachable only for a cancelled refund whose payee IBAN is the servicer's own account; no case added.
+- **tests-7 (scale timings of C, L, M, N on cancelled filed transfers).** Not extended here: 6b-3a-2 must add a fixture
+  with tens of transfers cancelled out of a downloaded file and re-issued (switch on inside the test), and time the
+  nightly checks, generation's holds and the evidence of a large file, before 6b-3b.
+- **L's payment exclusion** (`not a payment`, tests-2's L_pay): unreachable — a payment's line is a debtor credit
+  (`payment`'s trigger refuses any other), L reads debits. Kept as defence.
+- **A flaky integration bound, not this round's.** `test_debit_bookings_batch_rules_integration.py`'s linear-time bound
+  failed in two of three full non-scale runs here (its `_bb` statement 426,214 rows handled for 82,040 allowed), passed
+  in the third and in four runs of its file with its predecessors: that statement (`20261117100000`'s funds pass) calls
+  none of the functions this round or 6b-3a changes; its plan follows the tables' statistics. Recorded for 6b-3a-2 (an
+  `analyze` in the fixture, or a keyed probe).
+
+**Founder question added (COMPLIANCE OQ-86 (b)).** 7. A debit without our references beside a payout cancelled after
+download: may « Lier » take a debtor payment's return (or loss) on it? Default **a**: yes (OQ-86's rule; refused, the
+payment would stay allocated for good); (b) refused like the refund link, until the bank details the debit. Q5's note
+(OQ-80 (q)): a re-issue's own debit on a feed without our references is booked as the re-issue's.
+
+**Assertions whose expected value changed (house rule R3), each a switch-on test state.**
+
+| Test | Before | After | Why |
+|---|---|---|---|
+| `037c` R `r_cancelled_ended` | listed, the refund link ok, the refund executed | not listed, `payout_candidate`, the refund requested | DP-2: a payout cancelled after download may be executed late; linked as the refund, the line would release the client's next payout |
+| `039` (privileges) | the five helpers include `cancelled_refund_line_may_be` | `refund_line_barred_by` | the helper renamed and widened (DP-1, DP-2) |
+
+No other assertion of 015–039 changed; `039` N3's scenario gains a line (the PmtInf sum before the date), its assertion
+kept; `033` unchanged; `034` unchanged but its header.
+
+**Tests** (pgTAP `039_switch_on_followups`, 53 → 68; each new medium case failed on `fd5556b`'s bodies, the coverage
+cases passing there and proved by the mutants): « RF1 (DP-1) », « RF1b (DP-1) », « RF2 (DP-2) », « RF3 (DP-2) »,
+« LD1a (LD-1) », « LD1b (LD-1) », « LD2 (LD-2) », « K4 (tests-4) », « K5 (tests-4) », « L7 (… tests-2) », « L8
+(tests-2) », « L9 (tests-2) », « CM (tests-5) », « A′4 (… tests-3) », « D7 (… tests-5) »; `037c` R `r_cancelled_ended`.
+Before the fix 8 of the 68 failed (RF1, RF1b, RF2, RF3, LD1a, LD1b, LD2 and the privileges' rename). Vitest
+`switch-on-texts.test.ts` (11 → 20): the nine cases of « M2c-6b-3a review round 1 » and the updated pins.
+
+**Mutants** (SQL: one function of `20261118090000` as it now stands, redefined with one change right after the test
+file's `begin;`, rolled back with it; the no-op control passes `039` 68/68, `034` 18/18, `037c` 10/10):
+
+| Mutant | Killed by |
+|---|---|
+| DP1_ordered: the trigger's not-handed-out check removed | 039 RF1, RF1b |
+| DP1_options: `debit_link_options`' barred filter removed | 039 D2, RF1, RF1b |
+| DP1_samepay: the same-payment exemption dropped | 039 D7 (both) |
+| DP2_guard: the guard's cancelled payout/sweep arm removed | 039 RF2, RF3; 037c R `r_cancelled_ended` |
+| DP2_guard_sweep_iv: a cancelled sweep exempted again | 039 RF3 |
+| DP2_bars: the barred-by helper reading refunds only | 039 RF2, RF3 |
+| LD1_chain: the replaces-chain arm removed | 039 LD1a |
+| LD1_rerun: the re-taken-items arm removed | 039 LD1b |
+| LD1_all: the cancelled-payout exclusion removed | 039 LD1a, LD1b |
+| LD2_all: the cancelled-sweep exclusion removed | 039 LD2 |
+| LD2_time: `created_at > cancelled_at` → `<` | 039 LD2 |
+| OV_per_account: « Virements »' hold back per account | 039 A′4 |
+| L_nodl: L's « downloaded file » bound removed | 039 L9 |
+| L_unsplit, L_ret, L_linkexpl, L_retseen | 039 L8 (each) |
+| L_link: the link exclusion removed | 039 L7 |
+| K_nodl: (iv) without « downloaded » | 039 K4 |
+| K_retseen: (iv) without « return not seen » | 039 K5 |
+| C_M_dedupe: the M alert's dedupe removed | 039 CM |
+| N_sum_date: the PmtInf sum's date bound removed | 039 N3 |
+
+22 killed. Equivalent, recorded: DP1_chain (the request's own chain: removed from the helper, see DP-1), DCS_nodl
+(`debited_cancelled_sweeps` without « downloaded »: `transfer_late_debit_open` needs an item of a downloaded file
+already), L_pay (unreachable, above). Web (each library or page put back alone at `fd5556b`, vitest on
+`switch-on-texts.test.ts`): transfers.ts 5 failed, debits.ts 7, credit-notes.ts 1, file-actions.tsx 1, « Virements »
+1, the file page 1, « Débits et retours » 1, debit-actions.tsx 1 — all killed (forms.ts does not compile at `fd5556b`
+with the new imports).
+
+**Suites** (the main stack alone, each after a fresh reset): `supabase test db` — `Files=41, Tests=2773, Result: PASS`
+(`033` 44/44 unchanged, `034` 18/18 with no `todo()`, `037c` 10/10, `039` 68/68); the worker's `ruff check`, `ruff
+format --check` (177 files) and `mypy` (177 files) clean; 1,092 unit tests passed (5 xfailed); the non-scale
+integration tests 237 passed (the flaky bound above failed in the two earlier runs); `make eval`: mapping top-1 1.000
+(167/167, threshold 0.980), reconciliation 0.9600 automatic (95,997/100,000), 0 wrong, 0 policy violations; rule 3b's
+candidates, generation's D4 and the refund link changed, so the three scale files each ran once
+(`docs/benchmarks/remittances.md` « M2c-6b-3a review fixes, round 1 »): `test_transfer_files_scale_integration.py` 1
+passed (generation 2.88 s and download 1.01 s without the duplicate index), `test_transfer_line_scale_integration.py` 7
+passed (156.1 s), `test_debit_bookings_scale_integration.py` 5 passed (793.0 s); `database.types.ts` regenerated,
+unchanged (no public signature changed); the web's lint, types and 462 vitest tests; `./scripts/e2e.sh` 56 passed
+(desktop and mobile; the first run stopped at `next build` on the vitest's regex `s` flag, dropped); no page of the
+switch off changed: every screenshot diff (dates, ids, random IBAN digits) reverted.
+
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

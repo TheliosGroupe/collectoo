@@ -166,6 +166,9 @@ export default async function RemittanceRunPage({
   const page = Math.max(0, Number((await searchParams).page ?? 0) || 0);
   if (!/^[0-9a-f-]{36}$/.test(id)) notFound();
   const { supabase } = await staffSession();
+  // M2c-6b-3a: the cancellation-after-download switch, for the texts worded both ways
+  const { data: cancellationOn } = await supabase.rpc("cancellation_after_download");
+  const cancellationAfterDownload = cancellationOn === true;
   const { data, error } = await supabase.rpc("remittance_run_detail", {
     p_run_id: id,
     p_offset: page * 50,
@@ -362,7 +365,7 @@ export default async function RemittanceRunPage({
           data-testid="run-cancel-transfer-first"
         >
           {/* review round 5 (fail-closed): nothing of a downloaded file is cancelled until M2c-6b books its debits */}
-          <p>{runPayoutInDownloadedFileNote(transferFile.number)}</p>
+          <p>{runPayoutInDownloadedFileNote(transferFile.number, cancellationAfterDownload)}</p>
           <Link
             href={`/backoffice/reversements/virements/${transferFile.id}`}
             className="underline underline-offset-4"
@@ -377,6 +380,7 @@ export default async function RemittanceRunPage({
       cancelPath === "direct" ? (
         <ActionForm
           action={cancelRun}
+          cancellationAfterDownload={cancellationAfterDownload}
           submitLabel="Annuler le reversement"
           buttonClassName={dangerButtonClass}
           testId="run-cancel"
