@@ -1053,3 +1053,37 @@ export function refusalText(code: DownloadRefusal, blocked: readonly BlockedTran
       return "Le téléchargement a échoué. Rechargez la page et réessayez ; si le problème persiste, contactez le support.";
   }
 }
+
+/**
+ * M2c-6b-2c (plan §4.4, §7.4): what « Virements » says of a transfer from `transfer_bookings` (dates ISO, as booked
+ * from the statement): « Débité le … » once its debit is booked, « Revenu impayé le … » once its return is, and for a
+ * cancelled transfer the bank executed all the same (an unplanned booking) « Annulé — exécuté par la banque le …, hors
+ * reversement »; nothing otherwise (the status badge says the rest).
+ */
+export type TransferBooking = {
+  debited_on?: string | null;
+  returned_on?: string | null;
+  unplanned_on?: string | null;
+};
+
+export function transferBookingText(status: string, b: TransferBooking | null | undefined): string | null {
+  if (!b) return null;
+  if (status === "returned" && b.returned_on) return `Revenu impayé le ${frenchDate(b.returned_on)}`;
+  if (status === "booked" && b.debited_on) return `Débité le ${frenchDate(b.debited_on)}`;
+  if (status === "cancelled" && b.unplanned_on)
+    return `Annulé — exécuté par la banque le ${frenchDate(b.unplanned_on)}, hors reversement`;
+  return null;
+}
+
+/** `transfer_bookings`' rows by transfer id (the read gives only the caller's servicer's transfers). */
+export function transferBookingsById(
+  rows: { transfer_id: string; debited_on: string | null; returned_on: string | null; unplanned_on: string | null }[] | null,
+): Map<string, TransferBooking> {
+  const out = new Map<string, TransferBooking>();
+  for (const r of rows ?? []) out.set(r.transfer_id, r);
+  return out;
+}
+
+/** M2c-6b-2c (plan §7.4): the overview's banner while the last nightly checks found the servicer's share unswept. */
+export const SERVICER_FUNDS_UNSWEPT_NOTE =
+  "La quote-part du cabinet attend depuis plus de deux jours ouvrés sur le compte dédié sans virement au compte propre.";

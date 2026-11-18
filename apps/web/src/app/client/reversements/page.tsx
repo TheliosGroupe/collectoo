@@ -12,6 +12,7 @@ import {
   pageOf,
   returnedRuns,
   statementRunView,
+  unplannedRuns,
 } from "@/lib/remittance/documents";
 import { createClient } from "@/lib/supabase/server";
 
@@ -29,7 +30,9 @@ const PAGE_SIZE = 100;
  * part of « À reverser à ce jour » (K2); the list pages (« Plus anciens »). Review M2c-6b-1 (legal-texts#6, K4): a run
  * whose payout came back reads « Virement revenu impayé le … » (the summary's `returned_runs`: the client cannot read
  * the transfer itself) — round 2 (L2): « … : son montant sera reversé par un prochain reversement » until the run that
- * pays it again is booked, then « … : reversé à nouveau par le reversement <numéro> » (`repaid_by`).
+ * pays it again is booked, then « … : reversé à nouveau par le reversement <numéro> » (`repaid_by`). M2c-6b-2c
+ * (plan §7.4; critic L6, critic2 ML-12): the debit's date (`booked_on`), and a cancelled run whose payout the bank
+ * executed all the same reads so (`unplanned_runs`), never « Annulé avant la remise de son virement à la banque ».
  */
 export default async function ClientRemittancesPage({ searchParams }: PageProps<"/client/reversements">) {
   const supabase = await createClient();
@@ -60,7 +63,7 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
     supabase
       .from("remittance_statement")
       .select(
-        "run_id, number, issue_date, currency, line_count, file_count, pdf_document_id, csv_document_id, csv_sha256, run:remittance_run!run_id(status, gross_minor, net_minor)",
+        "run_id, number, issue_date, currency, line_count, file_count, pdf_document_id, csv_document_id, csv_sha256, run:remittance_run!run_id(status, gross_minor, net_minor, booked_on)",
       )
       .eq("client_organization_id", client.id)
       .order("issue_date", { ascending: false })
@@ -73,6 +76,8 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
   // review M2c-6b-1 (legal-texts#6, K4): the runs whose payout came back (their run stays booked); round 2 (L2): with
   // the run that paid each again
   const returned = returnedRuns(summary);
+  // M2c-6b-2c (critic L6, critic2 ML-12): a cancelled run the bank executed all the same, never « avant la remise »
+  const unplanned = unplannedRuns(summary);
   const statements = pageOf(statementRows, PAGE_SIZE);
   const href = (page: number) => (page > 0 ? `/client/reversements?page=${page}` : "/client/reversements");
   return (
@@ -125,7 +130,7 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
               // M2c-6b-1 (K4): and a payout that came back, never « débité » in green — round 2 (L2): and the run that
               // paid it again, once booked
               const run = s.run ?? null;
-              const view = statementRunView(run, returned.get(s.run_id));
+              const view = statementRunView(run, returned.get(s.run_id), unplanned.get(s.run_id));
               return (
                 <li key={s.run_id} className="flex flex-col gap-1 py-3" data-testid="statement-row">
                   <span className="flex flex-wrap items-center justify-between gap-2">

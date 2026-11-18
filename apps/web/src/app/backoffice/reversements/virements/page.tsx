@@ -8,6 +8,7 @@ import { money } from "@/lib/payments/statements";
 import { frenchDate } from "@/lib/remittance/runs";
 import {
   PAIN_VERSIONS,
+  SERVICER_FUNDS_UNSWEPT_NOTE,
   TRANSFER_KIND,
   type FileCard,
   type PayingAccount,
@@ -255,6 +256,20 @@ export default async function TransfersPage() {
   }
   const o = data as unknown as TransferOverview;
   const busy = o.accounts.some((a) => a.files.some((f) => f.status === "pending"));
+  // M2c-6b-2c (plan §7.4): the last nightly checks found the servicer's share waiting on the dedicated account
+  const { data: lastRun } = await supabase
+    .from("payment_check_run")
+    .select("id")
+    .order("started_at", { ascending: false })
+    .limit(1);
+  const { data: unswept } = lastRun?.[0]
+    ? await supabase
+        .from("payment_check_result")
+        .select("id")
+        .eq("run_id", lastRun[0].id)
+        .eq("code", "servicer_funds_unswept")
+        .limit(1)
+    : { data: [] };
   return (
     <WidePage title="Virements" back={back}>
       <AutoRefresh active={busy} abandonable={false} everyMs={2000} maxMs={120_000} />
@@ -262,6 +277,11 @@ export default async function TransfersPage() {
         Les reversements validés et les remboursements partent par fichier pain.001 : générez-le, téléchargez-le, déposez-le
         dans votre banque, puis « Marquer comme transmis ». Rien n&apos;est comptabilisé avant que le relevé montre le débit.
       </InfoNote>
+      {(unswept ?? []).length > 0 ? (
+        <p className="text-sm text-amber-900 dark:text-amber-200" data-testid="servicer-funds-unswept">
+          {SERVICER_FUNDS_UNSWEPT_NOTE}
+        </p>
+      ) : null}
       {o.accounts.length === 0 ? <InfoNote>Aucun compte dédié actif.</InfoNote> : null}
       {o.accounts.map((a) => (
         <Account key={a.bank_account_id} a={a} overview={o} />

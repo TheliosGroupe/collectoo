@@ -53,6 +53,10 @@ export function mappingOverrides(
  * reaches the page.
  */
 export type ErrorCode =
+  | "payout_candidate"
+  | "payout_candidate_not_bookable"
+  | "client_payout_line"
+  | "own_transfer_out_line"
   | "not_allowed"
   | "totals_mismatch"
   | "reason_required"
@@ -251,10 +255,10 @@ export type ErrorCode =
  * cancellation after download is available (M2c-6b-3, OQ-81).
  */
 export const PAYOUT_BOOKED_WHEN =
-  "automatiquement à l'import quand la ligne porte sa référence RMT ou celle de son lot ; sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir";
+  "automatiquement à l'import quand la ligne porte sa référence RMT ou celle de son lot ; sinon l'équipe la comptabilise dans « Débits et retours » (« Débit d'un reversement »)";
 /** The same for a file's transfers: payouts and the sweep from the statement, a refund once its line is linked. */
 export const FILE_BOOKED_WHEN =
-  "à l'import du relevé : automatiquement pour un reversement ou la quote-part du cabinet dont la ligne porte la référence RMT ou SWP, ou celle de son lot, sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir ; dès son rattachement pour un remboursement";
+  "à l'import du relevé : automatiquement pour un reversement ou la quote-part du cabinet dont la ligne porte la référence RMT ou SWP, ou celle de son lot, sinon l'équipe la comptabilise dans « Débits et retours » (« Débit d'un reversement », « Débit de la quote-part du cabinet ») ; dès son rattachement pour un remboursement";
 /** A payout the bank does not execute: no line on any statement. */
 export const PAYOUT_NOT_EXECUTED =
   "Un virement que la banque n'exécute pas (refusé, ou non autorisé après un nom non concordant) n'apparaît sur aucun relevé : il reste en cours jusqu'à ce que l'annulation après téléchargement soit disponible.";
@@ -610,10 +614,10 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "La banque a déjà exécuté ce fichier, en tout ou partie (un relevé montre le débit de l'un de ses virements ou de son lot) : il n'est plus servi. Ne le déposez plus : déposé de nouveau, il paierait une seconde fois.",
   // M2c-6b-1 review (money-1, K1): the database's hint, in the page's words (and the one link a batch line takes)
   own_transfer_line:
-    "Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, ligne groupée d'un lot de nos fichiers) : elle se comptabilise depuis le relevé, automatiquement à l'import ou par l'équipe (écran à venir). Elle ne se rattache pas à un paiement, ni à un remboursement (sauf la ligne groupée d'un lot de remboursements, à un remboursement de ce lot dont le fichier est déjà téléchargé), et ne se classe pas sans comptabiliser.",
+    "Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, ligne groupée d'un lot de nos fichiers) : elle se comptabilise depuis le relevé, automatiquement à l'import ou par l'équipe dans « Débits et retours » (débit d'un reversement, virement hors reversement, virement au compte propre, virement revenu), sinon elle attend le détail de la banque. Elle ne se rattache pas à un paiement, ni à un remboursement (sauf la ligne groupée d'un lot de remboursements, à un remboursement de ce lot dont le fichier est déjà téléchargé), et ne se classe pas sans comptabiliser.",
   // review round 3 (M1, M2): public.release_own_credit's and the top-up's refusal of a credit carrying our RMT/SWP id
   own_credit_own_transfer_line:
-    "Ce crédit porte la référence de l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient, ou celle de l'un des lots de nos fichiers. Il se comptabilise depuis le relevé, automatiquement à l'import quand la banque le signale comme un retour, sinon par l'équipe (écran à venir). Il ne devient ni le paiement d'un débiteur ni un approvisionnement. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.",
+    "Ce crédit porte la référence de l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient, ou celle de l'un des lots de nos fichiers. Il se comptabilise depuis le relevé, automatiquement à l'import quand la banque le signale comme un retour, sinon par l'équipe dans « Débits et retours » (« Virement revenu »), sinon il attend le détail de la banque. Il ne devient ni le paiement d'un débiteur ni un approvisionnement. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.",
   // review round 4 (N2): public.release_own_credit's refusal of a credit carrying our TOP id
   own_credit_top_up_line:
     "Ce crédit porte la référence de l'un de nos approvisionnements (TOP…) : c'est l'argent du cabinet, jamais le paiement d'un débiteur. Il se comptabilise comme « Approvisionnement par le compte propre » : automatiquement quand il correspond à l'approvisionnement demandé, sinon par l'équipe.",
@@ -624,6 +628,18 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   // review round 5 (Q4): public.resolve_duplicate's refusal (its hint, in the page's words): the line stays held
   duplicate_own_transfer_line:
     "Cette ligne porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, jamais le paiement d'un débiteur. Lue ainsi avant la correction de l'import, elle ne peut être ni libérée comme un paiement ni encore comptabilisée comme ce retour : elle reste dans « Doublons possibles ». Prévenez le support.",
+  // M2c-6b-2c (plan §4.1; critic L8): public.link_debit's guards — the line is booked with « Comptabiliser… »
+  // (review 6b-2c round 3: also a payout returned or cancelled the bank may have executed, never « en cours » alone)
+  payout_candidate:
+    "Cette ligne a le montant d'un virement du cabinet (reversement, quote-part ou remboursement en cours, ou reversement annulé ou revenu que la banque a pu exécuter) et ne porte pas sa référence : elle ne se classe pas sans comptabiliser. Si c'est ce virement, comptabilisez-la avec « Comptabiliser… » ; sinon, demandez le détail à la banque.",
+  // review 6b-2c round 3 (fix2-notdone:fee-explanation-text): the same refusal on a line « Comptabiliser… » does not
+  // offer (a debit the bank flags as a return: guardRefusalCode)
+  payout_candidate_not_bookable:
+    "Cette ligne a le montant d'un virement du cabinet (en cours, ou annulé ou revenu que la banque a pu exécuter) et ne porte pas sa référence : elle ne se classe pas sans comptabiliser. Si c'est le paiement d'un débiteur que sa banque reprend, liez-la à ce paiement avec « Retour du paiement … » ; sinon, demandez le détail à la banque et prévenez le support.",
+  client_payout_line:
+    "Ce débit va vers un compte de reversement d'un client : il se comptabilise comme « Virement hors reversement » (ou comme le débit de son reversement en cours).",
+  own_transfer_out_line:
+    "Un virement vers notre compte propre se comptabilise (« Virement au compte propre »), il ne se classe pas sans comptabiliser.",
   unknown:
     "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };

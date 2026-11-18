@@ -107,10 +107,27 @@ export function settlementText(
   return "à régler par compensation sur un reversement";
 }
 
-/** The status of a run in the client space: « ordonné » until the bank's debit is booked. */
-export function runStatusText(status: string, net: string | null): string {
-  if (status === "booked") return net === "0" ? "Réglé par compensation, sans virement" : "Virement débité de notre compte";
-  if (status === "cancelled") return "Annulé avant son exécution";
+/**
+ * The status of a run in the client space: « ordonné » until the bank's debit is booked. M2c-6b-2c (plan §7.4; critic
+ * L6, critic2 ML-12): the debit's date (`remittance_run.booked_on`, the debit line's booking date the database records)
+ * when the page has it; a cancelled run reads « Annulé avant la remise de son virement à la banque » (cancellation after
+ * download is switched off: a cancelled run's transfer never reached the bank in a file) unless the bank executed one of
+ * its chain's transfers all the same (`unplannedOn`, the summary's `unplanned_runs`), when saying so is the truth.
+ */
+export function runStatusText(
+  status: string,
+  net: string | null,
+  bookedOn?: string | null,
+  unplannedOn?: string | null,
+): string {
+  if (status === "booked") {
+    if (net === "0") return "Réglé par compensation, sans virement";
+    return bookedOn ? `Virement débité de notre compte le ${frenchDay(bookedOn)}` : "Virement débité de notre compte";
+  }
+  if (status === "cancelled")
+    return unplannedOn
+      ? `Annulé — la banque a néanmoins exécuté son virement le ${frenchDay(unplannedOn)} (voir le relevé suivant)`
+      : "Annulé avant la remise de son virement à la banque";
   return "Virement ordonné";
 }
 
@@ -128,8 +145,9 @@ export function runStatusText(status: string, net: string | null): string {
  * the neutral tone: the green stays the mark of a run whose own payout was debited.
  */
 export function statementRunView(
-  run: { status: string; net_minor: string | number | null } | null,
+  run: { status: string; net_minor: string | number | null; booked_on?: string | null } | null,
   returned?: { returned_on: string; repaid_by?: string | null } | null,
+  unplannedOn?: string | null,
 ): {
   label: string;
   tone: "neutral" | "ok" | "error";
@@ -143,7 +161,7 @@ export function statementRunView(
       ? { label: `${came} : reversé à nouveau par le reversement ${returned.repaid_by}`, tone: "neutral", net }
       : { label: `${came} : son montant sera reversé par un prochain reversement`, tone: "error", net };
   }
-  const label = runStatusText(run.status, net);
+  const label = runStatusText(run.status, net, run.booked_on ?? null, unplannedOn ?? null);
   if (run.status === "cancelled") return { label, tone: "error", net: null };
   return { label, tone: run.status === "booked" ? "ok" : "neutral", net };
 }
@@ -210,7 +228,28 @@ export type RemittanceSummary = {
   /** review M2c-6b-1 (K4): the client's runs whose payout came back, and (round 2, L2) the run that paid each again
    * (read through returnedRuns) */
   returned_runs?: unknown;
+  /** M2c-6b-2c (ML-12): the cancelled runs the bank executed all the same (read through unplannedRuns) */
+  unplanned_runs?: unknown;
 };
+
+/**
+ * M2c-6b-2c (critic L6, critic2 ML-12): the client's cancelled runs whose payout the bank executed all the same, by
+ * run id, with the date of the first such debit (the summary's `unplanned_runs`, keyed on every transfer of the run's
+ * chain). An entry that is not well formed is left out — the run then keeps its own words.
+ */
+export function unplannedRuns(summary: { unplanned_runs?: unknown } | null): Map<string, string> {
+  const out = new Map<string, string>();
+  const rows = summary?.unplanned_runs;
+  if (!Array.isArray(rows)) return out;
+  for (const r of rows as unknown[]) {
+    if (!r || typeof r !== "object") continue;
+    const { run_id, executed_on } = r as Record<string, unknown>;
+    if (typeof run_id === "string" && run_id !== "" && typeof executed_on === "string" &&
+        /^\d{4}-\d{2}-\d{2}$/.test(executed_on))
+      out.set(run_id, executed_on);
+  }
+  return out;
+}
 
 const isMinor = (v: unknown): v is string => typeof v === "string" && /^-?\d+$/.test(v);
 

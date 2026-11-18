@@ -14,7 +14,9 @@ import {
   lossEffect,
   offersTopUp,
   ownCreditEffect,
+  QUEUE_UNREAD,
   lineKindLabel,
+  linkGuarded,
   linkOffers,
   linkRefundEffect,
   readsLinkOptions,
@@ -24,6 +26,7 @@ import {
   returnEffect,
 } from "@/lib/payments/debits";
 import { money, signedMoney } from "@/lib/payments/statements";
+import { offersTransferLineBooking } from "@/lib/payments/transfer-lines";
 import {
   BookLine,
   Explain,
@@ -33,6 +36,7 @@ import {
   ReleaseOwnCredit,
   ResolveDuplicate,
 } from "./debit-actions";
+import { BookTransferLine } from "./transfer-line-sheet";
 
 const PAGE_SIZE = 20;
 const TABS: Record<string, string> = {
@@ -73,6 +77,9 @@ type Row = {
   total: number;
   /** « Doublons possibles »: what the import read the held line as, when the queue tells it (see heldKind) */
   held_kind?: string | null;
+  /** M2c-6b-2c (critic CSO-4): what « Comptabiliser… » may book the line as, by key (e, b, n, u; null: not offered) —
+   * its options are read only when its sheet opens */
+  bookable_as?: string | null;
 };
 
 /**
@@ -96,6 +103,10 @@ type Candidate = {
   end_to_end_id?: string;
   refund_status?: string;
   refund_minor?: string;
+  /** M2c-6b-2c (critic2 ML-4): a cancelled transfer's run, its status and number (debit_queue's enrichment) */
+  transfer_id?: string;
+  run_status?: string | null;
+  run_number?: string | null;
 };
 type Options = {
   payments: {
@@ -113,6 +124,8 @@ type Options = {
     status: string;
     payee_name: string;
   }[];
+  /** review 6b-2c round 3: on a debit, link_debit's answer for a payment's return (its code; null: it takes it) */
+  return_guard?: string | null;
 };
 
 /**
@@ -120,6 +133,8 @@ type Options = {
  * could not link (a payment's return, our refund, a refund come back), with what it found and the payments ops may
  * choose; CSV lines held as suspected duplicates; fees and other debits (not booked in M2b: explained gaps, founder
  * #20); lines decided. Every action is a SQL command that checks again what this page showed. Admins and ops managers.
+ * M2c-6b-2c (plan §7.3): « Comptabiliser… » on our transfer lines the import could not book (the debit of a payout, a
+ * lot, a transfer outside any run, a sweep to our own account, a transfer come back, an entry kept unsplit).
  */
 export default async function DebitsPage({
   searchParams,
@@ -155,13 +170,15 @@ export default async function DebitsPage({
       </WidePage>
     );
   }
-  const { data } = await supabase.rpc("debit_queue", {
+  const { data, error: queueError } = await supabase.rpc("debit_queue", {
     p_tab: tab,
     p_offset: (page - 1) * PAGE_SIZE,
     p_limit: PAGE_SIZE,
   });
   const rows = (data ?? []) as unknown as Row[];
   const total = rows[0]?.total ?? 0;
+  // review 6b-2c (cs-1): a queue the database could not read (its time limit) is said so, never « Aucune ligne » (0)
+  const unread = Boolean(queueError);
   // what ops may link a line to when the job found nothing it could link (bounded: one keyed read per line shown that
   // offers links; never our own transfers and credits, nor our RMT/SWP lines — review round 2, L4)
   const options = new Map<string, Options>();
@@ -216,13 +233,17 @@ export default async function DebitsPage({
             }`}
           >
             {label}
-            {key === tab ? ` (${total})` : ""}
+            {key === tab && !unread ? ` (${total})` : ""}
           </Link>
         ))}
       </nav>
 
       <Section title={TABS[tab]} testId="debit-list">
-        {rows.length === 0 ? (
+        {unread ? (
+          <p className="text-sm text-amber-900 dark:text-amber-200" data-testid="debit-list-unread">
+            {QUEUE_UNREAD}
+          </p>
+        ) : rows.length === 0 ? (
           <p className="text-sm text-zinc-600 dark:text-zinc-400">
             Aucune ligne.
           </p>
@@ -231,6 +252,7 @@ export default async function DebitsPage({
             {rows.map((r) => (
               <li
                 key={r.bank_transaction_id}
+                id={`ligne-${r.bank_transaction_id}`}
                 className="flex flex-col gap-2 py-3"
                 data-testid="debit-row"
               >
@@ -288,7 +310,7 @@ export default async function DebitsPage({
                     voir le relevé
                   </Link>
                 </p>
-                {debitReviewText(r) !== null ? (
+                {debitReviewText(r, options.get(r.bank_transaction_id)) !== null ? (
                   <p
                     className="text-sm text-amber-900 dark:text-amber-200"
                     data-testid="debit-review"
@@ -300,7 +322,7 @@ export default async function DebitsPage({
                     ) : null}{" "}
                     {/* review round 3 (M1): on our transfer coming back unflagged, what it is in place of the job's
                         top-up or client-credit review */}
-                    {debitReviewText(r)}
+                    {debitReviewText(r, options.get(r.bank_transaction_id))}
                   </p>
                 ) : null}
                 {tab === "a-classer" ? (
@@ -316,10 +338,12 @@ export default async function DebitsPage({
                       kind="fee"
                       label="Frais bancaires"
                       effect={feeEffect(money(r.amount_minor, r.currency))}
+                      offersBooking={offersTransferLineBooking(r)}
                       idempotencyKey={randomUUID()}
                     />
                     <Explain
                       lineId={r.bank_transaction_id}
+                      offersBooking={offersTransferLineBooking(r)}
                       idempotencyKey={randomUUID()}
                     />
                   </div>
@@ -426,9 +450,17 @@ function LineActions({
     returns: returnable,
     losses: beyond,
     refunds,
-  } = linkOffers(row, [...payments.values()], options?.refunds ?? []);
+  } = linkOffers(row, [...payments.values()], options?.refunds ?? [], options?.return_guard);
   return (
     <div className="flex flex-col gap-2">
+      {/* M2c-6b-2c (plan §7.3; critic CSO-4): our transfer lines booked from the statement, the options read on open */}
+      {offersTransferLineBooking(row) ? (
+        <BookTransferLine
+          lineId={row.bank_transaction_id}
+          currency={cur}
+          idempotencyKey={randomUUID()}
+        />
+      ) : null}
       {/* review round 3 (M1, M2): neither the top-up nor a relay on a credit carrying our RMT/SWP id (our transfer
           coming back, isOurTransferLine): the database refuses both (own_transfer_line) */}
       {offersTopUp(row) ? (
@@ -521,7 +553,9 @@ function LineActions({
           idempotencyKey={randomUUID()}
         />
       ))}
-      {explainable({
+      {/* M2c-6b-2c (plan §4.1): never on a debit « Comptabiliser… » books (link_debit refuses it) */}
+      {!linkGuarded(row) &&
+      explainable({
         direction: row.direction,
         kind: row.kind,
         namesPayment: fromReview.length > 0,
@@ -533,6 +567,7 @@ function LineActions({
       }) ? (
         <Explain
           lineId={row.bank_transaction_id}
+          offersBooking={offersTransferLineBooking(row)}
           idempotencyKey={randomUUID()}
         />
       ) : null}

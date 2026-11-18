@@ -15,6 +15,8 @@ export type Credit = {
   rf?: string;
   /** The payer's end-to-end id (NOTPROVIDED when absent). */
   e2e?: string;
+  /** M2c-6b-2c: the bank's return of one of our transfers (a return code, its RMT id as the end-to-end id). */
+  returned?: boolean;
 };
 
 /**
@@ -84,11 +86,12 @@ export function camt053Lines(
     return (
       `<Ntry><Amt Ccy="EUR">${amount(c.amountMinor)}</Amt><CdtDbtInd>CRDT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>` +
       `<BookgDt><Dt>${day}</Dt></BookgDt><ValDt><Dt>${day}</Dt></ValDt><AcctSvcrRef>N${esc(c.ref)}</AcctSvcrRef>` +
-      `<BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RCDT</Cd><SubFmlyCd>ESCT</SubFmlyCd></Fmly></Domn></BkTxCd>` +
+      `<BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>${c.returned ? "ICDT" : "RCDT"}</Cd><SubFmlyCd>${c.returned ? "RRTN" : "ESCT"}</SubFmlyCd></Fmly></Domn></BkTxCd>` +
       `<NtryDtls><TxDtls><Refs><AcctSvcrRef>${esc(c.ref)}</AcctSvcrRef><EndToEndId>${esc(c.e2e ?? "NOTPROVIDED")}</EndToEndId></Refs>` +
       `<Amt Ccy="EUR">${amount(c.amountMinor)}</Amt><CdtDbtInd>CRDT</CdtDbtInd>` +
       `<RltdPties><Dbtr><Pty><Nm>${esc(c.name)}</Nm></Pty></Dbtr><DbtrAcct><Id><IBAN>${c.iban}</IBAN></Id></DbtrAcct></RltdPties>` +
       (remittance ? `<RmtInf>${remittance}</RmtInf>` : "") +
+      (c.returned ? "<RtrInf><Rsn><Cd>AC04</Cd></Rsn></RtrInf>" : "") +
       `</TxDtls></NtryDtls></Ntry>`
     );
   });

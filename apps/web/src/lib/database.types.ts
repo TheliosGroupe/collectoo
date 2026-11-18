@@ -2815,7 +2815,7 @@ isOneToOne: false
                            },
 "debit_queue":
 { Args: { "p_limit"?: number,"p_offset"?: number,"p_tab"?: string }; Returns: {
-              "age_days": number,"amount_minor": string,"bank_account_id": string,"bank_transaction_id": string,"booking_date": string,"candidates": Json,"counterparty_iban_end": string,"counterparty_name": string,"currency": string,"decided_at": string,"decided_payment_id": string,"decision": string,"direction": string,"end_to_end_id": string,"held_kind": string,"kind": string,"names_our_lot": boolean,"original_end_to_end_id": string,"payment_info_id": string,"remittance_text": string,"return_reason": string,"review_reason": string,"statement_id": string,"total": number,"unsplit_ours": number
+              "age_days": number,"amount_minor": string,"bank_account_id": string,"bank_transaction_id": string,"bookable_as": string,"booking_date": string,"candidates": Json,"counterparty_iban_end": string,"counterparty_name": string,"currency": string,"decided_at": string,"decided_payment_id": string,"decision": string,"direction": string,"end_to_end_id": string,"held_kind": string,"kind": string,"names_our_lot": boolean,"original_end_to_end_id": string,"payment_info_id": string,"remittance_text": string,"return_reason": string,"review_reason": string,"statement_id": string,"total": number,"unsplit_ours": number
             }[]
                            },
 "discard_remittance_run":
@@ -2902,6 +2902,9 @@ isOneToOne: false
 "remittance_run_detail":
 { Args: { "p_limit"?: number,"p_offset"?: number,"p_run_id": string }; Returns: Json
                            },
+"remittance_run_payout":
+{ Args: { "p_run_id": string }; Returns: Json
+                           },
 "request_payment_checks":
 { Args: { "p_organization_id": string }; Returns: Json
                            },
@@ -2971,6 +2974,11 @@ isOneToOne: false
                            },
 "submit_statement_import":
 { Args: { "p_idempotency_key": string,"p_statement_id": string }; Returns: string
+                           },
+"transfer_bookings":
+{ Args: { "p_transfer_ids": (string)[] }; Returns: {
+              "debit_line_id": string,"debited_on": string,"return_line_id": string,"returned_on": string,"transfer_id": string,"unplanned_on": string
+            }[]
                            },
 "transfer_file_detail":
 { Args: { "p_after_seq"?: number,"p_file_id": string,"p_limit"?: number }; Returns: Json

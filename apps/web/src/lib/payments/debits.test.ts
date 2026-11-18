@@ -317,6 +317,9 @@ describe("returns (founder #13; design §2 #3)", () => {
         "unplanned_payout_return",
         "return_debit_pending",
         "own_transfer_line",
+        // M2c-6b-2c: « À classer »'s reasons for a reference-less debit « Comptabiliser… » books (not stored)
+        "payout_amount_match",
+        "client_payout_iban",
       ].sort(),
     );
   });
@@ -1468,7 +1471,7 @@ describe("M2c-6b-1 review round 3: our transfers coming back are never a debtor'
     const text = errorText(code);
     expect(text).toContain("l'un de nos propres virements (reversement ou quote-part du cabinet) qui revient");
     expect(text).toContain(
-      "Il se comptabilise depuis le relevé, automatiquement à l'import quand la banque le signale comme un retour, sinon par l'équipe (écran à venir).",
+      "Il se comptabilise depuis le relevé, automatiquement à l'import quand la banque le signale comme un retour, sinon par l'équipe dans « Débits et retours » (« Virement revenu »), sinon il attend le détail de la banque.",
     );
     expect(text).toContain("Il ne devient ni le paiement d'un débiteur ni un approvisionnement.");
     expect(text).not.toMatch(/refused|own_transfer|RETURN_RE/);
@@ -1502,10 +1505,11 @@ describe("M2c-6b-1 review round 3: our transfers coming back are never a debtor'
       expect(text, what).toContain(
         "Crédit portant la référence de l'un de nos virements (reversement ou quote-part du cabinet) : c'est ce virement qui revient, sans que la banque l'ait signalé comme un retour.",
       );
+      // M2c-6b-2c (plan §4.3): the screen exists — « Virement revenu » at its exact amount
       expect(text, what).toContain(
-        "Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement, et ne se classe pas sans comptabiliser.",
+        "Comptabilisez-le avec « Virement revenu » pour son montant exact (s'il est inférieur, demandez le détail à la banque) ; il ne devient ni le paiement d'un débiteur ni un approvisionnement.",
       );
-      expect(text, what).toContain("Vérifiez dans la banque");
+      expect(text, what).not.toContain("écran à venir");
       expect(text, what).not.toContain("paiement à affecter");
       // shown even when the job left no review on it
       expect(debitReviewText({ ...o, review_reason: null }), what).toBe(text);

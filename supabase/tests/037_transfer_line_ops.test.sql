@@ -16,12 +16,14 @@
 --      counts);
 --   I. compare and set (CSO-12); K. the booking guard; L. alerts. (J, every read's tenant isolation beyond A's, and M,
 --      the funds pass after an ops booking beyond G's and E's sweeps, are left: ADR-0014 « M2c-6b-2b ».)
+--   P. (6b-2c, plan §4) the guards of « Lier », the queue's bookable_as and reasons, the end of a suppression
+--      (transfer_line_offers, the five-business-day bound, debit_unbooked, bank_line_unbooked), the pages' reads.
 -- The review fixes (round 1: ADR-0014 « M2c-6b-2b review fixes ») add, in their groups, the cases named « review … ».
 -- run_payment_checks is asserted free of violations after each group (I8′, I12, I13, I14, I19, I20, bank_line_booked).
 -- Cancellation after download stays off (033 and 034 unchanged): the scenarios that need a payout cancelled after its
 -- file was handed out switch it on inside their own rolled-back subtransaction.
 begin;
-select plan(71);
+select plan(95);
 
 
 -- Fixtures (as 034: the servicer aa, its dedicated account cf and own account c0; Martin a1, Lilas a2, Cyprès a3;
@@ -375,6 +377,9 @@ create temporary table j (k text primary key, v jsonb) on commit drop;
 -- line is already late at its debit — the booking-time breach, which no single test day reaches otherwise).
 create temporary table dated (account_id uuid primary key, latest date not null) on commit drop;
 create temporary table earliest_hdr (client text primary key, d date not null) on commit drop;
+-- (review 6b-2c money-3) and the items of an account whose mandate's delay cannot be met (`unmeetable_acct`: the job
+-- marks them unmeetable, held to one month after their collection)
+create temporary table unmeetable_acct (account_id uuid primary key) on commit drop;
 create or replace function pg_temp.prepare(p_run uuid, p_docs jsonb, p_keys jsonb, p_plan jsonb) returns integer
 language plpgsql as $$
 declare r public.remittance_run;
@@ -398,6 +403,8 @@ begin
   join public.portfolio pf on pf.id = a.portfolio_id
   left join dated d on d.account_id = e.account_id
   where q.draft_run_id = p_run;
+  update private.remittance_draft_line l set unmeetable = true
+  from unmeetable_acct u where l.run_id = p_run and l.account_id = u.account_id;
   perform private.remittance_record_draft(p_run, r.job_token, jsonb_build_object(
     'line_count', (select count(*) from private.remittance_draft_line where run_id = p_run),
     'gross', (select sum(amount_minor)::text from private.remittance_draft_line where run_id = p_run),
@@ -408,7 +415,8 @@ begin
     'earliest_latest_execution_date',
       coalesce((select h.d from earliest_hdr h where h.client = right(r.client_organization_id::text, 2)),
                (select min(latest_execution_date) from private.remittance_draft_line where run_id = p_run)),
-    'unmeetable', 0, 'blockers', '[]'::jsonb, 'commission_blockers', '[]'::jsonb, 'engine_version', 'commission-1',
+    'unmeetable', (select count(*) from private.remittance_draft_line where run_id = p_run and unmeetable),
+    'blockers', '[]'::jsonb, 'commission_blockers', '[]'::jsonb, 'engine_version', 'commission-1',
     'inputs_hash', encode(sha256(convert_to(p_run::text || p_plan::text, 'UTF8')), 'hex'),
     'payout_account_id', (select pa.id from public.client_payout_account pa
                           where pa.client_organization_id = r.client_organization_id and pa.status = 'active'),
@@ -1052,7 +1060,14 @@ begin
     jsonb_build_object('amount', pg_temp.amt(v_s), 'e2e', pg_temp.e2e(v_s))));
   v := jsonb_build_object(
     'own', pg_temp.prop(pg_temp.l2('e1', 1)),
-    'own_booked', pg_temp.bkx(pg_temp.l2('e1', 1), pg_temp.prop(pg_temp.l2('e1', 1))));
+    -- (review 6b-2c T3) the sheet's share left on the dedicated account once this sweep is booked
+    'share_after', pg_temp.op(pg_temp.l2('e1', 1)) -> 'proposals' -> 0 -> 'preview' -> 'parts' -> 0 ->> 'share_after_minor');
+  v := v || jsonb_build_object('own_booked', pg_temp.bkx(pg_temp.l2('e1', 1), pg_temp.prop(pg_temp.l2('e1', 1))));
+  v := v || jsonb_build_object('share_after', (v ->> 'share_after')::bigint = (
+    select -coalesce(sum(lp.amount_minor), 0) from public.ledger_posting lp
+    join public.ledger_account la on la.id = lp.ledger_account_id
+    where la.organization_id = '00000000-0000-0000-0000-0000000000aa' and la.book = 'due_to_servicer'
+      and la.currency = 'EUR'));
   v := v || jsonb_build_object('own_bank', (select la.bank_account_id from public.ledger_posting p join public.ledger_account la
                    on la.id = p.ledger_account_id
                  where p.entry_id = pg_temp.ek('sweep:line:' || pg_temp.l2('e1', 1) || ':1') and la.book = 'own_cash'));
@@ -1069,7 +1084,7 @@ begin
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.isolated('e_sweeps'),
-  '{"own": [{"kind": "unplanned_sweep", "amount": "10000"}], "own_booked": "ok",
+  '{"own": [{"kind": "unplanned_sweep", "amount": "10000"}], "share_after": true, "own_booked": "ok",
     "own_bank": "80000000-0000-0000-0000-0000000000c0", "in_flight": "sweep_in_flight_matches", "sweep_booked": "ok",
     "unknown_own": "own_account_unknown", "s15": true, "s15_booked": "ok", "dirty": []}'::jsonb,
   'E (S14, S15; F13): a debit to our own IBAN we did not order is an unplanned sweep to that account; one of a sweep '
@@ -1256,7 +1271,9 @@ begin
   -- a held duplicate, a line the job booked, a line linked (explained), a payment's line
   perform pg_temp.stmt2('b3', private.paris_today(), jsonb_build_array(
     jsonb_build_object('amount', 164000, 'kind', 'suspected_duplicate', 'e2e', pg_temp.e2e(pg_temp.v('x1'))),
-    jsonb_build_object('amount', 1000, 'kind', 'other_debit', 'iban', 'FR7630004000031234567890143')));
+    -- (6b-2c: a debit to a client's payout IBAN is no longer explained, client_payout_line — this one goes to an IBAN
+    -- that is no client's)
+    jsonb_build_object('amount', 1000, 'kind', 'other_debit', 'iban', 'FR8130004000039876543210134')));
   perform pg_temp.link('key-ex-b3-2', pg_temp.l2('b3', 2), 'explained', null, null, null);
   return jsonb_build_object(
     'held', pg_temp.bkx(pg_temp.l2('b3', 1), pg_temp.s03()),
@@ -3032,6 +3049,1182 @@ select is(pg_temp.isolated('l_alerts'), '{"before": true, "after": false, "revie
   'L: the P0 transfer_unknown of a line carrying an RMT-shaped id ends once ops book it (its review deleted)');
 select is(pg_temp.dirty(), '{}'::text[], 'H, I, K, L: clean');
 select is(private.switch_on('downloaded_file_cancellation'), false, 'and the switch is off (033 and 034 unchanged)');
+
+
+-- P. 6b-2c « pages » (plan §4, §8.1 P; ADR-0014 « M2c-6b-2c »): the mis-booking guards of « Lier » (§4.1), the queue's
+-- cheap bookable_as and its two reasons (critic CSO-4, critic2 CSO2-13), the end of a suppression (§4.2; critic L8,
+-- critic2 ML-7: private.transfer_line_offers, the five-business-day bound, the breach row debit_unbooked,
+-- bank_line_unbooked), the reads of the run page, « Virements » and the client space (§4.4; critic CSO-9, L6, critic2
+-- ML-12). The new functions are called dynamically, so that before this slice's migration the cases fail, not the file.
+-- « Lier » by ops (user 01): ok, or the refusal's code
+create or replace function pg_temp.lk(p_line uuid, p_kind text, p_refund uuid default null) returns text
+language plpgsql as $$
+begin
+  perform pg_temp.link('lk-' || md5(p_line::text || p_kind || coalesce(p_refund::text, '')), p_line, p_kind, null,
+                       p_refund, null);
+  return 'ok';
+exception when others then
+  return regexp_replace(sqlerrm, '^(debit link refused|bank booking refused): ', '');
+end $$;
+-- (review 6b-2c money-1) « Retour du paiement … » or its loss by ops: ok, or the refusal's code
+create or replace function pg_temp.lkp(p_line uuid, p_kind text, p_payment uuid, p_left text) returns text
+language plpgsql as $$
+begin
+  perform pg_temp.link('lkp-' || md5(p_line::text || p_kind || p_payment::text), p_line, p_kind, p_payment, null, p_left);
+  return 'ok';
+exception when others then
+  return regexp_replace(sqlerrm, '^(debit link refused|bank booking refused): ', '');
+end $$;
+-- the queue's rows of tab p_tab as ops (user 01): {line: [review_reason, bookable_as, first candidate]}
+create or replace function pg_temp.dq(p_tab text) returns jsonb language plpgsql as $$
+declare v jsonb;
+begin
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  select coalesce(jsonb_object_agg(q.bank_transaction_id::text,
+                                   jsonb_build_array(q.review_reason, to_jsonb(q) ->> 'bookable_as',
+                                                     q.candidates -> 0)), '{}')
+  into v from public.debit_queue(p_tab, 0, 100) q;
+  reset role;
+  return v;
+end $$;
+-- private.transfer_line_offers(line, transfer), or null before this slice
+create or replace function pg_temp.offers(p_line uuid, p_transfer uuid) returns boolean language plpgsql as $$
+declare v boolean;
+begin
+  if to_regprocedure('private.transfer_line_offers(uuid,uuid)') is null then
+    return null;
+  end if;
+  execute 'select private.transfer_line_offers($1, $2)' into v using p_line, p_transfer;
+  return v;
+end $$;
+-- whether the options of a line propose a booking containing this transfer
+create or replace function pg_temp.proposes(p_line uuid, p_transfer uuid) returns boolean language sql as $$
+  select exists (select 1 from jsonb_array_elements(coalesce(pg_temp.op(p_line) -> 'proposals', '[]')) p
+                 cross join lateral jsonb_array_elements(p -> 'request') x
+                 where x ->> 'transfer_id' = p_transfer::text) $$;
+-- a CSV statement of the dedicated account (lines [{day, kind, amount, e2e, pmt, iban}], line k is pg_temp.l2(n, k)),
+-- its period p_from … p_to, uploaded at p_uploaded (a CSV covers a day uploaded after it, its period ending after it)
+create or replace function pg_temp.csv2(p_n text, p_lines jsonb, p_from date, p_to date, p_uploaded timestamptz)
+returns uuid language plpgsql as $$
+declare s uuid := ('e4' || lpad(p_n, 6, '0') || '-0000-0000-0000-000000000000')::uuid;
+begin
+  insert into public.bank_statement (id, organization_id, bank_account_id, currency, format, file_name, file_sha256,
+                                     size_bytes, storage_path)
+  values (s, '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf', 'EUR', 'csv', 'r.csv',
+          encode(sha256(convert_to(s::text, 'UTF8')), 'hex'), 1, 'test/' || s);
+  update public.bank_statement set status = 'uploaded', uploaded_at = p_uploaded where id = s;
+  insert into public.bank_transaction (id, organization_id, bank_account_id, statement_id, line_no, dedup_key, direction,
+                                       amount_minor, currency, booking_date, kind, end_to_end_id, payment_info_id,
+                                       counterparty_iban)
+  select pg_temp.l2(p_n, l.ord::integer), '00000000-0000-0000-0000-0000000000aa', '80000000-0000-0000-0000-0000000000cf',
+         s, l.ord, 'c:' || s || l.ord, 'debit', (l.v ->> 'amount')::bigint, 'EUR', (l.v ->> 'day')::date,
+         l.v ->> 'kind', l.v ->> 'e2e', l.v ->> 'pmt', l.v ->> 'iban'
+  from jsonb_array_elements(p_lines) with ordinality l (v, ord);
+  update public.bank_statement set status = 'imported', from_date = p_from, to_date = p_to, counts = '{}',
+    finished_at = clock_timestamp()
+  where id = s;
+  return s;
+end $$;
+-- the runs' nightly checks as of p_today; then each run's breach rows' blocked reasons (coalesced to 'none')
+create or replace function pg_temp.runs_check(p_today date) returns void language plpgsql as $$
+declare v uuid;
+begin
+  insert into public.payment_check_run (organization_id) values ('00000000-0000-0000-0000-0000000000aa')
+  returning id into v;
+  perform private.run_remittance_runs_checks(v, '00000000-0000-0000-0000-0000000000aa', p_today);
+  update public.payment_check_run set finished_at = clock_timestamp() where id = v;
+end $$;
+create or replace function pg_temp.breaches(p_run uuid) returns jsonb language sql as $$
+  select coalesce(jsonb_agg(coalesce(b.blocked_reason, 'none') order by b.ledger_entry_id), '[]')
+  from public.remittance_deadline_breach b where b.run_id = p_run $$;
+-- the transfer checks' bank_line_unbooked row as of p_today: [its line ids, its p0 flag]
+create or replace function pg_temp.unbooked(p_today date) returns jsonb language plpgsql as $$
+declare v uuid;
+begin
+  insert into public.payment_check_run (organization_id) values ('00000000-0000-0000-0000-0000000000aa')
+  returning id into v;
+  perform private.run_transfer_checks(v, '00000000-0000-0000-0000-0000000000aa', p_today);
+  update public.payment_check_run set finished_at = clock_timestamp() where id = v;
+  return coalesce((select jsonb_build_array(c.details -> 'ids', c.details -> 'p0') from public.payment_check_result c
+                   where c.run_id = v and c.code = 'bank_line_unbooked'), '[null, null]');
+end $$;
+-- a new read of this slice as user p_user (aal p_aal): its value as jsonb, null when it does not exist yet
+create or replace function pg_temp.read(p_user text, p_sql text, p_aal text default 'aal2') returns jsonb
+language plpgsql as $$
+declare v jsonb;
+begin
+  perform pg_temp.as_user(p_user, p_aal);
+  set local role authenticated;
+  begin
+    execute p_sql into v;
+  exception when undefined_function then
+    v := to_jsonb('missing'::text);
+  when insufficient_privilege then
+    v := to_jsonb('not allowed'::text);
+  end;
+  reset role;
+  return v;
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+
+-- §4.1 the guards of « Lier »: « Frais bancaires » and « Classer sans comptabiliser » on a reference-less debit a
+-- transfer of ours may be (payout_candidate) or that went to a client's payout IBAN (client_payout_line); the
+-- explanation of a transfer out to our own IBAN (own_transfer_out_line); the refund link when another transfer of ours
+-- may be the line (critic F9); the controls book
+create or replace function pg_temp.p_guards() returns jsonb language plpgsql as $$
+declare v_t uuid; v_r1 uuid; v_r2 uuid; v_reason text; v_left text; v_f uuid; v_opts jsonb;
+begin
+  perform pg_temp.exec_on(pg_temp.v('fa'), private.paris_today() - 1);   -- x2 executed yesterday
+  v_t := pg_temp.queued('a5', '05', 30000, 'p-g5');   -- Roux, 24 600
+  perform pg_temp.collect('c5', 24600, private.paris_today() - 3, false);
+  perform pg_temp.collect('c7', 1000, private.paris_today() - 3, false);
+  select p.review_reason, x.unallocated_minor::text into v_reason, v_left
+  from public.payment p cross join lateral private.payment_positions(array[p.id]) x where p.id = pg_temp.pay('c5');
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v_r1 := (public.request_refund('p-g-refund-1', pg_temp.pay('c5'), '24600', pg_temp.iban('a5'), 'ROUX SA', 'other',
+                                 v_reason, v_left, 'payeur inconnu') ->> 'refund_request_id')::uuid;
+  reset role;
+  select p.review_reason, x.unallocated_minor::text into v_reason, v_left
+  from public.payment p cross join lateral private.payment_positions(array[p.id]) x where p.id = pg_temp.pay('c7');
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v_r2 := (public.request_refund('p-g-refund-2', pg_temp.pay('c7'), '1000', null, null, 'other', v_reason, v_left,
+                                 'payeur inconnu') ->> 'refund_request_id')::uuid;
+  reset role;
+  v_f := pg_temp.handed_out('fpg', 'gen-p-guards');
+  perform pg_temp.exec_on(v_f, private.paris_today() - 1);
+  perform pg_temp.stmt2('ab1', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 419840, 'kind', 'other_debit', 'iban', pg_temp.iban('a2')),
+    jsonb_build_object('amount', 419840, 'kind', 'other_debit', 'iban', pg_temp.iban('a2')),
+    jsonb_build_object('amount', 5000, 'kind', 'other_debit', 'iban', pg_temp.iban('a3')),
+    jsonb_build_object('amount', 5000, 'kind', 'other_debit', 'iban', pg_temp.iban('a3')),
+    jsonb_build_object('amount', 7000, 'kind', 'transfer_out', 'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('amount', 1234, 'kind', 'other_debit', 'iban', 'FR8130004000039876543210134'),
+    jsonb_build_object('amount', 4321, 'kind', 'other_debit', 'iban', 'FR8130004000039876543210134'),
+    jsonb_build_object('amount', 24600, 'kind', 'other_debit', 'iban', pg_temp.iban('a5')),
+    jsonb_build_object('amount', 1000, 'kind', 'other_debit'),
+    -- (review 6b-2c T4) debits to a client's returned and to a client's retired payout account; (money-2) a flagged
+    -- return without our reference from a client's payout IBAN
+    jsonb_build_object('amount', 6100, 'kind', 'other_debit', 'iban', pg_temp.iban('a6')),
+    jsonb_build_object('amount', 6200, 'kind', 'other_debit', 'iban', pg_temp.iban('a9')),
+    jsonb_build_object('dir', 'credit', 'amount', 9900, 'kind', 'return', 'iban', pg_temp.iban('a1')),
+    jsonb_build_object('amount', 4400, 'kind', 'other_debit', 'iban', 'FR8130004000039876543210134'),
+    -- the same flagged return in an entry the bank kept unsplit (none of its details ours): not one movement, it keeps
+    -- the explanation (« Comptabiliser… » is not offered on it)
+    jsonb_build_object('dir', 'credit', 'amount', 9800, 'kind', 'return', 'iban', pg_temp.iban('a1'), 'unsplit', 0)));
+  update public.client_payout_account set status = 'returned' where client_organization_id = pg_temp.c('a6');
+  update public.client_payout_account set status = 'retired', closed_by = '10000000-0000-0000-0000-000000000001',
+    closed_at = now(), closed_reason = 'Fermé (test)'
+  where client_organization_id = pg_temp.c('a9');
+  -- what « À classer » offers to link, read before any link: no payment on a guarded debit, no refund on the guarded
+  -- credit, nor the refund another transfer of ours may be (Roux's payout), while a refund alone is still listed
+  v_opts := pg_temp.read('01', format(
+    'select jsonb_build_array(jsonb_array_length(public.debit_link_options(%L) -> ''payments''), '
+    'jsonb_array_length(public.debit_link_options(%L) -> ''payments''), '
+    'jsonb_array_length(public.debit_link_options(%L) -> ''payments'') > 0, '
+    'jsonb_array_length(public.debit_link_options(%L) -> ''refunds''), '
+    'jsonb_array_length(public.debit_link_options(%L) -> ''refunds''), '
+    'jsonb_array_length(public.debit_link_options(%L) -> ''refunds''))',
+    pg_temp.l2('ab1', 1), pg_temp.l2('ab1', 3), pg_temp.l2('ab1', 13), pg_temp.l2('ab1', 12), pg_temp.l2('ab1', 8),
+    pg_temp.l2('ab1', 9)));
+  return jsonb_build_object(
+    'options', v_opts,
+    'fee_candidate', pg_temp.lk(pg_temp.l2('ab1', 1), 'fee'),
+    'explain_candidate', pg_temp.lk(pg_temp.l2('ab1', 2), 'explained'),
+    'fee_client', pg_temp.lk(pg_temp.l2('ab1', 3), 'fee'),
+    'explain_client', pg_temp.lk(pg_temp.l2('ab1', 4), 'explained'),
+    'explain_own', pg_temp.lk(pg_temp.l2('ab1', 5), 'explained'),
+    'fee_plain', pg_temp.lk(pg_temp.l2('ab1', 6), 'fee'),
+    'explain_plain', pg_temp.lk(pg_temp.l2('ab1', 7), 'explained'),
+    'refund_other', pg_temp.lk(pg_temp.l2('ab1', 8), 'refund', v_r1),
+    'refund_alone', pg_temp.lk(pg_temp.l2('ab1', 9), 'refund', v_r2),
+    -- (review 6b-2c money-1) a payment's return, or its loss, on the same lines: never a debtor's money
+    'return_candidate', pg_temp.lkp(pg_temp.l2('ab1', 1), 'return', pg_temp.pay('13'), '1000000'),
+    'loss_candidate', pg_temp.lkp(pg_temp.l2('ab1', 2), 'loss', pg_temp.pay('13'), '0'),
+    'return_client', pg_temp.lkp(pg_temp.l2('ab1', 3), 'return', pg_temp.pay('13'), '1000000'),
+    'return_refund_line', pg_temp.lkp(pg_temp.l2('ab1', 8), 'return', pg_temp.pay('13'), '1000000'),
+    -- (T4) a client's returned or retired payout account is still the client's
+    'fee_returned_account', pg_temp.lk(pg_temp.l2('ab1', 10), 'fee'),
+    'explain_retired_account', pg_temp.lk(pg_temp.l2('ab1', 11), 'explained'),
+    -- (money-2) the flagged return from a client's payout IBAN: never explained, nor a refund come back
+    'explain_return_credit', pg_temp.lk(pg_temp.l2('ab1', 12), 'explained'),
+    'refund_back_credit', pg_temp.lk(pg_temp.l2('ab1', 12), 'refund_returned', v_r1),
+    'explain_unsplit_credit', pg_temp.lk(pg_temp.l2('ab1', 14), 'explained'),
+    -- a debit to no one we know is still a payment's return
+    'return_plain', pg_temp.lkp(pg_temp.l2('ab1', 13), 'return', pg_temp.pay('13'), '1000000'),
+    'dirty', pg_temp.dirty());
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_guards'),
+  '{"fee_candidate": "payout_candidate", "explain_candidate": "payout_candidate", "fee_client": "client_payout_line",
+    "explain_client": "client_payout_line", "explain_own": "own_transfer_out_line", "fee_plain": "ok",
+    "explain_plain": "ok", "refund_other": "payout_candidate", "refund_alone": "ok",
+    "return_candidate": "payout_candidate", "loss_candidate": "payout_candidate", "return_client": "client_payout_line",
+    "return_refund_line": "payout_candidate", "fee_returned_account": "client_payout_line",
+    "explain_retired_account": "client_payout_line", "explain_return_credit": "client_payout_line",
+    "refund_back_credit": "client_payout_line", "explain_unsplit_credit": "ok", "options": [0, 0, true, 0, 0, 1], "return_plain": "ok",
+    "dirty": []}'::jsonb,
+  'P (§4.1; critic F9; review 6b-2c money-1, money-2, T4): « Frais bancaires » and « Classer sans comptabiliser » are '
+  'refused payout_candidate on a debit without our reference a transfer of ours in flight may be, client_payout_line on '
+  'a debit to a client''s payout IBAN (its account active, returned or retired); the explanation of a transfer out to '
+  'our own IBAN own_transfer_out_line; the refund link payout_candidate when another transfer of ours may be the line; a '
+  'payment''s return and its loss likewise (and debit_link_options lists no payment there); the explanation and the '
+  'refund come back on a flagged return from a client''s payout IBAN client_payout_line (no refund listed) — a debit to '
+  'no one we know is still a fee, explained or a payment''s return, a refund alone its candidate still linked');
+
+-- §4.1 the queue (critic CSO-4; critic2 CSO2-13): « À classer » lists the reference-less debits a transfer of ours may
+-- be (payout_amount_match, the candidates) and those to a client's payout IBAN (client_payout_iban, the client), with
+-- bookable_as n; « Frais » no longer does; every row's bookable_as by key: e our id, b our lot, u stored details, null
+-- otherwise
+create or replace function pg_temp.p_queue() returns jsonb language plpgsql as $$
+declare a jsonb; f jsonb;
+begin
+  perform pg_temp.exec_on(pg_temp.v('fa'), private.paris_today() - 1);
+  perform pg_temp.stmt2('ab2', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 419840, 'kind', 'other_debit', 'iban', pg_temp.iban('a2')),
+    jsonb_build_object('amount', 5000, 'kind', 'other_debit', 'iban', pg_temp.iban('a3')),
+    jsonb_build_object('amount', 1234, 'kind', 'other_debit', 'iban', 'FR8130004000039876543210134'),
+    jsonb_build_object('amount', 419840, 'kind', 'transfer_out', 'e2e', pg_temp.e2e(pg_temp.v('x2'))),
+    jsonb_build_object('amount', 419000, 'kind', 'batch_unsplit', 'pmt', pg_temp.pmt(pg_temp.v('x2'))),
+    jsonb_build_object('amount', 419840, 'kind', 'batch_unsplit', 'unsplit', 1, 'count', 1,
+                       'details', jsonb_build_array(jsonb_build_object('id', pg_temp.e2e(pg_temp.v('x2')),
+                                                                       'direction', 'debit',
+                                                                       'amount_minor', '419840'))),
+    -- (review 6b-2c T4) a reference-less other debit to our own IBAN; a flagged return without our reference from a
+    -- client's payout IBAN; (cs-2) an other debit whose TF PmtInfId names no lot of ours (E0), to our own IBAN
+    jsonb_build_object('amount', 7000, 'kind', 'other_debit', 'iban', 'FR7610107001011234567890129'),
+    jsonb_build_object('dir', 'credit', 'amount', 9900, 'kind', 'return', 'iban', pg_temp.iban('a1')),
+    jsonb_build_object('amount', 7100, 'kind', 'other_debit', 'pmt', 'TF-2026-999999-9',
+                       'iban', 'FR7610107001011234567890129')));
+  a := pg_temp.dq('a-classer');
+  f := pg_temp.dq('frais');
+  return jsonb_build_object(
+    'own', a -> pg_temp.l2('ab2', 7)::text,
+    'return_credit', a -> pg_temp.l2('ab2', 8)::text -> 1,
+    'e0_rows', pg_temp.read('01', format('select count(*) from public.debit_queue(''a-classer'', 0, 100) q '
+                                         'where q.bank_transaction_id = %L', pg_temp.l2('ab2', 9))),
+    'candidate', jsonb_build_array(a -> pg_temp.l2('ab2', 1)::text -> 0, a -> pg_temp.l2('ab2', 1)::text -> 1,
+                                   a -> pg_temp.l2('ab2', 1)::text -> 2 ->> 'transfer_id' = pg_temp.v('x2')::text),
+    'client', jsonb_build_array(a -> pg_temp.l2('ab2', 2)::text -> 0, a -> pg_temp.l2('ab2', 2)::text -> 1,
+                                a -> pg_temp.l2('ab2', 2)::text -> 2 ->> 'client_id' = pg_temp.c('a3')::text),
+    'in_frais', jsonb_build_array(f ? pg_temp.l2('ab2', 1)::text, f ? pg_temp.l2('ab2', 2)::text,
+                                  f ? pg_temp.l2('ab2', 3)::text),
+    'plain', jsonb_build_array(a ? pg_temp.l2('ab2', 3)::text, f -> pg_temp.l2('ab2', 3)::text -> 1),
+    'ours', jsonb_build_array(a -> pg_temp.l2('ab2', 4)::text -> 1, a -> pg_temp.l2('ab2', 5)::text -> 1,
+                              a -> pg_temp.l2('ab2', 6)::text -> 1));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_queue'),
+  '{"candidate": ["payout_amount_match", "n", true], "client": ["client_payout_iban", "n", true],
+    "in_frais": [false, false, true], "plain": [false, null], "ours": ["e", "b", "u"],
+    "own": ["own_transfer_out", "n", null], "return_credit": "n", "e0_rows": 1}'::jsonb,
+  'P (§4.1; critic CSO-4, critic2 CSO2-13; review 6b-2c T4, cs-2): « À classer » lists a reference-less debit of an '
+  'in-flight payout''s amount to its IBAN (payout_amount_match, its candidate), a debit to a client''s payout IBAN '
+  '(client_payout_iban, the client) and one to our own IBAN (own_transfer_out), bookable_as n, and « Frais » none of '
+  'them; a debit to no one we know stays in « Frais », bookable_as null; our id e, our lot b, stored details u; a flagged '
+  'return from a client''s payout IBAN n; a line whose TF PmtInfId names no lot of ours listed once');
+
+-- §4.2 (critic L8, critic2 ML-7) the end of a suppression. Five payouts of one file, their lines held to today, executed
+-- today on a CSV export without the end-to-end column (statements covering today): Roux and Moreau 24 600 each,
+-- Dupont 82 000, Durand 41 000, Lambert 32 800 (held to yesterday, approved on time). Lines of today: 24 600 (two
+-- candidates: line_ambiguous), 41 000 (Durand its only candidate), our lot 106 600 (two subsets: batch_ambiguous);
+-- 32 800, Lambert's only candidate, dated after its date. Lambert's line booked at once: its breach row at the booking.
+-- Then the nightly checks four and five business days on: the lines that offer no booking of Roux, Moreau or Dupont
+-- suppress their rows for five business days, then the rows are written debit_unbooked; Durand's line offers its
+-- booking and keeps suppressing (and raises bank_line_unbooked after one business day, P0 once its date has passed);
+-- booked by ops, on time: no row, ever
+create or replace function pg_temp.p_bound() returns jsonb language plpgsql as $$
+declare v_today date := private.paris_today(); v_4 uuid; v_5 uuid; v_6 uuid; v_7 uuid; v_9 uuid; v_f uuid; v jsonb;
+begin
+  insert into dated select pg_temp.f(n), v_today from unnest(array['05', '06', '07', '09']) n;
+  insert into dated values (pg_temp.f('04'), v_today - 1);
+  insert into earliest_hdr select c, v_today + 10 from unnest(array['a4', 'a5', 'a6', 'a7', 'a9']) c;
+  v_4 := pg_temp.queued('a4', '04', 40000, 'p-b4');    -- 32 800
+  v_5 := pg_temp.queued('a5', '05', 30000, 'p-b5');    -- 24 600
+  v_6 := pg_temp.queued('a6', '06', 100000, 'p-b6');   -- 82 000
+  v_7 := pg_temp.queued('a7', '07', 50000, 'p-b7');    -- 41 000
+  v_9 := pg_temp.queued('a9', '09', 30000, 'p-b9');    -- 24 600
+  v_f := pg_temp.handed_out('fpb', 'gen-p-bound');
+  perform pg_temp.exec_on(v_f, v_today);
+  alter table public.bank_transfer disable trigger user;
+  update public.bank_transfer set requested_execution_date = v_today where id in (v_4, v_5, v_6, v_7, v_9);
+  alter table public.bank_transfer enable trigger user;
+  perform pg_temp.csv2('ab3', jsonb_build_array(
+      jsonb_build_object('day', v_today, 'kind', 'other_debit', 'amount', 24600),
+      jsonb_build_object('day', v_today, 'kind', 'other_debit', 'amount', 41000),
+      jsonb_build_object('day', v_today, 'kind', 'batch_unsplit', 'amount', 106600, 'pmt', pg_temp.pmt(v_5)),
+      jsonb_build_object('day', v_today, 'kind', 'other_debit', 'amount', 32800)),
+    v_today, pg_temp.bd_after(9), (pg_temp.bd_after(9) + 1 + time '09:00') at time zone 'Europe/Paris');
+  v := jsonb_build_object(
+    'options', jsonb_build_array(pg_temp.op(pg_temp.l2('ab3', 1)) ->> 'refusal',
+                                 pg_temp.op(pg_temp.l2('ab3', 3)) ->> 'refusal',
+                                 pg_temp.proposes(pg_temp.l2('ab3', 2), v_7)),
+    'unbooked_today', pg_temp.unbooked(v_today) -> 0 @> to_jsonb(pg_temp.l2('ab3', 2)),
+    'unbooked_2', pg_temp.unbooked(pg_temp.bd_after(2)) -> 0 @> to_jsonb(pg_temp.l2('ab3', 2)),
+    'unbooked_p0', pg_temp.unbooked(pg_temp.bd_after(2)) -> 1,
+    'late_booked', pg_temp.bkx(pg_temp.l2('ab3', 4), pg_temp.prop(pg_temp.l2('ab3', 4))),
+    'lambert', pg_temp.breaches(pg_temp.v('run-p-b4')));
+  perform pg_temp.runs_check(pg_temp.bd_after(4));
+  v := v || jsonb_build_object('day4', jsonb_build_array(pg_temp.breaches(pg_temp.v('run-p-b5')),
+                                                         pg_temp.breaches(pg_temp.v('run-p-b6')),
+                                                         pg_temp.breaches(pg_temp.v('run-p-b7')),
+                                                         pg_temp.breaches(pg_temp.v('run-p-b9'))));
+  perform pg_temp.runs_check(pg_temp.bd_after(5));
+  -- (review 6b-2c T2) the rows are written on the fifth business day exactly
+  v := v || jsonb_build_object('day5', jsonb_build_array(pg_temp.breaches(pg_temp.v('run-p-b5')),
+                                                         pg_temp.breaches(pg_temp.v('run-p-b6')),
+                                                         pg_temp.breaches(pg_temp.v('run-p-b7')),
+                                                         pg_temp.breaches(pg_temp.v('run-p-b9'))));
+  perform pg_temp.runs_check(pg_temp.bd_after(7));
+  v := v || jsonb_build_object('day7', jsonb_build_array(pg_temp.breaches(pg_temp.v('run-p-b5')),
+                                                         pg_temp.breaches(pg_temp.v('run-p-b6')),
+                                                         pg_temp.breaches(pg_temp.v('run-p-b7')),
+                                                         pg_temp.breaches(pg_temp.v('run-p-b9'))),
+                               'durand_booked', pg_temp.bkx(pg_temp.l2('ab3', 2), pg_temp.prop(pg_temp.l2('ab3', 2))));
+  perform pg_temp.runs_check(pg_temp.bd_after(8));
+  return v || jsonb_build_object('durand', pg_temp.breaches(pg_temp.v('run-p-b7')),
+                                 'lambert_after', pg_temp.breaches(pg_temp.v('run-p-b4')));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_bound'),
+  '{"options": ["line_ambiguous", "batch_ambiguous", true], "unbooked_today": false, "unbooked_2": true,
+    "unbooked_p0": true, "late_booked": "ok", "lambert": ["none"], "day4": [[], [], [], []],
+    "day5": [["debit_unbooked"], ["debit_unbooked"], [], ["debit_unbooked"]],
+    "day7": [["debit_unbooked"], ["debit_unbooked"], [], ["debit_unbooked"]], "durand_booked": "ok", "durand": [],
+    "lambert_after": ["none"]}'::jsonb,
+  'P (§4.2, Q14''s default; critic L8, critic2 ML-7; review 6b-2c T2): a reference-less line two payouts may be and a '
+  'lot two subsets make suppress the in-flight breach rows for five business days — on the fifth, not before nor '
+  'after, the rows are written « bloqué : débit possible '
+  'non comptabilisé » (debit_unbooked); a line that offers its payout''s booking keeps suppressing, raises '
+  'bank_line_unbooked after one business day (P0, its date passed), and booked on time writes no row ever; a line '
+  'dated after the date writes its row at its booking');
+
+-- §4.2 (critic2 ML-7) private.transfer_line_offers is true exactly when the options read proposes a booking containing
+-- the transfer, on every class: our id at its amount (and above it, by a fee that is not one of our transfers' amount;
+-- below it: S08b), rule 3b's only candidate, our lot's only subset, an entry kept unsplit whose details are ours
+create or replace function pg_temp.p_offers() returns jsonb language plpgsql as $$
+declare v_5 uuid; v_6 uuid; v_7 uuid; v_9 uuid; v_x2 uuid := pg_temp.v('x2'); v_pairs jsonb;
+begin
+  perform pg_temp.exec_on(pg_temp.v('fa'), private.paris_today() - 1);
+  v_5 := pg_temp.queued('a5', '05', 30000, 'p-o5');   -- 24 600
+  v_6 := pg_temp.queued('a6', '06', 100000, 'p-o6');  -- 82 000
+  v_7 := pg_temp.queued('a7', '07', 50000, 'p-o7');   -- 41 000
+  v_9 := pg_temp.queued('a9', '09', 30000, 'p-o9');   -- 24 600
+  perform pg_temp.handed_out('fpo', 'gen-p-offers');
+  perform pg_temp.exec_on(pg_temp.v('fpo'), private.paris_today() - 1);
+  perform pg_temp.stmt2('ab5', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 419840, 'e2e', pg_temp.e2e(v_x2)),
+    jsonb_build_object('amount', 400000, 'e2e', pg_temp.e2e(v_x2)),
+    jsonb_build_object('amount', 419840, 'kind', 'other_debit', 'iban', pg_temp.iban('a2')),
+    jsonb_build_object('amount', 24600, 'kind', 'other_debit'),
+    jsonb_build_object('amount', 131200, 'kind', 'batch_unsplit', 'pmt', pg_temp.pmt(v_5)),
+    jsonb_build_object('amount', 106600, 'kind', 'batch_unsplit', 'pmt', pg_temp.pmt(v_5)),
+    jsonb_build_object('amount', 419840, 'kind', 'batch_unsplit', 'unsplit', 1, 'count', 1,
+                       'details', jsonb_build_array(jsonb_build_object('id', pg_temp.e2e(v_x2), 'direction', 'debit',
+                                                                       'amount_minor', '419840'))),
+    jsonb_build_object('amount', 444440, 'e2e', pg_temp.e2e(v_x2)),
+    jsonb_build_object('amount', 419960, 'e2e', pg_temp.e2e(v_x2))));
+  select jsonb_agg(jsonb_build_array(p.name, pg_temp.offers(p.line, p.tr), pg_temp.proposes(p.line, p.tr))
+                   order by p.ord)
+  into v_pairs
+  from (values (1, 'e', pg_temp.l2('ab5', 1), v_x2), (2, 'e_below', pg_temp.l2('ab5', 2), v_x2),
+               (3, 'n', pg_temp.l2('ab5', 3), v_x2), (4, 'n_ambiguous_5', pg_temp.l2('ab5', 4), v_5),
+               (5, 'n_ambiguous_9', pg_temp.l2('ab5', 4), v_9), (6, 'b_5', pg_temp.l2('ab5', 5), v_5),
+               (7, 'b_6', pg_temp.l2('ab5', 5), v_6), (8, 'b_7', pg_temp.l2('ab5', 5), v_7),
+               (9, 'b_9', pg_temp.l2('ab5', 5), v_9), (10, 'b_ambiguous_6', pg_temp.l2('ab5', 6), v_6),
+               (11, 'u', pg_temp.l2('ab5', 7), v_x2), (12, 'e_fee_unexplained', pg_temp.l2('ab5', 8), v_x2),
+               (13, 'e_fee', pg_temp.l2('ab5', 9), v_x2), (14, 'other_transfer', pg_temp.l2('ab5', 1), v_5))
+       p (ord, name, line, tr);
+  return v_pairs;
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_offers'),
+  '[["e", true, true], ["e_below", false, false], ["n", true, true], ["n_ambiguous_5", false, false],
+    ["n_ambiguous_9", false, false], ["b_5", true, true], ["b_6", true, true], ["b_7", false, false],
+    ["b_9", true, true], ["b_ambiguous_6", false, false], ["u", true, true], ["e_fee_unexplained", false, false],
+    ["e_fee", true, true], ["other_transfer", false, false]]'::jsonb,
+  'P (§4.2; critic2 ML-7): private.transfer_line_offers is true exactly when the options propose a booking containing '
+  'the transfer — our id at its amount or above by a fee (not when the fee is one of our transfers'' amount, nor below '
+  'it), rule 3b''s only candidate, our lot''s only subset (not its member left out, nor any of an ambiguous lot), our '
+  'stored details; never another transfer');
+
+-- §4.2 (critic2 CSO2-13) « À classer » finds the reference-less debits a transfer may be from the lines, by key: with
+-- 300 cancelled payouts of the account put in a file, the queue's reads of bank_transfer do not grow with them
+create or replace function pg_temp.p_queue_reads() returns jsonb language plpgsql as $$
+declare v_before bigint; v_after bigint; v_seq_before bigint; v_seq_after bigint; v_rows integer; v_lines bigint;
+begin
+  alter table public.bank_transfer disable trigger user;
+  insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id, currency, amount_minor, payee_name,
+                                    payee_iban, end_to_end_id, requested_execution_date, status, cancelled_at,
+                                    cancel_reason, client_organization_id, transfer_file_id)
+  select '00000000-0000-0000-0000-0000000000aa', 'payout', '80000000-0000-0000-0000-0000000000cf', 'EUR', 100000 + g,
+         'MARTIN SAS', pg_temp.iban('a1'), 'RMT' || upper(lpad(to_hex(4096 + g), 12, '0')), private.paris_today() - 30,
+         'cancelled', now(), 'annulé (test)', pg_temp.c('a1'), pg_temp.v('fa')
+  from generate_series(1, 300) g;
+  alter table public.bank_transfer enable trigger user;
+  perform pg_temp.stmt2('ab6', private.paris_today(), (
+    select jsonb_agg(jsonb_build_object('amount', 500000 + g, 'kind', 'other_debit', 'iban', pg_temp.iban('a1')))
+    from generate_series(1, 40) g));
+  select coalesce(s.seq_tup_read, 0) + coalesce(s.idx_tup_fetch, 0), coalesce(s.seq_scan, 0) into v_before, v_seq_before
+  from pg_stat_xact_user_tables s where s.relid = 'public.bank_transfer'::regclass;
+  select coalesce(s.idx_tup_fetch, 0) into v_lines
+  from pg_stat_xact_user_tables s where s.relid = 'public.bank_transaction'::regclass;
+  v_rows := (select count(*) from jsonb_object_keys(pg_temp.dq('a-classer')));
+  -- (each line probed by its key: the lines read by index do not grow with the servicer's lines, whatever the
+  -- statistics)
+  v_lines := (select coalesce(s.idx_tup_fetch, 0) from pg_stat_xact_user_tables s
+              where s.relid = 'public.bank_transaction'::regclass) - v_lines;
+  select coalesce(s.seq_tup_read, 0) + coalesce(s.idx_tup_fetch, 0), coalesce(s.seq_scan, 0) into v_after, v_seq_after
+  from pg_stat_xact_user_tables s where s.relid = 'public.bank_transfer'::regclass;
+  return jsonb_build_object('listed', v_rows >= 40, 'bounded', v_after - v_before < 200,
+                            'seq_scans', v_seq_after - v_seq_before, 'lines_bounded', v_lines < 800);
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_queue_reads'),
+  '{"listed": true, "bounded": true, "seq_scans": 0, "lines_bounded": true}'::jsonb,
+  'P (critic2 CSO2-13): « À classer » with 40 reference-less debits to a client''s IBAN and 300 cancelled payouts of the '
+  'account in a file reads bank_transfer by key, a probe per line of its amount — never the account''s transfers — and '
+  'each line by its key (whatever the statistics)');
+
+-- (review 6b-2c cs-1) a backlog of 10,000 other debits without our reference, of amounts no transfer of ours put in a
+-- file has: « Frais » and « À classer » read it well under the API's 8 s — rule 3b's probe (planned again at each call:
+-- its settings, 0.5–0.8 ms) run only for a line of the amount of a transfer of ours put in a file and for the rows shown
+-- (bookable_as), never once per line of the servicer (before: 7 s and more for each tab)
+create or replace function pg_temp.p_queue_backlog() returns jsonb language plpgsql as $$
+declare v_t timestamptz; v_fast jsonb := '[]'; v_total jsonb := '[]'; v_tab text;
+begin
+  perform pg_temp.stmt2('ad1', private.paris_today() - 3, (
+    select jsonb_agg(jsonb_build_object('amount', 700000 + g, 'kind', 'other_debit')) from generate_series(1, 10000) g));
+  analyze public.bank_transaction;
+  foreach v_tab in array array['frais', 'a-classer'] loop
+    v_t := clock_timestamp();
+    v_total := v_total || pg_temp.read('01', format(
+      'select to_jsonb(coalesce(max(q.total), 0) >= 10000) from public.debit_queue(%L, 0, 20) q', v_tab));
+    v_fast := v_fast || to_jsonb(clock_timestamp() - v_t < interval '3 seconds');
+  end loop;
+  return jsonb_build_object('backlog', v_total, 'fast', v_fast);
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_queue_backlog'), '{"backlog": [true, false], "fast": [true, true]}'::jsonb,
+  'P (review 6b-2c cs-1; critic2 CSO2-13): « Frais » with a backlog of 10,000 other debits without our reference, and '
+  '« À classer » beside it, each read in under 3 s (the API stops a statement at 8 s) — rule 3b''s probe only for a '
+  'line of the amount of a transfer of ours put in a file, and for the rows shown');
+
+-- §4.4 (critic CSO-9) the run page's and « Virements »' reads: money staff of the run's servicer at aal2 only (another
+-- servicer's ops, a client admin, a collector, an admin at aal1: null, no rows); a mix of ids gives only the servicer's.
+-- The run page says the payout account is blocked only while it is (status returned, as a return marks it)
+create or replace function pg_temp.p_blocked() returns jsonb language plpgsql as $$
+begin
+  update public.client_payout_account a set status = 'returned'
+  where a.id = (select r.payout_account_id from public.remittance_run r where r.id = pg_temp.v('r1'));
+  return pg_temp.read('01', format('select public.remittance_run_payout(%L) -> ''payout_account_blocked''',
+                                   pg_temp.v('r1')));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(array[
+    pg_temp.read('01', format('select jsonb_build_array(p -> ''payout_account_blocked'', '
+                              'p -> ''transfers'' -> 0 -> ''repaid_by'') from public.remittance_run_payout(%L) p',
+                              pg_temp.v('r1'))) #>> '{}',
+    pg_temp.isolated('p_blocked') #>> '{}',
+    pg_temp.read('01', format('select public.remittance_run_payout(%L) -> ''transfers'' -> 0 -> ''status''',
+                              pg_temp.v('r1'))) #>> '{}',
+    pg_temp.read('01', format('select public.remittance_run_payout(%L) -> ''transfers'' -> 0 -> ''debited_on''',
+                              pg_temp.v('r1'))) #>> '{}',
+    pg_temp.read('01', format('select public.remittance_run_payout(%L) -> ''transfers'' -> 0 -> ''line_id''',
+                              pg_temp.v('r1'))) #>> '{}',
+    coalesce(pg_temp.read('05', format('select public.remittance_run_payout(%L)', pg_temp.v('r1'))) #>> '{}', 'null'),
+    coalesce(pg_temp.read('03', format('select public.remittance_run_payout(%L)', pg_temp.v('r1'))) #>> '{}', 'null'),
+    coalesce(pg_temp.read('02', format('select public.remittance_run_payout(%L)', pg_temp.v('r1'))) #>> '{}', 'null'),
+    coalesce(pg_temp.read('04', format('select public.remittance_run_payout(%L)', pg_temp.v('r1')), 'aal1') #>> '{}',
+             'null')],
+  array['[false, null]', 'true', 'booked', (private.paris_today() - 1)::text, pg_temp.l2('b1', 1)::text, 'null', 'null',
+        'null', 'null'],
+  'P (§4.4; critic CSO-9): remittance_run_payout gives the run''s transfer, its debit date and line to its servicer''s '
+  'money staff, its payout account blocked only while it is returned, no repaying run; null to another servicer''s '
+  'ops, a client admin, a collector and an admin at aal1');
+select is(array[
+    pg_temp.read('01', format('select jsonb_agg(jsonb_build_array(b.transfer_id, b.debited_on, b.debit_line_id) '
+                              'order by b.debited_on nulls last) from public.transfer_bookings(array[%L, %L, %L]::uuid[]) b',
+                              pg_temp.v('x1'), pg_temp.v('x2'), 'b0000000-0000-0000-0000-0000000000b1')),
+    pg_temp.read('05', format('select jsonb_agg(b.transfer_id) from public.transfer_bookings(array[%L, %L]::uuid[]) b',
+                              pg_temp.v('x1'), 'b0000000-0000-0000-0000-0000000000b1')),
+    coalesce(pg_temp.read('02', format('select jsonb_agg(b.transfer_id) from public.transfer_bookings(array[%L]::uuid[]) b',
+                                       pg_temp.v('x1'))), 'null'::jsonb),
+    coalesce(pg_temp.read('03', format('select jsonb_agg(b.transfer_id) from public.transfer_bookings(array[%L]::uuid[]) b',
+                                       pg_temp.v('x1'))), 'null'::jsonb)],
+  array[jsonb_build_array(jsonb_build_array(pg_temp.v('x1'), private.paris_today() - 1, pg_temp.l2('b1', 1)),
+                          jsonb_build_array(pg_temp.v('x2'), null, null)),
+        jsonb_build_array('b0000000-0000-0000-0000-0000000000b1'), 'null'::jsonb, 'null'::jsonb],
+  'P (§4.4; critic CSO-9): transfer_bookings gives each of the caller''s servicer''s transfers its debit date and line, '
+  'and nothing of another servicer''s ids, with nothing said about them; a collector and a client admin get no rows');
+
+-- §4.4 (critic L6, critic2 ML-12; switch on) the client space's unplanned_runs: Petit's run cancelled after its file was
+-- handed out, its payout executed late and booked as Petit's unplanned payout, while Petit's draft waited (it holds the
+-- −A item: the run page's draft_unplanned); Cyprès' run whose payout x was re-issued as x' before the run was
+-- cancelled, the bank executing x — keyed on the run's chain, not on run.transfer_id
+create or replace function pg_temp.p_unplanned_runs() returns jsonb language plpgsql as $$
+declare v_x uuid; v_y uuid; v_y2 uuid; v_d uuid; v jsonb;
+begin
+  v_x := pg_temp.cancelled_late('a8', '08', 30000, 'p-ur8');      -- Petit, 24 600
+  v_d := pg_temp.request('a8', 'p-ur8-draft');
+  perform pg_temp.prepare_plain(v_d);
+  -- Cyprès: x handed out, then re-issued as x' (the run's transfer now x'), then the run cancelled (x' with it)
+  v_y := pg_temp.inflight('a3', '33', 30000, 'p-ur3');
+  update public.bank_transfer set status = 'cancelled', cancelled_at = now(), cancel_reason = 'annulé (test)'
+  where id = v_y;
+  alter table public.bank_transfer disable trigger user;
+  insert into public.bank_transfer (id, organization_id, kind, debtor_bank_account_id, currency, amount_minor,
+                                    payee_name, payee_iban, end_to_end_id, requested_execution_date, status,
+                                    client_organization_id, run_id, replaces_transfer_id)
+  select gen_random_uuid(), y.organization_id, y.kind, y.debtor_bank_account_id, y.currency, y.amount_minor,
+         y.payee_name, y.payee_iban, 'RMT00000000C3A2', y.requested_execution_date, 'ordered',
+         y.client_organization_id, y.run_id, y.id
+  from public.bank_transfer y where y.id = v_y
+  returning id into v_y2;
+  alter table public.bank_transfer enable trigger user;
+  alter table public.remittance_run disable trigger user;
+  update public.remittance_run set transfer_id = v_y2 where id = pg_temp.v('run-p-ur3');
+  alter table public.remittance_run enable trigger user;
+  perform pg_temp.cancel_run(pg_temp.v('run-p-ur3'), 'p-ur3');
+  perform pg_temp.stmt2('ab7', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 24600, 'e2e', pg_temp.e2e(v_x)),
+    jsonb_build_object('amount', 24600, 'e2e', pg_temp.e2e(v_y))));
+  v := jsonb_build_object('booked', jsonb_build_array(pg_temp.bkx(pg_temp.l2('ab7', 1), pg_temp.prop(pg_temp.l2('ab7', 1))),
+                                                      pg_temp.bkx(pg_temp.l2('ab7', 2), pg_temp.prop(pg_temp.l2('ab7', 2)))));
+  return v || jsonb_build_object(
+    'petit_admin', pg_temp.read('03', format('select public.client_remittance_summary(%L) -> ''unplanned_runs''',
+                                             pg_temp.c('a8')))
+                   = jsonb_build_array(jsonb_build_object('run_id', pg_temp.v('run-p-ur8'),
+                                                          'executed_on', private.paris_today())),
+    'restricted', pg_temp.read('07', format('select public.client_remittance_summary(%L) -> ''unplanned_runs''',
+                                            pg_temp.c('a8'))),
+    'chain', pg_temp.read('01', format('select public.client_remittance_summary(%L) -> ''unplanned_runs''',
+                                       pg_temp.c('a3')))
+             = jsonb_build_array(jsonb_build_object('run_id', pg_temp.v('run-p-ur3'),
+                                                    'executed_on', private.paris_today())),
+    'run_unplanned', pg_temp.read('01', format(
+      'select jsonb_build_array(p -> ''unplanned'' -> 0 ->> ''kind'', p -> ''unplanned'' -> 0 ->> ''amount_minor'', '
+      'p -> ''unplanned'' -> 0 ->> ''paid_minor'', p -> ''unplanned'' -> 0 ->> ''advance_minor'', '
+      'p -> ''unplanned'' -> 0 ->> ''line_id'' = %L) from public.remittance_run_payout(%L) p',
+      pg_temp.l2('ab7', 2), pg_temp.v('run-p-ur3'))),
+    -- (review 6b-2c T3) its date, after the cancellation, not returned; « Virements »' date of the unplanned booking
+    'run_unplanned_facts', pg_temp.read('01', format(
+      'select jsonb_build_array(p -> ''unplanned'' -> 0 ->> ''on'', p -> ''unplanned'' -> 0 -> ''after_cancellation'', '
+      'p -> ''unplanned'' -> 0 -> ''returned'') from public.remittance_run_payout(%L) p', pg_temp.v('run-p-ur3'))),
+    'unplanned_on', pg_temp.read('01', format(
+      'select jsonb_agg(b.unplanned_on) from public.transfer_bookings(array[%L]::uuid[]) b', v_y)),
+    'chain_transfers', pg_temp.read('01', format(
+      'select jsonb_array_length(public.remittance_run_payout(%L) -> ''transfers'')', pg_temp.v('run-p-ur3'))),
+    'draft_unplanned', pg_temp.read('01', format(
+      'select jsonb_build_array(p -> ''draft_unplanned'' -> 0 ->> ''amount_minor'', '
+      'p -> ''draft_unplanned'' -> 0 ->> ''line_id'' = %L, p -> ''draft_unplanned'' -> 0 ->> ''on'') '
+      'from public.remittance_run_payout(%L) p', pg_temp.l2('ab7', 1), v_d)),
+    'dirty', pg_temp.dirty());
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_unplanned_runs'),
+  jsonb_build_object('booked', jsonb_build_array('ok', 'ok'), 'petit_admin', true, 'restricted', 'not allowed',
+                     'chain', true,
+                     'run_unplanned', jsonb_build_array('unplanned_payout', '24600', '24600', '0', true),
+                     'run_unplanned_facts', jsonb_build_array(private.paris_today(), true, false),
+                     'unplanned_on', jsonb_build_array(private.paris_today()),
+                     'chain_transfers', 2,
+                     'draft_unplanned', jsonb_build_array('24600', true, private.paris_today()::text),
+                     'dirty', '[]'::jsonb),
+  'P (§4.4; critic L6, CSO-6, critic2 ML-12): a cancelled run whose payout the bank executed all the same lists in the '
+  'client space''s unplanned_runs with its date, for whole-client members only — also when the bank executed the run''s '
+  'first transfer after a re-issue (the run''s chain); the run page says its unplanned booking, the draft that nets it '
+  'its unplanned item');
+-- Review 6b-2c (round 1) -----------------------------------------------------------------------------------------------
+-- (legal-deadlines-1) the lines the options can book as a payout's debit hold its in-flight breach row back whatever
+-- their references: Moreau's payout (24 600) debited today on a line of its amount to its payout IBAN carrying an
+-- end-to-end id that is not ours (class O: rule 3b's only candidate); Dupont's (246 000) in an entry the bank kept
+-- unsplit with no PmtInfId, netting it with the return of Durand's payout debited yesterday (205 000; its stored details
+-- ours: U). Both payouts' dates passed at the check: no row while the lines wait (they offer the booking), none once
+-- booked on time. A line already classified holds nothing back: Lambert's payout (32 800), a reference-less debit of its
+-- amount explained by ops before its file was handed out — its row is written plain once its date has passed
+create or replace function pg_temp.p_bound_any_ref() returns jsonb language plpgsql as $$
+declare v_today date := private.paris_today(); v_4 uuid; v_6 uuid; v_7 uuid; v_9 uuid; v_fa uuid; v_fb uuid; v jsonb;
+  v_o uuid := pg_temp.l2('ac1', 2); v_u uuid := pg_temp.l2('ac1', 1); v_x uuid := pg_temp.l2('ad0', 1);
+begin
+  insert into dated values (pg_temp.f('06'), v_today), (pg_temp.f('07'), v_today - 2), (pg_temp.f('09'), v_today),
+                           (pg_temp.f('04'), v_today);
+  insert into earliest_hdr select c, v_today + 10 from unnest(array['a4', 'a6', 'a7', 'a9']) c;
+  v_7 := pg_temp.queued('a7', '07', 50000, 'p-ar7');    -- 41 000
+  v_fa := pg_temp.handed_out('fpa', 'gen-p-ar-a');
+  perform pg_temp.exec_on(v_fa, v_today - 1);
+  perform pg_temp.stmt2('ac0', v_today - 1, jsonb_build_array(jsonb_build_object('amount', 41000, 'e2e', pg_temp.e2e(v_7))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ac0', 1), 'payout', v_7)));
+  v_6 := pg_temp.queued('a6', '06', 300000, 'p-ar6');   -- 246 000
+  v_9 := pg_temp.queued('a9', '09', 30000, 'p-ar9');    -- 24 600
+  v_4 := pg_temp.queued('a4', '04', 40000, 'p-ar4');    -- 32 800
+  perform pg_temp.stmt2('ad0', v_today, jsonb_build_array(jsonb_build_object('amount', 32800, 'kind', 'other_debit')));
+  v := jsonb_build_object('explained', pg_temp.lk(v_x, 'explained'));
+  v_fb := pg_temp.handed_out('fpb2', 'gen-p-ar-b');
+  perform pg_temp.exec_on(v_fb, v_today);
+  alter table public.bank_transfer disable trigger user;
+  update public.bank_transfer set requested_execution_date = v_today where id in (v_4, v_6, v_9);
+  alter table public.bank_transfer enable trigger user;
+  perform pg_temp.stmt2('ac1', v_today, jsonb_build_array(
+    jsonb_build_object('amount', 205000, 'kind', 'batch_unsplit', 'unsplit', 2, 'count', 2,
+                       'details', jsonb_build_array(
+                         jsonb_build_object('id', pg_temp.e2e(v_6), 'direction', 'debit', 'amount_minor', '246000'),
+                         jsonb_build_object('id', pg_temp.e2e(v_7), 'direction', 'credit', 'amount_minor', '41000'))),
+    jsonb_build_object('amount', 24600, 'kind', 'other_debit', 'e2e', 'VIR-BQ-0001', 'iban', pg_temp.iban('a9'))));
+  perform pg_temp.csv2('ac2', '[]'::jsonb, v_today, pg_temp.bd_after(9),
+                       (pg_temp.bd_after(9) + 1 + time '09:00') at time zone 'Europe/Paris');
+  v := v || jsonb_build_object(
+    'lines', jsonb_build_array(private.transfer_line_class(v_o), pg_temp.offers(v_o, v_9),
+                               private.transfer_line_class(v_u), pg_temp.offers(v_u, v_6)),
+    'suppression', jsonb_build_array(private.transfer_debit_suppression(v_9, v_today, pg_temp.bd_after(2)),
+                                     private.transfer_debit_suppression(v_6, v_today, pg_temp.bd_after(2)),
+                                     private.transfer_debit_suppression(v_4, v_today, pg_temp.bd_after(2))));
+  perform pg_temp.runs_check(pg_temp.bd_after(2));
+  v := v || jsonb_build_object('waiting', jsonb_build_array(pg_temp.breaches(pg_temp.v('run-p-ar9')),
+                                                            pg_temp.breaches(pg_temp.v('run-p-ar6')),
+                                                            pg_temp.breaches(pg_temp.v('run-p-ar4'))));
+  v := v || jsonb_build_object('booked', jsonb_build_array(pg_temp.bkx(v_o, pg_temp.prop(v_o)),
+                                                           pg_temp.bkx(v_u, pg_temp.prop(v_u))));
+  perform pg_temp.runs_check(pg_temp.bd_after(3));
+  return v || jsonb_build_object('after', jsonb_build_array(pg_temp.breaches(pg_temp.v('run-p-ar9')),
+                                                            pg_temp.breaches(pg_temp.v('run-p-ar6'))),
+                                 'dirty', pg_temp.dirty());
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_bound_any_ref'),
+  '{"explained": "ok", "lines": ["O", true, "U", true], "suppression": ["waiting", "waiting", null],
+    "waiting": [[], [], ["none"]], "booked": ["ok", "ok"], "after": [[], []], "dirty": []}'::jsonb,
+  'P (review 6b-2c legal-deadlines-1; §4.2, Q14, CPCE-08): a line « Comptabiliser… » books as an in-flight payout''s '
+  'debit holds its breach row back whatever its references — a debit of its amount to its payout IBAN with an '
+  'end-to-end id that is not ours (O), an entry kept unsplit whose stored details name it (U) — and booked on time, no '
+  'row is ever written; a line already classified holds nothing back (its row written once the date has passed)');
+
+-- (T6) bank_line_unbooked's P0 on a reference-less debit with a rule-3b candidate: not before the candidate's latest
+-- execution date (Lambert's run held to the fifth business day), once it has passed
+create or replace function pg_temp.p_unbooked_p0() returns jsonb language plpgsql as $$
+declare v_today date := private.paris_today(); v_4 uuid; v_f uuid;
+begin
+  insert into dated values (pg_temp.f('04'), pg_temp.bd_after(5));
+  insert into earliest_hdr values ('a4', pg_temp.bd_after(5));
+  v_4 := pg_temp.queued('a4', '04', 40000, 'p-p04');    -- 32 800
+  v_f := pg_temp.handed_out('fp04', 'gen-p-p04');
+  perform pg_temp.exec_on(v_f, v_today);
+  perform pg_temp.stmt2('ac3', v_today, jsonb_build_array(
+    jsonb_build_object('amount', 32800, 'kind', 'other_debit', 'iban', pg_temp.iban('a4'))));
+  return jsonb_build_object(
+    'before', jsonb_build_array(pg_temp.unbooked(pg_temp.bd_after(2)) -> 0 @> to_jsonb(pg_temp.l2('ac3', 1)),
+                                pg_temp.unbooked(pg_temp.bd_after(2)) -> 1),
+    'after', pg_temp.unbooked(pg_temp.bd_after(6)) -> 1);
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_unbooked_p0'), '{"before": [true, false], "after": true}'::jsonb,
+  'P (review 6b-2c T6): a reference-less debit an in-flight payout may be raises bank_line_unbooked after one business '
+  'day, P0 only once that payout''s run has a line past its latest execution date');
+
+-- (money-3, legal-deadlines-2) a payout's sheet says its debit is late, and names the date, as the booking records the
+-- breach: an item whose mandate's delay cannot be met is held to one month after its collection. Durand's item
+-- (collected three days ago, its short date two days ago) debited today: not late, no row; Dupont's (collected forty
+-- days ago) debited today, after its one-month date: late, that date, and the row recorded against it
+create or replace function pg_temp.p_unmeetable() returns jsonb language plpgsql as $$
+declare v_today date := private.paris_today(); v_f uuid; v_month date; a jsonb; b jsonb;
+begin
+  insert into dated values (pg_temp.f('06'), v_today - 2), (pg_temp.f('07'), v_today - 2);
+  insert into earliest_hdr select c, v_today + 10 from unnest(array['a6', 'a7']) c;
+  insert into unmeetable_acct values (pg_temp.f('06')), (pg_temp.f('07'));
+  perform pg_temp.queued('a7', '07', 50000, 'p-um7');    -- 41 000
+  -- Dupont's collected forty days ago (as pg_temp.queued, its collection's day apart)
+  perform pg_temp.file('06', '20000000-0000-0000-0000-0000000000a6', 100000);
+  perform pg_temp.collect('06', 100000, v_today - 40);
+  insert into t values ('run-p-um6', pg_temp.runk('a6', '{"06": "100000"}', 18000, 3000, 'p-um6'));   -- 82 000
+  v_month := (select d.latest_execution_date from private.remittance_deadline_or_null(v_today - 40, 30) d);
+  v_f := pg_temp.handed_out('fpum', 'gen-p-unmeetable');
+  perform pg_temp.exec_on(v_f, v_today);
+  perform pg_temp.stmt2('ac4', v_today, jsonb_build_array(
+    jsonb_build_object('amount', 41000, 'kind', 'other_debit', 'iban', pg_temp.iban('a7')),
+    jsonb_build_object('amount', 82000, 'kind', 'other_debit', 'iban', pg_temp.iban('a6'))));
+  a := pg_temp.op(pg_temp.l2('ac4', 1)) -> 'proposals' -> 0 -> 'preview' -> 'parts' -> 0;
+  b := pg_temp.op(pg_temp.l2('ac4', 2)) -> 'proposals' -> 0 -> 'preview' -> 'parts' -> 0;
+  a := jsonb_build_object(
+    'within', jsonb_build_array(a ->> 'kind', a -> 'late', a -> 'latest_execution_date'),
+    'past', jsonb_build_array(b ->> 'kind', b -> 'late', (b ->> 'latest_execution_date')::date = v_month,
+                              v_month < v_today),
+    -- (T3) the run's set-off the sheet words, its own
+    'settlement', jsonb_build_array((b ->> 'settlement_minor')::bigint > 0,
+                                    b ->> 'settlement_minor' = (select r.settlement_minor::text from public.remittance_run r
+                                                                where r.id = pg_temp.v('run-p-um6'))),
+    'booked', jsonb_build_array(pg_temp.bkx(pg_temp.l2('ac4', 1), pg_temp.prop(pg_temp.l2('ac4', 1))),
+                                pg_temp.bkx(pg_temp.l2('ac4', 2), pg_temp.prop(pg_temp.l2('ac4', 2)))));
+  return a || jsonb_build_object(
+    'rows', jsonb_build_array(pg_temp.breaches(pg_temp.v('run-p-um7')),
+                              (select jsonb_agg(x.latest_execution_date = v_month) from public.remittance_deadline_breach x
+                               where x.run_id = pg_temp.v('run-p-um6'))),
+    'dirty', pg_temp.dirty());
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_unmeetable'),
+  '{"within": ["payout", false, null], "past": ["payout", true, true, true], "settlement": [true, true],
+    "booked": ["ok", "ok"],
+    "rows": [[], [true]], "dirty": []}'::jsonb,
+  'P (review 6b-2c money-3, legal-deadlines-2; R124-6, OQ-71): a payout part is late, and names its date, as the '
+  'booking records the breach — an item whose delay cannot be met debited before its one-month date: not late, no date, '
+  'no row; after it: late, the one-month date, and the row recorded against that date');
+
+-- (money-4) the draft's run page says what the draft deducts of each unplanned booking — the net of that booking's own
+-- rows it holds (−A and the advance A − P): x1's second execution, booked « Virement hors reversement » with P = 0 above
+-- (A, the second debit of S03: its advance all of it), then Martin's next run requested — it holds −164 000 and
+-- +164 000: nothing deducted, nothing said
+create or replace function pg_temp.p_draft_net() returns jsonb language plpgsql as $$
+declare v_d uuid;
+begin
+  perform pg_temp.file('d1', '20000000-0000-0000-0000-0000000000a1', 50000);
+  perform pg_temp.collect('d1', 50000, private.paris_today() - 1);
+  v_d := pg_temp.request('a1', 'p-dn-draft');
+  return jsonb_build_object(
+    'booked', jsonb_build_array(pg_temp.bookings(pg_temp.l2('b2', 1)),
+                                (select jsonb_agg(a.cause || ':' || a.amount_minor) from public.client_advance a
+                                 where a.bank_transaction_id = pg_temp.l2('b2', 1))),
+    'held', (select jsonb_agg(q.kind || ':' || q.amount_minor order by q.kind) from private.remittance_pending q
+             where q.draft_run_id = v_d),
+    'draft_unplanned', pg_temp.read('01', format('select public.remittance_run_payout(%L) -> ''draft_unplanned''', v_d)));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_draft_net'),
+  '{"booked": [["1 unplanned_payout 164000"], ["double_payout:164000"]],
+    "held": ["allocation:50000", "client_advance:164000", "unplanned_payout:-164000"], "draft_unplanned": []}'::jsonb,
+  'P (review 6b-2c money-4; critic CSO-6): a draft holding an unplanned booking''s −A row and its advance A − P deducts '
+  'P — with P = 0 nothing, and its run page says nothing of it (P = A: p_unplanned_runs'' draft_unplanned)');
+-- (money-4) 0 < P < A: D's shape (a returned payout of Durand executed again while the queue nets 31 000 of its 41 000,
+-- a double_payout advance of 10 000), then a collection of Durand and his next run requested — the draft holds the
+-- booking's −41 000 and +10 000 rows: it deducts 31 000, as the run page says
+create or replace function pg_temp.p_draft_partial() returns jsonb language plpgsql as $$
+declare v_t0 uuid; v_x uuid; v_t2 uuid; v_d uuid; b text;
+begin
+  v_t0 := pg_temp.inflight('a7', 'c7', 10000, 'p-dp-r0');
+  perform pg_temp.stmt2('ae0', private.paris_today() - 2, jsonb_build_array(
+    jsonb_build_object('amount', pg_temp.amt(v_t0), 'e2e', pg_temp.e2e(v_t0))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ae0', 1), 'payout', v_t0)));
+  v_x := pg_temp.inflight('a7', '07', 50000, 'p-dp');
+  perform pg_temp.stmt2('ae1', private.paris_today() - 1, jsonb_build_array(
+    jsonb_build_object('amount', 41000, 'e2e', pg_temp.e2e(v_x))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ae1', 1), 'payout', v_x)));
+  v_t2 := pg_temp.inflight('a7', 'b7', 50000, 'p-dp-r2');
+  perform pg_temp.stmt2('ae2', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 41000, 'orig', pg_temp.e2e(v_x))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ae2', 1), 'payout_returned', v_x)));
+  perform private.ledger_reverse((select id from public.ledger_entry where payment_id = pg_temp.pay('c7')
+                                    and entry_type = 'allocation'), 'rev-p-dp-c7', 'Retour du paiement (test)',
+                                 private.paris_today());
+  perform pg_temp.stmt2('ae3', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 41000, 'e2e', pg_temp.e2e(v_x))));
+  b := pg_temp.bkx(pg_temp.l2('ae3', 1), pg_temp.prop(pg_temp.l2('ae3', 1)));
+  perform pg_temp.stmt2('ae4', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', pg_temp.amt(v_t2), 'e2e', pg_temp.e2e(v_t2))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ae4', 1), 'payout', v_t2)));
+  perform pg_temp.file('e7', '20000000-0000-0000-0000-0000000000a7', 50000);
+  perform pg_temp.collect('e7', 50000, private.paris_today() - 1);
+  v_d := pg_temp.request('a7', 'p-dp-draft');
+  return jsonb_build_object(
+    'booked', b,
+    'held', (select jsonb_agg(q.kind || ':' || q.amount_minor order by q.kind, q.amount_minor)
+             from private.remittance_pending q
+             where q.draft_run_id = v_d and q.kind in ('unplanned_payout', 'client_advance')),
+    'draft_unplanned', pg_temp.read('01', format(
+      'select jsonb_build_array(p -> ''draft_unplanned'' -> 0 ->> ''amount_minor'', '
+      'p -> ''draft_unplanned'' -> 0 ->> ''line_id'' = %L, jsonb_array_length(p -> ''draft_unplanned'')) '
+      'from public.remittance_run_payout(%L) p', pg_temp.l2('ae3', 1), v_d)));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_draft_partial'),
+  '{"booked": "ok", "held": ["client_advance:10000", "unplanned_payout:-41000"], "draft_unplanned": ["31000", true, 1]}'::jsonb,
+  'P (review 6b-2c money-4): a draft holding an unplanned booking''s −A row (41 000) and its advance A − P (10 000) '
+  'says it deducts P (31 000), never A');
+
+-- (T3) a planned return's facts on the sheet, the run page and « Virements »: x2 debited yesterday (the job's booking),
+-- its payee's bank's flagged return today — the part names the payout account it blocks; the run page and « Virements »
+-- the return's date and line
+create or replace function pg_temp.p_returned_reads() returns jsonb language plpgsql as $$
+declare v_x uuid := pg_temp.v('x2'); v_line uuid := pg_temp.l2('ac6', 1); p jsonb;
+begin
+  perform pg_temp.exec_on(pg_temp.v('fa'), private.paris_today() - 1);
+  perform pg_temp.stmt2('ac5', private.paris_today() - 1, jsonb_build_array(
+    jsonb_build_object('amount', 419840, 'e2e', pg_temp.e2e(v_x))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ac5', 1), 'payout', v_x)));
+  perform pg_temp.stmt2('ac6', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', pg_temp.e2e(v_x))));
+  p := pg_temp.op(v_line) -> 'proposals' -> 0 -> 'preview' -> 'parts' -> 0;
+  return jsonb_build_object(
+    'part', jsonb_build_array(p ->> 'kind', p ->> 'payout_iban_end', p -> 'blocks_account'),
+    'booked', pg_temp.bkx(v_line, pg_temp.prop(v_line)),
+    'run', pg_temp.read('01', format(
+      'select jsonb_build_array(p -> ''transfers'' -> 0 ->> ''returned_on'', '
+      'p -> ''transfers'' -> 0 ->> ''return_line_id'' = %L, p -> ''payout_account_blocked'') '
+      'from public.remittance_run_payout(%L) p', v_line, pg_temp.v('r2'))),
+    'virements', pg_temp.read('01', format(
+      'select jsonb_agg(jsonb_build_array(b.returned_on, b.return_line_id = %L)) '
+      'from public.transfer_bookings(array[%L]::uuid[]) b', v_line, v_x)),
+    'dirty', pg_temp.dirty());
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_returned_reads'),
+  jsonb_build_object('part', jsonb_build_array('payout_returned', right(pg_temp.iban('a2'), 4), true), 'booked', 'ok',
+                     'run', jsonb_build_array(private.paris_today(), true, true),
+                     'virements', jsonb_build_array(jsonb_build_array(private.paris_today(), true)),
+                     'dirty', '[]'::jsonb),
+  'P (review 6b-2c T3): a planned return''s sheet names the payout account it blocks; once booked, the run page and '
+  '« Virements » give its date and line, the payout account blocked');
+
+-- (T7) a cancelled transfer whose run is still in flight, debited by the bank (the job''s cancelled_transfer_debited
+-- review): « À classer »'s candidate carries its run's status and number (the page words it « ce débit est donc son
+-- paiement », never « Virement hors reversement »)
+create or replace function pg_temp.p_queue_run() returns jsonb language plpgsql as $$
+declare v_x uuid; c jsonb;
+begin
+  v_x := pg_temp.cancelled_late('a5', '05', 30000, 'p-qr', false);
+  perform pg_temp.stmt2('ac7', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 24600, 'e2e', pg_temp.e2e(v_x))));
+  perform pg_temp.book('[]', jsonb_build_array(jsonb_build_object(
+    'line', pg_temp.l2('ac7', 1), 'reason', 'cancelled_transfer_debited',
+    'candidates', jsonb_build_array(jsonb_build_object('transfer_id', v_x)))));
+  c := pg_temp.dq('a-classer') -> pg_temp.l2('ac7', 1)::text;
+  return jsonb_build_object('reason', c -> 0, 'run_status', c -> 2 ->> 'run_status',
+                            'run_number', c -> 2 ->> 'run_number' = (select number from public.remittance_run
+                                                                     where id = pg_temp.v('run-p-qr')));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_queue_run'),
+  '{"reason": "cancelled_transfer_debited", "run_status": "sent", "run_number": true}'::jsonb,
+  'P (review 6b-2c T7; critic2 ML-4): « À classer » gives a cancelled transfer''s candidate its run''s status and number');
+
+-- (pages-5) the pending debit a debit_pending refusal names, held as a suspected duplicate: the options say so (the
+-- sheet points to « Doublons possibles »); x2 debited yesterday (the job's booking), today a copy of that debit held and
+-- x2's flagged return
+create or replace function pg_temp.p_pending_held() returns jsonb language plpgsql as $$
+declare v_x uuid := pg_temp.v('x2'); o jsonb;
+begin
+  perform pg_temp.exec_on(pg_temp.v('fa'), private.paris_today() - 1);
+  perform pg_temp.stmt2('ac8', private.paris_today() - 1, jsonb_build_array(
+    jsonb_build_object('amount', 419840, 'e2e', pg_temp.e2e(v_x))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ac8', 1), 'payout', v_x)));
+  perform pg_temp.stmt2('ac9', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 419840, 'kind', 'suspected_duplicate', 'e2e', pg_temp.e2e(v_x)),
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', pg_temp.e2e(v_x))));
+  o := pg_temp.op(pg_temp.l2('ac9', 2));
+  return jsonb_build_object('refusal', o -> 'refusal', 'pending', o ->> 'pending_line_id' = pg_temp.l2('ac9', 1)::text,
+                            'held', o -> 'pending_held');
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_pending_held'), '{"refusal": "debit_pending", "pending": true, "held": true}'::jsonb,
+  'P (review 6b-2c pages-5; critic2 ML-3): a return waiting for a debit held in « Doublons possibles » says the debit is '
+  'held (the sheet links that tab, not « À classer »)');
+
+-- (review 6b-2c round 2, return-link-blocked-by-amount-twin) a debit the bank flags as a return — a debtor's payment
+-- taken back — carrying none of our references (a CSV feed: no end-to-end id, no counterparty IBAN), of x2's amount:
+-- while x2 is in flight (rule 3b's candidate i) and once x2 was debited and came back (candidate iii, for good).
+-- « Comptabiliser… » never books it (bookable_as null, the options not_a_transfer_line), so « Lier » keeps the payment's
+-- return and its loss (debit_link_options lists the payments); a flagged return to a client's payout IBAN and a held
+-- line released as a return likewise; an other debit of the same amount, held and released as one included, stays
+-- refused payout_candidate (money-1) while x2 is in flight — (round 3) once x2 is returned, its candidacy (iii) alone,
+-- it is linked too. Each link attempted and rolled back.
+create or replace function pg_temp.p_return_kind_reads() returns jsonb language plpgsql as $$
+declare v_l1 uuid := pg_temp.l2('af1', 1); v_l2 uuid := pg_temp.l2('af1', 2); v_l3 uuid := pg_temp.l2('af1', 3);
+        v_l5 uuid := pg_temp.l2('af1', 5); v_l6 uuid := pg_temp.l2('af1', 6);
+begin
+  return jsonb_build_object(
+    'candidates', (select jsonb_agg(c.cand order by c.cand)
+                   from private.transfer_line_candidates(v_l1, private.transfer_line_class(v_l1)) c),
+    'bookable_as', coalesce(private.transfer_line_bookable_as(v_l1), 'null'),
+    'options', pg_temp.op(v_l1) -> 'refusal',
+    'payments', pg_temp.read('01', format(
+      'select to_jsonb(jsonb_array_length(public.debit_link_options(%L) -> ''payments'') > 0)', v_l1)),
+    'return', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''1000000'')', v_l1, pg_temp.pay('13'))),
+    'loss', pg_temp.attempt(format('select pg_temp.lkp(%L, ''loss'', %L, ''100000'')', v_l1, pg_temp.pay('d8'))),
+    'return_client_iban', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''1000000'')', v_l3,
+                                                 pg_temp.pay('13'))),
+    'other_debit', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''1000000'')', v_l2,
+                                          pg_temp.pay('13'))),
+    -- held lines released by ops: read as the kind they were released as
+    'released_other_debit', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''1000000'')', v_l5,
+                                                   pg_temp.pay('13'))),
+    'released_return', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''1000000'')', v_l6,
+                                              pg_temp.pay('13'))));
+end $$;
+create or replace function pg_temp.p_return_kind() returns jsonb language plpgsql as $$
+declare v_x uuid := pg_temp.v('x2'); v_back uuid := pg_temp.l2('af2', 1); v_in jsonb; v_released jsonb;
+begin
+  perform pg_temp.exec_on(pg_temp.v('fa'), private.paris_today() - 1);
+  perform pg_temp.collect('d8', 100000, private.paris_today() - 3, false);
+  perform pg_temp.stmt2('af1', private.paris_today() - 1, jsonb_build_array(
+    jsonb_build_object('amount', 419840, 'kind', 'return'),
+    jsonb_build_object('amount', 419840, 'kind', 'other_debit'),
+    jsonb_build_object('amount', 5000, 'kind', 'return', 'iban', pg_temp.iban('a5')),
+    jsonb_build_object('amount', 419840, 'e2e', pg_temp.e2e(v_x)),
+    -- held as suspected duplicates: no reference (released as an other debit), the debtor's payment's id as the
+    -- original it returns (released as a return)
+    jsonb_build_object('amount', 419840, 'kind', 'suspected_duplicate'),
+    jsonb_build_object('amount', 419840, 'kind', 'suspected_duplicate', 'orig', 'E2E-13')));
+  v_released := jsonb_build_array(
+    pg_temp.try('01', format($q$ select public.resolve_duplicate('p-ret-kind-5', %L, false, 'autre débit') ->> 'kind' $q$,
+                             pg_temp.l2('af1', 5))),
+    pg_temp.try('01', format($q$ select public.resolve_duplicate('p-ret-kind-6', %L, false, 'un retour') ->> 'kind' $q$,
+                             pg_temp.l2('af1', 6))));
+  v_in := pg_temp.p_return_kind_reads();
+  -- x2's debit booked by the job; its payee's bank sends it back today, booked as its return: x2 returned
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('af1', 4), 'payout', v_x)));
+  perform pg_temp.stmt2('af2', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', pg_temp.e2e(v_x))));
+  perform pg_temp.bk(v_back, pg_temp.prop(v_back));
+  return jsonb_build_object('released', v_released, 'in_flight', v_in, 'status', pg_temp.status(v_x),
+                            'returned', pg_temp.p_return_kind_reads(), 'dirty', pg_temp.dirty());
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_return_kind'),
+  '{"released": ["other_debit", "return"],
+    "in_flight": {"candidates": ["i"], "bookable_as": "null", "options": "not_a_transfer_line", "payments": true,
+                  "return": "ok", "loss": "ok", "return_client_iban": "ok", "other_debit": "payout_candidate",
+                  "released_other_debit": "payout_candidate", "released_return": "ok"},
+    "status": "returned",
+    "returned": {"candidates": ["iii"], "bookable_as": "null", "options": "not_a_transfer_line", "payments": true,
+                 "return": "ok", "loss": "ok", "return_client_iban": "ok", "other_debit": "ok",
+                 "released_other_debit": "ok", "released_return": "ok"},
+    "dirty": []}'::jsonb,
+  'P (review 6b-2c round 2, return-link-blocked-by-amount-twin): a debit the bank flags as a return, without our '
+  'reference, of the amount of a payout in flight or of one returned keeps « Lier »''s payment return and loss (its '
+  'payments listed; « Comptabiliser… » never books it), and so does one to a client''s payout IBAN and a held line '
+  'released as a return; an other debit of that amount, held and released as one included, is refused '
+  'payout_candidate while the payout is in flight — (round 3) once it was returned, rule 3b''s (iii) alone, it is '
+  'linked too');
+
+-- Review 6b-2c (round 3) ----------------------------------------------------------------------------------------------
+-- (other-debit-return-blocked-by-returned-payout-twin) Lilas' x2 (419 840) debited and then returned by the payee's
+-- bank: rule 3b's candidate (iii), for good. Roux's debtor payment d1 of that same amount (a run holding one collection
+-- pays exactly its amount) is later taken back by a debit the bank does not flag as a return and that carries none of
+-- our references (an unpaid cheque, UPCQ; a CSV « CONTREPASSATION CHQ … »): kind other_debit, class N. While x2 was in
+-- flight (candidate i) that line's return and loss are refused payout_candidate (money-1); once x2's only candidacy is
+-- (iii), the guard lets them through (debit_link_options lists the payments, return_guard null; the loss is then M2b's
+-- own rule's — only on a debit the bank flags as a return, not_a_return here, OQ-34), the fee and the explanation still
+-- refused; a debit of that amount to Lilas' payout IBAN keeps client_payout_line. The return booked: Roux's queue loses
+-- d1, Lilas' returned item stays queued, d1 is returned, the checks clean
+create or replace function pg_temp.p_iii_reads(p_line uuid) returns jsonb language plpgsql as $$
+begin
+  return jsonb_build_object(
+    'candidates', (select jsonb_agg(c.cand order by c.cand)
+                   from private.transfer_line_candidates(p_line, private.transfer_line_class(p_line)) c),
+    'bookable_as', coalesce(private.transfer_line_bookable_as(p_line), 'null'),
+    'queue', pg_temp.dq('a-classer') -> p_line::text -> 0,
+    'options', pg_temp.read('01', format(
+      'select jsonb_build_array(public.debit_link_options(%L) -> ''payments'' @> %L, '
+      'coalesce(public.debit_link_options(%L) -> ''return_guard'', ''"absent"''))',
+      p_line, jsonb_build_array(jsonb_build_object('payment_id', pg_temp.pay('d1'))), p_line)),
+    'return', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''419840'')', p_line, pg_temp.pay('d1'))),
+    'loss', pg_temp.attempt(format('select pg_temp.lkp(%L, ''loss'', %L, ''100000'')', p_line, pg_temp.pay('d8'))),
+    'fee', pg_temp.attempt(format('select pg_temp.lk(%L, ''fee'')', p_line)),
+    'explained', pg_temp.attempt(format('select pg_temp.lk(%L, ''explained'')', p_line)));
+end $$;
+create or replace function pg_temp.p_iii_only() returns jsonb language plpgsql as $$
+declare v_x uuid := pg_temp.v('x2'); v_line uuid := pg_temp.l2('bf1', 1); v_iban uuid := pg_temp.l2('bf1', 2);
+        v_in jsonb; v_before jsonb; v jsonb;
+begin
+  perform pg_temp.exec_on(pg_temp.v('fa'), private.paris_today() - 2);
+  perform pg_temp.file('d1', '20000000-0000-0000-0000-0000000000a5', 419840);
+  perform pg_temp.collect('d1', 419840, private.paris_today() - 3);
+  perform pg_temp.collect('d8', 100000, private.paris_today() - 3, false);
+  perform pg_temp.stmt2('bf1', private.paris_today() - 1, jsonb_build_array(
+    jsonb_build_object('amount', 419840, 'kind', 'other_debit'),
+    jsonb_build_object('amount', 419840, 'kind', 'other_debit', 'iban', pg_temp.iban('a2'))));
+  v_in := pg_temp.p_iii_reads(v_line);
+  -- x2 debited (the job's booking), then returned by the payee's bank (booked as its return): x2 returned
+  perform pg_temp.stmt2('bf2', private.paris_today() - 1, jsonb_build_array(
+    jsonb_build_object('amount', 419840, 'e2e', pg_temp.e2e(v_x))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('bf2', 1), 'payout', v_x)));
+  perform pg_temp.stmt2('bf3', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 419840, 'orig', pg_temp.e2e(v_x))));
+  perform pg_temp.bk(pg_temp.l2('bf3', 1), pg_temp.prop(pg_temp.l2('bf3', 1)));
+  v_before := jsonb_build_object('roux', jsonb_build_array(pg_temp.queued_minor('a5'), pg_temp.owed('a5')),
+                                 'lilas', jsonb_build_array(pg_temp.queued_minor('a2'), pg_temp.owed('a2'),
+                                                            pg_temp.returned_items('a2')));
+  v := jsonb_build_object(
+    'in_flight', v_in, 'status', pg_temp.status(v_x),
+    'returned', pg_temp.p_iii_reads(v_line),
+    'to_lilas_iban', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''419840'')', v_iban,
+                                            pg_temp.pay('d1'))),
+    'linked', pg_temp.lkp(v_line, 'return', pg_temp.pay('d1'), '419840'));
+  -- what the return moved: Roux's queue (and what Roux is owed) down by d1, Lilas' queue, balance and returned item
+  -- unchanged (she still waits for x2's money)
+  return v || jsonb_build_object(
+    'roux_drop', jsonb_build_array((v_before #>> '{roux,0}')::bigint - pg_temp.queued_minor('a5'),
+                                   pg_temp.owed('a5') - (v_before #>> '{roux,1}')::bigint),
+    'lilas_kept', v_before -> 'lilas' = jsonb_build_array(pg_temp.queued_minor('a2'), pg_temp.owed('a2'),
+                                                          pg_temp.returned_items('a2')),
+    'lilas', v_before -> 'lilas',
+    'd1', (select p.status from public.payment p where p.id = pg_temp.pay('d1')),
+    'dirty', pg_temp.dirty());
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_iii_only'),
+  jsonb_build_object(
+    'in_flight', jsonb_build_object('candidates', jsonb_build_array('i'), 'bookable_as', 'n',
+                                    'queue', 'payout_amount_match',
+                                    'options', jsonb_build_array(false, 'payout_candidate'),
+                                    'return', 'payout_candidate', 'loss', 'payout_candidate',
+                                    'fee', 'payout_candidate', 'explained', 'payout_candidate'),
+    'status', 'returned',
+    'returned', jsonb_build_object('candidates', jsonb_build_array('iii'), 'bookable_as', 'n',
+                                   'queue', 'payout_amount_match',
+                                   'options', jsonb_build_array(true, 'null'::jsonb),
+                                   'return', 'ok', 'loss', 'not_a_return',
+                                   'fee', 'payout_candidate', 'explained', 'payout_candidate'),
+    'to_lilas_iban', 'client_payout_line', 'linked', 'ok', 'd1', 'returned', 'dirty', '[]'::jsonb,
+    'roux_drop', jsonb_build_array(419840, 419840), 'lilas_kept', true,
+    'lilas', jsonb_build_array(419840, -419840, 1)),
+  'P (review 6b-2c round 3, other-debit-return-blocked-by-returned-payout-twin; COMPLIANCE OQ-86): a reference-less '
+  'other debit of a returned payout''s amount — rule 3b''s candidate (iii) only — takes « Lier »''s payment return (its '
+  'payments listed, return_guard null; the loss is past the guard, refused by M2b''s own rule on a debit not flagged as a '
+  'return), its fee and explanation still refused; while that payout was in flight (i) all four were refused '
+  'payout_candidate; a debit to the client''s payout IBAN keeps client_payout_line; the return booked takes d1 out of '
+  'Roux''s queue and leaves Lilas'' returned item queued, the checks clean');
+
+-- (round 3) a cancelled payout whose run is still in flight is that run's payout (critic2 ML-4: run_still_live): its
+-- reference-less twin's return stays refused payout_candidate until the run ends; one whose run was cancelled is (iii)
+-- only, the return taken
+create or replace function pg_temp.p_iii_cancelled() returns jsonb language plpgsql as $$
+declare v_live uuid; v_done uuid;
+begin
+  v_live := pg_temp.cancelled_late('a6', '06', 100000, 'p-r3-live', false);   -- 82 000, its run still sent
+  v_done := pg_temp.cancelled_late('a7', '07', 50000, 'p-r3-done');            -- 41 000, its run cancelled
+  perform pg_temp.exec_on(pg_temp.v('file-p-r3-live'), private.paris_today() - 1);
+  perform pg_temp.exec_on(pg_temp.v('file-p-r3-done'), private.paris_today() - 1);
+  perform pg_temp.stmt2('bf4', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('amount', 82000, 'kind', 'other_debit'),
+    jsonb_build_object('amount', 41000, 'kind', 'other_debit')));
+  return jsonb_build_object(
+    'runs', jsonb_build_array((select r.status from public.remittance_run r where r.id = pg_temp.v('run-p-r3-live')),
+                              (select r.status from public.remittance_run r where r.id = pg_temp.v('run-p-r3-done'))),
+    'candidates', jsonb_build_array(
+      (select jsonb_agg(c.cand || ':' || c.status) from private.transfer_line_candidates(pg_temp.l2('bf4', 1), 'N') c),
+      (select jsonb_agg(c.cand || ':' || c.status) from private.transfer_line_candidates(pg_temp.l2('bf4', 2), 'N') c)),
+    'live', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''1000000'')', pg_temp.l2('bf4', 1),
+                                   pg_temp.pay('13'))),
+    'done', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''1000000'')', pg_temp.l2('bf4', 2),
+                                   pg_temp.pay('13'))),
+    'guards', pg_temp.read('01', format(
+      'select jsonb_build_array(public.debit_link_options(%L) -> ''return_guard'', '
+      'public.debit_link_options(%L) -> ''return_guard'')', pg_temp.l2('bf4', 1), pg_temp.l2('bf4', 2))));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_iii_cancelled'),
+  '{"runs": ["sent", "cancelled"], "candidates": [["iii:cancelled"], ["iii:cancelled"]], "live": "payout_candidate",
+    "done": "ok", "guards": ["payout_candidate", null]}'::jsonb,
+  'P (review 6b-2c round 3; critic2 ML-4): a reference-less other debit of a cancelled payout''s amount keeps the '
+  'payment return refused payout_candidate while that payout''s run is still sent (the debit may be its payout), and '
+  'takes it once the run is cancelled');
+
+-- (round 3, new:suppression-counts-other-transfer-line) legal-deadlines-1's branch counts the lines rule 3b reads (O,
+-- E0): never a line naming another transfer of ours. Petit's payout x (182 040) debited and booked; Petit's next payout
+-- T1, of the same amount to the same IBAN, in flight and late; x executed once more today, its line carrying x's RMT id
+-- and Petit's payout IBAN, left unbooked — it is not T1's debit: T1's row is written (plain) at the check
+create or replace function pg_temp.p_suppress_other() returns jsonb language plpgsql as $$
+declare v_today date := private.paris_today(); v_x uuid; v_t1 uuid; v_f uuid; v_line uuid := pg_temp.l2('bf6', 1);
+        v jsonb;
+begin
+  v_x := pg_temp.inflight('a8', 'e8', 222000, 'p-so-x');   -- 182 040
+  perform pg_temp.exec_on(pg_temp.v('file-p-so-x'), v_today - 2);
+  perform pg_temp.stmt2('bf5', v_today - 2, jsonb_build_array(jsonb_build_object('amount', 182040, 'e2e', pg_temp.e2e(v_x))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('bf5', 1), 'payout', v_x)));
+  insert into dated values (pg_temp.f('e9'), v_today);
+  insert into earliest_hdr values ('a8', v_today + 10);
+  v_t1 := pg_temp.queued('a8', 'e9', 222000, 'p-so1');      -- 182 040
+  v_f := pg_temp.handed_out('fso', 'gen-p-so');
+  perform pg_temp.exec_on(v_f, v_today);
+  alter table public.bank_transfer disable trigger user;
+  update public.bank_transfer set requested_execution_date = v_today where id = v_t1;
+  alter table public.bank_transfer enable trigger user;
+  perform pg_temp.stmt2('bf6', v_today, jsonb_build_array(
+    jsonb_build_object('amount', 182040, 'e2e', pg_temp.e2e(v_x), 'iban', pg_temp.iban('a8'))));
+  perform pg_temp.csv2('bfa', '[]'::jsonb, v_today, pg_temp.bd_after(9),
+                       (pg_temp.bd_after(9) + 1 + time '09:00') at time zone 'Europe/Paris');
+  v := jsonb_build_object(
+    'transfers', jsonb_build_array(pg_temp.status(v_x), pg_temp.status(v_t1), pg_temp.amt(v_t1) = pg_temp.amt(v_x),
+                                   (select t.payee_iban = pg_temp.iban('a8') from public.bank_transfer t where t.id = v_t1)),
+    'line', jsonb_build_array(private.transfer_line_class(v_line), pg_temp.offers(v_line, v_t1)),
+    'suppression', private.transfer_debit_suppression(v_t1, v_today, pg_temp.bd_after(2)));
+  perform pg_temp.runs_check(pg_temp.bd_after(2));
+  return v || jsonb_build_object('rows', pg_temp.breaches(pg_temp.v('run-p-so1')));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_suppress_other'),
+  '{"transfers": ["booked", "in_file", true, true], "line": ["E", false], "suppression": null, "rows": ["none"]}'::jsonb,
+  'P (review 6b-2c round 3, new:suppression-counts-other-transfer-line; CPCE-08): a debit naming another transfer of '
+  'ours (x''s second execution, its RMT id), of an in-flight payout''s amount to its payee''s IBAN, does not hold that '
+  'payout''s breach row back: the row is written once its date has passed');
+
+-- (round 3, new:refund-to-client-iban-unlinkable) a refund sent to a client's payout IBAN (the payer was that client):
+-- its reference-less debit, of which that refund's transfer is rule 3b's only candidate, takes the refund link (listed
+-- by debit_link_options); its return from that IBAN takes « Remboursement revenu » (listed), never the explanation; a
+-- refund to that IBAN in no file is no candidate of a line, and a debit to the client's IBAN is not linked to it
+create or replace function pg_temp.p_refund_client_iban() returns jsonb language plpgsql as $$
+declare v_reason text; v_left text; v_r uuid; v_r2 uuid; v_f uuid; v_debit uuid := pg_temp.l2('bf7', 1);
+        v_back uuid := pg_temp.l2('bf8', 1); v jsonb;
+begin
+  perform pg_temp.collect('c9', 5300, private.paris_today() - 3, false);
+  select p.review_reason, x.unallocated_minor::text into v_reason, v_left
+  from public.payment p cross join lateral private.payment_positions(array[p.id]) x where p.id = pg_temp.pay('c9');
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v_r := (public.request_refund('p-r3-refund', pg_temp.pay('c9'), '5300', pg_temp.iban('a3'), 'CYPRES SAS', 'other',
+                                v_reason, v_left, 'payé par le client par erreur') ->> 'refund_request_id')::uuid;
+  reset role;
+  v_f := pg_temp.handed_out('fpr3', 'gen-p-r3-refund');
+  perform pg_temp.exec_on(v_f, private.paris_today() - 1);
+  -- another refund to that IBAN, requested after the file: in no file, it is no candidate of a line
+  perform pg_temp.collect('ca', 5400, private.paris_today() - 3, false);
+  select p.review_reason, x.unallocated_minor::text into v_reason, v_left
+  from public.payment p cross join lateral private.payment_positions(array[p.id]) x where p.id = pg_temp.pay('ca');
+  perform pg_temp.as_user('01');
+  set local role authenticated;
+  v_r2 := (public.request_refund('p-r3-refund-2', pg_temp.pay('ca'), '5400', pg_temp.iban('a3'), 'CYPRES SAS', 'other',
+                                 v_reason, v_left, 'payé par le client par erreur') ->> 'refund_request_id')::uuid;
+  reset role;
+  perform pg_temp.stmt2('bf7', private.paris_today() - 1, jsonb_build_array(
+    jsonb_build_object('amount', 5300, 'kind', 'other_debit', 'iban', pg_temp.iban('a3')),
+    jsonb_build_object('amount', 5400, 'kind', 'other_debit', 'iban', pg_temp.iban('a3')),
+    jsonb_build_object('amount', 5300, 'kind', 'other_debit')));
+  v := jsonb_build_object(
+    -- a reference-less debit of the refund's amount with no IBAN (a CSV): that refund (ii) may be it, never a payment's
+    -- return
+    'return_ii', pg_temp.attempt(format('select pg_temp.lkp(%L, ''return'', %L, ''1000000'')', pg_temp.l2('bf7', 3),
+                                        pg_temp.pay('13'))),
+    'candidates', (select jsonb_agg(c.cand) from private.transfer_line_candidates(v_debit, 'N') c),
+    'not_filed', pg_temp.attempt(format('select pg_temp.lk(%L, ''refund'', %L)', pg_temp.l2('bf7', 2), v_r2)),
+    'listed', pg_temp.read('01', format(
+      'select jsonb_path_query_array(public.debit_link_options(%L) -> ''refunds'', ''$[*].refund_request_id'')', v_debit))
+      = jsonb_build_array(v_r),
+    'fee', pg_temp.attempt(format('select pg_temp.lk(%L, ''fee'')', v_debit)),
+    'refund', pg_temp.lk(v_debit, 'refund', v_r));
+  perform pg_temp.stmt2('bf8', private.paris_today(), jsonb_build_array(
+    jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 5300, 'iban', pg_temp.iban('a3'))));
+  return v || jsonb_build_object(
+    'refund_status', (select q.status from public.refund_request q where q.id = v_r),
+    'back_listed', pg_temp.read('01', format(
+      'select jsonb_path_query_array(public.debit_link_options(%L) -> ''refunds'', ''$[*].refund_request_id'')', v_back))
+      = jsonb_build_array(v_r),
+    'explained_back', pg_temp.attempt(format('select pg_temp.lk(%L, ''explained'')', v_back)),
+    'refund_back', pg_temp.lk(v_back, 'refund_returned', v_r),
+    'dirty', pg_temp.dirty());
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+select is(pg_temp.isolated('p_refund_client_iban'),
+  '{"candidates": ["ii"], "return_ii": "payout_candidate", "not_filed": "client_payout_line", "listed": true, "fee": "payout_candidate", "refund": "ok",
+    "refund_status": "executed",
+    "back_listed": true, "explained_back": "client_payout_line", "refund_back": "ok", "dirty": []}'::jsonb,
+  'P (review 6b-2c round 3, new:refund-to-client-iban-unlinkable; plan §3.4.4 (ii)): a refund sent to a client''s '
+  'payout IBAN is linked to its reference-less debit, whose only candidate it is, and to its return from that IBAN '
+  '(both listed); the fee and the explanation stay refused, and a refund in no file is not linked to a debit to the '
+  'client''s IBAN (client_payout_line)');
+
+select is(pg_temp.dirty(), '{}'::text[], 'P: clean');
+select is(private.switch_on('downloaded_file_cancellation'), false, 'P: the switch is still off');
 
 select * from finish();
 rollback;

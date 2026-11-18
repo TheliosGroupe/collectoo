@@ -293,3 +293,113 @@ export function refundNote(card: Pick<RunCard, "status" | "refund_minor" | "curr
   const amount = money(card.refund_minor, card.currency);
   return card.status === "booked" ? `avoir remboursé ${amount}` : `remboursement d'avoir inclus dans le virement : ${amount}`;
 }
+
+/**
+ * M2c-6b-2c (plan §4.4, §7.4; critic CSO-6, CSO-9): what became of a run's payout, as `remittance_run_payout` returns
+ * it (amounts text in minor units, dates ISO). The page formats; every amount and date is the database's.
+ */
+export type RunPayout = {
+  transfers: {
+    id: string;
+    status: string;
+    end_to_end_id?: string | null;
+    amount_minor?: string | null;
+    debited_on: string | null;
+    returned_on: string | null;
+    line_id: string | null;
+    return_line_id?: string | null;
+    repaid_by?: string | null;
+  }[];
+  payout_account_blocked?: boolean | null;
+  settled_on: string | null;
+  settlement_minor: string;
+  commission_minor: string;
+  advances_recovered_minor: string;
+  advances: { cause: string; amount_minor: string; open_minor: string; created_on: string }[];
+  unplanned: {
+    line_id: string;
+    kind: string;
+    amount_minor: string;
+    on: string;
+    paid_minor: string;
+    advance_minor: string;
+    after_cancellation: boolean;
+    returned?: boolean | null;
+  }[];
+  draft_unplanned: { amount_minor: string; on: string; line_id: string; statement_on: string | null }[];
+};
+
+const positive = (v: string | null | undefined): v is string => !!v && MINOR.test(v) && BigInt(v) > BigInt(0);
+
+/**
+ * The run page's sentences on its payout (plan §7.4): the debit's date; the set-off with its date, each part from its
+ * own field (« Commission » for the invoices set off, commission_minor; « Factures et avances » with each amount when it
+ * also recovered advances, Da > 0; review 6b-2c pages-1: never D, which also nets a credit-note refund paid with the
+ * transfer); an advance of the servicer at the debit (payout_overrun); a returned payout (its payout account said
+ * blocked only while it is, and the run that paid it again once booked); each unplanned booking of its transfers (a
+ * second execution, or one after the cancellation), and the return of one; for a draft, what it deducts of each
+ * unplanned booking (CSO-6; review 6b-2c money-4: P, the net of that booking's own rows it holds, never A).
+ */
+export function runPayoutNotes(p: RunPayout, currency: string): string[] {
+  const notes: string[] = [];
+  for (const t of p.transfers) {
+    if (t.debited_on) notes.push(`Débité de notre compte le ${frenchDate(t.debited_on)}`);
+  }
+  // review 6b-2c (pages-1): each part of the set-off from its own field — D also nets a credit-note refund paid with the
+  // transfer (refundNote says it), so the commission set off is commission_minor, never D
+  if (p.settled_on) {
+    const on = frenchDate(p.settled_on);
+    const commission = positive(p.commission_minor);
+    const advances = positive(p.advances_recovered_minor);
+    if (commission && advances)
+      notes.push(
+        `Factures et avances réglées par compensation le ${on} : commission ${money(p.commission_minor, currency)}, avances du cabinet ${money(p.advances_recovered_minor, currency)}`,
+      );
+    else if (commission) notes.push(`Commission réglée par compensation le ${on} : ${money(p.commission_minor, currency)}`);
+    else if (advances)
+      notes.push(`Avances du cabinet récupérées par compensation le ${on} : ${money(p.advances_recovered_minor, currency)}`);
+  }
+  for (const a of p.advances) {
+    if (a.cause !== "payout_overrun") continue;
+    notes.push(
+      `Avance du cabinet de ${money(a.amount_minor, currency)} au débit : le virement dépassait ce qui restait dû au client (une imputation annulée après la validation) ; à récupérer selon son mandat — ce recouvrement n'est pas encore géré dans Collectoo.`,
+    );
+  }
+  for (const t of p.transfers) {
+    if (t.status !== "returned" || !t.returned_on || !t.amount_minor) continue;
+    notes.push(
+      `Virement revenu impayé le ${frenchDate(t.returned_on)} : ${money(t.amount_minor, currency)} de nouveau dus au client, proposés dans un prochain reversement${
+        p.payout_account_blocked
+          ? " ; son compte de reversement est bloqué jusqu'à son remplacement ou sa reconfirmation."
+          : "."
+      }`,
+    );
+    if (t.repaid_by) notes.push(`Reversé à nouveau par le reversement ${t.repaid_by}.`);
+  }
+  for (const u of p.unplanned) {
+    const when = u.after_cancellation ? "après son annulation" : "une seconde fois";
+    notes.push(
+      `La banque a exécuté le virement de ce reversement ${when} le ${frenchDate(u.on)} (${money(u.amount_minor, currency)}) : comptabilisé hors reversement, avance du cabinet de ${money(u.advance_minor, currency)}.`,
+    );
+    if (u.returned)
+      notes.push(`Ce virement hors reversement du ${frenchDate(u.on)} est revenu depuis : son retour est comptabilisé.`);
+  }
+  for (const d of p.draft_unplanned) {
+    notes.push(
+      `Ce brouillon déduit ${money(d.amount_minor, currency)} déjà reçus par le client : virement exécuté hors reversement le ${frenchDate(d.on)}${
+        d.statement_on ? ` (relevé du ${frenchDate(d.statement_on)})` : ""
+      }.`,
+    );
+  }
+  return notes;
+}
+
+/** The run page's read, or null when it is not the read's shape — never a guess. */
+export function parseRunPayout(x: unknown): RunPayout | null {
+  if (!x || typeof x !== "object") return null;
+  const o = x as Record<string, unknown>;
+  for (const k of ["transfers", "advances", "unplanned", "draft_unplanned"]) if (!Array.isArray(o[k])) return null;
+  for (const k of ["settlement_minor", "commission_minor", "advances_recovered_minor"])
+    if (typeof o[k] !== "string" || !MINOR.test(o[k] as string)) return null;
+  return o as unknown as RunPayout;
+}

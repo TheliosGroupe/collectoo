@@ -54,7 +54,7 @@ describe("M2c-5 documents", () => {
       "Virement ordonné",
       "Virement ordonné",
       "Réglé par compensation, sans virement",
-      "Annulé avant son exécution",
+      "Annulé avant la remise de son virement à la banque",
       "à régler par compensation sur un reversement",
       "à régler au plus tard le 02/12/2026",
       "déduit des factures qu'il rectifie",
@@ -214,7 +214,7 @@ describe("the client's statements read the run as it stands (review M2c-5 figure
 
   it("shows no amount to transfer for a cancelled run", () => {
     expect(statementRunView({ status: "cancelled", net_minor: "65601" })).toEqual({
-      label: "Annulé avant son exécution",
+      label: "Annulé avant la remise de son virement à la banque",
       tone: "error",
       net: null,
     });

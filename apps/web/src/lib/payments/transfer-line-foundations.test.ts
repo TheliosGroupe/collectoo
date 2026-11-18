@@ -8,20 +8,21 @@ import { CHECK_LABEL, checkLabel, DEBIT_REVIEW, P0_DEBIT_REVIEWS, debitReviewRan
 import { OUR_TRANSFER_PAYMENT_NOTE } from "./matching";
 
 describe("the job's reviews of a return it does not book (critic F1, L5; critic2 ML-3, CSO2-14)", () => {
-  it("unplanned_payout_return names the payout and the sweep, books nothing and says to tell support", () => {
+  // M2c-6b-2c (plan §4.3; critic2 CSO2-14): the screen exists — both name « Virement revenu », 2a's « prévenez le
+  // support » is gone from the first (transfer-line-pages.test.ts holds the full texts)
+  it("unplanned_payout_return names the payout and the sweep, books nothing automatically, and « Virement revenu »", () => {
     const text = DEBIT_REVIEW.unplanned_payout_return;
     expect(text).toContain("reversement ou quote-part");
     expect(text).toContain("rien n'est comptabilisé automatiquement");
-    expect(text).toContain("prévenez le support");
-    expect(text).not.toContain("Virement revenu");
+    expect(text).toContain("Comptabilisez-le avec « Virement revenu »");
+    expect(text).not.toContain("prévenez le support");
     expect(text).not.toContain("écran à venir");
   });
-  it("return_debit_pending says the other debit is booked first, and to tell support", () => {
+  it("return_debit_pending says the other debit is booked first, then the return with « Virement revenu »", () => {
     const text = DEBIT_REVIEW.return_debit_pending;
     expect(text).toContain("figure sur un relevé sans être encore comptabilisé");
-    expect(text).toContain("ce débit se comptabilise d'abord");
-    expect(text).toContain("prévenez le support");
-    expect(text).not.toContain("Virement revenu");
+    expect(text).toContain("Comptabilisez d'abord ce débit (« Virement hors reversement »)");
+    expect(text).toContain("ce retour se comptabilisera ensuite avec « Virement revenu »");
   });
   // review M2c-6b-2a (M1): a held copy of the debit decided a duplicate no longer counts, and the decision queues the
   // job that takes the return up again (private.transfer_late_lines, public.resolve_duplicate); while it is held the

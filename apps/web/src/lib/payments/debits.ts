@@ -147,23 +147,28 @@ export const DEBIT_REVIEW: Record<string, string> = {
     "Crédit portant la référence d'un approvisionnement, mais d'un autre montant ou sur un autre compte : vérifiez dans la banque.",
   client_credit:
     "Virement reçu du compte de reversement d'un client : règlement d'une facture du cabinet (à classer, comptabilisé avec les factures à venir), ou paiement d'un débiteur que le client relaie (il devient alors un paiement à affecter).",
+  // M2c-6b-2c (plan §4.3): the screen books it
+  // review 6b-2c (pages-4): a sweep of its amount in flight is booked as that sweep's debit (the sheet's « Débit de la
+  // quote-part du cabinet »; the command refuses « Virement au compte propre » then: sweep_in_flight_matches)
   own_transfer_out:
-    "Virement émis par le cabinet vers l'un de ses comptes sans ordre de Collectoo : à vérifier dans la banque.",
+    "Virement émis vers l'un de nos comptes sans ordre de Collectoo : après vérification dans la banque, comptabilisez-le avec « Comptabiliser… » (débit de la quote-part du cabinet en cours de ce montant s'il y en a une, sinon « Virement au compte propre »).",
   // M2c-6b-1 (plan §2.3): our payouts' and sweeps' debits and returns the job does not book
+  // M2c-6b-2c (plan §4.3): the screen books them as « Virement hors reversement » (a cancelled transfer whose run is still
+  // in flight: CANCELLED_TRANSFER_LIVE_RUN, critic2 ML-4)
   cancelled_transfer_debited:
-    "Débit d'un virement annulé dans Collectoo : la banque l'a exécuté. Rien n'est comptabilisé ; vérifiez dans la banque avant tout nouveau virement (risque de double paiement).",
+    "Débit d'un virement annulé dans Collectoo : la banque l'a exécuté. Rien n'est comptabilisé : vérifiez dans la banque, puis comptabilisez-le comme « Virement hors reversement » (risque de double paiement).",
   transfer_debited_twice:
-    "Second débit d'un virement déjà comptabilisé : la banque l'a peut-être exécuté deux fois. Rien n'est comptabilisé ; voyez avec la banque.",
+    "Second débit d'un virement déjà comptabilisé : la banque l'a peut-être exécuté deux fois. Vérifiez avec la banque, puis comptabilisez ce second débit comme « Virement hors reversement ».",
   transfer_not_handed_out:
     "Débit d'un virement dont le fichier n'a jamais été téléchargé : rien n'est comptabilisé ; vérifiez dans la banque d'où vient cet ordre.",
   transfer_unknown:
     "Débit portant une référence de virement du cabinet (RMT, SWP) ou un lot que Collectoo ne connaît pas : rien n'est comptabilisé ; vérifiez dans la banque.",
   transfer_differs:
-    "Débit d'un virement du cabinet, mais d'un autre montant ou sur un autre compte : rien n'est comptabilisé ; vérifiez dans la banque.",
+    "Débit d'un virement du cabinet, mais d'un autre montant ou sur un autre compte : si la banque a prélevé ses frais sur la même ligne, comptabilisez-la comme « Débit d'un reversement » et frais ; sinon, vérifiez dans la banque.",
   run_not_in_flight:
     "Débit d'un reversement dont le reversement n'est plus en cours dans Collectoo : rien n'est comptabilisé ; vérifiez dans la banque.",
   batch_partial:
-    "Lot débité pour un autre montant que ses virements en cours (un virement manque ou a été rejeté) : rien n'est comptabilisé ; demandez à la banque le détail du lot.",
+    "Lot débité pour un autre montant que ses virements en cours (un virement manque, a été rejeté, ou un virement déjà débité l'a été de nouveau) : « Débit d'un lot » le comptabilise si une seule combinaison de ses virements fait ce montant ; sinon, demandez le détail à la banque.",
   batch_mixed:
     "Lot mêlant des virements de natures différentes : rien n'est comptabilisé ; demandez à la banque le détail du lot.",
   // review round 4 (N1): also a second return of a transfer already returned (the job's `return_differs` either way);
@@ -174,19 +179,49 @@ export const DEBIT_REVIEW: Record<string, string> = {
   // review M2c-6b-1 (T4, K5): also a return dated before its debit (the ledger never dates a reversal before its entry)
   return_before_debit:
     "Retour d'un virement du cabinet sans débit comptabilisé avant lui. Si le débit n'est pas encore comptabilisé, le retour est repris automatiquement à l'import d'un relevé, une fois le débit comptabilisé. S'il est daté d'avant le débit, rien n'est comptabilisé : vérifiez les deux lignes dans la banque et prévenez le support.",
-  // M2c-6b-2a (plan §2.6; critic2 CSO2-14, ML-3): the job's two returns it never books — worded while no screen books
-  // them (6b-2c rewords both with « Virement revenu »)
+  // M2c-6b-2a (plan §2.6; critic2 CSO2-14, ML-3): the job's two returns it never books — M2c-6b-2c (plan §4.3) rewords
+  // both with « Virement revenu », the screen that books them
   unplanned_payout_return:
-    "Retour d'un virement du cabinet (reversement ou quote-part) qui a aussi été exécuté hors de son ordre (virement annulé exécuté quand même, ou exécuté deux fois) : rien n'est comptabilisé automatiquement. Ce retour est celui du virement exécuté hors ordre, pas du reversement ni de la quote-part : prévenez le support.",
+    "Retour d'un virement du cabinet (reversement ou quote-part) qui a aussi été exécuté hors de son ordre (virement annulé exécuté quand même, ou exécuté deux fois) : rien n'est comptabilisé automatiquement. Comptabilisez-le avec « Virement revenu » : c'est le retour du virement exécuté hors ordre.",
   // review M2c-6b-2a (M1): that debit may be a copy held in « Doublons possibles » (private.transfer_late_lines counts a
   // held line, never one decided a duplicate; public.resolve_duplicate then queues the debit job)
   return_debit_pending:
-    "Retour d'un virement du cabinet dont un autre débit (second débit, ou débit après annulation) figure sur un relevé sans être encore comptabilisé : rien n'est comptabilisé automatiquement. Si ce débit attend dans « Doublons possibles », décidez-le d'abord : reconnu comme doublon, il ne compte plus et le retour est repris automatiquement. Sinon, ce débit se comptabilise d'abord ; prévenez le support.",
+    "Retour d'un virement du cabinet dont un autre débit (second débit, ou débit après annulation) figure sur un relevé sans être encore comptabilisé : rien n'est comptabilisé automatiquement. Si ce débit attend dans « Doublons possibles », décidez-le d'abord : reconnu comme doublon, il ne compte plus et le retour est repris automatiquement. Comptabilisez d'abord ce débit (« Virement hors reversement ») ; ce retour se comptabilisera ensuite avec « Virement revenu ».",
   // M2c-6b-2a (S20, OQ-84 (i)): the M2b pass's own reason — a link it decided, refused because the line is ours; review
   // M2c-6b-2a (T6): no screen promised while none books these lines
   own_transfer_line:
     "Ligne de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : elle ne se rattache à aucun paiement ni remboursement, et rien n'est comptabilisé automatiquement. Collectoo ne peut pas encore la comptabiliser depuis cet écran : prévenez le support.",
+  // M2c-6b-2c (plan §4.1; critic2 CSO2-13): « À classer »'s own reasons for a debit without our reference, found from the
+  // line by rule 3b's keyed probe (public.debit_queue) — it is booked with « Comptabiliser… », never a fee nor explained
+  // review 6b-2c round 3: a candidate in flight among them (a payout, a sweep or a refund in a file handed out); with
+  // only payouts returned or cancelled, debitReviewText words it PAYOUT_AMOUNT_MATCH_ENDED
+  payout_amount_match:
+    "Débit sans notre référence du montant d'un virement du cabinet en cours (ou d'un reversement annulé ou revenu que la banque a pu exécuter) : s'il s'agit de ce virement, comptabilisez-le comme son débit avec « Comptabiliser… ».",
+  client_payout_iban:
+    "Débit vers le compte de reversement d'un client, sans référence du cabinet : virement hors reversement (ou débit d'un reversement en cours sans sa référence).",
 };
+
+/**
+ * Review 6b-2c (cs-1): « Débits et retours » when the database could not read the tab (its time limit, or another
+ * error) — never « Aucune ligne » with a count of 0, which would hide the lines waiting.
+ */
+export const QUEUE_UNREAD =
+  "Cette liste n'a pas pu être lue pour l'instant (délai dépassé ou erreur) : actualisez la page dans un instant ; si cela se répète, prévenez le support.";
+
+/**
+ * Review 6b-2c round 3 (other-debit-return-blocked-by-returned-payout-twin): « À classer »'s payout_amount_match when
+ * every candidate is a payout returned, or cancelled with its run ended (rule 3b's (iii)) — never « en cours »; and, when
+ * public.debit_link_options says « Lier » takes a payment's return there (return_guard null), that the line may also be
+ * a debtor's payment the bank takes back without flagging it.
+ */
+export const PAYOUT_AMOUNT_MATCH_ENDED =
+  "Débit sans notre référence du montant d'un reversement annulé ou revenu dont la banque a reçu le fichier : s'il s'agit de ce virement, exécuté par la banque malgré son annulation ou de nouveau après son retour, comptabilisez-le avec « Comptabiliser… ».";
+export const PAYOUT_AMOUNT_MATCH_RETURN =
+  "Ce peut aussi être le paiement d'un débiteur que sa banque reprend sans que le relevé le signale comme un retour (chèque impayé, contre-passation) : après vérification dans la banque, liez-le à ce paiement avec « Retour du paiement … ».";
+
+/** critic2 ML-4: a cancelled transfer whose run is still approved or sent — this debit is that run's payout. */
+export const CANCELLED_TRANSFER_LIVE_RUN =
+  "Débit d'un virement annulé dans Collectoo : la banque l'a exécuté. Rien n'est comptabilisé : le reversement de ce virement est toujours en cours, ce débit est donc son paiement ; il ne peut pas encore être comptabilisé. Ne faites pas annuler ce reversement et prévenez le support.";
 
 /** The reasons that may mean money left twice or without an order (P0, first in « À classer »; plan §2.3). */
 export const P0_DEBIT_REVIEWS = new Set([
@@ -323,13 +358,17 @@ export function linkOffers<
   P extends { left_minor: string; named?: boolean },
   R,
 >(
-  row: LineIds & { amount_minor: string },
+  row: LineIds & { amount_minor: string; review_reason?: string | null; bookable_as?: string | null },
   payments: P[],
   refunds: R[],
+  returnGuard?: string | null,
 ): { returns: P[]; losses: P[]; refunds: R[] } {
   // review M2c-1: no return or refund link on our own transfers and credits (the database refuses them); review
-  // M2c-6b-1 (money-1): nor on our payouts' and sweeps' lines (own_transfer_line) — the loss included
-  const linkable = offersPaymentLinks(row);
+  // M2c-6b-1 (money-1): nor on our payouts' and sweeps' lines (own_transfer_line) — the loss included; review 6b-2c
+  // (money-1, money-2): nor a payment's return or loss on a debit « Comptabiliser… » books (paymentLinksGuarded:
+  // link_debit refuses payout_candidate, client_payout_line — round 3: but where debit_link_options' return_guard says
+  // it takes the return)
+  const linkable = offersPaymentLinks(row) && !paymentLinksGuarded(row, returnGuard);
   const amount = BigInt(row.amount_minor);
   const isReturn = row.direction === "debit" && row.kind !== "refund_out";
   return {
@@ -342,8 +381,11 @@ export function linkOffers<
         ? payments.filter((p) => p.named === true && BigInt(p.left_minor) < amount)
         : [],
     // … but our batch line takes a refund of its PmtInf in a file handed out (offersOwnBatchRefunds), and a credit
-    // naming our lot the refund that lot held alone (offersOwnLotRefundBack, round 5): what is listed
-    refunds: linkable || offersOwnBatchRefunds(row) || offersOwnLotRefundBack(row) ? refunds : [],
+    // naming our lot the refund that lot held alone (offersOwnLotRefundBack, round 5): what is listed; on a guarded
+    // line, the refunds public.debit_link_options still lists there — it lists only those private.link_debit_guard
+    // lets through: on a debit, a reference-less line of a refund whose own transfer is its only candidate (N1 (b));
+    // round 3, on the credit « Comptabiliser… » books, the refund sent to the IBAN it comes back from
+    refunds: offersPaymentLinks(row) || offersOwnBatchRefunds(row) || offersOwnLotRefundBack(row) ? refunds : [],
   };
 }
 
@@ -458,7 +500,7 @@ export function clientRelayable(o: LineIds): boolean {
  * suggests a relay the database refuses. The return the bank flags (kind `return`) and our debits keep their review.
  */
 export const OUR_TRANSFER_CREDIT_NOTE =
-  "Crédit portant la référence de l'un de nos virements (reversement ou quote-part du cabinet) : c'est ce virement qui revient, sans que la banque l'ait signalé comme un retour. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement, et ne se classe pas sans comptabiliser. Vérifiez dans la banque ; la ligne reste dans « À classer » d'ici là.";
+  "Crédit portant la référence de l'un de nos virements (reversement ou quote-part du cabinet) : c'est ce virement qui revient, sans que la banque l'ait signalé comme un retour. Comptabilisez-le avec « Virement revenu » pour son montant exact (s'il est inférieur, demandez le détail à la banque) ; il ne devient ni le paiement d'un débiteur ni un approvisionnement.";
 
 /**
  * Review M2c-6b-1 round 4 (N3): what « À classer » says of a credit naming one of our files' PmtInfIds with no
@@ -469,7 +511,7 @@ export const OUR_TRANSFER_CREDIT_NOTE =
  * booking, they tell support.
  */
 export const OUR_LOT_CREDIT_NOTE =
-  "Crédit portant la référence de l'un des lots de nos fichiers de virements (sans référence de bout en bout) : c'est ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement. Ne le classez pas sans comptabiliser : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements (sans référence de bout en bout) : c'est ce lot, ou des virements de ce lot, qui reviennent ; il ne devient ni le paiement d'un débiteur ni un approvisionnement. Ne le classez pas sans comptabiliser : « Virement revenu » propose les virements du lot dont les montants font seuls celui de la ligne ; sinon, demandez à la banque le détail du retour et prévenez le support.";
 
 /**
  * Review M2c-6b-1 round 6 (R2): what « À classer » says of a credit read as a return that names one of our lots with an
@@ -478,7 +520,7 @@ export const OUR_LOT_CREDIT_NOTE =
  * verifier: since T1 that end-to-end id can be one of ours (a refund's RFD id), so the note claims nothing of it.
  */
 export const OUR_LOT_FOREIGN_E2E_NOTE =
-  "Crédit portant la référence de l'un des lots de nos fichiers de virements, quelle que soit sa référence de bout en bout : c'est peut-être ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne le classez pas sans comptabiliser et ne le rattachez à aucun autre remboursement : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements, quelle que soit sa référence de bout en bout : c'est peut-être ce lot, ou des virements de ce lot, qui reviennent. Ne le classez pas sans comptabiliser et ne le rattachez à aucun autre remboursement : « Virement revenu » propose les virements du lot dont les montants font seuls celui de la ligne ; sinon, demandez à la banque le détail du retour et prévenez le support.";
 
 /**
  * Review M2c-6b-1 round 7 (S3): what « À classer » says of an own or a client's credit naming one of our lots of its
@@ -486,7 +528,7 @@ export const OUR_LOT_FOREIGN_E2E_NOTE =
  * or a relay the database refuses (own_transfer_line; COMPLIANCE OQ-84 (g)).
  */
 export const OUR_LOT_OWN_CREDIT_NOTE =
-  "Crédit portant la référence de l'un des lots de nos fichiers de virements de ce compte, même s'il vient du compte propre ou du compte d'un client : c'est ce lot, ou un virement de ce lot, qui revient. Il se comptabilise depuis le relevé, par l'équipe (écran à venir) : il ne devient ni le paiement d'un débiteur ni un approvisionnement. Ne le classez pas sans comptabiliser : vérifiez dans la banque et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+  "Crédit portant la référence de l'un des lots de nos fichiers de virements de ce compte, même s'il vient du compte propre ou du compte d'un client : c'est ce lot, ou des virements de ce lot, qui reviennent ; il ne devient ni le paiement d'un débiteur ni un approvisionnement. Ne le classez pas sans comptabiliser : « Virement revenu » propose les virements du lot dont les montants font seuls celui de la ligne ; sinon, demandez à la banque le détail du retour et prévenez le support.";
 
 /**
  * Review M2c-6b-1 round 7 (S2): what « À classer » says of a line of an unsplit entry holding a detail of ours
@@ -496,7 +538,7 @@ export const OUR_LOT_OWN_CREDIT_NOTE =
  * of ours whose own amount is not the entry's holds none); (T2) our refunds and top-ups are counted too.
  */
 export const UNSPLIT_OURS_NOTE =
-  "Ligne d'une écriture de la banque qui contient au moins l'un de nos virements (reversement, quote-part du cabinet, remboursement ou approvisionnement), son débit ou son retour, et dont le détail donné par la banque est incomplet ou ne correspond pas à l'écriture (nombre, sens ou montant des opérations) : son montant est celui de toute l'écriture, rien n'est comptabilisé automatiquement. Elle se comptabilise depuis le relevé, par l'équipe (écran à venir). Ne la classez pas sans comptabiliser et ne la rattachez à aucun paiement ni remboursement : demandez à la banque le détail de l'écriture et prévenez le support ; la ligne reste dans « À classer » d'ici là.";
+  "Ligne d'une écriture de la banque qui contient au moins l'un de nos virements (reversement, quote-part du cabinet, remboursement ou approvisionnement), son débit ou son retour, et dont le détail donné par la banque est incomplet ou ne correspond pas à l'écriture (nombre, sens ou montant des opérations) : son montant est celui de toute l'écriture, rien n'est comptabilisé automatiquement. Si le relevé détaille nos virements dans cette écriture et qu'ils en font exactement le montant, « Comptabiliser d'après le détail du relevé » les propose ; sinon (le paiement d'un débiteur, des frais, un remboursement ou un approvisionnement dans l'écriture, ou un détail incomplet), elle ne peut pas être comptabilisée ici : demandez le détail à la banque et prévenez le support. Ne la classez pas sans comptabiliser et ne la rattachez à aucun paiement ni remboursement.";
 
 /**
  * Review M2c-6b-1 round 5 (Q1): on such a credit read as a return (offersOwnLotRefundBack), the one exception — the
@@ -521,7 +563,35 @@ const CREDIT_REVIEW: Record<string, string> = {
  * credit naming only one of our lots (OUR_LOT_CREDIT_NOTE, round 4's N3), else the job's reason — in a credit's words
  * on a credit. The return of our payout or sweep keeps the funds pass's review, which names it (round 4's N1).
  */
-export function debitReviewText(o: LineIds & { review_reason: string | null }): string | null {
+export function debitReviewText(
+  o: LineIds & {
+    review_reason: string | null;
+    candidates?: ({ run_status?: string | null } & Record<string, unknown>)[] | null;
+  },
+  linkOptions?: { return_guard?: string | null } | null,
+): string | null {
+  // review 6b-2c round 3: a reference-less debit whose only candidates are payouts returned, or cancelled with their run
+  // ended (iii; a cancelled payout whose run is still approved or sent may be that run's payout: still « en cours »)
+  const cands = o.candidates ?? [];
+  if (
+    o.review_reason === "payout_amount_match" &&
+    cands.length > 0 &&
+    cands.every(
+      (c) =>
+        c.status === "returned" ||
+        (c.status === "cancelled" && c.run_status !== "approved" && c.run_status !== "sent"),
+    )
+  )
+    return linkOptions?.return_guard === null
+      ? `${PAYOUT_AMOUNT_MATCH_ENDED} ${PAYOUT_AMOUNT_MATCH_RETURN}`
+      : PAYOUT_AMOUNT_MATCH_ENDED;
+  // M2c-6b-2c (critic2 ML-4): a cancelled transfer whose run is still approved or sent — this debit is that run's payout,
+  // never booked as « Virement hors reversement » (the command refuses run_still_live)
+  if (
+    o.review_reason === "cancelled_transfer_debited" &&
+    (o.candidates ?? []).some((c) => c.run_status === "approved" || c.run_status === "sent")
+  )
+    return holdsOursUnsplit(o) ? `${CANCELLED_TRANSFER_LIVE_RUN} ${UNSPLIT_OURS_NOTE}` : CANCELLED_TRANSFER_LIVE_RUN;
   // review round 7 (S2): a line of an unsplit entry holding ours — a P0 first, then why nothing is offered
   if (holdsOursUnsplit(o))
     return o.review_reason !== null && P0_DEBIT_REVIEWS.has(o.review_reason)
@@ -1087,7 +1157,8 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   bank_line_unbooked: {
     label: "Débits du cabinet non comptabilisés",
-    help: "Des débits ou retours portant les références du cabinet attendent depuis plus d'un jour ouvré dans « Débits et retours ».",
+    // review 6b-2c (legal-deadlines-3): also the reference-less debits of an in-flight transfer's amount (6b-2c)
+    help: "Des débits ou retours de nos virements, ou des débits sans notre référence du montant d'un virement du cabinet en cours, attendent depuis plus d'un jour ouvré dans « Débits et retours ».",
   },
   servicer_funds_unswept: {
     label: "Quote-part du cabinet non virée",
@@ -1388,6 +1459,10 @@ export function debitErrorCode(message: string): ErrorCode {
     return "own_credit_top_up_line";
   // review M2c-6b-1 (money-1, K1): our payouts' and sweeps' lines are booked from the statement, never linked
   if (message.includes("own_transfer_line")) return "own_transfer_line";
+  // M2c-6b-2c (plan §4.1): the lines « Comptabiliser… » books, never a fee nor explained
+  if (message.includes("debit link refused: payout_candidate")) return "payout_candidate";
+  if (message.includes("debit link refused: client_payout_line")) return "client_payout_line";
+  if (message.includes("debit link refused: own_transfer_out_line")) return "own_transfer_out_line";
   if (message.includes("before_previous_return")) return "link_before_return";
   if (message.includes("payment_returned")) return "link_payment_returned";
   if (message.includes("posting_failed")) return "link_posting_failed";
@@ -1420,4 +1495,55 @@ export function debitErrorCode(message: string): ErrorCode {
 export function linkDebitErrorCode(message: string, kind: string): ErrorCode {
   const code = debitErrorCode(message);
   return code === "own_transfer_line" && kind === "own_credit" ? "own_credit_own_transfer_line" : code;
+}
+
+/**
+ * M2c-6b-2c (plan §4.1; critic F9, L8): a debit « À classer » lists because « Comptabiliser… » books it — a transfer of
+ * ours may be it (payout_amount_match), it went to a client's payout IBAN (client_payout_iban) or to one of our own
+ * accounts (own_transfer_out): public.link_debit refuses to classify it without booking (and, but for the first, to
+ * book it as a fee), so the page does not offer « Classer sans comptabiliser » on it. Review 6b-2c: (money-1) nor a
+ * payment's return or its loss (payout_candidate, client_payout_line) — also when the job's own review names the line
+ * (its bookable_as n says « Comptabiliser… » books it) — never a debit the bank flags as a return, which that screen does
+ * not book (bookable_as null): it keeps both (round 2); (money-2) a credit the bank flags as a return from a client's
+ * payout IBAN (bookable_as n: an unplanned payout's return, « Virement revenu ») takes neither the explanation nor
+ * « Remboursement revenu » (client_payout_line).
+ */
+export function linkGuarded(o: {
+  direction: string;
+  review_reason?: string | null;
+  bookable_as?: string | null;
+}): boolean {
+  if (o.direction === "credit") return o.bookable_as === "n";
+  return (
+    o.direction === "debit" &&
+    (o.bookable_as === "n" ||
+      o.review_reason === "payout_amount_match" ||
+      o.review_reason === "client_payout_iban" ||
+      o.review_reason === "own_transfer_out")
+  );
+}
+
+/**
+ * Review 6b-2c round 3 (other-debit-return-blocked-by-returned-payout-twin; COMPLIANCE OQ-86's default): whether
+ * « À classer » withholds a payment's return and its loss on a line — linkGuarded's lines, but for a debit
+ * « À classer » lists as payout_amount_match where public.debit_link_options says « Lier » takes the return
+ * (`returnGuard` null: rule 3b's only candidates are payouts returned, or cancelled with their run ended, and the line
+ * goes to no client's payout IBAN — a debtor's payment the bank takes back without flagging it, an unpaid cheque, is
+ * linked to that payment). While the options are not read (`undefined`) or the database refuses (its code), withheld.
+ */
+export function paymentLinksGuarded(
+  o: { direction: string; review_reason?: string | null; bookable_as?: string | null },
+  returnGuard?: string | null,
+): boolean {
+  if (!linkGuarded(o)) return false;
+  return !(o.direction === "debit" && o.review_reason === "payout_amount_match" && returnGuard === null);
+}
+
+/**
+ * Review 6b-2c round 3 (fix2-notdone:fee-explanation-text): link_debit's payout_candidate on a line « Comptabiliser… »
+ * does not offer (`offersBooking` false: a debit the bank flags as a return, of a payout's amount) — its own words,
+ * which never point to that screen; every other code as it is.
+ */
+export function guardRefusalCode(code: ErrorCode, offersBooking: boolean): ErrorCode {
+  return code === "payout_candidate" && !offersBooking ? "payout_candidate_not_bookable" : code;
 }

@@ -25,6 +25,8 @@ import {
   refusalFromSearch,
   refusalText,
   regenerationEffects,
+  transferBookingText,
+  transferBookingsById,
 } from "@/lib/remittance/transfers";
 import { markSent } from "../actions";
 import { CancelFile, DownloadLink, PayeeMismatch, RegenerateFile, TwoStepCancellation } from "../file-actions";
@@ -92,6 +94,12 @@ export default async function TransferFilePage({
     );
   }
   const f = data as unknown as FileDetail;
+  // M2c-6b-2c (plan §4.4, §7.4): what the statement booked of each transfer listed (its debit's date, its return's, or
+  // the bank's execution of a cancelled one outside its run), by key for the page's at most 100 transfers
+  const ids = f.items.map((t) => t.transfer_id).filter((x): x is string => typeof x === "string" && UUID.test(x));
+  const { data: bookingRows } =
+    ids.length > 0 ? await supabase.rpc("transfer_bookings", { p_transfer_ids: ids }) : { data: [] };
+  const bookings = transferBookingsById(bookingRows ?? []);
   const status = fileStatus(f.status);
   const warning = downloadWarning(f);
   // a generated file dated before today can no longer go (the download would refuse and replace it); one dated today
@@ -253,6 +261,11 @@ export default async function TransferFilePage({
                   {t.debit_seen ? <Badge tone="ok">Débit vu sur un relevé</Badge> : null}
                   {t.payee_check_open ? <Badge tone="error">Nom non concordant signalé</Badge> : null}
                 </span>
+                {transferBookingText(t.status, bookings.get(t.transfer_id)) ? (
+                  <span className="text-sm" data-testid="file-item-booking">
+                    {transferBookingText(t.status, bookings.get(t.transfer_id))}
+                  </span>
+                ) : null}
                 {t.kind === "payout" && t.status === "in_file" && !t.payee_check_open && f.download_count > 0 ? (
                   <PayeeMismatch transferId={t.transfer_id} fileId={f.id} cancellable={cancellable} idempotencyKey={randomUUID()} />
                 ) : null}
