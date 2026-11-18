@@ -25,7 +25,11 @@ import { reviewShot } from "./screenshot";
  * space and downloads them. M2c-6a: the payout goes in a pain.001 file (« Virements »), downloaded once by a tap (the
  * page refreshes itself), the second time only past the warning (a refusal comes back to the file's page with it open:
  * review tests-ui#9), marked as sent; once downloaded it cannot be cancelled in Collectoo, the page says so (review
- * round 5, fail-closed until M2c-6b). Phone-first. Synthetic data.
+ * round 5, fail-closed until M2c-6b). M2c-6b-2c: the run page and « Virements » say when the payout was debited; the bank
+ * debits it a second time and sends one copy back (one statement): ops book the second debit as « Virement hors
+ * reversement » (P = 0 sheet: all of it the servicer's advance), then the copy back with « Virement revenu » (the
+ * advance cancelled, nothing owed again); the client space reads « Virement débité de notre compte le … ». Phone-first.
+ * Synthetic data.
  */
 const BANK_IBAN = ibanFr(434343);
 const FIXTURE = {
@@ -342,7 +346,6 @@ test("ops prepare, read and approve a client's remittance run", async ({
     "Virement ordonné",
   );
   await expect(row).not.toContainText("payé");
-  await reviewShot(client, testInfo, "m2c-client-reversements");
   const clientPdf = await client.request.get(
     (await row.getByTestId("statement-pdf").getAttribute("href"))!,
   );
@@ -538,8 +541,265 @@ test("ops prepare, read and approve a client's remittance run", async ({
     });
   }).toPass({ timeout: 60_000 });
   await expect(page.getByTestId("run-transfer-status")).toContainText("Débité");
+  // M2c-6b-2c (plan §7.4): the dates, from public.remittance_run_payout
+  const debitDay = await statementDay();
+  const debitFr = debitDay.split("-").reverse().join("/");
+  await expect(page.getByTestId("run-payout-notes")).toContainText(
+    `Débité de notre compte le ${debitFr}`,
+  );
+  await expect(page.getByTestId("run-payout-notes")).toContainText(
+    `Commission réglée par compensation le ${debitFr} : 144,00`,
+  );
   await reviewShot(page, testInfo, "m2c-reversement-debite");
   await page.goto(filePage);
   await expect(page.getByTestId("file-item")).toContainText("Débité");
+  await expect(page.getByTestId("file-item")).toContainText(
+    `Débité le ${debitFr}`,
+  );
   await reviewShot(page, testInfo, "m2c-virement-debite");
+
+  // M2c-6b-2c (plan §8.4): the bank debits the payout a second time and sends one copy back, on one statement — the
+  // job reviews the second debit transfer_debited_twice (P0) and the copy back return_debit_pending
+  await page.goto("/backoffice/encaissements");
+  const twiceForm = page.getByTestId("statement-upload");
+  await twiceForm.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({
+    name: "releve-second-debit.xml",
+    mimeType: "application/xml",
+    buffer: Buffer.from(
+      camt053Lines(
+        BANK_IBAN,
+        debitDay,
+        [
+          {
+            ref: "RV-RETOUR",
+            amountMinor: BigInt(65601),
+            name: "BOULANGERIE DURAND",
+            iban: ibanFr(434344),
+            e2e,
+            returned: true,
+          },
+        ],
+        [
+          {
+            ref: "RV-DEBIT-2",
+            amountMinor: BigInt(65601),
+            kind: "transfer",
+            e2e,
+            name: "BOULANGERIE DURAND",
+          },
+        ],
+        opening - BigInt(65601),
+      ),
+      "utf-8",
+    ),
+  });
+  await twiceForm.getByRole("button", { name: "Importer le relevé" }).click();
+  await expect(page).toHaveURL(
+    /\/backoffice\/encaissements\/releves\/[0-9a-f-]{36}/,
+    { timeout: 30_000 },
+  );
+  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
+    timeout: 60_000,
+  });
+  await page.goto("/backoffice/encaissements/debits");
+  const debitedTwice = page
+    .getByTestId("debit-row")
+    .filter({ has: page.getByTestId("debit-review-p0") })
+    .filter({ hasText: "656,01" });
+  await expect(async () => {
+    await page.reload();
+    await expect(debitedTwice).toHaveCount(1, { timeout: 2_000 });
+  }).toPass({ timeout: 60_000 });
+  // « Comptabiliser… »: the options are read when the sheet opens (never while the list renders)
+  await debitedTwice.getByTestId("book-transfer-line").getByRole("button").click();
+  const unplannedSheet = page.getByRole("dialog");
+  const unplannedProposal = unplannedSheet.getByTestId("transfer-line-proposal");
+  await expect(unplannedProposal).toContainText("Virement hors reversement", {
+    timeout: 15_000,
+  });
+  await expect(unplannedSheet.getByTestId("transfer-line-effects")).toContainText(
+    `Rien n'est déduit du prochain reversement de ${tenant.clientName} ; avance du cabinet de 656,01`,
+  );
+  await unplannedSheet
+    .getByLabel("Motif (ce que montre le relevé ou la banque)")
+    .fill("La banque confirme une double exécution (E2E)");
+  await reviewShot(page, testInfo, "m2c-virement-hors-reversement");
+  await unplannedSheet
+    .getByRole("button", { name: "Comptabiliser le virement" })
+    .click();
+  await expect(unplannedSheet).toHaveCount(0, { timeout: 15_000 });
+  // the copy back: the funds pass the command queued reads it again — the unplanned booking's return. (review 6b-2c T8)
+  // Waited on what that re-read changes: its review becomes unplanned_payout_return (« exécuté hors de son ordre »);
+  // the stale return_debit_pending already said « Virement revenu »
+  const copyBack = page
+    .getByTestId("debit-row")
+    .filter({ hasText: "656,01" })
+    .filter({ hasText: "exécuté hors de son ordre" })
+    .filter({ hasNotText: "Comptabilisez d'abord ce débit" });
+  await expect(async () => {
+    await page.reload();
+    await expect(copyBack).toHaveCount(1, { timeout: 2_000 });
+  }).toPass({ timeout: 60_000 });
+  await copyBack.getByTestId("book-transfer-line").getByRole("button").click();
+  const returnSheet = page.getByRole("dialog");
+  await expect(returnSheet.getByTestId("transfer-line-proposal")).toContainText(
+    "Virement revenu",
+    { timeout: 15_000 },
+  );
+  await expect(returnSheet.getByTestId("transfer-line-effects")).toContainText(
+    `Le virement hors reversement du ${debitFr} (656,01`,
+  );
+  await expect(returnSheet.getByTestId("transfer-line-effects")).toContainText(
+    `revient : l'avance du cabinet de 656,01`,
+  );
+  await expect(returnSheet.getByTestId("transfer-line-effects")).toContainText(
+    `rien n'est de nouveau dû à ${tenant.clientName}`,
+  );
+  await returnSheet
+    .getByLabel("Motif (ce que montre le relevé ou la banque)")
+    .fill("Retour MD06 d'une des deux exécutions (E2E)");
+  await reviewShot(page, testInfo, "m2c-virement-revenu");
+  await returnSheet
+    .getByRole("button", { name: "Comptabiliser le retour" })
+    .click();
+  await expect(returnSheet).toHaveCount(0, { timeout: 15_000 });
+  await page.goto("/backoffice/encaissements/debits?onglet=traites");
+  await expect(
+    page.getByTestId("debit-row").filter({ hasText: "Virement hors reversement revenu" }),
+  ).toHaveCount(1);
+  await expect(
+    page
+      .getByTestId("debit-row")
+      .filter({ hasText: /Virement hors reversement$|Virement hors reversement\s/ })
+      .first(),
+  ).toBeVisible();
+  // (review 6b-2c T8) the run page says the second execution, with its date, and that it came back
+  await page.goto(runPage);
+  await expect(page.getByTestId("run-payout-notes")).toContainText(
+    `La banque a exécuté le virement de ce reversement une seconde fois le ${debitFr} (656,01`,
+  );
+  await expect(page.getByTestId("run-payout-notes")).toContainText(
+    `Ce virement hors reversement du ${debitFr} est revenu depuis : son retour est comptabilisé.`,
+  );
+
+  // the client space: the debit's date (plan §7.4, critic L6)
+  const later = await browser.newContext({
+    baseURL: use.baseURL,
+    viewport: use.viewport,
+    userAgent: use.userAgent,
+    deviceScaleFactor: use.deviceScaleFactor,
+    isMobile: use.isMobile,
+    hasTouch: use.hasTouch,
+  });
+  const clientLater = await later.newPage();
+  await loginWithEmailCode(
+    clientLater,
+    await createMember(tenant.clientId, "client_admin"),
+  );
+  await expect(clientLater).toHaveURL(/\/client$/);
+  await clientLater.goto("/client/reversements");
+  await expect(
+    clientLater.getByTestId("statement-row").getByTestId("statement-status"),
+  ).toHaveText(`Virement débité de notre compte le ${debitFr}`);
+  await reviewShot(clientLater, testInfo, "m2c-client-reversements");
+  await later.close();
+
+  // review 6b-2c (pages-6, T8; plan §7.4, §7.5): the payee's bank sends the payout's planned copy back (flagged): the job
+  // books the return — the run page says so and that the payout account is blocked; then the bank executes the payout
+  // once more: « Virement hors reversement » with P = A (the sums its return put back are deducted, no advance)
+  const statementOf = async (
+    file: string,
+    credits: Credit[],
+    debits: Parameters<typeof camt053Lines>[3],
+    from: bigint,
+  ) => {
+    await page.goto("/backoffice/encaissements");
+    const form = page.getByTestId("statement-upload");
+    await form.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({
+      name: file,
+      mimeType: "application/xml",
+      buffer: Buffer.from(camt053Lines(BANK_IBAN, debitDay, credits, debits, from), "utf-8"),
+    });
+    await form.getByRole("button", { name: "Importer le relevé" }).click();
+    await expect(page).toHaveURL(
+      /\/backoffice\/encaissements\/releves\/[0-9a-f-]{36}/,
+      { timeout: 30_000 },
+    );
+    await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
+      timeout: 60_000,
+    });
+  };
+  await statementOf(
+    "releve-retour-reversement.xml",
+    [
+      {
+        ref: "RV-RETOUR-2",
+        amountMinor: BigInt(65601),
+        name: "BOULANGERIE DURAND",
+        iban: ibanFr(434344),
+        e2e,
+        returned: true,
+      },
+    ],
+    [],
+    opening - BigInt(65601),
+  );
+  await page.goto(runPage);
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByTestId("run-payout-notes")).toContainText(
+      `Virement revenu impayé le ${debitFr} : 656,01`,
+      { timeout: 2_000 },
+    );
+  }).toPass({ timeout: 60_000 });
+  await expect(page.getByTestId("run-payout-notes")).toContainText(
+    "son compte de reversement est bloqué jusqu'à son remplacement ou sa reconfirmation",
+  );
+  await statementOf(
+    "releve-troisieme-debit.xml",
+    [],
+    [
+      {
+        ref: "RV-DEBIT-3",
+        amountMinor: BigInt(65601),
+        kind: "transfer",
+        e2e,
+        name: "BOULANGERIE DURAND",
+      },
+    ],
+    opening,
+  );
+  await page.goto("/backoffice/encaissements/debits");
+  const debitedAgain = page
+    .getByTestId("debit-row")
+    .filter({ hasText: "656,01" })
+    .filter({ has: page.getByTestId("book-transfer-line") });
+  await expect(async () => {
+    await page.reload();
+    await expect(debitedAgain).toHaveCount(1, { timeout: 2_000 });
+  }).toPass({ timeout: 60_000 });
+  await debitedAgain.getByTestId("book-transfer-line").getByRole("button").click();
+  const deductedSheet = page.getByRole("dialog");
+  await expect(deductedSheet.getByTestId("transfer-line-proposal")).toContainText(
+    "Virement hors reversement",
+    { timeout: 15_000 },
+  );
+  await expect(deductedSheet.getByTestId("transfer-line-effects")).toContainText(
+    `déjà reçus par ${tenant.clientName} seront déduits de son prochain reversement (sommes du reversement`,
+  );
+  await expect(deductedSheet.getByTestId("transfer-line-effects")).toContainText(
+    "remises à reverser par le retour de son virement) ; avance du cabinet : 0,00",
+  );
+  await deductedSheet
+    .getByLabel("Motif (ce que montre le relevé ou la banque)")
+    .fill("La banque a exécuté de nouveau le virement revenu (E2E)");
+  await reviewShot(page, testInfo, "m2c-virement-hors-reversement-deduit");
+  await deductedSheet
+    .getByRole("button", { name: "Comptabiliser le virement" })
+    .click();
+  await expect(deductedSheet).toHaveCount(0, { timeout: 15_000 });
+  await page.goto(runPage);
+  await expect(page.getByTestId("run-payout-notes")).toContainText(
+    "comptabilisé hors reversement, avance du cabinet de 0,00",
+  );
 });

@@ -1652,9 +1652,11 @@ select is(array[pg_temp.hint('select pg_temp.f_assign()'), pg_temp.hint('select 
   '(prévenez le support), and promise no screen');
 select is(private.own_transfer_line_hint('bank_booking'),
   'Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, lot de notre '
-  'fichier) : elle se comptabilise depuis le relevé, automatiquement ou par l''équipe (écran à venir). Elle ne se '
-  'rattache pas à un paiement et ne se classe pas sans comptabilisation.',
-  'F: the funds pass''s own-line hint, now one place, says what it said (6b-2c rewords it with the screen)');
+  'fichier) : elle se comptabilise depuis le relevé, automatiquement à l''import ou par l''équipe dans « Débits et '
+  'retours » (débit d''un reversement, virement hors reversement, virement au compte propre, virement revenu) ; sinon '
+  'elle attend le détail de la banque : prévenez le support. Elle ne se rattache pas à un paiement et ne se classe pas '
+  'sans comptabilisation.',
+  'F: the funds pass''s own-line hint, now one place (6b-2c reworded it with the screen: « Débits et retours »)');
 -- « Perte » by ops on our line (the funds pass's strict re-check), as 035's S2 case
 create or replace function pg_temp.s2_loss(p_line uuid, p_amount bigint) returns text language plpgsql as $$
 begin

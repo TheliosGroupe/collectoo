@@ -951,10 +951,12 @@ select is((select count(*)::integer from private.debit_candidates('00000000-0000
 -- books it: its item, the account returned, the P0)
 select is(pg_temp.attempt(format($q$ select pg_temp.link('rr-on-rmt-0001', %L, 'refund_returned', null, %L, null) $q$,
                                  pg_temp.ln('03', 1), (select (v ->> 'refund_request_id')::uuid from j where k = 'q1'))),
+          -- (M2c-6b-2c, plan §4.3: the screen exists, private.own_transfer_line_hint('debit_link'))
           'debit link refused: own_transfer_line | Cette ligne est un débit ou un retour de nos propres virements '
           '(reversement, quote-part du cabinet, lot de notre fichier) : elle se comptabilise depuis le relevé, '
-          'automatiquement ou par l''équipe (écran à venir). Elle ne se rattache pas à un paiement et ne se classe pas '
-          'sans comptabilisation.',
+          'automatiquement à l''import ou par l''équipe dans « Débits et retours » (débit d''un reversement, virement '
+          'hors reversement, virement au compte propre, virement revenu) ; sinon elle attend le détail de la banque : '
+          'prévenez le support. Elle ne se rattache pas à un paiement et ne se classe pas sans comptabilisation.',
   '« Remboursement revenu » refused on the return of our RMT payout: own_transfer_line, with its hint');
 -- review T4/K5: a return dated before its payout's debit (yesterday's) is left to ops as return_before_debit
 create or replace function pg_temp.sc_early_return() returns jsonb language plpgsql as $$
@@ -2551,11 +2553,12 @@ begin
 end $$;
 select is(pg_temp.isolated('sc_relay_own'),
           jsonb_build_object(
+            -- (M2c-6b-2c, plan §4.3: private.own_transfer_line_hint('own_credit'))
             'client_rmt', 'own credit release refused: own_transfer_line | Ce crédit est l''un de nos propres virements '
                           'qui revient (reversement, quote-part du cabinet, lot de notre fichier) : il se comptabilise '
                           'depuis le relevé, automatiquement quand la banque le signale comme un retour, sinon par '
-                          'l''équipe (écran à venir). Il ne devient jamais le paiement d''un débiteur ni un '
-                          'approvisionnement.',
+                          'l''équipe dans « Débits et retours » (« Virement revenu »), ou il attend le détail de la '
+                          'banque. Il ne devient jamais le paiement d''un débiteur ni un approvisionnement.',
             'others', to_jsonb(array_fill('own credit release refused: own_transfer_line'::text, array[3])),
             'relay', 'unmatched', 'relayed', 1),
   'M1: a client''s credit carrying our RMT id, an own credit carrying our SWP id, a credit returning our RMT id and one '

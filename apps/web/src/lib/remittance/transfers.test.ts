@@ -1239,9 +1239,11 @@ describe("M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is 
       expect(text, what).toContain(
         "automatiquement à l'import quand la ligne porte sa référence RMT ou celle de son lot",
       );
+      // M2c-6b-2c (plan §4.3): the team books it in « Débits et retours »
       expect(text, what).toContain(
-        "sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir",
+        "sinon l'équipe la comptabilise dans « Débits et retours » (« Débit d'un reversement »)",
       );
+      expect(text, what).not.toContain("à venir");
       expect(text, what).not.toContain("(automatiquement, à l");
       expect(text, what).not.toContain(
         "pas encore disponible pour un reversement",
@@ -1265,7 +1267,7 @@ describe("M2c-6a review, round 5 (fail-closed): nothing of a downloaded file is 
       expect(text, what).toMatch(/comptabilisés depuis le relevé/);
       // review legal-texts#3: « automatiquement » only for a line carrying the reference (RMT/SWP) or its lot's
       expect(text, what).toContain(
-        "à l'import du relevé : automatiquement pour un reversement ou la quote-part du cabinet dont la ligne porte la référence RMT ou SWP, ou celle de son lot, sinon la ligne attend dans « Débits et retours » sa comptabilisation par l'équipe, à venir ; dès son rattachement pour un remboursement",
+        "à l'import du relevé : automatiquement pour un reversement ou la quote-part du cabinet dont la ligne porte la référence RMT ou SWP, ou celle de son lot, sinon l'équipe la comptabilise dans « Débits et retours » (« Débit d'un reversement », « Débit de la quote-part du cabinet ») ; dès son rattachement pour un remboursement",
       );
       expect(text, what).not.toContain(
         "automatiquement pour les reversements et la quote-part du cabinet, dès",

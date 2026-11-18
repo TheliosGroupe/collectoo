@@ -7,13 +7,24 @@ books it — each timed against the plan's budget (options < 2 s, command ≤ 4 
 docs/benchmarks/remittances.md. The same line one member longer than the cap is refused
 lot_too_large at once (before any subset is searched), with its member count and no member
 list. First, in a rolled-back transaction, the same booking read from pg_stat_xact_user_tables (CI
-scale fix): every table read once per member read by key, whatever the statistics."""
+scale fix): every table read once per member read by key, whatever the statistics.
+
+M2c-6b-2b deferred tests (ADR-0014 « M2c-6b-2b deferred tests »): the time the command holds the
+servicer's allocation lock (`payments:`) while it books the 500-member lot, watched in pg_locks
+from a second connection; the options on a lot of 5,000 members (one PmtInf of a downloaded file:
+the file of two payouts made through the jobs, 4,998 members added to its PmtInf in a rolled-back
+transaction) answer lot_too_large from the keyed count, the subset search never called (it would
+raise), under 0.5 s; a client's draft of 50,000 reserved items (50,000 advances posted
+set-based, the draft requested by the command) re-prepared by the command booking that client's
+unplanned payout: within the command's 4 s, the allocation lock held under 1 s (the draft's lines
+are not cleared under it: the prepare job does that under the run lock)."""
 
 from __future__ import annotations
 
 import json
 import os
 import random
+import threading
 import time
 import uuid
 from typing import Any
@@ -23,7 +34,12 @@ import pytest
 from debit_helpers import api
 from integration_helpers import DB, one
 from psycopg.types.json import Jsonb
+from remittance_helpers import remittance_tenant, run_row, staff
+from test_debit_bookings_integration import _downloaded
 from test_debit_bookings_scale_integration import _file_payouts, _statement
+from test_transfer_files_integration import _own_account, _two_runs
+
+from collectoo_worker.remittance import pain001
 
 pytestmark = pytest.mark.integration
 LOT = int(os.environ.get("TRANSFER_LINE_LOT_SIZE", "500"))
@@ -164,26 +180,30 @@ def test_a_lot_at_the_cap_short_of_one_member_is_booked_within_budget(lot: dict[
     (proposal,) = opts["proposals"]
     assert len(proposal["parts"]) == LOT - 1
     assert left not in {p["end_to_end_id"] for p in proposal["parts"]}
+    watch = _LockWatch(str(lot["org"]))
     mark = time.monotonic()
-    res = dict(
-        api(
-            tenant,
-            "select public.book_transfer_line(%s, %s, %s, %s, %s)",
-            str(uuid.uuid4()),
-            line,
-            Jsonb(proposal["request"]),
-            proposal["preview"]["expected_text"],
-            REASON,
+    with watch:
+        res = dict(
+            api(
+                tenant,
+                "select public.book_transfer_line(%s, %s, %s, %s, %s)",
+                str(uuid.uuid4()),
+                line,
+                Jsonb(proposal["request"]),
+                proposal["preview"]["expected_text"],
+                REASON,
+            )
         )
-    )
-    command_s = time.monotonic() - mark
+        command_s = time.monotonic() - mark
     print(
         f"\n{LOT}-member lot short of one: transfer_line_options {options_s:.2f}s,"
-        f" book_transfer_line {command_s:.2f}s ({len(res['bookings'])} bookings)"
+        f" book_transfer_line {command_s:.2f}s ({len(res['bookings'])} bookings), the allocation"
+        f" lock held {watch.held_s:.2f}s"
     )
     assert len(res["bookings"]) == LOT - 1
     assert options_s < 2, options_s
     assert command_s <= 4, command_s
+    assert 0 < watch.held_s <= command_s + 0.1, watch.held_s
 
 
 def _as_ops(conn: psycopg.Connection[Any], tenant: dict[str, Any]) -> None:
@@ -302,3 +322,265 @@ def test_a_lot_above_the_cap_is_refused_at_once(over: dict[str, Any]) -> None:
         [],
     ), opts
     assert options_s < 0.5, options_s
+
+
+# -- M2c-6b-2b deferred tests ------------------------------------------------------------------
+
+BIG = int(os.environ.get("TRANSFER_LINE_BIG_LOT", "5000"))
+DRAFT_ITEMS = int(os.environ.get("TRANSFER_LINE_DRAFT_ITEMS", "50000"))
+
+
+class _LockWatch:
+    """While in its block, a second connection polls pg_locks (every 2 ms) for the servicer's
+    allocation lock (`pg_advisory_xact_lock(hashtext('payments:' || org))`, the bigint form) granted
+    to anyone; `held_s`: from the first poll that saw it to the last."""
+
+    def __init__(self, org: str) -> None:
+        self.org = org
+        self.first: float | None = None
+        self.last: float | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._poll)
+
+    def _poll(self) -> None:
+        with psycopg.connect(DB, autocommit=True) as conn:
+            tag = conn.execute(
+                """select ((k >> 32) & 4294967295)::text::oid, (k & 4294967295)::text::oid
+                   from (select hashtext('payments:' || %s)::bigint as k) x""",
+                (self.org,),
+            ).fetchone()
+            assert tag is not None
+            while not self._stop.is_set():
+                held = conn.execute(
+                    """select exists (select 1 from pg_locks where locktype = 'advisory'
+                         and granted and classid = %s and objid = %s and objsubid = 1)""",
+                    tag,
+                ).fetchone()
+                if held and held[0]:
+                    now = time.monotonic()
+                    self.first = self.first or now
+                    self.last = now
+                time.sleep(0.002)
+
+    def __enter__(self) -> _LockWatch:
+        self._thread.start()
+        time.sleep(0.05)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        time.sleep(0.05)
+        self._stop.set()
+        self._thread.join(10)
+
+    @property
+    def held_s(self) -> float:
+        return 0.0 if self.first is None or self.last is None else self.last - self.first
+
+
+def _line(conn: psycopg.Connection[Any], tenant: dict[str, Any], amount: int, **cols: Any) -> str:
+    """A debit on a new imported statement of the tenant's account (in the caller's transaction)."""
+    org = str(tenant["servicer"])
+    st = one(
+        conn,
+        """insert into public.bank_statement (organization_id, bank_account_id, currency, format,
+             file_name, file_sha256, size_bytes, storage_path)
+           values (%s, %s, 'EUR', 'camt053', 's.xml', %s, 1, %s) returning id""",
+        (org, tenant["bank"], uuid.uuid4().hex * 2, f"test/{uuid.uuid4()}"),
+    )
+    conn.execute(
+        "update public.bank_statement set status = 'uploaded', uploaded_at = now() where id = %s",
+        (st,),
+    )
+    names = ", ".join(cols)
+    marks = ", ".join(["%s"] * len(cols))
+    line = one(
+        conn,
+        f"""insert into public.bank_transaction (organization_id, bank_account_id, statement_id,
+              line_no, dedup_key, direction, amount_minor, currency, booking_date, {names})
+            values (%s, %s, %s, 1, %s, 'debit', %s, 'EUR', private.paris_today(), {marks})
+            returning id""",  # noqa: S608 - the column names are the test's own
+        (org, tenant["bank"], st, f"t:{st}:1", amount, *cols.values()),
+    )
+    conn.execute(
+        """update public.bank_statement set status = 'imported',
+             from_date = private.paris_today(), to_date = private.paris_today(),
+             opening_booked_minor = 0, closing_booked_minor = 0, counts = '{}',
+             finished_at = now() where id = %s""",
+        (st,),
+    )
+    return str(line)
+
+
+def test_options_on_a_5000_member_lot_answer_from_the_count(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Critic2 CSO2-3: a lot of BIG members (the file of two payouts made through the jobs, its
+    PmtInf filled to BIG in a rolled-back transaction): the options, the preview and the command
+    refuse lot_too_large from the keyed count — its member count, no member list — and never
+    search a subset (private.unique_subset replaced, in the same transaction, by one raising)."""
+    tenant, _other, _r1, _r2 = _two_runs()
+    f, data = _downloaded(tenant, tmp_path_factory.mktemp("big"))
+    ((pmt, members),) = [
+        (p.pmt_inf_id, len(p.transactions)) for p in pain001.read(data).payment_infos
+    ]
+    with psycopg.connect(DB) as conn, conn.transaction(force_rollback=True):
+        iban = one(
+            conn,
+            "select iban from public.client_payout_account where id = %s",
+            (tenant["payout"],),
+        )
+        conn.execute("alter table public.bank_transfer disable trigger bank_transfer_guard")
+        added = BIG - members
+        conn.execute(
+            """with t as (
+                 insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id,
+                   currency, amount_minor, payee_name, payee_iban, end_to_end_id,
+                   requested_execution_date, status, transfer_file_id, client_organization_id)
+                 select %s, 'payout', %s, 'EUR', 1000 + g, 'CLIENT SAS', %s,
+                        'RMT' || upper(substr(md5(%s || g::text), 1, 12)), private.paris_today(),
+                        'in_file', %s, %s
+                 from generate_series(1, %s) g
+                 returning id, amount_minor)
+               insert into public.transfer_file_item (file_id, seq, transfer_id, organization_id,
+                 pmt_inf_id, execution_date)
+               select %s, %s + row_number() over (order by t.amount_minor), t.id, %s, %s,
+                      private.paris_today()
+               from t""",
+            (tenant["servicer"], tenant["bank"], iban, uuid.uuid4().hex, f["id"],
+             tenant["client"], added, f["id"], members, tenant["servicer"], pmt),
+        )  # fmt: skip
+        conn.execute(
+            """create or replace function private.unique_subset(p_amounts bigint[], p_target bigint)
+               returns integer[] language plpgsql set search_path = '' as $$
+               begin raise exception 'the subset searched'; end $$"""
+        )
+        line = _line(conn, tenant, 123_456, kind="batch_unsplit", payment_info_id=pmt)
+        transfer = one(
+            conn,
+            "select transfer_id from public.transfer_file_item where file_id = %s and seq = 1",
+            (f["id"],),
+        )
+        _as_ops(conn, tenant)
+        mark = time.monotonic()
+        opts = one(conn, "select public.transfer_line_options(%s)", (line,))
+        options_s = time.monotonic() - mark
+        parts = Jsonb([{"kind": "payout", "transfer_id": str(transfer), "amount": "123456"}])
+        preview = one(conn, "select public.transfer_line_preview(%s, %s)", (line, parts))
+        mark = time.monotonic()
+        with pytest.raises(psycopg.Error) as exc:
+            conn.execute(
+                "select public.book_transfer_line(%s, %s, %s, %s, %s)",
+                (str(uuid.uuid4()), line, parts, "x", REASON),
+            )
+        command_s = time.monotonic() - mark
+    print(
+        f"\n{BIG}-member lot: transfer_line_options {options_s:.3f}s, book_transfer_line"
+        f" {command_s:.3f}s (lot_too_large)"
+    )
+    assert (opts["class"], opts["refusal"], opts["member_count"], opts["members"]) == (
+        "B",
+        "lot_too_large",
+        BIG,
+        None,
+    ), opts
+    assert opts["proposals"] == [] and (preview["ok"], preview["why"]) == (False, "lot_too_large")
+    assert exc.value.diag.message_primary == "transfer line booking refused: lot_too_large"
+    assert options_s < 0.5, options_s
+    assert command_s < 0.5, command_s
+
+
+@pytest.fixture(scope="module")
+def draft50k() -> dict[str, Any]:
+    """A client with DRAFT_ITEMS advances posted set-based (each a pending item of its queue), its
+    draft requested by ops (the command reserves them all), and a debit of 1 234,00 € to its payout
+    IBAN naming nothing of ours (S13), committed."""
+    tenant = remittance_tenant()
+    _own_account(tenant)
+    marks: dict[str, float] = {}
+    mark = time.monotonic()
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute("select private.ledger_post_set_begin()")
+        conn.execute(
+            """insert into pg_temp._lps_entry (entry_no, organization_id, entry_type,
+                 effective_date, idempotency_key, client_organization_id, source_type, source_id,
+                 reason)
+               select g, %s, 'client_advance', private.paris_today(),
+                      'scale-adv:' || gen_random_uuid(),
+                      %s, 'client_advance', gen_random_uuid()::text, 'Avance (test d''échelle)'
+               from generate_series(1, %s) g""",
+            (tenant["servicer"], tenant["client"], DRAFT_ITEMS),
+        )
+        conn.execute(
+            """insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency)
+               select g, v.line_no, v.book, v.sign * 100, 'EUR'
+               from generate_series(1, %s) g
+               cross join (values (1, 'due_to_servicer', 1), (2, 'client_payable', -1),
+                                  (3, 'client_advance_receivable', 1),
+                                  (4, 'due_from_client_funds', -1)) v (line_no, book, sign)""",
+            (DRAFT_ITEMS,),
+        )
+        conn.execute("select count(*) from private.ledger_post_set()")
+    marks["post"] = time.monotonic() - mark
+    mark = time.monotonic()
+    draft = staff(tenant, "select public.request_remittance_run(%s, %s, 'EUR')",
+                  str(uuid.uuid4()), tenant["client"])["run_id"]  # fmt: skip
+    marks["request"] = time.monotonic() - mark
+    with psycopg.connect(DB) as conn, conn.transaction():
+        iban = one(
+            conn,
+            "select iban from public.client_payout_account where id = %s",
+            (tenant["payout"],),
+        )
+        line = _line(conn, tenant, 123_400, kind="other_debit", counterparty_iban=iban)
+    assert run_row(str(draft))["item_count"] == DRAFT_ITEMS
+    return {"tenant": tenant, "draft": str(draft), "line": line, "marks": marks}
+
+
+def test_the_requeue_of_a_50000_item_draft_holds_the_allocation_lock_briefly(
+    draft50k: dict[str, Any],
+) -> None:
+    """Plan §8.2 « Scale »: the command booking the client's unplanned payout re-prepares its draft
+    of DRAFT_ITEMS reserved items (the new rows reserved, the job queued under a new token; the
+    draft's lines are not cleared here) within its 4 s, the allocation lock held under 1 s."""
+    tenant, line, draft = draft50k["tenant"], draft50k["line"], draft50k["draft"]
+    mark = time.monotonic()
+    opts = dict(api(tenant, "select public.transfer_line_options(%s)", line))
+    options_s = time.monotonic() - mark
+    (proposal,) = opts["proposals"]
+    assert [d["run_id"] for d in proposal["preview"]["drafts"]] == [draft]
+    watch = _LockWatch(str(tenant["servicer"]))
+    with watch:
+        mark = time.monotonic()
+        res = dict(
+            api(
+                tenant,
+                "select public.book_transfer_line(%s, %s, %s, %s, %s)",
+                str(uuid.uuid4()),
+                line,
+                Jsonb(proposal["request"]),
+                proposal["preview"]["expected_text"],
+                REASON,
+            )
+        )
+        command_s = time.monotonic() - mark
+    head = run_row(draft)
+    print(
+        f"\n{DRAFT_ITEMS}-item draft requeued: fixture post {draft50k['marks']['post']:.1f}s,"
+        f" request {draft50k['marks']['request']:.2f}s; transfer_line_options {options_s:.2f}s,"
+        f" book_transfer_line {command_s:.2f}s, the allocation lock held {watch.held_s:.2f}s"
+    )
+    assert res["drafts_requeued"] == [draft]
+    assert (head["job"], head["item_count"], head["prepared_at"]) == (
+        "prepare",
+        DRAFT_ITEMS + 2,
+        None,
+    )
+    assert command_s <= 4, command_s
+    assert 0 < watch.held_s < 1, watch.held_s
+    with psycopg.connect(DB) as conn:
+        # the queued prepare jobs of this draft taken off the queue: no later test pays for them
+        conn.execute(
+            """select pgmq.delete('remittances', m.msg_id) from pgmq.q_remittances m
+               where m.message ->> 'run_id' = %s""",
+            (draft,),
+        )

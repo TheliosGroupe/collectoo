@@ -2185,5 +2185,709 @@ transfer_file_item, the lot's runs' lines read at most 10 times per member (befo
 lock step alone scanned remittance_line 500 times). Timings in `docs/benchmarks/remittances.md` (« The ops command »,
 CI scale fix).
 
+## M2c-6b-2b deferred tests (2026-11-17)
+
+The tests 6b-2b left (« M2c-6b-2b » deviations above; `037`'s header; plan §8.1 037, §8.2 « Integration », « Concurrency »,
+« Stateful », « Scale »), written against the build `c581a8b` (6b-2b as PR #33 holds it), and the two bugs they found,
+fixed at the root in a new migration `20261117105000_transfer_line_ops_fixes.sql` (forward-only: `20261117100000` is
+treated as merged and unchanged; each function copied from its definition there, `SECURITY DEFINER`, every `SET`
+clause and `search_path` restated, its grants restated). The cancellation after download stays **off**; `033`, `034`
+and `037` are unchanged (track A appends 6b-2c's group P to `037`). No §10 question answered: each default stays open.
+
+**Bugs found and fixed** (each test red on `c581a8b`, green on the fix; severity by the slice's rule):
+- **Cross-tenant lock (low).** `private.transfer_line_locks` step 8 took `FOR SHARE` on every `transfer_file` holding an
+  item of the line's `payment_info_id`, whatever its account. The PmtInfId is the bank's data: a line of one servicer
+  whose PmtInfId equals another servicer's lot (TF numbers are one global sequence, so only a bank-given or mistyped
+  id collides) made that servicer's file locked for the command's duration — its download or regeneration waited,
+  then `busy` (critic CSO-5: « no row of another servicer is ever locked »). No money, no data shown. Fix: the PmtInf's
+  files of the line's account only, as every read of the lot already filters them (`transfer_line_class`,
+  `transfer_line_pre`, `transfer_line_members`). Test:
+  `test_transfer_line_concurrency_integration.py::test_another_servicer_s_rows_are_never_locked_by_the_command` (the
+  command booking such a line holds its transaction open while a second connection probes the other servicer's file,
+  transfers, runs and account `FOR UPDATE NOWAIT`: on `c581a8b` the file is held, 55P03; and a command naming the other
+  servicer's transfer, refused `transfer_unknown`, holds none of its rows). Mutant: the fix reverted → the test fails.
+- **A misleading refusal (low).** `public.transfer_line_options` answered `bad_request` for an entry kept unsplit
+  whose stored detail has no amount (its proposed part carried no amount; the preview's parse refused it) — the sheet's
+  label « La demande est incomplète ou mal formée : rouvrez la ligne et recommencez. », false — where the check and
+  plan §3.11, §3.4.12 say `unsplit_detail_missing` (« Le relevé ne détaille pas assez cette écriture … »). Nothing was
+  booked either way. Fix: such an entry is refused `unsplit_detail_missing` with no part proposed. Test:
+  `test_transfer_line_ops_more_integration.py::test_the_iso_charged_debit_without_chrgs_and_an_unsplit_entry_without_amounts_stay`
+  (`--unsplit-details no-amounts` through the real camt.053 import). Mutant: the fix reverted → the test fails.
+
+**pgTAP `037b_transfer_line_ops_more.test.sql`** (27 assertions, 037's fixtures copied):
+- **J. every read's tenant isolation** — the options, the preview and the command on the servicer's lines of each
+  class (E, N, B, U, an E credit) for another servicer's ops manager, a client admin, a client's restricted viewer, the
+  line's own client's admin, a collector, a user of no organization, and the servicer's admins and ops manager at
+  aal1: null, null, « not allowed », nothing booked nor recorded; the servicer's staff on the other servicer's line;
+  the other servicer's ops manager on its own lines naming our RMT id, our PmtInf, our return and our detail: no
+  proposal, no member, none of our ids, end-to-end ids, run or file numbers or client names in its answers, our ids
+  refused `transfer_unknown` / `client_unknown`; the reads not executable by anon; the preview never raising.
+- **M. the funds pass after an ops booking** (CSO-11, CSO2-7) — a planned payout, a payout with its recorded fee, an
+  unplanned payout each queue one `process_debits` message with `funds_after` null; a planned return alone none; two
+  flagged returns of x reviewed `unplanned_payout_return` in one pass: ops book the first as the unplanned return, the
+  second, still a candidate of the pass (`private.bank_booking_candidates`), is then booked `payout_returned(x)` by the
+  job's SQL re-check — x returned, its collection owed once again.
+- **S. S04 and S02** — every member of a lot booked, the lot debited again: an unplanned payout per member (P = 0,
+  `none`), each its `double_payout` advance, the queues unchanged; (switch on, in a rolled-back subtransaction) a live
+  member and a member cancelled after download with its run, debited whole: payout + unplanned payout, P = A from the
+  cancelled run's released item (reserved by the client's draft, re-prepared); the cancelled member's run still sent:
+  `run_still_live` with its number, no proposal.
+- **F. F1's lot variant** — a and b of one lot both booked and both executed again (booked unplanned); a credit naming
+  the lot at b's amount is b's `unplanned_payout_returned` (its planned return refused `unplanned_open`), b's client owed
+  nothing again, a's advance still open; and (switch on) b cancelled after download with its run, then debited with
+  the lot as its unplanned payout (P = A from the run's released item): b is in the lot's returnable universe by its
+  open unplanned booking alone (`private.transfer_line_returnable`'s `or u.open`), the credit that booking's return, the
+  item waiting again (Dupont's queue back to 1 000 €), a still paid.
+- **D. ML-1's signed pool with a `payout_overrun` cover** (the plan's own example) — the late payout's pool holds a
+  collection, a bounced collection's −3 000 and its cover's +3 000 advance (an item, not an unplanned booking's own
+  row): P = A while the collection is owed; once it bounces too, P = 0 (the signed net), never the cover's 3 000.
+- **C. ML-8's CSV form and its second line** — without an IBAN, a reference-less debit of a returned payout's amount
+  while the run re-paying its return item is in flight is that run's payout; a later second line of that amount is the
+  returned payout again (rule 3b's (iii)), P from its return item as it stands (0: frozen in the booked re-payment),
+  the advance all of it.
+
+**Worker integration** (as an aal2 API session through the real import, jobs and command):
+- `test_transfer_line_ops_more_integration.py`: `test_e1_to_e9_then_each_payout_debited_twice_and_one_copy_back` (E5–E9
+  through the jobs, every payout debited again: ops book the options' proposals, P = 0, the advances; RV-3's gross the
+  new collection, the −A and +A netting 0, approved; one copy back: the job reviews it, ops book the unplanned return,
+  nothing re-owed); `test_cso2_7_both_copies_back_on_one_statement` (the queued pass books the second as
+  `payout_returned(x)`, the schedule drafts the run, trigger `payout_returned`);
+  `test_ml3_the_return_waits_for_the_pending_second_debit`;
+  `test_a_run_cancelled_after_download_then_its_late_debit_pays_its_items` (the switch on for that one committed
+  transaction only, committed off again; P = A, the draft re-prepared and approved by the jobs; Martin received his
+  collection less the commission invoiced net of its credit note);
+  `test_a_partial_lot_booked_by_ops_then_the_left_out_member_by_the_job`;
+  `test_a_csv_without_references_rule_3b_and_a_cancelled_payout_s_late_execution` (the CSV export without `/REF` and
+  without the IBAN: rule 3b's one candidate, and F12 with P);
+  `test_a_debit_with_the_bank_s_charge_is_payout_and_fee` (`--debit-charge 120`: the ISO shape, class U, and the detail
+  without an amount, class E);
+  `test_the_iso_charged_debit_without_chrgs_and_an_unsplit_entry_without_amounts_stay` (the bug above);
+  `test_an_unflagged_return_is_virement_revenu_and_the_schedule_drafts_its_run` (the line held to the original run
+  line's date, K2); `test_an_unsplit_entry_of_our_details_is_booked_from_its_stored_details` (our return netted into
+  our next payout's debit, one entry kept unsplit: payout + payout_returned);
+  `test_p_parity_with_the_twin_on_generated_pools` (Hypothesis, 200 examples: a cancelled run's four released items
+  given signed pending amounts, reversals with their own pending amounts, earlier unreversed attributions, another item
+  of the queue and the transfer's amount, in one rolled-back transaction each; the preview's P, advance and bound equal
+  `payments.transfer_lines.unplanned_p` on the same facts read back from SQL).
+- `test_transfer_line_concurrency_integration.py` (two connections; each pair: one waits or is refused, no 40P01, the
+  line booked once, the nightly checks clean): the cross-tenant locks (above);
+  `test_cancel_and_the_command_on_the_client_s_run_never_deadlock[command|cancel]`;
+  `test_two_commands_naming_one_transfer_on_two_lines_book_it_once` (its RMT line and a reference-less one);
+  `test_link_debit_and_the_command_on_one_line_never_deadlock[fee|explained × link|command first]` (at integration with
+  6b-2c's guards: on the reference-less line a payout may be, « Lier » refuses both before any lock — asserted first —
+  so the pair runs on a reference-less debit to our own account, « Virement au compte propre »; « M2c-6b-2c integration » below);
+  `test_a_refund_holding_the_late_line_s_payment_and_the_command_never_deadlock` (6b-1's concurrency-2 staging with the
+  command's payout part: its key share on the late line's payment before the allocation lock, against
+  `request_refund`'s `FOR UPDATE` — the M2b pass's `post_debit_links` takes a payment the same way);
+  `test_the_prepare_job_of_an_old_token_never_writes_over_the_requeue` (the job's facts read under T1, the command
+  re-prepares under T2: the T1 write is skipped, never a draft priced on facts the command changed);
+  `test_an_approval_and_the_command_on_the_client_s_draft[approve|command]` (the approval job of a replaced token does
+  nothing; an approval behind the command is answered `busy` or finds the draft in prepare);
+  `test_the_payout_account_and_an_unplanned_return_never_deadlock[retire|confirm × account|command first]`;
+  `test_the_funds_pass_and_the_command_on_one_line_book_it_once`;
+  `test_a_sweep_s_generation_and_the_command_lowering_the_share[command|generate]` (no sweep handed out above the
+  share: a file generated first is refused at its first download, `file_blocked`).
+- `test_transfer_line_machine_integration.py::test_the_bank_model` — the stateful machine of plan §8.2 (Hypothesis
+  `RuleBasedStateMachine`, 10 examples of up to 20 steps; no rule has a precondition, each a no-op when nothing
+  applies): runs approved through the jobs, files handed out — or refused `cash_not_covered` once the bank's second
+  executions left the account short of the next file (its need above its available cash asserted) —, runs cancelled
+  before their file; the bank executing a payout on its RMT id once or twice, a whole PmtInf as one batch line or short
+  of its last member, a payout cancelled before its file anyway, a debited copy coming back flagged or unflagged; after
+  each statement the debit job, then ops booking every line it left through the options' proposal, then the queued
+  funds passes. Invariants after each step: every line booked, linked or reviewed; the nightly checks clean (5120
+  equals the bank — I9/I19 and `bank_balance_gap`, any severity —, each transfer booked once, I13: each client's 4670
+  never in debit, I14, I20); every `double_payout` advance is A − P of its unplanned booking, P its attributions; no item
+  attributed more than its own amount; the ledger never counts more debits or returns of a payout than the bank made,
+  one planned booking at most.
+- `test_transfer_line_scale_integration.py` (the `scale` job), extended: the allocation lock's hold time while the
+  500-member lot is booked (`pg_locks` polled from a second connection); `test_options_on_a_5000_member_lot_answer_from_the_count`;
+  `test_the_requeue_of_a_50000_item_draft_holds_the_allocation_lock_briefly` — timings in
+  `docs/benchmarks/remittances.md`.
+
+**Mutants** (SQL: one function redefined after `037b`'s fixtures inside its rolled-back transaction, or committed for
+an integration test and then restored from its migration; each killed by the test named):
+- in `037b` (each the function's latest definition with one change, created after the fixtures and rolled back with
+  the file): `private.transfer_line_returnable` without `or u.open` → F's cancelled-member variant (it survived the first
+  F scenario, where both members are booked: the variant was written for it); `private.unplanned_own_item` counting any
+  `client_advance` as an unplanned booking's own row (the `payout_overrun` cover dropped from the pool) → D;
+  the pool's net floored per item (`greatest(0, …)`) → D; the funds pass not queued after an unplanned return → M
+  (CSO2-7); nor after a planned payout → M (CSO-11); ML-8's (iii) exclusion removed from
+  `private.transfer_line_candidates` → C; `transfer_line_options` answering any member of any organization → J
+  (2, 7); `transfer_line_preview` answering anyone → J (3, 7, 9); the command's role check dropped → J (4, 5, 7);
+  a cancelled member's run's released items left out of its pool → S02 (switch on) and D; the unplanned
+  remittance's idempotency key without the part index → S04;
+- committed on the second stack for an integration test, then restored from `20261117105000`/`20261117100000`:
+  105000's lock fix reverted (`private.transfer_line_locks` step 8 back to every file of the PmtInfId) →
+  `test_another_servicer_s_rows_are_never_locked_by_the_command` (55P03 on the other servicer's file); 105000's
+  options fix reverted → `test_the_iso_charged_debit_without_chrgs_and_an_unsplit_entry_without_amounts_stay`
+  (`bad_request`); the advisory `payments:` lock taken before the payments' key share (6b-1 concurrency-2's order
+  broken) → `test_a_refund_holding_the_late_line_s_payment_and_the_command_never_deadlock` (40P01); P = A whatever the
+  items and the queue (`transfer_line_check`) → `test_the_bank_model` (a payout executed twice: the second
+  execution's booking refused `posting_failed`, LG008 4670 in debit; found and shrunk in 5 to 6 minutes); the pool's
+  net floored per item → `test_p_parity_with_the_twin_on_generated_pools` (its P against the twin's on a pool with a
+  negative item: the floor makes P = 1 where the twin's signed net gives 0).
+
+**Deviations, with why**:
+- `037b` is a new file beside `037` (track A appends 6b-2c's group P to `037`); its fixtures are `037`'s, copied.
+- The M2b pass's `post_debit_links` is not run against the command: `request_refund` holds the late line's payment
+  `FOR UPDATE` and then waits for the allocation lock exactly as it does (6b-1's concurrency-2 staging), so the pair
+  is the same lock shape.
+- The 5,000-member lot is not the payout scale fixture's (5,050 runs through the jobs, ≈ 14 minutes, in the
+  `scale-payouts` job): the file of two payouts is made through the jobs and its PmtInf filled to 5,000 members in a
+  rolled-back transaction. What the test measures — the keyed count answering before any member is read — reads only
+  `transfer_file_item` and `transfer_file`, which these rows populate as the jobs do.
+- The 50,000-item draft is not the remittance scale fixture's (50,000 files boarded): 50,000 advances are posted
+  set-based (each a pending item of the client's queue), then the draft is requested by the command (its 50,000 items
+  reserved). The requeue reads only the queue and the run.
+- The `_hold` pairs of the concurrency file let the first call finish before committing; a lock-order mutant (the
+  payments' key share after the allocation lock) is killed by the three-session refund staging (above), not by those
+  pairs.
+- The P parity examples shape the pool's facts with the guards off inside their rolled-back transaction (the
+  transfer's and the line's amount, the pending amounts, the attributions); every fact is then read back from SQL for
+  the twin, as `_pool_item` reads it for 6b-2b's single parity point.
+- Three test defects the runs found, fixed in the tests (no product change): the machine first picked payouts and
+  files by their random ids and gated rules on preconditions read from the database, so a replayed choice sequence
+  could enable other rules (Hypothesis `FlakyStrategyDefinition` in a full run): the picks now follow the model's own
+  order and no rule has a precondition; the machine took the file's `cash_not_covered` refusal for an error (now
+  modelled, above); the parity test's « fifth item » was the client's first other pending row by id, which an
+  example's reversal row could precede (its `extra` then landed on that row: a zero amount, refused by the check
+  constraint, found while the per-item floor mutant ran) — now pinned by the fixture.
+- Not changed (6b-1's): `test_debit_bookings_batch_rules_integration.py`'s row budget is met on a fresh database (the
+  CI `db` job's, and this run's after `supabase db reset`) but not once `bank_debit_link` holds a few dozen rows from
+  earlier runs on the same database: `private.post_bank_bookings`'s `_bb` statement then reads that small table by a
+  sequential scan per row of the job, twice (90,046 rows handled against a budget of 82,040 in the failing run; 158,080
+  once the table held 34 links): the planner's choice for a table that small, although the lookup is by its key
+  (`bank_debit_link_pkey`). Not measured on a large table here; left as found, for 6b-1's owner to judge.
+
+**Suites** (after `supabase db reset` on a second local stack, the VM's 4 vCPUs shared with track A's stack and runs:
+timings are noisier and higher than alone):
+- `supabase test db` after `supabase db reset`: `Files=38, Tests=2647, … Result: PASS` (177 s wallclock), `037b`
+  (27 assertions) ok, `033`, `034`, `037` unchanged and ok.
+- Worker: `ruff check .` and `ruff format --check .` clean, `mypy` (strict, 177 source files) no issues; unit
+  `pytest`: 1,057 passed, 5 xfailed (a first run lost one Hypothesis deadline of 200 ms in `test_camt053_details.py` to
+  the shared CPU — 367 ms, then 65 ms on its replay —; green when run again).
+- Non-scale integration (`pytest -m integration`, the `*scale_integration.py` files left out) after a second
+  `supabase db reset`: **236 passed**. Earlier full runs on the same database found the three test defects above.
+- `tests/test_transfer_line_scale_integration.py`: 6 passed (211.5 s; `docs/benchmarks/remittances.md`).
+- The machine alone, after its last change: passed with the default seed and with seeds 1 and 2.
+
+## M2c-6b-2c: the pages — ops book our transfer lines from « Débits et retours » (plan docs/design/m2c-6b-2-plan.md §4, §6, §7.3–§7.5, §8, §9)
+
+Migration `20261117110000_transfer_line_pages.sql` (forward-only; every redefinition copied from its latest definition —
+6b-2b's `20261117100000` treated as merged — with `SECURITY DEFINER`, every `SET` clause, `search_path` and its grants
+restated; no earlier file edited), pgTAP `037` group P (10 assertions), the web's pages and texts, the E2E. The
+cancellation after download stays **off**; `033` and `034` keep their assertions and TODO markers. The founder answered
+none of the plan's §10 questions: each default is built (Q14's five business days included) and stays open. Decisions:
+
+- **The guards of « Lier »** (plan §4.1; critic F9, L8). `private.link_debit_guard(line, kind, refund)`, called by
+  `public.link_debit` once its own request checks pass, on a debit of class N, O or E0 only (our own lines keep
+  `post_debit_links`' `own_transfer_line`): « Frais bancaires », « Classer sans comptabiliser » and the refund link are
+  refused `payout_candidate` while rule 3b (`private.transfer_line_candidates`) finds a transfer of ours the line may be
+  — for the refund link, a candidate other than that refund's own transfer and other than a sweep; `client_payout_line`
+  on a debit to a client's confirmed payout IBAN (an unplanned payout, or its run's payout without its reference);
+  the explanation `own_transfer_out_line` on a transfer out to one of our own accounts. The error is `debit link
+  refused: <code>` (`check_violation`); the web labels each (`errorText`), and the page no longer offers « Classer sans
+  comptabiliser » on such a line (`linkGuarded`).
+- **The queue's cheap facts** (plan §4.1; critic CSO-4, critic2 CSO2-13). `public.debit_queue` (dropped and created:
+  its row type changes) gains `bookable_as` (`private.transfer_line_bookable_as`: `e`, `b`, `u` from the line's class;
+  `n` for a reference-less debit of kind `transfer_out`, `other_debit` or `batch_unsplit` with a rule-3b candidate or to a
+  confirmed client payout IBAN or one of our own accounts, and for a return credit from a client's payout IBAN; null
+  otherwise, and for an entry kept unsplit holding nothing of ours), one keyed read per row shown — the options are
+  read only when a line's sheet opens. « À classer » lists the other debits without our reference that
+  `private.transfer_line_queue_reason` names (`payout_amount_match` with its candidates, `client_payout_iban`,
+  `own_transfer_out`), except those of a requested refund's amount (`refund_amount_match` as before); « Frais » no longer
+  lists them. Each candidate is enriched with its run's status and number by a fenced keyed lookup (`cancelled_transfer_debited`
+  is worded by it: a run still approved or sent is that payout's, never « Virement hors reversement », critic2 ML-4).
+- **The bounded suppression** (plan §4.2; Q14's default; critic L8, critic2 ML-7). `private.transfer_debit_suppression(transfer,
+  to, today)` reads the lines 6b-1's `private.transfer_debit_may_be_seen` read (now its wrapper: `= 'waiting'` at
+  `private.paris_today()`), newest first: `waiting` while a line is younger than `private.transfer_debit_bound_days()`
+  (5) business days (`private.business_days_between`) or offers a booking containing that transfer
+  (`private.transfer_line_offers`: the options' own proposals, `private.transfer_line_options_of`, so the alert and the
+  sheet agree by construction); `expired` once every such line is past the bound and offers none; null without any.
+  `private.run_remittance_runs_checks` writes the in-flight breach row with `blocked_reason = 'debit_unbooked'` when the
+  only lines left are expired (the check constraint gains the value); `private.run_transfer_checks`' `bank_line_unbooked`
+  extends to reference-less other debits with a rule-3b candidate (reason `payout_amount_match`; P0 when a candidate's run
+  holds a positive live line past its latest execution date).
+- **Plan robustness** (pgTAP `037` P `p_queue_reads`, 300 cancelled payouts of the account in a file, 40 reference-less
+  debits): `private.transfer_line_candidates` reads its line by key in a fenced subquery and probes the new non-partial
+  index `bank_transfer_account_amount_idx (debtor_bank_account_id, amount_minor)` — the partial
+  `bank_transfer_filed_amount_idx` let the planner imply its predicate and scan the account's transfers on stale
+  statistics — the file predicate outside the fence; `private.transfer_line_class` fences its unique end-to-end lookups
+  (as PR #33's CI scale fix already does in `20261117100000`: at integration this file's redefinition of it, the same
+  change, was dropped — « M2c-6b-2c integration » below).
+- **The texts reworded now that the screen exists** (plan §4.3): `private.own_transfer_line_hint` (`bank_booking`,
+  `debit_link`, `own_credit`), which `post_debit_links` and `release_own_credit` call; the job's reviews
+  (`own_transfer_out`, `cancelled_transfer_debited`, `transfer_debited_twice`, `transfer_differs`, `batch_partial`,
+  `unplanned_payout_return`, `return_debit_pending`), the notes on our credits and lots, `UNSPLIT_OURS_NOTE`,
+  `PAYOUT_BOOKED_WHEN`, `FILE_BOOKED_WHEN`; no « écran à venir » is left in `lib/` (a vitest walks it).
+- **Reads** (plan §4.4; critic CSO-6, CSO-9, L6; critic2 ML-12), money staff of the servicer at aal2 only, keyed:
+  `private.transfer_chain(transfer)` (itself, then each `replaces_transfer_id`, depth < 50);
+  `public.remittance_run_payout(run)` (the chain's transfers with their debit and return dates and lines, the run's
+  set-off date and amounts, its overrun advances, the unplanned bookings of its transfers, a draft's unplanned items);
+  `public.transfer_bookings(ids)` (≤ 500 ids; another servicer's ids are ignored); `client_remittance_summary`'s
+  `unplanned_runs` (a cancelled run any transfer of whose chain the bank executed all the same).
+- **Pages** (plan §7.3–§7.4): « Comptabiliser… » on a row whose `bookable_as` is set opens a sheet that reads
+  `transfer_line_options`; each proposal says its effects from the preview SQL returned (`transferLineEffects`: amounts,
+  P and its bound, dates — the page formats, it computes nothing), a lot's members (at most 50, the rest counted), the
+  refusal with its run; « Motif (ce que montre le relevé ou la banque) » is required; an entry kept unsplit is checked
+  again (« Vérifier », `transfer_line_preview`) before « Comptabiliser »; the command gets the parts and the preview's
+  text as the database gave them, with a UUID key made when the page renders. The run page lists `runPayoutNotes`
+  (`run-payout-notes`); a file's page says « Débité le … », « Revenu impayé le … », « Annulé — exécuté par la banque le …,
+  hors reversement » (`transfer_bookings`); « Virements » says when the last nightly check found the servicer's share
+  unswept; the client space says the debit's date and the cancelled run's truth (`runStatusText(status, net, bookedOn,
+  unplannedOn)`).
+
+**Deviations from the plan, with why**:
+- The refund link is not refused `payout_candidate` for a sweep of its amount (the plan: any candidate but the refund's
+  own transfer): review round 7's founder decision N1 (b), pinned by `033` (a reference-less line executes a refund in a
+  downloaded or sent file even beside the servicer's sweep of its amount); `033` test 42 failed with the plan's rule.
+- `remittance_run_payout` also returns `payout_account_blocked` (the run's payout account is `returned` now) and each
+  returned transfer's `repaid_by` (the booked run that paid it again, as the client summary's): the run page says the
+  block only while it holds (critic L3's rule for the sheet), then « Reversé à nouveau par le reversement RV-… »; the
+  plan's banner said the block unconditionally.
+- « Virements »' list shows only transfers waiting for a file, which have no bookings: the dates are on each file's page
+  (`file-item-booking`). The `servicer_funds_unswept` banner reads the last nightly check run's results
+  (`payment_check_result`), the plan's sentence.
+- The unsplit note keeps its front (M2c-6b-1 round 8's asserted words) and ends with the plan's sentence; the lot notes
+  keep « il ne devient ni le paiement d'un débiteur ni un approvisionnement » and « Ne le classez pas sans
+  comptabiliser » (round 4 and 5 assertions) around the plan's « Virement revenu » sentence; the note on our credits is
+  the plan's text exactly (round 3's « Vérifiez dans la banque » assertion dropped with it).
+- The client space's « Annulé avant son exécution » became the plan's « Annulé avant la remise de son virement à la
+  banque » (the switch is off: a cancelled run's transfer never reached the bank in a file).
+- The pending debit a `debit_pending` refusal names is linked in the page (`#ligne-…`): it is found only when it is in
+  the same page of « À classer ».
+- The vitest fixture of the run page lacked the transfer's amount the returned note words; added (`amount_minor`).
+- The sheet lives in `debits/transfer-line-sheet.tsx` (a client component reading the options through a server action
+  when it opens), not in `debit-actions.tsx`.
+- The plan's « Suivi » (6b-2d), the design's §9.7/§10/§12/§21 annotations, ROADMAP and ARCHITECTURE are not touched here.
+
+**Tests** (each red before its code): pgTAP `037` group P — `p_guards` (each guard by the kind asked, the refund alone
+allowed, nothing written), `p_queue` (`bookable_as` and the reasons, « Frais » without them), `p_bound` (two candidates
+and a lot of two subsets: no row for four business days, rows `debit_unbooked` on the seventh; a line that offers its
+payout's booking keeps suppressing, raises `bank_line_unbooked` (P0), and booked on time writes no row; a line dated
+after the date writes its row at its booking), `p_offers` (offers = the options' proposals), `p_queue_reads`
+(bounded reads, no sequential scan), the three reads' tenant filters, `p_unplanned_runs` (the chain), clean checks,
+the switch off; `035` and `036` hint texts; web `lib/payments/transfer-line-pages.test.ts` (48) and the reworded
+expectations; E2E `remittances.spec.ts` (the payout debited twice, one copy back: « Virement hors reversement » P = 0,
+then « Virement revenu », the dates on the run page, the file page and the client space).
+
+**Mutants** (each a scratch definition created right after the test file's `begin` in a copy of it, rolled back with
+it; the no-op control — `private.link_debit_guard` re-created unchanged — passes `037` 81 of 81): each of the three
+guards removed (`payout_candidate`, `client_payout_line`, `own_transfer_out_line`: `037` P `p_guards`, test 72); the
+refund link refused on its own transfer (72); the call to the guard dropped from `public.link_debit` (72); the sweep
+exemption of the refund link dropped (`033` test 42, round 7's N1 (b)); the bound at 8 business days, a bound that
+never expires, the offers ignored, the `debit_unbooked` reason dropped (each `p_bound`, test 74); `bookable_as` `n`
+dropped, the `payout_amount_match` reason dropped (`p_queue`, 73); the tenant filter of `remittance_run_payout` (77) and
+of `transfer_bookings` (78) removed; `unplanned_runs` keyed on `run.transfer_id` only (79); the payout account said
+blocked whatever its status (77); `bank_transfer_account_amount_idx` dropped (`p_queue_reads`, 76). None survives. Not
+mutated: the P0 of the extended `bank_line_unbooked` (asserted in `p_bound`) and the web's sentences (each asserted
+by vitest).
+
+Suites on the final code, after `supabase db reset`: pgTAP 37 files, 2,630 tests (`037` 81; `034`'s TODO markers
+kept); the worker's ruff, format and mypy (174 files), 1,057 unit tests passed (5 xfailed) and 205 integration tests
+(the scale files apart; no worker code changed); the evals unchanged — mapping 167/167 (threshold 0.980),
+reconciliation 0.9600 automatic (95,997/100,000), 0 wrong, 0 policy violations; on a fresh reset, the payouts scale
+test once (5 of 5) and the transfer-line scale test (4 of 4; timings in `docs/benchmarks/remittances.md`) — the
+download did not change, the transfer-files scale test was not run again; the web's lint, types and 408 vitest tests;
+the E2E's 54 tests: the first full run passed 52 and failed the remittances test in both projects at its last step (the
+second client login read the page before its sign-in had landed); the spec waits for it now and the remittances test
+passed in both projects on a fresh reset. Screenshots: new `m2c-virement-hors-reversement`, `m2c-virement-revenu`;
+retaken `m2c-reversement-debite`, `m2c-virement-debite`, `m2c-client-reversements`; every other image diff (dates,
+ages, ids) reverted. Not taken: `m2c-debits-reversement` and `m2c-debits-detail-releve` (no E2E fixture holds a partial
+lot line nor an entry kept unsplit) and `m2-checks` (no E2E takes it). `database.types.ts` regenerated (`debit_queue`'s
+`bookable_as`, `remittance_run_payout`, `transfer_bookings`).
+
+## M2c-6b-2c integration (2026-11-17): the pages, 6b-2b's deferred tests and PR #33's CI scale fix
+
+Branch `m6b2c-int`: track A's `de63d82` (the pages, « M2c-6b-2c » above) merged with track B's `30f88bb` (« M2c-6b-2b
+deferred tests » above, migration `20261117105000`), then PR #33's late commits `5bd93cd` (the CI scale fix, in place in
+`20261117100000`) and `0a0119c` (PROGRESS) cherry-picked: outside A's and B's files the tree equals main `e06b119`. The
+cancellation after download stays **off**; `033` and `034` keep their assertions and TODO markers; no §10 question is
+answered (Q14's five business days included: each default stays open).
+
+**The CI scale fix carried into the later files.** At `supabase db reset` and on merge the later file's definition wins,
+so each function `20261117105000` or `20261117110000` redefines had to hold `5bd93cd`'s change as well as its own
+(compared definition by definition against `5bd93cd`'s, `SET` clauses included; no earlier file edited):
+- `20261117105000`: `private.transfer_line_locks` and `public.transfer_line_options`, which track B copied from `c581a8b`,
+  are copied again from `5bd93cd`'s definitions with B's change on top — the locks `set enable_seqscan = off`, read the
+  unsplit details' transfers by their end-to-end id alone and step 4's payout runs' late lines by the run's key alone (the
+  conditions outside an `offset 0` subquery), and keep B's step 8 (the PmtInfId's items by `transfer_file_item_pmt_inf_idx`,
+  each file's account by its key, compared outside); the options' E and U probes and a lot member's file items are keyed
+  as `5bd93cd` keys them, beside B's `unsplit_detail_missing`.
+- `20261117110000`: `private.transfer_line_options_of` (the options' body, which track A moved out of
+  `public.transfer_line_options`) holds `5bd93cd`'s keyed reads and B's `unsplit_detail_missing` beside A's three line
+  facts; its wrapper `public.transfer_line_options` is unchanged. A's redefinition of `private.transfer_line_class` (its
+  end-to-end probes by the id alone, found by `037` P's read bound) was the very change `5bd93cd` made in
+  `20261117100000`: dropped here with its revoke — the definition there is the latest. `5bd93cd` changed no other
+  function these two files redefine.
+- The same shapes in the statements 6b-2c adds, keyed the same way: `private.transfer_line_parts_json`'s
+  `latest_execution_date` (each payout part's run's live lines — 500 parts in the preview of a lot at the cap — with
+  `not released` next to the run's key: after the 50,000-line runs, the shape `5bd93cd` found in the check's late flag, a
+  whole scan of `remittance_line_account_idx` per part) and `private.run_transfer_checks`' P0 (a candidate's run's late
+  lines) read the run's lines by its key alone, the conditions outside; `public.remittance_run_payout`,
+  `public.transfer_bookings` and `client_remittance_summary.unplanned_runs` read each transfer's bookings by `transfer_id`
+  alone (`bank_line_booking_transfer_idx`), the kind compared outside. Every other new read already was (each lookup by
+  its key in an `offset 0` subquery under `enable_seqscan = off`; `debit_queue`'s new branch reads the servicer's other
+  debits by `bank_transaction_other_debit_idx`, as its « Frais » branch always has).
+
+**A test adapted to 6b-2c's guards.** B's `test_link_debit_and_the_command_on_one_line_never_deadlock[fee|explained ×
+link first]` failed: on the reference-less line a payout may be (rule 3b's candidate, to its payee IBAN), A's
+`private.link_debit_guard` refuses a fee and an explanation (`payout_candidate`) before any lock, so the link never
+held the line. The test now asserts that refusal first (23514, nothing booked), then runs its four pairs on a
+reference-less debit to our own account, which the guards leave to both — the command books it « Virement au compte
+propre » (`unplanned_sweep`), the link books a fee or explains it; each first: no 40P01, the line booked or linked once,
+the payout untouched, the checks clean. Not weaker: the pair still takes both writers' locks on one line.
+
+**Known limits found, not fixed (low).**
+- The nightly check's bounded suppression (`private.transfer_debit_suppression`) reads `private.transfer_line_offers` for
+  each in-flight payout and each line older than the bound that could be its debit: a lot line that offers no booking
+  (`batch_ambiguous`, `lot_too_large`, a lot short of a member) has its options read once per member it may hold — up
+  to the lot cap's 500 reads of the same line in one check (0.25 to 2.2 s each at the cap), only once such a line has
+  waited five business days. A memo of the options per line within one check would read it once.
+- `public.link_debit` still books a fee on a reference-less other debit to our own IBAN (plan §4.1 refuses only the
+  explanation, on a `transfer_out`): the page offers no « Frais bancaires » there (the line is in « À classer »,
+  `own_transfer_out`, not « Frais »), so only a direct call of the command books it.
+- `private.post_bank_bookings`' own `_bb` build, its booking guard and `_bb_pay_locks` (6b-1's, outside this slice) as
+  PR #33's CI scale fix left them: they may still read `bank_line_booking` / `bank_debit_link` whole per row while their
+  statistics call them small (B's « not done »: 6b-1's batch-rules row budget on a reused database).
+
+**Suites on the integrated code** (the main stack alone, collectoo_t stopped; `supabase/config.toml` as on main;
+`./scripts/check-migration-order.sh origin/main`: the new files sort after `20261117100000`): `supabase test db` after a
+reset — `Files=38, Tests=2657, Result: PASS` (`037` 81, `037b` 27; `034`'s TODO markers kept, 16 TODO passed); the
+worker's `ruff check`, `ruff format --check` (177 files) and `mypy` (177 files) clean; 1,057 unit tests passed (5
+xfailed); the non-scale integration tests on a fresh reset: 236 passed (the first run, before the test's adaptation,
+failed its two link-first cases); the evals: mapping top-1 1.000 (167/167, threshold 0.980), reconciliation 0.9600
+automatic (95,997/100,000), 0 wrong, 0 policy violations; the payouts scale test once on a fresh reset (5 passed); the
+transfer-line scale file alone on a fresh reset (7 passed); CI's `scale` job as `ci.yml` runs it, on a fresh reset (14
+passed, no statement over 60 s; timings in `docs/benchmarks/remittances.md`, « The pages », Integration); the web's
+lint, types and 408 vitest tests; `database.types.ts` regenerated, unchanged (no public signature changed); the E2E's
+54 tests on a fresh reset, every image diff (dates, ids) reverted: the plan's new and retaken screenshots are track
+A's, the integration changes no page.
+
+## M2c-6b-2c review fixes (2026-11-18)
+
+**Round 1.** The review of 6b-2c (five lenses: money, legal deadlines, concurrency and security, tests, pages and texts;
+26 findings — money-1 high; money-2, money-3, money-4, legal-deadlines-1, legal-deadlines-2 and pages-1 medium; the
+rest low) checked against the integration `fea2a19`. Each finding was confirmed on the main stack; none rejected
+(money-3 and legal-deadlines-2 are one defect, T1 and pages-2 another). `20261117110000_transfer_line_pages.sql`, not
+merged yet, is edited in place (`20261117105000` unchanged); each function it now redefines is copied from its latest
+definition (`private.transfer_line_check` from `20261117100000` as PR #33's CI scale fix left it,
+`public.debit_link_options` from `20261116090000`), `SECURITY DEFINER`, every `SET` clause and the grants restated; no
+earlier file edited. The cancellation after download stays **off**; `033`/`034` unchanged; no §10 question answered
+(Q14's five business days included). Every fix narrows what is booked, linked or netted, but one: legal-deadlines-1
+widens which lines hold an in-flight breach row back, because plan §4.2, Q14's default and CPCE-08 require that a line
+ops can book as the payout's debit holds it back (the system wrote a false R124-6 row otherwise); it stays bounded
+the same way.
+
+- **money-1 (high) — a payout's debit could be linked as a debtor payment's return.** The lines 6b-2c moved into « À
+  classer » (`payout_amount_match`, `client_payout_iban`) were offered « Retour du paiement de … » and its loss, which
+  `private.link_debit_guard` let through (it checked fee, explanation and refund only): one click returned a debtor's
+  payment by the client's payout amount, hid the payout's on-time debit from the suppression and, once its date
+  passed, the nightly check wrote a false breach row. Fix: the guard refuses `return` and `loss` on a debit of class N,
+  O or E0 as it refuses a fee (round 2 below: of a kind « Comptabiliser… » books) — `payout_candidate` while rule 3b
+  finds a transfer of ours it may be,
+  `client_payout_line` on a debit to a client's confirmed payout IBAN (active, returned or retired);
+  `public.debit_link_options` (redefined) lists no payment there and only the refunds the guard lets through; the page's
+  `linkOffers` offers no return, loss or refund on a guarded row (`linkGuarded`, which now also reads `bookable_as`).
+  Tests: pgTAP `037` « P (§4.1; critic F9; review 6b-2c money-1, money-2, T4) … » (`p_guards`: return and loss refused on
+  lines 1, 2, 3 and 8, `debit_link_options` empty there, a debit to no one we know still a payment's return); vitest
+  `transfer-line-review-fixes.test.ts` « the links « Comptabiliser… » replaces (money-1, money-2; T5) ».
+- **money-2 (medium) — the return of an unplanned payout could be classified without booking.** A credit the bank flags
+  as a return from a client's payout IBAN (critic2 ML-11's shape, « Virement revenu ») took « Classer sans comptabiliser »
+  and « Remboursement revenu »: 5120 left unequal to the bank and the double_payout advance open, no check flagging it.
+  Fix: the guard refuses `explained` and `refund_returned` on such a credit of class N, O or E0 (its kind, or a held
+  line released as one), `client_payout_line` — whether or not an unplanned payout of that amount is open (deviation,
+  the narrower side: the review asked at least while one is; without one, it is Q13's « a client's money that waits »,
+  never explained); an entry kept unsplit is left out (its total is not one movement, « Comptabiliser… » is not offered
+  on it: it keeps the explanation). The page hides both (`linkGuarded` on a credit with `bookable_as` n, the same lines).
+  Tests: `037` `p_guards` (`explain_return_credit`, `refund_back_credit`, `explain_unsplit_credit`); vitest (same
+  describe).
+- **money-3, legal-deadlines-2 (medium) — the sheet said a breach was recorded that the booking does not record.** The
+  part's `late` flag and its `latest_execution_date` compared the run's lines' short date with the line's date; the
+  booking (`private.bank_booking_post_rows`) holds a line whose mandate's delay cannot be met (`unmeetable`, OQ-71) to
+  its one-month date. Fix: `private.remittance_run_late_on(run, date)` (new, internal) gives the date the booking would
+  record a breach against — per late live line, its one-month date (`remittance_deadline_or_null(encaissement, 30)`)
+  when unmeetable, else its own, the earliest, read by the run's key (`remittance_run_late_lines`); the check
+  (`private.transfer_line_check`, redefined) sets `late` and `late_date` from it and the parts carry that date. Test:
+  `037` « P (review 6b-2c money-3, legal-deadlines-2; R124-6, OQ-71) … » (`p_unmeetable`: before the one-month date no
+  late, no date, no row; after it the one-month date and the row).
+- **money-4 (medium) — the draft's run page said it deducted A.** `draft_unplanned` returned the −A row; the draft also
+  holds the booking's +(A − P) advance row, so it deducts P. Fix: per booking, the net of its own rows the draft holds
+  (−A and its double_payout advance, by their entries), a booking netting 0 not listed; `runPayoutNotes` words what SQL
+  returns. Tests: `037` « P (review 6b-2c money-4; critic CSO-6) … » (`p_draft_net`, P = 0: nothing listed) and « P
+  (review 6b-2c money-4): … says it deducts P (31 000), never A » (`p_draft_partial`, 0 < P < A; the mutant that
+  restores −A dies only here); P = A stays `p_unplanned_runs`; vitest « the run page (pages-1, money-4) ».
+- **legal-deadlines-1 (medium) — lines the options book as the payout's debit did not hold its breach row back.** A
+  debit of its amount to its payee's IBAN with a foreign end-to-end id or PmtInfId (O, E0) and an entry kept unsplit
+  whose stored details name its debit (U, netted) were not counted by `private.transfer_debit_suppression`: the first
+  nightly check after the date wrote a plain breach row though the bank debited on time. Fix: both shapes counted (the
+  unsplit one by its stored detail `{id, direction: debit}`), keyed and bounded as before (five business days unless
+  the line offers the booking). The WIP's first version left the « not booked nor linked » filter on the unsplit branch
+  only (`A or B and not …`): a line already booked or classified of the payout's amount held the row back five business
+  days and then wrote it `debit_unbooked`; the branches are now parenthesised. Tests: `037` « P (review 6b-2c
+  legal-deadlines-1; §4.2, Q14, CPCE-08) … » (`p_bound_any_ref`: O and U lines hold the row back and, booked on time,
+  none is written; a reference-less line explained by ops before the file holds nothing back, the plain row written —
+  it failed before the parentheses).
+- **legal-deadlines-3 (low) — the alert's P0 as documented was not built.** Option (b): the help of
+  `bank_line_unbooked` now says which lines it counts (our transfers' debits or returns, and debits without our
+  reference of an in-flight transfer's amount); COMPLIANCE CPCE-08 and OQ-83 say the P0 is set only on a reference-less
+  debit with a rule-3b candidate past its run's date and is not shown (default: not built, the founder's call). Tests:
+  `037` « P (review 6b-2c T6) … » (`p_unbooked_p0`); vitest « the unbooked lines' alert says which lines it counts ».
+- **cs-1 (low) — « À classer » and « Frais » reached the API's 8 s on a 10,000-line backlog.** Rule 3b's probe
+  (`private.transfer_line_candidates`, planned again at each call: its settings) ran once per unbooked other debit of
+  the servicer. Fix: `private.transfer_line_queue_reason` probes only when a transfer of the line's account and amount
+  was ever put in a file (one keyed read of `bank_transfer_account_amount_idx`, the key alone inside the fence); the page
+  says « Cette liste n'a pas pu être lue pour l'instant … » on an RPC error, never « Aucune ligne » (0). On the main
+  stack, 10,000 lines: 0.29 s (« À classer ») and 0.34 s (« Frais »), from 7.0 and 7.7 s. Test: `037` « P (review 6b-2c
+  cs-1; critic2 CSO2-13) … » (`p_queue_backlog`: each tab under 3 s; fails with the probe unconditional); vitest « a
+  queue the database could not read is said so (cs-1) ».
+- **cs-2 (low) — a TF-shaped line naming no lot of ours was listed twice.** The new arm excludes it as the refund arm
+  and « Frais » do. Test: `037` `p_queue` (`e0_rows` 1).
+- **T1, pages-2 (low) — `FR76 •••• ` hard-coded.** The sheets mask an IBAN as the rest of the page (`maskedIban`: « IBAN
+  …1234 ») from the last four characters SQL returns; the vitests use a non-FR76 IBAN. `m2c-virement-revenu` retaken.
+- **T2 (low)** — `p_bound` reads the rows on the fifth business day (`day5`). **T3 (low)** — the facts the pages word
+  are now asserted: `p_unmeetable` (late date, the run's `settlement_minor`), `e_sweeps` (`share_after_minor` equals
+  −Σ 4679 once booked), `p_returned_reads` (a planned return: the payout account blocked, `returned_on`,
+  `return_line_id`, « Virements »' `returned_on`), `p_unplanned_runs` (`on`, `after_cancellation`, `returned`,
+  `transfer_bookings.unplanned_on`), `037b` D (`d_ml1_cover`: the run page's `payout_overrun` advance with what is
+  open); `repaid_by` was already asserted. **T4 (low)** — `p_queue` (own_transfer_out, the flagged return credit
+  bookable_as n) and `p_guards` (a client's returned and retired payout accounts). **T5 (low)** — vitest for
+  `linkGuarded`. **T6 (low)** — `p_unbooked_p0` (no P0 before the candidate's date, P0 after). **T7 (low)** —
+  `p_queue_run` (a cancelled transfer's candidate carries its run's status and number).
+- **T8 (low) — the E2E's wait was vacuous.** It now waits on what the funds pass's re-read changes (the review
+  becoming « exécuté hors de son ordre », the stale « Comptabilisez d'abord ce débit » gone), asserts the sheet's « Le
+  virement hors reversement du <date> » and the run page's second-execution and « est revenu depuis » notes. A segment
+  is added at its end (pages-6): the payee's bank sends the planned copy back, the job books it and the run page says
+  « Virement revenu impayé le … » with the payout account blocked; the bank executes the payout once more and ops book
+  it « Virement hors reversement » with P = A (no advance) — the new capture `m2c-virement-hors-reversement-deduit`.
+  That sheet showed a false text, fixed in this round: the sums a P > 0 is netted from were « du reversement RV-…
+  annulé — ou du virement revenu — » whatever became of the transfer; they are now worded by its status (a cancelled
+  run's: « du reversement RV-… annulé »; a returned payout's: « remises à reverser par le retour de son virement »).
+  Vitest « the sums a « Virement hors reversement » is netted from … ».
+- **T9 (low) — the bank model had no lower bound.** `_ops_book` asserts that a line `bookable_as` names either gets a
+  proposal or says why not; the invariant `the_ledger_counts_what_the_bank_did` now also asserts that a payout debited
+  on its own RMT id is booked as its payout (the model's `rmt` count). Equality with the bank's executions is not
+  asserted: a lot no single subset makes, a second execution while the client's run is cancellable, or a return while
+  a debit waits are left unbooked by design.
+- **pages-1 (medium) — the set-off line understated the commission.** « Commission réglée par compensation » took D,
+  which also nets a credit-note refund paid with the transfer. Fix: each part from its own field — the commission
+  (`commission_minor`), the servicer's advances (`advances_recovered_minor`), both when both; the refund keeps its own
+  note (`refundNote`). Vitest « the run page (pages-1, money-4) ».
+- **pages-3 (low)** — a lot's members are worded by the line's direction (« revient par cette ligne ») and, with no
+  proposal, « à confirmer par la banque ». **pages-4 (low)** — a `payout` proposal debiting our sweep is titled
+  « Débit de la quote-part du cabinet »; the job's `own_transfer_out` review points to « Comptabiliser… » (a sweep in
+  flight of its amount first). **pages-5 (low)** — the options say whether the pending debit is held
+  (`pending_held`); the sheet then points to « Doublons possibles » (its tab URL), else to « À classer », and closes on
+  the link. Vitests in `transfer-line-review-fixes.test.ts`; `037` « P (review 6b-2c pages-5; critic2 ML-3) … »
+  (`p_pending_held`).
+
+**Deferred (T8, pages-6, low), recorded here and in the PR body:** plan §8.4's E2E flows of a partial lot (« Débit d'un
+lot de reversements », its members) and of an entry kept unsplit (« Comptabiliser d'après le détail du relevé »), the
+returned payout's client-space text, with §7.5's `m2c-debits-reversement` and `m2c-debits-detail-releve`. Each needs an
+E2E fixture of its own (two clients' runs approved into one file; a camt.053 entry the parser keeps unsplit with our
+details); the sheets they show are covered by `037` P/H and the vitests. The checks page (`m2-payment-checks`) is
+retaken by `payments-debits.spec.ts` as before; no E2E tenant raises the new `bank_line_unbooked` lines. Default: built
+with 6b-2d's E2E work, before the PR of 6b-2d merges.
+
+**Mutants** (each a change of one function, created after `037`'s `begin;` and rolled back with it; killed unless
+said): the guard without return/loss, without its credit branch, with active accounts only; `debit_link_options`
+listing payments or every refund; the queue without the TF exclusion, with the probe never or always run; the
+suppression without the O/E0 branch, without the U branch, with its old precedence, at 6 days, with `<=`; the late
+date ignoring `unmeetable` (two ways) and the parts' raw date; the draft's −A and its zero rows kept; `bookable_as`
+without the own-IBAN or credit branch; the queue reason without own_transfer_out; P0 always true; the run enrichment
+emptied; `returned_on`, `on`, `after_cancellation`, `returned` (true), `transfer_bookings`' dates, the parts' IBAN end,
+`blocks_account`, `settlement_minor`, `share_after_minor` without the sweep, the run page's advances emptied (`037b`),
+`pending_held` false. Web: `linkGuarded` false or blind to `bookable_as`, `linkOffers` unguarded, the credit's refunds
+offered, FR76 restored, D for the commission, members by direction or decision ignored, the sweep's label, `pending_held`
+ignored, the netted sums worded without the transfer's status.
+
+**Suites on round 1** (the main stack alone; `./scripts/check-migration-order.sh origin/main`: the new files sort after
+`20261117100000`): `supabase test db` after a reset — `Files=38, Tests=2666, Result: PASS` (`037` 90, `037b` 27; `034`'s
+TODO markers kept, 16 TODO passed); the worker's `ruff check`, `ruff format --check` (177 files) and `mypy` (177 files)
+clean; 1,057 unit tests passed (5 xfailed); the non-scale integration tests on a fresh reset: 236 passed (the bank model
+with its lower bound included); the evals: mapping top-1 1.000 (167/167, threshold 0.980), reconciliation 0.9600
+automatic (95,997/100,000), 0 wrong, 0 policy violations; the payouts scale test once on a fresh reset (5 passed) and
+the transfer-line scale file alone on a fresh reset (7 passed), timings in `docs/benchmarks/remittances.md` « Review
+fixes, round 1 »; `database.types.ts` regenerated, unchanged (no public signature changed); the web's lint, types and
+428 vitest tests; the E2E's 54 tests (desktop and mobile), the image diffs that only showed dates and ids reverted:
+`m2c-virement-revenu` retaken (the masked IBAN), `m2c-virement-hors-reversement-deduit` new.
+
+**Round 2.** One finding, checked against round 1's `2c66517` and confirmed on the main stack: a regression of round 1's
+money-1 fix (medium), not rejected. `20261117110000_transfer_line_pages.sql` is edited in place (`20261117105000` and
+earlier files unchanged); the cancellation after download stays **off**; `033`/`034` unchanged; no §10 question
+answered (Q14's five business days included). The fix widens what « Lier » accepts, the one exception the rules allow:
+round 1's guard refused an ordinary link the plan requires (M2b's return of a debtor's payment; plan §4.1 refuses on
+these lines only the fee, the explanation and the refund link). It now refuses the return and the loss only where
+« Comptabiliser… » books the line instead.
+
+- **return-link-blocked-by-amount-twin (medium; regression of money-1) — a debtor's payment return of a payout's amount
+  had no action.** Round 1's `private.link_debit_guard` refused « Retour du paiement … » and its loss
+  (`payout_candidate`, `client_payout_line`) on every debit of class N, O or E0 with a rule-3b candidate or to a client's
+  payout IBAN, whatever the line's kind, and `public.debit_link_options` then listed no payment. A debit the bank flags
+  as a return (kind `return`: a debtor's payment taken back) that the job leaves to ops (a CSV feed: no end-to-end id,
+  no counterparty IBAN), of the amount of a payout in flight — or of a payout debited and returned, a candidate (iii)
+  for good — could be neither linked nor booked (« Comptabiliser… » refuses it `not_a_transfer_line`, its
+  `bookable_as` null): the payment stayed allocated and the next run paid the client money the bank had taken back
+  (5120 above the bank, I13). Fix: the guard refuses the return and the loss only on a debit whose kind, as a held line
+  was released, is one « Comptabiliser… » books (`transfer_out`, `other_debit`, `batch_unsplit`: `bookable_as` n's
+  kinds; `post_debit_links` already refuses a return on `transfer_out` and `batch_unsplit`, `not_a_return`);
+  `debit_link_options` reads the guard (`v_no_payment`), so it lists the payments there again. An other debit of a
+  payout's amount stays refused (money-1). Tests: pgTAP `037` « P (review 6b-2c round 2,
+  return-link-blocked-by-amount-twin) … » (`p_return_kind`: a reference-less flagged return of x2's amount, x2 in
+  flight (candidate i) and then debited and returned (iii) — the return and the loss ok, its payments listed,
+  `bookable_as` null, the options `not_a_transfer_line`; a flagged return to a client's payout IBAN ok; a held line
+  released as a return ok; an other debit, and a held line released as one, `payout_candidate`. It failed before:
+  `payout_candidate`, `client_payout_line`, no payment listed); vitest `transfer-line-review-fixes.test.ts` « a debit
+  the bank flags as a return keeps « Retour du paiement … » and its loss (round 2) », a lock (the page already offered
+  them: `linkGuarded` false, `bookable_as` null; the database refused).
+- **Kept (low), with its default:** on such a flagged return with a rule-3b candidate, « Frais bancaires » and
+  « Classer sans comptabiliser » stay refused `payout_candidate` (plan §4.1's guard reads no kind; the narrower side),
+  and the refusal's text points to « Comptabiliser… », which that line does not offer; its other clause (« sinon,
+  demandez le détail à la banque ») holds, and the return link is the line's action. Default: unchanged until the
+  founder or a page needs to explain such a line.
+- **The bank model's file refusal (a test, found by this round's runs).** `test_the_bank_model` (6b-2b's stateful
+  model) failed twice in the integration suite on a fresh reset, by its random draws (seed
+  `230972557431453548038770131176083172761` reproduces it alone): a client's run approved, then that client's earlier
+  payout returned (flagged) — the return blocks its payout account (`returned`, until replaced or confirmed again:
+  `private.remittance_payout_blockers`), so the next file held the run's payout and, holding every ordered transfer,
+  was refused `nothing_to_file`; the model expected only `cash_not_covered`. The product is right (a returned payout
+  account blocks the client's payouts); the model now accepts that refusal only in that shape — every held item a
+  payout `payout_blocked:payout_account_returned` of a client one of whose payouts it returned — and counts it
+  (`event`). The seed failed before and passes after.
+
+**Mutants of round 2** (each a change of one function, created after `037`'s `begin;` and rolled back with it; all
+killed): the guard without the round-2 restriction (round 1's) — `p_return_kind`; the restriction reading the line's
+own kind, not the kind a held line was released as — `p_return_kind` (the released other debit); the return and the
+loss never refused (money-1 undone) — `p_guards` and `p_return_kind`; `debit_link_options` listing no payment whenever
+the fee is refused `payout_candidate` (kind-blind) — `p_guards` and `p_return_kind`; the flagged return kept among the
+refused kinds — `p_return_kind`. Web: `linkOffers` guarding every flagged return debit — the new vitest.
+
+**Suites on round 2** (the main stack alone): `supabase test db` after a reset — `Files=38, Tests=2667, Result: PASS`
+(`037` 91; `034`'s TODO markers kept, 16 TODO passed); the worker's `ruff check`, `ruff format --check` (177 files) and
+`mypy` (177 files) clean; 1,057 unit tests passed (5 xfailed); the non-scale integration tests on a fresh reset: 236
+passed (with the bank model's fix; before it, both fresh runs failed on that model alone, 235 passed); the evals: mapping
+top-1 1.000 (167/167, threshold 0.980), reconciliation 0.9600 automatic (95,997/100,000), 0 wrong, 0 policy
+violations; no scale run (neither the nightly checks, the debit job, the funds pass nor the command changed: the guard
+is read by « Lier » and `debit_link_options` only); `database.types.ts` regenerated, unchanged (no public signature
+changed); the web's lint, types and 429 vitest tests; the E2E's 54 tests (desktop and mobile) on a fresh reset, every
+image diff reverted (dates only: this round changes no page's rendering — its web changes are a comment and a vitest —
+so no screenshot is new or retaken).
+
+**Round 3.** Four items checked against round 2's `77d95b6` on the main stack (one medium — with its guidance, the same
+defect — and three low), each confirmed, none rejected. `20261117110000_transfer_line_pages.sql` is edited in place
+(`20261117105000` and earlier files unchanged); the cancellation after download stays **off**; `033`/`034` unchanged; no
+§10 question answered (Q14's five business days included). Two fixes widen what « Lier » accepts, the exception the
+rules allow: the guard refused ordinary links the plan requires — a debtor payment's return (M2b) on a line rule 3b
+keeps for a payout that can no longer be paid out by it, and a refund's own link (plan §3.4.4 (ii): one candidate → its
+M2b link). The others narrow (the suppression) or are texts.
+
+- **other-debit-return-blocked-by-returned-payout-twin (medium; with r3-guidance) — a debtor's payment taken back
+  without a return flag, of a returned payout's amount, could never be linked.** A payout debited and then returned by
+  the payee's bank is rule 3b's candidate (iii) for good (plan §3.4.4; ML-8's exclusion holds only while its re-payment
+  is a (i) candidate). A debit the bank does not flag as a return and that carries none of our references (an unpaid
+  cheque, camt.053 `RCHQ`/`UPCQ` outside `RETURN_SUBFAMILIES`; a CSV « CONTREPASSATION CHQ … » outside `RETURN_RE`:
+  kind `other_debit`, class N), of that amount, had round 1's money-1 refusal for good: « Retour du paiement … » and its
+  loss refused `payout_candidate`, `debit_link_options` listing no payment, the fee and the explanation refused, and the
+  only proposal « Virement hors reversement » to the returned payout's client (« le client a reçu cet argent »). Booked
+  so, the returned client's queue and balance went to 0 though she received nothing; not booked, the payment stayed
+  allocated and the next run paid its client money the bank took back (I13); `dirty()` saw neither. With gross payouts
+  (founder #3) a run holding one collection pays exactly that collection, so the twin is by construction. Fix
+  (r3-guidance's default; COMPLIANCE OQ-86, new): `private.link_debit_guard` refuses the return and the loss
+  `payout_candidate` only while a candidate may still be paid out by the line — (i), (ii), or (deviation, the narrower
+  side) a cancelled payout whose run is still approved or sent (critic2 ML-4: the debit may be that run's payout, the
+  booking refuses `run_still_live`; the block ends with the run, as with (i)) — and `client_payout_line` as before (a
+  (iii) line carrying an IBAN carries its payee's: still refused). The fee and the explanation stay refused on every
+  candidate. `public.debit_link_options` (redefined in place) also returns, on a debit, the guard's answer for a
+  payment's return (`return_guard`: its code, null when « Lier » takes it), and lists the payments by it; the page
+  follows it on « À classer »'s `payout_amount_match` rows only (`paymentLinksGuarded`, `linkOffers`' fourth argument;
+  « Classer sans comptabiliser » stays hidden: `linkGuarded`). The queue's reason no longer says « en cours » of such a
+  line: with every candidate returned, or cancelled with its run ended, `debitReviewText` gives
+`PAYOUT_AMOUNT_MATCH_ENDED` and, when
+  `return_guard` is null, `PAYOUT_AMOUNT_MATCH_RETURN` (the debtor's payment its bank takes back, linked after a check at
+  the bank); `DEBIT_REVIEW.payout_amount_match` (a candidate in flight) names the screen. Trade-off put to the founder
+  (OQ-86): a returned payout the bank executes again by itself, then linked by ops as a debtor's return, pays the client
+  twice and shows the debtor unpaid — an unusual bank shape against the queue's note. Tests: pgTAP `037` « P (review
+  6b-2c round 3, other-debit-return-blocked-by-returned-payout-twin; COMPLIANCE OQ-86) … » (`p_iii_only`: x2 in flight
+  (i) — return, loss, fee and explanation `payout_candidate`, no payment listed, `return_guard` `payout_candidate`; x2
+  debited and returned (iii) — the return ok, the loss past the guard (M2b's own `not_a_return` on a debit not flagged),
+  d1 listed, `return_guard` null, the fee and the explanation still `payout_candidate`; a debit to Lilas' payout IBAN
+  `client_payout_line`; the return booked: Roux's queue and balance down 419 840, Lilas' queue, balance and returned item
+  unchanged, d1 returned, the checks clean) and « P (review 6b-2c round 3; critic2 ML-4) … » (`p_iii_cancelled`: a
+  cancelled payout's run still sent → `payout_candidate`; its run cancelled → ok); round 2's `p_return_kind` now expects
+  its other debit and held line released as one ok once x2 is returned (they were `payout_candidate`: that assertion was
+  this defect); vitest `transfer-line-review-fixes.test.ts` « a debit of an ended payout's amount (round 3, …) ». Each
+  failed before.
+- **new:suppression-counts-other-transfer-line (low) — a line naming another transfer of ours held a payout's breach row
+  back.** Round 1's legal-deadlines-1 branch of `private.transfer_debit_suppression` (a debit of the payout's amount to
+  its payee's IBAN, meant for classes O and E0) also counted a debit carrying another payout's RMT id — the same
+  client's earlier payout executed twice — so the next payout's late row was held five business days, then written
+  `debit_unbooked`. Fix (a one-condition guard, the narrower side): that branch counts only a line of class N, O or E0
+  (`private.transfer_line_class`, read last and by key); the payout's own id, its PmtInf and the unsplit details keep
+  their branches. Test: `037` « P (review 6b-2c round 3, new:suppression-counts-other-transfer-line; CPCE-08) … »
+  (`p_suppress_other`: Petit's x booked, then executed again on a line with x's id and Petit's IBAN; Petit's next payout,
+  same amount and IBAN, late: no suppression, its row written plain; it failed before: `waiting`, no row).
+- **new:refund-to-client-iban-unlinkable (low) — a refund sent to a client's payout IBAN could not be linked.** The guard
+  applied `client_payout_line` to the refund link even when that refund's own transfer is the line's rule-3b candidate,
+  and to « Remboursement revenu » on a return from the IBAN the refund was sent to. Fix: neither (two one-line
+  conditions: `v_own`, the refund request's `payee_iban` equal to the credit's IBAN); a refund in no file stays refused
+  on a debit to a client's IBAN, and a refund come back from another IBAN too. The page shows on a credit exactly the
+  refunds `debit_link_options` lists (it lists only those the guard lets through; round 1's page-side hiding on the
+  guarded credit removed). Tests: `037` « P (review 6b-2c round 3, new:refund-to-client-iban-unlinkable; plan §3.4.4
+  (ii)) … » (`p_refund_client_iban`: the debit (ii) listed and linked, the refund executed, its return listed and
+  linked, the fee and the explanation refused, a refund in no file `client_payout_line`, a reference-less line of the
+  refund's amount refusing a payment's return `payout_candidate`); vitest « « Remboursement revenu » on the guarded
+  credit: exactly what debit_link_options lists (round 3) » (round 1's « no « Remboursement revenu » on the guarded
+  credit » encoded the refusal).
+- **fix2-notdone:fee-explanation-text (low; round 2's kept item, closed) — the refusal pointed to « Comptabiliser… » on a
+  line that does not offer it.** On a flagged return debit with a rule-3b candidate, « Classer sans comptabiliser » stays
+  refused `payout_candidate`; the page now sends whether the line offers « Comptabiliser… » (`line_books`, from
+  `bookable_as`) and `guardRefusalCode` words the refusal `payout_candidate_not_bookable` there (« … liez-la à ce
+  paiement avec « Retour du paiement … » ; sinon, demandez le détail à la banque et prévenez le support »); the general
+  `payout_candidate` text no longer says « en cours » alone and names the screen. Vitest « the fee's and the
+  explanation's refusal on a line « Comptabiliser… » does not offer (round 3) »; `transfer-line-pages.test.ts`' two text
+  locks updated to the new words.
+
+**Mutants of round 3** (each a change of one function, created after `037`'s `begin;` and rolled back with it; all ten
+killed): the return and the loss refused on any candidate (round 2's guard) — `p_return_kind`, `p_iii_only`,
+`p_iii_cancelled`; without the live-run clause — `p_iii_cancelled`; refused on (i) only — `p_refund_client_iban`
+(`return_ii`); `client_payout_line` on every refund link, and the refund exception for any refund —
+`p_refund_client_iban` (`refund`, `not_filed`); `client_payout_line` on every « Remboursement revenu » —
+`p_refund_client_iban`; its exception for a refund of any IBAN — `p_guards` (`refund_back_credit`); the suppression's
+class condition dropped — `p_suppress_other`; `debit_link_options` without `return_guard`, or with it always null —
+`p_iii_only`, `p_iii_cancelled`. Web (each a one-place change of `debits.ts`, all eight killed by the vitests):
+`paymentLinksGuarded` blind to the database, or open on any debit; the guarded credit's refunds hidden; the ended text
+never used, its return sentence always said, chosen when one candidate is ended, or when a cancelled payout's run is
+still sent; `guardRefusalCode` the identity.
+
+**Suites on round 3** (the main stack alone): `supabase test db` — `Files=38, Tests=2671, Result: PASS` (`037` 95;
+`034`'s TODO markers kept, 16 TODO passed); the worker's `ruff check`, `ruff format --check` (177 files) and `mypy` (177
+files) clean; 1,057 unit tests passed (5 xfailed); the non-scale integration tests on a fresh reset: 236 passed; the
+evals: mapping top-1 1.000 (167/167, threshold 0.980), reconciliation 0.9600 automatic (95,997/100,000), 0 wrong, 0
+policy violations; the nightly checks changed (the suppression), so the payouts scale test ran once on a fresh reset
+(5 passed) and the transfer-line scale file alone on a fresh reset (7 passed), timings in `docs/benchmarks/remittances.md`
+« Review fixes, round 3 » (as round 1's); `database.types.ts` regenerated, unchanged (`debit_link_options` returns
+`jsonb`: no public signature changed); the web's lint, types and 433 vitest tests; the E2E's 54 tests (desktop and
+mobile) on a fresh reset. No E2E scene shows a line this round changes (an ended payout's twin, a guarded credit's
+refund, a `payout_candidate` refusal), so no screenshot is new for it; every image diff showing only dates, ages or
+random IBAN digits reverted, but `m6b1-our-credit-unflagged` (desktop and mobile), kept as retaken: its committed copy
+still showed the note 6b-2c reworded in §4.3 (« écran à venir »), which no longer ships.
+
+**Left open after round 3 (low; for 6b-2d).** Round 3's verifier found every item fixed and none medium or higher open.
+It recorded three new low items:
+- **refund-link-blocked-by-returned-payout-twin.** A refund's debit that carries neither an end-to-end id nor an IBAN (a
+  CSV), of the amount of a payout already returned (iii), is refused `payout_candidate`. The options say
+  `line_ambiguous`, so the line stays unbooked. It is shown by `bank_line_unbooked`, and no money moves.
+  - Fix: treat the other candidates of a refund link as round 3 treats them for a return.
+  - Record the trade-off under OQ-86.
+  - Add a `037` case for {ii, iii}, listed and linked, and one for {ii, i}, still refused.
+- **suppression-e0-names-our-other-lot.** A line with a foreign end-to-end id and another lot's TF PmtInfId is class E0.
+  It is still counted by the suppression and proposed as T's debit. This needs a bank that drops our end-to-end id and
+  keeps the PmtInfId, and then executes the transfer again.
+  - Fix: skip a line naming another lot of ours, both in the suppression branch and in rule 3b's E0 candidates.
+- **ended-twin-return-sentence-without-payment.** `debitReviewText` adds « … avec « Retour du paiement … » » whenever
+  `return_guard` is null, even when `debit_link_options` lists no payment. The sentence then names a button the row does
+  not show. No money moves.
+  - Fix: say the sentence only when the row offers a return.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

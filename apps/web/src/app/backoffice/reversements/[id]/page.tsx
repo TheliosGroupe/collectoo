@@ -22,8 +22,10 @@ import {
   failureNote,
   frenchDate,
   percentText,
+  parseRunPayout,
   refundNote,
   runBusy,
+  runPayoutNotes,
   runStatus,
 } from "@/lib/remittance/runs";
 import { runStatementState } from "@/lib/remittance/documents";
@@ -178,7 +180,9 @@ export default async function RemittanceRunPage({
     .filter((x): x is string => Boolean(x));
   // M2c-6a: the file holding the payout (« Virements »), and whether it was downloaded (its transfer is then cancelled
   // first, in two steps: review T1)
-  const [{ data: statement }, { data: pdfs }, { data: inFile }] =
+  // M2c-6b-2c (plan §4.4, §7.4; critic CSO-6, CSO-9): what became of the payout — its debit, the set-off, a return, a
+  // transfer the bank executed outside the run, a draft's unplanned items — from public.remittance_run_payout
+  const [{ data: statement }, { data: pdfs }, { data: inFile }, { data: payoutData }] =
     await Promise.all([
       supabase
         .from("remittance_statement")
@@ -208,7 +212,10 @@ export default async function RemittanceRunPage({
         .eq("run_id", id)
         .neq("status", "cancelled")
         .maybeSingle(),
+      supabase.rpc("remittance_run_payout", { p_run_id: id }),
     ]);
+  const payout = parseRunPayout(payoutData);
+  const payoutNotes = payout ? runPayoutNotes(payout, r.currency) : [];
   const transferFile = inFile?.transfer_file_id
     ? {
         id: inFile.transfer_file_id,
@@ -569,6 +576,16 @@ export default async function RemittanceRunPage({
               </Link>
             </p>
           ) : null}
+        </Section>
+      ) : null}
+
+      {payoutNotes.length > 0 ? (
+        <Section title="Débit et compensation" testId="run-payout">
+          <ul className="flex flex-col gap-1 text-sm" data-testid="run-payout-notes">
+            {payoutNotes.map((n) => (
+              <li key={n}>{n}</li>
+            ))}
+          </ul>
         </Section>
       ) : null}
 

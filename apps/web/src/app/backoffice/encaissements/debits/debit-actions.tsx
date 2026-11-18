@@ -102,12 +102,15 @@ export function BookLine({
   kind,
   label,
   effect,
+  offersBooking = true,
   idempotencyKey,
 }: {
   lineId: string;
   kind: "fee" | "own_credit";
   label: string;
   effect: string;
+  /** review 6b-2c round 3: whether the line offers « Comptabiliser… » (the refusal's words: guardRefusalCode) */
+  offersBooking?: boolean;
   idempotencyKey: string;
 }) {
   return (
@@ -120,6 +123,7 @@ export function BookLine({
           <ActionForm onDone={close} action={linkDebit} submitLabel="Comptabiliser" buttonClassName={buttonClass}>
             <input type="hidden" name="bank_transaction_id" value={lineId} />
             <input type="hidden" name="kind" value={kind} />
+            <input type="hidden" name="line_books" value={offersBooking ? "1" : "0"} />
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />
             <Reason />
           </ActionForm>
@@ -207,8 +211,17 @@ export function LinkLoss({
   );
 }
 
-/** « Classer sans comptabiliser »: the motif is kept (since M2c-1 fees are booked: « Frais bancaires »). */
-export function Explain({ lineId, idempotencyKey }: { lineId: string; idempotencyKey: string }) {
+/** « Classer sans comptabiliser »: the motif is kept (since M2c-1 fees are booked: « Frais bancaires »). Review 6b-2c
+ * round 3: whether the line offers « Comptabiliser… » words a payout_candidate refusal (guardRefusalCode). */
+export function Explain({
+  lineId,
+  offersBooking = true,
+  idempotencyKey,
+}: {
+  lineId: string;
+  offersBooking?: boolean;
+  idempotencyKey: string;
+}) {
   return (
     <ConfirmSheet label="Classer sans comptabiliser" title="Classer sans comptabiliser" buttonClassName={secondaryClass} testId="explain">
       {(close) => (
@@ -220,6 +233,7 @@ export function Explain({ lineId, idempotencyKey }: { lineId: string; idempotenc
           <ActionForm onDone={close} action={linkDebit} submitLabel="Classer" buttonClassName={buttonClass}>
             <input type="hidden" name="bank_transaction_id" value={lineId} />
             <input type="hidden" name="kind" value="explained" />
+            <input type="hidden" name="line_books" value={offersBooking ? "1" : "0"} />
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />
             <Reason label="Explication (interne)" />
           </ActionForm>
