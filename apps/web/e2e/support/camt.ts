@@ -26,10 +26,24 @@ export type Credit = {
 export type Debit = {
   ref: string;
   amountMinor: bigint;
-  kind: "return" | "refund" | "fee" | "other" | "transfer";
-  /** return: the end-to-end id of the credit it takes back; refund: our RFD reference; transfer: its RMT or SWP id. */
+  kind: "return" | "refund" | "fee" | "other" | "transfer" | "lot" | "charged";
+  /**
+   * return: the end-to-end id of the credit it takes back; refund: our RFD reference; transfer: its RMT or SWP id;
+   * charged: the RMT id of its one detail.
+   */
   e2e?: string;
   name?: string;
+  /** M2c-6b-2d, lot: one line for a PmtInf of our file, without its details (the worker's synth `partial` shape). */
+  pmtInfId?: string;
+  /** lot: the NbOfTxs the bank gives (default 1: what the line holds). */
+  nbOfTxs?: number;
+  /**
+   * M2c-6b-2d, charged: the ISO shape of a charged transfer (the worker's synth `debit_charge_minor`): the entry is
+   * `amountMinor` (the transfer + the charge), its one detail carries the transfer's amount as its instructed amount
+   * (AmtDtls/TxAmt) and the entry the charge in `Chrgs` — the parser keeps it unsplit with that detail and charge.
+   */
+  instructedMinor?: bigint;
+  chargesMinor?: bigint;
 };
 
 function esc(text: string): string {
@@ -116,9 +130,9 @@ function debitEntry(day: string): (d: Debit) => string {
     const code =
       d.kind === "return"
         ? ["PMNT", "RCDT", "RRTN"]
-        : d.kind === "refund" || d.kind === "other" || d.kind === "transfer"
-          ? ["PMNT", "ICDT", "ESCT"]
-          : ["PMNT", "MDOP", "FEES"];
+        : d.kind === "fee"
+          ? ["PMNT", "MDOP", "FEES"]
+          : ["PMNT", "ICDT", "ESCT"];
     const head =
       `<Ntry><Amt Ccy="EUR">${amount(d.amountMinor)}</Amt><CdtDbtInd>DBIT</CdtDbtInd>` +
       (d.kind === "return" ? "<RvslInd>true</RvslInd>" : "") +
@@ -130,6 +144,22 @@ function debitEntry(day: string): (d: Debit) => string {
     // M2c-1: a debit the bank does not code as a charge (ops book it as a fee, or explain it)
     if (d.kind === "other")
       return `${head}<AddtlNtryInf>PRELEVEMENT ABONNEMENT BANQUE EN LIGNE</AddtlNtryInf></Ntry>`;
+    // M2c-6b-2d: one line for a lot of our file, its PmtInfId and count, no detail
+    if (d.kind === "lot")
+      return (
+        `${head}<NtryDtls><Btch><PmtInfId>${esc(d.pmtInfId ?? "")}</PmtInfId>` +
+        `<NbOfTxs>${d.nbOfTxs ?? 1}</NbOfTxs></Btch></NtryDtls><AddtlNtryInf>VIREMENTS SEPA</AddtlNtryInf></Ntry>`
+      );
+    // M2c-6b-2d: our transfer charged on its own entry (the charge in Chrgs, the transfer's amount in its detail)
+    if (d.kind === "charged")
+      return (
+        `${head}<Chrgs><Rcrd><Amt Ccy="EUR">${amount(d.chargesMinor ?? BigInt(0))}</Amt><CdtDbtInd>DBIT</CdtDbtInd>` +
+        `<ChrgInclInd>true</ChrgInclInd></Rcrd></Chrgs>` +
+        `<NtryDtls><TxDtls><Refs><AcctSvcrRef>${esc(d.ref)}</AcctSvcrRef><EndToEndId>${esc(d.e2e ?? "NOTPROVIDED")}</EndToEndId></Refs>` +
+        `<AmtDtls><TxAmt><Amt Ccy="EUR">${amount(d.instructedMinor ?? BigInt(0))}</Amt></TxAmt></AmtDtls>` +
+        (d.name ? `<RltdPties><Cdtr><Pty><Nm>${esc(d.name)}</Nm></Pty></Cdtr></RltdPties>` : "") +
+        `<RmtInf><Ustrd>VIREMENT SEPA</Ustrd></RmtInf></TxDtls></NtryDtls></Ntry>`
+      );
     return (
       head +
       `<NtryDtls><TxDtls><Refs><AcctSvcrRef>${esc(d.ref)}</AcctSvcrRef><EndToEndId>${esc(d.e2e ?? "NOTPROVIDED")}</EndToEndId></Refs>` +

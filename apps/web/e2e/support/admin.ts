@@ -46,6 +46,28 @@ export async function createTenant(): Promise<Tenant> {
   return { servicerId: servicer.id, clientId: client.id, clientName, portfolioId: portfolio.id, portfolioName };
 }
 
+/**
+ * M2c-6b-2d: another client of the tenant's servicer, with its own portfolio — two clients' payouts approved into one
+ * transfer file share its lot (one PmtInf). The tenant it returns is that client's, under the same servicer.
+ */
+export async function createOtherClient(tenant: Tenant, clientName: string): Promise<Tenant> {
+  const admin = adminClient();
+  const { data: client, error } = await admin
+    .from("organization")
+    .insert({ kind: "creditor_client", legal_name: clientName, servicer_organization_id: tenant.servicerId })
+    .select("id")
+    .single();
+  if (error) throw error;
+  const portfolioName = "Factures impayées 2026";
+  const { data: portfolio, error: e2 } = await admin
+    .from("portfolio")
+    .insert({ organization_id: tenant.servicerId, client_organization_id: client.id, name: portfolioName })
+    .select("id")
+    .single();
+  if (e2) throw e2;
+  return { servicerId: tenant.servicerId, clientId: client.id, clientName, portfolioId: portfolio.id, portfolioName };
+}
+
 export async function createMember(
   organizationId: string,
   role: "admin" | "ops_manager" | "collector" | "client_admin" | "client_viewer",

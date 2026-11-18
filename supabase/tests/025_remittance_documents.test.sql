@@ -348,7 +348,7 @@ select private.remittance_statement_prepare(d.ref_id) from due d where d.kind = 
 insert into pg_temp._rd_statement_files select d.ref_id, repeat('b', 64), repeat('c', 64) from due d
 where d.kind = 'statement';
 insert into pg_temp._rd_invoice_pdf select d.ref_id, repeat('d', 64) from due d where d.kind = 'invoice';
-select is(private.remittance_documents_record('00000000-0000-0000-0000-0000000000aa', 'releve-reversement-fr-1',
+select is(private.remittance_documents_record('00000000-0000-0000-0000-0000000000aa', 'releve-reversement-fr-3',
                                               'facture-commission-fr-1', 'test'),
   '{"statements": 2, "invoices": 2, "more": false}'::jsonb, 'recorded: two statements, two invoice PDFs');
 select results_eq($$ select s.number, s.line_count, s.file_count, s.payload_sha256 = encode(sha256(convert_to(s.payload::text,

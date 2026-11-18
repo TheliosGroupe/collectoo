@@ -457,7 +457,7 @@ create temporary table due on commit drop as
 select * from private.remittance_documents_begin('00000000-0000-0000-0000-0000000000aa', 0, 0);
 select private.remittance_statement_prepare((select v from t where k = 'r2'));
 insert into pg_temp._rd_statement_files values ((select v from t where k = 'r2'), repeat('b', 64), repeat('c', 64));
-select is(private.remittance_documents_record('00000000-0000-0000-0000-0000000000aa', 'releve-reversement-fr-2',
+select is(private.remittance_documents_record('00000000-0000-0000-0000-0000000000aa', 'releve-reversement-fr-3',
                                               'facture-commission-fr-2', 'test') ->> 'statements', '1',
   'Lilas''s statement recorded');
 select results_eq($$ select gross_minor, net_minor, drawn_status from public.remittance_statement

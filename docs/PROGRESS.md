@@ -3,7 +3,22 @@
 _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then this file._
 
 ## Done
-- PR #34 **M2c-6b-2c** (2026-11-18; the pages; plan `docs/design/m2c-6b-2-plan.md` §4–§7; ADR-0014 « M2c-6b-2b deferred tests », « M2c-6b-2c » and « M2c-6b-2c review fixes » rounds 1–3):
+- PR #35 **M2c-6b-2d** (2026-11-18; « Suivi »; plan `docs/design/m2c-6b-2-plan.md` §5; ADR-0014 « M2c-6b-2c carry-overs (in 6b-2d) », « M2c-6b-2d » and « M2c-6b-2d review fixes »):
+  - **Statement « Suivi »** (`20261117120000_statement_suivi.sql`, template `releve-reversement-fr-3`). The payload drops `follow_up` and adds `previous_payouts`: the client's earlier approved runs' events, posted between the previous approved run's K and this run's K, on each run's whole transfer chain.
+    - Events: debited; returned (`here` / `run` / `pending`); cancelled; executed after cancellation; executed again (ranked: second, third…, or before the planned debit); the return of an unplanned payout; an unplanned payout outside any run.
+    - A late line paid by an unplanned payout says when and how much (« versé le … » or « dont … versés le … »), as of K, and keeps its own cause beside it.
+    - The renderer words what the payload holds and refuses an fr-2 payload (`payload_version`). The record step refuses the fr-2 template once a « Suivi » is present.
+    - IBANs are printed « IBAN …1234 ». The CSV keeps its columns.
+  - **6b-2c carry-overs** (`20261117113000_transfer_line_pages_fixes.sql`):
+    - a refund's link beside a returned payout twin is accepted;
+    - an E0 line naming another lot of ours is neither counted nor proposed;
+    - the return sentence is shown only with a return offered;
+    - E2E: a lot debited short of a member and an entry kept unsplit, each booked and read back in the ledger; screenshots `m2c-debits-reversement` and `m2c-debits-detail-releve` new, `m2-payment-checks` retaken.
+  - **Review:** five lenses (2 medium, 13 low), one fix round; the verifier found nothing medium or higher open.
+    - The medium: « une seconde fois » was false for a third execution, or for one before the planned debit.
+  - **Tests:** pgTAP 2,704 (`038` 24, `037c` 9); worker unit 1,092 + 5 xfail, integration 237; evals 1.000 and 96.0 % / 0 wrong; payouts scale 5/5; transfer-line scale 7/7; remittance scale 1/1 (50,000-line statement build 6.0 s); vitest 442; E2E 56.
+  - The cancellation-after-download switch stays OFF.
+- PR #34 **M2c-6b-2c merged 2026-11-18** (main's push CI green on attempt 2, after a runner port error at E2E's `supabase start`; the pages; plan `docs/design/m2c-6b-2-plan.md` §4–§7; ADR-0014 « M2c-6b-2b deferred tests », « M2c-6b-2c » and « M2c-6b-2c review fixes » rounds 1–3):
   - **Migrations:**
     - `20261117105000_transfer_line_ops_fixes.sql`: two bugs found by 6b-2b's deferred tests, both low. The command's lock step locked another servicer's lot file; it now locks only the files of the line's own account. An unsplit entry without amounts returned `bad_request`; it now returns `unsplit_detail_missing`.
     - `20261117110000_transfer_line_pages.sql`:
@@ -92,14 +107,11 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
 - **M2c-6b-2** (plan `docs/design/m2c-6b-2-plan.md`, four PRs; founder questions in its §10, 16 with defaults, all open):
   - **6b-2a** foundations: merged (PR #32).
   - **6b-2b** the ops command: merged (PR #33).
-  - **6b-2c** pages: PR #34 (above), merging once its PR jobs and a dispatched volume run are green.
-  - **6b-2d** « Suivi » fr-3 is next (approved runs only; pgTAP 038). It also carries what 6b-2c left:
-    - two E2E flows with their screenshots, a lot line short of a member (`m2c-debits-reversement`) and an entry kept unsplit (`m2c-debits-detail-releve`) (T8, pages-6);
-    - the `m2-checks` screenshot retake;
-    - three low items from round 3 (ADR-0014 « Left open after round 3 »): a refund link refused on a returned payout's twin, an E0 line naming another of our lots still counted, and a return sentence with no « Retour du paiement » button.
+  - **6b-2c** pages: merged (PR #34).
+  - **6b-2d** « Suivi »: PR #35 (above), merging once its PR jobs and a dispatched volume run are green.
   - Then 6b-3 (needs founder question 1 of the 6b plan).
 - **M3 design (M3-01..M3-15)**: panel (legal-, engine-, ops-first, a critique each, a judge) → `docs/design/m3-calculation.md`: rule packs as versioned YAML citing read texts, one pure replay engine (exact integers, half-up per economic segment), interest posted at payment dates and a monthly close, late facts corrected by reversal at their dates (automatic only when no payment's total changes), judgments/surendettement measures/variable rates « hors calcul », receipts show « reste dû » only for validated packs. 15 founder decisions pending (§20); OQ-51..68 added to COMPLIANCE, notes on OQ-3..27. Legal flags to apply with M3a-1: a new INT row for C. conso L722-14, INT-08 wording, INT-04 test, CALCULATION_RULES §4.1 caveat; worked examples change under the conservative day rule (all TO VALIDATE until the founder's golden cases).
-- **M2c design (M2-12..M2-15)**: panel (compliance-, ledger-, ops-first designs, a critique each, a judge) → `docs/design/m2c-remittances.md` (two funds with a 4679/4689 mirror, remittance runs per client and currency, commission from the mandate's versioned schedule, invoices and credit notes in one gapless yearly series, pain.001 for ops, nothing leaves 5120 before the bank's debit, servicer advances for returns after remittance). 15 founder decisions accepted 2026-11-09 (§24); M2c-1 merged (PR #22); M2c-2 merged (PR #23); M2c-3 merged (PR #24); M2c-4 merged (PR #25); M2c-5 merged (PR #26); M2c-5b merged (PR #27); M2c-6a merged (PR #28, fail-closed); M2c-6b-1 merged (PR #29); M2c-6b-2a merged (PR #32); M2c-6b-2b merged (PR #33); M2c-6b-2c in PR #34 (pages); 6b-2d the statement's « Suivi » next, then 6b-3 (switching on cancellation after download once pgTAP `034` passes) (`docs/design/m2c-6b-plan.md`); OQ-35..50 added to COMPLIANCE (biggest: OQ-45, CMF L314-1 payment-service authorisation, before go-live).
+- **M2c design (M2-12..M2-15)**: panel (compliance-, ledger-, ops-first designs, a critique each, a judge) → `docs/design/m2c-remittances.md` (two funds with a 4679/4689 mirror, remittance runs per client and currency, commission from the mandate's versioned schedule, invoices and credit notes in one gapless yearly series, pain.001 for ops, nothing leaves 5120 before the bank's debit, servicer advances for returns after remittance). 15 founder decisions accepted 2026-11-09 (§24); M2c-1 merged (PR #22); M2c-2 merged (PR #23); M2c-3 merged (PR #24); M2c-4 merged (PR #25); M2c-5 merged (PR #26); M2c-5b merged (PR #27); M2c-6a merged (PR #28, fail-closed); M2c-6b-1 merged (PR #29); M2c-6b-2a merged (PR #32); M2c-6b-2b merged (PR #33); M2c-6b-2c merged (PR #34); M2c-6b-2d in PR #35; then 6b-3 the statement's « Suivi » next, then 6b-3 (switching on cancellation after download once pgTAP `034` passes) (`docs/design/m2c-6b-plan.md`); OQ-35..50 added to COMPLIANCE (biggest: OQ-45, CMF L314-1 payment-service authorisation, before go-live).
 
 ## Next
 - Performance before production volumes: RLS on `account` / `party` (and tables keyed by them) calls `can_read_portfolio()` per row; with 157k accounts locally a client's `count(*)` took 41 s. Apply the ledger's pattern (`= any ((select private.readable_portfolio_ids())::uuid[])`, evaluated once per query) and add a scale check.
@@ -147,6 +159,13 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
   - **Known limits (low):**
     - the nightly suppression reads `transfer_line_offers` once per member, up to 500;
     - cs-1's queue bound is asserted by timing.
+- M2c-6b-2d questions and known limits (COMPLIANCE):
+  - **OQ-87 (new, counsel and founder):** is the statement's « Suivi » an adequate account (C. civ. 1993, OQ-75), event by event as of each run's K, and are its wordings true enough? Defaults (a)–(h) are built (window, cancelled runs, executions ranked, unplanned payouts outside a run).
+  - **OQ-86:** now also covers the refund link accepted beside a returned payout twin.
+  - **Known limits (low):**
+    - SR-1: on a fresh database (empty statistics) the « Suivi » probe of a run's live lines may read `remittance_line_account_idx` whole. Only a new non-partial index on `remittance_line (ledger_entry_id)` keys it; it is read cost only.
+    - a line refused `names_other_lot` still names the transfer outside the lot in its queue reason and « Lier »'s text (no booking follows);
+    - a posting tie-break mutant of `038` is killed in 4 runs of 9.
 - M2c-6b-1 known costs for later slices: the 50k run's nightly checks ~5–6 s (whole-tenant receivables and `commission_key_open` × 50k); `ledger_post_set`'s pooled-account matching grows as lines × clients (most of a 5,000-member batch line's 21 s) (`docs/benchmarks/remittances.md`).
 - M2c-6a founder questions (COMPLIANCE): OQ-79 (which creditor IBANs SEPA files may pay; default: the EPC scheme countries by IBAN prefix, others held out, refunds to them by hand); OQ-80 (bank statement reading defaults, and the evidence rules for the switched-off cancellation); OQ-81 (a) a payout the bank refuses, or a file never uploaded, stays « en cours » until M2c-6b, possibly beyond R124-6 al. 2's month (default: accept, no live payouts before M2c-6b); (b) `cancel_refund` is refused once the refund's transfer was debited — a change from M2b (default: keep; an exit decided in M2c-6b); (c) no download once the bank executed a file or one of its transfers is booked (default: refuse; a copy for the records is an M2c-6b question).
 - Hosted Supabase: create the private bucket `transfer-files` before M2c-6a reaches production.

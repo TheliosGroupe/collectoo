@@ -115,6 +115,10 @@ export function lineKindLabel(kind: string, direction: string): string {
   if (kind === "own_transfer_in") return "Virement reçu du compte propre";
   if (kind === "client_transfer_in") return "Virement reçu d'un client";
   if (kind === "suspected_duplicate") return "Doublon possible";
+  // review M2c-6b-2d round 1 (pages-e2e-2): an entry the bank kept unsplit, never its code (« Relevés » words the
+  // credit so: statements.ts)
+  if (kind === "batch_unsplit")
+    return direction === "debit" ? "Écriture groupée de la banque (non ventilée)" : "Remise groupée non ventilée";
   return kind;
 }
 
@@ -389,6 +393,48 @@ export function linkOffers<
   };
 }
 
+/** A payment « À classer » may link a line to: a candidate the job named, or one public.debit_link_options listed. */
+export type LinkPayment = {
+  payment_id: string;
+  amount_minor: string;
+  booking_date: string;
+  payer_name: string | null;
+  left_minor: string;
+  file_reference: string | null;
+  /** the line's references name it (the job's candidate), else only same account and amount */
+  named?: boolean;
+};
+
+/**
+ * The payments linkOffers chooses « Retour du paiement … » and its loss from on a line « À classer » shows: the
+ * payments the job's review named (`candidates` naming a payment, not a refund, with what is left of it: `named`),
+ * then those public.debit_link_options listed (`listed`) that the job did not name. One list for the buttons and the
+ * text that names them (6b-2d, ended-twin-return-sentence-without-payment).
+ */
+export function linkPayments(
+  candidates: readonly Record<string, unknown>[] | null | undefined,
+  listed: readonly LinkPayment[] | null | undefined,
+): LinkPayment[] {
+  const out = new Map<string, LinkPayment>();
+  const text = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  for (const c of candidates ?? []) {
+    const id = text(c.payment_id);
+    const left = text(c.left_minor);
+    if (!id || c.refund_request_id || !left) continue;
+    out.set(id, {
+      named: true,
+      payment_id: id,
+      amount_minor: text(c.amount_minor) ?? "0",
+      booking_date: text(c.booking_date) ?? "",
+      payer_name: text(c.payer_name),
+      left_minor: left,
+      file_reference: text(c.file_reference),
+    });
+  }
+  for (const p of listed ?? []) if (!out.has(p.payment_id)) out.set(p.payment_id, p);
+  return [...out.values()];
+}
+
 /**
  * A line's ids as isOurTransferLine reads them (the credit's own end-to-end id, the original one it returns), and what
  * the database says of it on the row « À classer » loads (public.debit_queue; review round 7): how many details of
@@ -536,9 +582,12 @@ export const OUR_LOT_OWN_CREDIT_NOTE =
  * Review round 8 (T3): only what the code knows, true of every such line — the bank's detail of the entry is incomplete
  * or does not match it (a count, a direction or an amount), never that other movements sit beside ours (a single detail
  * of ours whose own amount is not the entry's holds none); (T2) our refunds and top-ups are counted too.
+ * Review M2c-6b-2d round 1 (pages-e2e-1): what « Comptabiliser d'après le détail du relevé » accepts — our details
+ * making the entry, or the only detail, ours, with the charges the statement records for the entry (S08) — and only
+ * charges the statement does not record are refused.
  */
 export const UNSPLIT_OURS_NOTE =
-  "Ligne d'une écriture de la banque qui contient au moins l'un de nos virements (reversement, quote-part du cabinet, remboursement ou approvisionnement), son débit ou son retour, et dont le détail donné par la banque est incomplet ou ne correspond pas à l'écriture (nombre, sens ou montant des opérations) : son montant est celui de toute l'écriture, rien n'est comptabilisé automatiquement. Si le relevé détaille nos virements dans cette écriture et qu'ils en font exactement le montant, « Comptabiliser d'après le détail du relevé » les propose ; sinon (le paiement d'un débiteur, des frais, un remboursement ou un approvisionnement dans l'écriture, ou un détail incomplet), elle ne peut pas être comptabilisée ici : demandez le détail à la banque et prévenez le support. Ne la classez pas sans comptabiliser et ne la rattachez à aucun paiement ni remboursement.";
+  "Ligne d'une écriture de la banque qui contient au moins l'un de nos virements (reversement, quote-part du cabinet, remboursement ou approvisionnement), son débit ou son retour, et dont le détail donné par la banque est incomplet ou ne correspond pas à l'écriture (nombre, sens ou montant des opérations) : son montant est celui de toute l'écriture, rien n'est comptabilisé automatiquement. Si le relevé détaille nos virements dans cette écriture et qu'ils en font exactement le montant, ou s'il n'y détaille que l'un de nos virements et que les frais qu'il indique pour l'écriture font la différence, « Comptabiliser d'après le détail du relevé » les propose ; sinon (le paiement d'un débiteur, un remboursement ou un approvisionnement dans l'écriture, des frais que le relevé n'indique pas, ou un détail incomplet), elle ne peut pas être comptabilisée ici : demandez le détail à la banque et prévenez le support. Ne la classez pas sans comptabiliser et ne la rattachez à aucun paiement ni remboursement.";
 
 /**
  * Review M2c-6b-1 round 5 (Q1): on such a credit read as a return (offersOwnLotRefundBack), the one exception — the
@@ -567,8 +616,10 @@ export function debitReviewText(
   o: LineIds & {
     review_reason: string | null;
     candidates?: ({ run_status?: string | null } & Record<string, unknown>)[] | null;
+    amount_minor?: string;
+    bookable_as?: string | null;
   },
-  linkOptions?: { return_guard?: string | null } | null,
+  linkOptions?: { return_guard?: string | null; payments?: LinkPayment[] | null } | null,
 ): string | null {
   // review 6b-2c round 3: a reference-less debit whose only candidates are payouts returned, or cancelled with their run
   // ended (iii; a cancelled payout whose run is still approved or sent may be that run's payout: still « en cours »)
@@ -582,7 +633,16 @@ export function debitReviewText(
         (c.status === "cancelled" && c.run_status !== "approved" && c.run_status !== "sent"),
     )
   )
-    return linkOptions?.return_guard === null
+    // 6b-2d (ended-twin-return-sentence-without-payment): the sentence names « Retour du paiement … » only when the row
+    // offers that button — linkOffers' returns from the same payments the row's actions read (linkPayments), never on
+    // return_guard alone (null while debit_link_options lists no payment the line can take back)
+    return o.amount_minor !== undefined &&
+      linkOffers(
+        { ...o, amount_minor: o.amount_minor },
+        linkPayments(cands, linkOptions?.payments),
+        [],
+        linkOptions?.return_guard,
+      ).returns.length > 0
       ? `${PAYOUT_AMOUNT_MATCH_ENDED} ${PAYOUT_AMOUNT_MATCH_RETURN}`
       : PAYOUT_AMOUNT_MATCH_ENDED;
   // M2c-6b-2c (critic2 ML-4): a cancelled transfer whose run is still approved or sent — this debit is that run's payout,
@@ -1228,6 +1288,11 @@ export function checkSubjectLink(r: {
     return `/backoffice/encaissements/paiements/${r.subject_id}`;
   if (r.subject_type === "bank_statement" && r.subject_id)
     return `/backoffice/encaissements/releves/${r.subject_id}`;
+  // review M2c-6b-2d round 1 (pages-e2e-3): a statement line left to ops (transfer_unknown, transfer_debited_twice,
+  // transfer_not_handed_out) is on « Débits et retours », at its row; our transfer lines left unbooked are there too
+  if (r.subject_type === "bank_transaction" && r.subject_id)
+    return `/backoffice/encaissements/debits#ligne-${r.subject_id}`;
+  if (r.code === "bank_line_unbooked") return "/backoffice/encaissements/debits";
   if (r.code === "debit_unclassified")
     return "/backoffice/encaissements/debits";
   if (r.code === "duplicate_unresolved")

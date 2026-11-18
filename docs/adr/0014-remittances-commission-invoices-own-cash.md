@@ -2889,5 +2889,388 @@ It recorded three new low items:
   not show. No money moves.
   - Fix: say the sentence only when the row offers a return.
 
+## M2c-6b-2c carry-overs (in 6b-2d) (2026-11-18)
+
+Branch `m6b2d-carry` from `df6e3b8` (6b-2c, PR #34): what 6b-2c left (« Left open after round 3 » above, and « Deferred
+(T8, pages-6) » of round 1), built tests first. Migration `20261117113000_transfer_line_pages_fixes.sql` (new,
+forward-only: every redefinition copied from its latest definition — `private.transfer_line_pre` from `20261117100000`,
+`private.transfer_debit_suppression` and `private.link_debit_guard` from `20261117110000` —, `SECURITY DEFINER`, every
+`SET` clause, `search_path` and the grants restated; no earlier file edited; it sorts after `20261117110000` and before
+6b-2d's « Suivi » file `20261117120000`, which must copy these three functions from it if it redefines them), pgTAP
+`037c` (new, 9 assertions, 037's fixtures and P helpers copied; `037`/`037b` unchanged), the page's text, the E2E. The
+cancellation after download stays **off**; `033` and `034` keep their assertions and TODO markers; no §10 question nor
+COMPLIANCE OQ-83/OQ-86 is answered: each default is built and stays open.
+
+- **refund-link-blocked-by-returned-payout-twin (low; COMPLIANCE OQ-86).** `private.link_debit_guard` treats the other
+  candidates of a refund link as round 3 treats them for a payment's return: refused `payout_candidate` only for another
+  payout or sweep in flight (i; a sweep stays apart for the refund link, round 7's N1 (b)), another refund in a file (ii)
+  or a cancelled payout whose run is still approved or sent (critic2 ML-4) — never for a payout only returned, or
+  cancelled with its run ended (iii). `public.debit_link_options` (unchanged) lists what the guard lets through, so it
+  lists the refund there. This fix **widens** what « Lier » accepts — the one exception the rules allow: the item shows
+  the link wrongly refused (beside a returned payout of its amount, a refund's reference-less debit could never be
+  linked; the refund stayed « en cours » for good and its line unbooked, `bank_line_unbooked`). The trade-off is
+  recorded under OQ-86 (if the bank in fact executed the returned payout again by itself, linking the line as the refund
+  shows the refund executed although its payee received nothing, and pays the client twice). The fee and the
+  explanation stay refused on every candidate. Tests: `037c` « R (6b-2d, refund-link-blocked-by-returned-payout-twin;
+  COMPLIANCE OQ-86) … » (`r_returned_twin`: {i, ii} — the refund link `payout_candidate`, not listed; then x2 debited
+  and returned, {ii, iii} — listed and linked, the refund executed, the fee and the explanation `payout_candidate`, the
+  options `line_ambiguous`, Lilas' returned item still queued, the checks clean), « R (6b-2d; critic2 ML-4) … »
+  (`r_cancelled_live`: {ii, a cancelled payout whose run is sent} refused, the run cancelled → listed and linked) and
+  « R (6b-2d): beside another refund … » (`r_two_refunds`: {ii, ii} each refused). The first two failed before.
+- **suppression-e0-names-our-other-lot (low; COMPLIANCE OQ-83, CPCE-08).** A debit with an end-to-end id that is not
+  ours and the TF PmtInfId of another lot of ours on the account (class E0), of an in-flight payout T's amount to T's
+  payee IBAN, held T's breach row back (`private.transfer_debit_suppression`'s legal-deadlines-1 branch) and was proposed
+  and booked as T's debit. By its PmtInfId it is that other lot's line — an execution again of one of its transfers
+  (the item's bank: our end-to-end id dropped, the PmtInfId kept). Fix: (1) the suppression's legal-deadlines-1 branch
+  skips a line whose TF PmtInfId names a lot of a file of the account (new `private.pmt_inf_names_account_lot`: plan
+  §3.3's class B test, keyed) other than T's own PmtInf in its current file; (2) the check's pre-read
+  (`private.transfer_line_pre`: the command, its preview and the options) refuses such an E0 line `names_other_lot`
+  whenever rule 3b finds a transfer of ours outside the lot it names (each candidate's item in its current file, by
+  key). The same line naming T's own lot, or a TF PmtInfId naming no lot of ours (or only another servicer's), is
+  unchanged: still counted and proposed. **Deviation, with why:** the item said to skip such a line « in rule 3b's E0
+  candidates »; `private.transfer_line_candidates` is left unchanged and the booking is refused before it instead,
+  because the candidates also give « Lier »'s refusals (fee, explanation, return, refund), the fallbacks' refusals (a
+  payout outside a run to the client's IBAN is refused while a transfer of ours may be the line,
+  `payout_in_flight_matches`), the queue's reason and the `bank_line_unbooked` alert — dropping T from them would have
+  let the line be booked « Virement hors reversement », or classified, where it was refused before. As built, the fix
+  only narrows what is booked and what is suppressed (the refusal covers every part: T's payout, a client's unplanned
+  payout, a sweep). The page labels the new refusal (`TRANSFER_LINE_REFUSAL.names_other_lot`: « Cette ligne porte
+  l'identifiant d'un autre lot de nos fichiers de virements … Demandez le détail à la banque. »). Tests: `037c` « E
+  (6b-2d, suppression-e0-names-our-other-lot; CPCE-08, OQ-83) … » (`e_other`: the line E0, no offer, no proposal,
+  refusal `names_other_lot`, suppression null, T's payout part and a client part both refused `names_other_lot`, the
+  fee still `payout_candidate`, T's breach row written plain at the check; it failed before: `waiting`, no row, the
+  payout part booked), `e_own`, `e_unknown`, `e_servicer` (the controls: `waiting`, proposed, booked, no row); vitest
+  `transfer-line-carry.test.ts` « names_other_lot … » (the label).
+- **ended-twin-return-sentence-without-payment (low).** `debitReviewText` said « … liez-la à ce paiement avec « Retour du
+  paiement … » » whenever `return_guard` was null. It now says it only when the row offers that button: linkOffers'
+  returns from the same payments the row's actions read — the job's named payments, then those `debit_link_options`
+  lists (`linkPayments`, new, which « À classer »'s `LineActions` now uses too). Tests: vitest
+  `transfer-line-carry.test.ts` « the ended payout's text names « Retour du paiement … » only when the row offers it
+  (6b-2d) » (an empty payment list, a payment of which less than the line is left, one the line can take back, the
+  options not read or refused) and « linkPayments … »; `transfer-line-review-fixes.test.ts`' round-3 assertion « the
+  return offered: the text says so » now passes the payment it offers (it encoded the defect: `return_guard` null with
+  no payment). It failed before.
+- **The E2E flows and screenshots (T8, pages-6; plan §8.4, §7.5).** `payments-debits.spec.ts` « a lot debited short of
+  one member, then an entry kept unsplit, booked from « Débits et retours » » (new; its own tenant: two clients of one
+  servicer, `createOtherClient` in `support/admin.ts`): each client's file boarded, paid, its run prepared and approved;
+  both payouts in one file (one PmtInf, read from the downloaded pain.001), downloaded and marked as sent. The bank
+  debits the lot short of Lilas' payout (one line, the lot's PmtInfId, `NbOfTxs` 1, no detail — the worker's synth
+  `partial` shape, `support/camt.ts` kind `lot`): the job reviews it `batch_partial`; « Comptabiliser… » proposes
+  « Débit d'un lot de reversements », its members shown (Durand « débit », Lilas « non débité par cette ligne »), the
+  effect « … débités le … »; booked with a motif and read back — the line's one booking `payout` of Durand's transfer at
+  its amount (`bank_line_booking`), Durand's transfer and run `booked` / « Comptabilisé » with « Débité de notre compte
+  le … », Lilas' still `in_file` / `sent`, « Traités » « Débit d'un reversement ». The bank then debits Lilas' payout
+  with its charge on one entry (the ISO shape: the charge in `Chrgs`, the transfer's amount in its one detail —
+  `support/camt.ts` kind `charged`, the synth's `debit_charge_minor`), kept unsplit by the import: « Comptabiliser
+  d'après le détail du relevé », « Vérifier », the effects (the payout, « Frais bancaires de 1,20 € … (frais indiqués par
+  le relevé) »), booked and read back (`payout` of Lilas' transfer and `fee` 120, Lilas' run `booked`, « Traités »
+  « Débit d'un reversement + Frais bancaires »). Screenshots (mobile + desktop): new `m2c-debits-reversement`,
+  `m2c-debits-detail-releve`. **The checks screenshot** §7.5 calls `m2-checks` is `m2-payment-checks`, taken by
+  `payments-debits.spec.ts`' first test; before its checks it now imports a debit carrying an RMT id Collectoo never
+  issued: the job reviews it `transfer_unknown` (P0), and the checks page shows « Référence du cabinet inconnue » and
+  « Débits du cabinet non comptabilisés » (both asserted) beside the top-up alert, no violation — retaken.
+
+**Mutants** (each a one-function change created right after `037c`'s `begin;` in a copy of it, rolled back with it;
+the control — `private.link_debit_guard` re-created unchanged — passes 9 of 9; all eleven killed): the refund link
+refused on (iii) as before (tests 1, 2); without the live-run clause (2); refused by (i) only (3); the suppression's
+skip dropped (4); skipping any other PmtInfId, the lot unread (6, 7); skipping any lot of ours, its own included (5);
+the pre-read's refusal dropped (4); refusing any E0 line naming a lot of ours (5); the lot unread in the pre-read (6,
+7); `private.pmt_inf_names_account_lot` blind to the account (7: another servicer's lot) or always false (4). Web (each
+a one-place change, all six killed by the vitests): the return sentence on `return_guard` alone (the defect); the
+listed payments ignored; `linkPayments` without the job's named payments, taking a refund candidate as a payment, or
+letting a listed payment override a named one; the `names_other_lot` label removed.
+
+**Suites** (the main stack; 6b-2d's second stack `collectoo_t` up beside it, untouched): `supabase test db` after a
+reset — `Files=39, Tests=2680, Result: PASS` (`037c` 9; `034`'s TODO markers kept, 16 TODO passed); the worker's `ruff
+check`, `ruff format --check` (177 files) and `mypy` (177 files) clean; 1,057 unit tests passed (5 xfailed); the
+non-scale integration tests on a fresh reset: 236 passed (no worker code changed); the evals: mapping top-1 1.000
+(167/167, threshold 0.980), reconciliation 0.9600 automatic, 0 wrong, 0 policy violations; the nightly checks and the
+command changed, so on a fresh reset each the payouts scale test once (5 passed) and the transfer-line scale file alone
+(7 passed), timings in `docs/benchmarks/remittances.md` « 6b-2c carry-overs, in 6b-2d »; `database.types.ts`
+regenerated, unchanged (no public signature changed); the web's lint, types and 439 vitest tests; the E2E's 56 tests
+(desktop and mobile) on a fresh reset, `payments-debits.spec.ts`' new test included. Screenshots: new
+`m2c-debits-reversement`, `m2c-debits-detail-releve`; retaken `m2-payment-checks` (the new alerts); every other image
+diff (dates, ages, ids, random names) reverted.
+
+**Left open (low), with its default:** the sheet of an entry kept unsplit says « La banque a regroupé plusieurs
+opérations dans cette écriture » also for the ISO shape of one charged transfer (the transfer and the bank's charge on
+one entry: two movements, one of ours) — true, and the effects list both; unchanged. On a line refused
+`names_other_lot`, what reads rule 3b's unchanged candidates still names the transfer outside the lot as a possible
+match — an other debit's queue reason (`payout_amount_match`) and « Lier »'s `payout_candidate` text, which points to
+« Comptabiliser… » — and the sheet then says the refusal and to ask the bank: no booking follows from either.
+
+## M2c-6b-2d: « Suivi » — the statement follows the earlier payouts as of K (plan docs/design/m2c-6b-2-plan.md §5, §6, §8.1 038, §8.2, §9)
+
+Migration `20261117120000_statement_suivi.sql` (forward-only; `private.remittance_statement_build` copied from its latest
+definition, `20261117100000` — not `20261116090000` — and `private.remittance_statement_line_columns` from its only one,
+`20261113090000`, each with `SECURITY DEFINER` where it had it, every `SET` clause, `search_path` and its grants
+restated; 6b-2c's `20261117105000` and `20261117110000` treated as merged; no earlier file edited), template
+`releve-reversement-fr-3` (`remittance/statement.py`, `statement_pdf.py`), pgTAP `038_statement_suivi` (14 assertions),
+the renderer's pytest and the documents integration test. No page reads the payload's `follow_up` (the web is
+unchanged: no screenshot). The cancellation after download stays **off**; `033` and `034` keep their assertions and TODO
+markers. The founder answered none of the plan's §10 questions nor COMPLIANCE OQ-83/OQ-86: each default is built and
+stays open; the defaults this slice adds are COMPLIANCE OQ-87. Decisions:
+
+- **The payload** drops M2c-5's `follow_up` (the previous run's transfer as it stood when the statement was drawn, not
+  as of K) and adds `previous_payouts` `{since, events}` (`private.remittance_statement_previous_payouts`, internal,
+  keyed, sequential scans off). `since` is the client's previous **approved** run of the currency (`approved_at` set,
+  `known_at` below this run's — critic L7: a draft discarded with its RV number neither bounds the window nor is listed)
+  with its K; the window is (since's K, this run's K] on `ledger_entry.posted_at` and `remittance_run.cancelled_at`
+  (ADR-0012; critic L17: never the statement's drawing time). The events are those of the client's earlier approved
+  runs that ordered a payout (N > 0), read on each run's chain (`private.transfer_chain`, critic2 ML-12), one per event,
+  ordered by effective date, then run number (nulls last), then kind: `debited`, `returned` (`repaid` here / run /
+  pending, `repaid_by`), `cancelled`, `executed_after_cancellation`, `debited_again` (`unplanned_minor`,
+  `advance_minor`, `p_bound` from the booking's `double_payout` advance — critic2 ML-9 — `amount` when there is none),
+  `unplanned_returned` (`owed_minor` = P = A − advance) and `executed_outside` (`iban_last4`). Amounts as text, dates
+  the entries' effective dates (the cancellation's Paris date).
+- **`here`** is « this run holds the event's entry in a live line » (`remittance_line_live_uq`): the payout_returned
+  item of a return, the −A line of an unplanned booking, the re-owed +A of its return. A run cancelled before its
+  statement is drawn holds nothing live, so its statement says « vous sera reversé / sera pris en compte dans un prochain
+  reversement » — true, and drawn as the run stands like the rest of a cancelled run's statement (OQ-87 (b)). `repaid`
+  `run` (a run approved by K holds the return's item) is built as the plan says, but with the window bounded by the
+  previous approved run it cannot occur (such a run would be approved with a K inside the window): no test reaches it.
+- **Late cause `paid_by_unplanned`** (critic L9, critic2 ML-9): a late line whose item an unplanned payout's P paid —
+  `private.unplanned_paid_item` of a booking whose remittance entry is posted at or before K and has no reversal posted
+  by then (`private.remittance_statement_paid_by_unplanned`, read for the late lines only, keyed) — takes that cause
+  first, with the amount attributed (`paid_by_unplanned_minor`, summed over the bookings) and the latest such booking's
+  date (`paid_by_unplanned_on`), the two line columns appended to `line_columns` (the CSV's columns unchanged; the
+  renderer reads by name). The renderer words it « versé le … par un virement exécuté hors reversement » when the amount
+  covers the line, « dont … versés le … » when it covers part of it; a payload with the cause and without either field
+  is refused.
+- **The renderer** (`releve-reversement-fr-3`; `TEMPLATE_VERSIONS` = fr-3 only: stored statements are never
+  re-rendered): `_previous_payouts` in place of `_follow_up`, every sentence of plan §5; a payload carrying `follow_up`,
+  missing `previous_payouts`, or holding an event it does not know is refused `StatementPayloadError`
+  (`payload_version`) — never drawn with a section missing (the documents job records the failure and retries). The
+  advance clause is worded by `p_bound` (`items`/`none`: « elle dépassait ce qui restait à vous reverser des sommes de ce
+  reversement »; `queue`: « vos sommes en attente à cette date ne permettaient pas d'en déduire davantage »; no advance,
+  no clause). An IBAN is printed « IBAN …1234 » from its last four characters (`masked_iban_end`, the pages' format of
+  review 6b-2c T1/pages-2), never « FR76 •••• ». The CSV is unchanged (its golden hash too); the statement PDF's golden
+  is regenerated and a second golden pins one sentence of each event.
+- **Read cost** (plan §5): the client's runs by `remittance_run_client_idx`, each chain and transfer by key, the
+  bookings by `bank_line_booking_transfer_idx`, entries and advances by key, live lines by `remittance_line_live_uq`;
+  the transfer-less unplanned payouts by a new small partial index `bank_line_booking_unplanned_client_idx
+  (organization_id) where kind = 'unplanned_payout' and transfer_id is null` (the mirror of 6b-2a's
+  `bank_line_booking_unplanned_return_idx`, which reads their returns), each entry by key for its client and time.
+  The late cause's lateral carries `offset 0`, like the build's other laterals: without it the planner pulls the
+  subquery up, the « is this line late » test becomes a filter on the helper's rows, and the helper (SQL with `SET`
+  clauses, never inlined) is called for every line. The 50,000-line scale run found it (the documents job's build
+  7.4 s against 6.1–6.2 s in `docs/benchmarks/remittances.md`): 50,000 calls (0.68 s) for a run with no late line, the
+  build 6.5–6.9 s against 5.5–5.8 s for `20261117100000`'s on the same run. With `offset 0` the late test is a
+  one-time filter: no call, the build 4.8–5.5 s against 4.8–5.3 s for the previous one (each timed four times,
+  alternately, on the second stack's scale run), the documents job's 5.9 s and 6.2 s in the scale file; `038`'s second R
+  asserts the calls (one per late line, none for the others).
+
+Deviations from the plan, each with its reason:
+- **`unplanned: true` is the existing `nature_reason` `unplanned`** (plan §5 critic L4). 6b-2b's review LT-2 brought the
+  unplanned return's nature forward as `nature_reason = 'unplanned'` on the payout_returned line, worded « Virement exécuté
+  hors reversement revenu » by the renderer's `UNPLANNED_RETURN`; a second flag would say the same thing twice. Kept;
+  `038` C2 and F assert it on lines this slice's scenarios build.
+- **`executed_after_cancellation` vs `debited_again` keyed on the run, not the transfer** (plan §5: « x cancelled / booked
+  or returned »). An unplanned booking of a transfer of the chain is `executed_after_cancellation` when the run was
+  cancelled by the booking (`run.status = 'cancelled'` and `cancelled_at <= posted_at`), `debited_again` otherwise. They
+  differ only when a re-issued payout's old (cancelled) transfer is executed while the run was paid by the new one: « Reversement
+  … annulé » would then be false (the run was booked; the client received its amount twice). OQ-87 (c).
+- **`unplanned_returned` also for a payout outside any run** (plan §5 lists it after the run events only). The return of
+  an S13/S07 unplanned payout is the same fact (its advance reversed) and would otherwise be told never; it is listed
+  with `run_number` null. OQ-87 (f).
+- **`unplanned_returned` says « l'avance du cabinet correspondante est annulée » only when there was an advance**, and
+  « … vous sont de nouveau dus » only when P > 0 (plan: the first always). With P = A there is no advance to annul.
+- **« Rien à signaler … (encaissements connus au 20/10/2026 à 17:30) »**: the header's own wording of K (`_paris`, « à »)
+  rather than the plan's « jj/mm/aaaa hh:mm » placeholder.
+- **A new index** (the plan's read cost lists none for `executed_outside`): above.
+- **Not in this track** (track B of the 6b-2d workflow): 6b-2c's « Left open after round 3 » items and the E2E flows
+  and screenshots PROGRESS lists; `docs/PROGRESS.md` not edited (the workflow's rule).
+
+Tests (each failed before the code: the WIP commit of the tests first): pgTAP `038_statement_suivi` — « A (plan §5,
+critic L17) … » (`a_window`), « B (plan §5) … » (`b_returned`), « C (switch on; plan §5, critic F17, L9, critic2 ML-9) … »
+(`c_late`), « R (plan §5 read cost) … » (no sequential scan while `previous_payouts` and the late cause of every line are
+read), « R (plan §5 read cost; scale run …) … » (the build calls the late cause's helper for RV2's two late lines only,
+not for its third line; written after the scale run, it failed on the code as first written — 3 calls — before the
+`offset 0` fix), « C2 (critic2 ML-9, critic L4) … » (`c_reversed`), « D (critic2 ML-9) … » (`d_queue`), « E (critic F17, critic2
+ML-9) … » (`e_items`), « F (S03, S28; critic L13, L4) … » (`f_twice`), « G (S13; critic L16, critic2 ML-11) … »
+(`g_outside`), « H (switch on; critic2 ML-12) … » (`h_chain`), « I (critic L7, plan §8.1) … » (`i_bounds`), « R: … the
+build is the documents job's (service role) » (grants), and the switch off; pytest `test_statement_docs.py` —
+`test_each_previous_payout_event_is_worded_from_its_payload` (20 cases), `test_the_advance_clause_never_says_the_run_s_sums_were_exceeded_when_the_queue_bound`,
+`test_the_events_keep_the_payload_order`, `test_nothing_to_report_names_the_previous_statement_or_says_there_is_none`,
+`test_an_iban_is_printed_by_its_last_four_characters_only`,
+`test_a_payload_drawn_for_another_template_is_refused_payload_version`,
+`test_a_late_line_paid_by_an_unplanned_payout_states_when_and_how_much`, `test_the_golden_hashes` (fr-3, the new
+statement PDF hash, `GOLDEN_SUIVI_PDF`), the snapshot and `test_nothing_says_paid_before_the_banks_debit` updated;
+integration `test_remittance_documents_integration.py::test_the_next_statement_follows_the_previous_payout_as_of_k`
+(RV-1's statement « Aucun reversement précédent à suivre. », RV-1's debit booked through the real path in RV-2's
+« Suivi », the stored PDF its rendering, RV-1 drawn again unchanged) and the template asserted fr-3.
+
+**Mutants** (SQL: each one function redefined — or the new index dropped — right after `038`'s plan, inside its
+transaction and rolled back with it; a no-op redefinition of `private.remittance_statement_previous_payouts` passes; all
+seventeen killed): the window from −∞ (no previous approved run) — A, B, D, F, G; no upper bound on the bookings' time —
+C (`after_return`); an unapproved run as the bound (L7) — I; the run's transfer alone, not its chain (ML-12) — H; the
+return's `here` lost — B; `cancelled` kept beside `executed_after_cancellation` — C, C2, D, E, H; never
+`executed_after_cancellation` — C, C2, D, E, H; `p_bound` ignored (always `amount`) — D, E; `executed_outside` of any
+client of the servicer — I; the transfer-less return dropped — G; the earlier runs of any client — I; `debited`
+dropped — A, B, F, G; `paid_by_unplanned` blind to the booking's reversal (as of K) — C2; a reversal posted after K
+counted — C; the late cause never `paid_by_unplanned` — C, D; `bank_line_booking_unplanned_client_idx` dropped — R
+(the bookings' tuples read: the servicer-wide index reads every booking); the late cause's lateral without `offset 0`
+(the migration as first written: the helper called for every line) — R (helper calls: 3 for RV2's 3 lines, 2 wanted).
+Python (each one change of
+`remittance/statement.py` on a scratch copy of `worker/src` and `worker/tests`, the statement tests run against it; a
+no-op copy passes; all sixteen killed): `debited` without its reference — the snapshot; `here` read as pending, the
+cancellation date dropped, the queue clause worded as the items', the advance clause dropped, P owed again dropped,
+« FR76 •••• » hard-coded — `test_the_golden_hashes` (and the per-event cases); `run` without its number, not-`here`
+worded as here, the advance printed as the second payout, « l'avance … est annulée » with no advance, the advance always
+named on `executed_outside` — `test_each_previous_payout_event_is_worded_from_its_payload`; « versé » for a partial
+attribution — `test_a_late_line_paid_by_an_unplanned_payout_states_when_and_how_much`; the payload check removed, an
+unknown event dropped — `test_a_payload_drawn_for_another_template_is_refused_payload_version`; `since` ignored —
+`test_nothing_to_report_names_the_previous_statement_or_says_there_is_none`.
+
+**Suites** (the second stack `collectoo_t`, ports 553xx, alone; the main stack untouched): `supabase test db` on a
+fresh reset — `Files=39, Tests=2685, Result: PASS` (`038` 14; `033` and `034` unchanged, `034`'s TODO markers kept, 16
+TODO passed); the worker's `ruff check`, `ruff format --check` (177 files) and `mypy` (177 files) clean; 1,083 unit
+tests passed (5 xfailed); the non-scale integration tests: 237 passed (the documents integration file alone, after the
+`offset 0` fix: 10 passed); the evals: mapping top-1 1.000 (167/167, threshold 0.980), reconciliation 0.9600 automatic
+(95,997/100,000), 0 wrong, 0 policy violations; `database.types.ts` regenerated, unchanged (the helpers are `private`,
+the build's signature is the same). The statement build is a path the CI `scale` job times, so its remittance file ran
+here twice on a fresh reset (`test_remittance_scale_integration.py`: 1 passed in 324 s before the fix, 1 passed in
+307 s after it; approval job and documents 17.5 s, then 15.5 s); the other scale files (import, matching, allocation,
+receipts, boarding, transfer files, payout bookings) do not draw a statement and were not run. The web is unchanged:
+no lint, vitest, E2E or screenshot run for this track.
+
+## M2c-6b-2d review fixes (2026-11-18)
+
+### Round 1
+
+Five lenses reviewed `m6b2d-int` (`1d006e4`): two medium items and thirteen low ones. Each was checked on the main
+stack before it was fixed: both medium items reproduced (the reviewers' scenarios, inside `BEGIN … ROLLBACK`); every
+low one is real. Every medium item and every low one that is a text, a test, a layout fix or a one-line guard is fixed,
+tests first; one part of SR-1 is left open below, with its reason. The migrations `20261117113000` and
+`20261117120000` are unmerged and were edited in place; `private.remittance_documents_record` is redefined there from
+its only definition (`20261113090000`), `SECURITY DEFINER`, `search_path` and its grants restated. The cancellation
+after download stays **off**; `033` and `034` keep their assertions and TODO markers. No founder question (plan §10,
+COMPLIANCE OQ-83, OQ-86) was answered: the defaults this round adds are in OQ-87 (c), (e) and (i).
+
+**Medium.**
+- **statement-money (`debited_again` before the first debit).** The window is read on `posted_at` and the events are
+  listed by effective date, so a debit the bank made first but that was booked after the planned one (the d-1
+  statement imported before the d-2 one; or, switch on, a re-issued payout's old transfer executed the day before the
+  new one and refused `run_still_live` until the new one's debit booked the run) was worded « une seconde fois le 16/11 »
+  and listed before the « débité … le 17/11 » it was said to repeat. Fix: `private.remittance_statement_previous_payouts`
+  reads the bookings of each run's chain posted by K whenever posted (`ab`), ranks the chain's executions — its
+  `payout` booking and every `unplanned_payout` one — by date, then posting (`xn`), and gives each `debited_again` the
+  planned debit's date (`debited_on`, the chain's `payout` booking, `bank_line_booking_debit_uq`'s) and
+  `before_debit` (its rank below the planned debit's). The renderer then says « la banque a exécuté son virement le
+  16/11/2026 (820,00 €), en plus de son débit du 17/11/2026 ; ce virement en plus, que vous avez reçu, figure … ».
+- **legal-texts-1 (a third execution « une seconde fois »).** Each unplanned booking of a chain carries its rank
+  (`execution_no`, the same ranking): the renderer says « une seconde fois » / « ce second virement » only of the
+  second execution, « de nouveau le … (… ; 3e exécution) » / « ce nouveau virement » after it. A cancelled run's
+  payout executed more than once is « a néanmoins exécuté » the first time and « a de nouveau exécuté … (2e
+  exécution) » after (`executed_after_cancellation` carries the rank too: two identical sentences would read as one
+  event told twice). A payload without the rank, a `debited_again` without its planned debit, or one ranked first but
+  not before it, is refused `payload_version` (never drawn with a guess; the SQL always gives them: an unplanned booking
+  of a live run's chain is refused `run_still_live`, so a run not cancelled by its booking was booked by a `payout`).
+
+**Low, fixed.**
+- **legal-texts-2.** `executed_outside` takes rank 5 (it was 7), so an S13 is listed before its same-day return (rank
+  6); and the events of one day, one run and one kind keep their posting order (`posted` before the entry id: a third
+  and a fourth execution of the same day in their order).
+- **legal-texts-3.** The late cause `paid_by_unplanned` only when the attribution covers the whole line; a line paid
+  in part keeps its own cause, the attribution carried beside it: the CSV's `hors_delai` reads « oui – validation
+  tardive ; dont 440,00 € versés le 18/11/2026 par un virement exécuté hors reversement » (the PDF's « le détail et leur
+  cause figurent dans le fichier CSV » stays true). A full cause short of the line is refused. COMPLIANCE CPCE-08 and
+  OQ-87 (e) restated.
+- **SR-1 (the chain's transfers).** Each chain transfer is read by its key alone (`where y.id = c.transfer_id offset 0`),
+  the servicer checked on the row read: the tenant predicate beside the key let the planner read every transfer of the
+  servicer by `bank_transfer_org_idx` once per earlier run. The helper also runs with bitmap scans off, and each live-line
+  probe reads by the entry in its own subquery, the run tested on the row read.
+- **SR-2 (deploy order).** `private.remittance_documents_record` refuses statements drawn by a template other than
+  `releve-reversement-fr-3` (`check_violation`, inside the item's savepoint: the attempt is recorded failed and retried
+  until the new worker draws it); invoices are unaffected. Migrations reach production on merge and the worker is
+  deployed apart: a worker of fr-2 running after this migration would otherwise store a statement with a false « Suivi »
+  forever. Deploy note: the worker of this slice (fr-3) should run before or with the merge; until then statements wait
+  (the nightly `document_missing` after 24 h). `025` and `026` record with `releve-reversement-fr-3` (they recorded fr-1
+  and fr-2 template names with this slice's payload: the same assertions, the template the record step now requires).
+- **tests-1, tests-2, tests-3.** `038` gains the cases listed below; every rule they name now has a test that fails
+  without it (the mutants).
+- **tests-4.** The lot E2E reads back the ledger postings of each booking (`ledger_posting` by the booking's entry,
+  by book, account and client): the payout from the client's payable and the lot's dedicated account by the line's
+  amount; the 1,20 € fee `bank_fees` (the servicer's cost), `due_to_servicer` / `due_from_client_funds`, and the
+  dedicated account.
+- **pages-e2e-1.** `UNSPLIT_OURS_NOTE` and the « Comptabiliser d'après le détail du relevé » intro say what the
+  command accepts: our details making the entry, or the only detail, ours, with the charges the statement records for
+  the entry (S08); only charges the statement does not record are « ne peut pas être comptabilisée ici ».
+- **pages-e2e-2.** `lineKindLabel('batch_unsplit')`: « Écriture groupée de la banque (non ventilée) » for a debit,
+  « Remise groupée non ventilée » for a credit (as « Relevés »).
+- **pages-e2e-3.** `checkSubjectLink`: a statement line's alert (`transfer_unknown`, `transfer_debited_twice`,
+  `transfer_not_handed_out`, subject `bank_transaction`) leads to its row on « Débits et retours »
+  (`#ligne-<id>`), `bank_line_unbooked` to « Débits et retours ».
+- **pages-e2e-4.** A payout's effect: « … ; son virement passe à « Débité » et le reversement à « Comptabilisé » » (the
+  labels the transfer's and the run's pages show).
+- **pages-e2e-5.** « Virements du lot » is a grid of fixed columns (Reversement and client, Référence, Montant
+  right-aligned in tabular figures, Dans cette ligne; on a phone the run and its amount, then the reference and what the
+  line does of it), above the proposals.
+
+**Left open (low), with its default.**
+- **SR-1, the live-line probe.** With empty statistics (a fresh database, CI) the planner may still read
+  `remittance_line_account_idx` whole for a `here` probe: the probe's `not released` implies that partial index's
+  predicate, so a full scan of it is a candidate path whatever the probe's form, and with bitmap scans off it is a
+  plain index scan. Seen in 5 of 16 runs of the full `038` here, after autovacuum had moved the tables' statistics (13
+  of the 14 live lines read for one probe; the transfers' tuples stayed 4); never in the scenario run alone. Only a non-partial index on
+  `remittance_line (ledger_entry_id)` keys it whatever the statistics (a new index on the table approvals write 50,000
+  lines into): not added in a review round. Read cost only (no amount, no sentence changes); the probe runs once per
+  unplanned event of a statement (rare). `038` R-reads does not assert the live lines' tuples (it would be flaky); it
+  asserts the transfers' and the helper's settings.
+- **The 6b-2d « Read cost » bullet above** says « live lines by `remittance_line_live_uq` »: true of analysed
+  statistics only, as this item says.
+
+Tests (pgTAP `038_statement_suivi`, 14 → 24; each new case failed on `1d006e4`'s function bodies run in its place, the
+coverage cases excepted, which pass there and are proved by the mutants): « C … » (c2 partial: its own cause, the
+attribution beside it), « D … » (d71 the same), « F … » (`execution_no` 2, `debited_on`), « H … » (executed on d-1,
+cancelled on d0), « B … » (`rv2_rebuilt`: still `pending` once RV3 holds the item), and the new « F-before »,
+« F-thrice » (second, third and fourth executions, the third and fourth in RV3's window, RV2 cancelled: `here` false),
+« H-released » (switch on, `private.transfer_file_release`), « G-same-day » (an S13 before its same-day return,
+`executed_on` ≠ `on`, `here` false once cancelled), « G-window » (an S13 posted after K₁ in RV2 only, its return
+after K₂ in RV3 only, each run listing only the previous cancellation), « I-currency » (a USD run copied in the test,
+an S13 and its return on a USD dedicated account: neither bounds nor is listed), « F-partial » (S03r with
+0 < P < A: `owed_minor` P, the advance A − P), « D-twice » (two late executions of a cancelled run: ranks 1 and 2, one
+late item paid by both in part, the latest date), « R-reads », « R-record »; `025`, `026` (the template argument). Before
+the fix, 14 of the 24 failed. Pytest `test_statement_docs.py`: `test_each_previous_payout_event_is_worded_from_its_payload`
+(+6 cases: third and fourth executions, before the debit, a cancelled run's second execution),
+`test_an_execution_without_its_rank_or_its_debit_is_refused` (4), `test_a_late_line_paid_by_an_unplanned_payout_states_when_and_how_much`
+(the partial cause), `test_the_golden_hashes` (`GOLDEN_SUIVI_PDF` regenerated: the fixture gains a later execution of each
+kind and one before the debit). Vitest: `debits.test.ts` (`batch_unsplit`, the checks' links), `transfer-line-pages.test.ts`
+(the unsplit note and the intro, the payout's statuses). E2E `payments-debits.spec.ts` (the ledger read-back).
+
+**Mutants** (SQL: each one function of `20261117120000` as it now stands redefined with one change right after `038`'s
+`begin;`, rolled back with it; a no-op redefinition passes): `here` always true — F-thrice, G-same-day; executed_outside
+without its upper bound, the transfer-less return without its upper or its lower bound, `cancelled` without its lower
+bound — G-window; `repaid` from any run holding the item — B; the currency filter dropped from the window's bound, the
+runs, executed_outside or the transfer-less return — I-currency (each); `executed_on` the return's date — G-same-day,
+F-partial; `cancelled_on` the execution's date — H, D-twice; `owed_minor` all or nothing — F-partial; the rank by
+posting only — F-before, H-released; the rank over the window only — F-thrice; `before_debit` never — F-before,
+H-released; `debited_on` dropped — F, F-before, F-thrice, H-released, F-partial; the cancelled run's rank dropped — C,
+C2, D, E, H, D-twice; executed_outside back at rank 7 — G-same-day; the late cause `paid_by_unplanned` for any
+attribution — C, D, D-twice; `paid_on` the earliest booking's — D-twice; the tenant predicate back beside the
+transfer's key — R-reads (44 transfer tuples for 4); the record step accepting any template — R-record: 25 killed. Two
+are caught only in part: the posting tie-break dropped (the entry id alone) — F-thrice in 4 of 9 runs (the order then
+follows random entry ids); the live-line probe back in its first form with bitmap scans allowed — R-reads, by the
+helper's settings only (left open above). Python (each one change of `remittance/statement.py` on a scratch copy of
+`worker/src` and `worker/tests`, the statement tests run against it; a no-op copy passes; all ten killed): before the
+debit ignored, a third execution « une seconde fois », a cancelled run's second execution « néanmoins », the rank,
+the planned debit and « first but not before » unchecked, the partial line's own cause dropped, its attribution
+dropped, the full cause accepted for part of the line, the partial attribution's date unchecked. Web (each one change,
+vitest on `src/lib/payments`, the file restored; all six killed): the unsplit note and the intro as they were, the
+`batch_unsplit` label dropped, either check link dropped, the payout's status sentence as it was.
+
+**Suites** (the main stack alone, each after a fresh reset): `supabase test db` — `Files=40, Tests=2704, Result: PASS`
+(`038` 24; `033` and `034` unchanged, `034`'s 16 TODO passed); the worker's `ruff check`, `ruff format --check` (177
+files) and `mypy` (177 files) clean; 1,092 unit tests passed (5 xfailed); the non-scale integration tests 237 passed;
+the evals: mapping top-1 1.000 (167/167, threshold 0.980), reconciliation 0.9600 automatic (95,997/100,000), 0 wrong, 0
+policy violations; the statement build changed, so `test_debit_bookings_scale_integration.py` (5 passed, 844.9 s),
+`test_transfer_line_scale_integration.py` (7 passed, 177.4 s) and `test_remittance_scale_integration.py` (1 passed,
+322.2 s; the 50,000-line statement build 6.05 s, its re-run's 6.02 s) each ran once (`docs/benchmarks/remittances.md`
+« Review fixes, round 1 »); `database.types.ts` regenerated, unchanged (no public signature changed); the web's lint,
+types and 442 vitest tests; `./scripts/e2e.sh` 56 passed (desktop and mobile; the first run stopped on the lot test's
+ledger read-back, an embed PostgREST has no relation for, read in two queries since). Retaken:
+`m2c-debits-reversement`, `m2c-debits-detail-releve` and `m2-payment-checks` (mobile and desktop); the other images'
+diffs (dates, ids, order, random IBANs) reverted.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

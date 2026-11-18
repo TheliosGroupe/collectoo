@@ -18,6 +18,7 @@ import {
   lineKindLabel,
   linkGuarded,
   linkOffers,
+  linkPayments,
   linkRefundEffect,
   readsLinkOptions,
   relayable,
@@ -415,33 +416,8 @@ function LineActions({
   options: Options | undefined;
 }) {
   const cur = row.currency;
-  const fromReview = row.candidates.filter(
-    (c) => c.payment_id && !c.refund_request_id && c.left_minor,
-  );
-  const payments = new Map<
-    string,
-    {
-      payment_id: string;
-      amount_minor: string;
-      booking_date: string;
-      payer_name: string | null;
-      left_minor: string;
-      file_reference: string | null;
-      named?: boolean; // the line's references name it (the job's candidate), else only same account and amount
-    }
-  >();
-  for (const c of fromReview)
-    payments.set(c.payment_id!, {
-      named: true,
-      payment_id: c.payment_id!,
-      amount_minor: c.amount_minor ?? "0",
-      booking_date: c.booking_date ?? "",
-      payer_name: c.payer_name ?? null,
-      left_minor: c.left_minor!,
-      file_reference: c.file_reference ?? null,
-    });
-  for (const p of options?.payments ?? [])
-    if (!payments.has(p.payment_id)) payments.set(p.payment_id, p);
+  // the job's named payments, then those debit_link_options listed (one list with the queue's text: linkPayments)
+  const payments = linkPayments(row.candidates, options?.payments);
   // review M2c-1, M2c-6b-1 (money-1) and round 2 (L4): what the line may be linked to — on our payouts' and sweeps'
   // lines exactly what debit_link_options lists there (our batch line: its PmtInf's refunds handed out; RMT/SWP lines
   // and their returns: nothing), never « Perte »; M2c-1 (OQ-34): « Perte » on a return naming a payment of which less
@@ -450,7 +426,7 @@ function LineActions({
     returns: returnable,
     losses: beyond,
     refunds,
-  } = linkOffers(row, [...payments.values()], options?.refunds ?? [], options?.return_guard);
+  } = linkOffers(row, payments, options?.refunds ?? [], options?.return_guard);
   return (
     <div className="flex flex-col gap-2">
       {/* M2c-6b-2c (plan §7.3; critic CSO-4): our transfer lines booked from the statement, the options read on open */}
@@ -558,7 +534,7 @@ function LineActions({
       explainable({
         direction: row.direction,
         kind: row.kind,
-        namesPayment: fromReview.length > 0,
+        namesPayment: payments.some((p) => p.named === true),
         endToEndId: row.end_to_end_id,
         originalEndToEndId: row.original_end_to_end_id,
         paymentInfoId: row.payment_info_id ?? null,
