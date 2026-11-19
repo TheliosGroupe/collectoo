@@ -137,7 +137,7 @@ Contents: [1. Glossary](#1-glossary-fr--en) · [2. Conventions](#2-modelling-con
 | Débit d'un reversement (par l'équipe) | Payout debit booked by ops | `bank_line_booking.kind = 'payout'`, `method = 'ops'`, its motif in `reason` | M2c-6b-2b: the same booking the debit job makes from our reference, made by ops when the line carries none of ours, carries our lot's, its entry is kept unsplit, or it exceeds our transfer by the bank's charge (S08: payout + fee); the entries and the run's settlement are the job's (`private.bank_booking_post_rows`), the motif is on the booking (and is the reason of the servicer's own fee and sweep entries, never of an entry a client reads) |
 | Comptabiliser… (Débits et retours) | Book from the statement (ops) | `public.debit_queue.bookable_as` (`e`, `b`, `n`, `u`), `public.transfer_line_options`, `public.book_transfer_line` | M2c-6b-2c: the button of « À classer » on our transfer lines the import could not book; its sheet reads the line's options when it opens, says each proposal's effects as SQL returned them, and books with ops' motif (« Motif (ce que montre le relevé ou la banque) ») |
 | Débit possible non comptabilisé | Possible debit not booked | `remittance_deadline_breach.blocked_reason = 'debit_unbooked'` | M2c-6b-2c (Q14's default, COMPLIANCE OQ-83): the breach row of a payout an unbooked line could be the debit of, written once that line is five business days old and no rule can book it as that payout's debit |
-| Virement revenu (par l'équipe) | Return booked by ops | `bank_line_booking.kind` `payout_returned`, `sweep_returned`, `unplanned_payout_returned`, `unplanned_sweep_returned` | M2c-6b-2b: a return of our transfer the import could not book (no reference, an unsplit entry, a lot credit, or the copy of a payout executed twice: then the unplanned booking is reversed, its advance with it, and nothing is re-owed twice) |
+| Virement revenu (par l'équipe) | Return booked by ops | `bank_line_booking.kind` `payout_returned`, `sweep_returned`, `unplanned_payout_returned`, `unplanned_sweep_returned` | M2c-6b-2b: a return of our transfer the import could not book (no reference, an unsplit entry, a lot credit, or the copy of a payout executed twice: then the unplanned booking is reversed, its advance with it, and nothing is re-owed twice). M2c-6b-3a-2 review round 2: the copies of one run's payout are the transfers of its chain (a re-issue and the transfer it replaces): the return of the run's payout closes another transfer's open « Virement hors reversement » (the sheet names both), and when that copy comes back too its return is the run's payout's (`payout_returned` on its line, naming it) |
 | Frais lus sur le relevé ; sens donné par le relevé | Charges read; direction given | `bank_transaction.charges_read`, `unsplit_direction_given` | M2c-6b-2b (COMPLIANCE OQ-84 (j)): whether a line's charges were read from the statement (a block seen and not read: false), and whether each detail of ours gave its own `CdtDbtInd`; a re-import compares every value the new file gives with the stored one, and only those |
 | Frais relevés par la banque | Charges the statement records | `bank_transaction.charges_minor` | M2c-6b-2a: `Ntry/Chrgs` and its one `TxDtls/Chrgs` of a line that is its entry's only line (`Chrgs/Rcrd`, camt.053.001.04 and later), the bank's debit in the account's currency included in the entry amount; null otherwise — a camt.053.001.02 `Chrgs` (no direction given) included (COMPLIANCE OQ-84 (j)) |
 | Encaissement | Cash received (one statement day) | `ledger_entry(entry_type = cash_in)` | ADR-0013 |
@@ -1513,6 +1513,23 @@ stateDiagram-v2
   re-issue is held (`already_debited`), its run's or refund's cancellation refused, the client's other payouts
   (`client_payout_debited_late`) or the payment's other refunds (`payment_refund_debited_late`) held, the file's
   cancellation on evidence refused (`unreferenced_debit_open`) — until ops book it (« Comptabiliser… ») or classify it.
+- **Débit tardif d'un virement annulé (prédécesseur tardif)** (M2c-6b-3a-2, E–G; COMPLIANCE OQ-80; meaningful once
+  cancellation after download is on): a payout x cancelled out of a downloaded file — the file cancelled whole and x
+  re-issued, or x cancelled alone — whose run is still approved or sent and whose run's live transfer chain holds x
+  (`private.transfer_late_predecessor`), then executed late by the bank. « Comptabiliser… » books that line as **its
+  run's payout** (« Débit d'un reversement »): `remit:<x>` and `settle:<run>` at the line's date, the run booked (its
+  R124-6 row written when that date is past its deadline, none when on time); x stays `cancelled`, with no entry of its
+  own (its debit is its `payout` booking's), and the run's live end is withdrawn — its re-issue cancelled, the file it
+  is in superseded when not downloaded yet. Refused `reissue_in_downloaded_file` (the file's number in the detail) while
+  that re-issue is in a downloaded or sent file: the bank confirms which it executed and that file is cancelled on
+  evidence first; refused `already_debited` once a transfer of the chain is debited or booked. Its return (« Virement
+  revenu ») reverses its payout booking's entry; every reader of « booked » (I20, the deadlines, the alerts, the run
+  page, the client's « Reversements », « Suivi ») takes it as the run's paid transfer. Review round 1 (ADR-0014
+  « M2c-6b-3a-2 review fixes »): executed as a detail of an entry the bank kept unsplit, it holds its re-issue and is
+  booked from that entry as from its own line; two debits of one run's chain in one entry are never two payouts of the
+  run (`unsplit_not_bookable`); executed again after its return, « Virement hors reversement » nets that return's item;
+  an on-time debit of it that waits unbooked holds the run's R124-6 row back, and the run's rows are judged at it when
+  the import books the re-issue's later debit.
 - **Quote-part retenue** (M2c-6b-3a, A): a sweep made while the servicer's share had already left once — by a sweep
   cancelled out of a downloaded file that the bank executed late, its debit still open or booked by ops only after this
   sweep was made (`private.sweep_after_debited_cancelled`, servicer-wide): held `cancelled_sweep_debited` (generation's

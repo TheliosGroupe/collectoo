@@ -1130,6 +1130,12 @@ export function transferBookingText(status: string, b: TransferBooking | null | 
   if (!b) return null;
   if (status === "returned" && b.returned_on) return `Revenu impayé le ${frenchDate(b.returned_on)}`;
   if (status === "booked" && b.debited_on) return `Débité le ${frenchDate(b.debited_on)}`;
+  // M2c-6b-3a-2 (T18): a late predecessor — cancelled, executed late and booked as its run's payout (a `payout` booking)
+  // (review M2c-6b-3a-2 round 1, pages-texts-5) executed a second time after that: its unplanned booking too
+  if (status === "cancelled" && b.debited_on)
+    return `Annulé — exécuté en retard par la banque le ${frenchDate(b.debited_on)}, comptabilisé comme le débit de son reversement${
+      b.returned_on ? `, revenu impayé le ${frenchDate(b.returned_on)}` : ""
+    }${b.unplanned_on ? ` ; exécuté une seconde fois le ${frenchDate(b.unplanned_on)}, hors reversement` : ""}`;
   if (status === "cancelled" && b.unplanned_on)
     return `Annulé — exécuté par la banque le ${frenchDate(b.unplanned_on)}, hors reversement`;
   return null;

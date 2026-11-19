@@ -1969,11 +1969,13 @@ begin
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.isolated('d_f4_call'),
-  '{"x2": 30000, "parts": [["unplanned_payout", "24600", "0", "amount"], ["unplanned_payout", "5400", "24600", "items"]],
-    "booked": "ok", "attributed": [[24600, 1], [5400, 1]], "dirty": []}'::jsonb,
+  '{"x2": 30000, "parts": [["unplanned_payout", "24600", "0", "amount"], ["unplanned_payout", "0", "30000", "items"]],
+    "booked": "ok", "attributed": [[24600, 1]], "dirty": []}'::jsonb,
   'D (F4): one item released by two cancelled runs, both payouts executed late in one entry kept unsplit, another '
-  'collection waiting: the first part pays 24 600 of it, the second counts that attribution of the same call (only '
-  'the 5 400 left, the rest an advance); one item attributed 24 600 + 5 400, never more than it was owed');
+  'collection waiting: the first part pays 24 600 of it, the second counts that attribution of the same call — '
+  'M2c-6b-3a-2 (J, OQ-82, Q3 (a)): an item another transfer''s part already netted is left out, so the second nets '
+  'nothing more (never its commission share taken from the client''s other collections), the whole of it an advance; '
+  'one item attributed 24 600, never more than it was owed');
 -- (F6) the items x paid are frozen in an approved run of the client not handed out: that run is cancelled first; then
 -- P = A. (ML-4) x cancelled alone while its run is still sent → run_still_live
 create or replace function pg_temp.d_f6_ml4() returns jsonb language plpgsql as $$
@@ -2001,10 +2003,11 @@ end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.isolated('d_f6_ml4'),
   '{"cancellable": "client_run_cancellable", "detail": true, "still_live": "run_still_live",
-    "still_live_options": "run_still_live", "after_cancel": ["24600", "0"]}'::jsonb,
+    "still_live_options": null, "after_cancel": ["24600", "0"]}'::jsonb,
   'D (F6): the items x was meant to pay sit in an approved run of the client not handed out → client_run_cancellable '
   '(its number in the detail); once that run is cancelled P = A. (ML-4) a cancelled payout whose run is still sent → '
-  'run_still_live, in the command and the options');
+  'run_still_live in the command (asked as an unplanned payout); M2c-6b-3a-2 (E): the options propose it as its run''s '
+  'payout (late predecessor) and refuse nothing');
 -- S03r (F2): a payout booked, returned (its item queued again and reserved by the client's draft), then executed again
 -- → P = A on its return item, no advance; (F3) an item reversed since its run was cancelled counts net: P = 0
 create or replace function pg_temp.d_s03r_f3() returns jsonb language plpgsql as $$

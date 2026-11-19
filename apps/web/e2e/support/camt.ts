@@ -76,13 +76,18 @@ export function camt053(iban: string, day: string, credits: Credit[]): string {
   return camt053Lines(iban, day, credits, [], BigInt(0));
 }
 
-/** A one-day statement of credits and debits, from an opening balance (the previous statement's closing). */
+/**
+ * A one-day statement of credits and debits, from an opening balance (the previous statement's closing). With `period`
+ * (review M2c-6b-3a-2 round 1, tests-5): a statement of `period.from` to `day` produced at `period.createdAt` (an ISO
+ * date-time in Paris time, after those days: the statements' evidence of a cancellation counts a day only then).
+ */
 export function camt053Lines(
   iban: string,
   day: string,
   credits: Credit[],
   debits: Debit[],
   opening: bigint,
+  period?: { from: string; createdAt: string },
 ): string {
   const total =
     opening +
@@ -112,9 +117,9 @@ export function camt053Lines(
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08"><BkToCstmrStmt>` +
-    `<GrpHdr><MsgId>MSG-E2E-${day}</MsgId><CreDtTm>${day}T20:00:00</CreDtTm></GrpHdr>` +
-    `<Stmt><Id>STMT-E2E-${day}</Id><ElctrncSeqNb>1</ElctrncSeqNb><CreDtTm>${day}T20:00:00</CreDtTm>` +
-    `<FrToDt><FrDtTm>${day}T00:00:00</FrDtTm><ToDtTm>${day}T23:59:59</ToDtTm></FrToDt>` +
+    `<GrpHdr><MsgId>MSG-E2E-${period?.from ?? ""}${day}</MsgId><CreDtTm>${period?.createdAt ?? `${day}T20:00:00`}</CreDtTm></GrpHdr>` +
+    `<Stmt><Id>STMT-E2E-${period?.from ?? ""}${day}</Id><ElctrncSeqNb>1</ElctrncSeqNb><CreDtTm>${period?.createdAt ?? `${day}T20:00:00`}</CreDtTm>` +
+    `<FrToDt><FrDtTm>${period?.from ?? day}T00:00:00</FrDtTm><ToDtTm>${day}T23:59:59</ToDtTm></FrToDt>` +
     `<Acct><Id><IBAN>${iban}</IBAN></Id><Ccy>EUR</Ccy></Acct>` +
     bal("OPBD", opening) +
     bal("CLBD", total) +

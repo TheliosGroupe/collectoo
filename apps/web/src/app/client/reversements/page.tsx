@@ -11,6 +11,7 @@ import {
   listPage,
   pageOf,
   returnedRuns,
+  cancelledRuns,
   statementRunView,
   unplannedRuns,
 } from "@/lib/remittance/documents";
@@ -78,6 +79,7 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
   const returned = returnedRuns(summary);
   // M2c-6b-2c (critic L6, critic2 ML-12): a cancelled run the bank executed all the same, never « avant la remise »
   const unplanned = unplannedRuns(summary);
+  const cancelled = cancelledRuns(summary);
   const statements = pageOf(statementRows, PAGE_SIZE);
   const href = (page: number) => (page > 0 ? `/client/reversements?page=${page}` : "/client/reversements");
   return (
@@ -130,7 +132,12 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
               // M2c-6b-1 (K4): and a payout that came back, never « débité » in green — round 2 (L2): and the run that
               // paid it again, once booked
               const run = s.run ?? null;
-              const view = statementRunView(run, returned.get(s.run_id), unplanned.get(s.run_id));
+              const view = statementRunView(
+                run,
+                returned.get(s.run_id),
+                unplanned.get(s.run_id),
+                cancelled.get(s.run_id),
+              );
               return (
                 <li key={s.run_id} className="flex flex-col gap-1 py-3" data-testid="statement-row">
                   <span className="flex flex-wrap items-center justify-between gap-2">

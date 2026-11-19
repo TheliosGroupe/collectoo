@@ -471,7 +471,8 @@ test("ops prepare, read and approve a client's remittance run", async ({
   await expect(page.getByTestId("request-cancellation")).toHaveCount(0);
   await expect(page.getByTestId("confirm-cancellation")).toHaveCount(0);
   await expect(page.getByTestId("transfer-refused")).toHaveCount(0);
-  await reviewShot(page, testInfo, "m2c-virement-telecharge");
+  // M2c-6b-3a-2 (plan m2c-6b-3 §3.7): the screenshot `m2c-virement-telecharge` is retaken by switch-on.spec.ts with the
+  // cancellation offered (the switch on, its own run); this page with the switch off is asserted above, not retaken
   await page
     .getByTestId("file-mark-sent")
     .getByRole("button", { name: "Marquer comme transmis" })
