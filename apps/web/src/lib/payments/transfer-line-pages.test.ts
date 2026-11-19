@@ -534,13 +534,15 @@ describe("the texts reworded now that the screen exists (§4.3): each old wordin
     const line = { direction: "debit", kind: "transfer_out", end_to_end_id: "RMT0123456789AB",
                    original_end_to_end_id: null, review_reason: "cancelled_transfer_debited" };
     const cancelled = debitReviewText({ ...line, candidates: [{ transfer_id: T, run_status: "cancelled" }] });
+    // M2c-6b-3a-2 (T14, T13; ADR-0014 « M2c-6b-3a-2 », R3): the screen books a cancelled payout's late debit — as its
+    // run's payout while the run is in flight (the late predecessor), else as « Virement hors reversement »
     expect(cancelled).toContain(
-      "Rien n'est comptabilisé : vérifiez dans la banque, puis comptabilisez-le comme « Virement hors reversement » (risque de double paiement).",
+      "Rien n'est comptabilisé : vérifiez dans la banque, puis comptabilisez-le avec « Comptabiliser… » : comme le débit de son reversement s'il est encore en cours, sinon comme « Virement hors reversement » (risque de double paiement).",
     );
     for (const s of ["approved", "sent"]) {
       const live = debitReviewText({ ...line, candidates: [{ transfer_id: T, run_status: s }] });
       expect(live, s).toContain(
-        "Rien n'est comptabilisé : le reversement de ce virement est toujours en cours, ce débit est donc son paiement ; il ne peut pas encore être comptabilisé. Ne faites pas annuler ce reversement et prévenez le support.",
+        "Son reversement est toujours en cours : si ce débit est bien ce virement (vérifiez-le auprès de la banque quand la ligne ne porte pas sa référence), comptabilisez-le avec « Comptabiliser… » comme « Débit d'un reversement » : le reversement est comptabilisé comme payé.",
       );
       expect(live, s).not.toContain("Virement hors reversement");
     }

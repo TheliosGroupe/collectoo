@@ -15,6 +15,7 @@ parser part of COMPLIANCE OQ-84 (j)), without the database:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -42,6 +43,7 @@ def _item(  # noqa: PLR0913 - one keyword per fact of an item a test sets
     reversal_pending: int = 0,
     paid: int = 0,
     own: bool = False,
+    paid_by_other: bool = False,
 ) -> PoolItem:
     return PoolItem(
         entry_id=f"i{n:03d}",
@@ -51,6 +53,7 @@ def _item(  # noqa: PLR0913 - one keyword per fact of an item a test sets
         reversal_pending=reversal_pending,
         paid=paid,
         own=own,
+        paid_by_other=paid_by_other,
     )
 
 
@@ -155,6 +158,26 @@ def test_q8_a_client_part_or_a_never_returned_transfer_has_no_items() -> None:
     assert (res.p, res.advance, res.bound, res.attribution) == (0, 900, "none", ())
 
 
+def test_j_an_item_netted_after_another_transfer_is_not_netted_again() -> None:
+    """M2c-6b-3a-2 (J; COMPLIANCE OQ-82, Q3 (a); pgTAP 037 D (F4), 040 J): one item released
+    by two cancelled runs whose payouts x1 and x2 were both executed late. In one call, x1's part
+    nets 24 600 of it, x2's nets nothing more (bound items, the whole of it an advance); in two
+    calls, x2's alike once x1's booking attributed it (paid_by_other). The same transfer twice
+    keeps netting what is left (the earlier rule)."""
+    item = _item(1, 30_000)
+    x1 = UnplannedAsk(24_600, "c", (item.entry_id,), transfer="x1")
+    x2 = UnplannedAsk(30_000, "c", (item.entry_id,), transfer="x2")
+    one, two = unplanned_p([x1, x2], {item.entry_id: item}, {"c": 80_000})
+    assert (one.p, one.bound) == (24_600, "amount")
+    assert (two.p, two.advance, two.bound, two.attribution) == (0, 30_000, "items", ())
+    later = replace(item, paid=24_600, paid_by_other=True)
+    (alone,) = unplanned_p([x2], {item.entry_id: later}, {"c": 55_400})
+    assert (alone.p, alone.advance, alone.bound) == (0, 30_000, "items")
+    again = UnplannedAsk(30_000, "c", (item.entry_id,), transfer="x1")
+    _first, same = unplanned_p([x1, again], {item.entry_id: item}, {"c": 80_000})
+    assert same.p == 5_400
+
+
 # -- P: properties ------------------------------------------------------------------------------
 
 AMOUNTS = st.integers(min_value=-5_000, max_value=5_000)
@@ -190,6 +213,8 @@ def pools(draw: st.DrawFn) -> tuple[list[UnplannedAsk], dict[str, PoolItem], dic
             ),
             paid=draw(st.one_of(st.just(0), st.integers(min_value=0, max_value=3_000))),
             own=draw(st.integers(min_value=0, max_value=9)) == 0,
+            # M2c-6b-3a-2 (J): sometimes attributed by another transfer's unreversed booking
+            paid_by_other=draw(st.integers(min_value=0, max_value=4)) == 0,
         )
         items[it.entry_id] = it
     names = sorted(items)
@@ -214,6 +239,8 @@ def pools(draw: st.DrawFn) -> tuple[list[UnplannedAsk], dict[str, PoolItem], dic
                 if draw(st.integers(min_value=0, max_value=3)) == 0
                 else 0
             ),
+            # M2c-6b-3a-2 (J): the parts of one call are of one transfer or of several
+            transfer=draw(st.sampled_from(["x1", "x1", "x2", None])),
         )
         for _ in range(draw(st.integers(min_value=1, max_value=4)))
     ]
@@ -224,7 +251,7 @@ def pools(draw: st.DrawFn) -> tuple[list[UnplannedAsk], dict[str, PoolItem], dic
 
 @settings(max_examples=600, deadline=None)
 @given(pools())
-def test_p_bounds_and_attribution(
+def test_p_bounds_and_attribution(  # noqa: PLR0912 - the oracle reads each rule from the raw facts
     case: tuple[list[UnplannedAsk], dict[str, PoolItem], dict[str, int]],
 ) -> None:
     """[critic F3, critic2 ML-1; review TESTS-6, money-2] For every part, from the raw facts of its
@@ -234,10 +261,14 @@ def test_p_bounds_and_attribution(
     earlier parts attributed to it; cap = that summed, floored once, and at most A less what
     earlier bookings of the same transfer netted; P = max(0, min(A, what the client's queue still
     nets after earlier parts, cap)) exactly; the bound that set it; the attribution is P spread over
-    the items in (posted_at, id) order, each up to what it can still take."""
+    the items in (posted_at, id) order, each up to what it can still take. M2c-6b-3a-2 (J; OQ-82, Q3
+    (a)): an item another transfer already netted — attributed by an unreversed booking of another
+    transfer, or by an earlier part of this call for another transfer — can take nothing more
+    (what it can still take floored at 0 from above)."""
     asks, items, queue = case
     res = unplanned_p(asks, items, queue)
     taken: dict[str, int] = {}
+    takers: dict[str, set[str | None]] = {}
     used = {"c": 0, "d": 0}
     for ask, r in zip(asks, res, strict=True):
         if ask.pool is None:
@@ -248,6 +279,9 @@ def test_p_bounds_and_attribution(
         el = [e for e in el if items[e].reverses not in el]
         net = {e: (items[e].pending or 0) + items[e].reversal_pending for e in el}
         can = {e: net[e] - items[e].paid - taken.get(e, 0) for e in el}
+        for e in el:
+            if items[e].paid_by_other or takers.get(e, set()) - {ask.transfer}:
+                can[e] = min(0, can[e])
         cap = min(max(0, sum(can.values())), max(0, ask.amount - ask.prior))
         left = max(0, queue[ask.client]) - used[ask.client]
         want = max(0, min(ask.amount, left, cap))
@@ -271,6 +305,7 @@ def test_p_bounds_and_attribution(
         assert list(r.attribution) == spread
         for e, a in spread:
             taken[e] = taken.get(e, 0) + a
+            takers.setdefault(e, set()).add(ask.transfer)
         used[ask.client] += want
     for e, total in taken.items():
         assert total <= max(0, items[e].net - items[e].paid)

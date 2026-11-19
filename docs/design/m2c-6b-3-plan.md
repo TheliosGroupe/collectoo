@@ -10,6 +10,15 @@
 > `037c` R (L: the run's cancellation refused beside a reference-less debit at its cancelled payout's amount) and a new
 > `037c` R pinning 6b-2d's rule with the run cancelled first. The switch stays off.
 
+> **As built, part 2 (2026-11-18, branch `m6b3a2`; ADR-0014 « M2c-6b-3a-2 »).** E–J are built in
+> `20261118100000_switch_on_prerequisites_2.sql` (one new helper, `private.transfer_late_predecessor`; 19 functions
+> redefined whole from their latest definitions), with pgTAP `040_switch_on_followups_2` (38), §3.3's changes of 037 D
+> (F4, F6), 037b `s_s02_live` and 038 `h_released`, the J twin and its property, `HELD_TO_SQL`, the texts T13, T14, T16's
+> late-predecessor wording, T17, T18 and J's sentence (`switch-on-texts-2.test.ts`), the 6b-3a review's lows, the
+> switch-on E2E project (§3.7: two screenshots, no late predecessor built in it) and the cancelled-and-re-issued scale
+> file (`test_transfer_cancellation_scale_integration.py`, not the 6a file: §3.5). Not built: the LP worker
+> integration file (§3.5; the two-connection cases). The switch stays off.
+
 Base: `b795713` (main `cd4981b` + 6b-2d, PR #35). Migrations up to `20261117120000` are treated as merged.
 This slice's migration is `supabase/migrations/20261118090000_switch_on_prerequisites.sql`.
 Branch: `m6b3a` (one PR). Never `main`. `docs/PROGRESS.md` and `CLAUDE.md` are not edited.
@@ -401,6 +410,10 @@ confirmation. Q2 says so.
 | refused also for an ordered transfer | D7 |
 
 ### E. The late predecessor, booked through `book_transfer_line`
+> *As built (6b-3a-2):* as below, the late predecessor read by `private.transfer_late_predecessor` (cancelled, its
+> run approved or sent, in a file downloaded once, held by the chain of the run's transfer); pgTAP `040` E1–E8,
+> F1b. The two-connection test is not built (the re-read's mutant survives one session).
+
 
 **Today, switch on.** Take x, cancelled out of a downloaded file, whose run is still `approved`/`sent`. Its live end y
 is the run's transfer: x itself when x was cancelled alone, else its re-issue. The bank then executes x late.
@@ -545,6 +558,11 @@ only, then committed off, as `test_a_run_cancelled_after_download_then_its_late_
 | y read before the remit lock (no re-read) | the two-connection test |
 
 ### F. Every reader of « t is booked »
+> *As built (6b-3a-2):* I20 (`run_payment_checks`), the deadlines (`pending_item_deadlines`, `HELD_TO_SQL`), the
+> P0 `payout_returned`, the run page (`remittance_run_payout`: `late_predecessor`, its advances, `repaid_by`), the
+> client summary's `returned_runs`, the lot's returnable members, the booked update skipping a cancelled transfer;
+> « Suivi » needed no change (pgTAP `040` F7). pgTAP `040` F1–F7.
+
 
 An LP transfer is cancelled, with a `payout` booking and no return booking. Each reader below must take it as booked.
 Before writing F, the build re-greps every reader of `bank_transfer.entry_id` and `return_entry_id` (critic 2-4). Those
@@ -567,6 +585,9 @@ known now:
 | Accounting export | — | `remit:<x>` with source `bank_transfer` x: its RMT id | none | 039 asserts it |
 
 ### G. The return of a late predecessor
+> *As built (6b-3a-2):* the check takes a cancelled payout with exactly one `payout` booking as that booking's
+> entry reversed; the guard widened to it; x stays cancelled. pgTAP `040` G1–G3 (G4 through the job: not built).
+
 
 **Today:**
 - The job reviews it `return_differs` (`payments/debits.py:677`, `f.status != "booked"`). It is never automatic, and that
@@ -608,6 +629,8 @@ known now:
 | the planned-branch widening of `pending_item_deadlines` removed | F2 |
 
 ### H. `transfer_file_release` with booked runs and refunds
+> *As built (6b-3a-2):* as below; pgTAP `040` H.
+
 
 **Today:** `private.transfer_file_release` (`20261115090000:1669`; security definer, `search_path ''`) re-issues every
 in-file payout and refund of a downloaded file.
@@ -630,6 +653,8 @@ booked` through). Cancel the file whole on evidence: there is no re-issue, x is 
 **Mutant:** the rule removed. A re-issue is created, and H fails.
 
 ### I. R124-6 in-flight rows of a re-issue, and of a run whose payout was cancelled alone
+> *As built (6b-3a-2):* in `private.run_remittance_runs_checks`; pgTAP `040` I1–I6.
+
 
 **Today:** in `private.run_remittance_runs_checks` (`20261117110000:1251`; security definer, `search_path ''`,
 `enable_seqscan off`), `olc.proven` has two branches:
@@ -685,6 +710,10 @@ transfers keep today's two branches. The chain is read by key and is a few rows 
 | the cancelled-run-transfer branch removed | I6 |
 
 ### J. OQ-82's known limit: P across two transfers
+> *As built (6b-3a-2):* default (a) in the check and its twin (`PoolItem.paid_by_other`, `UnplannedAsk.transfer`);
+> pgTAP `037` D (F4), `040` J; pytest `test_j_an_item_netted_after_another_transfer_is_not_netted_again` and the
+> property.
+
 
 **Today:** the P loop of `transfer_line_check` (`20261117110000:452`, « §3.6.1 P per item ») caps per transfer: A, less
 what earlier bookings of the **same** transfer netted. Take an item released by two cancelled runs whose payouts x1 and x2

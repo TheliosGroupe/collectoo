@@ -1356,10 +1356,11 @@ begin
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.isolated('s_s02_live'),
-  '{"proposals": 0, "refusal": "run_still_live", "detail": true, "command": "run_still_live", "run": "sent",
+  '{"proposals": 1, "refusal": null, "detail": null, "command": "run_still_live", "run": "sent",
     "bookings": []}'::jsonb,
-  'S (S02, ML-4): the lot''s cancelled member whose run is still sent is that run''s payout — no proposal, '
-  'run_still_live with the run''s number, the command refused');
+  'S (S02, ML-4): the lot''s cancelled member whose run is still sent is that run''s payout — M2c-6b-3a-2 (E): '
+  'proposed as payout + payout (late predecessor), nothing refused; the command asking an unplanned payout of it is '
+  'refused run_still_live');
 select is(pg_temp.dirty(), '{}'::text[], 'S: clean');
 
 

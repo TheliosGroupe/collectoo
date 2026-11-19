@@ -29,8 +29,10 @@ export const TRANSFER_LINE_REFUSAL: Record<string, string> = {
     "Cette ligne ne porte ni la référence de ce virement, ni celle de son lot dans son fichier, et rien ne permet de dire que c'est lui.",
   transfer_cancelled:
     "Ce virement est annulé : son débit se comptabilise comme « Virement hors reversement ».",
+  // M2c-6b-3a-2 (6b-3a review, low): also a late predecessor whose replacement, or the transfer it replaces, is
+  // already debited — the text names both
   already_debited:
-    "Ce virement est déjà débité : un second débit se comptabilise comme « Virement hors reversement ».",
+    "Ce virement, ou un autre virement de son reversement (celui qu'il remplace ou celui qui le remplace), est déjà débité : un second débit se comptabilise comme « Virement hors reversement ».",
   not_handed_out:
     "Ce virement n'a jamais été remis à la banque (aucun fichier téléchargé) : ce débit ne peut pas encore être comptabilisé. Vérifiez dans la banque d'où vient cet ordre et prévenez le support.",
   transfer_differs: "Ce virement est d'un autre compte ou d'une autre devise que la ligne.",
@@ -52,12 +54,19 @@ export const TRANSFER_LINE_REFUSAL: Record<string, string> = {
     "Ce lot contient des remboursements ou des virements de natures différentes : il ne peut pas être comptabilisé ici. Demandez le détail à la banque.",
   not_cancelled_nor_booked:
     "Ce virement n'est ni annulé, ni débité, ni revenu : comptabilisez la ligne comme « Débit d'un reversement » ; si ce virement n'a jamais été remis à la banque, prévenez le support.",
-  // critic2 ML-4 (the page adds the run's number from the refusal's detail)
+  // critic2 ML-4 (the page adds the run's number from the refusal's detail); M2c-6b-3a-2 (E, T16): such a debit is
+  // booked as its run's payout (the late predecessor) — refused only as an unplanned payout
   run_still_live:
-    "Ce virement a été annulé, mais son reversement est toujours en cours : ce débit est le paiement de ce reversement, pas un virement hors reversement. Il ne peut pas encore être comptabilisé ; ne faites pas annuler ce reversement et prévenez le support.",
+    "Ce virement a été annulé, mais son reversement est toujours en cours : ce débit est le paiement de ce reversement, pas un virement hors reversement. Comptabilisez-le comme « Débit d'un reversement » (« Comptabiliser… » le propose) : le reversement est comptabilisé comme payé.",
+  // M2c-6b-3a-2 (E, T13): the late predecessor while its replacement is in a downloaded file (the page adds the file's
+  // number from the refusal's detail); raised only once cancellation after download is on. (review round 1, LD-2,
+  // pages-texts-6) the replacement's own debit is the run's payout (the import books it): then this one, on screen, is
+  // « Virement hors reversement »
+  reissue_in_downloaded_file:
+    "Ce débit est celui d'un virement annulé dont le reversement est toujours en cours, mais son virement de remplacement est dans un fichier déjà téléchargé : demandez à la banque de ne pas l'exécuter, faites annuler ce fichier, relevés à l'appui (deux personnes), puis comptabilisez ce débit. Si le virement de remplacement est débité malgré tout, son débit est celui du reversement (l'import le comptabilise) : comptabilisez alors ce débit-ci comme « Virement hors reversement ».",
   // critic2 ML-3
   debit_pending:
-    "Un autre débit de ce virement (second débit, ou débit après annulation) figure sur un relevé sans être encore comptabilisé : comptabilisez-le d'abord ; ce retour sera alors celui du virement hors reversement, et rien ne sera reversé deux fois.",
+    "Un autre débit de ce virement, ou d'un autre virement du même reversement (second débit, ou débit après annulation), figure sur un relevé sans être encore comptabilisé : comptabilisez-le d'abord ; ce retour sera alors celui du virement hors reversement, et rien ne sera reversé deux fois.",
   // critic2 ML-10
   fee_unexplained:
     "L'écart entre la ligne et le virement a le montant d'un virement du cabinet, et le relevé n'indique aucun frais : ce n'est sans doute pas des frais (virement débité deux fois, ou un autre virement dans la même écriture). Demandez le détail à la banque.",
@@ -89,7 +98,7 @@ export const TRANSFER_LINE_REFUSAL: Record<string, string> = {
   return_before_debit: "Le débit de ce virement n'est pas comptabilisé, ou il est daté d'après ce retour.",
   // critic F1
   unplanned_open:
-    "Ce virement a aussi été exécuté hors reversement, et ce second virement n'est pas revenu : ce retour se comptabilise comme le sien (« Virement revenu », virement hors reversement), pour que rien ne soit reversé deux fois.",
+    "Ce virement, ou un autre virement du même reversement, a aussi été exécuté hors reversement, et ce virement-là n'est pas revenu : ce retour se comptabilise comme le sien (« Virement revenu », virement hors reversement), pour que rien ne soit reversé deux fois.",
   already_returned: "Ce virement est déjà revenu.",
   return_differs:
     "Ce retour ne correspond pas au virement (montant supérieur, virement sans débit comptabilisé, ou autre virement hors reversement à annuler d'abord).",
@@ -179,6 +188,26 @@ export type TransferLinePart = {
   blocks_account?: boolean;
   /** an unplanned return: the date of the line it reverses */
   returns_on?: string | null;
+  /**
+   * M2c-6b-3a-2 (E): a payout cancelled out of a downloaded file whose run is still in flight, booked as its run's
+   * payout (the late predecessor) — the re-issue the booking cancels and the file it withdraws, null when none
+   */
+  late_predecessor?: boolean;
+  cancels_transfer_id?: string | null;
+  cancels_end_to_end_id?: string | null;
+  supersedes_file_number?: string | null;
+  /** (review M2c-6b-3a-2 round 1, DP-3) an unplanned payout: the status of its transfer's run */
+  run_status?: string | null;
+  /**
+   * (review M2c-6b-3a-2 round 2) a return of a run's payout that closes the « Virement hors reversement » of another
+   * transfer of the run (its reference): the client keeps that other copy
+   */
+  closes_end_to_end_id?: string | null;
+  /**
+   * (review M2c-6b-3a-2 round 2) the return of a run's payout booked on the line of another transfer of the run (its
+   * reference), whose « Virement hors reversement » a return of the payout closed: both copies came back
+   */
+  returned_end_to_end_id?: string | null;
 };
 
 export type TransferLinePreview = {
@@ -259,6 +288,13 @@ function parsePart(raw: unknown): TransferLinePart | null {
     payout_iban_end: text(raw.payout_iban_end),
     blocks_account: raw.blocks_account === true,
     returns_on: text(raw.returns_on),
+    late_predecessor: raw.late_predecessor === true,
+    cancels_transfer_id: text(raw.cancels_transfer_id),
+    cancels_end_to_end_id: text(raw.cancels_end_to_end_id),
+    supersedes_file_number: text(raw.supersedes_file_number),
+    run_status: text(raw.run_status),
+    closes_end_to_end_id: text(raw.closes_end_to_end_id),
+    returned_end_to_end_id: text(raw.returned_end_to_end_id),
   };
 }
 function parseParts(raw: unknown): TransferLinePart[] {
@@ -419,6 +455,7 @@ export function transferLineRefusalText(code: string, detail: string | null): st
   const base = transferLineErrorText(code);
   if ((code === "client_run_cancellable" || code === "run_still_live") && detail)
     return `${base} (reversement ${detail})`;
+  if (code === "reissue_in_downloaded_file" && detail) return `${base} (fichier ${detail})`;
   return base;
 }
 
@@ -462,6 +499,40 @@ function blockSentence(p: TransferLinePart): string {
     : "";
 }
 
+/**
+ * M2c-6b-3a-2 (E; plan §4 T16, T13): a payout cancelled out of a downloaded file, its run still in flight, executed late
+ * by the bank — booked as its run's payout. Its transfer stays « Annulé »; its replacement, by what the options say the
+ * booking does to it (`cancels_transfer_id`, `supersedes_file_number`): cancelled while not handed out, withdrawn with
+ * its file not downloaded yet, or nothing (none, or cancelled already). Never that a replacement already handed out can
+ * no longer leave the account (the booking is refused then: reissue_in_downloaded_file).
+ */
+/** (review M2c-6b-3a-2 round 1, pages-texts-3) the sheet's intro when every payout of the proposal is a late predecessor. */
+export const LATE_PREDECESSOR_INTRO =
+  "La banque a exécuté en retard ce virement annulé : l'import ne comptabilise jamais seul le débit d'un virement annulé ; la ligne est comptabilisée comme le débit de son reversement, toujours en cours.";
+
+export function latePredecessorSentences(
+  p: TransferLinePart,
+  client: string,
+  lineDate: string,
+  setoff: string,
+  m: (minor: string | null | undefined) => string,
+): string[] {
+  const out = [
+    `Débit d'un reversement — virement annulé, exécuté en retard : ${p.run_number ?? "le reversement"} (${client}) est comptabilisé comme payé le ${lineDate} (${m(p.amount_minor)})${setoff} ; son virement reste « Annulé », exécuté en retard par la banque.`,
+  ];
+  if (p.cancels_transfer_id && p.supersedes_file_number)
+    out.push(
+      `Son virement de remplacement est annulé et retiré du fichier ${p.supersedes_file_number} ; les autres virements de ce fichier repassent dans le prochain fichier.`,
+    );
+  else if (p.cancels_transfer_id)
+    out.push("Son virement de remplacement, pas encore remis à la banque, est annulé.");
+  if (p.late && p.latest_execution_date)
+    out.push(
+      `Ce débit est postérieur à la date limite d'exécution du ${frenchDate(p.latest_execution_date)} : le dépassement du délai est enregistré.`,
+    );
+  return out;
+}
+
 /** One part's sentences (plan §7.3; critic L3, L13; critic2 ML-9, ML-11). */
 function partEffects(
   options: TransferLineOptions,
@@ -477,6 +548,8 @@ function partEffects(
         p.settlement_minor && p.settlement_minor !== "0"
           ? ` ; ses factures sont réglées par compensation (${m(p.settlement_minor)})`
           : "";
+      // M2c-6b-3a-2 (E, T16, T13): the late predecessor — its transfer stays « Annulé », its replacement by case
+      if (p.late_predecessor) return latePredecessorSentences(p, client, lineDate, setoff, m);
       const out = [
         // review M2c-6b-2d round 1 (pages-e2e-4): each status by the label its page shows (transfers.ts, runs.ts)
         `${p.run_number ?? "Le reversement"} (${client}) : ${m(p.amount_minor)} débités le ${lineDate}${setoff} ; son virement passe à « Débité » et le reversement à « Comptabilisé ».`,
@@ -497,15 +570,23 @@ function partEffects(
       // (its run cancelled), or those its own return put back (a returned payout executed again: its run is not
       // cancelled)
       const run = p.run_number ? `du reversement ${p.run_number}` : "d'un reversement";
+      // (review M2c-6b-3a-2 round 1, DP-3) a cancelled transfer whose run was booked (by its late predecessor, or its
+      // re-issue) nets the items the return of the run's payout put back
       const source =
-        p.status === "returned"
+        p.status === "returned" || (p.status === "cancelled" && p.run_status === "booked")
           ? `(sommes ${run} remises à reverser par le retour de son virement)`
           : p.status === "cancelled"
             ? `(sommes ${run} annulé, encore à reverser)`
             : `(sommes ${run} annulé — ou du virement revenu — encore à reverser)`;
       const paid = BigInt(p.paid_minor || "0");
       const advance = BigInt(p.advance_minor || "0");
-      if (paid === BigInt(0))
+      // M2c-6b-3a-2 (J; COMPLIANCE OQ-82, Q3 (a)): P = 0 bound by the items — the sums this payout was to pay were
+      // already deducted after another late transfer (never deducted twice)
+      if (paid === BigInt(0) && p.p_bound === "items")
+        out.push(
+          `Rien n'est déduit du prochain reversement de ${client} ; avance du cabinet de ${m(p.advance_minor)} : les sommes que ce virement devait reverser ont déjà été déduites (après un autre virement exécuté en retard, ou ne sont plus dues au client), ${NOT_YET_RECOVERED}.`,
+        );
+      else if (paid === BigInt(0))
         out.push(
           `Rien n'est déduit du prochain reversement de ${client} ; avance du cabinet de ${m(p.advance_minor)} : ce virement n'est rattaché à aucune somme en attente de ce client, ${NOT_YET_RECOVERED}.`,
         );
@@ -540,6 +621,13 @@ function partEffects(
     }
     case "payout_returned":
       return [
+        // (review M2c-6b-3a-2 round 2) the line of another copy of the run's payout, whose « Virement hors reversement »
+        // the return of the payout closed: both copies came back
+        ...(p.returned_end_to_end_id
+          ? [
+              `Le virement ${p.returned_end_to_end_id} du même reversement, exécuté hors reversement, revient aussi : son exécution a déjà été soldée par le retour du virement ${p.end_to_end_id ?? "du reversement"} ; ce retour-ci est donc celui du reversement, ${client} n'en a plus rien reçu.`,
+            ]
+          : []),
         `${p.run_number ?? "Le reversement"} : ${m(p.amount_minor)} de nouveau dus à ${client}, proposés dans un prochain reversement avec la date limite de leurs encaissements${blockSentence(p)}.`,
       ];
     case "sweep_returned":
@@ -549,6 +637,12 @@ function partEffects(
     case "unplanned_payout_returned": {
       const on = p.returns_on ? frenchDate(p.returns_on) : "";
       const out: string[] = [];
+      // (review M2c-6b-3a-2 round 2) the return of the run's payout while another copy of it, executed hors reversement,
+      // stays with the client: the return closes that copy (nothing paid twice)
+      if (p.closes_end_to_end_id)
+        out.push(
+          `Ce retour du virement ${p.end_to_end_id ?? "du reversement"} solde le virement ${p.closes_end_to_end_id} du même reversement, exécuté hors reversement le ${on} (${m(p.amount_minor)}) : ${client} garde l'un des deux virements et n'a reçu ce reversement qu'une fois.`,
+        );
       if (referenceLess)
         out.push(
           `La banque signale ce crédit comme un retour, sans notre référence, depuis le compte vers lequel le virement hors reversement du ${on} (${m(p.amount_minor)}) est parti : il est comptabilisé comme son retour. Vérifiez dans la banque avant de comptabiliser.`,
@@ -583,7 +677,15 @@ export function transferLineEffects(
   const preview = proposal.preview;
   const parts = preview.parts.length > 0 ? preview.parts : proposal.parts;
   const out: string[] = [];
-  const intro = options.class === "U" ? TRANSFER_LINE_ACTION.detail.intro : TRANSFER_LINE_ACTION[proposal.action]?.intro;
+  // (review M2c-6b-3a-2 round 1, pages-texts-3) a late predecessor's sheet: the import never books a cancelled
+  // transfer's debit (it reviews it, P0) — its own intro, not the payout's
+  const ours = parts.filter((p) => p.kind === "payout");
+  const intro =
+    options.class === "U"
+      ? TRANSFER_LINE_ACTION.detail.intro
+      : proposal.action === "payout" && ours.length > 0 && ours.every((p) => p.late_predecessor)
+        ? LATE_PREDECESSOR_INTRO
+        : TRANSFER_LINE_ACTION[proposal.action]?.intro;
   if (intro) out.push(intro);
   for (const p of parts) out.push(...partEffects(options, p, m));
   const fee = parts.find((p) => p.kind === "fee");

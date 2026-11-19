@@ -17,6 +17,11 @@ still waiting (Q4's default, COMPLIANCE OQ-82; critic F2, F3, F4, F5, L1; critic
                 transfer netted (review money-2, LT-1: together they never net more than x's
                 amount, all its run would have paid the client of its items — their gross left is
                 the commission that run set off, which the next run takes on them)
+    J         = (M2c-6b-3a-2, COMPLIANCE OQ-82, Q3 (a)) an item another transfer's late execution
+                already netted — an unreversed unplanned booking of another transfer attributed it
+                (`paid_by_other`), or an earlier part of this call for another transfer — counts
+                nothing more: its net - paid is floored at 0 from above (min(0, ...)), never netted
+                again
     queue(c)  = greatest(0, Σ pending of (c, currency)) - the P of earlier parts for c
     P         = greatest(0, least(A, queue(c), cap))
     attribute P over the items with net - paid > 0 in (posted_at, id) order, each up to that.
@@ -36,8 +41,10 @@ from datetime import datetime
 
 @dataclass(frozen=True, slots=True)
 class PoolItem:
-    """One ledger entry of a part's pool (a cancelled run's released line, or a returned x's
-    payout_returned item), as the queue holds it now."""
+    """One ledger entry of a part's pool (a cancelled run's released line, a returned x's
+    payout_returned item, or — review M2c-6b-3a-2 round 1, DP-3 — the payout_returned item of a
+    transfer of its run's payout chain, a late predecessor's return among them: the pool is built in
+    SQL and given here), as the queue holds it now."""
 
     entry_id: str
     posted_at: datetime
@@ -46,6 +53,8 @@ class PoolItem:
     reversal_pending: int  # the pending row of the entry reversing it (0: none)
     paid: int  # Σ private.unplanned_paid_item of unreversed bookings
     own: bool  # private.unplanned_own_item: an unplanned row or its advance (ML-1)
+    # M2c-6b-3a-2 (J): an unreversed unplanned booking of another transfer attributed it
+    paid_by_other: bool = False
 
     @property
     def eligible(self) -> bool:
@@ -66,6 +75,8 @@ class UnplannedAsk:
     client: str
     pool: tuple[str, ...] | None
     prior: int = 0
+    # M2c-6b-3a-2 (J): the part's transfer (another transfer's attributions count 0)
+    transfer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +92,7 @@ def unplanned_p(
 ) -> list[PartP]:
     """P, the advance, the bound and the attribution of each part, in the parts' order."""
     attributed: dict[str, int] = {}
+    by: dict[str, set[str | None]] = {}  # the transfers of this call's parts that attributed each
     used: dict[str, int] = {}
     out: list[PartP] = []
     for ask in asks:
@@ -91,6 +103,9 @@ def unplanned_p(
         ids = {i.entry_id for i in el}
         el = [i for i in el if not (i.reverses is not None and i.reverses in ids)]
         left = {i.entry_id: i.net - i.paid - attributed.get(i.entry_id, 0) for i in el}
+        for i in el:
+            if i.paid_by_other or any(t != ask.transfer for t in by.get(i.entry_id, ())):
+                left[i.entry_id] = min(0, left[i.entry_id])  # J: netted by another transfer already
         cap = min(max(0, sum(left.values())), max(0, ask.amount - ask.prior))
         q = max(0, queue.get(ask.client, 0)) - used.get(ask.client, 0)
         p = max(0, min(ask.amount, q, cap))
@@ -105,6 +120,7 @@ def unplanned_p(
                 rest -= take
         for e, a in shares:
             attributed[e] = attributed.get(e, 0) + a
+            by.setdefault(e, set()).add(ask.transfer)
         used[ask.client] = used.get(ask.client, 0) + p
         bound = "none" if not el else "amount" if p == ask.amount else None
         bound = bound or ("items" if p == cap else "queue")

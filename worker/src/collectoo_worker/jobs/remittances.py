@@ -605,7 +605,10 @@ HELD_TO_SQL = """select q.ledger_entry_id, rl.encaissement_date, coalesce(t.id, 
     cross join lateral (select bt.run_id from public.bank_transfer bt
                         where bt.id = case when pg_input_is_valid(re.source_id, 'uuid')
                                            then re.source_id::uuid end
-                          and bt.entry_id = e.reverses_entry_id
+                          and (bt.entry_id = e.reverses_entry_id
+                               or exists (select 1 from public.bank_line_booking k
+                                          where k.entry_id = e.reverses_entry_id
+                                            and k.kind = 'payout' and k.transfer_id = bt.id))
                         offset 0) bt
     cross join lateral (select l.encaissement_date, l.mandate_id, l.mandate_terms_id
                         from public.remittance_line l
@@ -670,9 +673,11 @@ def _held_to(conn: Conn, run: str) -> dict[str, tuple[date, str | None, int]]:
 
     M2c-6b-2b (plan §3.12, critic F11, L4; critic2 ML-2), as private.pending_item_deadlines: the
     planned branch follows a transfer's own planned remittance only (`bt.entry_id` = the reversed
-    entry); the re-owed item of a reversed unplanned remittance is held, once a run froze the items
-    its P paid, to the earliest latest execution date of those items' live lines (the reversed
-    remittance → private.unplanned_paid_item → each item's live line, by key); while those items
+    entry; M2c-6b-3a-2 (F): or a late predecessor's, the entry of its `payout` booking — it keeps
+    no entry of its own); the re-owed item of a reversed unplanned remittance is held, once a run
+    froze the items its P paid, to the earliest latest execution date of those items' live lines
+    (the reversed remittance → private.unplanned_paid_item → each item's live line, by key); while
+    those items
     are still pending it has no line (left out, as an advance's)."""
     rows = conn.execute(HELD_TO_SQL, (run, run)).fetchall()
     return {str(r[0]): (r[1], _uuid(r[2]), int(r[3])) for r in rows}

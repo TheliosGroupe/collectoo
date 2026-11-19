@@ -119,6 +119,7 @@ export function runStatusText(
   net: string | null,
   bookedOn?: string | null,
   unplannedOn?: string | null,
+  transferOutcome?: string | null,
 ): string {
   if (status === "booked") {
     if (net === "0") return "Réglé par compensation, sans virement";
@@ -127,7 +128,14 @@ export function runStatusText(
   if (status === "cancelled")
     return unplannedOn
       ? `Annulé — la banque a néanmoins exécuté son virement le ${frenchDay(unplannedOn)} (voir le relevé suivant)`
-      : "Annulé avant la remise de son virement à la banque";
+      : // M2c-6b-3a-2 (T17): a run whose transfer the bank refused (a file closed « refusé par la banque », or its
+        // transfer cancelled alone out of its live downloaded file) — the summary's per-run fact, never the switch
+        transferOutcome === "not_executed"
+        ? "Annulé : la banque n'a pas exécuté son virement (les relevés ne le montraient pas débité)"
+        : // (review M2c-6b-3a-2 round 1, pages-texts-4) a debit that may be its transfer, not booked yet
+          transferOutcome === "debit_pending"
+          ? "Annulé — un débit de notre compte qui peut être son virement est en cours de vérification"
+          : "Annulé avant la remise de son virement à la banque";
   return "Virement ordonné";
 }
 
@@ -148,6 +156,7 @@ export function statementRunView(
   run: { status: string; net_minor: string | number | null; booked_on?: string | null } | null,
   returned?: { returned_on: string; repaid_by?: string | null } | null,
   unplannedOn?: string | null,
+  transferOutcome?: string | null,
 ): {
   label: string;
   tone: "neutral" | "ok" | "error";
@@ -161,7 +170,7 @@ export function statementRunView(
       ? { label: `${came} : reversé à nouveau par le reversement ${returned.repaid_by}`, tone: "neutral", net }
       : { label: `${came} : son montant sera reversé par un prochain reversement`, tone: "error", net };
   }
-  const label = runStatusText(run.status, net, run.booked_on ?? null, unplannedOn ?? null);
+  const label = runStatusText(run.status, net, run.booked_on ?? null, unplannedOn ?? null, transferOutcome ?? null);
   if (run.status === "cancelled") return { label, tone: "error", net: null };
   return { label, tone: run.status === "booked" ? "ok" : "neutral", net };
 }
@@ -230,7 +239,35 @@ export type RemittanceSummary = {
   returned_runs?: unknown;
   /** M2c-6b-2c (ML-12): the cancelled runs the bank executed all the same (read through unplannedRuns) */
   unplanned_runs?: unknown;
+  /** M2c-6b-3a-2 (T17): what became of each cancelled run's transfer (read through cancelledRuns) */
+  cancelled_runs?: unknown;
 };
+
+/**
+ * M2c-6b-3a-2 (T17): the summary's `cancelled_runs` — each cancelled run's `transfer_outcome` by run id
+ * (`not_executed`: the bank refused its transfer; `never_handed_out`: it never reached the bank; review round 1,
+ * pages-texts-4: `debit_pending`, a debit that may be its transfer waits on a statement). An entry that is not
+ * well formed is left out (the run then keeps « Annulé avant la remise de son virement à la banque », the summary
+ * naming no other outcome).
+ */
+export function cancelledRuns(summary: { cancelled_runs?: unknown } | null): Map<string, string> {
+  const out = new Map<string, string>();
+  const rows = summary?.cancelled_runs;
+  if (!Array.isArray(rows)) return out;
+  for (const r of rows as unknown[]) {
+    if (!r || typeof r !== "object") continue;
+    const { run_id, transfer_outcome } = r as Record<string, unknown>;
+    if (
+      typeof run_id === "string" &&
+      run_id !== "" &&
+      (transfer_outcome === "not_executed" ||
+        transfer_outcome === "never_handed_out" ||
+        transfer_outcome === "debit_pending")
+    )
+      out.set(run_id, transfer_outcome);
+  }
+  return out;
+}
 
 /**
  * M2c-6b-2c (critic L6, critic2 ML-12): the client's cancelled runs whose payout the bank executed all the same, by

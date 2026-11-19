@@ -1145,3 +1145,171 @@ the debit job are unchanged.
 - Not timed here (tests-7, ADR-0014 « M2c-6b-3a review fixes » round 1, left to 6b-3a-2): the nightly checks,
   generation's holds and the cancellation evidence over tens of transfers cancelled out of a downloaded file and
   re-issued — the scale fixtures' only cancelled transfers are runs cancelled before any file.
+
+### M2c-6b-3a-2: the late predecessor, the switch off (2026-11-18, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+What the slice changes on a timed path: the nightly checks (`run_payment_checks`' I20 exemption and its « run booked
+by its late predecessor » probe, `run_transfer_checks`' `payout_returned`, `run_remittance_runs_checks`' chained runs),
+the deadlines' planned branch (`pending_item_deadlines`, the worker's `HELD_TO_SQL`), the booking command's check,
+options, locks, text and post, the debit job's `bank_booking_post_rows` (its booked update skips a cancelled transfer),
+the release of a file (`transfer_file_release`). Generation and download are unchanged.
+
+- **New:** `test_transfer_cancellation_scale_integration.py` (tests-7, left by 6b-3a's review round 1): 5,000 refunds in
+  a downloaded file never executed, beside 40 refunds cancelled with their downloaded file and re-issued, 20 of them
+  debited late; the switch on inside one forced-rollback transaction: **1 passed** — set-up 21.7 s; the confirmation of
+  the file's cancellation (40 transfers re-issued) **0.11 s**; the evidence of the 5,000-transfer file **0.36 s** (one
+  of its transfers 0.10 s); its page with the switch on **0.56 s**; generation with the holds **0.14 s** (20 held
+  `already_debited`, 20 in the file); the nightly checks **0.40 s** (41,370 `bank_transfer` rows read for 5,080
+  transfers; 20 `cancelled_transfer_debited`, 20 `transfer_already_debited`).
+- `test_transfer_files_scale_integration.py` (5,000 refunds in one file): **1 passed** — generation (command) 2.69 s,
+  job 0.83 s, download (command) 0.99 s, cash check 0.11 / 0.08 s, « Virements » 0.13 s, the debit job booking the
+  5,000 debits 9.8 s (15,000 transfer rows read), the nightly checks 0.26 s, every row read by index but the payments'
+  known sequential read (6b-3a: 2.83 s, 1.14 s, …, 10.2 s, 0.28 s).
+- `test_transfer_line_scale_integration.py`: **7 passed** (156.4 s) — the 500-member lot short of one: options 0.35 /
+  0.39 s, booking 1.41 / 1.53 s (499 bookings, the allocation lock held 1.30 s); the saturating lots: options 2.15 /
+  2.34 s, the command 2.19 / 2.33 s (`parts_do_not_add_up`); 501 and 5,000 members 0.013 to 0.02 s (`lot_too_large`);
+  the 50,000-item draft: options 0.06 s, command 0.18 s, lock 0.14 s.
+- `test_remittance_scale_integration.py` (50,000 lines): **1 passed** (318.5 s) — reserved 1.27 s, prepared 10.2 s,
+  approval command 0.39 s, job and documents 16.9 s; nightly checks 4.4 s (the draft waiting 5.2 s); cancellation
+  3.76 s; 6b-1's re-run prepared and approved 27.7 s, its payout filed, downloaded, debited and booked 0.7 s; the
+  nightly checks with the run booked **5.2 s** (5.15 s warm; 6b-2d: 5.4 s / 5.77 s) — `run_payment_checks` 2.7 s and
+  `commission_key_open` (50,000 calls) 1.5 s, `run_remittance_runs_checks` 0.55 s.
+- `test_debit_bookings_scale_integration.py` (the debit job's booked update changed): **5 passed** (764.7 s) — the
+  fixture's approval jobs 479.4 s, « Générer le fichier » for 5,000 payouts (+50 cancelled) 3.26 s; the 5,000-member
+  batch line's funds pass 22.4 s (23.8 s under auto_explain); 5,000 RMT debits imported in 1.2 s, the debit job 20.9 s
+  in chunks of 8.5, 8.6 and 3.7 s; the nightly checks 1.02 s (1.11 s warm with row counts on); 200 members 0.53 s; 200
+  RMT debits imported in 0.3 s and booked in 0.68 s (6b-3a: 782.2 s; 24.1 s, 22.7 s, 1.13 s).
+
+### M2c-6b-3a-2 review fixes, round 1 (2026-11-19, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+What the round changes on a timed path: the hold of a re-issue (`transfer_debited_before`: generation's holds, the
+download's re-checks), the late debits' readers (`transfer_late_lines`: the nightly P0, A, B, C and M), the cancellation
+evidence, the nightly chained branch (`run_remittance_runs_checks`: `transfer_named_debit_on` per chain transfer of a
+chained run), the debit job's R124-6 rows (`bank_booking_post_rows`: the run's chain read per booked payout) and the
+booking command's check (the class-U derivation, an unplanned payout's pool, a payout's late date). Each new probe is
+keyed: a detail by `bank_transaction_unsplit_details_idx` (GIN `jsonb_path_ops`), the rest by their existing keys.
+
+- `test_transfer_cancellation_scale_integration.py` (CSC-3, tests-6: one client's chained payout run added, SIZE more
+  refunds ordered and filed with the re-issues): **1 passed** — set-up 37.9 s; the confirmation of the cancellation
+  (41 transfers re-issued) **0.12 s**; the evidence of the 5,000-transfer file **0.40 s** (one of its transfers 0.11 s);
+  its page with the switch on **0.55 s**; generation with the holds **2.87 s** (20 held `already_debited`, 5,021 in the
+  file); the nightly checks **0.63 s** (86,438 `bank_transfer` rows read for 10,082 transfers; 146,726 in an earlier
+  run of the same fixture); the late predecessor's options **0.02 s** and its booking **2.00 s** (its re-issue's
+  generated 5,021-transfer file withdrawn, 5,040 refunds ordered again; 1.49 s in an earlier run), under the 4 s bound
+  the review asked for (the booking holds the payments and remit locks for its length).
+- `test_transfer_files_scale_integration.py` (5,000 refunds in one file): **1 passed** — generation (command) 2.68 s,
+  job 0.83 s, download (command) 1.04 s, cash check 0.12 / 0.07 s, « Virements » 0.12 s, the debit job booking the
+  5,000 debits 9.4 s (15,000 transfer rows read), the nightly checks 0.22 s (6b-3a-2: 2.69 s, 0.83 s, 0.99 s, …,
+  9.8 s, 0.26 s).
+- `test_transfer_line_scale_integration.py`: **7 passed** (149.8 s) — the 500-member lot short of one: options 0.41 /
+  0.43 s, booking 1.33 / 1.47 s (499 bookings, the allocation lock held 1.23 s); the saturating lots: options 1.99 /
+  2.03 s, the command 2.13 / 2.15 s (`parts_do_not_add_up`); 501 and 5,000 members 0.013 to 0.02 s (`lot_too_large`);
+  the 50,000-item draft: options 0.06 s, command 0.15 s, lock 0.11 s.
+- `test_debit_bookings_scale_integration.py` (the debit job's R124-6 rows now read the run's chain per booked payout):
+  **5 passed** (715.3 s) — « Générer le fichier » for 5,000 payouts (+50 cancelled) 3.16 s; the 5,000-member batch
+  line's funds pass 21.5 s (23.0 s under auto_explain); 5,000 RMT debits imported in 1.2 s, the debit job 19.9 s in
+  chunks of 8.1, 8.0 and 3.6 s; the nightly checks 0.97 s (1.04 s warm with row counts on); 200 members 0.50 s; 200 RMT
+  debits imported in 0.3 s and booked in 0.68 s (6b-3a-2: 764.7 s; 22.4 s, 20.9 s, 1.02 s).
+- `test_remittance_scale_integration.py` (50,000 lines; its re-run's payout booked by the debit job, the nightly checks
+  with a booked run): **1 passed** (257.1 s) — reserved 1.19 s, prepared 9.2 s; nightly checks 4.2 s (the draft waiting
+  3.6 s); cancellation 3.50 s; 6b-1's re-run prepared and approved 25.4 s, its payout filed, downloaded, debited and
+  booked 0.6 s; the nightly checks with the run booked **4.5 s** (4.72 s warm; 6b-3a-2: 5.2 s / 5.15 s) —
+  `run_payment_checks` 2.4 s and `commission_key_open` (50,000 calls) 1.3 s, `run_remittance_runs_checks` 0.37 s.
+
+### M2c-6b-3a-2 review fixes, round 2 (2026-11-19, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+What the round changes on a timed path: `private.transfer_unplanned_open` and `private.transfer_line_open_unplanned`
+read the run's payout chain of a return's transfer (`private.transfer_chain_unplanned`: the transfer, its run, the chain,
+each one's bookings by key) — the debit job's facts of a return, its SQL re-check, a lot credit's returnable members, the
+options of a return; and the nightly checks take the booked runs whose chain holds a payout cancelled out of a downloaded
+file (`bank_transfer_cancelled_filed_idx`), each judged at `private.remittance_run_paid_on` once a return of its chain is
+seen.
+
+- `test_transfer_cancellation_scale_integration.py`: **1 passed** (50.7 s) — set-up 37.9 s; the confirmation 0.11 s; the
+  evidence of the 5,000-transfer file 0.51 s (one transfer 0.11 s); its page 0.57 s; generation with the holds 3.00 s (20
+  held, 5,021 in the file); the nightly checks **0.67 s** (86,479 `bank_transfer` rows read; round 1: 0.63 s, 86,438);
+  the late predecessor's options 0.02 s, its booking 1.89 s.
+- `test_transfer_files_scale_integration.py`: **1 passed** (35.5 s) — generation (command) 2.74 s, job 0.80 s, download
+  (command) 1.19 s, cash check 0.11 / 0.08 s, « Virements » 0.13 s, the debit job booking the 5,000 debits 9.8 s (15,000
+  transfer rows read), the nightly checks 0.25 s (round 1: 2.68 s, 0.83 s, 1.04 s, …, 9.4 s, 0.22 s).
+- `test_transfer_line_scale_integration.py`: **7 passed** (156.4 s) — the 500-member lot short of one: options 0.43 /
+  0.47 s, booking 1.40 / 1.77 s (499 bookings, the allocation lock held 1.51 s); the saturating lots: options 2.25 /
+  2.13 s, the command 2.20 / 2.27 s (`parts_do_not_add_up`); 501 and 5,000 members 0.03 / 0.012 s (`lot_too_large`); the
+  50,000-item draft: options 0.06 s, command 0.17 s, lock 0.12 s (round 1: 0.41 / 0.43, 1.33 / 1.47, 1.99 / 2.03, 2.13 /
+  2.15 s; every budget held).
+- `test_debit_bookings_scale_integration.py`: **5 passed** (748.9 s) — « Générer le fichier » for 5,000 payouts (+50
+  cancelled) 3.46 s; the 5,000-member batch line's funds pass 23.0 s (23.6 s under auto_explain); 5,000 RMT debits
+  imported in 1.2 s, the debit job 20.9 s in chunks of 8.3, 8.4 and 4.0 s; the nightly checks **1.10 s** (1.20 s warm;
+  `run_remittance_runs_checks` 0.22 s); 200 members 0.46 s; 200 RMT debits booked in 0.68 s (round 1: 715.3 s; 21.5 s,
+  19.9 s, 0.97 s).
+- `test_remittance_scale_integration.py` (50,000 lines; the nightly checks with a booked run): **1 passed** (309.6 s) —
+  reserved 1.21 s, prepared 9.5 s; nightly checks 4.3 s (the draft waiting 3.5 s); cancellation 3.59 s; the re-run
+  prepared and approved 26.3 s, its payout filed, downloaded, debited and booked 0.7 s; the nightly checks with the run
+  booked **5.0 s** (4.83 s warm; round 1: 4.5 s / 4.72 s) — `run_payment_checks` 2.7 s, `commission_key_open` (50,000
+  calls) 1.4 s, `run_remittance_runs_checks` 0.50 s (its booked-chain branch reads the servicer's cancelled filed
+  transfers by key: none booked in this fixture).
+
+### M2c-6b-3a-2 review fixes, round 3 (2026-11-19, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+What the round changes on a timed path: the nightly checks' booked-chain branch (`run_remittance_runs_checks`) reads
+`private.transfer_return_known` for each transfer of the chains it takes (a run booked whose chain holds a payout
+cancelled out of a downloaded file, by `bank_transfer_cancelled_filed_idx`): `transfer_return_seen`, one probe of
+`bank_transaction_unsplit_details_idx` for a credit detail and the transfer's return bookings by
+`bank_line_booking_transfer_idx`; `remittance_run_paid_on` reads it too, and a booked line's other bookings no longer
+drop it. Nothing else timed changed.
+
+- `test_transfer_cancellation_scale_integration.py`: **1 passed** (49.7 s) — set-up 37.1 s; the confirmation 0.15 s; the
+  evidence of the 5,000-transfer file 0.47 s (one transfer 0.14 s); its page 0.65 s; generation with the holds 2.79 s
+  (20 held, 5,021 in the file); the nightly checks **0.65 s** (86,479 `bank_transfer` rows read; round 2: 0.67 s,
+  86,479); the late predecessor's options 0.03 s, its booking 1.89 s.
+- `test_transfer_files_scale_integration.py`: **1 passed** (36.3 s) — generation (command) 2.68 s, job 0.82 s, download
+  (command) 1.10 s, cash check 0.12 / 0.07 s, « Virements » 0.18 s, the nightly checks 0.23 s (0.27 s warm; round 2:
+  2.74 s, 0.80 s, 1.19 s, …, 0.25 s).
+- `test_transfer_line_scale_integration.py`: **7 passed** (155.8 s) — the 500-member lot short of one: options 0.45 /
+  0.45 s, booking 1.55 / 1.57 s (499 bookings, the allocation lock held 1.35 s); the saturating lots: options 2.19 /
+  2.16 s, the command 2.24 / 2.16 s (`parts_do_not_add_up`); 501 and 5,000 members 0.02 / 0.013 s (`lot_too_large`);
+  the 50,000-item draft: options 0.07 s, command 0.18 s, lock 0.14 s (round 2: 156.4 s; every budget held).
+- `test_debit_bookings_scale_integration.py`: **5 passed** (747.5 s) — « Générer le fichier » for 5,000 payouts (+50
+  cancelled) 3.57 s; the 5,000-member batch line's funds pass 22.3 s (23.6 s under auto_explain); 5,000 RMT debits
+  imported in 1.2 s, the debit job 21.1 s in chunks of 8.5, 8.4 and 4.0 s; the nightly checks **1.22 s** (1.20 s warm;
+  `run_remittance_runs_checks` 0.23 s); 200 members 0.47 s; 200 RMT debits booked in 0.73 s (round 2: 748.9 s; 23.0 s,
+  20.9 s, 1.10 s).
+- `test_remittance_scale_integration.py` (50,000 lines; the nightly checks with a booked run): **1 passed** (307.0 s) —
+  reserved 1.26 s, prepared 9.3 s; nightly checks 4.1 s (the draft waiting 3.4 s); cancellation 3.62 s; the re-run
+  prepared and approved 25.7 s, its payout filed, downloaded, debited and booked 0.7 s; the nightly checks with the run
+  booked **4.7 s** (4.74 s warm; round 2: 5.0 s / 4.83 s) — `run_payment_checks` 2.6 s, `commission_key_open` (50,000
+  calls) 1.3 s, `run_remittance_runs_checks` 0.47 s.
+
+### M2c-6b-3a-2 review fixes, round 4 (2026-11-19, same VM: 4 vCPU, 16 GB RAM, the main stack alone, each run right after `supabase db reset`)
+
+What the round changes on a timed path: one rule for the date a run's client stayed paid
+(`private.remittance_chain_events`, `private.remittance_chain_paid`) replaces `transfer_named_debit_on` and
+`transfer_return_known`. Its events are read per transfer of a run's payout chain by key (the transfer's id lines by
+`bank_transaction_end_to_end_idx` and `bank_transaction_return_e2e_idx`, its details by
+`bank_transaction_unsplit_details_idx`, its PmtInf lines, its bookings by `bank_line_booking_transfer_idx`), only for
+runs whose chain holds another transfer: the booking (`bank_booking_post_rows`) and the sheet's late flag keep the
+line's date for a run with no other transfer (the 5,000 payouts of the scale fixture), the nightly reads it for the
+chained branch's runs and for the booked runs whose chain holds a payout cancelled out of a downloaded file. Nothing
+else timed changed.
+
+- `test_transfer_cancellation_scale_integration.py`: **1 passed** (52.5 s) — set-up 39.0 s; the confirmation 0.14 s; the
+  evidence of the 5,000-transfer file 0.41 s (one transfer 0.15 s); its page 0.61 s; generation with the holds 3.24 s
+  (20 held, 5,021 in the file); the nightly checks **0.65 s** (86,479 `bank_transfer` rows read; round 3: 0.65 s,
+  86,479); the late predecessor's options 0.03 s, its booking 2.13 s (round 3: 1.89 s).
+- `test_transfer_files_scale_integration.py`: **1 passed** (37.8 s) — generation (command) 2.80 s, job 0.90 s, download
+  (command) 1.41 s, cash check 0.13 / 0.08 s, « Virements » 0.13 s, the nightly checks 0.25 s (0.29 s warm; round 3:
+  2.68 s, 0.82 s, 1.10 s, …, 0.23 s).
+- `test_transfer_line_scale_integration.py`: **7 passed** (170.4 s) — the 500-member lot short of one: options 0.49 /
+  0.48 s, booking 1.72 / 1.62 s (499 bookings, the allocation lock held 1.40 s); the saturating lots: options 2.29 /
+  2.50 s, the command 2.28 / 2.53 s (`parts_do_not_add_up`); 501 and 5,000 members 0.03 / 0.014 s (`lot_too_large`);
+  the 50,000-item draft: options 0.07 s, command 0.17 s, lock 0.13 s (round 3: 155.8 s; every budget held).
+- `test_debit_bookings_scale_integration.py`: **5 passed** (773.5 s) — « Générer le fichier » for 5,000 payouts (+50
+  cancelled) 3.55 s; the 5,000-member batch line's funds pass 23.3 s (24.7 s under auto_explain); 5,000 RMT debits
+  imported in 1.2 s, the debit job 22.5 s in chunks of 9.0, 8.9 and 4.5 s; the nightly checks **1.13 s** (1.12 s warm;
+  `run_remittance_runs_checks` 0.21 s); 200 members 0.50 s; 200 RMT debits booked in 0.68 s (round 3: 747.5 s; 22.3 s,
+  21.1 s, 1.22 s).
+- `test_remittance_scale_integration.py` (50,000 lines; the nightly checks with a booked run): **1 passed** (301.2 s) —
+  reserved 1.24 s, prepared 9.7 s; nightly checks 4.2 s; cancellation 3.74 s; the re-run prepared and approved 27.6 s,
+  its payout filed, downloaded, debited and booked 0.7 s; the nightly checks with the run booked **5.0 s** (5.42 s warm;
+  round 3: 4.7 s / 4.74 s) — `run_payment_checks` 2.5 s, `commission_key_open` (50,000 calls) 1.5 s,
+  `run_remittance_runs_checks` 0.50 s.

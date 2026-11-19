@@ -309,6 +309,8 @@ export type RunPayout = {
     line_id: string | null;
     return_line_id?: string | null;
     repaid_by?: string | null;
+    /** M2c-6b-3a-2 (F): a payout cancelled, booked as the run's payout (executed late by the bank) */
+    late_predecessor?: boolean | null;
   }[];
   payout_account_blocked?: boolean | null;
   settled_on: string | null;
@@ -325,6 +327,8 @@ export type RunPayout = {
     advance_minor: string;
     after_cancellation: boolean;
     returned?: boolean | null;
+    /** (review M2c-6b-3a-2 round 2) closed by the return of another transfer of the run (its reference) */
+    returned_by_end_to_end_id?: string | null;
   }[];
   draft_unplanned: { amount_minor: string; on: string; line_id: string; statement_on: string | null }[];
 };
@@ -343,7 +347,16 @@ const positive = (v: string | null | undefined): v is string => !!v && MINOR.tes
 export function runPayoutNotes(p: RunPayout, currency: string): string[] {
   const notes: string[] = [];
   for (const t of p.transfers) {
-    if (t.debited_on) notes.push(`Débité de notre compte le ${frenchDate(t.debited_on)}`);
+    // M2c-6b-3a-2 (T18): the late predecessor — its transfer cancelled, executed late by the bank; (review round 1,
+    // pages-texts-1) under its own reference, the one the bank debited (the « Virement » section shows the re-issue)
+    if (t.debited_on)
+      notes.push(
+        t.late_predecessor
+          ? `Débité de notre compte le ${frenchDate(t.debited_on)}${
+              t.end_to_end_id ? ` sous la référence ${t.end_to_end_id}` : ""
+            } (virement annulé, exécuté en retard par la banque)`
+          : `Débité de notre compte le ${frenchDate(t.debited_on)}`,
+      );
   }
   // review 6b-2c (pages-1): each part of the set-off from its own field — D also nets a credit-note refund paid with the
   // transfer (refundNote says it), so the commission set off is commission_minor, never D
@@ -366,7 +379,9 @@ export function runPayoutNotes(p: RunPayout, currency: string): string[] {
     );
   }
   for (const t of p.transfers) {
-    if (t.status !== "returned" || !t.returned_on || !t.amount_minor) continue;
+    // M2c-6b-3a-2 (T18): also a late predecessor's return (its transfer stays cancelled)
+    if (!(t.status === "returned" || (t.status === "cancelled" && t.late_predecessor)) || !t.returned_on || !t.amount_minor)
+      continue;
     notes.push(
       `Virement revenu impayé le ${frenchDate(t.returned_on)} : ${money(t.amount_minor, currency)} de nouveau dus au client, proposés dans un prochain reversement${
         p.payout_account_blocked
@@ -381,7 +396,12 @@ export function runPayoutNotes(p: RunPayout, currency: string): string[] {
     notes.push(
       `La banque a exécuté le virement de ce reversement ${when} le ${frenchDate(u.on)} (${money(u.amount_minor, currency)}) : comptabilisé hors reversement, avance du cabinet de ${money(u.advance_minor, currency)}.`,
     );
-    if (u.returned)
+    // (review M2c-6b-3a-2 round 2) closed by the return of another transfer of the run: that copy came back, not this one
+    if (u.returned && u.returned_by_end_to_end_id)
+      notes.push(
+        `Le virement ${u.returned_by_end_to_end_id} de ce reversement est revenu depuis : son retour solde ce virement hors reversement du ${frenchDate(u.on)} (le client n'a reçu ce reversement qu'une fois) ; il est comptabilisé.`,
+      );
+    else if (u.returned)
       notes.push(`Ce virement hors reversement du ${frenchDate(u.on)} est revenu depuis : son retour est comptabilisé.`);
   }
   for (const d of p.draft_unplanned) {

@@ -139,8 +139,10 @@ def _come_back(tenant: dict[str, Any], data: bytes, e2e: str) -> tuple[str, str]
     return sid, _line_of(sid)
 
 
-def _pool_item(conn: psycopg.Connection[Any], entry: str) -> PoolItem:
-    """The SQL facts of one pool item, as the Python twin reads them (parity)."""
+def _pool_item(conn: psycopg.Connection[Any], entry: str, transfer: str | None = None) -> PoolItem:
+    """The SQL facts of one pool item, as the Python twin reads them (parity). With `transfer`
+    (review M2c-6b-3a-2 round 1, tests-7): J's fact too — an unreversed unplanned booking of
+    another transfer attributed it (private.transfer_line_check's predicate, `paid_by_other`)."""
     row = conn.execute(
         """select e.posted_at, q.amount_minor, e.reverses_entry_id::text,
                   coalesce((select y.amount_minor from private.remittance_pending y
@@ -150,14 +152,23 @@ def _pool_item(conn: psycopg.Connection[Any], entry: str) -> PoolItem:
                             where u.ledger_entry_id = e.id
                               and not exists (select 1 from public.ledger_entry r
                                               where r.reverses_entry_id = u.booking_entry_id)), 0),
-                  private.unplanned_own_item(e.id)
+                  private.unplanned_own_item(e.id),
+                  %s::uuid is not null
+                  and exists (select 1 from private.unplanned_paid_item u
+                              join public.bank_line_booking k on k.entry_id = u.booking_entry_id
+                              where u.ledger_entry_id = e.id
+                                and k.transfer_id is distinct from %s::uuid
+                                and not exists (select 1 from public.ledger_entry r
+                                                where r.reverses_entry_id = u.booking_entry_id))
            from public.ledger_entry e
            left join private.remittance_pending q on q.ledger_entry_id = e.id
            where e.id = %s""",
-        (entry,),
+        (transfer, transfer, entry),
     ).fetchone()
     assert row is not None
-    return PoolItem(entry, row[0], row[1], row[2], int(row[3]), int(row[4]), bool(row[5]))
+    return PoolItem(
+        entry, row[0], row[1], row[2], int(row[3]), int(row[4]), bool(row[5]), bool(row[6])
+    )
 
 
 def _queue(conn: psycopg.Connection[Any], client: str) -> int:

@@ -854,13 +854,17 @@ ITEM = st.tuples(
     pool=st.lists(ITEM, min_size=4, max_size=4),
     amount=st.integers(1, 120_000),
     extra=st.integers(-50_000, 80_000).filter(lambda v: v != -5_000),  # the fifth item: never 0
+    other=st.booleans(),
 )
 def test_p_parity_with_the_twin_on_generated_pools(
     cancelled_pool: dict[str, Any], pool: list[tuple[int | None, int | None, int]], amount: int,
-    extra: int,
+    extra: int, other: bool,
 ) -> None:  # fmt: skip
     """The command's P, advance and bound (its preview, as ops see it) equal the twin's on the
-    same facts, read back from SQL (`_pool_item`, `_queue`)."""
+    same facts, read back from SQL (`_pool_item`, `_queue`). With `other` (review M2c-6b-3a-2
+    round 1, tests-7), the earlier attributions are those of an unplanned booking of another
+    transfer (a bank_line_booking of it on that entry): J's items, `paid_by_other` read with the
+    SQL predicate and the ask carrying x."""
     t, x, line = cancelled_pool["tenant"], cancelled_pool["x"], cancelled_pool["line"]
     client = str(t["client"])
     with psycopg.connect(DB) as conn, conn.transaction(force_rollback=True):
@@ -906,10 +910,37 @@ def test_p_parity_with_the_twin_on_generated_pools(
                    where ledger_entry_id = %s""",
                 (extra, cancelled_pool["fifth"]),
             )
-        items = {e: _pool_item(conn, e) for e in cancelled_pool["items"]}
+        if other:
+            # the attributions' booking is an unplanned payout of another cancelled transfer (a
+            # copy of x under another id and reference), on another line of the account
+            conn.execute("alter table public.bank_line_booking disable trigger user")
+            copy = conn.execute(
+                """insert into public.bank_transfer
+                   select (jsonb_populate_record(null::public.bank_transfer, to_jsonb(t)
+                           || jsonb_build_object('id', gen_random_uuid(),
+                                                 'end_to_end_id', 'RMTF' || upper(left(md5(
+                                                   random()::text), 11))))).*
+                   from public.bank_transfer t where t.id = %s returning id""",
+                (x["id"],),
+            ).fetchone()
+            assert copy is not None
+            conn.execute(
+                """insert into public.bank_line_booking (bank_transaction_id, seq, organization_id,
+                     bank_account_id, kind, transfer_id, entry_id, amount_minor, method)
+                   select q.id, 99, q.organization_id, q.bank_account_id, 'unplanned_payout', %s,
+                          %s, 1, 'auto'
+                   from public.bank_transaction q
+                   where q.organization_id = %s and q.id <> %s limit 1""",
+                (copy[0], cancelled_pool["booking"], t["servicer"], line),
+            )
+        transfer = str(x["id"])
+        items = {e: _pool_item(conn, e, transfer) for e in cancelled_pool["items"]}
+        assert other or not any(i.paid_by_other for i in items.values())
         queue = _queue(conn, client)
         (twin,) = unplanned_p(
-            [UnplannedAsk(amount, client, tuple(cancelled_pool["items"]))], items, {client: queue}
+            [UnplannedAsk(amount, client, tuple(cancelled_pool["items"]), transfer=transfer)],
+            items,
+            {client: queue},
         )
         claims = json.dumps({"sub": t["staff"], "role": "authenticated", "aal": "aal2"})
         conn.execute("select set_config('request.jwt.claims', %s, true)", (claims,))

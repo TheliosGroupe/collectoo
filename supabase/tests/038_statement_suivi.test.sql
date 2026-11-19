@@ -1725,7 +1725,7 @@ begin
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.iso('h_released'),
-  '{"reissued": true, "x_live": "run_still_live", "y": "ok", "x": "ok", "approved": "approved:approved",
+  '{"reissued": true, "x_live": "reissue_in_downloaded_file", "y": "ok", "x": "ok", "approved": "approved:approved",
     "suivi": {"since": ["RV1", true], "events": [
       {"kind": "debited_again", "run_number": "RV1", "unplanned_minor": "24600", "advance_minor": "24600",
        "p_bound": "none", "execution_no": 1, "debited_on": "d0", "before_debit": true, "on": "d-1", "here": true},

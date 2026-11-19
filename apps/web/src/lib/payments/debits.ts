@@ -160,8 +160,10 @@ export const DEBIT_REVIEW: Record<string, string> = {
   // M2c-6b-1 (plan §2.3): our payouts' and sweeps' debits and returns the job does not book
   // M2c-6b-2c (plan §4.3): the screen books them as « Virement hors reversement » (a cancelled transfer whose run is still
   // in flight: CANCELLED_TRANSFER_LIVE_RUN, critic2 ML-4)
+  // M2c-6b-3a-2 (T14): kind-aware, both ways — a payout's (its run in flight: its payout, the late predecessor;
+  // CANCELLED_TRANSFER_LIVE_RUN), a sweep's (CANCELLED_SWEEP_DEBITED), a refund's (CANCELLED_REFUND_DEBITED)
   cancelled_transfer_debited:
-    "Débit d'un virement annulé dans Collectoo : la banque l'a exécuté. Rien n'est comptabilisé : vérifiez dans la banque, puis comptabilisez-le comme « Virement hors reversement » (risque de double paiement).",
+    "Débit d'un virement annulé dans Collectoo : la banque l'a exécuté. Rien n'est comptabilisé : vérifiez dans la banque, puis comptabilisez-le avec « Comptabiliser… » : comme le débit de son reversement s'il est encore en cours, sinon comme « Virement hors reversement » (risque de double paiement).",
   transfer_debited_twice:
     "Second débit d'un virement déjà comptabilisé : la banque l'a peut-être exécuté deux fois. Vérifiez avec la banque, puis comptabilisez ce second débit comme « Virement hors reversement ».",
   transfer_not_handed_out:
@@ -191,7 +193,7 @@ export const DEBIT_REVIEW: Record<string, string> = {
   // review M2c-6b-2a (M1): that debit may be a copy held in « Doublons possibles » (private.transfer_late_lines counts a
   // held line, never one decided a duplicate; public.resolve_duplicate then queues the debit job)
   return_debit_pending:
-    "Retour d'un virement du cabinet dont un autre débit (second débit, ou débit après annulation) figure sur un relevé sans être encore comptabilisé : rien n'est comptabilisé automatiquement. Si ce débit attend dans « Doublons possibles », décidez-le d'abord : reconnu comme doublon, il ne compte plus et le retour est repris automatiquement. Comptabilisez d'abord ce débit (« Virement hors reversement ») ; ce retour se comptabilisera ensuite avec « Virement revenu ».",
+    "Retour d'un virement du cabinet dont un autre débit, ou celui d'un autre virement du même reversement (second débit, ou débit après annulation), figure sur un relevé sans être encore comptabilisé : rien n'est comptabilisé automatiquement. Si ce débit attend dans « Doublons possibles », décidez-le d'abord : reconnu comme doublon, il ne compte plus et le retour est repris automatiquement. Comptabilisez d'abord ce débit (« Virement hors reversement ») ; ce retour se comptabilisera ensuite avec « Virement revenu ».",
   // M2c-6b-2a (S20, OQ-84 (i)): the M2b pass's own reason — a link it decided, refused because the line is ours; review
   // M2c-6b-2a (T6): no screen promised while none books these lines
   own_transfer_line:
@@ -249,9 +251,16 @@ export const CANCELLED_SWEEP_DEBITED =
 export const REFUND_AMOUNT_MATCH_BARRED =
   "Débit sans notre référence du montant d'un remboursement demandé, mais un autre virement du cabinet de ce montant — en cours, ou annulé après téléchargement et peut-être exécuté en retard — peut être ce débit : il ne peut pas être lié à ce remboursement. Attendez la ligne portant sa référence RFD ou celle de son lot (relevé camt.053) ; sinon demandez à la banque le détail de ce débit et prévenez le support.";
 
-/** critic2 ML-4: a cancelled transfer whose run is still approved or sent — this debit is that run's payout. */
+/**
+ * critic2 ML-4: a cancelled transfer whose run is still approved or sent — this debit is that run's payout. M2c-6b-3a-2
+ * (E, T13): « Comptabiliser… » books it as its run's payout (the late predecessor; what it does to the re-issue, the
+ * sheet says by case); hedged — a line without our reference may be another debit.
+ */
 export const CANCELLED_TRANSFER_LIVE_RUN =
-  "Débit d'un virement annulé dans Collectoo : la banque l'a exécuté. Rien n'est comptabilisé : le reversement de ce virement est toujours en cours, ce débit est donc son paiement ; il ne peut pas encore être comptabilisé. Ne faites pas annuler ce reversement et prévenez le support.";
+  "Débit d'un virement annulé dans Collectoo : la banque l'a peut-être exécuté en retard. Son reversement est toujours en cours : si ce débit est bien ce virement (vérifiez-le auprès de la banque quand la ligne ne porte pas sa référence), comptabilisez-le avec « Comptabiliser… » comme « Débit d'un reversement » : le reversement est comptabilisé comme payé. Si son virement de remplacement est déjà dans un fichier téléchargé, « Comptabiliser… » dit d'abord quoi faire de ce fichier.";
+/** M2c-6b-3a-2 (T14): a refund's late debit after its cancellation — no booking kind for it yet (S25, OQ-81 (b)). */
+export const CANCELLED_REFUND_DEBITED =
+  "Débit d'un remboursement annulé : il ne peut pas encore être comptabilisé ; ne refaites pas ce remboursement, voyez avec la banque et prévenez le support.";
 
 /** The reasons that may mean money left twice or without an order (P0, first in « À classer »; plan §2.3). */
 export const P0_DEBIT_REVIEWS = new Set([
@@ -724,6 +733,9 @@ export function debitReviewText(
     (o.candidates ?? []).some((c) => c.run_status === "approved" || c.run_status === "sent")
   )
     return holdsOursUnsplit(o) ? `${CANCELLED_TRANSFER_LIVE_RUN} ${UNSPLIT_OURS_NOTE}` : CANCELLED_TRANSFER_LIVE_RUN;
+  // M2c-6b-3a-2 (T14): a refund's
+  if (o.review_reason === "cancelled_transfer_debited" && cands.length > 0 && cands.every((c) => c.kind === "refund"))
+    return CANCELLED_REFUND_DEBITED;
   // review round 7 (S2): a line of an unsplit entry holding ours — a P0 first, then why nothing is offered
   if (holdsOursUnsplit(o))
     return o.review_reason !== null && P0_DEBIT_REVIEWS.has(o.review_reason)
@@ -1339,10 +1351,15 @@ function checkHelpOn(code: string, details: Record<string, unknown> | null | und
   if (status === "cancelled")
     return kind === "refund"
       ? "Un remboursement annulé après téléchargement a été débité malgré tout (relevé, sous sa référence, dans une ligne groupée de son lot ou sans référence) : il ne peut pas encore être comptabilisé. Ne refaites pas ce remboursement, voyez avec la banque et prévenez le support."
-      : "Un reversement dont le virement a été annulé après téléchargement a été débité malgré tout (relevé, sous sa référence, dans une ligne groupée de son lot ou sans référence) : ne refaites aucun virement. Son reversement terminé, comptabilisez ce débit dans « Débits et retours » (« Virement hors reversement ») : l'alerte cesse ensuite ; son reversement encore en cours, prévenez le support.";
+      : // M2c-6b-3a-2 (E): its run still in flight, the debit is its payout (the late predecessor)
+        "Un reversement dont le virement a été annulé après téléchargement a été débité malgré tout (relevé, sous sa référence, dans une ligne groupée de son lot ou sans référence) : ne refaites aucun virement. Comptabilisez ce débit dans « Débits et retours » (« Comptabiliser… ») : son reversement encore en cours, comme « Débit d'un reversement » (le reversement est comptabilisé comme payé) ; terminé, comme « Virement hors reversement ». L'alerte cesse ensuite.";
   // review round 1 (pages-texts-3, pages-texts-6): a debit without our references only may be the replaced transfer's;
   // dated on or after this one's execution in its downloaded file, it may be this one's too — booked as its debit then
   // (« Comptabiliser… » proposes it) — and its file's cancellation is refused while it is open
+  // M2c-6b-3a-2 (E, T15): a payout's re-issue — the debit of the transfer it replaces is its run's payout (the late
+  // predecessor): booked, this one is cancelled and the hold ends; in a downloaded file, that file cancelled first
+  if (kind === "payout")
+    return "Un relevé montre le débit, ou un débit sans nos références qui peut l'être, du virement qu'il remplace (exécuté plus tard malgré tout) : ce virement reste hors des fichiers pour ne pas payer deux fois. Ne refaites aucun virement. S'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter et faites annuler ce fichier, relevés à l'appui (deux personnes), avant de comptabiliser ce débit : un débit sans nos références de son montant peut aussi être sa propre exécution — « Comptabiliser… » le propose alors comme son débit —, et l'annulation de ce fichier est refusée tant que ce débit n'est ni comptabilisé ni classé. Sinon, comptabilisez ce débit dans « Débits et retours » (« Comptabiliser… », « Débit d'un reversement ») : le reversement est comptabilisé comme payé, ce virement annulé, et la retenue cesse ; s'il ne peut pas y être comptabilisé, demandez à la banque le détail de ce débit et prévenez le support.";
   return "Un relevé montre le débit, ou un débit sans nos références qui peut l'être, du virement qu'il remplace (exécuté plus tard malgré tout) : ce virement reste hors des fichiers pour ne pas payer deux fois. Ne refaites aucun virement. S'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter : un débit sans nos références de son montant peut aussi être sa propre exécution — « Comptabiliser… » le propose alors comme son débit —, et l'annulation de ce fichier est refusée tant que ce débit n'est ni comptabilisé ni classé. Sinon, voyez ce débit dans « Débits et retours » ; s'il ne peut pas y être comptabilisé, demandez à la banque le détail de ce débit et prévenez le support.";
 }
 
