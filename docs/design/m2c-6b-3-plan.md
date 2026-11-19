@@ -413,6 +413,9 @@ confirmation. Q2 says so.
 > *As built (6b-3a-2):* as below, the late predecessor read by `private.transfer_late_predecessor` (cancelled, its
 > run approved or sent, in a file downloaded once, held by the chain of the run's transfer); pgTAP `040` E1–E8,
 > F1b. The two-connection test is not built (the re-read's mutant survives one session).
+> *As built (6b-3b part 1):* the worker integration file `test_switch_on_late_predecessor_integration.py` takes the
+> late predecessor through the import and the debit job, its return (G4), `HELD_TO_SQL`'s parity, and the two
+> connections against a generation (the re-read's lock order observed) and against the download, each first.
 
 
 **Today, switch on.** Take x, cancelled out of a downloaded file, whose run is still `approved`/`sent`. Its live end y
@@ -654,6 +657,9 @@ booked` through). Cancel the file whole on evidence: there is no re-issue, x is 
 
 ### I. R124-6 in-flight rows of a re-issue, and of a run whose payout was cancelled alone
 > *As built (6b-3a-2):* in `private.run_remittance_runs_checks`; pgTAP `040` I1–I6.
+> *As built (6b-3b part 1):* the booking of a chained run's payout (`private.bank_booking_post_rows`), its sheet's late
+> flag and the nightly booked branch apply the same two holds (`private.remittance_chain_holds`: coverage of
+> [least(e0, L), L], no uncounted possible debit of another transfer of the chain by L); pgTAP `041`.
 
 
 **Today:** in `private.run_remittance_runs_checks` (`20261117110000:1251`; security definer, `search_path ''`,
