@@ -4906,5 +4906,56 @@ by « the booking never waits » in the build, is killed a fortiori.
 payout line's date (round 1, above); and « The rows only ever come later, never different » held only for a reader whose
 facts did not move between its reads (chain-holds-snapshot-race, above).
 
+## M2c-6b-3b part 1 — CI round (PR #38) (2026-11-21)
+
+**The failure.** CI run 44850889494, job « Database (migrations, pgTAP) », step « Worker integration tests »:
+`test_a_batch_line_of_2000_members_is_re_checked_in_linear_time_and_memory` failed its bound (40 rows per row of the
+job × 2,001 + 2,000 = 82,040 rows per statement), the facts' statement of `private.post_bank_bookings` (`create temp
+table _bb …`) handling 338,170 rows. The same commit passed the same job in the dispatched run 44850891917, and a fresh
+reset locally (22,012 rows). Nothing in PR #38 touches that function or a table it reads.
+
+**Root cause: the plan, chosen from the statistics the suite leaves.** Reproduced on the main stack in CI's order
+(`supabase db reset`, `supabase test db`, the two integration files before the batch test: it passed there, as in the
+next CI run), then exactly: `vacuum analyze` of `bank_transaction` and `ledger_entry` gave three of CI's figures
+(44,036; 34,015; 32,038), and `vacuum full` of `ledger_entry` (its 144 committed rows in 7 pages) with
+`random_page_cost` 5 the fourth (338,170), each to the row. Two keyed reads of the facts ran as
+sequential scans once per row of the job: the lateral read of `bank_transaction` by the row's line (15 rows each time,
++28,014) and the correlated read of `ledger_entry` by the transfer's entry (`tr_entry_date`: 144 rows each time, all
+removed by the filter — an `in_file` transfer has no entry —, +288,144); the bank-account lock's lateral read
+`bank_transaction` the same way (44,036 rows; 16,012 by key). Each table's scan was priced below one probe of its
+primary key — tables vacuumed back to a few pages after the pgTAP suite, their keys left bloated by its rolled-back rows
+—; with autovacuum at other times the index plan won. « Flake » was the timing of autovacuum, not the cause: every keyed
+read of the re-check had the same exposure, the one PR #33's CI scale fix left open (« the job's own `_bb` build and
+payments lock in `private.post_bank_bookings` », above). With a probe priced at 1,000 sequential pages, the facts handled
+8.3 million rows and the keys, the files' lock and the batch rule 4 million each: the batch line's 2,000 transfers of
+`bank_transfer`, and their file items, scanned once per member.
+
+**Fix** (in place in the unmerged `20261119090000`, its last section; behaviour unchanged, only the plans): the re-check —
+the keys, the locks, the facts and the rules' verdicts, everything before the posting — moved verbatim into
+`private.bank_booking_recheck(org)` (new: SECURITY DEFINER, `set enable_seqscan = off`, EXECUTE revoked from every
+role), which `private.post_bank_bookings` (redefined from its latest definition, `20261117100000`, settings and grants
+restated) calls first. As `private.transfer_line_bb` (the ops' copy of the same facts) and `private.transfer_line_locks`
+since PR #33's CI scale fix, every lateral and correlated read of a stored table by its key is a probe of its index
+whatever the statistics; the job's temporary tables are read whole as before; the posting (`bank_booking_post_rows`)
+keeps its callers' settings. Same rows, the same locks in the same order and strength, the same verdicts: inlining the
+helper back gives the old body line for line. At 2,000 members, under both cost settings: the facts 22,012 rows, the
+keys 32,010, the batch rule 40,014, the bank-account lock 24,016 (its union sorted, no longer hashed: 8,004 more, linear).
+
+**Test** (`worker/tests/test_debit_bookings_batch_rules_integration.py`; the existing test unchanged and passing):
+`test_the_re_check_reads_by_key_whatever_the_statistics` — the same batch line, verdicts and per-statement bound, with
+`random_page_cost` 1,000 (a probe of a key index priced above a scan of any table the re-check reads, as CI's statistics
+priced it for its small tables), and no stored table scanned once per row of the job. Deterministic: it fails on the old
+body after a fresh reset as after the suite — the facts 8.0 million rows, 16 scans of stored tables repeated once per row
+(18 after the suite), those of `bank_transfer` and `transfer_file_item` 4 million rows each — and passes on the new (the
+old body applied over the new one in place, then `supabase db reset`). It runs in the `db` job, in a few seconds.
+
+**Suites** (the main stack alone): `supabase test db` after `supabase db reset` — **Files=43, Tests=2,882, PASS**; then,
+without a reset (CI's order), the integration tests but the scale files — **242 passed** (241 and the new test);
+`database.types.ts` regenerated: unchanged (the new function is internal). Worker: `ruff check .`, `ruff format --check
+.`, `mypy` (179 files) clean; unit pytest 1,093 passed, 5 xfailed. The payouts' bookings scale file once right after
+`supabase db reset`: **5 passed** (782.8 s; the 5,000-member batch line's funds pass 20.3 s, the debit job 19.1 s — within
+the earlier rounds' spread, `docs/benchmarks/remittances.md` « M2c-6b-3b part 1 — CI round (PR #38) »). No web code
+changed.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

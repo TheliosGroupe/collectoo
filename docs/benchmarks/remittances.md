@@ -1362,3 +1362,19 @@ hold at its booking, as before.
   nightly checks 3.8 s (the draft waiting 3.4 s); the re-run prepared and approved 24.9 s, its payout booked 0.7 s; the
   nightly checks with the run booked **4.4 s** (4.53 s warm; part 1: 4.8 s) — `run_payment_checks` 2.3 s,
   `commission_key_open` (50,000 calls) 1.2 s, `run_remittance_runs_checks` 0.41 s.
+
+### M2c-6b-3b part 1 — CI round (PR #38) (2026-11-21, same VM, the main stack alone, the run right after `supabase db reset`)
+
+What the round changes on a timed path: `private.post_bank_bookings`' re-check (the keys, the locks, the facts and the
+verdicts) runs in `private.bank_booking_recheck` under `enable_seqscan = off` — the same statements, every keyed read a
+probe of its index whatever the statistics; the posting keeps its callers' settings (ADR-0014 « M2c-6b-3b part 1 — CI
+round (PR #38) »). The db suite's 2,000-member batch line: the facts 22,012 rows, the keys 32,010, the batch rule 40,014
+(36,015 before: sorted and merged, no longer hashed), the bank-account lock 24,016 (16,012) — the same under a probe
+priced at 1,000 pages, where the old body's facts handled 8.0 million rows.
+
+- `test_debit_bookings_scale_integration.py`: **5 passed** (782.8 s) — « Générer le fichier » for 5,000 payouts (+50
+  cancelled) 3.20 s; the 5,000-member batch line's funds pass **20.3 s** (21.6 s under auto_explain; round 1: 19.7 s /
+  20.0 s), no sequential read of a table of transfers, no temporary file; 5,000 RMT debits imported in 1.3 s, the debit
+  job **19.1 s** in chunks of 7.9, 7.3 and 3.6 s (round 1: 18.1 s; 7.7, 6.9, 3.4 s); the nightly checks 1.14 s (1.03 s
+  warm; `run_remittance_runs_checks` 0.22 s); 200 members 0.52 s; 200 RMT debits' job 0.60 s. Within the run-to-run
+  spread of the earlier rounds (19.1 to 26.4 s for the funds pass, 18.1 to 23.0 s for the debit job): no timing changed.

@@ -21,18 +21,23 @@
 --       private.remittance_inflight_facts), waits when the chain's paid date moved since the caller's own read, and
 --       writes a row resting on the options of an old line only if the facts read again afterwards have not moved
 --       (private.remittance_chain_holds, private.remittance_inflight_judge).
+--   * CI round (PR #38; ADR-0014 « M2c-6b-3b part 1 — CI round (PR #38) »; the last section of this file): the funds
+--     pass's re-check (private.post_bank_bookings' keys, locks, facts and verdicts) reads every stored row by its key
+--     whatever the statistics — moved verbatim into private.bank_booking_recheck, run under enable_seqscan off. Only the
+--     plans change.
 --
 -- New (internal): private.transfer_debit_lines (the lines private.transfer_debit_suppression reads, shared with the
 -- holds), private.remittance_chain_hold_facts (the holds' facts in one snapshot), private.remittance_chain_holds (the
 -- two holds at L), private.remittance_chain_rows (a chained run's rows due at a date: its lines late then whose holds
 -- pass), private.remittance_inflight_facts and private.remittance_inflight_judge (the in-flight branch's rule on facts
--- read in one snapshot). Redefined, each copied from its latest definition across all the
--- migration files and changed only as its comment says, with SECURITY DEFINER, every SET clause, search_path and its
--- grants restated:
+-- read in one snapshot), private.bank_booking_recheck (the CI round's). Redefined, each copied from its latest
+-- definition across all the migration files and changed only as its comment says, with SECURITY DEFINER, every SET
+-- clause, search_path and its grants restated:
 --   private.transfer_debit_suppression (20261117113000_transfer_line_pages_fixes.sql:175)
 --   private.bank_booking_post_rows (20261118100000_switch_on_prerequisites_2.sql:2344)
 --   private.transfer_line_check (20261118100000_switch_on_prerequisites_2.sql:801)
 --   private.run_remittance_runs_checks (20261118100000_switch_on_prerequisites_2.sql:3889)
+--   private.post_bank_bookings (20261117100000_transfer_line_ops.sql:3198; the CI round)
 -- and private.remittance_chain_events (20261118100000_switch_on_prerequisites_2.sql:164) gets its comment corrected
 -- (COMMENT ON FUNCTION: its body is unchanged).
 
@@ -2023,4 +2028,497 @@ revoke execute on function private.transfer_debit_lines(uuid, date),
 revoke execute on function private.transfer_debit_suppression(uuid, date, date),
   private.bank_booking_post_rows(uuid), private.transfer_line_check(uuid, boolean),
   private.run_remittance_runs_checks(uuid, uuid, date)
+  from public, anon, authenticated, service_role;
+
+
+------------------------------------------------------------------------------------------
+-- CI round (PR #38): the funds pass's re-check reads every stored row by its key, whatever the statistics
+------------------------------------------------------------------------------------------
+
+-- CI run 44850889494 (PR #38, the `db` job; ADR-0014 « M2c-6b-3b part 1 — CI round (PR #38) »): the 2,000-member batch
+-- test (worker/tests/test_debit_bookings_batch_rules_integration.py) failed its bound, the facts' statement of
+-- private.post_bank_bookings (CREATE TEMP TABLE _bb) handling 338,170 rows for the job's 2,001 (bound 82,040): its
+-- lateral read of bank_transaction by the row's key and its correlated read of ledger_entry by the transfer's entry ran
+-- as sequential scans of those tables once per row of the job (15 and 144 rows each time: 28,014 + 288,144 more than
+-- the 22,012 of an index plan), and the bank-account lock's lateral read bank_transaction the same way (44,036 rows).
+-- Each table's scan was priced below one probe of its primary key: tables vacuumed to a few pages after the pgTAP
+-- suite, their keys left bloated by its rolled-back rows. The same commit passed in the next run (autovacuum at other
+-- times). Nothing in this migration touched that function: its plan only rested on the statistics. Every keyed read of
+-- the re-check had the same exposure — the keys', the locks' and the batch rule's laterals of bank_transfer,
+-- transfer_file_item, transfer_file and remittance_line, the facts' reads of bank_line_booking, bank_debit_link,
+-- bank_own_credit_release, bank_duplicate_resolution, remittance_run and ledger_entry: priced so (random_page_cost
+-- 1000), the facts read 8.3 million rows and the keys, the files' lock and the batch rule 4 million each, the batch
+-- line's 2,000 transfers scanned once per member. Left as « not done » by PR #33's CI scale fix (ADR-0014: « the job's
+-- own _bb build and payments lock in private.post_bank_bookings »).
+
+-- The re-check of private.post_bank_bookings — the keys, the locks, the facts (pg_temp._bb) and the rules' verdicts —
+-- moved here verbatim from its body (20261117100000_transfer_line_ops.sql, lines 3210 to 3557, its latest definition),
+-- run under enable_seqscan off in this function's own settings, as the ops' copy of the same facts
+-- (private.transfer_line_bb) and the command's locks (private.transfer_line_locks) have run since PR #33's CI scale
+-- fix: every lateral and correlated read of a stored table by its key is a probe of that key's index whatever the
+-- statistics, never a scan of the table once per row of the job. The job's temporary tables are read whole as before;
+-- the posting (private.bank_booking_post_rows) stays in private.post_bank_bookings under its callers' settings. Same
+-- rows read, the same locks in the same order and strength, the same verdicts.
+create or replace function private.bank_booking_recheck(p_organization_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+begin
+  -- The keys first (what a transfer pays, its file history and its run never change): the transfers the rows name and
+  -- every member of the PmtInf a batch line names — read once per LINE (review round 3, M3: once per row of the line,
+  -- a batch line of N members read its PmtInf's N items N times, N² rows sorted for the distinct: 16 million rows and
+  -- 766 MB of temporary files at 2,000 members).
+  drop table if exists pg_temp._bb_keys;
+  create temp table _bb_keys on commit drop as
+  select distinct k.transfer_id, x.run_id, x.debtor_bank_account_id, x.creditor_bank_account_id
+  from (select b.transfer_id from pg_temp._bank_booking b where b.transfer_id is not null
+        union
+        select i.transfer_id
+        from (select distinct b.bank_transaction_id from pg_temp._bank_booking b where b.kind in ('payout', 'sweep')) l
+        cross join lateral (select q.direction, q.end_to_end_id, q.payment_info_id from public.bank_transaction q
+                            where q.id = l.bank_transaction_id offset 0) t
+        cross join lateral (select y.transfer_id from public.transfer_file_item y
+                            where y.pmt_inf_id = t.payment_info_id offset 0) i
+        where t.direction = 'debit' and t.end_to_end_id is null and t.payment_info_id is not null) k
+  cross join lateral (select q.run_id, q.debtor_bank_account_id, q.creditor_bank_account_id from public.bank_transfer q
+                      where q.id = k.transfer_id offset 0) x;
+
+  drop table if exists pg_temp._bb_cover;
+  create temp table _bb_cover (ord integer) on commit drop;   -- (the advances posted: bank_booking_post_rows)
+
+  perform 1 from public.remittance_run r
+  where r.id = any (array(select k.run_id from pg_temp._bb_keys k where k.run_id is not null))
+  order by r.id for update;
+  perform 1 from public.client_payout_account a
+  where a.id = any (array(select r.payout_account_id from public.remittance_run r
+                          where r.id = any (array(select k.run_id from pg_temp._bb_keys k
+                                                  join pg_temp._bank_booking b on b.transfer_id = k.transfer_id
+                                                  where b.kind = 'payout_returned' and k.run_id is not null))
+                            and r.payout_account_id is not null))
+  order by a.id for no key update;
+  perform 1 from public.bank_account a
+  where a.id = any (array(
+          select t.bank_account_id from pg_temp._bank_booking b
+          cross join lateral (select q.bank_account_id from public.bank_transaction q
+                              where q.id = b.bank_transaction_id offset 0) t
+          union
+          select k.debtor_bank_account_id from pg_temp._bb_keys k
+          union
+          select k.creditor_bank_account_id from pg_temp._bb_keys k where k.creditor_bank_account_id is not null))
+  order by a.id for share;
+  drop table if exists pg_temp._bb_pay_locks;
+  create temp table _bb_pay_locks on commit drop as
+  select distinct y.payment_id
+  from pg_temp._bank_booking b
+  join pg_temp._bb_keys k on k.transfer_id = b.transfer_id
+  cross join lateral (select q.booking_date from public.bank_transaction q where q.id = b.bank_transaction_id offset 0) t
+  cross join lateral (select x.payment_id from public.remittance_line x
+                      where x.run_id = k.run_id and x.amount_minor > 0 and not x.released and x.payment_id is not null
+                        and x.latest_execution_date < t.booking_date offset 0) y
+  where b.kind = 'payout' and k.run_id is not null;
+  perform 1 from public.payment p
+  where p.id = any (array(select l.payment_id from pg_temp._bb_pay_locks l))
+  order by p.id for key share;
+  -- M2c-6b-2b (review CSR-1): a sweep's return too — every row whose posting reverses an entry (private.ledger_reverse
+  -- always takes `payments:`) takes it here, before the lines and `remit:`, the order every other writer takes them
+  if exists (select 1 from pg_temp._bank_booking b
+             where b.kind in ('payout', 'payout_returned', 'sweep_returned', 'unplanned_payout')) then
+    perform pg_advisory_xact_lock(hashtext('payments:' || p_organization_id::text));
+  end if;
+  perform 1 from public.bank_transaction t
+  where t.id = any (array(select b.bank_transaction_id from pg_temp._bank_booking b))
+  order by t.id for no key update;
+  if exists (select 1 from pg_temp._bank_booking) then
+    perform pg_advisory_xact_lock(hashtext('remit:' || p_organization_id::text));
+  end if;
+  perform 1 from public.transfer_file f
+  where f.id = any (array(select q.transfer_file_id from pg_temp._bb_keys k
+                          cross join lateral (select y.transfer_file_id from public.bank_transfer y
+                                              where y.id = k.transfer_id offset 0) q
+                          where q.transfer_file_id is not null))
+  order by f.id for share;
+  perform 1 from public.bank_transfer x
+  where x.id = any (array(select k.transfer_id from pg_temp._bb_keys k))
+  order by x.id for update;
+
+  -- The facts, read under the locks (one keyed lookup per row: laterals holding only the key).
+  drop table if exists pg_temp._bb;
+  create temp table _bb on commit drop as
+  select b.*, t.organization_id as line_org, t.bank_account_id as line_bank, t.direction, t.currency,
+         t.amount_minor as line_minor, t.booking_date as line_date, coalesce(dr.released_kind, t.kind) as line_kind,
+         (t.kind = 'suspected_duplicate' and dr.decision is distinct from 'released') as held,
+         t.counterparty_iban, t.end_to_end_id, coalesce(t.original_end_to_end_id, t.end_to_end_id) as returned_id,
+         t.payment_info_id, t.unsplit_ours,
+         (t.direction = 'debit' and t.end_to_end_id is null and t.payment_info_id is not null) as batch_line,
+         -- booked in the funds, or an own credit released as a relayed debtor payment (booked by its cash_in)
+         (exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = b.bank_transaction_id offset 0)
+          or exists (select 1 from public.bank_own_credit_release c
+                     where c.bank_transaction_id = b.bank_transaction_id offset 0)) as booked,
+         (select l.kind from public.bank_debit_link l where l.bank_transaction_id = b.bank_transaction_id) as link_kind,
+         coalesce((select -sum(p.amount_minor) from public.bank_debit_link l
+                   join public.ledger_posting p on p.entry_id = l.cash_entry_id
+                   where l.bank_transaction_id = b.bank_transaction_id and l.kind = 'return'
+                     and (select la.book from public.ledger_account la where la.id = p.ledger_account_id)
+                         = 'client_money_cash'), 0)::bigint as linked_minor,
+         x.organization_id as tr_org, x.kind as tr_kind, x.status as tr_status, x.creditor_bank_account_id as tr_creditor,
+         x.debtor_bank_account_id as tr_debtor, x.amount_minor as tr_minor, x.currency as tr_currency,
+         x.end_to_end_id as tr_e2e, x.transfer_file_id as tr_file, x.run_id as tr_run,
+         x.client_organization_id as tr_client, x.entry_id as tr_entry,
+         f.status as file_status, f.download_count as file_downloads,
+         (select i.pmt_inf_id from public.transfer_file_item i
+          where i.file_id = x.transfer_file_id and i.transfer_id = x.id) as tr_pmt_inf,
+         exists (select 1 from public.bank_line_booking k where k.transfer_id = b.transfer_id
+                   and k.kind in ('payout', 'sweep', 'top_up') offset 0) as tr_debit_booked,
+         exists (select 1 from public.bank_line_booking k where k.transfer_id = b.transfer_id
+                   and k.kind in ('payout_returned', 'sweep_returned') offset 0) as tr_return_booked,
+         -- M2c-6b-2a (plan §2.3; critic F1, L5; critic2 ML-3): for a return of a transfer of this servicer, an unplanned
+         -- booking of it whose entry is not reversed, and a debit line of it on a statement not booked beyond its booked
+         -- debit (each by key)
+         case when b.kind in ('payout_returned', 'sweep_returned') and x.organization_id = p_organization_id
+              then private.transfer_unplanned_open(b.transfer_id) end as tr_unplanned_open,
+         case when b.kind in ('payout_returned', 'sweep_returned') and x.organization_id = p_organization_id
+              then exists (select 1 from private.transfer_late_lines(b.transfer_id)) end as tr_debit_pending,
+         (select e.effective_date from public.ledger_entry e where e.id = x.entry_id) as tr_entry_date,
+         ru.status as run_status, ru.transfer_id as run_transfer, ru.payout_account_id as run_payout_account,
+         null::uuid as own_bank, null::bigint as book_minor, null::text as why
+  from pg_temp._bank_booking b
+  left join lateral (select q.organization_id, q.bank_account_id, q.direction, q.currency, q.amount_minor,
+                            q.booking_date, q.kind, q.counterparty_iban, q.end_to_end_id, q.original_end_to_end_id,
+                            q.payment_info_id, q.unsplit_ours
+                     from public.bank_transaction q where q.id = b.bank_transaction_id offset 0) t on true
+  left join lateral (select q.decision, q.released_kind from public.bank_duplicate_resolution q
+                     where q.bank_transaction_id = b.bank_transaction_id offset 0) dr on true
+  left join lateral (select q.organization_id, q.kind, q.status, q.creditor_bank_account_id, q.debtor_bank_account_id,
+                            q.amount_minor, q.currency, q.end_to_end_id, q.transfer_file_id, q.run_id,
+                            q.client_organization_id, q.entry_id, q.id
+                     from public.bank_transfer q where q.id = b.transfer_id offset 0) x on true
+  left join lateral (select q.status, q.download_count from public.transfer_file q where q.id = x.transfer_file_id
+                     offset 0) f on true
+  left join lateral (select q.status, q.transfer_id, q.payout_account_id from public.remittance_run q
+                     where q.id = x.run_id offset 0) ru on true;
+  -- review round 3 (M3): its size known to the planner (a temporary table is never analysed by autovacuum: unanalysed,
+  -- the rules' joins of _bb to itself were planned as nested loops over every pair of a batch line's rows)
+  analyze pg_temp._bb;
+  -- a top-up's own account: its transfer's, or (ops, no transfer) the registered own account the credit came from
+  update pg_temp._bb b set own_bank = coalesce(b.tr_debtor, (
+    select o.id from public.bank_account o
+    where o.organization_id = b.line_org and o.purpose = 'own' and o.status = 'active' and o.iban = b.counterparty_iban
+      and o.currency = b.currency))
+  where b.kind = 'top_up';
+  update pg_temp._bb b set book_minor = case when b.kind = 'loss' then b.amount_minor
+                                             when b.kind in ('payout', 'sweep', 'payout_returned', 'sweep_returned')
+                                               then b.tr_minor
+                                             else b.line_minor end
+  where b.bank_transaction_id is not null;
+
+  update pg_temp._bb b set why = case
+    when b.line_org is distinct from p_organization_id then 'line_unknown'
+    when b.held then 'held_duplicate'
+    when b.booked then 'already_booked'
+    when b.method = 'ops' and nullif(btrim(b.reason), '') is null then 'reason_required'
+    when b.kind = 'fee' then case
+      when b.link_kind is not null then 'already_linked'
+      -- an other debit only: our own transfers out are booked as sweeps and payouts or left to ops, never as fees
+      -- (M2c-1 review: a withdrawal to the own account read as a bank fee); M2c-6b-1: nor a line carrying our RMT/SWP
+      -- id or one of our PmtInfIds (plan §2.2)
+      when b.direction <> 'debit' or b.line_kind <> 'other_debit' then 'not_a_fee'
+      -- (review round 3, M2: its OWN id only, never the original it names — a bank charge naming our payout or sweep,
+      -- e.g. the payee's bank's charge on a payout it sent back, is a charge on our account, the servicer's cost, booked
+      -- as a fee as the job books every coded charge (CHRG/FEES) whatever its original id; ADR-0014)
+      when b.end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$'
+           or (b.batch_line and b.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$') then 'not_a_fee'
+      when b.transfer_id is not null or b.amount_minor is not null then 'bad_request' end
+    when b.kind = 'top_up' then case
+      -- review round 3 (M2, round 2's L4): never one of our payouts' or sweeps' lines — a credit carrying our RMT/SWP
+      -- id as its own or as the original it returns (a sweep back from the own IBAN that the feed did not flag as a
+      -- return: a CSV label missing RETURN_RE reads it own_transfer_in), as the loss rule below; such a credit is
+      -- booked from the statement as that transfer's return (sweep_returned), never as a top-up. Nor (integration of
+      -- round 3, as public.release_own_credit reads a credit) a line naming one of our PmtInfIds without an end-to-end
+      -- id, whatever its direction: our batch line, or a lot of one of our files coming back as one credit (a top-up is
+      -- never in a file: our TOP id, typed in the bank)
+      -- Review round 7: (S3, verdict new:own-client-credit-naming-our-lot-relay-top-up) nor a credit naming one of our
+      -- lots of its account (private.names_our_lot: a file of that account handed out) whatever its end-to-end id — our
+      -- outgoing transfer coming back (a top-up is never in a file of this dedicated account: its lot would be a file of
+      -- the own account); (S2) nor a line of an entry kept unsplit holding a detail of ours
+      when coalesce(b.end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+           or coalesce(b.returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+           or (b.end_to_end_id is null and coalesce(b.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$', false))
+           or coalesce(b.unsplit_ours, 0) > 0
+           or (b.direction = 'credit' and private.names_our_lot(b.line_bank, b.payment_info_id))
+        then 'own_transfer_line'
+      when b.link_kind is not null then 'already_linked'
+      when b.direction <> 'credit' or b.line_kind <> 'own_transfer_in' then 'not_an_own_credit'
+      when b.amount_minor is not null then 'bad_request'
+      when b.transfer_id is not null and (b.tr_org is distinct from p_organization_id or b.tr_kind <> 'top_up'
+                                          or b.tr_creditor is distinct from b.line_bank) then 'transfer_unknown'
+      when b.transfer_id is not null and b.tr_status <> 'ordered' then 'transfer_not_pending'
+      when b.transfer_id is not null and (b.tr_minor <> b.line_minor or b.tr_currency <> b.currency) then 'amount_differs'
+      when b.own_bank is null then 'own_account_unknown' end
+    when b.kind = 'loss' then case
+      -- review round 2 (L4, money-1's defence in depth): never one of our payouts' or sweeps' lines — a line carrying our
+      -- RMT/SWP id as its own or as the original it returns, or a batch line of one of our PmtInfIds — whatever kind the
+      -- statement gives it: as for every other link (private.post_debit_links), such a line is only booked
+      -- (review round 7, S2: or a line of an entry kept unsplit holding a detail of ours, whose ids are not on its line)
+      when coalesce(b.end_to_end_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+           or coalesce(b.returned_id ~ '^(RMT|SWP)[0-9A-F]{12}$', false)
+           or (b.batch_line and b.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$')
+           or coalesce(b.unsplit_ours, 0) > 0 then 'own_transfer_line'
+      when b.direction <> 'debit' or b.line_kind <> 'return' then 'not_a_return'
+      when b.link_kind is not null and b.link_kind <> 'return' then 'already_linked'
+      when b.transfer_id is not null or b.amount_minor is null or b.amount_minor <= 0 then 'bad_request'
+      when b.amount_minor + b.linked_minor <> b.line_minor then 'amount_differs' end
+    when b.kind in ('payout', 'sweep') then case
+      when b.amount_minor is not null or b.client_organization_id is not null then 'bad_request'
+      when b.link_kind is not null then 'already_linked'
+      when b.direction <> 'debit' or b.line_kind not in ('transfer_out', 'other_debit', 'batch_unsplit')
+        then 'not_a_transfer_line'
+      when b.transfer_id is null or b.tr_org is distinct from p_organization_id or b.tr_kind is distinct from b.kind
+        then 'transfer_unknown'
+      -- own id first (plan §2.4 rule 1): a line carrying an end-to-end id is that id's transfer only — a re-issue is
+      -- never booked by its predecessor's id; a batch line names the transfer's PmtInf in its current file (rule 2)
+      when not coalesce(b.end_to_end_id = b.tr_e2e or (b.batch_line and b.payment_info_id = b.tr_pmt_inf), false)
+        then 'not_its_line'
+      when b.tr_status = 'cancelled' then 'cancelled_transfer_debited'
+      when b.tr_status in ('booked', 'returned') or b.tr_debit_booked then 'transfer_debited_twice'
+      when b.tr_status <> 'in_file' or coalesce(b.file_downloads, 0) = 0
+           or b.file_status not in ('downloaded', 'sent') then 'transfer_not_handed_out'
+      when b.tr_debtor is distinct from b.line_bank or b.tr_currency is distinct from b.currency then 'transfer_differs'
+      when not b.batch_line and b.tr_minor <> b.line_minor then 'transfer_differs'
+      when b.kind = 'payout' and (b.run_status is null or b.run_status not in ('approved', 'sent')
+                                  or b.run_transfer is distinct from b.transfer_id) then 'run_not_in_flight'
+      -- review round 7 (S2, verdict new:debit-entry-unsplit-with-our-details-explainable): never from an entry the bank
+      -- kept unsplit holding a detail of ours — by the id its one detail gives (one shown of several: the entry's total)
+      -- nor as a batch line whose details are given but do not add up (payments.debits; COMPLIANCE OQ-84 (h)); a batch
+      -- line the bank sent with no details (a count of 0) keeps the batch rule
+      when coalesce(b.unsplit_ours, 0) > 0 or (not b.batch_line and b.unsplit_ours is not null) then 'batch_partial' end
+    when b.kind in ('payout_returned', 'sweep_returned') then case
+      when b.amount_minor is not null or b.client_organization_id is not null then 'bad_request'
+      when b.link_kind is not null then 'already_linked'
+      when b.direction <> 'credit' or b.line_kind <> 'return' then 'not_a_return'
+      when b.transfer_id is null or b.tr_org is distinct from p_organization_id
+           or b.tr_kind is distinct from case b.kind when 'payout_returned' then 'payout' else 'sweep' end
+        then 'transfer_unknown'
+      when b.returned_id is distinct from b.tr_e2e then 'not_its_line'
+      when b.tr_status in ('ordered', 'in_file') then 'return_before_debit'
+      -- M2c-6b-2a (critic F1, L5): a copy coming back of a transfer that has an open unplanned booking (a booked or
+      -- returned transfer executed again, a cancelled one executed late) is that unplanned payout's return, booked by ops
+      -- (6b-2b): booked here as the planned payout's, it would pay the client again
+      when b.tr_unplanned_open then 'unplanned_payout_return'
+      -- (critic2 ML-3) a second or late debit of it on a statement, not booked yet: that debit is booked first
+      when b.tr_debit_pending then 'return_debit_pending'
+      when b.tr_status = 'returned' or b.tr_return_booked then 'already_returned'
+      when b.tr_status <> 'booked' or not b.tr_debit_booked or b.tr_entry is null then 'return_differs'
+      when b.tr_debtor is distinct from b.line_bank or b.tr_currency is distinct from b.currency then 'transfer_differs'
+      when b.line_minor > b.tr_minor then 'return_differs'
+      -- review round 6 (R1, a regression of round 5): a line read from a camt.053 entry kept unsplit carries the
+      -- entry's total, not this transfer's return — less than the transfer is never its return with the rest as the
+      -- bank's charge (the round-5 verifier's netted entry: our payout's return beside another payout's debit booked
+      -- that debit as our bank fee; or a chargeback), nor any amount with several details of ours (the first one's id
+      -- only what the refusals read). Review round 7 (S1, verdict new:unsplit-exact-total-other-details): nor with one
+      -- detail of ours for the transfer's exact amount — the entry's other details (a debtor's credit, netting debits),
+      -- a detail of ours short of the entry or shown alone of several, are not ours to read: never booked
+      -- (payments.debits). A detail of ours that is the whole entry is a line of its own (payments.camt053)
+      when b.unsplit_ours is not null then 'return_differs'
+      when b.line_date < b.tr_entry_date then 'return_before_debit' end
+    -- the unplanned kinds are ops' (M2c-6b-2: public.book_transfer_line)
+    else 'bad_request'
+  end
+  where b.bank_transaction_id is not null;  -- (every row: PostgREST sessions refuse an UPDATE without WHERE)
+
+  -- A line is one kind of booking (the job's): a payout, sweep or return line holds nothing else. Review round 3 (M3):
+  -- per line, aggregated once (two kinds or more, one of them ours) — the same lines as « another row of the line of
+  -- another kind, one of the two ours », which, as a correlated EXISTS, hashed a batch line's N rows into one bucket
+  -- and compared every pair (25 million join-filter rows at 5,000 members).
+  update pg_temp._bb b set why = 'bad_request'
+  from (select o.bank_transaction_id from pg_temp._bb o
+        group by o.bank_transaction_id
+        having count(distinct o.kind) > 1
+           and bool_or(o.kind in ('payout', 'sweep', 'payout_returned', 'sweep_returned'))) k
+  where b.why is null and b.bank_transaction_id = k.bank_transaction_id;
+  -- A batch line (plan §2.3 row 3, §2.4 rule 2): booked only for exactly the in_file members of the PmtInf it names, in
+  -- its file of the line's account (the members that file holds), none cancelled (but returned), of one kind, adding up
+  -- to the line — never a « best subset ». The members are read under their locks.
+  -- Linear whatever the line's size (review round 2, P1): each step is MATERIALIZED, so it runs once — the lines, the
+  -- rows each line holds, the members of each line's PmtInf by keyed laterals (each item, file and transfer read
+  -- once), then the verdict per line. (As one grouped subquery joined to the rows, the planner re-ran it once per row
+  -- of the line: 150 members read 23,250 items and ~25,000 transfers.) Review round 3 (M3): the members aggregated per
+  -- line first (a), then compared with the line's rows (w) — never an array growing with the line in a sort or group
+  -- key (grouped by the array of the line's N transfer ids, each of the N joined rows carried it into the sort: N² bytes,
+  -- 392 MB of temporary files at 5,000 members).
+  with l as materialized (
+    select distinct o.bank_transaction_id, o.line_bank, o.payment_info_id, o.line_minor from pg_temp._bb o
+    where o.batch_line and o.kind in ('payout', 'sweep') and o.why is null),
+  r as materialized (   -- every row the line holds (the job's, whatever their verdict)
+    select o.bank_transaction_id, array_agg(o.transfer_id order by o.transfer_id) as ids
+    from pg_temp._bb o
+    where o.bank_transaction_id in (select l.bank_transaction_id from l)
+    group by o.bank_transaction_id),
+  m as materialized (
+    select l.bank_transaction_id, t.id, t.kind, t.status, t.amount_minor, fl.download_count, fl.status as file_status,
+           case when t.status = 'cancelled' then private.transfer_return_seen(t.id) else false end as returned
+    from l
+    cross join lateral (select y.file_id, y.transfer_id from public.transfer_file_item y
+                        where y.pmt_inf_id = l.payment_info_id offset 0) i
+    cross join lateral (select q.debtor_bank_account_id, q.status, q.download_count from public.transfer_file q
+                        where q.id = i.file_id offset 0) fl
+    cross join lateral (select q.id, q.kind, q.status, q.amount_minor, q.transfer_file_id from public.bank_transfer q
+                        where q.id = i.transfer_id offset 0) t
+    where fl.debtor_bank_account_id = l.line_bank and t.transfer_file_id = i.file_id),
+  a as materialized (   -- each line's members, aggregated once (grouped by the line's key only)
+    select l.bank_transaction_id, l.line_minor, count(m.id) as members,
+           bool_or(m.status = 'cancelled' and not m.returned) as cancelled_unreturned,
+           bool_and(m.status = 'in_file' and (coalesce(m.download_count, 0) = 0
+                                              or m.file_status not in ('downloaded', 'sent'))) as none_handed_out,
+           count(m.id) filter (where m.status = 'in_file') as live,
+           count(distinct m.kind) filter (where m.status = 'in_file') as live_kinds,
+           bool_or(m.status = 'in_file' and m.kind = 'refund') as live_refund,
+           coalesce(sum(m.amount_minor) filter (where m.status = 'in_file'), 0) as live_minor,
+           array_agg(m.id order by m.id) filter (where m.status = 'in_file') as live_ids
+    from l
+    left join m on m.bank_transaction_id = l.bank_transaction_id
+    group by l.bank_transaction_id, l.line_minor),
+  w as materialized (   -- the verdict per line: one row of a, compared with the one row of r
+    select a.bank_transaction_id,
+           case
+             when a.members = 0 then 'transfer_unknown'
+             when a.cancelled_unreturned then 'cancelled_transfer_debited'
+             when a.none_handed_out then 'transfer_not_handed_out'
+             when a.live = 0 then 'transfer_debited_twice'
+             when a.live_kinds > 1 or a.live_refund then 'batch_mixed'
+             when a.live_minor <> a.line_minor then 'batch_partial'
+             when a.live_ids is distinct from r.ids then 'batch_incomplete'
+           end as why
+    from a
+    left join r on r.bank_transaction_id = a.bank_transaction_id)
+  update pg_temp._bb b set why = w.why
+  from w
+  where b.bank_transaction_id = w.bank_transaction_id and b.why is null and w.why is not null;
+  -- a transfer booked once per call (a later line waits: ops, or the next run): a row whose transfer an earlier row
+  -- still accepted, of another line, books the same way (a debit, or a return). Review round 3 (M3): counted by a
+  -- window over the accepted rows, by the transfer's key (as a correlated EXISTS over the unanalysed _bb, a nested loop
+  -- compared every pair of a batch line's rows: 25 million at 5,000 members).
+  update pg_temp._bb b set why = 'transfer_twice'
+  from (select o.ord,
+               count(*) over (partition by o.transfer_id, o.returns order by o.ord
+                              rows between unbounded preceding and 1 preceding) as before_any,
+               count(*) over (partition by o.transfer_id, o.returns, o.bank_transaction_id order by o.ord
+                              rows between unbounded preceding and 1 preceding) as before_here
+        from (select x.ord, x.transfer_id, x.bank_transaction_id,
+                     x.kind in ('payout_returned', 'sweep_returned') as returns
+              from pg_temp._bb x where x.why is null and x.transfer_id is not null) o) w
+  where b.ord = w.ord and w.before_any > w.before_here and b.why is null;
+  -- one refused row refuses its line (a line is booked whole)
+  update pg_temp._bb b set why = w.why
+  from (select distinct on (o.bank_transaction_id) o.bank_transaction_id, o.why from pg_temp._bb o
+        where o.why is not null order by o.bank_transaction_id, o.ord) w
+  where b.bank_transaction_id = w.bank_transaction_id and b.why is null;
+end;
+$$;
+
+-- private.post_bank_bookings, redefined from 20261117100000_transfer_line_ops.sql (line 3198, its latest definition; the
+-- same signature, settings and results, its grants restated below). CI round (PR #38): its re-check, from the keys to
+-- the last verdict, runs in private.bank_booking_recheck (above, moved there verbatim) under enable_seqscan off; the
+-- rest of the body is unchanged. Only the plans change.
+create or replace function private.post_bank_bookings(p_organization_id uuid, p_strict boolean)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_why record;
+  v_l record;
+  v_state text;
+  v_msg text;
+begin
+  -- the re-check — the keys, the locks, the facts and the verdicts — under enable_seqscan off (CI round, PR #38)
+  perform private.bank_booking_recheck(p_organization_id);
+
+  select b.why into v_why from pg_temp._bb b where b.why is not null order by b.ord limit 1;
+  if found and p_strict then
+    if v_why.why = 'own_transfer_line' then
+      raise exception 'bank booking refused: %', v_why.why using errcode = 'check_violation',
+        hint = private.own_transfer_line_hint('bank_booking');
+    end if;
+    raise exception 'bank booking refused: %', v_why.why using errcode = 'check_violation';
+  end if;
+  insert into pg_temp._booking_skipped (bank_transaction_id, why)
+  select distinct on (b.bank_transaction_id) b.bank_transaction_id, b.why from pg_temp._bb b where b.why is not null
+  order by b.bank_transaction_id, b.ord
+  on conflict (bank_transaction_id) do update set why = excluded.why;
+  delete from pg_temp._bb b where b.why is not null;
+  analyze pg_temp._bb;
+
+  if p_strict then
+    begin
+      perform private.bank_booking_post_rows(p_organization_id);
+    exception when others then
+      get stacked diagnostics v_state = returned_sqlstate, v_msg = message_text;
+      if v_state like 'LG%' or v_state like '22%' or v_state like '23%' then
+        raise exception 'bank booking refused: posting_failed (%: %)', v_state, left(v_msg, 500)
+          using errcode = 'check_violation';
+      end if;
+      raise;
+    end;
+  elsif exists (select 1 from pg_temp._bb) then
+    begin
+      perform private.bank_booking_post_rows(p_organization_id);   -- the whole chunk at once
+    exception when others then
+      get stacked diagnostics v_state = returned_sqlstate;
+      if not (v_state like 'LG%' or v_state like '22%' or v_state like '23%') then
+        raise;
+      end if;
+      -- a line the posting refuses: each LINE tried alone with all its rows (always rolled back), the refused ones to
+      -- ops, then the others together
+      drop table if exists pg_temp._bb_all;
+      create temp table _bb_all on commit drop as select * from pg_temp._bb;
+      for v_l in select a.bank_transaction_id from pg_temp._bb_all a group by a.bank_transaction_id
+               order by min(a.ord) loop
+        begin
+          delete from pg_temp._bb b where b.bank_transaction_id is not null;
+          insert into pg_temp._bb select * from pg_temp._bb_all a where a.bank_transaction_id = v_l.bank_transaction_id;
+          perform private.bank_booking_post_rows(p_organization_id);
+          raise exception 'bank booking tried' using errcode = 'BB000';
+        exception when others then
+          get stacked diagnostics v_state = returned_sqlstate, v_msg = message_text;
+          if v_state <> 'BB000' then
+            if not (v_state like 'LG%' or v_state like '22%' or v_state like '23%') then
+              raise;
+            end if;
+            insert into pg_temp._booking_failed (bank_transaction_id, detail)
+            values (v_l.bank_transaction_id, left(v_state || ': ' || v_msg, 2000))
+            on conflict (bank_transaction_id) do nothing;
+          end if;
+        end;
+      end loop;
+      delete from pg_temp._bb b where b.bank_transaction_id is not null;
+      insert into pg_temp._bb select * from pg_temp._bb_all a
+      where not exists (select 1 from pg_temp._booking_failed f where f.bank_transaction_id = a.bank_transaction_id);
+      if exists (select 1 from pg_temp._bb) then
+        perform private.bank_booking_post_rows(p_organization_id);
+      end if;
+    end;
+  end if;
+
+  -- M2c-1's counts, then (only when some were posted) the debits' bookings
+  return jsonb_build_object(
+    'fees', (select count(*) from pg_temp._bb where kind = 'fee'),
+    'top_ups', (select count(*) from pg_temp._bb where kind = 'top_up'),
+    'losses', (select count(*) from pg_temp._bb where kind = 'loss'),
+    'skipped', (select count(*) from pg_temp._booking_skipped),
+    'failed', (select count(*) from pg_temp._booking_failed))
+    || jsonb_strip_nulls(jsonb_build_object(
+         'payouts', (select nullif(count(*), 0) from pg_temp._bb where kind = 'payout'),
+         'sweeps', (select nullif(count(*), 0) from pg_temp._bb where kind = 'sweep'),
+         'returns', (select nullif(count(*), 0) from pg_temp._bb where kind in ('payout_returned', 'sweep_returned')),
+         'advances', (select nullif(count(*), 0) from pg_temp._bb_cover)));
+end;
+$$;
+
+-- the new internal (PostgreSQL grants EXECUTE to PUBLIC by default): only private.post_bank_bookings calls it; the
+-- redefined one as 20261117100000 left it (called by private.apply_bank_bookings and the commands only)
+revoke execute on function private.bank_booking_recheck(uuid), private.post_bank_bookings(uuid, boolean)
   from public, anon, authenticated, service_role;
