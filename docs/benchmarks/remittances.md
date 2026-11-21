@@ -1378,3 +1378,54 @@ priced at 1,000 pages, where the old body's facts handled 8.0 million rows.
   job **19.1 s** in chunks of 7.9, 7.3 and 3.6 s (round 1: 18.1 s; 7.7, 6.9, 3.4 s); the nightly checks 1.14 s (1.03 s
   warm; `run_remittance_runs_checks` 0.22 s); 200 members 0.52 s; 200 RMT debits' job 0.60 s. Within the run-to-run
   spread of the earlier rounds (19.1 to 26.4 s for the funds pass, 18.1 to 23.0 s for the debit job): no timing changed.
+
+### M2c-6b-3b part 2: the held-rows alert, the booking guard keyed (2026-11-21, same VM, the main stack alone, each run right after `supabase db reset`)
+
+What the slice changes on a timed path: the nightly checks read the booked branch's runs through
+`private.remittance_booked_chain_runs` (its CTEs moved there unchanged) and, in the results' statement, the held rows'
+alert (`private.remittance_breach_held`: the same runs again, then, for a run with a late line still without a row, the
+holds' facts per date held to and the uncovered days one by one) — only chained runs reach the second read; the booking
+guard (`private.bank_line_booking_guard()`, a statement trigger on every booking) runs under `enable_seqscan = off`
+with its one join read by key. The db suite's 2,000-member batch line posted in one statement, a probe priced at 1,000
+pages and the guard's tables' statistics forgotten: the guard's statement **48,001 rows** (the old body 36,258,001;
+`enable_seqscan = off` alone 12,052,001).
+
+- `test_transfer_cancellation_scale_integration.py`: **1 passed** (51.4 s) — set-up 38.9 s; the confirmation 0.12 s; the
+  evidence of the 5,000-transfer file 0.41 s (one transfer 0.097 s); its page 0.52 s; generation with the holds 2.64 s
+  (20 held, 5,021 in the file); the nightly checks **0.67 s** (86,520 `bank_transfer` rows read; part 1 round 1: 0.80 s);
+  the late predecessor's options 0.05 s, its booking **1.84 s** (part 1 round 1: 1.94 s).
+- `test_remittance_scale_integration.py` (50,000 lines; the nightly checks with a booked run): **1 passed** (262.1 s) —
+  reserved 1.12 s, prepared 9.9 s; nightly checks 4.0 s (the draft waiting 3.6 s); cancellation 3.30 s; the re-run
+  prepared and approved 26.1 s, its payout filed, downloaded, debited and booked 1.0 s; the nightly checks with the run
+  booked **4.4 s** (4.70 s warm; part 1 round 1: 4.4 s) — `run_payment_checks` 2.5 s, `commission_key_open` (50,000
+  calls) 1.1 s, `run_remittance_runs_checks` 0.31 s.
+- `test_debit_bookings_scale_integration.py`: **5 passed** (812.0 s) — « Générer le fichier » for 5,000 payouts (+50
+  cancelled) 3.35 s; the 5,000-member batch line's funds pass **23.1 s** (22.2 s under auto_explain); 5,000 RMT debits
+  imported in 1.3 s, the debit job **20.5 s** in chunks of 8.1, 7.9 and 4.2 s (each posting its bookings through the
+  guard); the nightly checks **1.06 s** (0.92 s warm; `run_remittance_runs_checks` 0.21 s); 200 members 0.52 s; 200 RMT
+  debits' job 0.68 s. Within the run-to-run spread of the earlier rounds (19.1 to 26.4 s for the funds pass, 18.1 to
+  23.0 s for the debit job).
+
+### M2c-6b-3b part 2, review round 1: the funds pass's posting under enable_seqscan off (2026-11-21, same VM, the main stack alone, each run right after `supabase db reset`)
+
+What the round changes on a timed path: `private.bank_booking_post_rows` (the funds pass's posting: entries, bookings,
+transfers, runs, R124-6 rows) runs under `enable_seqscan = off` (its body unchanged), and so do the statements its
+triggers run (the booking guard inherits it). It was found by the guard's test once that test stores a first batch
+line: the posting's last-seq read of `bank_line_booking`, a correlated subquery per new booking, read the table whole
+per row when priced below a probe — **4,024,001 rows** for the second 2,000-member line (2,000 stored rows each time);
+now a probe of the primary key, the statement within its bound. The alert's texts changed, not its SQL.
+
+- `test_transfer_cancellation_scale_integration.py`: **1 passed** (49.8 s) — set-up 37.7 s; the evidence of the
+  5,000-transfer file 0.39 s; generation with the holds 2.82 s (20 held, 5,021 in the file); the nightly checks
+  **0.50 s** (86,520 `bank_transfer` rows read; part 2: 0.67 s); the late predecessor's options 0.03 s, its booking
+  **1.44 s** (part 2: 1.84 s).
+- `test_remittance_scale_integration.py` (50,000 lines): **1 passed** (258.5 s) — prepared 9.3 s; nightly checks 3.9 s
+  (the draft waiting 3.6 s); cancellation 3.51 s; the re-run prepared and approved 26.5 s, booked 0.8 s; the nightly
+  checks with the run booked **4.7 s** (4.23 s warm; part 2: 4.4 s) — `run_payment_checks` 3.0 s, `commission_key_open`
+  (50,000 calls) 1.1 s, `run_remittance_runs_checks` 0.35 s.
+- `test_debit_bookings_scale_integration.py`: **5 passed** (802.0 s) — « Générer le fichier » for 5,000 payouts (+50
+  cancelled) 2.79 s; the 5,000-member batch line's funds pass **21.6 s** (21.8 s under auto_explain, the same heaviest
+  statements as before: the ledger's own `_lps_dim` and `_lps_x`); 5,000 RMT debits imported in 1.2 s, the debit job
+  **19.4 s** in chunks of 8.1, 7.7 and 3.5 s; the nightly checks **1.29 s** (1.23 s warm; `run_remittance_runs_checks`
+  0.30 s); 200 members 0.46 s; 200 RMT debits' job 0.60 s. Within the earlier rounds' spread (19.1 to 26.4 s for the
+  funds pass, 18.1 to 23.0 s for the debit job).

@@ -1103,6 +1103,7 @@ One bad line never stops the job (M2b-6 #14). Refund debits keep their single M2
 - `document_missing` (> 1 hour);
 - `vat_pack_review` (from 2026-12-01);
 - `calendar_horizon` (< 12 months seeded);
+- M2c-6b-3b part 2: `remittance_breach_held` (a booked run whose payout chain holds another transfer, its R124-6 row waiting for the statements of the days in question or for a line that may be another transfer's debit; ADR-0014 « M2c-6b-3b part 2 », CPCE-08);
 - M2c-4 review: `remittance_payout_not_executed` (an approved or sent run not booked past its requested execution date), `remittance_deadline_not_computable` (an encaissement date outside the seeded calendar), `remittance_schedule_failed` (the hourly schedule could not draft a client, or its job failed for good); an unmeetable delay's one-month dates raise `remittance_due_soon`, `remittance_due_critical` and `remittance_deadline_breached`.
 
 ---

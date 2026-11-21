@@ -10,7 +10,8 @@ import {
   type Notification,
   notificationState,
 } from "@/lib/payments/allocation";
-import type { Tone } from "@/lib/payments/statements";
+import { frenchDate } from "@/lib/payments/bank-accounts";
+import { type Tone, money } from "@/lib/payments/statements";
 
 /**
  * M2b-6: money leaving the client-funds account, on the back-office. Bank returns and chargebacks (the payment's
@@ -1100,6 +1101,16 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Reversement validé non débité après la date limite",
     help: "La dernière date d'exécution de certains encaissements d'un reversement validé est passée (art. R124-6 CPCE) et son débit n'est pas comptabilisé : vérifiez que le virement a été transmis et exécuté. Si le relevé montre ce débit sans sa référence, ou dans une ligne groupée d'un autre montant, la ligne attend dans « Débits et retours ». Le dépassement est enregistré aussitôt pour un virement jamais remis à la banque (encore à mettre dans un fichier, ou dans un fichier jamais téléchargé) ; sinon, une fois les relevés de cette date importés sans aucune ligne qui puisse être ce débit.",
   },
+  // M2c-6b-3b part 2 (CPCE-08; founder question 2 of « M2c-6b-3b part 1 », its default): a booked run whose payout chain
+  // holds another transfer, whose R124-6 row waits for the statements or a line's classification
+  // (private.remittance_breach_held) — the row details' days and lines are worded by breachHeldHelp. Review round 1:
+  // a statement counts for a day only once established after that day's end (dt-1, private.statement_covers); a line
+  // « Comptabiliser… » does not propose as that transfer stops holding the record after the bound days, though it may
+  // still wait in « Débits et retours » (dt-2, private.remittance_chain_holds)
+  remittance_breach_held: {
+    label: "Dépassement de délai non encore enregistré",
+    help: "D'après les relevés importés, ce reversement a été payé après la dernière date d'exécution de certains de ses encaissements (art. R124-6 CPCE), mais un autre virement émis pour ce reversement (le virement annulé après téléchargement, ou celui qui l'a remplacé) a pu les payer à temps : le dépassement n'est pas encore enregistré. Il le sera, s'il est avéré, au prochain contrôle une fois que les relevés du compte de fonds de tiers couvrent chaque jour ouvré en cause et qu'aucune ligne qui peut être le débit de cet autre virement ne retient plus l'enregistrement (une ligne que « Comptabiliser… » ne propose pas comme ce virement cesse de le retenir quelques jours ouvrés après sa date) : selon le cas, importez les relevés manquants, établis après la fin des jours en cause, ou classez dans « Débits et retours » la ligne en attente ; l'alerte cesse alors.",
+  },
   remittance_payout_not_executed: {
     label: "Reversement non exécuté à la date demandée",
     help: "La date d'exécution demandée d'un reversement validé est passée et son débit n'est pas comptabilisé : vérifiez la transmission du fichier de virements à la banque.",
@@ -1363,11 +1374,100 @@ function checkHelpOn(code: string, details: Record<string, unknown> | null | und
   return "Un relevé montre le débit, ou un débit sans nos références qui peut l'être, du virement qu'il remplace (exécuté plus tard malgré tout) : ce virement reste hors des fichiers pour ne pas payer deux fois. Ne refaites aucun virement. S'il est déjà dans un fichier téléchargé, demandez à la banque de ne pas l'exécuter : un débit sans nos références de son montant peut aussi être sa propre exécution — « Comptabiliser… » le propose alors comme son débit —, et l'annulation de ce fichier est refusée tant que ce débit n'est ni comptabilisé ni classé. Sinon, voyez ce débit dans « Débits et retours » ; s'il ne peut pas y être comptabilisé, demandez à la banque le détail de ce débit et prévenez le support.";
 }
 
+/** A waiting line as « remittance_breach_held »'s details name it (private.remittance_breach_held). */
+type HeldLine = { booking_date?: unknown; amount_minor?: unknown; currency?: unknown; end_to_end_id?: unknown };
+
+const HELD_DAYS_NAMED = 10;
+const HELD_LINES_NAMED = 3;
+
+/** « et 2 autres », « et 1 autre ligne »… after a list cut short; empty when nothing was cut. */
+function andOthers(rest: number, noun = ""): string {
+  if (rest <= 0) return "";
+  const s = rest > 1 ? "s" : "";
+  return noun ? ` et ${rest} autre${s} ${noun}${s}` : ` et ${rest} autre${s}`;
+}
+
+/**
+ * M2c-6b-3b part 2 (CPCE-08): the help of « remittance_breach_held » from its row's details — the label's own text,
+ * then what holds the row back: the business days no imported statement covers yet (`uncovered_days`, the first ten
+ * named, `uncovered_count` all of them; a statement counts for a day only once established after its end — review
+ * round 1, dt-1), a break in the balances of two imported statements (`balance_break`), or the lines that may be
+ * another transfer's debit (`waiting`, the first three named, `waiting_count` all of them; each stops holding
+ * `bound_days` business days after its date when « Comptabiliser… » does not propose it as that transfer; several
+ * lines are each told what to do — tests-ui-4). Neither: the facts moved while the check ran, and the next one judges
+ * the run again. Dates and amounts
+ * are the row's (the statements' and the ledger's), never computed here; the alert gives no deadline of its own.
+ */
+export function breachHeldHelp(details: Record<string, unknown> | null | undefined): string {
+  const base = CHECK_LABEL.remittance_breach_held.help;
+  const days = Array.isArray(details?.uncovered_days)
+    ? details.uncovered_days.filter((d): d is string => typeof d === "string")
+    : [];
+  const lines: HeldLine[] = Array.isArray(details?.waiting) ? (details.waiting as HeldLine[]) : [];
+  const parts: string[] = [];
+  if (days.length > 0) {
+    const total = typeof details?.uncovered_count === "number" ? details.uncovered_count : days.length;
+    const named = days.slice(0, HELD_DAYS_NAMED);
+    // review round 1 (dt-1): a day is named when no imported statement covers it (private.statement_covers) — also
+    // when a statement of that day is imported but established during it, or is a CSV ending on it: never « missing »
+    const list = named.map((d) => frenchDate(d)).join(", ");
+    parts.push(
+      `Aucun relevé importé du compte de fonds de tiers ne couvre encore les jours ouvrés suivants : ${list}${andOthers(total - named.length)}. Importez un relevé de ces jours établi par la banque après leur fin : un relevé établi pendant l'un d'eux ne compte pas pour ce jour, ni le dernier jour d'un export CSV (exportez jusqu'au jour suivant).`,
+    );
+  }
+  if (details?.balance_break === true)
+    parts.push(
+      "Deux relevés importés de la période ne se suivent pas (le solde d'ouverture de l'un ne reprend pas le solde de clôture du précédent) : importez le relevé manquant entre eux.",
+    );
+  if (lines.length > 0) {
+    const total = typeof details?.waiting_count === "number" ? details.waiting_count : lines.length;
+    const shown = lines.slice(0, HELD_LINES_NAMED);
+    const named = shown
+      .map((w) => {
+        const date = typeof w.booking_date === "string" ? frenchDate(w.booking_date) : "?";
+        const amount = money(
+          typeof w.amount_minor === "string" ? w.amount_minor : null,
+          typeof w.currency === "string" ? w.currency : "EUR",
+        );
+        const ref = typeof w.end_to_end_id === "string" ? ` ${w.end_to_end_id}` : "";
+        return `la ligne du ${date} de ${amount}, qui peut être le débit du virement${ref}`;
+      })
+      .join(" ; ");
+    const bound = typeof details?.bound_days === "number" ? details.bound_days : null;
+    // review round 1 (tests-ui-4): several lines — the instruction for each, each line's own transfer
+    const several = total > 1;
+    const what = several
+      ? "pour chacune, comptabilisez-la (« Comptabiliser… ») si c'est le débit du virement en cause, sinon classez-la pour ce qu'elle est."
+      : "comptabilisez-la (« Comptabiliser… ») si c'est le débit de ce virement, sinon classez-la pour ce qu'elle est.";
+    const s = bound !== null && bound > 1 ? "s" : "";
+    parts.push(
+      `Classez dans « Débits et retours » ${named}${andOthers(total - shown.length, "ligne")} : ${what}${
+        bound !== null
+          ? ` Une ligne que « Comptabiliser… » ne propose pas comme ${several ? "le virement en cause" : "ce virement"} cesse de retenir l'enregistrement ${bound} jour${s} ouvré${s} après sa date : si rien d'autre ne le retient, le dépassement est alors enregistré « bloqué : débit possible non comptabilisé ».`
+          : ""
+      }`,
+    );
+  }
+  if (parts.length === 0)
+    parts.push(
+      "Les relevés ou les lignes en cause ont changé pendant le contrôle : le reversement sera réexaminé au prochain contrôle.",
+    );
+  return `${base} ${parts.join(" ")}`;
+}
+
+/** « le plus ancien : N jour(s) », a check result's oldest age on « Contrôles » (review round 1 of M2c-6b-3b part 2,
+ *  tests-ui-5: its noun agreeing with its number). */
+export function checkOldestDays(n: number): string {
+  return `le plus ancien : ${n} jour${n > 1 ? "s" : ""}`;
+}
+
 export function checkLabel(
   code: string,
   opts?: { cancellationAfterDownload?: boolean; details?: Record<string, unknown> | null },
 ): { label: string; help: string } {
   const l = CHECK_LABEL[code] ?? { label: code, help: "" };
+  // M2c-6b-3b part 2: the held rows' alert names its days and lines whichever the switch (raised only for a chain)
+  if (code === "remittance_breach_held" && opts?.details) return { label: l.label, help: breachHeldHelp(opts.details) };
   const on = opts?.cancellationAfterDownload ? checkHelpOn(code, opts.details) : null;
   return on ? { label: l.label, help: on } : l;
 }
