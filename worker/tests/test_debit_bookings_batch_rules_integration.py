@@ -177,3 +177,73 @@ def test_a_batch_line_of_2000_members_is_re_checked_in_linear_time_and_memory() 
     assert spilled == [], spilled
     over = [(r, s) for r, s in rows if r > ROWS_PER_ROW * (n + 1) + SLACK]
     assert over == [], over
+
+
+# A probe of a key index priced as this many sequential pages: above a scan of every table the
+# re-check reads (the batch line's 2,000 transfers fill about 100 pages), as CI's statistics priced
+# it for its small tables (below).
+PROBE_PAGES = 1_000
+
+
+def _scans_per_row(node: dict[str, Any], n: int) -> list[tuple[str, int, int]]:
+    """The sequential scans of a stored table a plan repeats once per row of the job or more: (the
+    table, its loops, the rows they read). A temporary table (`_…`) is the job's own: scanned
+    whole by design."""
+    name = str(node.get("Relation Name", ""))
+    loops = int(node.get("Actual Loops", 1))
+    found = (
+        [(name, loops, work({k: v for k, v in node.items() if k != "Plans"}))]
+        if node.get("Node Type") == "Seq Scan" and not name.startswith("_") and loops >= n
+        else []
+    )
+    return found + [f for c in node.get("Plans", []) for f in _scans_per_row(c, n)]
+
+
+def test_the_re_check_reads_by_key_whatever_the_statistics() -> None:
+    """CI run 44850889494 (PR #38; ADR-0014 « M2c-6b-3b part 1 — CI round (PR #38) »): the test
+    above failed its bound in the `db` job, its facts' statement handling 338,170 rows — a
+    sequential scan of bank_transaction (15 rows) and of ledger_entry (144) per row of the job,
+    each table's scan priced below a probe of its primary key (tables vacuumed to a few pages,
+    their keys left bloated by the pgTAP suite's rolled-back rows; the same commit passed in the
+    next run, autovacuum having run at other times). Deterministic here: the same batch line, the
+    planner pricing a probe of a key index at PROBE_PAGES sequential pages (random_page_cost) — so
+    a scan of any table the re-check reads looks cheaper than one probe of it. Every statement of
+    the call holds the same per-statement bound, and no stored table is scanned once per row: the
+    re-check's keys, locks, facts and rules read each row by its key whatever the planner's
+    estimates (enable_seqscan off in private.bank_booking_recheck; the posting keeps its callers'
+    settings). Before the fix, at 2,000 members: the facts 8.3 million rows, the batch rule, the
+    keys and the files' lock 4 million each (bank_transfer scanned once per member)."""
+    n = MEMBERS
+    with psycopg.connect(ADMIN) as conn:  # (the superuser: auto_explain's settings)
+        try:
+            conn.execute("set role postgres")  # the worker's: its temporary tables, as the job's
+            world = _batch_world(conn, n)
+            conn.execute("set local work_mem = '4MB'")  # the local stack's and CI's
+            conn.execute(f"set local random_page_cost = {PROBE_PAGES}")
+            conn.execute("reset role")
+            with explained(conn) as plans:
+                conn.execute("set role postgres")
+                summary = conn.execute(
+                    "select private.post_bank_bookings(%s, false)", (world["org"],)
+                ).fetchone()
+                skipped: dict[uuid.UUID, str] = dict(
+                    conn.execute(
+                        "select bank_transaction_id, why from pg_temp._booking_skipped"
+                    ).fetchall()
+                )
+                conn.execute("reset role")
+        finally:
+            conn.rollback()
+    assert summary is not None
+    # the same verdicts as above: only « a transfer booked once per call » left the line to ops
+    assert skipped == {world["line_b"]: "transfer_twice"}, (skipped, summary)
+    assert len(plans) > 10, "auto_explain logged nothing"
+    rows = sorted(((work(p["Plan"]), statement(p)) for p in plans), reverse=True)
+    print(f"\na batch line of {n} members, probes priced at {PROBE_PAGES} pages: {summary[0]},"
+          f" {len(plans)} statements, the heaviest (rows handled) {rows[:6]}")  # fmt: skip
+    per_row = [(statement(p), s) for p in plans for s in _scans_per_row(p["Plan"], n)]
+    assert per_row == [], per_row
+    spilled = [(statement(p), temp_blocks(p["Plan"])) for p in plans if temp_blocks(p["Plan"])]
+    assert spilled == [], spilled
+    over = [(r, s) for r, s in rows if r > ROWS_PER_ROW * (n + 1) + SLACK]
+    assert over == [], over
