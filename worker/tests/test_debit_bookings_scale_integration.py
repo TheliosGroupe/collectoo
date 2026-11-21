@@ -391,10 +391,16 @@ SMALL_FUNDS_PASS_S = 2.0
 
 
 def _file_payouts(
-    factory: pytest.TempPathFactory, size: int, cancelled: int, label: str
+    factory: pytest.TempPathFactory,
+    size: int,
+    cancelled: int,
+    label: str,
+    day: date | None = None,
 ) -> dict[str, Any]:
     """size + cancelled clients' runs approved through the jobs, `cancelled` of them cancelled
-    before any file, the file of the `size` payouts generated, written and downloaded."""
+    before any file, the file of the `size` payouts generated, written and downloaded. `day`: the
+    collections' day (a recent business day by default; M2c-6b-3b part 3's held-rows volume case
+    dates them back, test_breach_held_scale_integration.py)."""
     timings: dict[str, float] = {}
     started = time.monotonic()
     tenant = remittance_tenant()  # its servicer's identity complete, an admin
@@ -402,7 +408,7 @@ def _file_payouts(
     timings["clients"] = time.monotonic() - started
     mark = time.monotonic()
     pay(tenant, storage(), credits, prefix=f"K{uuid.uuid4().hex[:5].upper()}",
-        start=recent_business_day(), days=1)  # fmt: skip
+        start=day or recent_business_day(), days=1)  # fmt: skip
     timings["collections"] = time.monotonic() - mark
     mark = time.monotonic()
     runs = _runs(tenant, clients)

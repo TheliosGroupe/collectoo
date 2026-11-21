@@ -1132,6 +1132,13 @@ It builds an LP from « Débits et retours » and takes these screenshots, mobil
 The off pages are unchanged and are not retaken. **Risk:** the flip must never leak. The teardown is in `finally`, and
 the project asserts the flag off at its start and at its end.
 
+> *As built (6b-3a-2 review round 1, 6b-3b parts 2 and 3; ADR-0014 « M2c-6b-3b part 3 »):* the project builds the LP
+> through the pages and takes the first three, plus « Contrôles » with the held rows' alert
+> (`m2c-controles-depassement-en-attente`). `m2c-annulation-debit-sans-reference` is not taken: on the spec's one run, a
+> debit without our references at x's amount refuses both the cancellation and its own classification
+> (`payout_candidate`), so the LP could not follow; it needs a second downloaded file. Default: not taken before the
+> switch flips; N's refusal is pinned by pgTAP `039` and its words by vitest (`switch-on-texts.test.ts`).
+
 ## 4. Texts (§4.2): written for the switch off, and given their « on » variants
 
 **How the pages read the flag.** Through a new read, `public.cancellation_after_download() returns boolean`: stable,

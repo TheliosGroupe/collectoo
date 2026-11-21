@@ -1429,3 +1429,111 @@ now a probe of the primary key, the statement within its bound. The alert's text
   **19.4 s** in chunks of 8.1, 7.7 and 3.5 s; the nightly checks **1.29 s** (1.23 s warm; `run_remittance_runs_checks`
   0.30 s); 200 members 0.46 s; 200 RMT debits' job 0.60 s. Within the earlier rounds' spread (19.1 to 26.4 s for the
   funds pass, 18.1 to 23.0 s for the debit job).
+
+### M2c-6b-3b part 3: the held rows' alert at volume (2026-11-21, same VM, the main stack alone)
+
+What the slice changes on a timed path: the nightly checks read the booked chained runs once (`pg_temp._rc_runs`) and
+every line due at their dates with its hold's findings once (`private.remittance_chain_judged`, `pg_temp._rc_lines`; the
+holds now return the possible debits they judged on); « remittance_breach_held » reads those two tables, its uncovered
+days once per paying account and window. The booking path's `private.remittance_chain_rows` filters
+`private.remittance_chain_judged` (the same rows, one more function layer).
+
+**The volume case** (new, `test_breach_held_scale_integration.py`, CI's `scale-payouts` job): 2,000 payouts of one downloaded
+file cancelled whole and re-issued, the re-issues filed, downloaded and debited today under their own ids (the debit
+job's funds pass books them: each run booked by its re-issue), each run's lines held to L, the business day M after the
+evidence statement on no statement and, for half the runs (their x dated a business day earlier, W), W too: every run
+held, alerted; then W's and M's statements imported, every row written the next night. Measured on one committed
+fixture (the scenario rolled back each time), each value from two runs:
+
+| | before the dedups (part 2) | after |
+|---|---|---|
+| nightly checks, 2,000 held chained runs, two windows | **28.5 s**, 29.1 s | **12.8 s**, 13.0 s |
+| the standalone reading (`private.remittance_breach_held`, part 2's alert alone) | 13.4 s, 13.6 s | (not called by the checks) |
+| the next night, every row written (no alert) | 20.3 s, 23.4 s | 14.6 s, 15.1 s |
+| the funds pass booking the 2,000 re-issues | 21.3 s, 20.6 s | 17.9 s, 18.8 s |
+| calls in the nightly checks: `remittance_booked_chain_runs` | 2 | **1** |
+| `remittance_chain_hold_facts` | 4,000 | **2,000** |
+| `remittance_chain_paid` / `remittance_chain_events` | 8,000 / 8,000 (19.3 s own) | 4,000 / 4,000 (7.3 s own) |
+| `remittance_run_late_lines` | 8,000 | **4,000** |
+| `statement_covers` | 15,000 | **2,013** (2,000 holds + 2 windows + 11 days) |
+| `transfer_chain` | 18,000 | 10,000 |
+
+What remains (12.8 s) is the booked branch's own reading of each chain — the chain's paid date and events read for the
+runs and again in the holds' one-snapshot facts (part 1's race fix) — above plan §1.4's 5 s, which is for 5,000 booked
+payouts without chains: recorded in ADR-0014 « M2c-6b-3b part 3 », left open (low). The test's bound: 37 s for each
+night (twice the worst after, the scale file's own run on a freshly reset stack below: 18.1 s), and the calls exactly.
+
+The scale files that time what the slice changes, each once, each right after `supabase db reset` (same VM, the main
+stack alone):
+
+- `test_transfer_cancellation_scale_integration.py`: **1 passed** (51.0 s) — set-up 38.5 s; the evidence of the
+  5,000-transfer file 0.36 s; generation with the holds 2.66 s (20 held, 5,021 in the file); the nightly checks
+  **0.68 s** (86,479 `bank_transfer` rows read; part 2's round 1: 0.50 s); the late predecessor's options 0.03 s, its
+  booking **1.76 s** (part 2's round 1: 1.44 s).
+- `test_breach_held_scale_integration.py` (new, 2,000 held chained runs): **1 passed** (363.2 s) — the fixture's runs
+  requested, prepared and approved 248.0 s; the cancellation confirmed 6.51 s; the funds pass booking the 2,000
+  re-issues 22.4 s; the nightly checks **18.14 s** (2,000 alerts; `remittance_chain_events` 4,000 calls, 9.0 s own;
+  `remittance_chain_hold_facts` 2,000 calls) against the standalone reading's 12.91 s; once W and M are imported, the
+  nightly checks **18.11 s** (2,000 rows written, no alert). Slower than the fixture measured again above (12.8–13.0
+  s): here the scenario runs right after the fixture is written, as in CI, where the remeasure ran on a fixture
+  committed long before (its tables analysed by autovacuum: the likely difference); the bound (37 s) keeps twice this
+  run.
+- `test_remittance_scale_integration.py` (50,000 lines): **1 passed** (302.5 s) — prepared 11.2 s; nightly checks
+  4.2 s (the draft waiting 3.9 s); cancellation 3.33 s; the re-run prepared and approved 26.0 s, booked 0.8 s; the
+  nightly checks with the run booked **4.73 s** (5.15 s warm; part 2's round 1: 4.7 s) — `run_payment_checks` 2.6 s,
+  `commission_key_open` (50,000 calls) 1.2 s, `run_remittance_runs_checks` 0.51 s.
+- `test_debit_bookings_scale_integration.py`: **5 passed** (858.8 s) — « Générer le fichier » for 5,000 payouts (+50
+  cancelled) 4.59 s; the 5,000-member batch line's funds pass **24.1 s** (26.2 s under auto_explain, the same heaviest
+  statements: the ledger's own `_lps_dim` and `_lps_x`); 5,000 RMT debits imported in 1.3 s, the debit job **22.5 s** in
+  chunks of 9.2, 8.6 and 4.5 s; the nightly checks **1.28 s** (1.38 s warm; `run_remittance_runs_checks` 0.28 s); 200
+  members 0.48 s; 200 RMT debits' job 0.63 s. Within the earlier rounds' spread (19.1 to 26.4 s for the funds pass,
+  18.1 to 23.0 s for the debit job).
+
+CI's `scale-payouts` job now runs the held runs' file after the payouts' bookings (the `scale` job took 27.6 of its 30
+minutes on `main`, the run of 2026-11-21 08:13 UTC; `scale-payouts` 12.4 of its 40). Its command, after `supabase db
+reset`: **6 passed** in 1,178.5 s (19.6 min) — the 5,000-member line's funds pass 24.0 s, the debit job 19.9 s, the
+nightly checks 1.13 s; then the 2,000 held chained runs: the funds pass 18.2 s, the nightly checks **13.41 s** (the
+standalone reading 11.35 s), once the days are imported **12.57 s**.
+
+### M2c-6b-3b part 3 review fixes (2026-11-21, same VM, the main stack alone)
+
+What the round changes on a timed path: the alert aggregates its days and waiting lines once per run (cost-1) and
+reads the waiting lines' bookings and links by key; its details gain `last_uncovered_day`; and
+`private.transfer_line_offers` reads its answer in a subtransaction rolled back once read (the options' working tables
+and their locks released at once).
+
+**The waiting lines' variant** (new, in `test_breach_held_scale_integration.py`'s scenario, rolled back to a savepoint
+after the first night): x requested from W, W's statement holding two debits without our references of x's amount for
+each run of the half dated back (and one credit of their total), M's: every window covered; 1,000 runs alerted with
+their two lines each, 1,000 runs' rows written. **Before the offers fix it failed the whole check** — « out of shared
+memory », `max_locks_per_transaction` (64) exhausted by the options' working tables, dropped and created again at each
+of the 1,000 calls, each dropped table's lock held to the end of the check's transaction (60 relation locks per call:
+`042` #26 measures 180 for three calls before, 0 after). After it: **52.8 s** and **55.3 s** (two runs, each right after a reset) — the holds asking the options of each
+run's first line (1,000 calls of `private.transfer_line_check`, 11.5 s own; `private.remittance_chain_events` 5,000
+calls, 10.1 s; `private.transfer_debit_lines` 2,000 calls, 6.4 s), the alert itself a fraction of a second. Its bound:
+110 s (twice the first measure, 52.8 s; the holds' own cost, not the alert's, is what it guards).
+
+**Option 1 of dt3-race, measured, not built**: each alerted run's paid date read again
+(`private.remittance_chain_paid` for the 2,000 runs) **4.21 s** and **4.71 s** — against the night's 14.68 s and
+15.48 s (about 30 %).
+
+The scale files that time what the round changes, each once, each right after `supabase db reset`:
+
+- `test_transfer_cancellation_scale_integration.py`: **1 passed** (50.3 s) — set-up 38.3 s; generation with the holds
+  2.64 s; the nightly checks **0.67 s** (86,479 `bank_transfer` rows read; part 3: 0.68 s); the late predecessor's
+  booking 1.67 s.
+- `test_breach_held_scale_integration.py` (2,000 held chained runs; after the offers fix and its variant's bound): **1
+  passed** (449.0 s) — the fixture's runs requested, prepared and approved 267.1 s; the cancellation confirmed 6.10 s;
+  the funds pass booking the 2,000 re-issues 18.8 s; the nightly checks **15.48 s** (2,000 alerts;
+  `remittance_chain_events` 4,000 calls, 8.6 s own; part 3: 18.14 s) against the standalone reading's 11.94 s; the
+  waiting lines' variant **55.25 s** (1,000 alerts with two lines each, 1,000 runs' rows written; `transfer_line_check`
+  1,000 calls, 12.2 s own); once W and M are imported, the nightly checks **18.07 s** (2,000 rows written, no alert;
+  part 3: 18.11 s). Its first run (before the variant had its own bound) measured 14.68 s, 52.80 s and 16.32 s.
+- `test_remittance_scale_integration.py` (50,000 lines; before the offers fix, which it does not call): **1 passed**
+  (259.7 s) — prepared 9.8 s; nightly checks 4.0 s (the draft waiting 3.7 s); cancellation 3.73 s; the re-run prepared
+  and approved 28.1 s; the nightly checks with the run booked **4.6 s** (4.69 s warm; part 3: 4.73 s) —
+  `run_payment_checks` 2.5 s, `commission_key_open` (50,000 calls) 1.26 s, `run_remittance_runs_checks` 0.44 s.
+- `test_debit_bookings_scale_integration.py`: **5 passed** (802.7 s) — « Générer le fichier » for 5,000 payouts (+50
+  cancelled) 2.83 s; the 5,000-member batch line's funds pass **22.6 s**; 5,000 RMT debits imported in 1.2 s, the debit
+  job **19.4 s** in chunks of 7.8, 8.0 and 3.3 s; the nightly checks **1.23 s** (1.24 s warm; `run_remittance_runs_checks`
+  0.27 s); 200 members 0.53 s; 200 RMT debits' job 0.77 s. Within the earlier rounds' spread.

@@ -1179,7 +1179,9 @@ begin
     'rv3', pg_temp.suivi(pg_temp.v('RV3')),
     'rv2_later', private.remittance_statement_build(pg_temp.v('RV2')) -> 'previous_payouts' = s2,
     'rv1_later', private.remittance_statement_build(pg_temp.v('RV1')) -> 'previous_payouts' = s1,
-    'runs', (select jsonb_agg(r.status order by r.created_at) from public.remittance_run r
+    -- (M2c-6b-3b part 3 review round 1: the runs share their transaction's created_at — their numbers, drawn from one
+    -- sequence as they are requested, keep their order whatever plan reads them)
+    'runs', (select jsonb_agg(r.status order by r.created_at, r.number) from public.remittance_run r
              where r.client_organization_id = pg_temp.c('a1')));
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
