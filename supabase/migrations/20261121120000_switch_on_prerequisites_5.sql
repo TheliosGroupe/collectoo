@@ -21,7 +21,8 @@
 --   lines are those the booked branch judged on (named only when the window is covered and was so then; else the run is
 --   judged again at the next check, as « ni jour ni ligne » already says).
 --
--- New (internal, EXECUTE revoked from every role): private.remittance_chain_judged.
+-- New (internal, EXECUTE revoked from every role): private.remittance_chain_judged; private.transfer_reissues (PR #40's
+-- CI round).
 -- Dropped and created again (its result gains `lines`, which CREATE OR REPLACE cannot add), its body copied from its
 -- latest definition with that one change, its settings and grants restated:
 --   private.remittance_chain_holds (20261119090000_switch_on_prerequisites_3.sql:209)
@@ -37,6 +38,9 @@
 --   private.transfer_line_offers (20261117110000_transfer_line_pages.sql:405; review round 1): its answer read in a
 --     subtransaction rolled back once read, so the options' working tables and their locks do not pile up in the
 --     nightly check's transaction (the lock table filled after about a hundred lines)
+--   private.run_transfer_checks (20261118100000_switch_on_prerequisites_2.sql:2905; PR #40's CI round, ADR-0014
+--     « M2c-6b-3b part 3 — CI round (PR #40) »): a cancelled refund's chain read forward by key
+--     (private.transfer_reissues) instead of every waiting refund's chain once per cancelled refund debited late
 -- private.remittance_booked_chain_runs (20261121090000) is not redefined.
 -- Review round 1 (ADR-0014 « M2c-6b-3b part 3 review fixes »): the alert's details gain last_uncovered_day (the last
 -- day no statement covers: the day a CSV export must go past, also beyond the 31 days named), in the checks and the
@@ -899,6 +903,452 @@ comment on function private.remittance_breach_held(uuid, date) is
   'compare them with (pgTAP 042''s pg_temp.nightly, worker/tests/test_breach_held_integration.py).';
 
 ------------------------------------------------------------------------------------------
+-- PR #40's CI round (ADR-0014 « M2c-6b-3b part 3 — CI round (PR #40) »): the nightly checks read each cancelled refund's
+-- chain forward by key, whatever the statistics
+------------------------------------------------------------------------------------------
+
+-- A transfer and the transfers re-issuing it: itself, then the transfer whose replaces_transfer_id it is (at most one:
+-- bank_transfer_replaces_transfer_id_key), and so on, by key — private.transfer_chain read the other way, with its depth
+-- bound: y is in private.transfer_reissues(t) exactly when t is in private.transfer_chain(y) (replaces_transfer_id is
+-- unique, so each transfer is re-issued at most once). Read by private.run_transfer_checks (below) for a cancelled
+-- refund debited late, instead of every waiting refund of the servicer. Internal (EXECUTE revoked from every role).
+create or replace function private.transfer_reissues(p_transfer_id uuid)
+returns table (transfer_id uuid, depth integer)
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  with recursive c (transfer_id, depth) as (
+    select p_transfer_id, 0 where p_transfer_id is not null
+    union all
+    select q.id, c.depth + 1
+    from c
+    cross join lateral (select y.id from public.bank_transfer y where y.replaces_transfer_id = c.transfer_id offset 0) q
+    where c.depth < 50)
+  select c.transfer_id, c.depth from c;
+$$;
+
+-- private.run_transfer_checks, redefined from 20261118100000_switch_on_prerequisites_2.sql (line 2905; same signature
+-- and settings — SECURITY DEFINER, search_path '', enable_seqscan off —, its grants restated below; its comments there).
+-- PR #40's CI round (CI run 44909449352, the scale job: 486,480 rows of bank_transfer read by the nightly checks of
+-- test_transfer_cancellation_scale_integration.py, its bound 183,008): the arm « transfer_already_debited » over the
+-- cancelled transfers of a downloaded file debited late (cx) excluded a refund whose chain's live end is still waiting
+-- by reading every refund request the servicer has waiting (refund_request_waiting_idx), each one's transfer and chain
+-- (private.transfer_chain), once per cancelled transfer debited late, until one held it: refund_request analysed (as
+-- autovacuum left it in that run), a bitmap scan of all 10,012 waiting requests, 21 times — 210,250 probes of
+-- bank_transfer and 200,210 chains (200,424 rows), reproduced to the row on the main stack after the scale job's earlier
+-- files, with main's bodies as with this migration's (486,521 and 486,480); not analysed yet, the waiting index read in
+-- requested_at order met the early refunds' re-issues after 488 requests each (86,480 rows in all, as main's CI run).
+-- The same exclusion is now read from the cancelled refund forward (private.transfer_reissues: its re-issues by key,
+-- each one's request by refund_request_transfer_id_key and its transfer's status by key) — the same rows (75,850 rows
+-- of bank_transfer in that state, 65,874 with the tables analysed in the transaction). Nothing else changes.
+create or replace function private.run_transfer_checks(p_check_run_id uuid, p_organization_id uuid,
+                                                       p_today date default null)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  v_today date := coalesce(p_today, private.paris_today());
+  v_now timestamptz := case when p_today is null or p_today = private.paris_today() then clock_timestamp()
+                            else (p_today + time '23:59:59') at time zone 'Europe/Paris' end;
+  v_bd2 date;   -- the second business day on or before today: a day before it is more than 1 business day ago
+  v_bd3 date;
+begin
+  select c.day into v_bd2 from public.business_calendar c
+  where c.scope = 'FR-conservative' and not c.closed and c.day <= v_today and c.day > v_today - 30
+  order by c.day desc offset 1 limit 1;
+  select c.day into v_bd3 from public.business_calendar c
+  where c.scope = 'FR-conservative' and not c.closed and c.day <= v_today and c.day > v_today - 30
+  order by c.day desc offset 2 limit 1;
+  insert into public.payment_check_result (run_id, organization_id, code, severity, subject_type, subject_id, currency,
+                                           amount_minor, count, oldest_days, details)
+  with flight as materialized (   -- the transfers in flight, per paying account (one pass each, keyed)
+    select b.id as bank_account_id, b.currency, x.transfer_id, x.amount_minor, x.execution_date
+    from public.bank_account b
+    cross join lateral private.transfers_in_flight(b.id) x
+    where b.organization_id = p_organization_id and b.purpose = 'client_funds'),
+  cx as materialized (   -- M2c-6b-3a (C): the servicer's cancelled transfers that were in a downloaded file (read once)
+    select t.id, t.kind, t.status, t.run_id, t.currency, t.amount_minor, t.created_at, t.end_to_end_id,
+           t.debtor_bank_account_id
+    from public.bank_account b
+    cross join lateral (select q.id, q.kind, q.status, q.run_id, q.currency, q.amount_minor, q.created_at,
+                               q.end_to_end_id, q.debtor_bank_account_id
+                        from public.bank_transfer q
+                        where q.organization_id = p_organization_id and q.debtor_bank_account_id = b.id
+                          and q.status = 'cancelled' and q.transfer_file_id is not null offset 0) t
+    where b.organization_id = p_organization_id and b.purpose = 'client_funds'
+      and exists (select 1 from public.transfer_file_item i
+                  cross join lateral (select f.download_count from public.transfer_file f
+                                      where f.id = i.file_id offset 0) f
+                  where i.transfer_id = t.id and f.download_count > 0))
+  select p_check_run_id, p_organization_id, u.code, 'alert', u.subject_type, u.subject_id, u.currency, u.amount_minor,
+         u.count, u.oldest_days, coalesce(u.details, '{}')
+  from (
+    select 'transfer_not_filed' as code, 'bank_account' as subject_type, t.debtor_bank_account_id as subject_id,
+           t.currency, sum(t.amount_minor)::bigint as amount_minor, count(*)::integer as count,
+           max(v_today - (t.created_at at time zone 'Europe/Paris')::date) as oldest_days,
+           jsonb_build_object('ids', (array_agg(t.id order by t.created_at, t.id))[1:50]) as details
+    from public.bank_transfer t
+    where t.organization_id = p_organization_id and t.status = 'ordered' and t.kind in ('payout', 'refund', 'sweep')
+      and (t.created_at at time zone 'Europe/Paris')::date < v_bd2
+      and exists (select 1 from public.bank_account b where b.id = t.debtor_bank_account_id
+                    and b.purpose = 'client_funds')
+    group by t.debtor_bank_account_id, t.currency
+    union all
+    select 'file_not_downloaded', 'transfer_file', f.id, f.currency, f.ctrl_sum_minor, f.nb_of_txs,
+           v_today - (f.generated_at at time zone 'Europe/Paris')::date, jsonb_build_object('number', f.number)
+    from public.transfer_file f
+    where f.organization_id = p_organization_id and f.status = 'generated'
+      and (f.generated_at at time zone 'Europe/Paris')::date < v_bd2
+    union all
+    select 'file_not_marked_sent', 'transfer_file', f.id, f.currency, f.ctrl_sum_minor, f.nb_of_txs,
+           v_today - f.first_execution_date, jsonb_build_object('number', f.number,
+                                                                'first_execution_date', f.first_execution_date)
+    from public.transfer_file f
+    where f.organization_id = p_organization_id and f.status = 'downloaded'
+      and private.transfer_file_cutoff_at(f.id) <= v_now
+      and not (exists (select 1 from public.transfer_file_item i
+                       cross join lateral (select t.status from public.bank_transfer t where t.id = i.transfer_id
+                                           offset 0) t
+                       where i.file_id = f.id and t.status = 'cancelled')
+               and not private.transfer_file_executed(f.id))
+    union all
+    select 'transfer_not_debited', 'bank_account', x.bank_account_id, x.currency, sum(x.amount_minor)::bigint,
+           count(*)::integer, max(v_today - x.execution_date),
+           jsonb_build_object('ids', (array_agg(x.transfer_id order by x.execution_date, x.transfer_id))[1:50])
+    from flight x
+    where x.execution_date < v_bd3
+    group by x.bank_account_id, x.currency
+    union all
+    select 'transfer_file_failed', 'transfer_file', f.id, f.currency, f.ctrl_sum_minor, f.nb_of_txs,
+           v_today - (f.closed_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('number', f.number, 'error', f.error)
+    from public.transfer_file f
+    where f.organization_id = p_organization_id and f.status = 'failed'
+      and exists (select 1 from public.transfer_file_item i join public.bank_transfer t on t.id = i.transfer_id
+                  where i.file_id = f.id and t.status = 'ordered')
+    union all
+    select 'transfer_file_pending', 'transfer_file', f.id, f.currency, f.ctrl_sum_minor, f.nb_of_txs,
+           v_today - (f.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('number', f.number, 'created_at', f.created_at)
+    from public.transfer_file f
+    where f.organization_id = p_organization_id and f.status = 'pending'
+      and f.created_at + interval '15 minutes' <= v_now
+    union all
+    select 'payee_name_mismatch', 'client_payout_account', c.payout_account_id, null, null, 1,
+           v_today - (c.recorded_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('client_id', c.client_organization_id, 'result', c.result, 'check_id', c.id)
+    from public.payee_name_check c
+    where c.organization_id = p_organization_id and c.cleared_at is null
+      and private.payee_check_open(c.payout_account_id)
+    union all
+    select 'transfer_already_debited', 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('kind', t.kind, 'status', t.status, 'end_to_end_id', t.end_to_end_id, 'run_id', t.run_id,
+                              'bank_account_id', t.debtor_bank_account_id)
+    from public.bank_transfer t
+    where t.organization_id = p_organization_id and t.kind in ('payout', 'refund')
+      and (t.status = 'ordered' or (t.status = 'in_file' and t.replaces_transfer_id is not null))
+      and exists (select 1 from public.bank_account b where b.id = t.debtor_bank_account_id
+                    and b.purpose = 'client_funds')
+      and private.transfer_debited_before(t.id)
+    union all
+    select 'transfer_already_debited', 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('kind', t.kind, 'status', t.status, 'end_to_end_id', t.end_to_end_id, 'run_id', t.run_id,
+                              'bank_account_id', t.debtor_bank_account_id)
+    from public.bank_account b
+    cross join lateral private.debited_cancelled_sweeps(b.id) s (id)
+    cross join lateral (select x.* from public.bank_transfer x where x.id = s.id offset 0) t
+    where b.organization_id = p_organization_id and b.purpose = 'client_funds'
+    union all
+    -- M2c-6b-3a (A): a sweep in flight made after a cancelled sweep the bank debited late (its share left once already)
+    select 'transfer_already_debited', 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('kind', t.kind, 'status', t.status, 'end_to_end_id', t.end_to_end_id, 'run_id', t.run_id,
+                              'bank_account_id', t.debtor_bank_account_id, 'reason', 'cancelled_sweep_debited')
+    from public.bank_account b
+    cross join lateral (select q.* from public.bank_transfer q
+                        where q.debtor_bank_account_id = b.id and q.status in ('ordered', 'in_file') and q.kind = 'sweep'
+                        offset 0) t
+    where b.organization_id = p_organization_id and b.purpose = 'client_funds'
+      and private.sweep_after_debited_cancelled(t.id)
+    union all
+    -- M2c-6b-3a (M): a payout or a refund in flight held for a cancelled one of its client or payment debited late (not
+    -- alerted above already)
+    select 'transfer_already_debited', 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('kind', t.kind, 'status', t.status, 'end_to_end_id', t.end_to_end_id, 'run_id', t.run_id,
+                              'bank_account_id', t.debtor_bank_account_id, 'reason', s.reason)
+    from public.bank_account b
+    cross join lateral (select q.* from public.bank_transfer q
+                        where q.debtor_bank_account_id = b.id and q.status in ('ordered', 'in_file')
+                          and q.kind in ('payout', 'refund') offset 0) t
+    cross join lateral (select private.transfer_sibling_debited_late(t.id) as reason) s
+    where b.organization_id = p_organization_id and b.purpose = 'client_funds' and s.reason is not null
+      and not ((t.status = 'ordered' or t.replaces_transfer_id is not null) and private.transfer_debited_before(t.id))
+    union all
+    -- review round 4 (G1); M2c-6b-3a (C, G1c): a cancelled payout or refund that was in a downloaded file, debited after
+    -- all, its late line not booked nor linked — whatever its run's or refund's state (the alert stops once ops book or
+    -- link that line) —, but while the live end of its chain is alerted by the ordered or in-file branch above
+    select 'transfer_already_debited', 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('kind', t.kind, 'status', t.status, 'end_to_end_id', t.end_to_end_id, 'run_id', t.run_id,
+                              'bank_account_id', t.debtor_bank_account_id)
+    from cx t
+    where t.kind in ('payout', 'refund')
+      and private.transfer_debited_before(t.id)
+      and private.transfer_late_debit_open(t.id)
+      and not exists (select 1 from public.remittance_run r
+                      cross join lateral (select y.status from public.bank_transfer y where y.id = r.transfer_id offset 0) y
+                      where t.kind = 'payout' and r.id = t.run_id and r.status in ('approved', 'sent')
+                        and y.status in ('ordered', 'in_file')
+                        and exists (select 1 from private.transfer_chain(r.transfer_id) c where c.transfer_id = t.id))
+      -- PR #40's CI round: the refund requests whose transfer's chain holds t, read from t forward by key
+      -- (private.transfer_reissues: y is in it exactly when t is in private.transfer_chain(y)) — no longer every
+      -- refund the servicer has waiting, each with its transfer and its chain, once per cancelled refund debited late
+      and not exists (select 1
+                      from private.transfer_reissues(t.id) c
+                      cross join lateral (select q.organization_id, q.status from public.refund_request q
+                                          where q.transfer_id = c.transfer_id offset 0) q
+                      cross join lateral (select y.status from public.bank_transfer y where y.id = c.transfer_id offset 0) y
+                      where t.kind = 'refund' and q.organization_id = p_organization_id and q.status = 'requested'
+                        and y.status in ('ordered', 'in_file'))
+    union all
+    select h.code, 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('kind', t.kind, 'end_to_end_id', t.end_to_end_id, 'run_id', t.run_id,
+                              'bank_account_id', t.debtor_bank_account_id)
+    from public.bank_transfer t
+    cross join lateral (select 'payee_name_not_epc' as code where private.epc_name_empty(t.payee_name)
+                        union all
+                        select 'iban_not_sepa' where not private.iban_in_sepa(t.payee_iban)) h
+    where t.organization_id = p_organization_id and t.status = 'ordered' and t.kind in ('payout', 'refund')
+      and exists (select 1 from public.bank_account b where b.id = t.debtor_bank_account_id
+                    and b.purpose = 'client_funds')
+    union all
+    -- M2c-6b-1 (P0): a debit of a cancelled transfer — its own id, or a batch line that can hold it
+    -- (private.transfer_late_lines: private.transfer_debited_before's two branches) — not booked nor linked, one row per
+    -- line, whatever the state of its run or refund (a cancelled one included: G1c); and a line the debit job left to
+    -- ops for it. The source: the cancelled transfers that were in a downloaded file (their partial index).
+    select 'cancelled_transfer_debited', 'bank_transaction', x.id, x.currency, x.amount_minor, 1,
+           v_today - x.booking_date,
+           jsonb_build_object('transfer_ids', l.transfer_ids, 'kinds', l.kinds, 'run_ids', l.run_ids,
+                              'refund_request_ids', l.refund_ids, 'pmt_inf_id', x.payment_info_id,
+                              'end_to_end_id', x.end_to_end_id)
+    from (select z.line_id,
+                 coalesce(jsonb_agg(distinct z.transfer_id) filter (where z.transfer_id is not null), '[]') as transfer_ids,
+                 coalesce(jsonb_agg(distinct z.kind) filter (where z.kind is not null), '[]') as kinds,
+                 coalesce(jsonb_agg(distinct z.run_id) filter (where z.run_id is not null), '[]') as run_ids,
+                 coalesce(jsonb_agg(distinct z.refund_id) filter (where z.refund_id is not null), '[]') as refund_ids
+          from (select ll.line_id, t.id as transfer_id, t.kind, t.run_id,
+                       (select q.id from public.refund_request q
+                        where q.transfer_id = t.id
+                           or q.transfer_id = (select y.id from public.bank_transfer y where y.replaces_transfer_id = t.id)
+                        limit 1) as refund_id
+                from cx t
+                cross join lateral private.transfer_late_lines(t.id) ll (line_id)
+                union all
+                select v.bank_transaction_id, null::uuid, null::text, null::uuid, null::uuid
+                from public.bank_debit_review v
+                where v.organization_id = p_organization_id and v.reason = 'cancelled_transfer_debited') z
+          group by z.line_id) l
+    cross join lateral (select q.* from public.bank_transaction q where q.id = l.line_id offset 0) x
+    where not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = x.id offset 0)
+      and not exists (select 1 from public.bank_debit_link k where k.bank_transaction_id = x.id and k.kind <> 'explained'
+                      offset 0)
+    union all
+    -- a second debit of a transfer booked or returned, a debit of a transfer never handed out (the bank has bytes we
+    -- never served): the lines the debit job left to ops for it (P0; plan §2.3); M2c-6b-2a (critic L14): a line, debit
+    -- or credit, carrying a reference of ours (RMT, SWP, a lot) no transfer of ours has (transfer_unknown)
+    select v.reason, 'bank_transaction', x.id, x.currency, x.amount_minor, 1, v_today - x.booking_date,
+           jsonb_build_object('end_to_end_id', x.end_to_end_id, 'pmt_inf_id', x.payment_info_id,
+                              'candidates', v.candidates)
+    from public.bank_debit_review v
+    cross join lateral (select q.* from public.bank_transaction q where q.id = v.bank_transaction_id offset 0) x
+    where v.organization_id = p_organization_id and v.reason in ('transfer_debited_twice', 'transfer_not_handed_out',
+                                                                 'transfer_unknown')
+      and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = x.id offset 0)
+      and not exists (select 1 from public.bank_debit_link k where k.bank_transaction_id = x.id offset 0)
+    union all
+    -- a payout returned by the client's bank (P0 while its item waits to be paid again: drafted at once by the
+    -- schedule, trigger payout_returned; the payout account `returned` until replaced or reconfirmed)
+    select 'payout_returned', 'remittance_run', bt.run_id, q.currency, q.amount_minor, 1,
+           v_today - (q.posted_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('client_id', q.client_organization_id, 'transfer_id', bt.id,
+                              'end_to_end_id', bt.end_to_end_id, 'draft_run_id', q.draft_run_id)
+    from private.remittance_pending q
+    cross join lateral (select e.reverses_entry_id from public.ledger_entry e where e.id = q.ledger_entry_id offset 0) e
+    cross join lateral (select r.source_id from public.ledger_entry r
+                        where r.id = e.reverses_entry_id and r.source_type = 'bank_transfer' offset 0) re
+    cross join lateral (select t.id, t.run_id, t.end_to_end_id, t.entry_id from public.bank_transfer t
+                        where t.id = case when pg_input_is_valid(re.source_id, 'uuid') then re.source_id::uuid end
+                        offset 0) bt
+    where q.organization_id = p_organization_id and q.kind = 'payout_returned'
+      -- M2c-6b-2a: the transfer's own payout (an unplanned payout's return is the branch below) — M2c-6b-3a-2 (F): a
+      -- late predecessor's, its payout booking's entry
+      and (bt.entry_id = e.reverses_entry_id
+           or exists (select 1 from public.bank_line_booking k
+                      where k.entry_id = e.reverses_entry_id and k.kind = 'payout' and k.transfer_id = bt.id))
+    union all
+    -- M2c-6b-2a (plan §2.6): the return of an unplanned payout (ops' unplanned_payout_returned, 6b-2b) while its item
+    -- waits to be paid again, as a planned payout's (by the booking whose entry queued the item: keyed)
+    select 'payout_returned', 'bank_transaction', k.bank_transaction_id, q.currency, q.amount_minor, 1,
+           v_today - (q.posted_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('client_id', q.client_organization_id, 'transfer_id', k.transfer_id, 'unplanned', true,
+                              'draft_run_id', q.draft_run_id)
+    from private.remittance_pending q
+    cross join lateral (select k.bank_transaction_id, k.transfer_id from public.bank_line_booking k
+                        where k.entry_id = q.ledger_entry_id and k.kind = 'unplanned_payout_returned' offset 0) k
+    where q.organization_id = p_organization_id and q.kind = 'payout_returned'
+    union all
+    -- a sweep returned by the own account's bank (P0 while the servicer's share is not swept again)
+    select 'sweep_returned', 'bank_transfer', t.id, t.currency, t.amount_minor, 1, v_today - re.effective_date,
+           jsonb_build_object('end_to_end_id', t.end_to_end_id, 'bank_account_id', t.debtor_bank_account_id)
+    from public.bank_transfer t
+    cross join lateral (select e.effective_date, e.posted_at from public.ledger_entry e
+                        where e.id = t.return_entry_id offset 0) re
+    where t.organization_id = p_organization_id and t.kind = 'sweep' and t.status = 'returned'
+      and not exists (select 1 from public.bank_transfer s
+                      where s.organization_id = t.organization_id and s.kind = 'sweep'
+                        and s.debtor_bank_account_id = t.debtor_bank_account_id and s.created_at > re.posted_at
+                        and s.status <> 'cancelled')
+    union all
+    -- M2c-6b-2a (plan §2.6): the return of an unplanned sweep (ops' unplanned_sweep_returned, 6b-2b), the same way (its
+    -- booking by the partial index bank_line_booking_unplanned_return_idx)
+    select 'sweep_returned', 'bank_transaction', k.bank_transaction_id, l.currency, k.amount_minor, 1,
+           v_today - l.booking_date,
+           jsonb_build_object('transfer_id', k.transfer_id, 'unplanned', true, 'bank_account_id', k.bank_account_id)
+    from public.bank_line_booking k
+    cross join lateral (select q.currency, q.booking_date from public.bank_transaction q
+                        where q.id = k.bank_transaction_id offset 0) l
+    cross join lateral (select e.posted_at from public.ledger_entry e where e.id = k.entry_id offset 0) re
+    where k.organization_id = p_organization_id and k.kind = 'unplanned_sweep_returned'
+      and not exists (select 1 from public.bank_transfer s
+                      where s.organization_id = k.organization_id and s.kind = 'sweep'
+                        and s.debtor_bank_account_id = k.bank_account_id and s.created_at > re.posted_at
+                        and s.status <> 'cancelled')
+    union all
+    -- an advance the servicer made at a payout's debit (the payout went beyond what the client was owed: a collection
+    -- reversed after the approval), open until recovered (M2c-7's advance_open takes it over)
+    select 'payout_overrun', 'client_advance', a.id, a.currency, (a.amount_minor - coalesce(s.settled, 0))::bigint, 1,
+           v_today - (a.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('client_id', a.client_organization_id, 'transfer_id', a.transfer_id,
+                              'bank_transaction_id', a.bank_transaction_id)
+    from public.client_advance a
+    left join lateral (select sum(c.amount_minor) as settled from public.commission_settlement c
+                       where c.document_kind = 'advance' and c.document_id = a.id) s on true
+    where a.organization_id = p_organization_id and a.cause = 'payout_overrun'
+      and a.amount_minor > coalesce(s.settled, 0)
+    union all
+    -- M2c-6b-2a (plan §2.6): the advance of a double payout (6b-2b's unplanned payouts: what P could not net), open
+    -- until recovered (M2c-7) — none once its entry is reversed (the unplanned payout came back)
+    select 'double_payout_open', 'client_advance', a.id, a.currency, (a.amount_minor - coalesce(s.settled, 0))::bigint,
+           1, v_today - (a.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('client_id', a.client_organization_id, 'transfer_id', a.transfer_id,
+                              'bank_transaction_id', a.bank_transaction_id)
+    from public.client_advance a
+    left join lateral (select sum(c.amount_minor) as settled from public.commission_settlement c
+                       where c.document_kind = 'advance' and c.document_id = a.id) s on true
+    where a.organization_id = p_organization_id and a.cause = 'double_payout'
+      and a.amount_minor > coalesce(s.settled, 0)
+      and not exists (select 1 from public.ledger_entry r where r.reverses_entry_id = a.entry_id)
+    union all
+    -- M2c-6b-2a (plan §2.6; critic L10; COMPLIANCE OQ-84 (e)): a payment made of a line carrying our RMT/SWP id (own or
+    -- original) or naming one of our lots — the flag « Paiements à traiter » shows, read the same way — unassigned for
+    -- more than one business day: one of our transfers come back, sitting on 4710 with no R124-6 clock (P0)
+    select 'own_transfer_payment', 'payment', p.id, p.currency, p.amount_minor, 1, v_today - p.booking_date,
+           jsonb_build_object('bank_transaction_id', p.bank_transaction_id, 'end_to_end_id', t.end_to_end_id,
+                              'original_end_to_end_id', t.original_end_to_end_id, 'pmt_inf_id', t.payment_info_id)
+    from public.payment p
+    cross join lateral (select q.end_to_end_id, q.original_end_to_end_id, q.payment_info_id, q.bank_account_id
+                        from public.bank_transaction q where q.id = p.bank_transaction_id offset 0) t
+    where p.organization_id = p_organization_id and p.status = 'unmatched' and p.booking_date < v_bd2
+      and (private.names_our_transfer(t.end_to_end_id, t.original_end_to_end_id, t.payment_info_id)
+           or private.names_our_lot(t.bank_account_id, t.payment_info_id))
+    union all
+    -- our transfer lines left to ops more than one business day (an I9 gap: 5120 and the bank differ by them)
+    select 'bank_line_unbooked', 'bank_account', x.bank_account_id, x.currency, sum(x.amount_minor)::bigint,
+           count(*)::integer, max(v_today - x.booking_date),
+           jsonb_build_object('ids', (array_agg(x.id order by x.booking_date, x.id))[1:50],
+                              'reasons', to_jsonb(array_agg(distinct x.reason)), 'p0', bool_or(x.p0))
+    from (
+    select x.id, x.bank_account_id, x.currency, x.amount_minor, x.booking_date, v.reason, false as p0
+    from public.bank_debit_review v
+    cross join lateral (select q.* from public.bank_transaction q where q.id = v.bank_transaction_id offset 0) x
+    -- review M2c-6b-2a (M2, T1): a line held as a suspected duplicate and released is read as the kind it was released
+    -- as (bank_duplicate_resolution, by its key), as the job reads it (coalesce(released_kind, kind))
+    left join lateral (select r.released_kind from public.bank_duplicate_resolution r
+                       where r.bank_transaction_id = x.id and r.decision = 'released' offset 0) dr on true
+    where v.organization_id = p_organization_id and x.booking_date < v_bd2
+      and (coalesce(dr.released_kind, x.kind) = 'transfer_out'
+           or (x.direction = 'debit' and x.end_to_end_id is null and x.payment_info_id ~ '^TF-[0-9]{4}-[0-9]{6,}-[0-9]+$')
+           or (x.direction = 'credit' and coalesce(dr.released_kind, x.kind) = 'return'
+               and coalesce(x.original_end_to_end_id, x.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$')
+           -- M2c-6b-2a (plan §2.6; the inventory): an entry kept unsplit holding ours, a credit naming our lot, an own or
+           -- a client's credit carrying our RMT/SWP id (S16), and (review M2, T1: the plan's clause, restored — a held
+           -- line released as a return is no `return` by its own kind) the returns the job leaves for ops' booking
+           or x.unsplit_ours > 0
+           or (x.direction = 'credit' and private.names_our_lot(x.bank_account_id, x.payment_info_id))
+           or (coalesce(dr.released_kind, x.kind) in ('own_transfer_in', 'client_transfer_in')
+               and coalesce(x.original_end_to_end_id, x.end_to_end_id) ~ '^(RMT|SWP)[0-9A-F]{12}$')
+           or v.reason in ('unplanned_payout_return', 'return_debit_pending'))
+      and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = x.id offset 0)
+      and not exists (select 1 from public.bank_debit_link k where k.bank_transaction_id = x.id and k.kind <> 'explained'
+                      offset 0)
+    union all
+    -- M2c-6b-2c (plan §4.2; critic2 ML-7): an other debit without our reference a transfer of ours may be (rule 3b's
+    -- probe), not booked nor linked, with no review (counted above), by bank_transaction_other_debit_idx; p0 when an
+    -- in-flight candidate's run has a positive live line past its latest execution date
+    select x.id, x.bank_account_id, x.currency, x.amount_minor, x.booking_date, 'payout_amount_match', c.p0
+    from (select q.id, q.bank_account_id, q.currency, q.amount_minor, q.booking_date, q.direction, q.unsplit_ours
+          from public.bank_transaction q
+          where q.organization_id = p_organization_id and q.kind = 'other_debit' and q.booking_date < v_bd2
+          offset 0) x
+    cross join lateral (select count(*) as n,
+                               coalesce(bool_or(c.cand = 'i' and exists (
+                                 select 1
+                                 from (select q.amount_minor, q.released, q.latest_execution_date
+                                       from public.remittance_line q where q.run_id = c.run_id offset 0) rl
+                                 where rl.amount_minor > 0 and not rl.released
+                                   and rl.latest_execution_date < v_today)), false) as p0
+                        from private.transfer_line_candidates(x.id, private.transfer_line_class(x.id)) c) c
+    where x.direction = 'debit' and x.unsplit_ours is null and c.n > 0
+      and not exists (select 1 from public.bank_debit_review v where v.bank_transaction_id = x.id offset 0)
+      and not exists (select 1 from public.bank_line_booking k where k.bank_transaction_id = x.id offset 0)
+      and not exists (select 1 from public.bank_debit_link k where k.bank_transaction_id = x.id offset 0)
+    ) x
+    group by x.bank_account_id, x.currency
+    union all
+    -- the servicer's settled share on the dedicated account for more than two business days, no sweep ordered or in
+    -- a file (§13 #8): −Σ4679 > 0 three business days ago and today
+    select 'servicer_funds_unswept', 'servicer', null, s.currency, (-s.now_owed)::bigint, null, null,
+           jsonb_build_object('due_to_servicer_minor', s.now_owed::text, 'as_of', v_bd3)
+    from (select la.currency, sum(lp.amount_minor) as now_owed,
+                 coalesce(sum(lp.amount_minor) filter (where lp.effective_date <= v_bd3), 0) as then_owed
+          from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
+          where la.organization_id = p_organization_id and la.book = 'due_to_servicer'
+          group by la.currency) s
+    where s.now_owed < 0 and s.then_owed < 0
+      and not exists (select 1 from public.bank_transfer x
+                      where x.organization_id = p_organization_id and x.kind = 'sweep' and x.currency = s.currency
+                        and x.status in ('ordered', 'in_file'))
+    union all
+    -- a top-up ordered more than one business day ago, its credit not booked yet
+    select 'top_up_pending', 'bank_transfer', t.id, t.currency, t.amount_minor, 1,
+           v_today - (t.created_at at time zone 'Europe/Paris')::date,
+           jsonb_build_object('end_to_end_id', t.end_to_end_id, 'bank_account_id', t.creditor_bank_account_id)
+    from public.bank_transfer t
+    where t.organization_id = p_organization_id and t.kind = 'top_up' and t.status in ('ordered', 'in_file')
+      and (t.created_at at time zone 'Europe/Paris')::date < v_bd2) u;
+end;
+$$;
+
+------------------------------------------------------------------------------------------
 -- Privileges (restated for every function redefined here; the new internals revoked)
 ------------------------------------------------------------------------------------------
 
@@ -915,4 +1365,9 @@ revoke execute on function private.remittance_chain_rows(uuid, date, date, uuid,
 -- review round 1: private.remittance_breach_held, as 20261121090000 left it, and private.transfer_line_offers, as
 -- 20261117110000 left it (internal: only the SECURITY DEFINER callers use them)
 revoke execute on function private.remittance_breach_held(uuid, date), private.transfer_line_offers(uuid, uuid)
+  from public, anon, authenticated, service_role;
+
+-- PR #40's CI round: the new internal (PostgreSQL grants EXECUTE to PUBLIC by default), and private.run_transfer_checks
+-- as 20261118100000 left it (internal: only private.run_payment_checks, SECURITY DEFINER, calls them)
+revoke execute on function private.transfer_reissues(uuid), private.run_transfer_checks(uuid, uuid, date)
   from public, anon, authenticated, service_role;

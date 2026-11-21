@@ -1537,3 +1537,38 @@ The scale files that time what the round changes, each once, each right after `s
   cancelled) 2.83 s; the 5,000-member batch line's funds pass **22.6 s**; 5,000 RMT debits imported in 1.2 s, the debit
   job **19.4 s** in chunks of 7.8, 8.0 and 3.3 s; the nightly checks **1.23 s** (1.24 s warm; `run_remittance_runs_checks`
   0.27 s); 200 members 0.53 s; 200 RMT debits' job 0.77 s. Within the earlier rounds' spread.
+
+### M2c-6b-3b part 3 — CI round (PR #40) (2026-11-21, same VM, the main stack alone)
+
+What the round changes on a timed path: in the nightly checks, `private.run_transfer_checks` reads a cancelled
+refund's chain forward by key (`private.transfer_reissues`) instead of every waiting refund of the servicer, with its
+transfer and chain, once per cancelled refund debited late (ADR-0014 « M2c-6b-3b part 3 — CI round (PR #40) »).
+
+The transfer-cancellation file's world after the scale job's six earlier files (5,000 + 5,040 refunds, 40 cancelled
+out of a downloaded file, 20 debited late), its nightly checks on one committed state, each variant in the same
+rolled-back transaction: `bank_transfer` rows read **486,480** with `refund_request` analysed (CI run 44909449352:
+486,480, 3.41 s) and 86,480 with it never analysed (main's CI run: 86,521, 0.88 s) — **75,850** fixed, either way.
+
+The scale job's command as `ci.yml` runs it, right after `supabase db reset` with CI's logging settings: **15 passed**
+(1,421.5 s):
+
+- `test_transfer_cancellation_scale_integration.py`: the nightly checks **0.63 s**, **75,850** `bank_transfer` rows (its
+  bound 183,008; part 3 review fixes, alone: 0.67 s, 86,479); set-up 40.6 s; the cancellation confirmed 0.11 s;
+  generation with the holds 2.76 s; the late predecessor's booking 1.87 s.
+- `test_remittance_scale_integration.py` (50,000 lines): nightly checks with the run booked **5.4 s**
+  (`run_payment_checks` 2.86 s own, `run_remittance_runs_checks` 0.61 s; main's CI run 5.1 s, this PR's 4.9 s; part 3
+  review fixes 4.6 s).
+- `test_transfer_files_scale_integration.py`: nightly checks 0.32 s, 25,083 `bank_transfer` rows (its bound 32,000;
+  this PR's CI run 25,084, main's 10,001 — replayed afterwards on the committed world, 16,046 with this round's bodies,
+  main's and PR #40's alike: the statistics', not the bodies').
+- The others within the earlier spread: 50,000 credits imported and matched 30.6 s, allocated 73.2 s; the statement
+  50,000 credits 44.0 s; 25 receipt jobs 71.7 s (14.3 ms per receipt); the 50k boarding 111 s; the camt.053 import job
+  28.2 s; 500 runs' approval jobs 136.7 s, the 500-member lot short of one 0.41 s / 1.78 s.
+
+The `scale-payouts` job's command, right after `supabase db reset` with CI's logging settings: **6 passed** (1,348.8 s)
+— the 5,000-member batch line's funds pass **22.9 s**, the debit job **23.0 s** in chunks of 9.2, 8.8 and 4.8 s, the
+nightly checks **1.08 s**; the 2,000 held chained runs: the nightly checks **14.89 s** (the standalone reading 11.09 s),
+the night the rows are written **14.90 s**, the waiting lines' variant **64.03 s** (bound 110 s; part 3 review fixes
+52.8 and 55.3 s), each run's paid date read again 5.15 s. This round's change is not on those paths (no cancelled
+refund in them); the 10 to 20 % over part 3's figures on the debit job and the variant is this VM's run-to-run spread
+(18.1 to 23.0 s for the debit job across the earlier rounds).

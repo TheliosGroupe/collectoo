@@ -5644,5 +5644,91 @@ first day not the first, `orderCheckResults` without nullsFirst, without its las
   named by that check's alert; the next one names it. Default: keep (part 2's reading named it; nothing is written).
 - The earlier opens stay so (part 3's: the booked branch's own cost at volume, plan §3.7's fourth screenshot).
 
+## M2c-6b-3b part 3 — CI round (PR #40) (2026-11-21)
+
+**The failure.** CI run 44909449352 (dispatched on the PR's branch), job « Scale runs (50k boarding, statement,
+matching, allocation; 5k receipts) »: `test_transfers_cancelled_out_of_a_downloaded_file_and_reissued_beside_a_large_file`
+read **486,480** rows of `bank_transfer` in its nightly checks, its bound 183,008 (12 × (SIZE + 2 × CANCELLED) + 24 ×
+(SIZE + 2) + 2,000); every other assertion passed (the checks 3.41 s; main's last scale run, 417fe36: 86,521 rows,
+0.88 s, the same breaches). Part 3's build ran the file alone after a reset: it passed.
+
+**Root cause: not this PR's bodies — an arm of `private.run_transfer_checks` that reads every waiting refund once per
+cancelled refund, cheap only while the plan happens to stop early.** Reproduced on the main stack in the scale job's
+order (`supabase db reset`, CI's logging settings, the six scale files before this one, then this file's world with
+its nightly checks measured per statement under auto_explain, in its rolled-back transaction): **486,480** rows — CI's
+figure to the row; with main's bodies (417fe36's `run_remittance_runs_checks`, `remittance_chain_holds`,
+`remittance_chain_rows`, `remittance_breach_held`, `transfer_line_offers`) applied over the PR's in the same
+transaction, 486,521 (the 41 more: main reads the servicer's cancelled filed transfers twice). Named: the statement
+`insert into public.payment_check_result … with flight …, cx …` of `private.run_transfer_checks` (as 20261118100000
+left it: this arm unchanged since M2c-6b-3a, PR #36), its arm « transfer_already_debited » over `cx` (the cancelled
+transfers of a downloaded file debited late) and its exclusion of a refund whose chain's live end is still waiting —
+`not exists (select 1 from public.refund_request q … where q.organization_id = … and q.status = 'requested' … and exists
+(select 1 from private.transfer_chain(q.transfer_id) c where c.transfer_id = t.id))`: a Bitmap Heap Scan of
+`refund_request` by `refund_request_waiting_idx` (the servicer's 10,012 waiting requests) 21 times, each request's
+transfer probed by `bank_transfer_pkey` (**210,250** loops) and its chain read (SubPlan, `private.transfer_chain`:
+**200,210** calls, their statement 200,424 rows). Which plan it got rested on `refund_request`'s statistics, that is on
+autovacuum: the scale test asks 10,040 refunds in its set-up and autovacuum analyses the table within the minute. Once
+analysed (the PR's run), the bitmap read every waiting refund before reaching a cancelled refund's own (its row
+rewritten by the re-issue, so last); not yet (main's run, the build's), the waiting index read in `requested_at` order
+met the cancelled refunds' requests among the first, after 488 requests each: 86,480 rows. The same state with only
+`refund_request`'s statistics forgotten in the transaction: 86,480; analysed: 486,480. « Flake » was the timing of
+autovacuum; the cause, a read whose cost is the servicer's waiting refunds per cancelled refund, by construction (a
+servicer whose cancelled refunds were asked after its other waiting refunds pays it under any plan).
+
+**Fix** (in place in the unmerged `20261121120000`, a new last section; behaviour unchanged):
+`private.transfer_reissues(t)` (new; SQL, stable, `search_path ''`, `enable_seqscan off`; EXECUTE revoked from every
+role) — a transfer and the transfers re-issuing it, forward by key (`bank_transfer_replaces_transfer_id_key`, unique:
+each transfer is re-issued at most once), with `private.transfer_chain`'s depth bound: y is in `transfer_reissues(t)`
+exactly when t is in `transfer_chain(y)`. `private.run_transfer_checks` redefined from 20261118100000 (line 2905;
+SECURITY DEFINER, `search_path ''`, `enable_seqscan off` and its grants restated), changed only in that exclusion: the
+same refund requests (requested, the servicer's, their transfer ordered or in a file) read from the cancelled refund
+forward — each re-issue by key, its request by `refund_request_transfer_id_key`, its transfer's status by key, the
+other conditions outside the probes (as `transfer_sibling_debited_late`'s). The same rows: in every state measured the
+checks raise the same results (CI's six codes and counts), pgTAP 039 (C4: a cancelled refund whose request was
+cancelled, executed late, alerted; L3) passes unchanged. `bank_transfer` rows read by the scale world's nightly checks
+(the same committed state, each variant in the same transaction, rolled back between them):
+
+| statistics in the transaction | PR's bodies (main's) | fixed |
+| --- | --- | --- |
+| `refund_request` analysed (CI's PR run) | 486,480 (486,521) | **75,850** |
+| `refund_request` never analysed (main's CI run) | 86,480 | 75,850 |
+| `bank_transfer`, `transfer_file_item`, `refund_request`, `transfer_cancellation_request` analysed | 276,294 | 65,874 |
+| eight tables' statistics forgotten (their indexes recorded empty), probes priced at 1,000 pages | 86,482 (86,523) | 115,980 |
+
+(The last: three once-per-check reads of the servicer's cancelled filed transfers — `remittance_booked_chain_runs`,
+the paying account's, `transfer_sibling_debited_late`'s payouts — took `bank_transfer_file_idx` whole under those forged
+index statistics, 10,063 rows each, once: linear, below.)
+
+**Test** (`worker/tests/test_transfer_cancellation_reads_integration.py`, in the `db` job, about 6 s): the
+transfer-cancellation world at 300 + 300 refunds and 40 cancelled out of their own downloaded file (20 debited late),
+the cancelled refunds' requests asked after 300 others still waiting — so whatever plan reads the waiting refunds meets
+300 of them before a cancelled one's —, the statistics of `bank_transfer`, `refund_request`, `transfer_file_item` and
+`transfer_file` forgotten and probes priced at 1,000 pages in its rolled-back transaction (the switch on there only).
+It holds the rows (each late refund's re-issue alerted, never the cancelled refund; each late line once),
+`private.transfer_chain`'s calls (track_functions: deterministic, whatever the plan or the stack) ≤ 4 × 40 + 100, and
+the rows read from `bank_transfer` ≤ 12 per transfer the servicer owns + one reading of the table + 1,000. On the PR's
+body (applied over the fixed one): **6,210** calls of `transfer_chain` and 21,410 rows — it fails; fixed: none (20 of
+`transfer_reissues`), 7,500 to 9,460 rows as the stack's other servicers' rows grow (the once-per-check reading).
+
+**Suites** (the main stack alone): `supabase test db` after `supabase db reset` — **Files=44, Tests=2,911, PASS**; then,
+without a reset (CI's order), the integration tests but the scale files — **245 passed** (244 and the new test);
+`database.types.ts` regenerated: unchanged (the new function is internal). Worker: `ruff check .`, `ruff format --check
+.`, `mypy` (182 files) clean; unit pytest 1,093 passed, 5 xfailed. On a fresh reset with CI's logging settings, the
+`scale` job's command as `ci.yml` runs it (its nine files): **15 passed** (1,421.5 s) — this file's nightly checks
+**0.63 s, 75,850 rows** of `bank_transfer`; then, on another fresh reset, the `scale-payouts` job's command: **6 passed**
+(1,348.8 s; the 2,000 held runs' nightly checks 14.89 s) — `docs/benchmarks/remittances.md` « M2c-6b-3b part 3 — CI
+round (PR #40) ». Then `supabase db reset` (the stack left running). No web code changed.
+
+### Left open (low), with its default
+
+- **`private.run_payment_checks` has no `enable_seqscan = off`.** Under the test's forced statistics its reads of
+  `refund_request` by a payment's or a transfer's key ran as scans of the table once per row (1.7 million rows for the
+  test's 640 payments: not counted by any bound, the table being small), and it read `bank_transfer` once by a scan of
+  the table (every servicer's rows: the « one reading of the table » the test allows). Not met with the statistics the
+  scale files leave (their per-table reads are pinned). Default: keep; set it in a later slice with the 50k scale run
+  measured (it changes every plan of the funds checks).
+- **The three once-per-check reads of `bank_transfer_file_idx` whole** under forged index statistics (above): linear,
+  once per check. Default: keep.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
