@@ -23,7 +23,7 @@
 -- The fixtures and helpers are 041's (themselves 040's: F1 downloaded on d(0) and cancelled whole on evidence, Martin's
 -- payout x re-issued as y, L = d(4)).
 begin;
-select plan(20);
+select plan(29);
 
 
 
@@ -1209,10 +1209,31 @@ create or replace function pg_temp.own(p_transfer uuid, p_day integer) returns j
 create or replace function pg_temp.import_y(p_line uuid) returns integer language sql as $$
   select (pg_temp.book(jsonb_build_array(jsonb_build_object('line', p_line, 'kind', 'payout',
                                                             'transfer', pg_temp.v('y')))) ->> 'payouts')::integer $$;
--- the nightly check of today (keyed p_key in t), then Martin's run's R124-6 rows
+-- the nightly check of today (keyed p_key in t), then Martin's run's R124-6 rows.
+-- M2c-6b-3b part 3 review round 1 (tests-ui-1-alert-equivalence-one-shape): every check a scenario runs also holds
+-- the checks' « remittance_breach_held » rows (from what their booked branch recorded) to the standalone reading's
+-- (private.remittance_breach_held, part 2's one snapshot), run by run, field by field — else the scenario dies naming
+-- both. Off (eqv) only inside a race scenario below, where another session's commit lands between the two statements.
+create temp table eqv (on_ boolean) on commit drop;
+insert into eqv values (true);
+grant all on eqv to authenticated;
 create or replace function pg_temp.nightly(p_key text) returns jsonb language plpgsql as $$
+declare v_alert jsonb; v_oracle jsonb;
 begin
   insert into t select p_key, pg_temp.chk(private.paris_today());
+  if (select on_ from eqv) then
+    select coalesce(jsonb_agg(jsonb_build_array(r.subject_id, r.currency, r.amount_minor, r.count, r.oldest_days,
+                                                r.details) order by r.subject_id), '[]')
+    into v_alert
+    from public.payment_check_result r where r.run_id = pg_temp.v(p_key) and r.code = 'remittance_breach_held';
+    select coalesce(jsonb_agg(jsonb_build_array(h.run_id, h.currency, h.amount_minor, h.line_count, h.oldest_days,
+                                                h.details) order by h.run_id), '[]')
+    into v_oracle
+    from private.remittance_breach_held('00000000-0000-0000-0000-0000000000aa', private.paris_today()) h;
+    if v_alert is distinct from v_oracle then
+      raise exception 'check %: the alert is not the standalone reading: % <> %', p_key, v_alert, v_oracle;
+    end if;
+  end if;
   return pg_temp.breaches('r1');
 end $$;
 -- the sheet's word on a payout part of p_transfer on p_line: « late latest-execution-date » (the preview's late flag)
@@ -1764,6 +1785,339 @@ select results_eq($$ select (v ->> 'job')::int, (v ->> 'chain')::int, v -> 'book
                             v -> 'nightly1', v -> 'alert1', v ->> 'run' from j where k = 'hu' $$,
   $$ values (1, 1, '["none"]'::jsonb, '["none"]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'booked'::text) $$,
   'HU (forged): a run whose chain holds no other transfer gets its row at the booking whatever the statements, and no alert — nor once its row is taken out (the alert is the chained runs'' holds'')');
+
+-- 6b-3b part 3's review round 1 ---------------------------------------------------------------------------------------
+-- (tests-ui-1-alert-equivalence-one-shape; CPCE-08) The checks' alert, raised from what their booked branch recorded,
+-- held to the standalone reading (pg_temp.nightly's guard, above) and to its own facts on three shapes no scenario above
+-- has:
+--   EA (forged): Martin's held line beside a released copy of itself (its ledger entry, its amount; an item re-run after
+--     a cancelled run leaves such a line beside the live one, remittance_line_live_uq allowing it): the held line
+--     counted once (1, 200 000), never its released copy;
+--   EB: x first filed in F0, F0 cancelled before anyone downloaded it (« Annuler le fichier ») and its date set back to
+--     the 20th business day before today, then filed again in F1 (downloaded on d(0)): the window starts at the
+--     earliest execution in a file downloaded at least once (d0) — d2 and d3 named, never F0's day;
+--   EC: a chain of three — y's file F2 cancelled whole on evidence too, its re-issue z filed in F3 (downloaded) and
+--     booked by its own debit after L (L = d15, the debit on d16) — and a debit of 1 640,00 € without our references on
+--     d14, younger than the bound days: it may be x's debit or y's; the alert names it once, as the debit of the one of
+--     them with the smaller id (as the standalone reading does).
+-- (dt3-csv-hint-last-day-not-named) And the last day no statement covers, also beyond the 31 named
+-- (last_uncovered_day): HL, HD's 41 days (d15); EA's two (d3).
+create or replace function pg_temp.sc_ea() returns jsonb language plpgsql as $$
+declare v jsonb; v_ly uuid;
+begin
+  perform pg_temp.chain_prefix('ea');
+  perform pg_temp.st('c3', 4, 7, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3');
+  v := jsonb_build_object('job', pg_temp.import_y(v_ly));
+  set constraints all immediate;
+  alter table public.remittance_line disable trigger remittance_line_insert_guard;
+  insert into public.remittance_line
+  select (jsonb_populate_record(null::public.remittance_line, to_jsonb(l) || jsonb_build_object(
+            'line_no', l.line_no + 1, 'released', true, 'released_at', clock_timestamp()))).*
+  from public.remittance_line l where l.run_id = pg_temp.v('r1');
+  alter table public.remittance_line enable always trigger remittance_line_insert_guard;
+  set constraints all deferred;
+  v := v || jsonb_build_object('lines', (select jsonb_agg(jsonb_build_array(l.amount_minor, l.released,
+                                                                            l.ledger_entry_id = f.ledger_entry_id)
+                                                          order by l.line_no)
+                                         from public.remittance_line l
+                                         cross join (select q.ledger_entry_id from public.remittance_line q
+                                                     where q.run_id = pg_temp.v('r1') and q.line_no = 1) f
+                                         where l.run_id = pg_temp.v('r1')));
+  v := v || jsonb_build_object('nightly', pg_temp.nightly('eaa'));
+  return v || jsonb_build_object('alert', pg_temp.alerts('eaa'), 'facts', pg_temp.alert_facts('eaa'),
+    'last', (select pg_temp.dk((r.details ->> 'last_uncovered_day')::date) from public.payment_check_result r
+             where r.run_id = pg_temp.v('eaa') and r.code = 'remittance_breach_held'));
+end $$;
+create or replace function pg_temp.sc_eb() returns jsonb language plpgsql as $$
+declare v jsonb; v_f0 uuid; v_ly uuid;
+begin
+  v_f0 := (pg_temp.gen('01', 'eb-g0') ->> 'file_id')::uuid;
+  v := jsonb_build_object('f0', pg_temp.try('01', format(
+    $q$ select public.cancel_transfer_file(%L, %L, %s, 'Fichier à refaire (test)') ->> 'status' $q$,
+    pg_temp.k('eb-c0'), v_f0, (pg_temp.fl(v_f0)).version)));
+  perform pg_temp.backdate(v_f0, pg_temp.bd(20));
+  perform pg_temp.chain_prefix('eb');
+  v := v || jsonb_build_object(
+    'x_in_f0', exists (select 1 from public.transfer_file_item i
+                       where i.file_id = v_f0 and i.transfer_id = pg_temp.v('m0') and i.execution_date = pg_temp.bd(20)),
+    'f0_downloads', (pg_temp.fl(v_f0)).download_count,
+    'f0_day_covered', private.statement_covers(pg_temp.cf(), pg_temp.bd(20), pg_temp.bd(20)));
+  perform pg_temp.st('c3', 4, 7, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3');
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('nightly', pg_temp.nightly('eba'));
+  return v || jsonb_build_object('alert', pg_temp.alerts('eba'));
+end $$;
+create or replace function pg_temp.sc_ec() returns jsonb language plpgsql as $$
+declare v jsonb; v_lz uuid;
+begin
+  perform pg_temp.chain_prefix('ec');
+  perform pg_temp.hold_to('r1', 15);
+  v := jsonb_build_object('cancel_f2', pg_temp.cancel_whole('f2', 'ecf2', 'b2', 2));
+  insert into t values ('z', pg_temp.trid('r1'));
+  perform pg_temp.handed_out('f3', 'ec-g3', 4);
+  alter table public.bank_transfer disable trigger bank_transfer_guard;
+  update public.bank_transfer set requested_execution_date = pg_temp.d(0) where id = pg_temp.v('z');
+  alter table public.bank_transfer enable always trigger bank_transfer_guard;
+  perform pg_temp.st('c3', 4, 16, jsonb_build_array(jsonb_build_object('amount', 164000, 'day', pg_temp.d(14)),
+                                                    pg_temp.own(pg_temp.v('z'), 16)));
+  v_lz := pg_temp.ln('c3', 2);
+  v := v || jsonb_build_object(
+    'chain', (select count(*) from private.transfer_chain(pg_temp.v('z'))),
+    'may_be', (select jsonb_agg(case when x.t = pg_temp.v('m0') then 'x' when x.t = pg_temp.v('y') then 'y' end
+                                order by 1)
+               from (values (pg_temp.v('m0')), (pg_temp.v('y'))) x (t)
+               where exists (select 1 from private.transfer_debit_lines(x.t, pg_temp.d(15)) l
+                             where l.line_id = pg_temp.ln('c3', 1))),
+    'job', (pg_temp.book(jsonb_build_array(jsonb_build_object('line', v_lz, 'kind', 'payout',
+                                                              'transfer', pg_temp.v('z')))) ->> 'payouts')::integer);
+  v := v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+  v := v || jsonb_build_object('nightly', pg_temp.nightly('eca'));
+  return v || jsonb_build_object('alert', pg_temp.alerts('eca'),
+    'first', case when pg_temp.v('m0') < pg_temp.v('y') then 'x' else 'y' end);
+end $$;
+create or replace function pg_temp.sc_hl() returns jsonb language plpgsql as $$
+declare v jsonb; v_ly uuid;
+begin
+  perform pg_temp.chain_prefix('hl');
+  perform pg_temp.hold_to('r1', 15);
+  alter table public.transfer_file_item disable trigger transfer_file_item_append_only;
+  update public.transfer_file_item set execution_date = pg_temp.bd(45)
+  where transfer_id = pg_temp.v('m0') and file_id = pg_temp.v('f1');
+  alter table public.transfer_file_item enable always trigger transfer_file_item_append_only;
+  perform pg_temp.st('c3', 16, 16, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 16)));
+  v_ly := pg_temp.ln('c3');
+  v := jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('nightly', pg_temp.nightly('hla'));
+  return v || (select jsonb_build_object('named', jsonb_array_length(r.details -> 'uncovered_days'),
+                                         'count', r.details -> 'uncovered_count',
+                                         'last', pg_temp.dk((r.details ->> 'last_uncovered_day')::date))
+               from public.payment_check_result r
+               where r.run_id = pg_temp.v('hla') and r.code = 'remittance_breach_held');
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+insert into j select 'ea', pg_temp.isolated('sc_ea');
+insert into j select 'eb', pg_temp.isolated('sc_eb');
+insert into j select 'ec', pg_temp.isolated('sc_ec');
+insert into j select 'hl', pg_temp.isolated('sc_hl');
+select results_eq($$ select (v ->> 'job')::int, v -> 'lines', v -> 'nightly', v -> 'alert', v -> 'facts' -> 'ids',
+                            v -> 'facts' -> 'uncovered_count' from j where k = 'ea' $$,
+  $$ values (1, '[[200000, false, true], [200000, true, true]]'::jsonb, '[]'::jsonb,
+             '[["r1", "alert", "remittance_run", 1, "200000", ["d2", "d3"], false, []]]'::jsonb, 'true'::jsonb,
+             '2'::jsonb) $$,
+  'EA (forged; tests-ui-1): a held line beside a released copy of itself (its ledger entry) — the alert counts and sums the held line once, as the standalone reading does');
+select results_eq($$ select v ->> 'f0', (v ->> 'x_in_f0')::boolean, (v ->> 'f0_downloads')::int,
+                            (v ->> 'f0_day_covered')::boolean, (v ->> 'job')::int, v -> 'nightly', v -> 'alert'
+                     from j where k = 'eb' $$,
+  $$ values ('superseded'::text, true, 0, false, 1, '[]'::jsonb,
+             '[["r1", "alert", "remittance_run", 1, "200000", ["d2", "d3"], false, []]]'::jsonb) $$,
+  'EB (tests-ui-1): x first filed in a file nobody downloaded, dated earlier — the window starts at the earliest execution of a file downloaded (d0): d2 and d3 named, never that file''s day');
+select results_eq($$ select v ->> 'cancel_f2', (v ->> 'chain')::int, v -> 'may_be', (v ->> 'job')::int, v -> 'booked',
+                            v -> 'nightly', v -> 'alert' #- '{0,7,0,2}',
+                            v -> 'alert' -> 0 -> 7 -> 0 ->> 2 = v ->> 'first' from j where k = 'ec' $$,
+  $$ values ('requested/superseded'::text, 3, '["x", "y"]'::jsonb, 1, '[]'::jsonb, '[]'::jsonb,
+             '[["r1", "alert", "remittance_run", 1, "200000", [], false, [["d14", "164000"]]]]'::jsonb, true) $$,
+  'EC (tests-ui-1): a chain of three, a line that may be the debit of x or of y — named once, as the debit of the one with the smaller id');
+select results_eq($$ select k, v ->> 'last' from j where k in ('ea', 'hl') order by k $$,
+  $$ values ('ea'::text, 'd3'::text), ('hl', 'd15') $$,
+  'dt3-csv-hint-last-day-not-named: the alert gives the last day no statement covers — d3 of two, and d15 of 41 days beyond the 31 named');
+select is((select jsonb_build_array(v -> 'named', v -> 'count', (v ->> 'job')::int, v -> 'nightly') from j where k = 'hl'),
+  '[31, 41, 1, []]'::jsonb,
+  'HL (HD''s shape): 31 days named, 41 counted, the last one given apart');
+
+-- (dt3-race-alert-for-run-paid-on-time; CPCE-08) The alert's runs, lines and the holds' findings are what the booked
+-- branch recorded; the rows written, the days and the waiting lines' bookings and links are read again in the results'
+-- statement. Another session's commit between the two (041's harness: pg_temp.wrap renames a function and runs the
+-- armed injection as it is called) can leave the check's alert stale until the next check — as a commit landing just
+-- after the results' statement leaves part 2's alert stale; in these two shapes part 2's second reading, made after the
+-- commit, raised none. Pinned as built (ADR-0014 « M2c-6b-3b part 3 review fixes », its default), the guard off for the
+-- racing check only:
+--   RC: the import of the statement showing x's on-time debit (d3) as the holds start (041's race C) — the check
+--     raises the alert naming neither day nor line (the text: judged again at the next check), no row;
+--   RD: ops book x's on-time line without our references « Virement hors reversement » as the holds ask its options
+--     (041's race D2) — the alert no longer names that line (booked: the results' statement reads the waiting lines'
+--     bookings and links), no row.
+-- In both the standalone reading at that state raises none, and the next check none: the client was paid on time (d3).
+create temp table inj (armed boolean, fired integer, sql text, args jsonb, ctx text) on commit drop;
+insert into inj values (false, 0, null, null, null);
+grant all on inj to authenticated;
+create or replace function pg_temp.inject(p_args jsonb) returns void language plpgsql as $$
+declare v_ctx text;
+begin
+  if (select armed from inj) and (select coalesce(p_args @> i.args, true) from inj i) then
+    get diagnostics v_ctx = pg_context;
+    update inj set armed = false, fired = fired + 1, ctx = v_ctx;
+    execute (select sql from inj);
+  end if;
+end $$;
+create or replace function pg_temp.arm(p_sql text, p_args jsonb default null) returns void language sql as $$
+  update inj set armed = true, sql = p_sql, args = p_args $$;
+-- ops' « Comptabiliser… » of a line as proposed (its parts and compare text read now), injected when armed — as ops' own
+-- session commits it (no role switch inside the caller's security definer functions)
+create or replace function pg_temp.arm_ops(p_line uuid, p_args jsonb default null) returns void language plpgsql as $$
+declare v_parts jsonb := pg_temp.prop(p_line); v_text text;
+begin
+  v_text := coalesce(pg_temp.pv(p_line, v_parts) ->> 'expected_text', 'none');
+  perform pg_temp.arm(format($q$ select pg_temp.as_user('01'), public.book_transfer_line(%L, %L, %L::jsonb, %L,
+                                                                                         'motif de test') $q$,
+                             pg_temp.k('race-' || p_line), p_line, v_parts, v_text), p_args);
+end $$;
+create or replace function pg_temp.wrap(p_name text) returns void language plpgsql as $$
+declare o oid; v_modes "char"[]; v_names text[]; v_id text; v_args text; v_ret text; v_in text; v_out text;
+        v_json text;
+begin
+  select p.oid, p.proargmodes, p.proargnames into strict o, v_modes, v_names from pg_proc p
+  where p.pronamespace = 'private'::regnamespace and p.proname = p_name;
+  v_id := pg_get_function_identity_arguments(o);
+  v_args := pg_get_function_arguments(o);
+  v_ret := pg_get_function_result(o);
+  select string_agg(quote_ident(v_names[i]), ', ' order by i) filter (where coalesce(v_modes[i], 'i') in ('i', 'b')),
+         string_agg(quote_ident(v_names[i]), ', ' order by i) filter (where v_modes[i] in ('o', 'b')),
+         'jsonb_build_object(' || string_agg(quote_literal(v_names[i]) || ', ' || quote_ident(v_names[i]), ', '
+                                             order by i) filter (where coalesce(v_modes[i], 'i') in ('i', 'b')) || ')'
+  into v_in, v_out, v_json from generate_subscripts(v_names, 1) i;
+  execute format('alter function private.%I(%s) rename to %I', p_name, v_id, p_name || '_real');
+  execute format('create function private.%I(%s) %s language plpgsql volatile set search_path = '''' as %L',
+    p_name, v_args, case when v_out is null then 'returns ' || v_ret else '' end,
+    'begin perform pg_temp.inject(' || v_json || '); '
+    || case when v_out is null then format('return private.%I(%s);', p_name || '_real', v_in)
+            else format('select h.* into %s from private.%I(%s) h;', v_out, p_name || '_real', v_in) end
+    || ' end');
+end $$;
+create or replace function pg_temp.fired(p_ctx text) returns jsonb language sql as $$
+  select jsonb_build_object('fired', fired, 'ctx', ctx ~ p_ctx) from inj $$;
+create or replace function pg_temp.x_import() returns text language sql as $$
+  select format($q$ select pg_temp.st('c4', 2, 3, %L::jsonb) $q$, jsonb_build_array(pg_temp.own(pg_temp.v('m0'), 3))) $$;
+create or replace function pg_temp.held_now() returns integer language sql as $$
+  select count(*)::integer
+  from private.remittance_breach_held('00000000-0000-0000-0000-0000000000aa', private.paris_today()) $$;
+create or replace function pg_temp.sc_rc() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid;
+begin
+  perform pg_temp.wrap('remittance_chain_holds');
+  perform pg_temp.chain_prefix('rc');
+  perform pg_temp.st('c3', 4, 7, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3');
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('nightly0', pg_temp.nightly('rca'));
+  v := v || jsonb_build_object('alert0', pg_temp.alerts('rca'));
+  update eqv set on_ = false;
+  perform pg_temp.arm(pg_temp.x_import());
+  v := v || jsonb_build_object('nightly1', pg_temp.nightly('rcb'));
+  v := v || pg_temp.fired('run_remittance_runs_checks');
+  v := v || jsonb_build_object('alert1', pg_temp.alerts('rcb'), 'standalone1', pg_temp.held_now());
+  update eqv set on_ = true;
+  v := v || jsonb_build_object('nightly2', pg_temp.nightly('rcc'));
+  return v || jsonb_build_object('alert2', pg_temp.alerts('rcc'),
+                                 'paid', pg_temp.dk(private.remittance_run_paid_on(pg_temp.v('r1'))));
+end $$;
+create or replace function pg_temp.sc_rd() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_lx uuid; v_ly uuid;
+begin
+  perform pg_temp.chain_prefix('rd');
+  perform pg_temp.st('c3', 2, 7, jsonb_build_array(
+    jsonb_build_object('amount', 164000, 'iban', pg_temp.martin_iban(), 'day', pg_temp.d(3)),
+    pg_temp.own(pg_temp.v('y'), 6)));
+  v_lx := pg_temp.ln('c3', 1); v_ly := pg_temp.ln('c3', 2);
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('nightly0', pg_temp.nightly('rda'));
+  v := v || jsonb_build_object('alert0', pg_temp.alerts('rda'));
+  update eqv set on_ = false;
+  perform pg_temp.arm_ops(v_lx, jsonb_build_object('p_line_id', v_lx, 'p_transfer_id', pg_temp.v('m0')));
+  perform pg_temp.wrap('transfer_line_offers');
+  v := v || jsonb_build_object('nightly1', pg_temp.nightly('rdb'));
+  v := v || pg_temp.fired('remittance_chain_holds');
+  v := v || jsonb_build_object('alert1', pg_temp.alerts('rdb'), 'standalone1', pg_temp.held_now(),
+                               'x_booked', (select count(*) from public.bank_line_booking k
+                                            where k.bank_transaction_id = v_lx));
+  update eqv set on_ = true;
+  v := v || jsonb_build_object('nightly2', pg_temp.nightly('rdc'));
+  return v || jsonb_build_object('alert2', pg_temp.alerts('rdc'),
+                                 'paid', pg_temp.dk(private.remittance_run_paid_on(pg_temp.v('r1'))));
+end $$;
+-- RL: H2l's shape — ops classify x's possible debit not ours (linked as a payer's return) as the holds ask its options:
+-- that check writes no row (the facts moved after its read) and its alert names no line — the standalone reading at
+-- that state says the same (the guard on), and the next check writes the row at y's date
+create or replace function pg_temp.sc_rl() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_lx uuid; v_ly uuid;
+begin
+  perform pg_temp.chain_prefix('rl');
+  perform pg_temp.collect('81', 164000, pg_temp.d(1), false);
+  perform pg_temp.st('c3', 2, 7, jsonb_build_array(jsonb_build_object('amount', 164000, 'day', pg_temp.d(3)),
+                                                   pg_temp.own(pg_temp.v('y'), 6)));
+  v_lx := pg_temp.ln('c3', 1); v_ly := pg_temp.ln('c3', 2);
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('nightly0', pg_temp.nightly('rla'));
+  v := v || jsonb_build_object('alert0', pg_temp.alerts('rla'));
+  perform pg_temp.arm(format($q$ select pg_temp.as_user('01'), public.link_debit(%L, %L, 'return', %L, null, '164000',
+                                                                                  'retour du payeur (test)') $q$,
+                             pg_temp.k('rl-link'), v_lx, pg_temp.pay('81')),
+                      jsonb_build_object('p_line_id', v_lx, 'p_transfer_id', pg_temp.v('m0')));
+  perform pg_temp.wrap('transfer_line_offers');
+  v := v || jsonb_build_object('nightly1', pg_temp.nightly('rlb'));
+  v := v || pg_temp.fired('remittance_chain_holds');
+  v := v || jsonb_build_object('alert1', pg_temp.alerts('rlb'),
+                               'x_linked', (select count(*) from public.bank_debit_link l
+                                            where l.bank_transaction_id = v_lx));
+  v := v || jsonb_build_object('nightly2', pg_temp.nightly('rlc'));
+  return v || jsonb_build_object('alert2', pg_temp.alerts('rlc'),
+                                 'paid', pg_temp.dk(private.remittance_run_paid_on(pg_temp.v('r1'))));
+end $$;
+-- OL (found by the scale scenario's waiting lines, review round 1): the options a nightly check asks of a possible
+-- debit past the bound days (private.transfer_line_offers) leave no lock behind — their working tables were dropped and
+-- created again at each call, each dropped table's lock held to the end of the check's transaction, and the lock table
+-- filled after about a hundred lines (the whole check failed). H2's line to Martin's IBAN on d3: asked once, then three
+-- times more — the same answer (it offers x's booking), the transaction's relation locks unchanged
+create or replace function pg_temp.sc_ol() returns jsonb language plpgsql as $$
+declare v_lx uuid; v_ly uuid; v_before integer; v_after integer; v_first boolean; v_more boolean[] := '{}';
+begin
+  perform pg_temp.chain_prefix('ol');
+  perform pg_temp.st('c3', 2, 7, jsonb_build_array(
+    jsonb_build_object('amount', 164000, 'iban', pg_temp.martin_iban(), 'day', pg_temp.d(3)),
+    pg_temp.own(pg_temp.v('y'), 6)));
+  v_lx := pg_temp.ln('c3', 1); v_ly := pg_temp.ln('c3', 2);
+  perform pg_temp.import_y(v_ly);
+  v_first := private.transfer_line_offers(v_lx, pg_temp.v('m0'));
+  select count(*) into v_before from pg_locks where pid = pg_backend_pid() and locktype = 'relation';
+  for k in 1..3 loop
+    v_more := v_more || private.transfer_line_offers(v_lx, pg_temp.v('m0'));
+  end loop;
+  select count(*) into v_after from pg_locks where pid = pg_backend_pid() and locktype = 'relation';
+  return jsonb_build_object('first', v_first, 'more', to_jsonb(v_more), 'locks_added', v_after - v_before);
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+insert into j select 'ol', pg_temp.isolated('sc_ol');
+insert into j select 'rc', pg_temp.isolated('sc_rc');
+insert into j select 'rd', pg_temp.isolated('sc_rd');
+insert into j select 'rl', pg_temp.isolated('sc_rl');
+select results_eq($$ select (v ->> 'job')::int, v -> 'nightly0', v -> 'alert0', (v ->> 'fired')::int,
+                            (v ->> 'ctx')::boolean, v -> 'nightly1', v -> 'alert1', (v ->> 'standalone1')::int,
+                            v -> 'nightly2', v -> 'alert2', v ->> 'paid' from j where k = 'rc' $$,
+  $$ values (1, '[]'::jsonb, '[["r1", "alert", "remittance_run", 1, "200000", ["d2", "d3"], false, []]]'::jsonb, 1,
+             true, '[]'::jsonb, '[["r1", "alert", "remittance_run", 1, "200000", [], false, []]]'::jsonb, 0,
+             '[]'::jsonb, '[]'::jsonb, 'd3'::text) $$,
+  'RC (dt3-race; as built): the import showing x''s on-time debit lands as the holds start — that check''s alert names neither day nor line (judged again at the next check), no row; the standalone reading and the next check none (paid on time)');
+select results_eq($$ select (v ->> 'job')::int, v -> 'nightly0', v -> 'alert0', (v ->> 'fired')::int,
+                            (v ->> 'ctx')::boolean, v -> 'nightly1', v -> 'alert1', (v ->> 'standalone1')::int,
+                            (v ->> 'x_booked')::int, v -> 'nightly2', v -> 'alert2', v ->> 'paid'
+                     from j where k = 'rd' $$,
+  $$ values (1, '[]'::jsonb,
+             '[["r1", "alert", "remittance_run", 1, "200000", [], false, [["d3", "164000", "x"]]]]'::jsonb, 1, true,
+             '[]'::jsonb, '[["r1", "alert", "remittance_run", 1, "200000", [], false, []]]'::jsonb, 0, 1,
+             '[]'::jsonb, '[]'::jsonb, 'd3'::text) $$,
+  'RD (dt3-race; as built): ops book x''s on-time line as the holds ask its options — that check''s alert no longer names the line (booked: never « comptabilisez-la » for a booked line), no row; the standalone reading and the next check none');
+select results_eq($$ select (v ->> 'job')::int, v -> 'nightly0', v -> 'alert0', (v ->> 'fired')::int,
+                            (v ->> 'ctx')::boolean, v -> 'nightly1', v -> 'alert1', (v ->> 'x_linked')::int,
+                            v -> 'nightly2', v -> 'alert2', v ->> 'paid' from j where k = 'rl' $$,
+  $$ values (1, '[]'::jsonb,
+             '[["r1", "alert", "remittance_run", 1, "200000", [], false, [["d3", "164000", "x"]]]]'::jsonb, 1, true,
+             '[]'::jsonb, '[["r1", "alert", "remittance_run", 1, "200000", [], false, []]]'::jsonb, 1,
+             '["none"]'::jsonb, '[]'::jsonb, 'd6'::text) $$,
+  'RL (dt3-race): ops classify x''s possible debit not ours as the holds ask its options — that check''s alert names no line (linked), as the standalone reading at that state; the next check writes the row at y''s date');
+select is((select v from j where k = 'ol'), '{"first": true, "more": [true, true, true], "locks_added": 0}'::jsonb,
+  'OL (review round 1): the options asked of a possible debit leave no lock behind (the same answer each time) — the nightly check no longer fills the lock table after about a hundred lines');
+
 
 -- The functions (PR #38's treatment for the booking guard and, review round 1 (tests-ui-1), the funds pass's posting;
 -- the alert's helpers internal) -----------------------------------------------------------------------------------
