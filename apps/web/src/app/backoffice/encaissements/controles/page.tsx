@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import Link from "next/link";
 import { ActionForm } from "@/components/action-form";
 import { AutoRefresh } from "@/components/auto-refresh";
@@ -12,8 +13,10 @@ import {
   unlistedText,
 } from "@/lib/payments/check-results";
 import { checkLabel, checkOldestDays, checkSubjectLink } from "@/lib/payments/debits";
+import { coverPrompt } from "@/lib/payments/remitted";
 import { money } from "@/lib/payments/statements";
 import { requestChecks } from "../debits/actions";
+import { CoverReversal, FullAdvanceCheck } from "./advance-actions";
 
 type Result = {
   id: string;
@@ -91,6 +94,21 @@ export default async function ChecksPage() {
       ? (run.summary as Record<string, unknown>)
       : null;
   const grouped = groupCheckResults(results, summary);
+  // M2c-7a: « Couvrir » and the full check are an admin's; the clients the uncovered reversals name, by name
+  const isAdmin = staff.role === "admin";
+  const uncoveredClients = [
+    ...new Set(
+      results
+        .filter((r) => r.code === "remitted_reversal_uncovered")
+        .map((r) => (typeof r.details?.client_id === "string" ? r.details.client_id : null))
+        .filter((x): x is string => x !== null),
+    ),
+  ];
+  const { data: clientRows } =
+    isAdmin && uncoveredClients.length > 0
+      ? await supabase.from("organization").select("id, legal_name").in("id", uncoveredClients)
+      : { data: [] as { id: string; legal_name: string }[] };
+  const clientName = new Map((clientRows ?? []).map((c) => [c.id, c.legal_name]));
 
   return (
     <WidePage title="Contrôles des encaissements" back={back}>
@@ -117,6 +135,7 @@ export default async function ChecksPage() {
       <p className="text-xs text-zinc-600 dark:text-zinc-400">
         Le contrôle s&apos;exécute en arrière-plan, en quelques secondes : actualisez la page pour voir le nouveau résultat.
       </p>
+      {isAdmin ? <FullAdvanceCheck organizationId={staff.organization_id} idempotencyKey={randomUUID()} /> : null}
 
       {run ? (
         <Section title="Résultats" testId="check-results">
@@ -156,6 +175,24 @@ export default async function ChecksPage() {
                             </>
                           ) : null}
                         </span>
+                        {isAdmin &&
+                        r.code === "remitted_reversal_uncovered" &&
+                        r.subject_id &&
+                        r.amount !== null &&
+                        r.currency &&
+                        typeof r.details?.recorded_on === "string" ? (
+                          <CoverReversal
+                            reversalId={r.subject_id}
+                            expectedGap={r.amount}
+                            prompt={coverPrompt(
+                              r.amount,
+                              r.currency,
+                              clientName.get(String(r.details?.client_id)) ?? "",
+                              r.details.recorded_on,
+                            )}
+                            idempotencyKey={randomUUID()}
+                          />
+                        ) : null}
                       </li>
                     );
                   }),

@@ -2,9 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 import { staffSession } from "@/lib/auth/staff";
-import { type ActionResult, parseEurosToMinor } from "@/lib/boarding/forms";
+import { type ActionResult, type ErrorCode, parseEurosToMinor } from "@/lib/boarding/forms";
 import { allocationErrorCode } from "@/lib/payments/allocation";
 import { debitErrorCode, normaliseIban, refundExecutionMode } from "@/lib/payments/debits";
+import { reverseErrorCode } from "@/lib/payments/remitted";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const AMOUNT = /^\d{1,16}$/;
@@ -30,8 +31,11 @@ function done(paymentId: string, error: { message: string } | null): ActionResul
   return { ok: true };
 }
 
-/** « Désimputer »: the allocation entries the page showed, on one file, reversed at their date. */
-export async function reverseAllocation(formData: FormData): Promise<ActionResult> {
+/** « Désimputer »: the allocation entries the page showed, on one file, reversed at their date. M2c-7a: with the total
+ * of the advances the command posted for the entries already remitted (minor units, from SQL), for the page's notice. */
+export async function reverseAllocation(
+  formData: FormData,
+): Promise<{ ok: true; advanceMinor: string } | { error: ErrorCode }> {
   const key = field(formData, "idempotency_key");
   const payment = field(formData, "payment_id");
   const account = field(formData, "account_id");
@@ -41,14 +45,27 @@ export async function reverseAllocation(formData: FormData): Promise<ActionResul
   const reason = field(formData, "reason");
   if (!reason) return { error: "reason_required" };
   const { supabase } = await staffSession();
-  const { error } = await supabase.rpc("reverse_allocation", {
+  const { data, error } = await supabase.rpc("reverse_allocation", {
     p_idempotency_key: key,
     p_payment_id: payment,
     p_account_id: account,
     p_entry_ids: entries,
     p_reason: reason,
   });
-  return done(payment, error);
+  if (error) {
+    console.error("allocation command failed", { error: error.message });
+    return { error: reverseErrorCode(error) };
+  }
+  revalidatePath(`/backoffice/encaissements/paiements/${payment}`);
+  revalidatePath("/backoffice/encaissements/a-traiter");
+  // the advances it posted (their amounts as text, from SQL): their total for the notice
+  const advances = (data as { advances?: { amount_minor?: unknown }[] } | null)?.advances ?? [];
+  const total = advances.reduce(
+    (s, a) =>
+      s + (typeof a.amount_minor === "string" && /^\d{1,16}$/.test(a.amount_minor) ? BigInt(a.amount_minor) : BigInt(0)),
+    BigInt(0),
+  );
+  return { ok: true, advanceMinor: total.toString() };
 }
 
 /** « Imputer »: send the payment to allocation again (from the reason the page showed), or use what is left

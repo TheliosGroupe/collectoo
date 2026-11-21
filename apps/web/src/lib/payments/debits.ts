@@ -1308,7 +1308,8 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   // review M2c-6b-1 (legal-texts#7): « dû au client »
   payout_overrun: {
     label: "Reversement au-delà du dû",
-    help: "Un reversement débité dépassait ce qui restait dû au client : une avance au client est comptabilisée, à récupérer.",
+    // M2c-7a (plan §3.7)
+    help: "Un reversement débité dépassait ce qui restait dû au client : le cabinet lui a avancé la différence.",
   },
   bank_line_unbooked: {
     label: "Débits du cabinet non comptabilisés",
@@ -1331,7 +1332,21 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   double_payout_open: {
     label: "Avance du cabinet après un virement hors reversement",
-    help: "Avance du cabinet après un virement exécuté hors reversement : à récupérer auprès du client — ce recouvrement n'est pas encore géré dans Collectoo.",
+    // M2c-7a (plan §3.7): « ce recouvrement n'est pas encore géré » goes (7b adds how it is recovered)
+    help: "Avance du cabinet après un virement exécuté hors reversement.",
+  },
+  // M2c-7a (plan §3.4, §3.7): the advances' checks (private.run_advance_checks)
+  remitted_reversal_uncovered: {
+    label: "Annulation d'un encaissement déjà reversé sans avance du cabinet",
+    help: "Un encaissement déjà versé au client a été annulé sans que le cabinet en fasse l'avance : la somme serait déduite des autres encaissements du client, une compensation faite sans l'avance ni la clause qui la prévoit. « Couvrir » enregistre l'avance.",
+  },
+  advance_ledger: {
+    label: "Avances du cabinet ≠ compte des avances",
+    help: "Pour ce client, les avances non récupérées ne valent pas le solde du compte des avances à récupérer (I18).",
+  },
+  advance_open: {
+    label: "Avance du cabinet non récupérée depuis plus de 30 jours",
+    help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée.",
   },
   top_up_pending: {
     label: "Approvisionnement attendu",
@@ -1773,6 +1788,8 @@ export function debitErrorCode(message: string): ErrorCode {
   if (message.includes("debit link refused: own_transfer_out_line")) return "own_transfer_out_line";
   if (message.includes("before_previous_return")) return "link_before_return";
   if (message.includes("payment_returned")) return "link_payment_returned";
+  // M2c-7a: a return of a remitted payment whose cover could not be recorded (LG009)
+  if (message.includes("posting_failed") && message.includes("LG009")) return "remitted_cover_failed";
   if (message.includes("posting_failed")) return "link_posting_failed";
   if (message.includes("amount_exceeds") || message.includes("amount_differs"))
     return "link_amount";

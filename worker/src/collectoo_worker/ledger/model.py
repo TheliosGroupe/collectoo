@@ -268,7 +268,7 @@ REQUIRES_REASON = frozenset(
 )
 
 
-# --- Errors (SQLSTATE LG000-LG007 in the database) -------------------------------------------
+# --- Errors (SQLSTATE LG000-LG009 in the database) -------------------------------------------
 
 
 class LedgerError(Exception):
@@ -324,6 +324,14 @@ class ClientMoneyShortError(LedgerError):
     sqlstate = "LG008"
 
 
+class RemittedReversalUncoveredError(LedgerError):
+    """A reversal of an entry already remitted to its client is not covered by an advance of the
+    servicer for what it undoes (I23, M2c-7a): the client's other collections would pay it back,
+    a compensation no clause allows. Post the reversal through a path that covers it."""
+
+    sqlstate = "LG009"
+
+
 ERRORS_BY_SQLSTATE: Mapping[str, type[LedgerError]] = {
     "LG000": AppendOnlyError,
     "LG001": UnbalancedEntryError,
@@ -334,6 +342,7 @@ ERRORS_BY_SQLSTATE: Mapping[str, type[LedgerError]] = {
     "LG006": InvalidRequestError,
     "LG007": OverdrawnError,
     "LG008": ClientMoneyShortError,
+    "LG009": RemittedReversalUncoveredError,
 }
 
 

@@ -335,11 +335,18 @@ export type RunPayout = {
 
 const positive = (v: string | null | undefined): v is string => !!v && MINOR.test(v) && BigInt(v) > BigInt(0);
 
+/** M2c-7a (plan §3.7): what each cause of an advance of the servicer says on the run page. */
+const ADVANCE_CAUSE: Record<string, string> = {
+  remitted_reversal: "encaissement de ce reversement annulé ou repris",
+  payout_overrun: "reversement débité au-delà de ce qui restait dû",
+  double_payout: "virement exécuté hors reversement",
+};
+
 /**
  * The run page's sentences on its payout (plan §7.4): the debit's date; the set-off with its date, each part from its
  * own field (« Commission » for the invoices set off, commission_minor; « Factures et avances » with each amount when it
  * also recovered advances, Da > 0; review 6b-2c pages-1: never D, which also nets a credit-note refund paid with the
- * transfer); an advance of the servicer at the debit (payout_overrun); a returned payout (its payout account said
+ * transfer); the advances of the servicer at its debit, by cause (M2c-7a); a returned payout (its payout account said
  * blocked only while it is, and the run that paid it again once booked); each unplanned booking of its transfers (a
  * second execution, or one after the cancellation), and the return of one; for a draft, what it deducts of each
  * unplanned booking (CSO-6; review 6b-2c money-4: P, the net of that booking's own rows it holds, never A).
@@ -372,11 +379,12 @@ export function runPayoutNotes(p: RunPayout, currency: string): string[] {
     else if (advances)
       notes.push(`Avances du cabinet récupérées par compensation le ${on} : ${money(p.advances_recovered_minor, currency)}`);
   }
+  // M2c-7a (plan §3.7 [critic] L19 (b), F5): each advance of this payout's chain, worded by its cause, with the date it
+  // was recorded
   for (const a of p.advances) {
-    if (a.cause !== "payout_overrun") continue;
-    notes.push(
-      `Avance du cabinet de ${money(a.amount_minor, currency)} au débit : le virement dépassait ce qui restait dû au client (une imputation annulée après la validation) ; à récupérer selon son mandat — ce recouvrement n'est pas encore géré dans Collectoo.`,
-    );
+    const why = ADVANCE_CAUSE[a.cause];
+    if (!why) continue;
+    notes.push(`Avance du cabinet enregistrée le ${frenchDate(a.created_on)} : ${why} (${money(a.amount_minor, currency)})`);
   }
   for (const t of p.transfers) {
     // M2c-6b-3a-2 (T18): also a late predecessor's return (its transfer stays cancelled)

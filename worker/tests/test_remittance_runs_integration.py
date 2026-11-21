@@ -457,10 +457,13 @@ def _book_payout(run: str) -> None:
 
 
 def test_the_worked_example_continues_a_credit_note_on_a_settled_invoice() -> None:
-    """§7.2 RV-3 (without the advance, M2c-7): RV-1 debited (emulated M2c-6: FC-1 settled, its VAT
-    due); then E10 +300 000 on another file and P1's allocation undone: FC-3 54 000 TTC and a credit
-    note on FC-1 of 36 000 TTC, its VAT off the VAT already due (44571); FC-1 settled, the 36 000 is
-    a refund owed paid with the payout: N 82 000, D 18 000; 4111 = the open documents."""
+    """§7.2 RV-3 (M2c-7a: with the advance A1, before 7b's claw-back): RV-1 debited (FC-1 settled,
+    its VAT due); then E10 +300 000 on another file and P1's allocation undone — E2 was remitted
+    in RV-1, so « Désimputer » posts A1 +200 000 (design §13 #1; before 7a the reversal netted
+    against E10: gross 100 000, N 82 000, the compensation §13 excludes): FC-3 54 000 TTC and a
+    credit note on FC-1 of 36 000 TTC, its VAT off the VAT already due (44571); FC-1 settled, the
+    36 000 is a refund owed paid with the payout: gross 300 000, N 282 000, D 18 000 (§7.3's
+    first variant, 4112 open until 7b claws it back); 4111 = the open documents."""
     tenant = remittance_tenant()
     f42, p1 = paid_file(tenant, 200_000)
     rv1 = request_run(tenant)
@@ -484,9 +487,9 @@ def test_the_worked_example_continues_a_credit_note_on_a_settled_invoice() -> No
     rv3 = request_run(tenant)
     draft = run_row(rv3)
     assert (draft["gross_minor"], draft["refund_minor"], draft["net_minor"]) == (
-        100_000,
+        300_000,
         36_000,
-        82_000,
+        282_000,
     ), draft["last_failure"]
     approve(tenant, rv3)
     drain()
@@ -631,11 +634,16 @@ def test_a_cancelled_runs_credit_note_is_restored_and_the_reversal_credited_once
         assert restore[5].startswith(f"Annulation du reversement {done['number']} — rétablissement")
         rv3 = request_run(tenant)
         draft = run_row(rv3)
-        # the same net as if RV-2 had been paid: C less its invoice, plus FC-1's credit owed back
+        # the same net as if RV-2 had been paid: C less its invoice, plus FC-1's credit owed back;
+        # M2c-7a (ADR-0014 « M2c-7a », R3; plan §3.9 case 16): B was remitted in RV-1 (debited),
+        # so « Désimputer » posted the servicer's advance A1 (+150 000), an item of RV-3 as B's
+        # reversal is: no longer netted against C (design §13 #1), N gains 150 000 (before 7a,
+        # 150 000 + 27 000 - C TTC)
         c_ttc = 45_000 + (4_500 if rate_change else 9_000)
-        assert (draft["refund_minor"], draft["net_minor"]) == (27_000, 150_000 + 27_000 - c_ttc), (
-            draft["last_failure"]
-        )
+        assert (draft["refund_minor"], draft["net_minor"]) == (
+            27_000,
+            150_000 + 150_000 + 27_000 - c_ttc,
+        ), draft["last_failure"]
         approve(tenant, rv3)
         drain()
         assert run_row(rv3)["status"] == "approved", run_row(rv3)["last_failure"]

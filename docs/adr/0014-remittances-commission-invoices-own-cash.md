@@ -5730,5 +5730,245 @@ round (PR #40) ». Then `supabase db reset` (the stack left running). No web cod
 - **The three once-per-check reads of `bank_transfer_file_idx` whole** under forged index statistics (above): linear,
   once per check. Default: keep.
 
+## M2c-7a: remitted reversals covered everywhere, and the backstop (2026-11-21)
+
+Plan: `docs/design/m2c-7-plan.md` §0 (D1–D4, D12, D13), §1.4 (7a row), §2, §3 and their [critic] / [check 1–3]
+marks; founder questions §10 none answered, every default built and left open. Migration
+`20261122090000_remitted_reversals_covered.sql` (one file, forward-only). New: `private.run_settled_at` /
+`run_settled_on`, `private.entry_remitted`, `private.remitted_cover_fact` / `_held` / `_target` / `_gap`,
+`private.remitted_cover_begin` / `_post`, `private.cover_remitted_reversals` (at the reversal),
+`private.cover_booked_run_reversals` (at the booking), `private.advance_in_flight_run`, `private.remitted_cover_release`
+(the unplanned return), the deferred constraint triggers `ledger_entry_remitted_cover` and `remittance_run_booked_cover`
+(SQLSTATE `LG009`), `private.run_advance_checks`, the table `private.advance_full_check_request` (RLS on, no grant to any
+client role, its guard, append-only for deletes, change log) with `private.advance_full_check_take` and
+`public.request_full_advance_check`, `public.cover_remitted_reversal` (« Couvrir »), `public.allocation_remitted` (the
+« Désimputer » read), three indexes for the nightly's keyed reads. Redefined, each copied whole from its latest
+definition across every migration file (the change only; settings, `search_path ''`, SECURITY DEFINER where it was and
+grants restated): `private.ledger_check_now` (`20261111090000:1335`), `public.reverse_allocation`
+(`20261109190000:1079`), `private.debit_post_rows` (`20261110120000:549`), `private.approve_remittance_run`
+(`20261114090000:786`), `private.run_remittance_checks` (`20261115090000:3710`), `private.transfer_line_post`
+(`20261118100000:2163`), `private.bank_booking_post_rows` (`20261121090000:808`), `public.remittance_run_payout`
+(`20261118100000:4380`). Worker: `RemittedReversalUncoveredError` (`LG009`; a debit-job link refused so is
+`posting_failed`, as `LG008`). Web: « Désimputer » and « Débits et retours » say what was remitted, the toast says the
+advance, the run page words each advance by cause, « Contrôles » gains the three checks, « Couvrir » and « Vérification
+complète des avances ». **The switch stays off**: nothing writes `private.feature_switch`; the rules reachable only with
+it on are tested with it on inside rolled-back subtransactions (043 `pg_temp.iso(name, true)`); `033` byte for byte
+unchanged.
+
+### Decisions
+
+- **D1 — remitted, and what is covered (plan §2.1).** An allocation or forward E is remitted when its live line is in a
+  booked run that does not also hold its reversal R ([critic] M7-MONEY-1: a same-run pair nets to 0 in that run and was
+  never paid out; 5a–5c). T(R) = E's line then; otherwise what the live unplanned payouts paid of E (switch on; an
+  attribution whose booking is not reversed); otherwise 0. C(R) = R's live covers (`client_advance`, cause
+  `remitted_reversal`, `cause_entry_id` = R, entry not reversed). I23: C(R) = T(R) for every reversal.
+- **D2 — where the cover is posted.** In the transaction of the reversal: `reverse_allocation` (« Désimputer »), the M2b
+  return in both modes and « Retour au-delà du paiement » (`private.debit_post_rows`, step 1 collects the reversals it
+  posts and covers them before step 2), set-based (`pg_temp._rcv`, at most 2,000 entries per `ledger_post_set`). At the
+  booking, for a line reversed while its run was in flight: `private.bank_booking_post_rows` step 3b (the payout's
+  transfer and debit line on the advance, [critic] F5) and the N = 0 branch of `private.approve_remittance_run` (no
+  transfer). The overrun cover (step 4) then reads the balances after these covers: `payout_overrun` remains `LG008`'s
+  backstop for a debit no reversed line explains (043 #39, a planted raw 4670 debit).
+- **Its date** is greatest(R's date, the date of the payout it covers) ([critic] F3: a back-dated « Désimputer » never
+  puts the advance before the payout; 043 #1 reads 4670, 4679 and 4112 the day before the payout).
+- **D3 — the backstop.** Two deferred constraint triggers check I23 at every commit — on each reversal (its own gap; a
+  reversal of an unplanned booking: the gap of every item that booking paid; a reversal of a cover: its reversal's gap,
+  [critic] F6) and on a run set booked (each live allocation or forward line's reversal, never a same-run pair) — SQLSTATE
+  `LG009`. `private.ledger_check_now()` fires them with `LG008`'s, so every command that calls it fails at once.
+- **D4 — the release (switch on).** An unplanned payout's return reverses the covers of the items it paid that were
+  reversed since, down to what the other live bookings still pay (re-posted under `adv:<R>:rel:<line>:<booking>`);
+  refused « transfer line booking refused: advance_settled » while the advance is settled and « advance_in_flight »
+  while an approved or sent run's plan takes it back ([critic] M7-MONEY-2), nothing booked.
+- **D12 — what the client received, and when (`private.run_settled_at`, plan §3.2.1 [check 1] [check 2]).** A run's
+  transfer chain paid and stayed paid → its paid date, « paid »; came back → followed through the re-queued item's live
+  line in a booked run (the chain's returns read from its `payout_returned` bookings, never `return_entry_id`, which a
+  late predecessor's return leaves null); an N = 0 run → its `booked_on`, « set_off » when it set something off, else
+  « netted »; recursion bounded at 10 (`settled_on_depth` on `advance_open`). The « Désimputer » sheet follows `paid_how`.
+- **D13 — the nightly (`private.run_advance_checks`, called by `private.run_remittance_checks`).**
+  `remitted_reversal_uncovered` (violation, the gap) reads a delta: the reversals posted since the last finished run
+  less one day, the runs booked since, the attributions and covers since, and the reversals the last run listed
+  ([critic] F9); the whole history on the 1st of the month (Paris) or when the run takes an admin's request
+  (`public.request_full_advance_check`, aal2; one open request per servicer; taken by the next check run, its `run_id`
+  set; a run that fails rolls the take back). `advance_ledger` (violation: per client, the open advances against
+  4112) and `advance_open` (alert: an advance open more than 30 days). « Couvrir » (`public.cover_remitted_reversal`,
+  admins at aal2, compare-and-set on the gap the page showed) posts a missing cover under `adv:<R>:cov:<md5 of the key>`.
+- **Locks.** Row locks, then `payments:<org>` (taken by the ledger's posting before any cover reads a line), then
+  `remit:<org>`, then a counter (plan §2.2). `reverse_allocation`'s `lock_timeout` (2 s) may now be reached on the remit
+  lock a file generation holds: « Opération en cours sur les virements : réessayez dans un instant. » (55P03).
+
+### Deviations from the plan
+
+- **The migration's name** is the task's, `20261122090000_remitted_reversals_covered.sql`.
+- **`private.cover_remitted_reversals(p_reversal_ids uuid[], p_line_ids uuid[] default null)`**: a second, parallel
+  array — the bank line each reversal was posted at (the M2b return), kept on the advance (`bank_transaction_id`).
+- **Keys.** « Couvrir » posts under `adv:<R>:cov:<md5 of its idempotency key>` (the plan's `adv:<R>:cov:<key>`: a key
+  of any length in an entry's key); the release's re-post under `adv:<R>:rel:<line>:<booking>` (the plan's
+  `adv:<R>:rel:<line>`: one return line can reverse several bookings — an unsplit lot — each releasing its own items).
+- **`private.run_settled_at` rule 2 fallback.** A booked run whose chain has no counted execution and no return (the
+  chain rule, `private.remittance_chain_paid`, does not count a debit dated before its transfer's requested execution
+  date — a booking the debit job and the tests make) gives the run's `booked_on`, « paid »: without it « Désimputer »
+  said « revenu, à verser de nouveau » of a payout that never came back.
+- **043 holds 44 assertions, not ≈ 70**: each scenario returns one `jsonb` of every fact it checks (the advance, its
+  key, date, books, the queue, the gap, the check), compared whole.
+- **Pins flipped beyond the plan's list (house rule R3; each keeps its purpose):**
+  - `037` `p_draft_partial` (« P (review 6b-2c money-4) »): the same raw reversal of a booked run's line as `d_f5`; reworked
+    as `d_f5` (the bounced collection in the run in flight R2, covered at R2's booking): `held` gains
+    `client_advance:10000` (the cover); `draft_unplanned` unchanged (31 000).
+  - `037` `d_queue_call`: its bounced collection is now e7 in R2 in flight (c7, remitted in the booked R0, would be
+    covered); the expectation is unchanged (the queue nets the same 39 200).
+  - `038` `d_queue`, `f_partial`, `d_twice` (the Suivi of a bounce): they stand for a bank's return of a remitted
+    collection by a raw `private.ledger_reverse`, which now fails `LG009` at commit; the setup switches the cover trigger
+    off around those three scenarios (`pg_temp.cover_check(false)`, then `(true)`), every assertion unchanged.
+  - `017` (three check-code sets, l.845–878): + `advance_ledger` — the fixtures post raw `client_advance` entries
+    (4112) with no advance row, which I18's new advance half flags.
+  - `023` r5 (l.518, l.580): « Désimputer » of file 01's collection remitted in the booked r1 posts its cover: r5's plan
+    gross 100 000 → 300 000 and its lines 2 → 3 (the plan named this flip); its `prepare` helper left-joins the file of
+    an item (an advance item has none).
+  - `024` (l.472): the runs booked above queue their deferred cover check; it is fired before the test's `ALTER TABLE`
+    (PostgreSQL refuses one with trigger events pending).
+  - `035` §5 (r8, l.1435ff), `036` #14 (`c_overrun`), `037b` `d_ml1_cover`, `040` F5b: cause `payout_overrun` →
+    `remitted_reversal`, same amount, same payout and line (the plan named 035, 037b, 040); 035's `payout_overrun`
+    alert → none (the advance is the reversal's cover; `advance_open` takes it after 30 days).
+  - Named by the plan and flipped so: `037` `d_f5` and `d_ml1_signed`; the worker's RV-3
+    (`test_remittance_runs_integration.py::test_the_worked_example_continues_a_credit_note_on_a_settled_invoice`: gross
+    300 000, refund 36 000, net 282 000, its docstring saying why).
+- **Not done:** `tests/ledger_machine.py`'s 7a part (the `reverse` rule marking an entry remitted; the oracle expecting
+  an advance or `LG009`): left to 7f's full machine, the entry-level rule pinned by 043 #1–#21 meanwhile.
+
+### Tests
+
+- pgTAP `043_remitted_reversal_cover.test.sql` (new, **44**; fixtures as 037's: a servicer, Martin, Lilas, Durand, their
+  mandates, runs approved through `approve_remittance_run` and booked through the funds pass; every scenario in a
+  rolled-back subtransaction, the switch on only inside those that need it): cases 1–3 (#1–#3: the back-dated cover's
+  date and balances, no `LG008`, a pending pair netted), 4 and 5d (#4–#6: no cover in flight, the at-booking cover with
+  the payout's transfer and debit line, listed on the run page), 5a–5c (#7–#9: same-run pairs never covered), 5e–5g
+  (#10–#12, switch on: an attribution covered and released; Q17's default with `paid_on` null), 6 (#13–#14: strict
+  return, partial return), 7 (#15–#16: the job's chunk, a planted forgotten cover `posting_failed` LG009, `_rcv` begun
+  three times), 8 (#17), 9–10 (#18–#20: LG009 at `ledger_check_now`, at a run set booked; none for a same-run pair), 18
+  (#21: a cover reversed raw), 11 (#22–#26, switch on: the release, the re-post, `advance_settled`,
+  `advance_in_flight`, and — added after the first mutant run — the release skipped, refused LG009 as a cover above
+  its target), 12 (#27), 13 (#28: replays, « Couvrir » refusals and roles, its own key after a release), 14 (#29–#32:
+  the nightly's gap, the one-day overlap — added after the first mutant run —, the delta window and the full pass,
+  `advance_open` at 31 days and not 30, `advance_ledger`, the 1st of the month, the request taken once, a failed run
+  keeping it open, the guard), 19 (#33: the check codes), 15 (#34–#38: RLS and grants of the new functions and table),
+  16's backstop (#39: a planted raw 4670 debit → `payout_overrun`), 17 (#40–#42: `paid_on`/`paid_how`/`paid_run_number`,
+  depth, N = 0 `set_off`/`netted`, the late predecessor's return read from its booking), #43 (the §3.3 example from
+  12/11), #44 (the switch is off).
+- Worker: `tests/test_remitted_reversal_integration.py` (new): the §7 example from 12/11 through the real debit job
+  (P1's return → A1 `adv:<R>` at the return's date, its gap 0 once committed; 4670 −300 000; RV-3 prepared gross
+  300 000, N 282 000, D 18 000); two connections — « Désimputer » against `generate_transfer_file` and against the
+  client's approval job (one waits, one cover), `reverse_allocation` against the funds pass booking the payout of the
+  run in flight, in both orders (one advance: `adv:<R>` or `adv:<R>:<run>`, no LG009), « Couvrir » against the
+  at-booking cover (one advance). Unit: `test_ledger_model.py::test_lg009_is_a_remitted_reversal_not_covered`.
+  Flipped (R3): `test_remittance_runs_integration.py` RV-3 (l.459) and the cancelled run's credit note (l.637: N gains
+  B's cover, 150 000), `test_transfer_line_ops_integration.py::test_p_is_the_twin_s_when_the_client_s_queue_binds` (the
+  negative item a collection of a run in flight, as `d_f5`). `test_remittance_documents_integration.py:540` and
+  `test_manual_credit_note_integration.py:112` (named by the plan) pass unchanged: their assertions read the reversal's
+  credit note and the documents, not the run's gross.
+- Web: vitest `remitted.test.ts` (new, 16: the three checks' labels, the two reworded helps, LG009 and 55P03, the
+  « Désimputer » sentences per `paid_how` — never « versé » or « débité » for `set_off`/`netted` —, the toast, the
+  return note, « Couvrir »'s prompt and refusals, the full check, the run page note per cause);
+  `transfer-line-foundations.test.ts` and `transfer-line-pages.test.ts` (the reworded help and run note). E2E
+  `remitted-reversal.spec.ts` (new, desktop and mobile): a collection remitted and debited, « Désimputer »: the sheet
+  says « Déjà reversé au client (reversement RV-…, débité le …) » and the advance, the page says it recorded, the run
+  page says « Avance du cabinet enregistrée le … », one `remitted_reversal` advance; an admin's « Contrôles »: no
+  `remitted_reversal_uncovered` nor `advance_ledger`, « Vérification complète des avances » asked; « Couvrir » on a
+  planted result (an uncovered reversal of a remitted entry cannot be committed): its sentence, then « Rien à couvrir :
+  l'avance existe déjà. ». Screenshots `m2c7-desimputer-deja-reverse`, `m2c-controles`, `m2c7-controles-couvrir`.
+- Seen failing first (WIP `9ce09fc`, the tests before the code): 043 stopped at its first scenario (the functions it
+  calls did not exist), the worker's new integration file and the LG009 unit test failed (no
+  `RemittedReversalUncoveredError`), vitest `remitted.test.ts` failed (no module).
+
+### Mutants
+
+SQL: each mutant is one function of the migration replaced (`CREATE OR REPLACE` with the change) inside the killer's own
+transaction, rolled back with it (`psql`: `begin`, the mutant, the pgTAP file); the killers run against 043 (and 037 for
+the at-booking cover). 043's numbers are the final file's (44 tests).
+
+| Mutant (plan §3.9) | Killed by |
+|---|---|
+| cover keyed on any live line, booked or not (`remitted_cover_fact`: any status) | 043 #5, #6 (4, 5d), #19 (10), #27 (12) |
+| the same-run exclusion dropped (`remitted_cover_fact`) | 043 #7 (5a), #10 (5e) |
+| advance dated at R's effective date | 043 #1 (case 1, back-dated) |
+| advance dated today | 043 #1 |
+| the `cover_booked_run_reversals` call removed from `bank_booking_post_rows` | 043 #6, #27; 037 `d_f5` (#45) |
+| T counting attributions when the item is remitted | 043 #11 (5f) |
+| the check `gap > 0` instead of `<> 0` (`remitted_cover_check`) | 043 #26 (11, the release skipped) — survived the first run; #26 added |
+| the release not called (`transfer_line_post`) | 043 #10, #22–#25 |
+| the release's in-flight test removed | 043 #25 (`advance_in_flight`) |
+| the cover-reversal branch of `remitted_cover_check` removed | 043 #21 (18) |
+| `ledger_check_now` without the new constraints | 043 #16 (7), #18 (9), #19 (10), #21 (18), #26 |
+| `paid_on` read from `remittance_run_paid_on` only | 043 #11, #12 (5f), #40–#42 (17 a–d) |
+| rule 3 reading the chain's `bank_transfer.return_entry_id` | 043 #42 (17 d) |
+| `run_remittance_checks` passing `p_full` false always | 043 #31, #32 (14: the 1st of the month, the request) |
+| the take without `run_id is null` (a request taken by every run) | 043 #32 (« the run after it ») |
+| the N = 0 branch worded `paid` | 043 #11, #41 (17 b); vitest (below) |
+| the unplanned-return branch of rule 4 dropped | 043 #11, #12 (5f) |
+| the nightly's `not exists` inverted (`advance_ledger`'s live advances) | 043 #29, #30 |
+| the uncovered filter inverted (`target = held`) | 043 #29, #31, #32 |
+| the delta window without its overlap | 043 #29 — survived the first run; the overlap assertion added |
+| `advance_open` at 30 days | 043 #30 (30 → none) |
+| `remittance_run_payout` reading `payout_overrun` only | 043 #6 (the run page lists the cover) |
+
+22 of 22 killed (two of them — the check's sign, the window's overlap — survived the first run and are killed by
+the two assertions added to 043 after it: #26 and #29's overlap; every mutant was run again against the final file). The plan's last mutant (« a cover statement reading the lines before `payments:<org>` is taken ») is
+not run as a function mutant: the advisory lock is taken by the ledger's posting (`private.ledger_reverse`, `ledger_post`, `ledger_post_set`,
+`20261111090000`) before any cover reads a line, not by a statement of this migration; the order is pinned by the worker's
+F14 two-session tests (`reverse_allocation` against the funds pass, both orders: one advance, no LG009).
+
+Python: `ERRORS_BY_SQLSTATE` without `LG009` → `test_ledger_model.py::test_lg009_is_a_remitted_reversal_not_covered`.
+Web (`remitted.test.ts`, the file restored after each): the `set_off` sentence worded « reversé … débité », the
+`netted` one so, the returned payout said paid, the 55P03 mapping dropped, the toast without the advance,
+`nothing_to_cover` unmapped, the « pas déduite de ses autres encaissements » clause dropped — 7 of 7 killed.
+
+### Suites
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 45 files, **2,955 tests, PASS** — `033` byte for byte;
+  in `034`–`042` every assertion kept, the expectations changed listed under Deviations (R3).
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 183 files) clean; unit pytest **1,094 passed, 5
+  xfailed**; the non-scale integration tests in CI's order, after `supabase test db` without a reset: 253 — 246 passed
+  and 7 failed on the first run (three pins of today's behaviour — the cancelled run's credit note at both rates, the
+  queue-binds parity test — flipped as above, their purpose kept; and four of the new file's: a wrong column name in a helper and a same-transaction check by `xmin`, which a savepoint per link defeats);
+  after the fixes the 11 tests of those files pass (no product code changed after that run).
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic, **0** wrong.
+- Scale, each file once right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-7a »): the transfer
+  cancellation file 1 passed (51.0 s; nightly checks 0.66 s, the late predecessor's booking 1.69 s); the 50,000-line run
+  1 passed (299.7 s; its payout booked 0.9 s, the nightly checks with it booked 4.49 s); CI's `scale-payouts` command
+  6 passed in 20.9 min (the 5,000-member batch line's funds pass 22.6 s, the debit job 20.2 s, the nightly checks
+  0.98 s; the 2,000 held chained runs' nightly checks 13.98 s, then 15.87 s).
+- `database.types.ts` regenerated: `allocation_remitted`, `cover_remitted_reversal`, `request_full_advance_check`.
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **27 files, 524 tests** passed.
+- E2E (`./scripts/e2e.sh` after `supabase db reset`; desktop, mobile and switch-on projects): **61 passed** (6.0 min),
+  the new spec on desktop and mobile; its six screenshots added; every other screenshot's diff reverted (dates, ids,
+  order: no page they show changed — « Vérification complète des avances » and « Couvrir » are an admin's, and the
+  specs that screenshot « Contrôles » log in as ops managers).
+
+### Size
+
+2,552 non-test lines added (and 27 removed): the migration 2,093 — of which 1,068 are the eight redefined functions
+copied whole from their latest definitions (about 80 of those lines changed) and 40 the grants restated; the new SQL
+about 985 lines with its comments —, the web 443 (`remitted.ts` 137, « Contrôles »' actions and sheet 145, the payment,
+debits and run pages, the labels, `database.types.ts` 9), the worker 16. Over the task's ~2,500 only by the copies the
+house rule asks for (every redefined function restated whole).
+
+### Left open (low), with its default
+
+- Founder questions (plan §10) 1 (a partial return of a remitted payment: every remitted entry advanced in full; the part
+  allocated again owed again) and 17 (a payout that came back, then one of its collections undone: advanced; OQ-97) —
+  defaults built; the others are later slices'. The cancellation after download (6b-3 plan Q1) stays off.
+- The advance's recovery (claw-back, repayment request, write-off): 7b, 7c; until then `advance_open` alerts after 30
+  days.
+- COMPLIANCE: CPCE-02 (the « Until M2c-7 » sentence replaced by the rule as built), OQ-38 (built; partial-return default;
+  the texts for counsel), OQ-82 (its residual closed), OQ-97 (new; OQ-88 to OQ-96 are the later slices' numbers in the
+  plan, not used yet).
+- `038`'s three Suivi scenarios (`d_queue`, `f_partial`, `d_twice`) still build their bounce by a raw reversal of a
+  remitted collection, the cover trigger off around them: their texts are pinned, but they describe a state the
+  ledger now refuses. Default: rework them on the covering path (a return through the debit job) when 7b rewords the
+  Suivi of a covered bounce.
+- The « Désimputer » notice reads the advance from the page's address (`?avance=`, the command's own result, digits
+  only): a user who edits it sees another figure on their own screen, nothing else. Default: keep (no other reader; the
+  run page and « Contrôles » read the ledger).
+- The worker's `tests/ledger_machine.py` 7a part (Deviations): with 7f.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

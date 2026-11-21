@@ -2715,6 +2715,9 @@ isOneToOne: false
 "allocate_payment":
 { Args: { "p_account_id": string,"p_evidence_document_id": string,"p_expected_reason": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
                            },
+"allocation_remitted":
+{ Args: { "p_payment_id": string }; Returns: Json
+                           },
 "apply_credit_note":
 { Args: { "p_account_id": string,"p_idempotency_key": string,"p_proposal_key": string }; Returns: Json
                            },
@@ -2797,6 +2800,9 @@ isOneToOne: false
                            },
 "confirm_transfer_file_cancellation":
 { Args: { "p_expected_version": number,"p_file_id": string,"p_idempotency_key": string }; Returns: Json
+                           },
+"cover_remitted_reversal":
+{ Args: { "p_expected_gap_text": string,"p_idempotency_key": string,"p_reversal_id": string }; Returns: Json
                            },
 "create_boarding_batch":
 { Args: { "p_conformance"?: string,"p_cut_off_date"?: string,"p_idempotency_key": string,"p_portfolio_id": string }; Returns: string
@@ -2907,6 +2913,9 @@ isOneToOne: false
                            },
 "remittance_run_payout":
 { Args: { "p_run_id": string }; Returns: Json
+                           },
+"request_full_advance_check":
+{ Args: { "p_idempotency_key": string,"p_organization_id": string }; Returns: Json
                            },
 "request_payment_checks":
 { Args: { "p_organization_id": string }; Returns: Json

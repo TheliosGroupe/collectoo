@@ -37,6 +37,7 @@ import {
 } from "@/lib/payments/debits";
 import { METHOD_LABEL, RULE_LABEL, formatRf, reviewReason } from "@/lib/payments/matching";
 import { RECEIPT_KIND, type ReceiptVersion, receiptPending, receiptVersions, shortHash } from "@/lib/payments/receipts";
+import { parseAllocationRemitted, reverseRemittedEffect, reverseToast } from "@/lib/payments/remitted";
 import { money } from "@/lib/payments/statements";
 import { Forward, Reallocate, ReleaseHold, ReverseAllocation, UnassignHere, UseForOtherFile } from "./payment-actions";
 import { CancelRefund, RequestRefund } from "./refund-actions";
@@ -56,8 +57,14 @@ function frenchDateTime(iso: string): string {
  * forward to the client, use an overpayment for another file of the debtor. Every action is a command checked in SQL
  * against what this page showed. M2b-5: the receipt (R124-6) and its versions, each PDF with its SHA-256.
  */
-export default async function PaymentPage({ params }: PageProps<"/backoffice/encaissements/paiements/[id]">) {
+export default async function PaymentPage({
+  params,
+  searchParams,
+}: PageProps<"/backoffice/encaissements/paiements/[id]">) {
   const { id } = await params;
+  // M2c-7a: « Désimputer » done — the advance it recorded (minor units as text; anything else is ignored)
+  const avanceParam = (await searchParams).avance;
+  const advanceDone = typeof avanceParam === "string" && /^\d{1,16}$/.test(avanceParam) ? avanceParam : null;
   const back = { href: "/backoffice/encaissements/a-traiter", label: "Paiements à traiter" };
   const { supabase } = await staffSession();
   // M2c-6b-3a: the cancellation-after-download switch, for the texts worded both ways
@@ -74,7 +81,7 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   }
   const p = d.payment;
   const cur = p.currency;
-  const [{ data: receiptRows }, { data: receiptJobQueued }] = await Promise.all([
+  const [{ data: receiptRows }, { data: receiptJobQueued }, { data: remittedData }] = await Promise.all([
     supabase
       .from("receipt")
       .select("id, number, version, kind, known_at, issued_at, pdf_sha256, account_id")
@@ -82,7 +89,10 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
       .order("version", { ascending: false }),
     // whether a receipts job naming this payment is still to run (review #18: the job's outcome ends the wait)
     supabase.rpc("receipt_job_pending", { p_payment_id: p.id }),
+    // M2c-7a: the entries of this payment already remitted to the client (the « Désimputer » sheet says it)
+    supabase.rpc("allocation_remitted", { p_payment_id: p.id }),
   ]);
+  const remitted = parseAllocationRemitted(remittedData) ?? [];
   const receipts = receiptVersions((receiptRows ?? []) as ReceiptVersion[]);
   const figures = positionFigures(d.position);
   const forwarded = BigInt(figures.forwarded) > BigInt(0);
@@ -131,6 +141,11 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   return (
     <WidePage title={`Paiement de ${money(p.amount_minor, cur)}`} back={back}>
       <AutoRefresh active={waiting || receiptWaiting} abandonable={false} everyMs={2000} maxMs={5 * 60_000} />
+      {advanceDone !== null ? (
+        <p role="status" className="text-sm font-medium" data-testid="reverse-notice">
+          {reverseToast([{ amount_minor: advanceDone }], cur)}
+        </p>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={status.tone} testId="payment-status">
           {status.label}
@@ -423,6 +438,10 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
                     ownFile: account === p.account_id,
                     othersRemain: live.size > 1,
                   })}
+                  remitted={reverseRemittedEffect(
+                    remitted.filter((r) => entries.some((e) => e.entry_id === r.entry_id)),
+                    cur,
+                  )}
                   entryIds={entries.map((e) => e.entry_id)}
                   idempotencyKey={randomUUID()}
                 />
