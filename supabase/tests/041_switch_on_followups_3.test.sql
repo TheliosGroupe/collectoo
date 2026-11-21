@@ -10,14 +10,21 @@
 --     statement imported after the re-issue's), S2c (a line without our references waiting), their controls (the
 --     earlier statement shows no debit of x; the line classified not ours; a possible debit past the bound days), S3
 --     (the late predecessor booked after L), and 040's property with the lines arriving on several statements over time;
---   * S4 (the sheet as the booking), S5 (a delay that cannot be met), S6 (the run's own transfer holds nothing);
+--   * S4 (the sheet as the booking), S5 (a delay that cannot be met), S6 (the run's own transfer holds nothing), S2y
+--     (a young possible debit waits), S7 (a run whose payout came back: its sums' rows are the queue's);
 --   * the three mutants round 4 left alive (a line booked or linked otherwise, the previewed line, the requested
 --     execution date's bound);
+--   * review round 1 (ADR-0014 « M2c-6b-3b part 1 review fixes »): a chain that paid nothing while its payout stands
+--     judged at its payout line's date by the nightly check too (nightly-null-paid-date-skips-standing-run); the run's
+--     own transfer, the holds' date L and Q14's bound at its edge pinned (tests-1, tests-2, tests-3); another session's
+--     commit between the snapshot a reader judged in and the holds' reads, or the options a possible debit offers, never
+--     writes a row the facts disprove (chain-holds-snapshot-race: the booking, the nightly check's booked and in-flight
+--     branches, the in-flight branch of a run with no other transfer, the switch off, included);
 --   * the switch off at the end.
 -- The fixtures and helpers are 040's (each scenario builds on its states: F1 downloaded on d(0) and cancelled whole on
 -- evidence, Martin's payout x re-issued as y).
 begin;
-select plan(18);
+select plan(25);
 
 
 
@@ -1729,6 +1736,39 @@ select results_eq($$ select (select (v ->> 'job')::int from j where k = 's6a'), 
   'S6 (CPCE-08): a possible debit of the transfer the run is booked by, or of one never handed out, holds nothing — the re-issue''s booking beside a batch line of its own PmtInf, the late predecessor''s beside a line of its amount without our references: the row at the booking');
 
 
+-- S7 (the run's payout standing, CPCE-08): y executed on time (d3) on a statement of d2 … d4, booked by the import as
+-- the run's payout; its flagged return (d5) on a statement of d5, booked as proposed (« Virement revenu »: the run's
+-- sums owed again); x's own-id debit after L (d6) on a statement of d6 … d7 — the chain's paid date is after L, but the
+-- run's payout came back: the rows of its sums are the queue's (round 2), and the nightly booked branch writes none for
+-- the run
+create or replace function pg_temp.sc_s7() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid; v_lr uuid;
+begin
+  perform pg_temp.chain_prefix('s7');
+  perform pg_temp.st('c3', 2, 4, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 3)));
+  v_ly := pg_temp.ln('c3');
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly), 'booked', pg_temp.breaches('r1'),
+                               'nightly0', pg_temp.nightly('s7a'));
+  perform pg_temp.st('c4', 5, 5, jsonb_build_array(jsonb_build_object('dir', 'credit', 'amount', 164000,
+                                                                      'orig_e2e', pg_temp.e2e(pg_temp.v('y')),
+                                                                      'day', pg_temp.d(5))));
+  v_lr := pg_temp.ln('c4');
+  v := v || jsonb_build_object('ret_req', pg_temp.req(v_lr), 'ret', pg_temp.bkx(v_lr, pg_temp.prop(v_lr)),
+                               'nightly1', pg_temp.nightly('s7b'));
+  perform pg_temp.st('c5', 6, 7, jsonb_build_array(pg_temp.own(pg_temp.v('m0'), 6)));
+  return v || jsonb_build_object('nightly2', pg_temp.nightly('s7c'),
+                                 'paid', pg_temp.dk(private.remittance_run_paid_on(pg_temp.v('r1'))),
+                                 'run', pg_temp.run_status('r1'));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+insert into j select 's7', pg_temp.isolated('sc_s7');
+select results_eq($$ select (v ->> 'job')::int, v -> 'booked', v -> 'nightly0', v -> 'ret_req', v ->> 'ret',
+                            v -> 'nightly1', v -> 'nightly2', v ->> 'paid', v ->> 'run' from j where k = 's7' $$,
+  $$ values (1, '[]'::jsonb, '[]'::jsonb, '[["payout_returned", "164000"]]'::jsonb, 'ok'::text, '[]'::jsonb,
+             '[]'::jsonb, 'd6'::text, 'booked'::text) $$,
+  'S7 (CPCE-08): the run''s payout came back before x''s debit after L — the chain''s paid date is after L, but the run''s sums are owed again (their rows the queue''s): no row for the run');
+
+
 -- The three mutants round 4 left alive (ADR-0014 « M2c-6b-3a-2 review fixes », round 4) -----------------------------
 -- (a) a line naming a transfer of the chain booked or linked otherwise is none of its executions (forged: no command
 -- books or links such a line otherwise — classes E, B, U; link_debit_guard): x's own-id debit on time (d3) linked as a
@@ -1794,6 +1834,411 @@ select results_eq($$ select v -> 'req', v ->> 'preview', v ->> 'book', v -> 'boo
 select results_eq($$ select (v ->> 'before')::boolean, (v ->> 'job')::int, v -> 'booked', v ->> 'paid' from j where k = 'm3' $$,
   $$ values (true, 1, '["none"]'::jsonb, 'd6'::text) $$,
   'round 4''s survivor (c), forged dates: x''s own-id debit dated before x''s requested execution date is not its execution — the row at y''s booking');
+
+
+-- M2c-6b-3b part 1 review fixes, round 1 (ADR-0014 « M2c-6b-3b part 1 review fixes »; CPCE-08) -----------------------
+-- nightly-null-paid-date-skips-standing-run: a booked chained run whose chain paid nothing (every execution came back,
+-- the return not booked yet) while its payout booking stands is judged by the nightly check at its payout line's date,
+-- as its booking judges it — the same row whatever the order the statements arrive in. N1: y's unflagged return
+-- (client_transfer_in under its RMT id) on a statement imported before (n1r) or after (n1c) the earlier statement
+-- covering d2 … d3; N3: the late predecessor x booked after L before d2 … d4 are covered, its flagged return (left to
+-- ops: the job only reviews it, return_differs) imported before (n3r) or after (n3c) the statement covering them
+create or replace function pg_temp.n1(p_key text, p_ret_first boolean) returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid;
+begin
+  perform pg_temp.chain_prefix(p_key);
+  perform pg_temp.st('c3', 4, 7, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3');
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+  if p_ret_first then
+    perform pg_temp.ctin('c5', pg_temp.v('y'), 8);
+    perform pg_temp.st('c4', 2, 3);
+  else
+    perform pg_temp.st('c4', 2, 3);
+    v := v || jsonb_build_object('nightly0', pg_temp.nightly(p_key || 'a'));
+    perform pg_temp.ctin('c5', pg_temp.v('y'), 8);
+  end if;
+  v := v || jsonb_build_object('chain', (select jsonb_build_array(pg_temp.dk(c.paid_on), c.returned)
+                                         from private.remittance_chain_paid(pg_temp.v('y')) c));
+  v := v || jsonb_build_object('nightly1', pg_temp.nightly(p_key || 'b'));
+  v := v || jsonb_build_object('nightly2', pg_temp.nightly(p_key || 'c'));
+  return v || jsonb_build_object('stands', (select count(*) from public.bank_line_booking k
+                                            where k.bank_transaction_id = v_ly and k.kind = 'payout'
+                                              and not exists (select 1 from public.ledger_entry z
+                                                              where z.reverses_entry_id = k.entry_id)));
+end $$;
+create or replace function pg_temp.n3(p_key text, p_ret_first boolean) returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_l uuid;
+begin
+  perform pg_temp.lp_prefix(p_key);
+  alter table public.bank_transfer disable trigger bank_transfer_guard;
+  update public.bank_transfer set requested_execution_date = pg_temp.d(0) where id in (pg_temp.v('m0'), pg_temp.v('y'));
+  alter table public.bank_transfer enable always trigger bank_transfer_guard;
+  set constraints all immediate;
+  alter table public.remittance_line disable trigger remittance_line_guard;
+  update public.remittance_line set latest_execution_date = pg_temp.d(4), deadline = pg_temp.d(6)
+  where run_id = pg_temp.v('r1');
+  alter table public.remittance_line enable always trigger remittance_line_guard;
+  set constraints all deferred;
+  perform pg_temp.st('c3', 5, 7, jsonb_build_array(pg_temp.own(pg_temp.v('m0'), 6)));
+  v_l := pg_temp.ln('c3');
+  v := v || jsonb_build_object('book', pg_temp.bkx(v_l, pg_temp.prop(v_l)));
+  v := v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+  if p_ret_first then
+    perform pg_temp.ret_line('c5', pg_temp.v('m0'), 8);
+    perform pg_temp.st('c4', 2, 4);
+  else
+    perform pg_temp.st('c4', 2, 4);
+    v := v || jsonb_build_object('nightly0', pg_temp.nightly(p_key || 'a'));
+    perform pg_temp.ret_line('c5', pg_temp.v('m0'), 8);
+  end if;
+  v := v || jsonb_build_object('chain', (select jsonb_build_array(pg_temp.dk(c.paid_on), c.returned)
+                                         from private.remittance_chain_paid(pg_temp.v('y')) c));
+  v := v || jsonb_build_object('nightly1', pg_temp.nightly(p_key || 'b'));
+  v := v || jsonb_build_object('nightly2', pg_temp.nightly(p_key || 'c'));
+  return v || jsonb_build_object('stands', (select count(*) from public.bank_line_booking k
+                                            where k.bank_transaction_id = v_l and k.kind = 'payout'
+                                              and not exists (select 1 from public.ledger_entry z
+                                                              where z.reverses_entry_id = k.entry_id)));
+end $$;
+create or replace function pg_temp.sc_n1r() returns jsonb language sql as $$ select pg_temp.n1('n1r', true) $$;
+create or replace function pg_temp.sc_n1c() returns jsonb language sql as $$ select pg_temp.n1('n1c', false) $$;
+create or replace function pg_temp.sc_n3r() returns jsonb language sql as $$ select pg_temp.n3('n3r', true) $$;
+create or replace function pg_temp.sc_n3c() returns jsonb language sql as $$ select pg_temp.n3('n3c', false) $$;
+grant execute on all functions in schema pg_temp to authenticated;
+insert into j select 'n1r', pg_temp.isolated('sc_n1r');
+insert into j select 'n1c', pg_temp.isolated('sc_n1c');
+insert into j select 'n3r', pg_temp.isolated('sc_n3r');
+insert into j select 'n3c', pg_temp.isolated('sc_n3c');
+select results_eq($$ select k, coalesce(v ->> 'job', v ->> 'book'), v -> 'booked', v -> 'nightly0', v -> 'chain',
+                            v -> 'nightly1', v -> 'nightly2', (v ->> 'stands')::int
+                     from j where k in ('n1r', 'n1c', 'n3r', 'n3c') order by k $$,
+  $$ values ('n1c'::text, '1'::text, '[]'::jsonb, '["none"]'::jsonb, '["null", true]'::jsonb, '["none"]'::jsonb,
+             '["none"]'::jsonb, 1),
+            ('n1r', '1', '[]', null, '["null", true]', '["none"]', '["none"]', 1),
+            ('n3c', 'ok', '[]', '["none"]', '["null", true]', '["none"]', '["none"]', 1),
+            ('n3r', 'ok', '[]', null, '["null", true]', '["none"]', '["none"]', 1) $$,
+  'nightly-null-paid-date-skips-standing-run (CPCE-08): the chain paid nothing (y''s unflagged return, the late predecessor''s flagged return, not booked) while its payout stands — the nightly check judges the run at its payout line''s date, as its booking does: the row once d2 … L are covered, whichever of the return and the cover arrives first, once');
+
+-- tests-1 (round 1): the transfer the run is booked by never holds its own rows — at the nightly check (R-A: y's own
+-- debit after L booked by the import before d2 … d3 are covered; then a statement of d2 … d3 holding a batch line of y's
+-- own PmtInf no subset makes: the nightly check writes the row, not « bloqué : débit possible non comptabilisé ») and in
+-- the sheet (R-B: S6a's state, y's line previewed before the import says late, as its booking records)
+create or replace function pg_temp.sc_ra() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid;
+begin
+  perform pg_temp.chain_prefix('ra');
+  perform pg_temp.st('c3', 4, 7, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3');
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+  perform pg_temp.st('c4', 2, 3, jsonb_build_array(
+    jsonb_build_object('amount', 1000, 'pmt_inf', pg_temp.pmt_of(pg_temp.v('y')), 'day', pg_temp.d(3))));
+  return v || jsonb_build_object('nightly', pg_temp.nightly('raa'));
+end $$;
+create or replace function pg_temp.sc_rb() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid;
+begin
+  perform pg_temp.chain_prefix('rb');
+  perform pg_temp.st('c3', 2, 7, jsonb_build_array(
+    jsonb_build_object('amount', 1000, 'pmt_inf', pg_temp.pmt_of(pg_temp.v('y')), 'day', pg_temp.d(3)),
+    pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3', 2);
+  v := v || jsonb_build_object('preview', pg_temp.late_of(v_ly, pg_temp.v('y')));
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  return v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+end $$;
+-- tests-2 (round 1): the holds are judged at L, the line's own date — R-C: a line of x's amount to Martin's IBAN without
+-- our references dated after L (d5) is no possible debit of x by L: the sheet says late, the booking writes the row;
+-- R-F: L covered (d2 … d4), d5 on no statement, y's own debit on d6 — the holds need [least(e0, L), L], not the days up
+-- to the paid date: the row at the booking
+create or replace function pg_temp.sc_rc() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid;
+begin
+  perform pg_temp.chain_prefix('rc');
+  perform pg_temp.st('c3', 2, 7, jsonb_build_array(
+    jsonb_build_object('amount', 164000, 'iban', pg_temp.martin_iban(), 'day', pg_temp.d(5)),
+    pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3', 2);
+  v := v || jsonb_build_object('preview', pg_temp.late_of(v_ly, pg_temp.v('y')));
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+  v := v || jsonb_build_object('nightly', pg_temp.nightly('rca'));
+  return v || jsonb_build_object('paid', pg_temp.dk(private.remittance_run_paid_on(pg_temp.v('r1'))));
+end $$;
+create or replace function pg_temp.sc_rf() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid;
+begin
+  perform pg_temp.chain_prefix('rf');
+  perform pg_temp.st('c4', 2, 4);
+  perform pg_temp.st('c3', 6, 7, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3');
+  v := v || jsonb_build_object('preview', pg_temp.late_of(v_ly, pg_temp.v('y')));
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  return v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+end $$;
+-- tests-3 (round 1): Q14's bound at its edge — a possible debit of x (a batch line of x's PmtInf no subset makes) exactly
+-- private.transfer_debit_bound_days() business days old, L its day (the k-th of the timeline, found from today: one
+-- day earlier when today is no business day): private.transfer_debit_suppression says 'expired' that day, and the
+-- nightly check writes « bloqué : débit possible non comptabilisé » the same day
+create or replace function pg_temp.sc_re() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid; v_k integer;
+begin
+  select max(k) into v_k from generate_series(2, 15) k
+  where private.business_days_between(pg_temp.d(k), private.paris_today()) = private.transfer_debit_bound_days();
+  perform pg_temp.chain_prefix('re');
+  set constraints all immediate;
+  alter table public.remittance_line disable trigger remittance_line_guard;
+  update public.remittance_line set latest_execution_date = pg_temp.d(v_k), deadline = pg_temp.d(v_k + 2)
+  where run_id = pg_temp.v('r1');
+  alter table public.remittance_line enable always trigger remittance_line_guard;
+  set constraints all deferred;
+  perform pg_temp.st('c3', 2, 16, jsonb_build_array(
+    jsonb_build_object('amount', 1000, 'pmt_inf', pg_temp.pmt('f1', 1), 'day', pg_temp.d(v_k)),
+    pg_temp.own(pg_temp.v('y'), 16)));
+  v_ly := pg_temp.ln('c3', 2);
+  v := v || jsonb_build_object('edge', v_k is not null);
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+  v := v || jsonb_build_object('supp', private.transfer_debit_suppression(pg_temp.v('m0'), pg_temp.d(v_k),
+                                                                          private.paris_today()));
+  return v || jsonb_build_object('nightly', pg_temp.nightly('rea'));
+end $$;
+grant execute on all functions in schema pg_temp to authenticated;
+insert into j select 'ra', pg_temp.isolated('sc_ra');
+insert into j select 'rb', pg_temp.isolated('sc_rb');
+insert into j select 'rc', pg_temp.isolated('sc_rc');
+insert into j select 'rf', pg_temp.isolated('sc_rf');
+insert into j select 're', pg_temp.isolated('sc_re');
+select results_eq($$ select (select (v ->> 'job')::int from j where k = 'ra'), (select v -> 'booked' from j where k = 'ra'),
+                            (select v -> 'nightly' from j where k = 'ra'), (select v ->> 'preview' from j where k = 'rb'),
+                            (select (v ->> 'job')::int from j where k = 'rb'), (select v -> 'booked' from j where k = 'rb') $$,
+  $$ values (1, '[]'::jsonb, '["none"]'::jsonb, 'true d4'::text, 1, '["none"]'::jsonb) $$,
+  'tests-1 (CPCE-08): a possible debit of the transfer the run is booked by holds nothing at the nightly check (the row once d2 … d3 are covered, not « bloqué : débit possible non comptabilisé ») nor in the sheet (late, as the booking records)');
+select results_eq($$ select k, v ->> 'preview', (v ->> 'job')::int, v -> 'booked', v -> 'nightly', v ->> 'paid'
+                     from j where k in ('rc', 'rf') order by k $$,
+  $$ values ('rc'::text, 'true d4'::text, 1, '["none"]'::jsonb, '["none"]'::jsonb, 'd6'::text),
+            ('rf', 'true d4', 1, '["none"]', null, null) $$,
+  'tests-2 (CPCE-08): the holds are judged at L — a line of x''s amount without our references dated after L holds nothing, and the statements must cover [least(e0, L), L], not the days up to the paid date: the row at the booking');
+select results_eq($$ select (v ->> 'edge')::boolean, (v ->> 'job')::int, v -> 'booked', v ->> 'supp', v -> 'nightly'
+                     from j where k = 're' $$,
+  $$ values (true, 1, '[]'::jsonb, 'expired'::text, '["debit_unbooked"]'::jsonb) $$,
+  'tests-3 (CPCE-08, Q14''s rule): a possible debit exactly the bound days old — private.transfer_debit_suppression says expired, and the nightly check writes « bloqué : débit possible non comptabilisé » the same day');
+
+-- chain-holds-snapshot-race (round 1; CPCE-08): another session's commit lands between the snapshot a reader judged the
+-- run's paid date in and the holds' reads, or between the holds' read and the options a possible debit offers. The
+-- harness: pg_temp.wrap(name) renames private.<name> and puts in its place a wrapper of the same signature (read from
+-- the catalogue) that first runs the armed injection once — its writes visible to the next query of the wrapped
+-- function, as a commit from another session is under READ COMMITTED, and invisible to the caller's statement
+-- snapshot; everything rolled back with the scenario. A: the import of the earlier statement (x on time, d3) as the
+-- booking's holds start; C: the same import as the nightly check's holds start; D: S2c's shape, ops book x's on-time
+-- line without our references (« Virement hors reversement ») as the nightly check's holds start; D2: the same booking as
+-- the nightly check asks whether that line offers x's booking (after the holds' read); IA: the in-flight branch of a
+-- chained run (y ordered) as ops book x's on-time line without our references as the late predecessor; IB: the in-flight
+-- branch of a run whose chain holds no other transfer (the switch OFF: production since 6b-2c) as ops book its own
+-- payout's line without our references. In each, the client was paid on time (d3): no row, at the race nor after
+create temp table inj (armed boolean, fired integer, sql text, args jsonb, ctx text) on commit drop;
+insert into inj values (false, 0, null, null, null);
+grant all on inj to authenticated;
+create or replace function pg_temp.inject(p_args jsonb) returns void language plpgsql as $$
+declare v_ctx text;
+begin
+  if (select armed from inj) and (select coalesce(p_args @> i.args, true) from inj i) then
+    get diagnostics v_ctx = pg_context;
+    update inj set armed = false, fired = fired + 1, ctx = v_ctx;
+    execute (select sql from inj);
+  end if;
+end $$;
+create or replace function pg_temp.arm(p_sql text, p_args jsonb default null) returns void language sql as $$
+  update inj set armed = true, sql = p_sql, args = p_args $$;
+-- ops' « Comptabiliser… » of a line as proposed (its parts and compare text read now), injected when armed — as ops' own
+-- session commits it (no role switch inside the caller's security definer functions)
+create or replace function pg_temp.arm_ops(p_line uuid, p_args jsonb default null) returns void language plpgsql as $$
+declare v_parts jsonb := pg_temp.prop(p_line); v_text text;
+begin
+  v_text := coalesce(pg_temp.pv(p_line, v_parts) ->> 'expected_text', 'none');
+  perform pg_temp.arm(format($q$ select pg_temp.as_user('01'), public.book_transfer_line(%L, %L, %L::jsonb, %L,
+                                                                                         'motif de test') $q$,
+                             pg_temp.k('race-' || p_line), p_line, v_parts, v_text), p_args);
+end $$;
+create or replace function pg_temp.wrap(p_name text) returns void language plpgsql as $$
+declare o oid; v_modes "char"[]; v_names text[]; v_id text; v_args text; v_ret text; v_in text; v_out text;
+        v_json text;
+begin
+  select p.oid, p.proargmodes, p.proargnames into strict o, v_modes, v_names from pg_proc p
+  where p.pronamespace = 'private'::regnamespace and p.proname = p_name;
+  v_id := pg_get_function_identity_arguments(o);
+  v_args := pg_get_function_arguments(o);
+  v_ret := pg_get_function_result(o);
+  select string_agg(quote_ident(v_names[i]), ', ' order by i) filter (where coalesce(v_modes[i], 'i') in ('i', 'b')),
+         string_agg(quote_ident(v_names[i]), ', ' order by i) filter (where v_modes[i] in ('o', 'b')),
+         'jsonb_build_object(' || string_agg(quote_literal(v_names[i]) || ', ' || quote_ident(v_names[i]), ', '
+                                             order by i) filter (where coalesce(v_modes[i], 'i') in ('i', 'b')) || ')'
+  into v_in, v_out, v_json from generate_subscripts(v_names, 1) i;
+  execute format('alter function private.%I(%s) rename to %I', p_name, v_id, p_name || '_real');
+  execute format('create function private.%I(%s) %s language plpgsql volatile set search_path = '''' as %L',
+    p_name, v_args, case when v_out is null then 'returns ' || v_ret else '' end,
+    'begin perform pg_temp.inject(' || v_json || '); '
+    || case when v_out is null then format('return private.%I(%s);', p_name || '_real', v_in)
+            else format('select h.* into %s from private.%I(%s) h;', v_out, p_name || '_real', v_in) end
+    || ' end');
+end $$;
+create or replace function pg_temp.fired(p_ctx text) returns jsonb language sql as $$
+  select jsonb_build_object('fired', fired, 'ctx', ctx ~ p_ctx) from inj $$;
+-- a scenario in its own subtransaction with the switch as the migration leaves it (off), rolled back, its outcome kept
+create or replace function pg_temp.isolated_off(p_scenario text) returns jsonb language plpgsql as $$
+declare v jsonb;
+begin
+  begin
+    execute format('select pg_temp.%I()', p_scenario) into v;
+    raise exception 'scenario % rolled back', p_scenario using errcode = 'TR001';
+  exception when sqlstate 'TR001' then
+    null;
+  end;
+  return v;
+end $$;
+create or replace function pg_temp.x_import() returns text language sql as $$
+  select format($q$ select pg_temp.st('c4', 2, 3, %L::jsonb) $q$, jsonb_build_array(pg_temp.own(pg_temp.v('m0'), 3))) $$;
+create or replace function pg_temp.sc_race_a() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid;
+begin
+  perform pg_temp.wrap('remittance_chain_holds');
+  perform pg_temp.chain_prefix('rca');
+  perform pg_temp.st('c3', 4, 7, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3');
+  perform pg_temp.arm(pg_temp.x_import());
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || pg_temp.fired('bank_booking_post_rows');
+  v := v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+  v := v || jsonb_build_object('nightly', pg_temp.nightly('rcan'));
+  return v || jsonb_build_object('paid', pg_temp.dk(private.remittance_run_paid_on(pg_temp.v('r1'))));
+end $$;
+create or replace function pg_temp.sc_race_c() returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_ly uuid;
+begin
+  perform pg_temp.wrap('remittance_chain_holds');
+  perform pg_temp.chain_prefix('rcc');
+  perform pg_temp.st('c3', 4, 7, jsonb_build_array(pg_temp.own(pg_temp.v('y'), 6)));
+  v_ly := pg_temp.ln('c3');
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+  v := v || jsonb_build_object('nightly0', pg_temp.nightly('rcc0'));
+  perform pg_temp.arm(pg_temp.x_import());
+  v := v || jsonb_build_object('nightly', pg_temp.nightly('rcc1'));
+  v := v || pg_temp.fired('run_remittance_runs_checks');
+  v := v || jsonb_build_object('nightly2', pg_temp.nightly('rcc2'));
+  return v || jsonb_build_object('paid', pg_temp.dk(private.remittance_run_paid_on(pg_temp.v('r1'))));
+end $$;
+-- D (p_after false: as the holds start) and D2 (p_after: as the nightly check asks the options of x's line)
+create or replace function pg_temp.race_d(p_key text, p_after boolean) returns jsonb language plpgsql as $$
+declare v jsonb := '{}'; v_lx uuid; v_ly uuid;
+begin
+  if not p_after then
+    perform pg_temp.wrap('remittance_chain_holds');
+  end if;
+  perform pg_temp.chain_prefix(p_key);
+  perform pg_temp.st('c3', 2, 7, jsonb_build_array(
+    jsonb_build_object('amount', 164000, 'iban', pg_temp.martin_iban(), 'day', pg_temp.d(3)),
+    pg_temp.own(pg_temp.v('y'), 6)));
+  v_lx := pg_temp.ln('c3', 1); v_ly := pg_temp.ln('c3', 2);
+  v := v || jsonb_build_object('job', pg_temp.import_y(v_ly));
+  v := v || jsonb_build_object('booked', pg_temp.breaches('r1'));
+  v := v || jsonb_build_object('nightly0', pg_temp.nightly(p_key || '0'), 'req', pg_temp.req(v_lx));
+  if p_after then
+    perform pg_temp.arm_ops(v_lx, jsonb_build_object('p_line_id', v_lx, 'p_transfer_id', pg_temp.v('m0')));
+    perform pg_temp.wrap('transfer_line_offers');
+  else
+    perform pg_temp.arm_ops(v_lx);
+  end if;
+  v := v || jsonb_build_object('nightly', pg_temp.nightly(p_key || '1'));
+  v := v || pg_temp.fired(case when p_after then 'remittance_chain_holds' else 'run_remittance_runs_checks' end);
+  v := v || jsonb_build_object('nightly2', pg_temp.nightly(p_key || '2'));
+  v := v || jsonb_build_object('x_booked', (select count(*) from public.bank_line_booking k
+                                            where k.bank_transaction_id = v_lx));
+  return v || jsonb_build_object('paid', pg_temp.dk(private.remittance_run_paid_on(pg_temp.v('r1'))));
+end $$;
+create or replace function pg_temp.sc_race_d() returns jsonb language sql as $$ select pg_temp.race_d('rcd', false) $$;
+create or replace function pg_temp.sc_race_d2() returns jsonb language sql as $$ select pg_temp.race_d('rce', true) $$;
+-- IA (p_chained: y ordered, x cancelled with F1) and IB (x in F1, never cancelled: no chain): the in-flight branch,
+-- the booking injected as its decision for Martin's run starts (p_offers false: private.remittance_inflight_judge —
+-- before review round 1, private.transfer_debit_suppression of x, which the branch decided with) or as it asks the
+-- options of x's line (p_offers)
+create or replace function pg_temp.race_i(p_key text, p_chained boolean, p_offers boolean) returns jsonb
+language plpgsql as $$
+declare v jsonb := '{}'; v_lx uuid;
+begin
+  if p_chained then
+    perform pg_temp.lp_prefix(p_key);
+  else
+    perform pg_temp.handed_out('f1', p_key || '-g1', 0);
+    insert into t values ('m0', pg_temp.trid('r1'));
+  end if;
+  alter table public.bank_transfer disable trigger bank_transfer_guard;
+  update public.bank_transfer set requested_execution_date = pg_temp.d(0)
+  where id = pg_temp.v('m0') or (p_chained and id = pg_temp.v('y'));
+  alter table public.bank_transfer enable always trigger bank_transfer_guard;
+  set constraints all immediate;
+  alter table public.remittance_line disable trigger remittance_line_guard;
+  update public.remittance_line set latest_execution_date = pg_temp.d(4), deadline = pg_temp.d(6)
+  where run_id = pg_temp.v('r1');
+  alter table public.remittance_line enable always trigger remittance_line_guard;
+  set constraints all deferred;
+  perform pg_temp.st('c3', case when p_chained then 2 else 0 end, 7, jsonb_build_array(
+    jsonb_build_object('amount', 164000, 'iban', pg_temp.martin_iban(), 'day', pg_temp.d(3))));
+  v_lx := pg_temp.ln('c3', 1);
+  v := v || jsonb_build_object('nightly0', pg_temp.nightly(p_key || '0'), 'req', pg_temp.req(v_lx),
+                               'lp', coalesce(pg_temp.op(v_lx) #>> '{proposals,0,parts,0,late_predecessor}', 'false'));
+  if p_offers then
+    perform pg_temp.arm_ops(v_lx, jsonb_build_object('p_line_id', v_lx, 'p_transfer_id', pg_temp.v('m0')));
+    perform pg_temp.wrap('transfer_line_offers');
+  elsif to_regproc('private.remittance_inflight_judge') is not null then
+    perform pg_temp.arm_ops(v_lx, jsonb_build_object('p_run_id', pg_temp.v('r1')));
+    perform pg_temp.wrap('remittance_inflight_judge');
+  else
+    perform pg_temp.arm_ops(v_lx, jsonb_build_object('p_transfer_id', pg_temp.v('m0')));
+    perform pg_temp.wrap('transfer_debit_suppression');
+  end if;
+  v := v || jsonb_build_object('nightly', pg_temp.nightly(p_key || '1'));
+  v := v || pg_temp.fired('run_remittance_runs_checks');
+  v := v || jsonb_build_object('nightly2', pg_temp.nightly(p_key || '2'));
+  return v || jsonb_build_object('run', pg_temp.run_status('r1'),
+                                 'switch', private.switch_on('downloaded_file_cancellation'));
+end $$;
+create or replace function pg_temp.sc_race_ia() returns jsonb language sql as $$
+  select pg_temp.race_i('ria', true, false) $$;
+create or replace function pg_temp.sc_race_ia2() returns jsonb language sql as $$
+  select pg_temp.race_i('rja', true, true) $$;
+create or replace function pg_temp.sc_race_ib() returns jsonb language sql as $$
+  select pg_temp.race_i('rib', false, false) $$;
+create or replace function pg_temp.sc_race_ib2() returns jsonb language sql as $$
+  select pg_temp.race_i('rjb', false, true) $$;
+grant execute on all functions in schema pg_temp to authenticated;
+insert into j select 'race_a', pg_temp.isolated('sc_race_a');
+insert into j select 'race_c', pg_temp.isolated('sc_race_c');
+insert into j select 'race_d', pg_temp.isolated('sc_race_d');
+insert into j select 'race_d2', pg_temp.isolated('sc_race_d2');
+insert into j select 'race_ia', pg_temp.isolated('sc_race_ia');
+insert into j select 'race_ia2', pg_temp.isolated('sc_race_ia2');
+insert into j select 'race_ib', pg_temp.isolated_off('sc_race_ib');
+insert into j select 'race_ib2', pg_temp.isolated_off('sc_race_ib2');
+select results_eq($$ select k, (v ->> 'fired')::int, (v ->> 'ctx')::boolean, v -> 'booked', v -> 'nightly',
+                            v -> 'nightly2', v ->> 'paid'
+                     from j where k in ('race_a', 'race_c', 'race_d', 'race_d2') order by k $$,
+  $$ values ('race_a'::text, 1, true, '[]'::jsonb, '[]'::jsonb, null::jsonb, 'd3'::text),
+            ('race_c', 1, true, '[]', '[]', '[]', 'd3'),
+            ('race_d', 1, true, '[]', '[]', '[]', 'd3'),
+            ('race_d2', 1, true, '[]', '[]', '[]', 'd3') $$,
+  'chain-holds-snapshot-race (CPCE-08): an import or ops'' booking committed while the booking or the nightly check judges a booked chained run (A, C, D: as its holds start; D2: as the options of a possible debit are asked) never makes it write a row the facts it read disprove — the client was paid on time: no row then, none after');
+select results_eq($$ select k, (v ->> 'fired')::int, (v ->> 'ctx')::boolean, v -> 'req', v ->> 'lp', v -> 'nightly0',
+                            v -> 'nightly', v -> 'nightly2', v ->> 'run', (v ->> 'switch')::boolean
+                     from j where k in ('race_ia', 'race_ia2', 'race_ib', 'race_ib2') order by k $$,
+  $$ values ('race_ia'::text, 1, true, '[["payout", "164000"]]'::jsonb, 'true'::text, '[]'::jsonb, '[]'::jsonb,
+             '[]'::jsonb, 'booked'::text, true),
+            ('race_ia2', 1, true, '[["payout", "164000"]]', 'true', '[]', '[]', '[]', 'booked', true),
+            ('race_ib', 1, true, '[["payout", "164000"]]', 'false', '[]', '[]', '[]', 'booked', false),
+            ('race_ib2', 1, true, '[["payout", "164000"]]', 'false', '[]', '[]', '[]', 'booked', false) $$,
+  'chain-holds-snapshot-race, the in-flight branch (CPCE-08): ops'' booking of the run''s on-time debit without our references committed as the nightly check decides whether it may be its debit (as its decision starts, or as it asks the line''s options) — chained (the late predecessor) and, the switch off, a run with no other transfer (production since 6b-2c): no row');
 
 
 -- The property over time (CPCE-08): 040's r4 property (pg_temp.pc) with the case's lines arriving on several statements,
@@ -1935,11 +2380,15 @@ end $$;
 -- stayed) is after L (d4); each nightly check from the booking's statement on writes it when they did and the paid date
 -- then (no lot credit booked: ops book at the end) is after L, the run's payout standing (it is until ops book); the last
 -- one, every line booked as proposed, with the paid date of every event but the lot credits left unbooked and the
--- payout as it then stands. A row iff one of them wrote it — append-only, once.
+-- payout as it then stands. Review round 1 (nightly-null-paid-date-skips-standing-run): while the run's payout stands,
+-- each of them reads the booked line's day when no copy stayed, as the booking does — not only the booking's own
+-- statement. A row iff one of them wrote it — append-only, once.
 create or replace function pg_temp.pc2_rule(p_ev jsonb, p_ranges jsonb, p_got jsonb) returns jsonb language plpgsql as $$
 declare
   v_ev jsonb := pg_temp.pc_ev(p_ev); v_n integer := jsonb_array_length(p_ranges); v_at integer := (p_got ->> 'booked_at')::integer;
   k integer; v_cov boolean; v_seen jsonb; v_p integer; v_row boolean := false; v_final integer;
+  v_day integer := (select (x.v ->> 'd')::integer from jsonb_array_elements(pg_temp.pc_ev(p_ev)) x (v)
+                    where x.v ->> 'o' = p_got ->> 'booked');
 begin
   for k in v_at .. v_n loop
     -- the events on the statements arrived by the k-th
@@ -1950,15 +2399,11 @@ begin
     v_cov := (select bool_and(exists (select 1 from jsonb_array_elements(p_ranges) with ordinality r (g, i)
                                       where r.i <= k and d between (r.g ->> 0)::integer and (r.g ->> 1)::integer))
               from generate_series(2, 4) d);
-    v_p := pg_temp.pc_rule(v_seen, '[]', true);
-    if k = v_at then
-      v_p := coalesce(v_p, (select (x.v ->> 'd')::integer from jsonb_array_elements(v_ev) x (v)
-                            where x.v ->> 'o' = p_got ->> 'booked'));
-    end if;
+    v_p := coalesce(pg_temp.pc_rule(v_seen, '[]', true), v_day);
     v_row := v_row or coalesce(v_cov and v_p > 4, false);
   end loop;
   v_final := pg_temp.pc_rule(p_ev, p_got -> 'unbooked');
-  v_row := v_row or coalesce((p_got ->> 'stands')::boolean and v_final > 4, false);
+  v_row := v_row or coalesce((p_got ->> 'stands')::boolean and coalesce(v_final, v_day) > 4, false);
   return jsonb_build_object('paid', coalesce('d' || v_final, 'null'), 'row', v_row);
 end $$;
 -- a case run (switch on, rolled back) against the rule over time: [] when they agree, else what differs (as
@@ -2004,8 +2449,8 @@ end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 create temp table pc2_cases (k text primary key, ev jsonb, ranges jsonb) on commit drop;
 -- the verifiers' shapes (040's, the suspected duplicate aside: its line is a debit that may be x's, which holds the
--- row back until its decision — S2c's rule), the later statement first (d5 … d9, then d2 … d4: S1's order), and S1
--- itself (x on time imported after y)
+-- row back until its decision — S2c's rule), the later statement first (d5 … d9, then d2 … d4: S1's order), S1
+-- itself (x on time imported after y) and review round 1's chain that paid nothing while its payout stands (nul)
 insert into pc2_cases
 select c.k, c.ev::jsonb, '[[5, 9], [2, 4]]'::jsonb from (values
   ('n2b', '[{"m":"x","k":"e","s":"own","d":2},{"m":"x","k":"r","s":"own","d":3},{"m":"x","k":"e","s":"own","d":4},
@@ -2029,7 +2474,10 @@ select c.k, c.ev::jsonb, '[[5, 9], [2, 4]]'::jsonb from (values
              {"m":"x","k":"r","s":"own","d":8}]'),
   ('early', '[{"m":"x","k":"r","s":"own","d":3},{"m":"x","k":"e","s":"own","d":5},{"m":"y","k":"e","s":"own","d":6}]'),
   ('s1', '[{"m":"x","k":"e","s":"own","d":3},{"m":"y","k":"e","s":"own","d":6}]'),
-  ('s1n', '[{"m":"y","k":"e","s":"own","d":6}]')) c (k, ev);
+  ('s1n', '[{"m":"y","k":"e","s":"own","d":6}]'),
+  -- review round 1 (nightly-null-paid-date-skips-standing-run): y after L and its unflagged return on the later
+  -- statement, imported first — the chain paid nothing while the payout stands until ops book the return
+  ('nul', '[{"m":"y","k":"e","s":"own","d":6},{"m":"y","k":"r","s":"ctin","d":8}]')) c (k, ev);
 select setseed(0.5151);
 insert into pc2_cases select 'rnd' || lpad(g::text, 2, '0'), pg_temp.pc_gen(), pg_temp.pc2_ranges()
 from generate_series(1, 12) g;

@@ -353,6 +353,14 @@ def _blocked(pid: int) -> bool:
     return row is not None and row[0] == "Lock"
 
 
+def _blockers(pid: int) -> list[int]:
+    """The backends `pid` waits on (pg_blocking_pids): which session holds the lock it waits
+    for, not only that it waits."""
+    with psycopg.connect(DB, autocommit=True) as conn:
+        row = conn.execute("select pg_blocking_pids(%s)", (pid,)).fetchone()
+    return sorted(row[0]) if row is not None and row[0] is not None else []
+
+
 def _until(cond: Any, timeout_s: float = 15.0) -> bool:
     end = time.monotonic() + timeout_s
     while time.monotonic() < end:
@@ -419,9 +427,12 @@ def test_the_late_predecessor_against_a_generation_locks_the_new_file_s_transfer
         )
         line_holder.execute("rollback")
         # past the remit lock the booking re-reads y, finds it in F2 (not downloaded) and locks
-        # every transfer of F2 FOR UPDATE: it waits on yl's key-share lock
+        # every transfer of F2 FOR UPDATE: it waits on yl's key-share lock — the yl holder's
+        # session itself, not any other lock (review round 1, tests-4)
         time.sleep(1.5)
-        out["waited_on_yl"] = t.is_alive() and _blocked(pids["b"])
+        out["blockers"] = _blockers(pids["b"])
+        out["yl_holder"] = yl_holder.info.backend_pid
+        out["waited_on_yl"] = t.is_alive() and out["blockers"] == [out["yl_holder"]]
         yl_holder.execute("rollback")
         t.join(60)
         assert not t.is_alive()

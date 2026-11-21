@@ -3,7 +3,8 @@
 -- flips 'downloaded_file_cancellation' with a one-line migration once the founder answers Q1 (OQ-81 (a)). Every rule
 -- below bites only for a run whose payout chain holds another transfer (a payout cancelled out of a downloaded file and
 -- re-issued, or a late predecessor booked while its re-issue exists): production has none, and pgTAP 033 (the
--- switch-off test) is unchanged.
+-- switch-off test) is unchanged — but for review round 1's snapshot rule, which also reaches the nightly check's in-flight
+-- branch of every run (below).
 --   * booking-rows-skip-chain-coverage-and-waiting-lines (CPCE-08): the booking of such a run's payout writes its R124-6
 --     rows only once the paying account's statements cover [least(e0, L), L] — e0 the earliest execution date of the
 --     chain's transfers handed out — and no other transfer of the chain handed out has a line dated by L that may be
@@ -11,10 +12,21 @@
 --     the same; the nightly check's booked branch judges such a run at the chain's paid date once both hold — a line
 --     that may be such a transfer's debit and offers no booking of it past the bound days writing the row « bloqué :
 --     débit possible non comptabilisé » — each item's row written once (append-only).
+--   * review round 1 (ADR-0014 « M2c-6b-3b part 1 review fixes »; CPCE-08):
+--     - nightly-null-paid-date-skips-standing-run: the nightly booked branch judges a run whose chain paid nothing while
+--       its payout booking stands at that booking's line date, as the booking does;
+--     - chain-holds-snapshot-race: every reader that writes an R124-6 row from the holds or the suppression — the
+--       booking, its sheet, the nightly booked branch, and the nightly in-flight branch of every run (the switch off
+--       included: a race since 6b-2c) — reads its facts in one snapshot (private.remittance_chain_hold_facts,
+--       private.remittance_inflight_facts), waits when the chain's paid date moved since the caller's own read, and
+--       writes a row resting on the options of an old line only if the facts read again afterwards have not moved
+--       (private.remittance_chain_holds, private.remittance_inflight_judge).
 --
 -- New (internal): private.transfer_debit_lines (the lines private.transfer_debit_suppression reads, shared with the
--- holds), private.remittance_chain_holds (the two holds at L) and private.remittance_chain_rows (a chained run's rows
--- due at a date: its lines late then whose holds pass). Redefined, each copied from its latest definition across all the
+-- holds), private.remittance_chain_hold_facts (the holds' facts in one snapshot), private.remittance_chain_holds (the
+-- two holds at L), private.remittance_chain_rows (a chained run's rows due at a date: its lines late then whose holds
+-- pass), private.remittance_inflight_facts and private.remittance_inflight_judge (the in-flight branch's rule on facts
+-- read in one snapshot). Redefined, each copied from its latest definition across all the
 -- migration files and changed only as its comment says, with SECURITY DEFINER, every SET clause, search_path and its
 -- grants restated:
 --   private.transfer_debit_suppression (20261117113000_transfer_line_pages_fixes.sql:175)
@@ -117,6 +129,54 @@ begin
 end;
 $$;
 
+-- The facts the two holds of a chained run's rows judge at L, read in one snapshot (M2c-6b-3b part 1 review round 1,
+-- chain-holds-snapshot-race; CPCE-08): a STABLE function's queries all read the snapshot of the query that calls it, so
+-- an import or a booking another session commits meanwhile is seen by all three or by none —
+--   covered: the paying account's statements cover [least(e0, L), L] (private.statement_covers), e0 the earliest
+--     execution date of the chain's transfers handed out (an item of a file downloaded at least once);
+--   paid_on: the date the chain paid the client and stayed paid (private.remittance_chain_paid, round 4's rule; the line
+--     p_line_id, previewed, counted as p_paying's payout);
+--   lines: [transfer, line, date] of each line dated by L that may be the debit of another transfer of the chain handed
+--     out (not p_paying, the transfer the run is booked by; private.transfer_debit_lines) that the chain's rule does not
+--     count yet as one of its executions (private.remittance_chain_events), p_line_id never one; newest first — read only
+--     when covered.
+-- Keyed: the run's transfer, its chain, each transfer's items and files, its lines and the chain's events by key.
+create or replace function private.remittance_chain_hold_facts(p_transfer_id uuid, p_paying uuid, p_latest date,
+                                                               p_line_id uuid,
+                                                               out covered boolean, out paid_on date, out lines jsonb)
+language sql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+  with h as materialized (     -- the chain's transfers handed out, each with its earliest execution date
+    select c.transfer_id, min(i.execution_date) as e0
+    from private.transfer_chain(p_transfer_id) c
+    cross join lateral (select q.file_id, q.execution_date from public.transfer_file_item q
+                        where q.transfer_id = c.transfer_id offset 0) i
+    cross join lateral (select f.download_count from public.transfer_file f where f.id = i.file_id offset 0) f
+    where f.download_count > 0
+    group by c.transfer_id),
+  cv as materialized (
+    select coalesce(private.statement_covers((select q.debtor_bank_account_id from public.bank_transfer q
+                                              where q.id = p_transfer_id),
+                                             least((select min(h.e0) from h), p_latest), p_latest), false) as covered),
+  ev as materialized (         -- the executions the chain's rule counts
+    select e.transfer_id, e.line_id from private.remittance_chain_events(p_transfer_id) e where e.delta > 0)
+  select cv.covered,
+         (select x.paid_on from private.remittance_chain_paid(p_transfer_id, p_line_id, p_paying) x),
+         case when cv.covered
+              then coalesce((select jsonb_agg(jsonb_build_array(h.transfer_id, l.line_id, l.line_date)
+                                              order by l.line_date desc, l.line_id, h.transfer_id)
+                             from h
+                             cross join lateral private.transfer_debit_lines(h.transfer_id, p_latest) l
+                             where h.transfer_id is distinct from p_paying and l.line_id is distinct from p_line_id
+                               and not exists (select 1 from ev where ev.transfer_id = h.transfer_id
+                                                                  and ev.line_id = l.line_id)), '[]')
+              else '[]' end
+  from cv;
+$$;
+
 -- The two holds of the R124-6 rows at L of a run whose payout chain holds another transfer (M2c-6b-3b part 1,
 -- booking-rows-skip-chain-coverage-and-waiting-lines; CPCE-08), p_transfer_id the run's transfer:
 --   covered: the paying account's statements cover [least(e0, L), L] (private.statement_covers), e0 the earliest
@@ -133,10 +193,17 @@ $$;
 --     comptabilisé »); without (the booking and its sheet, which cannot build the options' working tables inside their
 --     own), any such line waits — the nightly check decides the next night. p_line_id, the line being previewed as the
 --     run's payout, is never one (once booked it is none).
--- Volatile (the options of an old line, with p_decide). Keyed: the run's transfer, its chain, each transfer's items and
--- files, its lines (private.transfer_debit_lines) and the chain's events by key.
+-- Review round 1 (chain-holds-snapshot-race; CPCE-08): the three facts are read in one snapshot
+-- (private.remittance_chain_hold_facts) together with the chain's paid date, which must be p_paid — the paid date the
+-- caller judged the run at, in its own statement's snapshot (null when no copy stayed): an import of an earlier statement
+-- or a booking of a line committed since then moves it, and the run waits (the nightly check judges it again on facts
+-- read together); and an 'expired' — decided by the options of each old line, asked after that snapshot — stands only if
+-- the facts read again afterwards have not moved (a line booked meanwhile no longer offers its booking). A line arriving
+-- after the first read is not in it, and is decided the next night.
+-- Volatile (the options of an old line, with p_decide). Keyed as its facts.
 create or replace function private.remittance_chain_holds(p_transfer_id uuid, p_paying uuid, p_latest date,
-                                                          p_today date, p_decide boolean, p_line_id uuid default null,
+                                                          p_today date, p_decide boolean, p_line_id uuid,
+                                                          p_paid date,
                                                           out covered boolean, out waiting boolean,
                                                           out expired boolean)
 language plpgsql
@@ -145,55 +212,48 @@ set search_path = ''
 set enable_seqscan = off
 as $$
 declare
-  v_account uuid;
-  v_e0 date;
-  v_counted text[];
-  h record;
+  f record;
+  g record;
   v_line record;
 begin
   waiting := false;
   expired := false;
-  select q.debtor_bank_account_id into v_account from public.bank_transfer q where q.id = p_transfer_id;
-  select min(i.execution_date) into v_e0
-  from private.transfer_chain(p_transfer_id) c
-  cross join lateral (select q.file_id, q.execution_date from public.transfer_file_item q
-                      where q.transfer_id = c.transfer_id offset 0) i
-  cross join lateral (select f.download_count from public.transfer_file f where f.id = i.file_id offset 0) f
-  where f.download_count > 0;
-  covered := coalesce(private.statement_covers(v_account, least(v_e0, p_latest), p_latest), false);
+  -- one snapshot: the coverage, the chain's paid date and the possible debits its rule does not count yet
+  select x.covered, x.paid_on, x.lines into f
+  from private.remittance_chain_hold_facts(p_transfer_id, p_paying, p_latest, p_line_id) x;
+  covered := coalesce(f.covered, false);
   if not covered then
     return;
   end if;
-  select coalesce(array_agg(e.transfer_id::text || ':' || e.line_id::text), '{}') into v_counted
-  from private.remittance_chain_events(p_transfer_id) e
-  where e.delta > 0;
-  for h in
-    select c.transfer_id
-    from private.transfer_chain(p_transfer_id) c
-    where c.transfer_id is distinct from p_paying
-      and exists (select 1
-                  from (select q.file_id from public.transfer_file_item q where q.transfer_id = c.transfer_id offset 0) i
-                  cross join lateral (select f.download_count from public.transfer_file f where f.id = i.file_id
-                                      offset 0) f
-                  where f.download_count > 0)
+  -- the caller judged the run at another paid date: something was committed since its snapshot
+  if f.paid_on is distinct from p_paid then
+    waiting := true;
+    return;
+  end if;
+  for v_line in
+    select (x.v ->> 0)::uuid as transfer_id, (x.v ->> 1)::uuid as line_id, (x.v ->> 2)::date as line_date
+    from jsonb_array_elements(f.lines) with ordinality x (v, o)
+    order by x.o
   loop
-    for v_line in
-      select l.line_id, l.line_date from private.transfer_debit_lines(h.transfer_id, p_latest) l
-      where l.line_id is distinct from p_line_id
-        and (h.transfer_id::text || ':' || l.line_id::text) <> all (v_counted)
-      order by l.line_date desc, l.line_id
-    loop
-      if not p_decide
-         or private.business_days_between(v_line.line_date, coalesce(p_today, private.paris_today()))
-              < private.transfer_debit_bound_days()
-         or private.transfer_line_offers(v_line.line_id, h.transfer_id) then
-        waiting := true;
-        expired := false;
-        return;
-      end if;
-      expired := true;
-    end loop;
+    if not p_decide
+       or private.business_days_between(v_line.line_date, coalesce(p_today, private.paris_today()))
+            < private.transfer_debit_bound_days()
+       or private.transfer_line_offers(v_line.line_id, v_line.transfer_id) then
+      waiting := true;
+      expired := false;
+      return;
+    end if;
+    expired := true;
   end loop;
+  -- 'expired' rests on the options asked after the facts' snapshot: the facts read again must not have moved
+  if expired then
+    select x.covered, x.paid_on, x.lines into g
+    from private.remittance_chain_hold_facts(p_transfer_id, p_paying, p_latest, p_line_id) x;
+    if g.covered is distinct from true or g.paid_on is distinct from f.paid_on or g.lines is distinct from f.lines then
+      waiting := true;
+      expired := false;
+    end if;
+  end if;
 end;
 $$;
 
@@ -203,10 +263,12 @@ $$;
 -- private.bank_booking_post_rows has recorded them since 6b-2c), whose two holds at that date pass
 -- (private.remittance_chain_holds, once per date: the statements cover it, no other transfer of the chain may have paid
 -- by it); debit_unbooked when a line that may have been such a transfer's debit offers no booking of it past the bound
--- days (p_decide: the nightly check). Read by the booking (p_paying the transfer it books; p_decide false), its sheet's
--- late flag (with the previewed line, p_line_id) and the nightly check's booked branch (p_decide). Volatile (the holds').
-create or replace function private.remittance_chain_rows(p_run_id uuid, p_on date, p_paying uuid, p_line_id uuid,
-                                                         p_today date, p_decide boolean)
+-- days (p_decide: the nightly check). p_paid: the chain's paid date the caller read p_on from (review round 1: p_on is
+-- p_paid, or the payout line's date when no copy stayed; the holds wait when the chain's paid date has moved since).
+-- Read by the booking (p_paying the transfer it books; p_decide false), its sheet's late flag (with the previewed line,
+-- p_line_id) and the nightly check's booked branch (p_decide). Volatile (the holds').
+create or replace function private.remittance_chain_rows(p_run_id uuid, p_on date, p_paid date, p_paying uuid,
+                                                         p_line_id uuid, p_today date, p_decide boolean)
 returns table (ledger_entry_id uuid, payment_id uuid, deadline date, latest_execution_date date, kind text,
                debit_unbooked boolean)
 language sql
@@ -228,11 +290,151 @@ as $$
     from (select distinct l.latest from l) d
     cross join (select r.transfer_id from public.remittance_run r where r.id = p_run_id) r
     cross join lateral private.remittance_chain_holds(r.transfer_id, p_paying, d.latest, p_today, p_decide,
-                                                      p_line_id) x)
+                                                      p_line_id, p_paid) x)
   select l.ledger_entry_id, l.payment_id, l.deadline, l.latest, l.kind, h.expired
   from l
   join h on h.latest = l.latest
   where h.covered and not h.waiting;
+$$;
+
+-- The facts the nightly check's in-flight branch judges a run's lines held to L by (M2c-6b-3b part 1 review round 1,
+-- chain-holds-snapshot-race; CPCE-08), read in one snapshot (a STABLE function's queries all read the snapshot of the
+-- query that calls it): whether the run is still in flight (approved or sent), its transfer, and —
+--   a run whose transfer re-issues another or is itself cancelled (6b-3a-2 (I)): whether the statements cover
+--     [least(e0, L), L] (e0 the earliest execution date of its chain's transfers handed out; L alone when none is),
+--     whether the chain paid the client by L and stayed paid (named: private.remittance_chain_paid, round 4), and
+--     [transfer, line, date] of each line dated by L that may be the debit of a transfer of its chain handed out
+--     (private.transfer_debit_lines: the very lines private.transfer_debit_suppression reads);
+--   another run (6b-1, 6b-2c): whether its transfer is handed out and not seen debited (unseen: in a downloaded file,
+--     the statements covering L and showing no debit of it) and, then, the lines that may be its debit by L.
+-- Lines newest first. Keyed: the run, its transfer and file, its chain, each transfer's items, files and lines by key.
+create or replace function private.remittance_inflight_facts(p_run_id uuid, p_latest date)
+returns jsonb
+language plpgsql
+stable
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  r record;
+  t record;
+  v jsonb;
+begin
+  select q.status, q.transfer_id into r from public.remittance_run q where q.id = p_run_id;
+  select q.id, q.debtor_bank_account_id, q.status, f.download_count,
+         q.replaces_transfer_id is not null or q.status = 'cancelled' as chained
+  into t
+  from (select y.id, y.debtor_bank_account_id, y.status, y.transfer_file_id, y.replaces_transfer_id
+        from public.bank_transfer y where y.id = r.transfer_id offset 0) q
+  left join lateral (select g.download_count from public.transfer_file g where g.id = q.transfer_file_id offset 0) f
+    on true;
+  v := jsonb_build_object('live', coalesce(r.status in ('approved', 'sent'), false), 'transfer', t.id,
+                          'status', t.status, 'downloads', coalesce(t.download_count, 0), 'chained', t.chained);
+  if t.id is null then
+    return v;
+  end if;
+  if t.chained then
+    return v || (
+      with h as materialized (
+        select c.transfer_id, min(i.execution_date) as e0
+        from private.transfer_chain(t.id) c
+        cross join lateral (select q.file_id, q.execution_date from public.transfer_file_item q
+                            where q.transfer_id = c.transfer_id offset 0) i
+        cross join lateral (select g.download_count from public.transfer_file g where g.id = i.file_id offset 0) g
+        where g.download_count > 0
+        group by c.transfer_id)
+      select jsonb_build_object(
+               'covered', coalesce(private.statement_covers(t.debtor_bank_account_id,
+                                                            least((select min(h.e0) from h), p_latest), p_latest),
+                                   false),
+               'named', coalesce((select c.paid_on <= p_latest from private.remittance_chain_paid(t.id) c), false),
+               'lines', coalesce((select jsonb_agg(jsonb_build_array(h.transfer_id, l.line_id, l.line_date)
+                                                   order by l.line_date desc, l.line_id, h.transfer_id)
+                                  from h cross join lateral private.transfer_debit_lines(h.transfer_id, p_latest) l),
+                                 '[]')));
+  end if;
+  v := v || jsonb_build_object('unseen', coalesce(t.status = 'in_file' and coalesce(t.download_count, 0) > 0
+                                                  and private.statement_covers(t.debtor_bank_account_id, p_latest,
+                                                                               p_latest)
+                                                  and not private.transfer_debit_seen(t.id), false));
+  return v || jsonb_build_object('lines', case when (v ->> 'unseen')::boolean
+                                               then coalesce((select jsonb_agg(jsonb_build_array(t.id, l.line_id,
+                                                                                                 l.line_date)
+                                                                               order by l.line_date desc, l.line_id)
+                                                              from private.transfer_debit_lines(t.id, p_latest) l),
+                                                             '[]')
+                                               else '[]' end);
+end;
+$$;
+
+-- Whether the nightly check's in-flight branch proves a run unpaid at L (its lines held to L get their R124-6 row), and
+-- whether only because the lines that could be its debit offered no booking of it for the bound days (« bloqué : débit
+-- possible non comptabilisé »): the rule of private.run_remittance_runs_checks' in-flight branch since 6b-2c and 6b-3a-2
+-- (I), unchanged —
+--   a run whose transfer re-issues another or is itself cancelled: the statements cover [least(e0, L), L], its chain did
+--     not pay the client by L and stay paid (round 4), and no line that may be a debit of its chain's transfers handed
+--     out by L waits;
+--   another run: its transfer never handed out (ordered, or in a file nobody downloaded) — proven at once; else handed
+--     out and not seen debited with the statements covering L, and no line that may be its debit by L waits;
+-- a line waits while younger than private.transfer_debit_bound_days() business days or while it offers that transfer's
+-- booking (Q14's rule, as private.transfer_debit_suppression), and is expired past them offering none.
+-- Review round 1 (chain-holds-snapshot-race; CPCE-08): judged on facts read in one snapshot
+-- (private.remittance_inflight_facts, the run still in flight) — no longer the nightly statement's snapshot beside the
+-- suppression's own later reads, between which ops' booking of the run's on-time debit without our references could
+-- land and the row be written for a run paid on time — and a proof that rests on the options asked after that snapshot
+-- stands only if the facts read again afterwards have not moved. Volatile (the options).
+create or replace function private.remittance_inflight_judge(p_run_id uuid, p_latest date, p_today date,
+                                                             out proven boolean, out debit_unbooked boolean)
+language plpgsql
+volatile
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  f jsonb;
+  v_line record;
+  v_any boolean := false;
+  v_again jsonb;
+begin
+  proven := false;
+  debit_unbooked := false;
+  select private.remittance_inflight_facts(p_run_id, p_latest) into f;
+  if not (f ->> 'live')::boolean or f ->> 'transfer' is null then
+    return;
+  end if;
+  if (f ->> 'chained')::boolean then
+    if not (f ->> 'covered')::boolean or (f ->> 'named')::boolean then
+      return;
+    end if;
+  elsif f ->> 'status' = 'ordered' or (f ->> 'status' = 'in_file' and (f ->> 'downloads')::integer = 0) then
+    -- never handed out to the bank: unpaid whatever the statements
+    proven := true;
+    return;
+  elsif not (f ->> 'unseen')::boolean then
+    return;
+  end if;
+  for v_line in
+    select (x.v ->> 0)::uuid as transfer_id, (x.v ->> 1)::uuid as line_id, (x.v ->> 2)::date as line_date
+    from jsonb_array_elements(f -> 'lines') with ordinality x (v, o)
+    order by x.o
+  loop
+    if private.business_days_between(v_line.line_date, coalesce(p_today, private.paris_today()))
+         < private.transfer_debit_bound_days()
+       or private.transfer_line_offers(v_line.line_id, v_line.transfer_id) then
+      return;
+    end if;
+    v_any := true;
+  end loop;
+  -- a proof resting on the options asked after the facts' snapshot: the facts read again must not have moved
+  if v_any then
+    select private.remittance_inflight_facts(p_run_id, p_latest) into v_again;
+    if v_again is distinct from f then
+      return;
+    end if;
+  end if;
+  proven := true;
+  debit_unbooked := v_any;
+end;
 $$;
 
 
@@ -245,7 +447,8 @@ $$;
 -- CPCE-08): the R124-6 rows of a run whose payout chain holds another transfer are written at the booking only once
 -- the statements cover [least(e0, L), L] and no other transfer of the chain handed out may have been debited by L
 -- without the chain's rule counting it (private.remittance_chain_rows); else the nightly check's booked branch writes
--- them once that holds. Nothing else changes.
+-- them once that holds. Review round 1 (chain-holds-snapshot-race): the chain's paid date read here is passed to the
+-- holds, which wait when it moved. Nothing else changes.
 create or replace function private.bank_booking_post_rows(p_organization_id uuid)
 returns void
 language plpgsql
@@ -447,15 +650,16 @@ begin
   -- imported later, or a line without our references, may show the client paid on time, and the row is append-only;
   -- the nightly check's booked branch judges the run once they hold (private.run_remittance_runs_checks). A run with no
   -- other transfer: as before.
-  with pr as materialized (     -- each payout row's run, whether its chain holds another transfer, its paid date
-    select b.tr_run as run_id, b.transfer_id, ru.organization_id, ru.client_organization_id,
+  -- Review round 1 (chain-holds-snapshot-race; CPCE-08): the holds read the chain's paid date again with the coverage and
+  -- the possible debits, in one snapshot, and wait when it is not the one read here (chain_paid, null when no copy
+  -- stayed): an earlier statement imported, or a line booked, by another session since this statement began.
+  with pr0 as materialized (    -- each payout row's run, whether its chain holds another transfer, the chain's paid date
+    select b.tr_run as run_id, b.transfer_id, b.line_date, ru.organization_id, ru.client_organization_id,
            ru.requested_execution_date, ru.late_reason, c.chained,
            case when c.chained
-                then coalesce((select x.paid_on
-                               from private.remittance_chain_paid(ru.transfer_id, b.bank_transaction_id,
-                                                                  b.transfer_id) x),
-                              b.line_date)
-                else b.line_date end as paid_on
+                then (select x.paid_on
+                      from private.remittance_chain_paid(ru.transfer_id, b.bank_transaction_id, b.transfer_id) x)
+                end as chain_paid
     from pg_temp._bb b
     cross join lateral (select q.organization_id, q.client_organization_id, q.requested_execution_date, q.late_reason,
                                q.transfer_id
@@ -463,6 +667,11 @@ begin
     cross join lateral (select exists (select 1 from private.transfer_chain(ru.transfer_id) h
                                        where h.transfer_id is distinct from b.transfer_id) as chained) c
     where b.kind = 'payout'),
+  pr as materialized (          -- … and the date its rows are judged at: this line's when no copy stayed
+    select p.run_id, p.transfer_id, p.organization_id, p.client_organization_id, p.requested_execution_date,
+           p.late_reason, p.chained, p.chain_paid,
+           case when p.chained then coalesce(p.chain_paid, p.line_date) else p.line_date end as paid_on
+    from pr0 p),
   late as materialized (
     select p.run_id, p.paid_on as line_date, p.organization_id, p.client_organization_id,
            p.requested_execution_date, p.late_reason, l.ledger_entry_id, l.payment_id, l.deadline,
@@ -479,7 +688,8 @@ begin
     select p.run_id, p.organization_id, p.client_organization_id, p.requested_execution_date, p.late_reason,
            x.ledger_entry_id, x.payment_id, x.deadline, x.latest_execution_date, x.kind, x.debit_unbooked
     from pr p
-    cross join lateral private.remittance_chain_rows(p.run_id, p.paid_on, p.transfer_id, null, null, false) x
+    cross join lateral private.remittance_chain_rows(p.run_id, p.paid_on, p.chain_paid, p.transfer_id, null, null,
+                                                     false) x
     where p.chained)
   insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
                                                  run_id, deadline, latest_execution_date, requested_execution_date,
@@ -519,7 +729,8 @@ $$;
 -- settings, its grants restated below). M2c-6b-3b part 1 (CPCE-08): a payout part of a run whose chain holds another
 -- transfer is late, and its late date set, by the lines whose rows its booking writes (private.remittance_chain_rows,
 -- the previewed line counted as its execution and never as a possible debit of another transfer): the sheet says « le
--- dépassement du délai est enregistré » only when the booking records it. Nothing else changes.
+-- dépassement du délai est enregistré » only when the booking records it. Review round 1 (chain-holds-snapshot-race): the
+-- chain's paid date read here is passed to the holds, which wait when it moved. Nothing else changes.
 create or replace function private.transfer_line_check(p_line_id uuid, p_locked boolean)
 returns jsonb
 language plpgsql
@@ -559,6 +770,8 @@ declare
   v_y record;          -- M2c-6b-3a-2 (E): a late predecessor's live transfer
   v_lp_entry uuid;     -- (G): its payout booking's entry
   v_lp_n integer;
+  v_chained boolean;   -- M2c-6b-3b part 1 review round 1: a payout part's run whose chain holds another transfer
+  v_chain_paid date;   -- … the date its chain paid the client and stayed paid, this line its execution
 begin
   -- (the working tables every branch's statements name exist, so each statement plans whatever the class)
   create temp table if not exists _tl_locked_runs (run_id uuid primary key) on commit drop;
@@ -959,19 +1172,24 @@ begin
         -- transfer, at the date its chain paid the client and stayed paid with this line booked as this part's payout
         -- (private.remittance_chain_paid: every execution and return of the chain, each counted for the transfer it
         -- names), this line's date when none stayed paid; a run with no other transfer, at this line's date as before
+        -- M2c-6b-3b part 1 review round 1 (chain-holds-snapshot-race): the chain's paid date read here (null when no
+        -- copy stayed) is passed to the holds, which read it again with the coverage and the possible debits and wait
+        -- when it moved
+        v_chained := r.kind = 'payout'
+                     and exists (select 1 from private.transfer_chain(r.run_transfer) h
+                                 where h.transfer_id <> r.transfer_id);
+        v_chain_paid := case when v_chained
+                             then (select p.paid_on
+                                   from private.remittance_chain_paid(r.run_transfer, l.id, r.transfer_id) p) end;
         update pg_temp._tl t set c = r.tr_client, a = r.amount,
           -- M2c-6b-3b part 1 (CPCE-08): for a run whose chain holds another transfer, only the lines whose rows the
           -- booking writes (private.remittance_chain_rows: the statements cover L, no other transfer of the chain may
           -- have paid by L uncounted; this line, previewed, none of them) — the sheet says late only then
           late_date = case when r.kind = 'payout' then
-            case when exists (select 1 from private.transfer_chain(r.run_transfer) h where h.transfer_id <> r.transfer_id)
+            case when v_chained
                  then (select min(x.latest_execution_date)
-                       from private.remittance_chain_rows(
-                              r.tr_run,
-                              coalesce((select p.paid_on
-                                        from private.remittance_chain_paid(r.run_transfer, l.id, r.transfer_id) p),
-                                       l.booking_date),
-                              r.transfer_id, l.id, null, false) x)
+                       from private.remittance_chain_rows(r.tr_run, coalesce(v_chain_paid, l.booking_date), v_chain_paid,
+                                                          r.transfer_id, l.id, null, false) x)
                  else private.remittance_run_late_on(r.tr_run, l.booking_date) end end
         where t.n = r.n;
         update pg_temp._tl t set late = t.late_date is not null where t.n = r.n;
@@ -1322,7 +1540,10 @@ $$;
 -- yet, once the statements cover each one's L and no other transfer of the chain may have paid by it uncounted
 -- (private.remittance_chain_rows, decided: 'expired' writes « bloqué : débit possible non comptabilisé ») — no longer
 -- only once a return of the chain is on the statements: the booking now leaves to it the rows it could not judge.
--- Nothing else changes (the chained in-flight branch and every other check as before).
+-- Review round 1 (CPCE-08): the booked branch judges a chain that paid nothing while its payout stands at that payout
+-- line's date (nightly-null-paid-date-skips-standing-run) and passes the chain's paid date it read to the holds
+-- (chain-holds-snapshot-race); the in-flight branch, its rule unchanged, judges each run by
+-- private.remittance_inflight_judge (facts in one snapshot, read again after the options). Every other check as before.
 create or replace function private.run_remittance_runs_checks(p_check_run_id uuid, p_organization_id uuid,
                                                               p_today date default null)
 returns void
@@ -1361,30 +1582,39 @@ begin
   -- booking, else « bloqué : débit possible non comptabilisé »). The rows the booking did not write (the statements not
   -- covering L then, or such a line waiting) are written here once both hold; a return that undid a copy moves the paid
   -- date later (round 2) — an execution only ever moves it earlier, never a row more.
+  -- Review round 1 (nightly-null-paid-date-skips-standing-run; CPCE-08): a chain that paid nothing (every execution came
+  -- back, the return not booked as the payout's yet) while its payout booking stands is judged at that booking's line
+  -- date, as private.bank_booking_post_rows judges it — the same row whichever of the return and the cover reaches the
+  -- statements first. (chain-holds-snapshot-race) The chain's paid date read here is passed to the holds, which read it
+  -- again with the coverage and the possible debits in one snapshot and wait when it moved.
   bp as materialized (
     select r.id as run_id, r.organization_id, r.client_organization_id, r.requested_execution_date, r.late_reason,
-           s.transfer_id as paying, p.paid_on
+           s.transfer_id as paying, p.paid_on as chain_paid, coalesce(p.paid_on, s.line_date) as paid_on
     from bc
     cross join lateral (select q.id, q.organization_id, q.client_organization_id, q.requested_execution_date,
                                q.late_reason, q.status, q.transfer_id
                         from public.remittance_run q where q.id = bc.run_id offset 0) r
-    cross join lateral (select k.transfer_id
+    cross join lateral (select k.transfer_id, x.booking_date as line_date
                         from private.transfer_chain(r.transfer_id) h
-                        cross join lateral (select k.entry_id, k.transfer_id from public.bank_line_booking k
+                        cross join lateral (select k.entry_id, k.transfer_id, k.bank_transaction_id
+                                            from public.bank_line_booking k
                                             where k.transfer_id = h.transfer_id and k.kind = 'payout' offset 0) k
+                        cross join lateral (select q.booking_date from public.bank_transaction q
+                                            where q.id = k.bank_transaction_id offset 0) x
                         where not exists (select 1 from public.ledger_entry z where z.reverses_entry_id = k.entry_id
                                           offset 0)
                         limit 1) s
     cross join lateral (select c.paid_on from private.remittance_chain_paid(r.transfer_id) c offset 0) p
-    where r.status = 'booked' and p.paid_on is not null
-      and exists (select 1 from private.remittance_run_late_lines(r.id, p.paid_on) q
+    where r.status = 'booked'
+      and exists (select 1 from private.remittance_run_late_lines(r.id, coalesce(p.paid_on, s.line_date)) q
                   where not exists (select 1 from public.remittance_deadline_breach b
                                     where b.ledger_entry_id = q.ledger_entry_id offset 0))),
   late as materialized (
     select p.run_id, p.organization_id, p.client_organization_id, p.requested_execution_date, p.late_reason,
            x.ledger_entry_id, x.payment_id, x.deadline, x.latest_execution_date, x.kind, x.debit_unbooked
     from bp p
-    cross join lateral private.remittance_chain_rows(p.run_id, p.paid_on, p.paying, null, v_today, true) x)
+    cross join lateral private.remittance_chain_rows(p.run_id, p.paid_on, p.chain_paid, p.paying, null, v_today,
+                                                     true) x)
   insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
                                                  run_id, deadline, latest_execution_date, requested_execution_date,
                                                  late_reason, blocked_reason)
@@ -1438,55 +1668,17 @@ begin
   -- one rule over the chain (private.remittance_chain_paid): the chain paid the client by L and stayed paid — a
   -- transfer whose every execution came back (its return unflagged included) paid nothing, one executed more often
   -- than it came back stays paid.
+  -- M2c-6b-3b part 1 review round 1 (chain-holds-snapshot-race; CPCE-08): the rule above, unchanged, judged by
+  -- private.remittance_inflight_judge on facts read in one snapshot (the run still in flight, its transfer, the
+  -- coverage, the chain's paid date, the lines that may be a debit) — no longer this statement's snapshot beside the
+  -- suppression's own later reads, between which ops' booking of the run's on-time debit without our references (or an
+  -- import) could land and the append-only row be written for a run paid on time — a proof resting on the options
+  -- asked after that snapshot standing only if the facts read again afterwards have not moved. Every run in flight,
+  -- chained or not (the in-flight branch of a run with no other transfer included: production since 6b-2c).
   olc as materialized (
-    select k.run_id, k.latest_execution_date,
-           case when t.chained then coalesce(ch.covered and not coalesce(ch.waiting, false)
-                                             and not coalesce(nm.named, false), false)
-                else coalesce(t.status = 'ordered' or (t.status = 'in_file' and coalesce(t.download_count, 0) = 0)
-                              or (e.unseen and e.suppression is distinct from 'waiting'), false) end as proven,
-           -- M2c-6b-2c (plan §4.2): proven only because the lines that could be its debit offered no booking of it for
-           -- five business days
-           case when t.chained then coalesce(ch.covered and not coalesce(ch.waiting, false)
-                                             and not coalesce(nm.named, false) and ch.expired, false)
-                else coalesce(t.status = 'in_file' and coalesce(t.download_count, 0) > 0 and e.unseen
-                              and e.suppression = 'expired', false) end as debit_unbooked
+    select k.run_id, k.latest_execution_date, j.proven, j.debit_unbooked
     from (select distinct o.run_id, o.latest_execution_date from ol o where not o.out_of_horizon) k
-    left join lateral (select q.id, q.debtor_bank_account_id, q.status,
-                              (select f.download_count from public.transfer_file f where f.id = q.transfer_file_id)
-                                as download_count,
-                              q.replaces_transfer_id is not null or q.status = 'cancelled' as chained
-                       from public.remittance_run r join public.bank_transfer q on q.id = r.transfer_id
-                       where r.id = k.run_id offset 0) t on true
-    left join lateral (
-      select private.statement_covers(t.debtor_bank_account_id, least(min(h.e0), k.latest_execution_date),
-                                      k.latest_execution_date) as covered,
-             bool_or(s.s = 'waiting') as waiting, bool_or(s.s = 'expired') as expired
-      from (select c.transfer_id,
-                   (select min(i.execution_date)
-                    from (select q.file_id, q.execution_date from public.transfer_file_item q
-                          where q.transfer_id = c.transfer_id offset 0) i
-                    cross join lateral (select f.download_count from public.transfer_file f
-                                        where f.id = i.file_id offset 0) f
-                    where f.download_count > 0) as e0
-            from private.transfer_chain(t.id) c
-            where t.chained offset 0) h
-      cross join lateral (select private.transfer_debit_suppression(h.transfer_id, k.latest_execution_date, v_today)
-                                   as s) s
-      where h.e0 is not null) ch on true
-    -- review round 4 (CPCE-08): the chain paid the client by L and stayed paid (private.remittance_chain_paid: every
-    -- execution and return of the chain, each counted for the transfer it names) — never proven unpaid, whether or not
-    -- « Comptabiliser… » offers the booking yet
-    left join lateral (select c.paid_on <= k.latest_execution_date as named
-                       from private.remittance_chain_paid(t.id) c
-                       where t.chained offset 0) nm on true
-    left join lateral (select u.unseen,
-                              case when u.unseen then private.transfer_debit_suppression(t.id, k.latest_execution_date,
-                                                                                         v_today) end as suppression
-                       from (select t.status = 'in_file' and coalesce(t.download_count, 0) > 0
-                                    and private.statement_covers(t.debtor_bank_account_id, k.latest_execution_date,
-                                                                 k.latest_execution_date)
-                                    and not private.transfer_debit_seen(t.id) as unseen
-                             where t.id is not null offset 0) u) e on true),
+    cross join lateral private.remittance_inflight_judge(k.run_id, k.latest_execution_date, v_today) j),
   inflight_breach as (
     insert into public.remittance_deadline_breach (organization_id, client_organization_id, ledger_entry_id, payment_id,
                                                    run_id, deadline, latest_execution_date, requested_execution_date,
@@ -1809,7 +2001,9 @@ comment on function private.remittance_chain_events(uuid, uuid, uuid) is
   'client by L, at the booking of the run''s payout (any such line), in its sheet''s late flag and in the nightly '
   'check''s chained and booked branches (Q14''s rule: while it is young or offers that transfer''s booking; past the '
   'bound days with none, the row « bloqué : débit possible non comptabilisé »), and so do statements not yet covering '
-  'least(e0, L) to L (private.remittance_chain_holds, M2c-6b-3b part 1).';
+  'least(e0, L) to L (private.remittance_chain_holds, M2c-6b-3b part 1). The holds read these events, the coverage and '
+  'the chain''s paid date in one snapshot (private.remittance_chain_hold_facts, review round 1), and wait when the paid '
+  'date the reader judged at has moved since.';
 
 ------------------------------------------------------------------------------------------
 -- Privileges (restated for every function redefined here; the new internals revoked)
@@ -1817,8 +2011,11 @@ comment on function private.remittance_chain_events(uuid, uuid, uuid) is
 
 -- the new internals (PostgreSQL grants EXECUTE to PUBLIC by default): only the SECURITY DEFINER callers use them
 revoke execute on function private.transfer_debit_lines(uuid, date),
-  private.remittance_chain_holds(uuid, uuid, date, date, boolean, uuid),
-  private.remittance_chain_rows(uuid, date, uuid, uuid, date, boolean)
+  private.remittance_chain_hold_facts(uuid, uuid, date, uuid),
+  private.remittance_chain_holds(uuid, uuid, date, date, boolean, uuid, date),
+  private.remittance_chain_rows(uuid, date, date, uuid, uuid, date, boolean),
+  private.remittance_inflight_facts(uuid, date),
+  private.remittance_inflight_judge(uuid, date, date)
   from public, anon, authenticated, service_role;
 -- the redefined internals, as 20261117113000 (private.transfer_debit_suppression), 20261117100000
 -- (private.bank_booking_post_rows) and 20261118100000 (private.transfer_line_check, private.run_remittance_runs_checks)

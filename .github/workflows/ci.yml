@@ -88,7 +88,7 @@ jobs:
             "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
           sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
           supabase --version
-      - run: supabase start
+      - run: bash scripts/ci-supabase-start.sh
       - run: supabase db reset
       - run: supabase test db
       - name: Generated DB types are up to date
@@ -126,7 +126,7 @@ jobs:
             "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
           sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
           supabase --version
-      - run: supabase start
+      - run: bash scripts/ci-supabase-start.sh
       - run: supabase db reset
       - name: Log the plan of any statement slower than 60 s (read when the job fails)
         run: |
@@ -179,7 +179,7 @@ jobs:
             "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
           sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
           supabase --version
-      - run: supabase start
+      - run: bash scripts/ci-supabase-start.sh
       - run: supabase db reset
       - name: Log the plan of any statement slower than 60 s (read when the job fails)
         run: |
@@ -242,7 +242,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
-      - run: supabase start
+      - run: bash scripts/ci-supabase-start.sh
       - name: Export local Supabase settings
         run: |
           eval "$(supabase status -o env)"
