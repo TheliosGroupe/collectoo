@@ -30,7 +30,9 @@ import { loginAsStaff } from "./support/session";
  * refused with those words and nothing changes. Then (review M2c-6b-3a-2 round 1, tests-5) time moves on — the file
  * dated back through psql, as pgTAP does — and the late predecessor is played through the pages: the cancellation
  * asked and confirmed by two people on the statements' evidence, the cancelled payout debited late all the same and
- * booked from « Débits et retours » as its run's payout (`latePredecessor`). Synthetic data.
+ * booked from « Débits et retours » as its run's payout (`latePredecessor`); then (M2c-6b-3b part 2) its collections held
+ * to the last business day before today, the checks raise « remittance_breach_held » on « Contrôles », the R124-6 row
+ * waiting for the statement of that day (`heldAlert`). Synthetic data.
  */
 const BANK_IBAN = ibanFr(828282);
 const SWITCH = "downloaded_file_cancellation";
@@ -361,6 +363,58 @@ async function latePredecessor(page: Page, mobile: Page, fileId: string, filePag
       `sous la référence ${x.end_to_end_id as string} (virement annulé, exécuté en retard par la banque)`,
     );
     await shot(p, "m2c-reversement-debite-en-retard", viewport);
+  }
+
+  await heldAlert(page, mobile, x.run_id as string, after);
+}
+
+/**
+ * M2c-6b-3b part 2 (ADR-0014 « M2c-6b-3b part 2 »; CPCE-08): « remittance_breach_held » on « Contrôles ». Time moved
+ * on once more (as pgTAP's pg_temp.hold_to): the run's collections are held to `after`, the last business day before
+ * today, through psql on the local stack only — the late predecessor's debit (today) is then after their latest
+ * execution date. But the run's chain held another transfer handed out (x, executed from X) and no statement imported
+ * covers `after` yet (the statement of that day was produced the same evening): the R124-6 row waits, and the checks,
+ * run now from the page, raise the alert on the run, naming that day and what to do. Screenshots of the checks page,
+ * mobile and desktop. The alert resolves itself the night the statement of `after` is imported (pgTAP 042).
+ */
+async function heldAlert(page: Page, mobile: Page, runId: string, after: string): Promise<void> {
+  psql(
+    `begin;
+     alter table public.remittance_line disable trigger remittance_line_guard;
+     update public.remittance_line set latest_execution_date = '${after}', deadline = '${after}' where run_id = '${runId}';
+     alter table public.remittance_line enable always trigger remittance_line_guard;
+     commit;`,
+  );
+  const [y, m, d] = after.split("-");
+  const row = (p: Page) => p.locator('[data-testid="check-row"][data-code="remittance_breach_held"]');
+  await page.goto("/backoffice/encaissements/controles");
+  await page.getByTestId("run-checks").getByRole("button", { name: "Lancer les contrôles" }).click();
+  await expect(async () => {
+    await page.reload();
+    await expect(row(page)).toHaveCount(1, { timeout: 2_000 });
+  }).toPass({ timeout: 60_000 });
+  await expect(row(page)).toContainText("Dépassement de délai non encore enregistré");
+  await expect(row(page)).toContainText("le dépassement n'est pas encore enregistré");
+  // review round 1 (dt-1): the statement of `after` is imported but was produced during that day — the day is named as
+  // not covered, and ops are asked for a statement established after its end
+  await expect(row(page)).toContainText(
+    `Aucun relevé importé du compte de fonds de tiers ne couvre encore les jours ouvrés suivants : ${d}/${m}/${y}.`,
+  );
+  await expect(row(page)).toContainText("Importez un relevé de ces jours établi par la banque après leur fin");
+  // (tests-ui-5) the oldest age, its noun agreeing with its number: today − `after`, in days
+  const age = Number(psql(`select private.paris_today() - '${after}'::date`));
+  await expect(row(page)).toContainText(new RegExp(`le plus ancien : ${age} jour${age > 1 ? "s" : ""}(?!s)`));
+  await expect(row(page).getByRole("link", { name: "Ouvrir" })).toHaveAttribute("href", `/backoffice/reversements/${runId}`);
+  // no row yet: the alert is its only trace
+  const { data: rows } = await adminClient().from("remittance_deadline_breach").select("id").eq("run_id", runId);
+  expect(rows).toEqual([]);
+  for (const [p, viewport] of [
+    [mobile, "mobile"],
+    [page, "desktop"],
+  ] as const) {
+    if (p !== page) await p.goto("/backoffice/encaissements/controles");
+    await expect(row(p)).toHaveCount(1);
+    await shot(p, "m2c-controles-depassement-en-attente", viewport);
   }
 }
 

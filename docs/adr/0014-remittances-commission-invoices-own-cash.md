@@ -4957,5 +4957,333 @@ without a reset (CI's order), the integration tests but the scale files — **24
 the earlier rounds' spread, `docs/benchmarks/remittances.md` « M2c-6b-3b part 1 — CI round (PR #38) »). No web code
 changed.
 
+## M2c-6b-3b part 2: the held-rows alert and the booking guard's plans, the switch still off (2026-11-21)
+
+Plan: founder question 2 of « M2c-6b-3b part 1 » (its default: « remittance_breach_held » before the switch-on), round 1's
+low booked-chained-rows-held-without-alert, and PR #38's known limit on `private.bank_line_booking_guard()` (PROGRESS).
+Migration `20261121090000_switch_on_prerequisites_4.sql`: two internal helpers are new —
+`private.remittance_booked_chain_runs` and `private.remittance_breach_held`, EXECUTE revoked from every role — and two
+functions are redefined whole from their latest definitions across all the migration files (each restating `SECURITY
+DEFINER` where it was, every `SET`, `search_path ''` and its grants): `private.run_remittance_runs_checks`
+(`20261119090000:1552`) and `private.bank_line_booking_guard` (`20261118100000:2595`). No public signature changed
+(`database.types.ts` regenerated: unchanged); no Python product code changed. **The switch stays off**: no statement
+writes `private.feature_switch`; `033` is byte for byte unchanged; `015`–`041` keep every assertion.
+
+### Decisions
+
+- **« remittance_breach_held » (CPCE-08; an operational safeguard, not a legal deadline).** Since 6b-3b part 1 the R124-6
+  rows of a booked run whose payout chain holds another transfer wait while the paying account's statements do not cover
+  [least(e0, L), L] or a line that may be another transfer's debit waits (`private.remittance_chain_holds`). The nightly
+  checks now raise an alert of the existing kind on every such run: `payment_check_result` code
+  `remittance_breach_held`, severity `alert` (not a violation: nothing is wrong in the books, a record waits), subject
+  the run (`remittance_run`, « Ouvrir » leads to its page), currency, the held lines' amount and count, `oldest_days` the
+  days since the earliest date they are held to; `details`: the run's `number`, `judged_on` (the date the run is judged
+  at: the chain's paid date, or the payout line's date when no copy stayed), `earliest_latest_execution_date`, and why —
+  `uncovered_days` (the business days of [least(e0, L), L] no imported statement covers yet, each read by
+  `private.statement_covers` of that day; the first 31, `uncovered_count` all of them), `balance_break` (every day covered
+  but two statements' balances not following: the window's own break), `waiting` (once the dates are covered, the lines
+  dated by L that may be another transfer's debit and that the chain's rule does not count yet: line id, booking date,
+  amount, currency, the end-to-end id of the transfer it may be; the first 10, `waiting_count` all of them),
+  `bound_days` (`private.transfer_debit_bound_days()`, the page's « N jours ouvrés » — never a number of its own), `ids`
+  (the held lines' ledger entries, the first 50). Open/resolved as every check: a check run's results are the open ones;
+  the next run raises it again while the row waits and not once it is written.
+- **One rule for the rows and their alert.** The booked branch's runs moved verbatim into
+  `private.remittance_booked_chain_runs` (its `bc` and `bp` CTEs, the same rows: every booked run of the servicer whose
+  payout chain holds a payout cancelled out of a downloaded file, its payout standing, with a late line at the chain's
+  paid date — or the payout line's — that has no row yet); the booked branch reads it, and so does the alert. The alert's
+  helper takes, per run, the lines due at that date (each held to its latest execution date, or to the one-month date of
+  its collection for a delay that cannot be met once that date is before the run's — `private.remittance_chain_rows`'
+  own reading) that still have no row, and per date they are held to, the holds' own facts
+  (`private.remittance_chain_hold_facts`, one snapshot). It runs in the results' statement, after the booked branch's
+  statement wrote the rows that are due: a run whose row the check writes, or whose chain the statements show paid on
+  time, raises nothing — the alert resolves itself. A run whose payout came back raises none (its sums' rows are the
+  queue's, alerted as such); a run whose chain holds no other transfer raises none (its booking writes its row whatever
+  the statements, since 6b-2c).
+- **Neither day nor line.** When the facts read in the results' statement show the window covered and no line waiting
+  (an import or a booking another session committed between the booked branch's statement and the results'), the alert
+  is still raised — the row is not written yet — and says the run is judged again at the next check.
+- **The texts** (`apps/web/src/lib/payments/debits.ts`, `CHECK_LABEL.remittance_breach_held`, `breachHeldHelp`): label «
+  Dépassement de délai non encore enregistré »; help: according to the imported statements the run paid some collections
+  after their latest execution date (art. R124-6 CPCE), but another transfer issued for it (the one cancelled after
+  download, or its replacement) may have paid them on time, so the overrun is not recorded yet; it will be, if it
+  stands, at the next check once the statements cover every business day in question and no line that may be that
+  transfer's debit waits in « Débits et retours » — then the alert stops. With the row's details: « Importez les relevés
+  du compte de fonds de tiers des jours ouvrés suivants : … » (ten named, then « et N autres »), the balances' break and «
+  importez le relevé manquant entre eux », or « Classez dans « Débits et retours » la ligne du … de …, qui peut être le
+  débit du virement … » (three named), « comptabilisez-la (« Comptabiliser… ») si c'est le débit de ce virement, sinon
+  classez-la pour ce qu'elle est », and that a line « Comptabiliser… » does not propose as that transfer stops holding
+  the record `bound_days` business days after its date (then « bloqué : débit possible non comptabilisé »). The same
+  text whichever the switch (the alert exists only for a chain). No deadline of its own: the alert names no legal date.
+- **PR #38's known limit, the booking guard.** `private.bank_line_booking_guard()` runs under `enable_seqscan = off` (its
+  own `SET`, beside hash and merge joins off), as `private.bank_booking_recheck` since PR #38's CI round. That alone was
+  not enough: its one join — the run of the reversed booking's transfer, `bank_line_booking` joined to `bank_transfer` —
+  read `bank_line_booking` whole through `bank_line_booking_transfer_idx` once per new row (a full index scan is no
+  sequential scan), so that read is keyed too: the reversed booking's transfer by its entry (`entry_id` is unique), then
+  that transfer's run by its key — the same row, null when the booking has no transfer. The same rows read and the same
+  verdict; only the plans change.
+
+### Deviations from the task
+
+- The guard got both treatments the task allowed (« enable_seqscan off in its SET clause, or keyed reads »): the first
+  alone left 12 million rows under the test's statistics.
+- The guard's test forgets the statistics of the nine tables the guard reads, inside its own transaction (rolled back
+  with it), beside `random_page_cost` 1,000: with the statistics a run happened to leave, the joined read chose the
+  entry's index (the guard passed at 48,001 rows with the join back), so the test was not deterministic for that mutant.
+  *(Corrected in review round 1, tests-ui-1: forgetting the tables' statistics did not make it deterministic either —
+  the planner sized each table from its blocks, and the indexes kept the stack's own statistics; the test now stores a
+  first batch line and forges the indexes' row counts in its transaction: « M2c-6b-3b part 2 review fixes », round 1.)*
+- The E2E's held state dates the run's collections back to the last business day before today through psql (as pgTAP's
+  `pg_temp.hold_to` and the spec's own file backdating): the spec's late predecessor is booked today, before its
+  collections' month ends.
+
+### Assertions whose expected value changed (house rule R3)
+
+None: `015`–`041` unchanged (`033` byte for byte).
+
+### Tests
+
+- pgTAP `042_breach_held_alert` (15), each scenario switching the flag on inside its own subtransaction (041's fixtures
+  and helpers): H1 (y's own debit after L booked, d2 … d3 on no statement: the alert names d2 and d3; the other servicer's
+  check raises none and its ops manager reads none; the statement then showing nothing of x: the row at y's date and the
+  alert gone, the next night too), H1's facts (number, judged_on, held-to date, bound days, entries, age, currency,
+  counts), H1x (the statement showing x's on-time debit: no row, the alert gone), H2 (a line without our references
+  offering x's booking: the alert names it, one line, no day; booked « Virement hors reversement » of x or classified not
+  ours, the alert gone), H2y (a young possible debit offering none: named), HB (a break in the balances: no day named,
+  the break said), no alert where the row is written (at the booking; « bloqué … » at the nightly check), a delay that
+  cannot be met (before its one-month date: none; after: the held days named), H3 (forged: a second line held to a
+  covered date, its row written: the alert counts and sums the held line alone), a run whose payout came back (none), HU
+  (forged: a run with no other transfer, its row at the booking whatever the statements, none — nor once its row is taken
+  out), the four functions' settings and privileges, the switch off at the end.
+- Seen failing first: `042` on the stack without the migration (WIP `28e411c`, 14 assertions): **8 of 14 fail** — H1,
+  H1's facts, H1x, H2, H2y, HB, the unmeetable pair, the functions' settings; the « none » cases (rows written, payout
+  returned, HU) pass there, each proved by its mutant below. H3 was added during mutation testing (the alert's own
+  « no row yet » filter survived the others).
+- Worker: `test_the_booking_guard_reads_by_key_whatever_the_statistics` in
+  `worker/tests/test_debit_bookings_batch_rules_integration.py` — the 2,000-member batch line alone (the batch rule
+  accepts it: 2,000 sweeps posted, their 2,000 bookings inserted by one statement), `random_page_cost` 1,000, the guard's
+  tables' statistics forgotten in the transaction; the guard's statement scans no stored table once per new row and every
+  statement of the call holds the per-statement bound (40 rows per row of the job). On the old body: **36,258,001 rows**
+  (`bank_transfer` scanned five times per new row, 4 million rows each); with `enable_seqscan = off` alone: 12,052,001;
+  final: **48,001**. `_batch_world` gained `line_a` (default true: the two earlier tests unchanged).
+- Web: vitest `breach-held.test.ts` (8: the label and help, days, the break, lines, caps and totals, the facts moved, the
+  same text whichever the switch, the link to the run), seen failing first (7 of 8). E2E (switch-on project): after the
+  late predecessor's booking, the run's collections held to the last business day before today (no statement covers it:
+  that day's statement was produced the same evening), the checks run from « Contrôles »: the alert on the run, its day
+  named, no R124-6 row yet; screenshots `m2c-controles-depassement-en-attente-{desktop,mobile}`.
+
+### Mutants
+
+SQL: one function as it now stands, redefined with one change right after the test file's `begin;`, rolled back with it;
+the no-op control passes `042` 15/15 and `041` 25/25.
+
+| Mutant | Killed by |
+|---|---|
+| alert: never raised | 042 H1, H1's facts, H1x, H2, H2y, HB, the unmeetable pair, H3 |
+| alert: the one-month filter of a delay that cannot be met dropped | 042 the unmeetable pair (before its date: raised) |
+| alert: its own « no row yet » filter dropped | 042 H3 |
+| alert: no uncovered day computed | 042 H1, H1's facts, H1x, the unmeetable pair, H3 |
+| alert: the window [L, L] (e0 dropped) | 042 H1, H1's facts, H1x, the unmeetable pair, H3 |
+| alert: the balances' break never said | 042 HB |
+| alert: no waiting line named | 042 H2, H2y |
+| alert: `waiting_count` 0 | 042 H2 |
+| alert: `uncovered_count` 0 | 042 H1's facts |
+| alert: one line too many counted | 042 H1, H1x, H2, H2y, HB, the unmeetable pair, H3 |
+| checks: the alert read before the booked branch writes the rows (the two statements swapped) | 042 H1 (the night the row is written), H2 (classified), no alert where the row is written |
+| checks: severity `violation` | 042 H1, H1x, H2, H2y, HB, the unmeetable pair, H3 |
+| checks: subject the servicer | 042 H1, H1's facts, H1x, H2, H2y, HB, the unmeetable pair, H3 |
+| runs: the servicer's filter dropped | 042 H1 (the other servicer's check raises this servicer's alert) |
+| runs: the payout standing dropped | 042 the payout came back; 041 S7 |
+| runs: `judged_on` the payout line's date (the chain's paid date dropped) | 041 the property over time (shapes, interleavings) |
+| runs: `status = 'booked'` widened to runs in flight | **equivalent** — a standing `payout` booking books its run |
+| runs: « a late line without a row » dropped | **equivalent** — a gate on work: the booked branch's insert is `on conflict do nothing`, the alert filters its own lines (its mutant above) |
+| guard: `enable_seqscan = off` dropped (in the migration) | 042 the functions' settings; the guard's test (40,262,001 rows, `bank_transfer` scanned per row) |
+| guard: the reversed run joined again (seqscan off kept) | the guard's test (12,052,001 rows) — *not deterministic (review round 1, tests-ui-1): on an empty stack the join read by key and the mutant survived; killed whatever the stack since round 1, below* |
+| guard: the old body (20261118100000) | the guard's test (36,258,001 rows) |
+
+21 SQL mutants: 19 killed, 2 equivalent. Web (each run against `breach-held.test.ts`, the file restored after): the
+details ignored, the details read only with the switch on, the days or the lines not capped, the bound hardcoded, the
+totals ignored, the label's text dropped from the detailed help, the break ignored, the « facts moved » sentence dropped —
+10 of 10 killed.
+
+### Suites
+
+- `supabase test db` (after `supabase db reset`): **Files=44, Tests=2,897, PASS** — `033` byte for byte unchanged,
+  `015`–`041` unchanged (`041` 25/25), `042` 15/15.
+- Worker (only `test_debit_bookings_batch_rules_integration.py` changed): `ruff check .`, `ruff format --check .`, `mypy`
+  (179 files) clean; unit pytest 1,093 passed, 5 xfailed; the integration tests but the scale files, right after `supabase
+  test db` without a reset (CI's order): **243 passed** (242 and the guard's test); `make eval`: mapping top-1 1.000
+  (167/167, threshold 0.980), reconciliation 96.0 % automatic (95,997/100,000), 0 wrong, 0 policy violations.
+- Scale, each once right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-6b-3b part 2 »): the
+  cancellation file 1 passed (51.4 s; nightly checks 0.67 s, the late predecessor's booking 1.84 s), the 50,000-line run
+  1 passed (262.1 s; its nightly checks with the run booked 4.4 s), the 5,000 payouts' bookings 5 passed (812.0 s; the
+  5,000-member batch line's funds pass 23.1 s, the debit job 20.5 s, nightly checks 1.06 s) — within the earlier
+  rounds' spread.
+- `database.types.ts` regenerated: unchanged (the new functions are internal). Web: `lint`, `typecheck`, vitest **496
+  passed** (488 and the alert's 8).
+- E2E `./scripts/e2e.sh` (after `supabase db reset`): **57 passed** (desktop and mobile, then `switch-on`, which now ends
+  on « Contrôles »), the switch off at its end. Screenshots `m2c-controles-depassement-en-attente-{desktop,mobile}` new;
+  every other diff (dates, ids) reverted.
+
+### Left open (low), with its default
+
+- An alert row lists at most 31 days and 10 lines (with their totals); a run held by more names the first ones.
+- The race in « Neither day nor line » above: the alert then says the run is judged again; the next check decides.
+- The earlier slices' open lows stay so (6b-3b part 1's: the partner as an entry kept unsplit, the booking leaving a
+  chained run's rows a night later when a possible debit past the bound days is on the statements; rounds 1–4's), and
+  the founder questions (6b-3b part 1's 1, 3, 4; CPCE-08's defaults; Q1: the switch).
+
+## M2c-6b-3b part 2 review fixes (2026-11-21)
+
+### Round 1
+
+The review of `15d9a03` raised eight lows and no high or medium: two texts of the alert (dt-1, dt-2), four test gaps
+(tests-ui-1 … tests-ui-3, the plural of tests-ui-4), the oldest age's plural on « Contrôles » (tests-ui-5) and the
+alert's cost (cost-breach-held-linear-recompute). Each was reproduced first on the main stack (the switch on inside
+`BEGIN … ROLLBACK` only). The migration `20261121090000` is unmerged and was edited in place. **The switch stays off**;
+`033` byte for byte unchanged; `015`–`041` unchanged (no assertion changed).
+
+- **dt-1 (the uncovered days' instruction).** A day is named when no imported statement covers it
+  (`private.statement_covers`), which is also the case when a statement of that day *is* imported but was produced by
+  the bank during that day (camt.053: `bank_created_at` in Paris not after it) or is a CSV ending on it (a CSV never
+  covers its last booking day): « Importez les relevés … des jours ouvrés suivants » then asked for a statement already
+  imported, every night. The sentence now states the coverage and what counts: « Aucun relevé importé du compte de
+  fonds de tiers ne couvre encore les jours ouvrés suivants : … Importez un relevé de ces jours établi par la banque
+  après leur fin : un relevé établi pendant l'un d'eux ne compte pas pour ce jour, ni le dernier jour d'un export CSV
+  (exportez jusqu'au jour suivant). » (the rule `statement_covers` applies: a camt.053 produced after the day, a CSV
+  uploaded after it and going beyond it); the label's help says « importez les relevés manquants, établis après la fin
+  des jours en cause ». No SQL change: `042` pins the alert naming such a day (sdc: a camt.053 of d2 … d3 produced on d3
+  at 18:00; sdv: a CSV of d2 … d3 uploaded the morning after — d3 named, d2 covered).
+- **dt-2 (the label's help and the bound days).** The help said the overrun is recorded once « aucune ligne … n'attend
+  plus dans « Débits et retours » », but a line « Comptabiliser… » does not propose as that transfer stops holding the
+  record `bound_days` business days after its date while it still waits there (`private.remittance_chain_holds`,
+  « bloqué : débit possible non comptabilisé »). It now reads « qu'aucune ligne qui peut être le débit de cet autre
+  virement ne retient plus l'enregistrement (une ligne que « Comptabiliser… » ne propose pas comme ce virement cesse de
+  le retenir quelques jours ouvrés après sa date) » — the number itself stays the row's (`bound_days`, in the detailed
+  sentence), never one of the page's.
+- **tests-ui-4 (several lines).** With two or more lines (the count, `waiting_count`, not the three named), the help
+  says « pour chacune, comptabilisez-la (« Comptabiliser… ») si c'est le débit du virement en cause, sinon classez-la
+  pour ce qu'elle est » and « ne propose pas comme le virement en cause »; one line keeps « comptabilisez-la … de ce
+  virement ». The bound's noun agrees with its number (« 1 jour ouvré »).
+- **tests-ui-5 (« le plus ancien : 1 jours »).** `checkOldestDays(n)` (`lib/payments/debits.ts`) writes « le plus
+  ancien : N jour(s) », the noun agreeing (0 and 1 singular, as French counts); « Contrôles » uses it for every result.
+  The two screenshots are retaken.
+- **tests-ui-2 (aggregates across held dates, the caps).** `042` H4 (forged as H3): the run held to d15 and given a
+  second line held to d10, y's debit after L on a statement of d16 alone — both held, windows d2 … d10 and d2 … d15
+  overlapping: the alert counts and sums both (2, 201 000), names each day once (d2 … d15), `uncovered_count` 14 (not
+  9 + 14), `earliest_latest_execution_date` d10 and `oldest_days` today − d10. The caps: HD (forged: x's execution in
+  F1 set back to the 45th business day before today) — 41 business days on no statement, the first 31 named (from e0 to
+  d5), 41 counted; HW — eleven batch lines of x's PmtInf that no subset makes, young, on d14: the first 10 by date and id
+  named (each as x's possible debit), 11 counted.
+- **tests-ui-3 (the unmeetable boundary).** `042` h5c: a delay that cannot be met whose one-month date is the very date
+  the run is judged at (d6) — on time: no row, no alert; and none either the next night once the statement of d2 … d4
+  covers the window (the row a line paid on its date would falsely get). That second night also pins
+  `private.remittance_chain_rows`' own « before » (`<` → `<=` survived `041` and `042`; killed now).
+- **tests-ui-1 (the guard's test was not deterministic for the joined read).** Reproduced: on a fresh reset the
+  « reversed run joined again » mutant passed the test (48,001 rows), and failed it after other runs (16 to 40 million).
+  Two causes, both of the stack's own state, not the test's: `bank_line_booking` was empty (the join read it whole per
+  new row only once it held rows), and the indexes kept the statistics the stack left them — a partial index that a
+  vacuum recorded with pages but no tuples (as after the pgTAP suite's rolled-back rows, or a table filled since its
+  last vacuum) prices its whole scan at one page, and the joined read then scanned `bank_line_booking_transfer_idx`
+  whole per new row; with fresh indexes it probed the entry. The test now (i) posts a first 2,000-member batch line in
+  its transaction, so bookings are stored whatever the stack holds; (ii) forges, in its transaction, each index of the
+  guard's tables as such a vacuum left it (its real page count, no tuples) beside the tables' statistics forgotten;
+  (iii) also reads the guard's plan for an index read whole per new row (an Index, Index Only or Bitmap Index Scan
+  without an index condition, looped once per row or more: `_whole_index_reads_per_row`). Runs one after another from a
+  fresh reset, the first included: the joined read fails (16,048,001 rows; `bank_line_booking_transfer_idx` read whole
+  2,000 times), so do `enable_seqscan` off alone (24,048,001) and the old body (32,048,001) — the counts grow with the
+  index's dead entries from run to run, the verdicts do not; the final body passes (48,001) each time.
+- **The posting's last-seq read (found by tests-ui-1's fix).** With bookings stored, the test's other statements broke
+  their bound too: the funds pass's posting (`private.bank_booking_post_rows`, which PR #38's CI round left on its
+  callers' settings) reads each new booking's line's last seq — `max(seq)` of `bank_line_booking` by its primary key, a
+  correlated subquery per row — and, priced below a probe, read the table whole once per row: 4,024,001 rows for the
+  second line's 2,000 (2,000 stored rows each time; production's bookings would be read whole per row, the same class
+  as PR #38's limit; the existing test's bound held only while the stack's `bank_line_booking` stayed nearly empty).
+  `private.bank_booking_post_rows` is redefined in `20261121090000` from its latest definition (`20261119090000:457`)
+  with `set enable_seqscan = off` beside `search_path` (SECURITY DEFINER and its grants restated; the body unchanged):
+  its every read of a stored table is a probe of its key, its temporary tables read whole as before (no index: the only
+  plan). The same rows in the same order; only the plans change. Its triggers run under the setting too (the guard
+  inherits it in the funds pass; its own `SET` stays for the ops' booking, `private.transfer_line_post`).
+
+### Assertions whose expected value changed (house rule R3)
+
+None in `015`–`041` (`033` byte for byte). In this slice's own unmerged files: `042`'s functions' settings and
+privileges assertions list `private.bank_booking_post_rows` too (SECURITY DEFINER, `enable_seqscan=off`, no role but
+the owner); the unmeetable assertion gained h5c's row; `breach-held.test.ts`'s days assertion and the switch-on E2E's
+read the coverage wording (dt-1) — the text they pinned was the finding.
+
+### Tests
+
+- pgTAP `042` (15 → 20): sdc/sdv (one assertion), H4 (two), the caps HD/HW (one), h5c's second night (one; its first in
+  the unmeetable assertion), the settings and privileges with the posting.
+- Worker: `test_the_booking_guard_reads_by_key_whatever_the_statistics` (a first batch line stored, the indexes forged,
+  whole-index reads per row asserted); `_batch_world` drops its `_members` table first (two worlds in a transaction).
+- Web: vitest `breach-held.test.ts` (8 → 11): the coverage wording (dt-1), the help without « n'attend plus » (dt-2),
+  several lines and the bound's agreement (tests-ui-4), `checkOldestDays` (tests-ui-5).
+- Seen failing first (WIP `23d50b8`, the tests before the code): vitest 5 of 11 failing; `042` 1 of 20 (the posting's
+  settings); the guard's test failing on `15d9a03`'s bodies (the posting's insert, 4,024,001 rows); the other new `042`
+  cases pass on `15d9a03` — they pin the alert's aggregates, caps and boundary, each proved by its mutant below.
+- E2E (switch-on project): its held state is dt-1's own shape — the day's statement imported, produced that evening —
+  and the spec now reads the coverage wording and the oldest age agreeing with its number (today − that day, read from
+  the stack); screenshots `m2c-controles-depassement-en-attente-{desktop,mobile}` retaken.
+
+### Mutants
+
+SQL, each one change of the function as it now stands, redefined right after `042`'s `begin;` (rolled back with it); the
+no-op control passes `042` 20/20.
+
+| Mutant | Killed by |
+|---|---|
+| alert: `max(p_today − latest)` → `min` (oldest age) | 042 H4's facts |
+| alert: `min(latest)` → `max` (earliest date held to) | 042 H4's facts |
+| alert: `count(distinct u.d)` → `count(u.d)` | 042 H4's facts |
+| alert: the days' cap `[1:31]` → `[1:3]` | 042 H4, the caps (HD) |
+| alert: the days' cap `[1:31]` → `[1:32]` | 042 the caps (HD) |
+| alert: the lines' cap `limit 10` → `limit 1` | 042 the caps (HW) |
+| alert: the lines' cap `limit 10` → `limit 11` | 042 the caps (HW) |
+| alert: a delay that cannot be met, `<` → `<=` | 042 the unmeetable assertion (h5c), h5c's second night |
+| rows (`private.remittance_chain_rows`, 20261119090000): the same `<` → `<=` | 042 h5c's second night (survived 041 and 042 before) |
+| posting: `enable_seqscan = off` dropped | 042 the functions' settings; the guard's test (the insert, 4,024,001 rows) |
+
+The guard's test, each body installed in its own transaction, the runs one after another from a fresh reset: the joined
+read (16,048,001 rows; the whole-index read asserted), `enable_seqscan` off alone (24,048,001), the old body
+(32,048,001), the posting without its setting (4,024,001 on the insert) — all fail; the guard without its own `enable_seqscan = off` passes in the
+funds pass (it inherits the posting's setting): killed by `042`'s settings assertion, as before. Web (each against
+`breach-held.test.ts`, the file restored after): the old days wording, the « établi après » sentence dropped, « n'attend
+plus » back in the help, the help's established-after clause dropped, never plural, plural from the lines shown, the
+bound always or never plural, the oldest age always « jours » or plural from 1 — 10 of 10 killed.
+
+### Suites
+
+- `supabase test db` (after `supabase db reset`): **Files=44, Tests=2,902, PASS** — `033` byte for byte unchanged,
+  `015`–`041` unchanged, `042` 20/20.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (179 files) clean; unit pytest 1,093 passed, 5 xfailed; the
+  integration tests but the scale files, right after `supabase test db` without a reset (CI's order): **243 passed**;
+  `make eval`: mapping top-1 1.000 (167/167, threshold 0.980), reconciliation 96.0 % automatic (95,997/100,000), 0
+  wrong, 0 policy violations.
+- Scale, each once right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-6b-3b part 2, review round 1
+  »): the cancellation file 1 passed (49.8 s; nightly checks 0.50 s, the late predecessor's booking 1.44 s), the
+  50,000-line run 1 passed (258.5 s; its nightly checks with the run booked 4.7 s), the 5,000 payouts' bookings 5
+  passed (802.0 s; the 5,000-member batch line's funds pass 21.6 s, the debit job 19.4 s, nightly checks 1.29 s) —
+  within the earlier rounds' spread with the posting under `enable_seqscan = off`.
+- `database.types.ts` regenerated: unchanged (no public signature changed). Web: `lint`, `typecheck`, vitest **499
+  passed** (496 and the alert's 3 new).
+- E2E `./scripts/e2e.sh` (after `supabase db reset`): **57 passed** (desktop and mobile, then `switch-on`), the switch
+  off at its end. Screenshots `m2c-controles-depassement-en-attente-{desktop,mobile}` retaken (the coverage wording, «
+  le plus ancien : 1 jour »); every other diff (dates, ids) reverted. Mutants: the SQL table and the web ten above.
+
+### Left open (low), with its default
+
+- **cost-breach-held-linear-recompute** (not a text, a test or a one-line guard: recorded). The alert reads the booked
+  chained runs again (`private.remittance_booked_chain_runs`, after the booked branch's statement), the holds' facts
+  once per (run, date held to) and `private.statement_covers` once per business day of each window: about 5.5 to 7 ms
+  per held chained run, measured by the review at 2,001 held runs (`private.run_remittance_runs_checks` 22 s against
+  12 s without the alert). Keyed, latency only; the worker's nightly call has no statement timeout, so the alert is
+  still raised. **Default:** keep it; the three dedups the review lists (the booked runs once into a temporary table,
+  the holds' findings recorded by the booked branch, the days once per account and window) and a volume case in
+  `test_transfer_cancellation_scale_integration.py` (2,000 re-issued payouts of one cancelled file, a statement day
+  missing, the plan §1.4 nightly bound) come with 6b-3b part 3, before the switch is flipped.
+- The earlier opens stay so (part 2's: the alert's caps, the « neither day nor line » race; 6b-3b part 1's and rounds
+  1–4's), and the founder questions (6b-3b part 1's 1, 3, 4; CPCE-08's defaults; Q1: the switch).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

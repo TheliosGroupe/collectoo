@@ -35,15 +35,16 @@ ROWS_PER_ROW = 40
 SLACK = 2_000  # the locks' and the posting's few rows (one sweep), the reference tables
 
 
-def _batch_world(conn: psycopg.Connection[Any], n: int) -> dict[str, Any]:
+def _batch_world(conn: psycopg.Connection[Any], n: int, line_a: bool = True) -> dict[str, Any]:
     """A servicer, its dedicated and own accounts, a downloaded file holding one PmtInf of n
     sweeps (in_file), its batch line and the first sweep's own debit line (A) on one statement;
-    the job's rows (A first) in pg_temp._bank_booking."""
+    the job's rows (A first) in pg_temp._bank_booking. Without `line_a`: the batch line alone,
+    and the job's rows its n members (the batch rule accepts it: every member is posted)."""
     rng = random.Random(f"batch-rules-{uuid.uuid4()}")
     org, funds, own = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     funds_iban, own_iban = iban_fr(rng), iban_fr(rng)
     file_id, statement_id = uuid.uuid4(), uuid.uuid4()
-    line_a, line_b = uuid.uuid4(), uuid.uuid4()
+    line_a_id, line_b = uuid.uuid4(), uuid.uuid4()
     number = f"TF-2099-{rng.randint(10**8, 10**9 - 1)}"
     pmt_inf = f"{number}-1"
     amounts = [1_000 + k for k in range(n)]
@@ -76,6 +77,7 @@ def _batch_world(conn: psycopg.Connection[Any], n: int) -> dict[str, Any]:
              first_downloaded_at = now() where id = %s""",
         (file_id,),
     )
+    conn.execute("drop table if exists pg_temp._members")  # (a second world in the transaction)
     conn.execute(
         """create temp table _members on commit drop as
            select k, gen_random_uuid() as id,
@@ -119,12 +121,15 @@ def _batch_world(conn: psycopg.Connection[Any], n: int) -> dict[str, Any]:
         """insert into public.bank_transaction (id, organization_id, bank_account_id,
              statement_id, line_no, dedup_key, direction, amount_minor, currency, booking_date,
              kind, end_to_end_id, payment_info_id, counterparty_iban)
-           values (%s, %s, %s, %s, 1, 't:' || %s, 'debit', %s, 'EUR', private.paris_today(),
-                   'transfer_out', (select e2e from _members where k = 1), null, %s),
-                  (%s, %s, %s, %s, 2, 't:' || %s, 'debit', %s, 'EUR', private.paris_today(),
-                   'batch_unsplit', null, %s, null)""",
-        (line_a, org, funds, statement_id, line_a, amounts[0], own_iban,
-         line_b, org, funds, statement_id, line_b, sum(amounts), pmt_inf),
+           select * from (values
+             (%s::uuid, %s::uuid, %s::uuid, %s::uuid, 1, 't:' || %s, 'debit', %s::bigint, 'EUR',
+              private.paris_today(), 'transfer_out', (select e2e from _members where k = 1),
+              null::text, %s),
+             (%s, %s, %s, %s, 2, 't:' || %s, 'debit', %s, 'EUR', private.paris_today(),
+              'batch_unsplit', null, %s, null)) v
+           where %s or v.column1 <> %s""",
+        (line_a_id, org, funds, statement_id, line_a_id, amounts[0], own_iban,
+         line_b, org, funds, statement_id, line_b, sum(amounts), pmt_inf, line_a, line_a_id),
     )  # fmt: skip
     conn.execute(
         """update public.bank_statement set status = 'imported',
@@ -136,12 +141,12 @@ def _batch_world(conn: psycopg.Connection[Any], n: int) -> dict[str, Any]:
     conn.execute("select private.bank_booking_begin()")
     conn.execute(
         """insert into pg_temp._bank_booking (ord, bank_transaction_id, kind, transfer_id, method)
-           select 1, %s, 'sweep', (select id from _members where k = 1), 'auto'
+           select 1, %s, 'sweep', (select id from _members where k = 1), 'auto' where %s
            union all
            select 1 + m.k, %s, 'sweep', m.id, 'auto' from _members m""",
-        (line_a, line_b),
+        (line_a_id, line_a, line_b),
     )
-    return {"org": org, "line_a": line_a, "line_b": line_b}
+    return {"org": org, "line_a": line_a_id, "line_b": line_b}
 
 
 def test_a_batch_line_of_2000_members_is_re_checked_in_linear_time_and_memory() -> None:
@@ -243,6 +248,150 @@ def test_the_re_check_reads_by_key_whatever_the_statistics() -> None:
           f" {len(plans)} statements, the heaviest (rows handled) {rows[:6]}")  # fmt: skip
     per_row = [(statement(p), s) for p in plans for s in _scans_per_row(p["Plan"], n)]
     assert per_row == [], per_row
+    spilled = [(statement(p), temp_blocks(p["Plan"])) for p in plans if temp_blocks(p["Plan"])]
+    assert spilled == [], spilled
+    over = [(r, s) for r, s in rows if r > ROWS_PER_ROW * (n + 1) + SLACK]
+    assert over == [], over
+
+
+_GUARD_TEXT = "select min(n.bank_transaction_id::text || ':' || n.seq) from new_rows n"
+# The tables the guard reads per new row: their statistics forgotten inside the test's transaction
+# (rolled back with it), as a fresh stack leaves them before autovacuum's first analyse
+_GUARD_TABLES = (
+    "bank_transaction",
+    "bank_duplicate_resolution",
+    "ledger_entry",
+    "bank_debit_link",
+    "payment",
+    "bank_transfer",
+    "bank_line_booking",
+    "ledger_posting",
+    "ledger_account",
+)
+
+
+def _forget_in_transaction(conn: psycopg.Connection[Any]) -> None:
+    """The guard's tables as never analysed (no row count, no column statistics), and their
+    indexes as a vacuum that saw none of their rows left them (pages, no tuples: as after the pgTAP
+    suite's rolled-back rows, or a table filled since its last vacuum) — in `conn`'s transaction
+    only (the superuser's: the catalogue rows are rolled back with it). Review round 1 of M2c-6b-3b
+    part 2 (tests-ui-1): the indexes' own row counts were the stack's — autovacuum's, after earlier
+    runs or none after a reset —, and a partial index recorded empty prices its whole scan at
+    nothing, the plan the joined read of the reversed booking's run took or not with them."""
+    for t in _GUARD_TABLES:
+        conn.execute("delete from pg_statistic where starelid = %s::regclass", (f"public.{t}",))
+        conn.execute(
+            "update pg_class set reltuples = -1, relpages = 0 where oid = %s::regclass",
+            (f"public.{t}",),
+        )
+        conn.execute(
+            """update pg_class set reltuples = 0,
+                 relpages = greatest(2, pg_relation_size(oid) / current_setting('block_size')::int)
+               where oid in (select indexrelid from pg_index where indrelid = %s::regclass)""",
+            (f"public.{t}",),
+        )
+
+
+def _whole_index_reads_per_row(node: dict[str, Any], n: int) -> list[tuple[str, str, int, int]]:
+    """The index scans a plan repeats once per row of the job or more without an index condition —
+    each loop reading a stored table's index whole (a partial index's whole predicate; its rows
+    sifted by a filter): (the table, or the index of a bitmap scan, the index, its loops, the rows
+    they read). No sequential scan, yet as costly as one (review round 1 of M2c-6b-3b part 2,
+    tests-ui-1: the reversed booking's run joined read bank_line_booking_transfer_idx whole per new
+    row, as a bitmap)."""
+    name = str(node.get("Relation Name", ""))
+    loops = int(node.get("Actual Loops", 1))
+    found = (
+        [
+            (
+                name,
+                str(node.get("Index Name", "")),
+                loops,
+                work({k: v for k, v in node.items() if k != "Plans"}),
+            )
+        ]
+        if node.get("Node Type") in ("Index Scan", "Index Only Scan", "Bitmap Index Scan")
+        and "Index Cond" not in node
+        and not name.startswith("_")
+        and loops >= n
+        else []
+    )
+    return found + [f for c in node.get("Plans", []) for f in _whole_index_reads_per_row(c, n)]
+
+
+def test_the_booking_guard_reads_by_key_whatever_the_statistics() -> None:
+    """PR #38's known limit (ADR-0014 « M2c-6b-3b part 2 »): private.bank_line_booking_guard(),
+    the statement trigger on bank_line_booking, disabled hash and merge joins but not sequential
+    scans, so under stale statistics each of its keyed reads (the line, its duplicate resolution,
+    the entry, the debit link, the payment, the transfer, the bookings of the reversed entry, the
+    entry's postings) could run as a scan of its table once per new row: posting a 2,000-member
+    batch line in one statement handled 5.5 million rows. Deterministic here, as the re-check's
+    test above: the batch line alone (the batch rule accepts it: its 2,000 sweeps are posted, and
+    their 2,000 bookings inserted by one statement), a probe of a key index priced at PROBE_PAGES
+    sequential pages, and the statistics of the tables it reads forgotten (as before autovacuum's
+    first analyse; in this transaction only). The guard's statement holds the per-statement bound
+    and scans no stored table once per new row: before, 36 million rows (bank_transfer scanned
+    five times per new row, 4 million rows each); with enable_seqscan off alone, 12 million — the
+    reversed booking's run, a join, read bank_line_booking whole through its transfer index per
+    new row — hence that read keyed too (the transfer by the reversed entry, then its run):
+    48,001 rows.
+
+    Review round 1 (tests-ui-1): forgotten statistics leave the planner sizing each table by its
+    blocks, so whether the joined read is planned whole per new row depended on what the stack's
+    bank_line_booking held (rows committed by earlier tests, or none after a reset): with it empty,
+    that mutant passed. A first 2,000-member batch line is now posted in the transaction before,
+    so bank_line_booking always holds bookings whatever the stack holds, and the guard's plan is
+    also read for an index read whole per new row (no index condition: a full index scan is no
+    sequential scan)."""
+    n = MEMBERS
+    with psycopg.connect(ADMIN) as conn:  # (the superuser: auto_explain's settings)
+        try:
+            conn.execute("set role postgres")  # the worker's: its temporary tables, as the job's
+            # bookings stored before, whatever the stack holds: a first batch line posted
+            first = _batch_world(conn, n, line_a=False)
+            conn.execute("select private.post_bank_bookings(%s, false)", (first["org"],))
+            stored = conn.execute(
+                "select count(*) from public.bank_line_booking where bank_transaction_id = %s",
+                (first["line_b"],),
+            ).fetchone()
+            world = _batch_world(conn, n, line_a=False)
+            conn.execute("set local work_mem = '4MB'")  # the local stack's and CI's
+            conn.execute(f"set local random_page_cost = {PROBE_PAGES}")
+            conn.execute("reset role")
+            _forget_in_transaction(conn)
+            with explained(conn) as plans:
+                conn.execute("set role postgres")
+                summary = conn.execute(
+                    "select private.post_bank_bookings(%s, false)", (world["org"],)
+                ).fetchone()
+                skipped = conn.execute("select count(*) from pg_temp._booking_skipped").fetchone()
+                booked = conn.execute(
+                    """select count(*) from public.bank_line_booking
+                       where bank_transaction_id = %s and kind = 'sweep'""",
+                    (world["line_b"],),
+                ).fetchone()
+                conn.execute("reset role")
+        finally:
+            conn.rollback()
+    assert summary is not None
+    assert stored == (n,), stored
+    # the batch line is posted whole: one booking per member, inserted by one statement
+    assert skipped == (0,), (skipped, summary)
+    assert booked == (n,), (booked, summary)
+    # the guard's one statement (its text: « a booking that does not match its line, entry or
+    # transfer »)
+    guard = [p for p in plans if _GUARD_TEXT in " ".join(str(p.get("Query Text", "")).split())]
+    assert len(guard) == 1, [statement(p) for p in plans if "new_rows" in str(p.get("Query Text"))]
+    handled = work(guard[0]["Plan"])
+    rows = sorted(((work(p["Plan"]), statement(p)) for p in plans), reverse=True)
+    print(f"\na batch line of {n} members posted, probes priced at {PROBE_PAGES} pages: the"
+          f" guard handled {handled} rows; {summary[0]}, the heaviest {rows[:6]}")  # fmt: skip
+    per_row = _scans_per_row(guard[0]["Plan"], n)
+    assert per_row == [], per_row
+    whole = _whole_index_reads_per_row(guard[0]["Plan"], n)
+    assert whole == [], whole
+    # every statement of the call (the re-check, the posting, the guard and the ledger's
+    # triggers) within the per-statement bound, none spilled to disk
     spilled = [(statement(p), temp_blocks(p["Plan"])) for p in plans if temp_blocks(p["Plan"])]
     assert spilled == [], spilled
     over = [(r, s) for r, s in rows if r > ROWS_PER_ROW * (n + 1) + SLACK]

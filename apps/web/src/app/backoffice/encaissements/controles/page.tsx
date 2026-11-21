@@ -3,7 +3,7 @@ import { ActionForm } from "@/components/action-form";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { Badge, InfoNote, Section, Stats, WidePage, buttonClass } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
-import { checkLabel, checkSubjectLink } from "@/lib/payments/debits";
+import { checkLabel, checkOldestDays, checkSubjectLink } from "@/lib/payments/debits";
 import { money } from "@/lib/payments/statements";
 import { requestChecks } from "../debits/actions";
 
@@ -122,7 +122,7 @@ export default async function ChecksPage() {
                     <span className="text-sm">
                       {r.count !== null ? `${r.count} · ` : ""}
                       {r.amount !== null && r.currency ? `${money(r.amount, r.currency)} · ` : ""}
-                      {r.oldest_days !== null ? `le plus ancien : ${r.oldest_days} jours` : ""}
+                      {r.oldest_days !== null ? checkOldestDays(r.oldest_days) : ""}
                       {to ? (
                         <>
                           {" "}
