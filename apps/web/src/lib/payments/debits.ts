@@ -1409,10 +1409,23 @@ export function breachHeldHelp(details: Record<string, unknown> | null | undefin
     const total = typeof details?.uncovered_count === "number" ? details.uncovered_count : days.length;
     const named = days.slice(0, HELD_DAYS_NAMED);
     // review round 1 (dt-1): a day is named when no imported statement covers it (private.statement_covers) — also
-    // when a statement of that day is imported but established during it, or is a CSV ending on it: never « missing »
+    // when a statement of that day is imported but established during it, or is a CSV ending on it: never « missing ».
+    // M2c-6b-3b part 3 (PR #39's known limit): a CSV's period is its lines' first and last booking dates
+    // (private.ingest_statement) and it covers the days from its first operation's to the day before its last one's —
+    // so the hint is worded by operations (« exportez jusqu'au jour suivant » proved nothing when that day had none)
     const list = named.map((d) => frenchDate(d)).join(", ");
+    // review round 1 (dt3-csv-hint-last-day-not-named): the export's two ends by date — the first day (the row's days
+    // are in order) and the last: the row's own (`last_uncovered_day`, also beyond the 31 days it names), else the last
+    // of its days when they are all there; never a day the row does not give (an older row, its days cut: the rule)
+    const last =
+      typeof details?.last_uncovered_day === "string"
+        ? details.last_uncovered_day
+        : total <= days.length
+          ? days[days.length - 1]
+          : null;
+    const ends = `une opération datée au plus tard du ${frenchDate(days[0])} (le premier de ces jours) et une opération postérieure ${last ? `au ${frenchDate(last)} (le dernier)` : "au dernier"}`;
     parts.push(
-      `Aucun relevé importé du compte de fonds de tiers ne couvre encore les jours ouvrés suivants : ${list}${andOthers(total - named.length)}. Importez un relevé de ces jours établi par la banque après leur fin : un relevé établi pendant l'un d'eux ne compte pas pour ce jour, ni le dernier jour d'un export CSV (exportez jusqu'au jour suivant).`,
+      `Aucun relevé importé du compte de fonds de tiers ne couvre encore les jours ouvrés suivants : ${list}${andOthers(total - named.length)}. Importez un relevé de ces jours établi par la banque après leur fin : un relevé établi pendant l'un d'eux ne compte pas pour ce jour, ni le jour de la dernière opération d'un export CSV, ni un jour avant sa première : exportez une période qui contient ${ends}.`,
     );
   }
   if (details?.balance_break === true)

@@ -5285,5 +5285,364 @@ bound always or never plural, the oldest age always « jours » or plural from 1
 - The earlier opens stay so (part 2's: the alert's caps, the « neither day nor line » race; 6b-3b part 1's and rounds
   1–4's), and the founder questions (6b-3b part 1's 1, 3, 4; CPCE-08's defaults; Q1: the switch).
 
+## M2c-6b-3b part 3: the alert at volume, the last switch-on prerequisites, the switch still off (2026-11-21)
+
+Plan: founder question 3 of « M2c-6b-3b part 2 » (its default: the three dedups round 1's fixer named and a 2,000-payout
+volume case, before the switch flips; round 1's « Left open » cost-breach-held-linear-recompute), PR #39's two known
+limits (the alert's CSV hint, « Contrôles »' 200 results), and plan §3.7's switch-on screenshots carried since 6b-3a-2.
+Migration `20261121120000_switch_on_prerequisites_5.sql`: one internal helper is new — `private.remittance_chain_judged`
+(EXECUTE revoked from every role); `private.remittance_chain_holds` is dropped and created again (its result gains
+`lines`, which CREATE OR REPLACE cannot add; its body copied from its latest definition, `20261119090000:209`, with that
+one change, its settings and grants restated); two functions are redefined whole from their latest definitions across
+all the migration files (settings, `search_path ''` and grants restated, SECURITY DEFINER where it was):
+`private.remittance_chain_rows` (`20261119090000:275`) and `private.run_remittance_runs_checks` (`20261121090000:208`);
+`private.remittance_breach_held`'s comment is set. No public signature changed (`database.types.ts` regenerated:
+unchanged); no Python product code changed. **The switch stays off**: no statement writes `private.feature_switch`;
+`033` is byte for byte unchanged; `034`–`042` unchanged (no assertion changed; `041` 25/25, `042` 20/20).
+
+### Decisions
+
+- **The three dedups (founder question 3's default; behaviour unchanged).** The nightly checks read the booked chained
+  runs once (`private.remittance_booked_chain_runs` into `pg_temp._rc_runs`), then every line due at each run's date
+  with what its hold found, once (`private.remittance_chain_judged` into `pg_temp._rc_lines`: `private.remittance_chain_rows`'
+  lines, unfiltered, each with its date's `covered`, `waiting`, `expired` and — new — the possible debits the hold
+  judged on, `lines`, from the first of its one-snapshot reads). The booked branch writes the rows of the lines whose
+  holds pass, as before; « remittance_breach_held » reads the same two tables in the results' statement: its held lines
+  (those still without a row), per run its account and e0 (once per run), per account and window [least(e0, L), L] the
+  coverage and the uncovered days (once, not once per run), and the waiting lines from the findings. No second reading
+  of the runs, their late lines, the chain's paid date, its events, nor the holds' facts. `private.remittance_chain_rows`
+  now returns `private.remittance_chain_judged`'s lines whose holds pass (its body moved there verbatim): one rule for
+  the booking, its sheet's late flag and the nightly check.
+- **The holds keep their name.** `private.remittance_chain_holds` itself records the lines (dropped and created again
+  with the extra column) rather than a new function beside it: 041's race harness (`pg_temp.wrap('remittance_chain_holds')`,
+  chain-holds-snapshot-race A, C, D) injects another session's commit as the holds start, by that function's name — a
+  copy under another name left it never called (041 #20 failed: fired 0) and would have kept two bodies of one rule.
+- **The standalone reading stays.** `private.remittance_breach_held` (part 2's, one snapshot) is kept unchanged and no
+  longer called by the checks; the tests compare the checks' alert with it run by run (at 6 and 2,000 runs). Its comment
+  says so.
+- **The facts' snapshot (race only).** Part 2 read the alert's facts again in the results' statement. Now the window's
+  coverage and its days are still read there (once per window), but the waiting lines are those the booked branch's
+  holds judged on — named only when the window is covered now and was so then, and never a line booked or linked since
+  (review round 1's guard, pinned by 042 RD and RL); otherwise neither day nor line is named and the text says the run is
+  judged again at the next check (part 2's « neither day nor line » case). In a race (another session's import or booking
+  between the two statements) the alert can be raised for a run the statements already show paid on time — part 2's
+  second reading raised none there; the next check corrects it and no R124-6 row is written or missed (« M2c-6b-3b part 3
+  review fixes », dt3-race-alert-for-run-paid-on-time). Outside a race the alert is the standalone reading's, row for row.
+- **The CSV hint (PR #39's known limit).** A CSV statement's period is its lines' first and last booking dates
+  (`private.ingest_statement`), and `private.statement_covers` counts a day of it only from its first operation's day to
+  the day before its last one's (and uploaded after the day). « exportez jusqu'au jour suivant » was not enough when that
+  day had no operation, nor when the export's first operation came after the day. The sentence now reads « … un relevé
+  établi pendant l'un d'eux ne compte pas pour ce jour, ni le jour de la dernière opération d'un export CSV, ni un jour
+  avant sa première : exportez une période qui contient une opération datée au plus tard du <premier jour> (le premier de
+  ces jours) et une opération postérieure au <dernier jour> (le dernier). » — dated since review round 1
+  (dt3-csv-hint-last-day-not-named: the details carry `last_uncovered_day`); true of the rule, no legal rule invented.
+- **« Contrôles » beyond 200 results (PR #39's known limit).** The page still reads 200 results, now in one total order
+  (`CHECK_RESULT_ORDER`: anomalies first, then by code, then within a code the oldest first, an undated one last, then by
+  subject, then by the result's id), and says what it leaves out: above the list « Seuls les 200 premiers résultats sont
+  affichés, sur N : le nombre de résultats non affichés est indiqué pour chaque contrôle. », under a code's last row « N
+  autres résultats de ce contrôle ne sont pas affichés. », and a code none of whose results is read is listed with « N
+  résultats de ce contrôle ne sont pas affichés. » The counts are the run's own by code (`payment_check_run.summary`,
+  written by `private.run_payment_checks` when it finishes) minus the rows read — counts only, no amount said for the
+  results not read; a run in progress (no summary yet) says nothing is cut. No SQL change (`lib/payments/check-results.ts`).
+- **Plan §3.7's switch-on screenshots.** The switch-on E2E project has built the late predecessor through the pages
+  since 6b-3a-2's review round 1 (tests-5: a payout cancelled out of a downloaded file by two people on the statements'
+  evidence, executed late under its own reference, booked from « Débits et retours » as its run's payout) and
+  screenshots the pages it changes: the file page before (`m2c-virement-telecharge`, `m2c-annulation-fichier`), the
+  booking sheet (`m2c-debit-reversement-annule`), the run page (`m2c-reversement-debite-en-retard`) and, since part 2,
+  « Contrôles » (`m2c-controles-depassement-en-attente`) — run again in this slice (its two screenshots were left at
+  part 2's, the old CSV hint on them, until review round 1 committed them: « M2c-6b-3b part 3 review fixes »). Plan §3.7's fourth,
+  `m2c-annulation-debit-sans-reference` (the cancellation card refusing `unreferenced_debit_open`, N), is **not taken**:
+  on the spec's one run, a debit without our references at x's amount refuses both x's file's cancellation and its own
+  classification « Classer sans comptabiliser » (`private.link_debit_guard`: `payout_candidate`), so the late predecessor
+  could not follow; it needs a second downloaded file (a second run of the client, or a refund's file) on the local
+  stack. Default: not taken before the switch flips; the refusal is pinned by pgTAP `039` (N) and its words by vitest
+  (`switch-on-texts.test.ts`, `UNREFERENCED_DEBIT_OPEN`).
+
+### Deviations from the task
+
+- **No pgTAP 043.** (Review round 1, tests-ui-1: the claim below that `041` and `042` pin every behaviour was not so —
+  three shapes of the alert's new code changed its rows with every test green; `042` now holds every check it runs to
+  the standalone reading and adds those shapes: « M2c-6b-3b part 3 review fixes ».) The dedups' equivalence is carried
+  by the scenario the volume case runs, at two sizes: the db job's
+  integration tests run it at 6 runs (`worker/tests/test_breach_held_integration.py`, CI's `db` job, on every pull
+  request) and the `scale-payouts` job at 2,000 (`test_breach_held_scale_integration.py`). Each compares the
+  checks' alert with the standalone reading run by run, two windows on one account (half the runs' x dated a business
+  day earlier, W: their window starts there), writes every row the next night once W and M are imported, and counts the
+  work by function (`track_functions`: calls are deterministic whatever the machine). A pgTAP file would have needed
+  041's 1,200-line fixture for one more chain; `041` and `042` already pin every behaviour, unchanged.
+- **`private.remittance_chain_holds` dropped and created again** (not CREATE OR REPLACE): its result gains a column. Its
+  body is its latest definition's with that one change; `041`'s race harness finds it by name and wraps it generically.
+- **The volume case is a new scale file**, `test_breach_held_scale_integration.py`, beside the cancellation file (the
+  task allowed either): its fixture is the 5,000-payout file's (`_file_payouts`, given a `day` for the collections;
+  the default unchanged), sized 2,000, and its scenario is shared with the db job's small twin.
+- **It runs in CI's `scale-payouts` job, not `scale`.** The `scale` job took 27.6 of its 30 minutes on `main` (the run
+  of 2026-11-21 08:13 UTC); this file adds about 6 (its 2,000 runs through the jobs about 4); `scale-payouts` took 12.4
+  of its 40. The payouts' bookings run first in that job, on the database they were tuned on; the held runs after them.
+- **The nightly bound is not plan §1.4's 5 s.** 2,000 held chained runs (two windows) took 28.5–29.1 s before the
+  dedups and take 12.8–13.0 s after (one fixture, committed and measured again); the scale file alone right after a
+  reset, 18.1 s; after the payouts' bookings, as CI's `scale-payouts` job runs it, 13.4 s. What remains is the booked branch's own reading of each chain (the chain's paid
+  date and its events, twice per run: once for the runs, once in the holds' one-snapshot facts — 4,000 calls of
+  `private.remittance_chain_events`, 7.3 s of the 12.8). The bound keeps twice the worst run after (37 s, both nights;
+  it guards against a cliff, not against the dedups' undoing), and the dedups are pinned by the calls (exactly: the
+  booked runs once, the holds' facts once per run and date held to, the late lines twice per run; at most:
+  `private.statement_covers` once per run plus 14 for the windows).
+
+### Assertions whose expected value changed (house rule R3)
+
+None in `034`–`042` (`033` byte for byte). In part 2's vitest `breach-held.test.ts` (not a pgTAP file): the dt-1
+assertion `toContain("ni le dernier jour d'un export CSV")` is replaced by the new test pinning the sentence by
+operations — the text it pinned was PR #39's known limit (« exportez jusqu'au jour suivant »).
+
+### Tests
+
+- Worker: `test_breach_held_integration.py` (the db job, 6 runs) and `test_breach_held_scale_integration.py` (the
+  `scale-payouts` job, 2,000 runs), one scenario (`held_runs`, `assert_held`): every run held and alerted once with its
+  days (W and M for the half dated back, M for the others), its oldest age today − L, no row while held; the alert
+  equal, run by run, to `private.remittance_breach_held`'s (currency, amount, count, oldest, details); W's and M's
+  statements imported: every line's row written the next night, one run per row set, no alert; the calls
+  (`remittance_booked_chain_runs` 1, `remittance_chain_hold_facts` one per run, `remittance_run_late_lines` two per run,
+  `statement_covers` at most one per run plus 14); the scale file adds the bound (37 s, both nights).
+- Web: vitest `check-results.test.ts` (5: the order and the cap, the rows of a code in one order whatever they come in,
+  the counts per code beyond the rows, nothing said cut without counts or when all are listed, the French texts and no
+  amount), `breach-held.test.ts` (11 → 12: the CSV hint by operations). E2E `checks-cap.spec.ts` (desktop and mobile:
+  203 debits carrying an RMT id Collectoo never issued, each « Référence du cabinet inconnue »; « Contrôles » lists 200,
+  the note above, the count under each code from the run's summary, the unknown references' rows in the order of their
+  lines, no amount for what is not listed); screenshots `m2c-controles-resultats-non-affiches` (the top) and
+  `m2c-controles-resultats-non-affiches-fin` (the end of the list), mobile and desktop.
+- Seen failing first (WIP `54c62e1`, `a5ce2fb`, the tests before the code): vitest `check-results.test.ts` (no module)
+  and `breach-held.test.ts` 1 of 12; the scenario on part 2's functions, at 20 and at 2,000 runs: every alert assertion
+  held (the alert already the standalone reading's — the dedups change no row) and the calls failed (booked runs 2,
+  holds' facts 2 per run, late lines 4 per run, `statement_covers` 7.5 per run); the night 28.5 s (12.8 s after).
+- During the build, `041` #20 (chain-holds-snapshot-race A, C, D) failed on a first shape of the migration that moved
+  the holds' body into a new function under another name: the harness wraps `private.remittance_chain_holds` by name
+  and the copy was never called (fired 0). The holds kept their name (above); `041` 25/25.
+
+### Mutants
+
+SQL: the migration applied whole with one change (every statement in it idempotent; in one transaction), the killers
+run in order — `test_breach_held_integration.py` (6 runs), then `042`, then `041` — and the migration applied again as
+written after each.
+
+| Mutant | Killed by |
+|---|---|
+| `alert-row-filter-dropped`: the alert counts lines whose row is written | `test_breach_held_integration` |
+| `alert-window-key-without-start`: one window per account and date held to, from the earliest start | `test_breach_held_integration` |
+| `alert-window-join-without-start`: each run joined to its account's earliest window | `test_breach_held_integration` |
+| `alert-e0-dropped`: the window starts at L, not at the earliest possible debit | `test_breach_held_integration` |
+| `alert-lines-never`: the alert never names the possible debits judged on | `042` #5, #6, #16 (H2, H2y, the caps) |
+| `alert-days-per-run`: the uncovered days read per run, not per account and window | `test_breach_held_integration` |
+| `alert-facts-read-again`: the alert reads each run's holds' facts again | `test_breach_held_integration` |
+| `checks-booked-runs-read-twice`: the booked chained runs read again | `test_breach_held_integration` |
+| `checks-rows-while-waiting`: rows written for lines whose hold waits | `042` #5, #6, #16 |
+| `checks-rows-never-blocked`: an expired hold's row not « bloqué : débit possible non comptabilisé » | `042` #8 |
+| `holds-lines-never-recorded`: the holds return no possible debit | `042` #5, #6, #16 |
+| `judged-unmeetable-filter-dropped`: a delay that cannot be met held before its one-month date | `042` #9, #10 |
+| `rows-waiting-dropped`: `private.remittance_chain_rows` keeps the lines whose hold waits | `042` #5, #6, #8, #16 |
+| `alert-lines-whatever-found`: the lines named whenever the window is covered now, whatever the hold found | **equivalent** — a hold that found its window uncovered records no possible debit (`private.remittance_chain_hold_facts` reads them only when covered), so its `lines` are already `[]`; the condition is kept as the rule stated |
+| `rows-never-blocked`: `private.remittance_chain_rows` never says `debit_unbooked` | **equivalent** — its remaining callers (`private.bank_booking_post_rows`, the booking's rows, and `private.transfer_line_check`, the booking sheet's late flag) pass `p_decide` false, so no hold expires there; the one deciding caller, the nightly check, now reads `private.remittance_chain_judged` (its mutant `checks-rows-never-blocked` killed by `042` #8) |
+
+13 of 15 killed; the 2 survivors are equivalent (above): no test can tell either apart from the migration as written.
+
+Web (each against its vitest file, the file restored after): the hidden row's noun always plural, the unlisted code's
+never plural, the hidden count the run's count (the rows read not subtracted), the codes with no row listed dropped, a
+count given as text read as a number, the result's id dropped from the order, undated results first, ties not broken
+by id, the cut note's total the rows shown, the CSV hint back to « exportez jusqu'au jour suivant », the CSV hint
+without its first-operation bound — 11 of 11 killed.
+
+### Suites
+
+- `supabase test db` (fresh `supabase db reset`): 44 files, **2,902 tests, PASS** — `033` byte for byte, `034`–`042`
+  unchanged.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 181 files) clean; unit pytest **1,093 passed, 5
+  xfailed**; the non-scale integration tests in CI's order, after `supabase test db` without a reset, **244 passed**
+  (with `test_breach_held_integration.py`).
+- Evals (`make eval`'s two commands): mapping top-1 **1.000**; payment reconciliation **96.00 %** automatic, **0** wrong.
+- Scale, each file once right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-6b-3b part 3 »): the
+  transfer cancellation file 1 passed (nightly checks 0.68 s); the new held-rows file 1 passed (2,000 runs: nightly
+  checks 18.14 s held, 18.11 s written, under the 37 s bound; the calls exact); the 50,000-line run 1 passed (nightly
+  checks with the run booked 4.73 s); the payouts' bookings 5 passed (funds pass 24.1 s, debit job 22.5 s, nightly
+  checks 1.28 s). Then CI's `scale-payouts` command as the workflow now runs it, after a reset: **6 passed** in
+  19.6 min (the bookings' funds pass 24.0 s, debit job 19.9 s; then the held runs' nightly checks 13.41 s held, 12.57 s
+  written).
+- `database.types.ts`: unchanged (no public signature changed; the new and redefined functions are in `private`).
+- Web: `npm run lint`, `tsc --noEmit` clean; vitest **26 files, 505 tests** passed.
+- E2E (`./scripts/e2e.sh` after `supabase db reset`; desktop, mobile and switch-on projects): **59 passed** (57 and
+  `checks-cap.spec.ts` on desktop and mobile); its four screenshots added; every other screenshot's diff reverted (dates,
+  ids, and the matched payments page caught before its matching pass) — wrongly for
+  `m2c-controles-depassement-en-attente` (desktop, mobile), a page this slice does change (the CSV hint): committed in
+  review round 1.
+
+### Left open (low), with its default
+
+- **The booked branch's own cost at volume.** After the dedups, 2,000 held chained runs still take 12.8–13.0 s of
+  nightly checks (the night their rows are written 14.6–15.1 s; 18.1 s each on a freshly reset stack): each run's chain
+  is read for its paid date when the runs are selected and again inside its holds' one-snapshot facts (part 1's race
+  fix: the holds must see the paid date, the coverage and the possible debits together) — 2 × 2,000 calls of
+  `private.remittance_chain_events`, 7.3 s. Keyed, latency only, and only after a whole downloaded file of thousands of
+  payouts was cancelled and re-issued; the worker's nightly call has no statement timeout. Default: keep (above plan
+  §1.4's 5 s, which is for 5,000 booked payouts without chains); passing the chain's events from the selection into the
+  holds would trade part 1's snapshot guarantee for it.
+- **The waiting lines' snapshot in a race** (Decisions): an import or a booking by another session between the booked
+  branch's statement and the results' can leave the alert naming neither day nor line (« réexaminé au prochain
+  contrôle »), or raised for a run the statements already show paid on time; it never names a line booked or linked since
+  (round 1's guard). The next check decides. Default: accepted, as part 2's race. (Review round 1,
+  dt3-race-alert-for-run-paid-on-time: not « as part 2's » — in those shapes part 2's second reading, made after the
+  commit, raised no alert; corrected and pinned in « M2c-6b-3b part 3 review fixes ».)
+- **Plan §3.7's `m2c-annulation-debit-sans-reference`** (Decisions): not taken; default as stated there.
+- The earlier opens stay so (part 2's: the alert's caps; 6b-3b part 1's and rounds 1–4's), and the founder questions
+  (6b-3b part 1's 1, 3, 4; part 2's 1 and 2; CPCE-08's defaults; Q1: the switch). Part 2's question 3 (the alert's
+  cost) is answered by its default, built here.
+
+## M2c-6b-3b part 3 review fixes (2026-11-21)
+
+### Round 1
+
+The review of `8a369c3` raised seven lows and no high or medium: the alert in a race (dt3-race-alert-for-run-paid-on-time),
+the held-rows screenshots left at part 2's (dt3-held-alert-screenshot-shows-old-csv-hint), the CSV hint's last day
+(dt3-csv-hint-last-day-not-named), three test gaps (tests-ui-1 … tests-ui-3) and the alert's own per-run scans (cost-1).
+Each was reproduced first on the main stack (the switch on inside rolled-back transactions only). The migration
+`20261121120000` is unmerged and was edited in place: one function more is redefined, `private.remittance_breach_held`
+(copied from its latest definition, `20261121090000:114`, with one key added, its settings and grants restated).
+Building cost-1's volume case found one medium more, pre-existing (below: the options' locks), fixed at the root:
+`private.transfer_line_offers` is redefined too (from `20261117110000:405`). **The switch stays off**; `033` byte for
+byte unchanged; `034`–`041` keep every assertion, no expected value changed (`038` #1's runs read in their numbers'
+order besides their shared `created_at`, below); `042` keeps its 20 assertions, each unchanged, and gains 9 (below:
+#18 … #26) and a guard in its `pg_temp.nightly` helper.
+
+- **dt3-race-alert-for-run-paid-on-time (kept, pinned, and the booked line never named).** The alert takes its runs,
+  their held lines and the holds' findings from what the booked branch recorded; the rows written, the days and (new)
+  the waiting lines' bookings and links are read again in the results' statement. A commit by another session between
+  the two — an import showing the chain paid on time, or ops booking the very line that waited — leaves that check's
+  alert stale until the next one, which part 2's second reading, made after the commit, did not raise in those shapes
+  (a commit landing just after part 2's results' statement left its alert stale alike). The review's option 1 (each
+  alerted run's paid date read again in the results' statement) was measured, not built: one more
+  `private.remittance_chain_paid` per alerted run, 4.21 and 4.71 s at 2,000 held runs (the night: 14.7 and 15.5 s;
+  close to a third of what the dedups saved) — for a race that only delays a correct reading by one night.
+  **Default: keep** (the alert is the booked branch's reading of each run; the next check judges it again), and one cheap guard: a waiting line booked
+  or linked since the booked branch judged it is no longer named (two lookups by key per waiting line, as
+  `private.transfer_debit_lines` reads them) — never « comptabilisez-la » for a booked line. Pinned in `042`: RC (041's
+  race C: the import as the holds start) — the racing check's alert names neither day nor line, no row, the standalone
+  reading and the next check none; RD (041's race D2: ops book x's line « Virement hors reversement » as the holds ask
+  its options) — the alert no longer names the line (it did: failed first on `8a369c3`), no row, the standalone reading
+  and the next check none; RL (H2l's shape: ops classify the line not ours as the holds ask its options) — the alert
+  names no line, as the standalone reading at that state does (the guard on), the next check writes the row at y's
+  date. The ADR's « Left open » sentence (« as part 2's race ») is corrected in place.
+- **dt3-held-alert-screenshot-shows-old-csv-hint.** `m2c-controles-depassement-en-attente` (desktop, mobile) retaken
+  by the switch-on project and committed, with the new hint (their date and id diffs are the page's own); the two
+  sentences of « M2c-6b-3b part 3 » that said otherwise are corrected in place.
+- **dt3-csv-hint-last-day-not-named.** The alert's details gain `last_uncovered_day`, the last business day no imported
+  statement covers (null when none), in the checks and in the standalone reading alike; the hint names both ends: «
+  exportez une période qui contient une opération datée au plus tard du JJ/MM/AAAA (le premier de ces jours) et une
+  opération postérieure au JJ/MM/AAAA (le dernier). » — the last the row's own, else the last of its days when they are
+  all there; an older row whose days were cut keeps the rule without a date (no day the page cannot know). True of
+  `private.statement_covers`' rule for a CSV (its period is its lines' first and last booking dates,
+  `private.ingest_statement`); no legal rule. `042` #21/#22 (EA's two days: d3; HL, HD's 41 days: d15 beyond the 31
+  named); vitest `breach-held.test.ts` (12 → 13; the CSV test's expected sentence now dated — this slice's own test).
+- **tests-ui-1 (the alert's equivalence on one shape).** `042`'s `pg_temp.nightly` now holds every check it runs to the
+  standalone reading (`private.remittance_breach_held`, part 2's correlated reads, kept independent on purpose: the
+  review's suggestion to give it the checks' new aggregates too would have let one mistake pass both), run by run and
+  field by field, the scenario dying otherwise — every scenario of `042` (H1 … HU, the waiting lines, the break, the
+  caps, two dates) — off only inside RC and RD. And three shapes no scenario had: EA (#18, forged: the held line beside a
+  released copy of itself), EB (#19: x first filed in a file nobody downloaded, cancelled and dated earlier), EC (#20: a
+  chain of three, a line that may be the debit of x or of y, named once as the one with the smaller id). The review's
+  three mutants are killed by them (each by its own assertion with the guard off, by the guard with it on). The scale
+  scenario adds the waiting lines' shape at volume (below), its alert held to the standalone reading too.
+- **tests-ui-2 (a code none of whose results is listed).** `checks-cap.spec.ts`: the statement is dated a month back
+  and also holds a credit nobody's file claims — « Paiements sans dossier depuis 20 jours ou plus » (`unmatched_ageing`,
+  sorting after the unknown references): the 200 results read end inside the unknown references, so that check is
+  listed with none of its results — « 1 résultat de ce contrôle n'est pas affiché. » —, asserted, and the end-of-list
+  screenshots (mobile, desktop) show it. The page without its unlisted rows now fails the spec (it passed before).
+- **tests-ui-3 (the rows' order where the page uses it).** The query's order is `orderCheckResults(query)`
+  (`lib/payments/check-results.ts`, CHECK_RESULT_ORDER key by key), called by the page and unit-tested with a builder
+  that records each `.order` (column, ascending, nullsFirst); `groupCheckResults` lists the rows read in
+  `compareCheckResults`' order, so the rows of a code come in one order whatever order the database returns them in
+  (unit-tested from every rotation). `compareCheckResults` is now the page's (kept with its test).
+- **cost-1 (the alert's per-run scans).** The alert's days and waiting lines are aggregated once per run (`hd`: the days
+  in order, their count, the last, the break; `hwr`/`hwa`: the lines numbered per run, the first 10 named — their
+  amounts and transfers read by key for those only —, all counted) and joined to each run by key, instead of five
+  correlated subqueries scanning the per-run facts once per run. Its rows are unchanged (the guard and the scale
+  scenario hold them to the standalone reading). The scale scenario adds the waiting lines' variant, rolled back to a
+  savepoint after the first night: x requested from W (as pgTAP's `chain_prefix`), W's statement holding two debits
+  without our references of x's amount for each run of the half dated back (and one credit of their total, the balances
+  following), M's: every window covered, those runs alerted with their two lines each and no day, the others' rows
+  written — timed under its own bound (110 s: twice its first measure, 52.8 s; 55.3 s on the final run).
+- **The options' locks (medium, pre-existing; found by cost-1's volume case).** The waiting lines' variant at 2,000 runs
+  failed the whole nightly check: « out of shared memory — You might need to increase max_locks_per_transaction », in
+  `private.transfer_line_check`'s `create temp table _tl_drafts`, reached from `private.remittance_chain_holds` through
+  `private.transfer_line_offers`. The options of a line build working tables, dropped and created again at each call,
+  and a dropped table's lock is held to the end of the transaction; the nightly checks ask the options of every possible
+  debit past the bound days, in one transaction — the booked branch's holds (switch on) and, since 6b-2c, the in-flight
+  branch (`private.remittance_inflight_judge`, `private.transfer_debit_suppression`: production, switch off). About a
+  hundred such lines in one servicer's check (6,400 lock slots at the default `max_locks_per_transaction`, 60 per call) (a CSV bank's statement without our references, its payouts' debits left
+  unbooked past the bound days) failed the check every night: no R124-6 row written, no alert, no other check. Fixed at
+  the root: `private.transfer_line_offers` reads its answer in a subtransaction rolled back once read — the working
+  tables and their locks go with it (the options only read; the same answer from the same reads); 041's race harness,
+  which wraps that function by name, still injects before it. Pinned: `042` #26 (OL: asked once, then three times more —
+  the same answer, the transaction's relation locks unchanged; 60 more per call before: failed first), and the scale
+  scenario's waiting variant (52.8 and 55.3 s at 2,000 runs; failed before).
+- **`038` #1 (« Suivi », a flaky order, pre-existing).** The full suite failed it once: its runs were listed `order by
+  created_at`, which they share (one transaction's `now()`), so the plan decided their order. Read now `order by
+  created_at, number` (numbers drawn from one sequence as the runs are requested): the expected value unchanged (house
+  rule R3: no expectation changed); 038 passed alone and in the next full run.
+
+### Mutants
+
+SQL, the migration applied with one change, `042` run, the migration applied again as written (each also run with the
+guard off, to see the assertion that kills it on its own):
+
+| Mutant | Killed by (guard off) |
+|---|---|
+| review (a) `alert-released-copy-counted`: the held line's released copy counted | `042` #18 (EA) |
+| review (b) `alert-e0-any-file`: e0 read from files never downloaded | `042` #19 (EB) |
+| review (c) `alert-waiting-tie-break-desc`: the other transfer named for a line of two | `042` #20 (EC) |
+| `alert-booked-line-named`: a line booked since the booked branch named | `042` #24 (RD) |
+| `alert-linked-line-named`: a line linked since the booked branch named | `042` #25 (RL; with the guard on, the guard) |
+| `alert-last-day-first`: `last_uncovered_day` the first day | `042` #21 |
+| `alert-days-cap-30`: 30 days named | `042` #16, #22 |
+| `alert-waiting-cap-9`: 9 lines named | `042` #16 |
+| `alert-waiting-count-named`: the lines counted among the named only | `042` #16 |
+| `alert-days-counted-per-window`: a day counted once per window | `042` #15 (H4) |
+| `standalone-last-dropped`: the standalone reading without `last_uncovered_day` | the guard (every scenario) |
+| `offers-locks-kept`: `private.transfer_line_offers` as `20261117110000` left it | `042` #26 (OL); the scale variant (out of shared memory) |
+
+12 of 12 killed (with the guard on, every one dies in `042`). Web (each against its vitest file, restored after): the
+hint's last day never dated, the last day taken from days that were cut, the row's `last_uncovered_day` ignored, the
+first day not the first, `orderCheckResults` without nullsFirst, without its last key, `groupCheckResults` not sorting —
+7 of 7 killed. E2E: « Contrôles » without its unlisted codes' rows — `checks-cap.spec.ts`
+(desktop) fails (« element(s) not found »); it passed before the spec's change.
+
+### Suites
+
+- `supabase test db` (fresh `supabase db reset`): 44 files, **2,911 tests, PASS** — `033` byte for byte; `042` 29
+  (20 unchanged + 9). The first full run, before `038`'s tie-break, failed `038` #1 once (the runs' order, above);
+  `038` passed alone and in every full run since (2,910 before the offers fix, 2,911 after).
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 181 files) clean; unit pytest **1,093 passed, 5
+  xfailed**; the non-scale integration tests in CI's order, after `supabase test db` without a reset, **244 passed**
+  (twice: before and after the offers fix).
+- Evals (`make eval`'s two commands): mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic,
+  **0** wrong.
+- Scale, each file once right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-6b-3b part 3 review
+  fixes »): the transfer cancellation file 1 passed (nightly checks 0.67 s); the held-rows file 1 passed (2,000 runs:
+  nightly checks 15.48 s held, 18.07 s written, the waiting lines' variant 55.25 s; its first run failed on the variant's
+  bound before the variant had its own, and before the offers fix on « out of shared memory »); the 50,000-line run 1
+  passed (nightly checks with the run booked 4.6 s); the payouts' bookings 5 passed (funds pass 22.6 s, debit job
+  19.4 s, nightly checks 1.23 s).
+- `database.types.ts`: unchanged (no public signature changed; every redefined function is in `private`).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **26 files, 508 tests** passed (`check-results.test.ts` 5 → 7,
+  `breach-held.test.ts` 12 → 13).
+- E2E (`./scripts/e2e.sh` after `supabase db reset`; desktop, mobile and switch-on projects): **59 passed**. Kept:
+  `m2c-controles-depassement-en-attente` (desktop, mobile: the dated CSV hint) and
+  `m2c-controles-resultats-non-affiches`, `…-fin` (desktop, mobile: the check none of whose results is listed); every
+  other screenshot's diff reverted (dates and ids only: pages this round does not change).
+
+### Left open (low), with its default
+
+- **The alert in a race** (dt3, above): stale until the next check when another session's import or booking lands
+  between the booked branch's statement and the results'. Default: keep; the alternative (each alerted run's paid date
+  read again) costs 4.2–4.7 s at 2,000 held runs (about 30 % of that night).
+- **A line imported onto a day already covered** during the check (a second statement overlapping the first) is not
+  named by that check's alert; the next one names it. Default: keep (part 2's reading named it; nothing is written).
+- The earlier opens stay so (part 3's: the booked branch's own cost at volume, plan §3.7's fourth screenshot).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

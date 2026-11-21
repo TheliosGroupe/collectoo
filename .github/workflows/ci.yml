@@ -145,9 +145,11 @@ jobs:
           RECEIPT_FILES: "5000"  # rendering ~10 ms a receipt: 50k is the benchmark (docs/benchmarks/payments.md)
         run: |
           eval "$(./scripts/local-env.sh)"
-          # (the 5,000 payouts' bookings run in their own job, scale-payouts: ~15 min on their own)
+          # (the 5,000 payouts' bookings run in their own job, scale-payouts: ~15 min on their own; so do the 2,000
+          # held chained runs of M2c-6b-3b part 3, ~6 min: this job took 27.6 of its 30 minutes on main, 2026-11-21)
           cd worker && uv sync --frozen && uv run pytest -m integration -s \
-            $(ls tests/*scale_integration.py | grep -v test_debit_bookings_scale_integration.py)
+            $(ls tests/*scale_integration.py | grep -v -e test_debit_bookings_scale_integration.py \
+                                                      -e test_breach_held_scale_integration.py)
       - name: Slowest statements and the plans of those over 60 s
         if: failure()
         run: |
@@ -193,10 +195,11 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: worker/uv.lock
-      - name: 200 and 5,000 payouts booked from their debits, one line each and as one batch line (docs/benchmarks/remittances.md)
+      - name: 200 and 5,000 payouts booked from their debits, one line each and as one batch line; 2,000 held chained runs' nightly checks (docs/benchmarks/remittances.md)
         run: |
           eval "$(./scripts/local-env.sh)"
-          cd worker && uv sync --frozen && uv run pytest -m integration -s tests/test_debit_bookings_scale_integration.py
+          cd worker && uv sync --frozen && uv run pytest -m integration -s tests/test_debit_bookings_scale_integration.py \
+            tests/test_breach_held_scale_integration.py
       - name: Slowest statements and the plans of those over 60 s
         if: failure()
         run: |

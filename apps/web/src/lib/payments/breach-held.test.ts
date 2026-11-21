@@ -74,7 +74,25 @@ describe("remittance_breach_held (M2c-6b-3b part 2, CPCE-08)", () => {
     );
     expect(h).toContain("Importez un relevé de ces jours établi par la banque après leur fin");
     expect(h).toContain("un relevé établi pendant l'un d'eux ne compte pas pour ce jour");
-    expect(h).toContain("ni le dernier jour d'un export CSV");
+    expect(h).not.toMatch(INVENTED);
+  });
+
+  it("words a CSV export's coverage by its operations, never « the next day » (M2c-6b-3b part 3, PR #39's known limit)", () => {
+    // a CSV statement's period is its lines' first and last booking dates (private.ingest_statement), and it covers a
+    // day only from its first operation's day to the day before its last one (private.statement_covers): exporting up
+    // to the next day proves nothing when that day has no operation, nor does an export whose first operation comes
+    // after the day
+    const h = breachHeldHelp(DETAILS_DAYS);
+    expect(h).not.toContain("exportez jusqu'au jour suivant");
+    expect(h).not.toContain("ni le dernier jour d'un export CSV");
+    // review round 1 (dt3-csv-hint-last-day-not-named): the first and the last day named, whatever the list shows
+    expect(h).toContain(
+      "ni le jour de la dernière opération d'un export CSV, ni un jour avant sa première : exportez une période qui contient une opération datée au plus tard du 03/11/2026 (le premier de ces jours) et une opération postérieure au 04/11/2026 (le dernier).",
+    );
+    // still one sentence after the days, the camt.053 rule first
+    expect(h).toContain(
+      "Importez un relevé de ces jours établi par la banque après leur fin : un relevé établi pendant l'un d'eux ne compte pas pour ce jour, ni le jour de la dernière opération",
+    );
     expect(h).not.toMatch(INVENTED);
   });
 
@@ -161,6 +179,36 @@ describe("remittance_breach_held (M2c-6b-3b part 2, CPCE-08)", () => {
     });
     expect(counted).toContain("10/10/2026 et 30 autres.");
     expect(counted).toContain("et 9 autres lignes");
+  });
+
+  it("names the last day to export past, even when the list stops at ten or the row at 31 (dt3-csv-hint-last-day-not-named)", () => {
+    // more days than the page names (ten): the last one is in the row's days, not on the page's list
+    const days = Array.from({ length: 12 }, (_, k) => `2026-10-${String(k + 10).padStart(2, "0")}`);
+    const twelve = breachHeldHelp({ ...DETAILS_DAYS, uncovered_days: days, uncovered_count: 12 });
+    expect(twelve).toContain("10/10/2026, 11/10/2026");
+    expect(twelve).toContain("19/10/2026 et 2 autres.");
+    expect(twelve).toContain(
+      "une opération datée au plus tard du 10/10/2026 (le premier de ces jours) et une opération postérieure au 21/10/2026 (le dernier).",
+    );
+    // the row's own last day (last_uncovered_day) when given — beyond the 31 days the row carries
+    const counted = breachHeldHelp({
+      ...DETAILS_DAYS,
+      uncovered_days: days,
+      uncovered_count: 41,
+      last_uncovered_day: "2026-11-20",
+    });
+    expect(counted).toContain("et 31 autres.");
+    expect(counted).toContain("et une opération postérieure au 20/11/2026 (le dernier).");
+    expect(counted).not.toContain("postérieure au 21/10/2026");
+    // an older row without it, its days cut: no day the page cannot know — the rule alone
+    const older = breachHeldHelp({ ...DETAILS_DAYS, uncovered_days: days, uncovered_count: 41 });
+    expect(older).toContain("au plus tard du 10/10/2026 (le premier de ces jours) et une opération postérieure au dernier.");
+    expect(older).not.toContain("postérieure au 21/10/2026");
+    // one day: the same day both ends
+    expect(breachHeldHelp({ ...DETAILS_DAYS, uncovered_days: ["2026-11-03"], uncovered_count: 1 })).toContain(
+      "au plus tard du 03/11/2026 (le premier de ces jours) et une opération postérieure au 03/11/2026 (le dernier).",
+    );
+    expect(counted).not.toMatch(INVENTED);
   });
 
   it("says the run is judged again when neither a day nor a line holds it any more (the facts moved meanwhile)", () => {
