@@ -115,7 +115,7 @@ M2c-7 slice is copied from that slice's merged body (« from 7x »), never from 
 | [check 2] `private.remittance_chain_events` (7e-3: a return booked on a line whose label names the transfer counts) | `20261118100000_switch_on_prerequisites_2.sql:164` | 101 |
 | [check 2] `private.remittance_schedule_candidates` (7d-2: a waiting `settlement_withheld` item; dropped and recreated, one column more) and constraint `remittance_run_trigger_check` (7d-2: trigger `settlement_withheld`) | `20261112090000_remittance_runs.sql:2421`; the column check at `:44` | 28; — |
 | [check 2] `private.run_remittance_checks` (7a: also passes `p_full`, §3.2.11) | `20261115090000_transfers_files.sql:3710` (its 7a row near the top of this table; one redefinition, not two) | 11 |
-| [check 1] M2c-7's own functions redefined by a later slice: `private.run_advance_checks` (7a → 7b, 7c-1, 7c-2, 7d-1, 7d-2, 7d-3, 7e-1), `private.document_client_payable` (7c-1 → 7d-2), `public.book_client_payment_line` (7c-1 → [check 2] 7e-3), `public.request_advance_repayment` and `private.advance_repayment_payload` (7c-2 → 7d-1, 7d-2), `private.document_before_opening` (7c-1 → 7d-2), [check 2] `public.record_client_status_event` (7d-1 only: the declared items move into 7d-1, §6.1, so 7d-3 does not redefine it) | their slice's merged migration | — |
+| [check 1] M2c-7's own functions redefined by a later slice: `private.run_advance_checks` (7a → 7b, 7c-1, 7c-2, 7d-1, 7d-2, 7d-3, 7e-1, [check 3] 7e-2), `private.document_client_payable` (7c-1 → 7d-2), `public.book_client_payment_line` (7c-1 → [check 2] 7e-3), `public.request_advance_repayment` and `private.advance_repayment_payload` (7c-2 → 7d-1, 7d-2), `private.document_before_opening` (7c-1 → 7d-2), [check 2] `public.record_client_status_event` (7d-1 only: the declared items move into 7d-1, §6.1, so 7d-3 does not redefine it) | their slice's merged migration | — |
 
 House rules kept (ADR-0014): a redefinition copies the latest body whole, changes only what this plan says, restates
 its settings and grants, and its header names the file and line it redefines from. Every helper that reads by key does
@@ -315,7 +315,7 @@ refusal hints. Amounts are integer minor units, text in JSON; no float anywhere.
 | [check 1] **7d-2** Set-off bars at approval and at the debit | opening, birth, bar and nettable functions, the run's own invoice, `remittance_approval_refusal`, `transfer_hold_reason`, `post_run_settlements` with the barred settlement posted and reversed (`ledger_entry_guard`, commit check, `ledger_check_now`, 4670 trigger, kinds, `pending_item_deadlines`, worker kind), `document_client_payable`, `in_proceeding`, `set_off_after_bar`; [check 2] `remittance_schedule_candidates` (28-line copy) and the trigger `settlement_withheld` | ≈ 1,500 (≈ 680 copies) | pgTAP 046b, integration through the debit job |
 | [check 1] **7d-3** Declarations, liquidation, statement | [check 2] `claims_to_declare` (reading 7d-1's declared items), `post_opening_unpaid`, `payout_after_liquidation` and `liquidation_payout_disposition`, `invoice_overdue` (559-line copy), statement fr-4 (447-line copy + renderer) | ≈ 1,555 (≈ 1,000 copies) | pgTAP 046c, goldens |
 | [check 1] **7e-1** Top-ups (after 7d-3) | hourly top-up job, shortfall log, own-account file (file, item and transfer guards, download, cancel), filed top-ups booked (`bank_booking_recheck` + `decide_line`), `book_top_up_credit`, `cancel_top_up` of a filed top-up, S23 texts | ≈ 1,650 (≈ 950 copies) | pgTAP 047a |
-| [check 1] [check 2] **7e-2** Our references in CSV labels: held and reviewed | kind `label_reference` (twins, parser, stage helpers, ingest, kind constraints), [check 2] `bank_booking_candidates` (167-line copy) and `decide_line` so the job sends it to review `label_reference`, `debit_queue` | ≈ 1,150 (≈ 880 copies) | pgTAP 047b, parser parity |
+| [check 1] [check 2] **7e-2** Our references in CSV labels: held and reviewed | kind `label_reference` (twins, parser, stage helpers, ingest, kind constraints), [check 2] `bank_booking_candidates` (167-line copy) and `decide_line` so the job sends it to review `label_reference`, `debit_queue`; [check 3] `link_debit_guard` (112) and `bank_debit_link_guard` (37) refuse every other link, `run_advance_checks` (copy) raises `label_reference_waiting` | ≈ 1,550 (≈ 1,280 copies) | pgTAP 047b, parser parity |
 | [check 2] **7e-3** Our references in CSV labels: the three exits | exit (a) (`transfer_line_check` 801-line copy from 7b and its class / pre / bookable helpers, `bank_line_booking_guard` 155, `remittance_chain_events` 101), exit (b) (`book_client_payment_line` from 7c-1), exit (c) (`release_own_credit`, `bank_own_credit_release_guard`, `payment_insert_guard`), the three actions on the page | ≈ 1,750 (≈ 1,500 copies) | pgTAP 047c |
 | **7f** Close-out | property machine (off and on), 50k close-out, `run_payment_checks` hardening + §13 #4 shortfall, docs, gate | ≈ 650 code + ≈ 950 docs | machine, scale |
 
@@ -778,8 +778,9 @@ Lilas, their mandates, runs built through `approve_remittance_run` and booked th
    download (E released), U executed late and its −A `unplanned_payout` row attributes E, the next run Y holds E (+A)
    and U's row (−A) → N = 0, booked at approval; then R(E) → E is remitted in Y, T = A, cover A1 = A (`adv:<R>`); then U
    returned → U's reversal re-queues +A, A1 stays (T unchanged, no release), no LG009; the queue holds +A (the client is
-   paid A again) and A1 is open; `entry_remitted(E).paid_on` null until the re-queued +A is paid (§3.2.1 rule 4), so a
-   request is refused `payout_not_received` until then; with a claw-back clause the next run takes A1 from the +A
+   paid A again) and A1 is open; `entry_remitted(E).paid_on` null until the re-queued +A is paid (§3.2.1 rule 4) [check 3] (7a asserts only
+   this, with `allocation_remitted` showing `paid_on` null; the « request refused `payout_not_received` » half is 045b
+   (n), 7c-2, on the same fixture); with a claw-back clause the next run takes A1 from the +A
    (net 0), without one the client is paid A and asked for A once paid (Q17, OQ-97).
 6. An M2b return in ops' strict mode (`link_debit 'return'`) of a payment with an allocation and a forward in a booked
    run → two advances; a partial return → every remitted entry covered in full.
@@ -844,8 +845,10 @@ Lilas, their mandates, runs built through `approve_remittance_run` and booked th
     null; (d) [check 2] switch on: RV-1's payout T1 cancelled after download and re-issued as T2, T1 executed late and
     booked as RV-1's payout (late predecessor: T1 stays `cancelled`, T2 cancelled), then T1 returned (its
     `payout_returned` booking; T1's `return_entry_id` stays null), +N re-queued and paid by RV-2 → `paid_on` = RV-2's
-    debit date, `paid_how = 'paid'`, `paid_run_number` RV-2; before RV-2's debit → null and a request refused
-    `payout_not_received`.
+    debit date, `paid_how = 'paid'`, `paid_run_number` RV-2; before RV-2's debit → `entry_remitted(E).paid_on` null,
+    `run_settled_on(RV-1)` returns no row and `allocation_remitted` shows `paid_on` null [check 3] (the « request refused
+    `payout_not_received` » half is 045b (n), 7c-2, on the same fixture: `request_advance_repayment` exists only from
+    7c-2).
 18. [critic] F6: a raw `private.ledger_reverse` of a `remitted_reversal` cover's entry → LG009 at `ledger_check_now()`;
     the release (case 11) is not refused.
 19. [critic] F12: the full list of check codes `run_advance_checks` emits equals the expected set (extended by each
@@ -1444,6 +1447,9 @@ Martin's admin and money staff, not by Lilas, restricted viewers or collectors; 
   D > 0) and an advance whose run's payout came back and was paid by RV-2; refuses `payout_not_received` while the
   re-queued item sits in a draft; the payload's origin rows say « réglé par compensation dans le relevé RV-… » and
   « versé le … (relevé RV-2, après le retour du virement du relevé RV-1) » (golden letter rows).
+- (n) [check 3] the request halves of 043 cases 5f and 17 (d), on the same fixtures (switch on): before the re-queued
+  +A (5f) or +N (17 (d)) is paid, `request_advance_repayment` for the covering advance → `payout_not_received`; once
+  RV-2's debit is booked → accepted, its origin row dated RV-2's debit.
 
 **Worker.** Unit: the letter's text snapshot and golden PDF hash (every origin, [critic] L3/M7-MONEY-9: a remitted
 « Désimputer » of a back-dated allocation, an at-booking cover — reversal before the payout —, a partial bank return,
@@ -2283,6 +2289,35 @@ merges after 7e-1 (`decide_line` and `bank_debit_review_reason_check` are redefi
     to-end ids); `decide_line` reviews it before any other credit rule (`_funds_review(line, LABEL_REFERENCE)`), and
     `apply_bank_bookings` writes the review as for any other (`20261117090000:1500-1535`). Not chosen: the ingest
     writing the review row itself (Appendix B).
+  - **[check 3] The other ways out, closed (7e-2).** At `1440178`, `link_debit(kind 'explained')` accepts a
+    `label_reference` credit: `private.link_debit_guard` (latest `20261118100000_switch_on_prerequisites_2.sql:4743`,
+    112 lines) refuses a credit only when it is a `return` from a client payout IBAN; `private.post_debit_links`'
+    `explained` rule refuses only `line_kind in ('debtor_credit','batch_unsplit')` (`20261117110000:2983`); and
+    `private.bank_debit_link_guard` (latest `20261111090000_remittance_funds.sql:3586`, 37 lines) refuses `explained`
+    only on those two kinds (l.3609). Explained, the line would leave the job's candidates (they exclude any
+    `bank_debit_link`) and never become a payment, a client payment or a return: a debtor's money never allocated, or a
+    returned payout never paid again with the run reading « versé » for good (D14). 7e-2 redefines both guards (whole
+    copies, settings and grants restated): `link_debit_guard` refuses **every** link kind on a credit whose kind is
+    `label_reference` — as read, or released so through `bank_duplicate_resolution` (`private.held_line_kind`) — with
+    the new code `label_reference_line` (« Le libellé cite un de nos virements : choisissez « Retour de ce virement »,
+    « Règlement du client » ou « Paiement d'un débiteur » » — the last three exist from 7e-3; until then the hint
+    ends « … : prévenez le support »), and `bank_debit_link_guard` adds `label_reference` to its `explained` refusal
+    list as the backstop (a raw insert → `check_violation`). `refund_returned` is already safe (`post_debit_links`
+    requires `line_kind = 'return'`). No fourth exit: a bank error on such a line is explained by the bank's detail
+    and the support, as OQ-84 (b) says for the other stuck lines.
+  - **[check 3] The alert (7e-2).** No nightly check names such a line today: `debit_unclassified` (`run_payment_checks`,
+    `20261118100000:3808-3838`) counts other kinds; `bank_line_unbooked` (`run_transfer_checks`, `20261121120000:946`)
+    reads other kinds and reasons. And 7e-2 would otherwise remove one: a CSV credit from a client's confirmed IBAN is
+    `client_transfer_in` (alerted `debit_unclassified` after 3 days) and becomes `label_reference` when it cites a real
+    RMT. 7e-2 redefines **`private.run_advance_checks`** (whole copy of 7e-1's body; not `run_transfer_checks`, left
+    unchanged by D6) with **`label_reference_waiting`** (severity alert; P0 when the candidate is an `RMT` whose run is
+    booked, since a payout that came back may be waiting; subject `bank_transaction`; amount the line's; details
+    `{reference_from_label, candidate_transfer_id, run_number, oldest_days}`): a `label_reference` line — as read or
+    released so — unbooked, unlinked and unreleased, imported more than 2 business days ago (as `bank_line_unbooked`).
+    It stops once an exit is taken (7e-3). `debits.ts` CHECK_LABEL gains « Libellé citant notre virement, à classer »
+    and its help text (« Une ligne du relevé cite notre référence RMT/SWP dans son libellé. Elle attend qu'on choisisse
+    ce qu'elle est. »); 043's list of check codes (case 19) gains the code. Size: 7e-2 ≈ 1,150 + 112 + 37 + the
+    `run_advance_checks` copy (≈ 250) ≈ 1,550 lines.
   - **Exit (a), a return of exactly that transfer** ([check 2] 7e-3) — through `public.book_transfer_line` with one
     return part naming the candidate's transfer: `private.transfer_line_check` redefined (whole copy from **7b's** body,
     801 lines + the rules below; in 7e-3's size) admits a `label_reference` credit as a return line (beside `return`,
@@ -2433,6 +2468,14 @@ the kind held and reviewed) and **047c** (7e-3: the three exits). Added:
   is not returned; in 7e-2 every command that could act on the line refuses it (`release_own_credit`
   `not_own_credit`, `book_transfer_line`'s check, 7c-1's `book_client_payment_line` `not_a_client_credit`), so it
   waits in review.
+- **[check 3] (047b, 7e-2) No other way out, and the alert.** `link_debit` with `explained` (and with each other link
+  kind) on a `label_reference` line, and on a held duplicate released as one → `label_reference_line`, the review
+  stays; a raw insert of an `explained` `bank_debit_link` on such a line (service role, subtransaction) →
+  `check_violation`; an `explained` link on a `debtor_credit` line still refused as today and on an `other_debit` line
+  still accepted (unchanged). The nightly: such a line in review imported 3 business days ago → one
+  `label_reference_waiting` row with its id, P0 when its candidate is an `RMT` of a booked run, alert otherwise; one
+  imported 1 business day ago → none; 043 case 19's code list extended. 047c: after each of the three exits the alert
+  is gone at the next check.
 - **[check 2] Gap 1 (047c, 7e-3), the three exits end to end.** Exit (a): `book_transfer_line` with the return of
   exactly the transfer's amount → `payout_returned` booked (the redefined `bank_line_booking_guard` admits it), the
   run's account `returned`, +N re-queued; a smaller amount or a fee part → `label_reference_amount`; another transfer
@@ -2455,6 +2498,9 @@ the kind held and reviewed) and **047c** (7e-3: the three exits). Added:
   « revenu, à verser de nouveau »; then RV-2 pays the re-queued +N → `paid_on` = RV-2's debit date (rule 3 of
   §3.2.1) and the request passes; before exit (a) — the line still in review — `paid_on` stays the execution date
   (an unbooked label reference never counts, D14).
+**Mutants ([check 3]).** `link_debit_guard` left unchanged → 047b « `explained` refused »; `bank_debit_link_guard`
+left unchanged → the raw-insert case; the alert's branch removed → 047b « past the bound »; its age bound inverted →
+« 1 business day ago → none ».
 **Mutants ([check 2]).** `bank_booking_candidates` without the new kind in either branch → 047b « the job reaches it »
 (imported, released); the guard's return arms admitting `label_reference` without the transfer-reference match → 047c
 « another transfer » raw insert; the arm admitting it with no transfer → the `unplanned_payout_returned` raw insert;
@@ -3014,3 +3060,12 @@ Where the critic offered options, or the check found more than it said:
   moved into 7d-1 instead: `record_client_status_event` is dropped and recreated once (7d-1), where the other option
   would recreate it a second time in 7d-3 (≈ 110 more copied lines) for the same result. 7d-1 then records
   declarations that 7d-3's alert reads.
+
+### [check 3] Third completeness check (folded by hand at assembly)
+- **`label_reference` explained away** — taken as proposed: both link guards redefined in 7e-2, every link kind refused
+  on such a line (`label_reference_line`), the `explained` backstop in `bank_debit_link_guard`; no fourth exit.
+- **No alert for a `label_reference` line** — taken in the first form: `label_reference_waiting` in
+  `run_advance_checks` (7e-1's body), not a 404-line copy of `run_transfer_checks` (D6 keeps it unchanged; 7e-2 stays
+  ≈ 1,550 lines).
+- **043 asserting a 7c-2 command** — taken: 043 cases 5f and 17 (d) assert only `paid_on` and `run_settled_on`; the
+  request halves move to 045b (n).
