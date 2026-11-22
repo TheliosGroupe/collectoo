@@ -13,6 +13,9 @@ export type RemittedEntry = {
   entry_id: string;
   account_id: string | null;
   run_number: string;
+  /** (review round 1, M7A-MONEY-2) whether that run had a payout transfer of its own: false for an N = 0 run, whose
+   *  payout that came back (run_settled_on rule 4) was an unplanned one, « hors reversement » */
+  run_transfer: boolean;
   booked_on: string;
   amount_minor: string;
   /** null: the client has not kept it yet (the payout came back, not paid again) */
@@ -39,6 +42,7 @@ export function parseAllocationRemitted(x: unknown): RemittedEntry[] | null {
     if (!v || typeof v !== "object") return null;
     const o = v as Record<string, unknown>;
     if (typeof o.entry_id !== "string" || typeof o.run_number !== "string") return null;
+    if (typeof o.run_transfer !== "boolean") return null;
     if (typeof o.booked_on !== "string" || !ISO.test(o.booked_on)) return null;
     if (typeof o.amount_minor !== "string" || !MINOR.test(o.amount_minor)) return null;
     if (o.account_id !== null && typeof o.account_id !== "string") return null;
@@ -49,6 +53,7 @@ export function parseAllocationRemitted(x: unknown): RemittedEntry[] | null {
       entry_id: o.entry_id,
       account_id: o.account_id as string | null,
       run_number: o.run_number,
+      run_transfer: o.run_transfer,
       booked_on: o.booked_on,
       amount_minor: o.amount_minor,
       paid_on: o.paid_on as string | null,
@@ -59,6 +64,14 @@ export function parseAllocationRemitted(x: unknown): RemittedEntry[] | null {
   return out;
 }
 
+/** (review round 1, M7A-MONEY-2) the payout that came back before a later run paid the entry: the remitted run's own
+ *  (run_settled_on rule 3), or — for an N = 0 run, which had none — the unplanned payout that had paid it (rule 4). */
+function returnedPayout(e: RemittedEntry): string {
+  return e.run_transfer
+    ? `après le retour du virement du reversement ${e.run_number}`
+    : "après le retour du virement hors reversement qui l'avait payé";
+}
+
 /** What the client received of the entry, by `paid_how` (plan §3.2.1): never « versé » nor « débité » for a set-off or a
  *  net nil, and « revenu, à verser de nouveau » while a payout that came back is not paid again. */
 export function remittedHead(e: RemittedEntry): string {
@@ -66,7 +79,7 @@ export function remittedHead(e: RemittedEntry): string {
     const run = e.paid_run_number ?? e.run_number;
     return run === e.run_number
       ? `Déjà reversé au client (reversement ${run}, débité le ${frenchDay(e.paid_on)}).`
-      : `Déjà reversé au client (reversement ${run}, débité le ${frenchDay(e.paid_on)}, après le retour du virement du reversement ${e.run_number}).`;
+      : `Déjà reversé au client (reversement ${run}, débité le ${frenchDay(e.paid_on)}, ${returnedPayout(e)}).`;
   }
   if (e.paid_how === "set_off" && e.paid_on)
     return `Déjà réglé au client par compensation dans le relevé ${e.paid_run_number ?? e.run_number} du ${frenchDay(e.paid_on)}.`;
@@ -91,12 +104,62 @@ export function reverseToast(advances: { amount_minor: string }[], currency: str
     : "Imputation annulée.";
 }
 
-/** « Débits et retours »: a return of a payment some of which was remitted (null when nothing was). */
+/** The return note's clause for one entry, by `paid_how` (review round 1, tests-ui-1: « reversé » only for a payout
+ *  paid and kept, as `remittedHead` says it); `first` capitalises it. */
+function returnClause(e: RemittedEntry): string {
+  if (e.paid_how === "paid" && e.paid_on) {
+    const run = e.paid_run_number ?? e.run_number;
+    return run === e.run_number
+      ? `déjà reversé au client (${run})`
+      : `déjà reversé au client (${run}, ${returnedPayout(e)})`;
+  }
+  if (e.paid_how === "set_off" && e.paid_on)
+    return `déjà réglé au client par compensation dans le relevé ${e.paid_run_number ?? e.run_number} du ${frenchDay(e.paid_on)}`;
+  if (e.paid_how === "netted" && e.paid_on)
+    return `déjà compris dans le relevé ${e.paid_run_number ?? e.run_number} du ${frenchDay(e.paid_on)} (montant net nul)`;
+  return `compris dans le reversement ${e.run_number} (revenu, à verser de nouveau)`;
+}
+
+/** « Débits et retours »: a return of a payment some of which was remitted (null when nothing was). Its first clause
+ *  follows `paid_how`, as the « Désimputer » sheet does: a payout that came back, a set-off or a net nil is never said
+ *  « reversé » (review round 1, tests-ui-1). */
 export function returnRemittedNote(entries: RemittedEntry[], currency: string): string | null {
   if (entries.length === 0) return null;
   const total = entries.reduce((s, e) => s + BigInt(e.amount_minor), BigInt(0));
-  const runs = [...new Set(entries.map((e) => e.run_number))].join(", ");
-  return `Paiement déjà reversé au client (${runs}) : au retour, le cabinet lui avance ${money(total.toString(), currency)}.`;
+  const clauses = [...new Set(entries.map(returnClause))].join(" ; ");
+  return `Paiement ${clauses} : au retour, le cabinet lui avance ${money(total.toString(), currency)}.`;
+}
+
+// (review round 1, M7A-MONEY-3) After « Désimputer », the URL names the advances the command posted — their ids, never an
+// amount — and the page reads them back from the ledger: a crafted or stale link shows no amount the ledger does not hold.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const MAX_ADVANCE_IDS = 50;
+
+/** The URL value naming the advances a « Désimputer » posted (empty when it posted none). */
+export function advanceIdsParam(ids: string[]): string {
+  return ids.join(",");
+}
+
+/** The advance ids of the URL, or null when absent or not that shape (then no notice at all). */
+export function parseAdvanceIds(x: unknown): string[] | null {
+  if (typeof x !== "string") return null;
+  if (x === "") return [];
+  const ids = x.split(",");
+  if (ids.length > MAX_ADVANCE_IDS || !ids.every((id) => UUID_RE.test(id))) return null;
+  return ids;
+}
+
+/** One advance read back: its amount (minor units as text, from the ledger), the reversal it covers, and whether its
+ *  entry has been reversed since (a release). */
+export type AdvanceRead = { id: string; amount_minor: string; cause_entry_id: string; reversed: boolean };
+
+/** The notice once « Désimputer » is done: the advances of the URL that cover a reversal of this payment
+ *  (`reversalIds`) and are still live, their total as the ledger holds it; null when nothing of the payment was
+ *  reversed (a link to a payment it does not concern). */
+export function reverseNotice(rows: AdvanceRead[], reversalIds: ReadonlySet<string>, currency: string): string | null {
+  if (reversalIds.size === 0) return null;
+  const live = rows.filter((a) => reversalIds.has(a.cause_entry_id) && !a.reversed && MINOR.test(a.amount_minor));
+  return reverseToast(live, currency);
 }
 
 /** « Désimputer »'s error: a lock wait is an operation on the transfers (a file generation holds the remit lock while
@@ -133,5 +196,7 @@ export const FULL_CHECK = {
 export function fullCheckErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
   if (message.includes("advance check refused: already_requested")) return "full_check_already_requested";
+  // (review round 1, CC-3) another request of the servicer being recorded at that instant (its lock, lock_timeout 2s)
+  if (message.includes("lock timeout") || message.includes("could not obtain lock")) return "full_check_busy";
   return "unknown";
 }

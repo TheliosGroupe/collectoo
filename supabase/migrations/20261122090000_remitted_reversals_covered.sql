@@ -47,8 +47,10 @@ create index unplanned_paid_item_org_idx on private.unplanned_paid_item (organiz
 -- switch on), each followed through its re-queued item's live line in a booked run Y: when every one has a row, the
 -- latest; else no row; (4) an N = 0 run (no transfer, booked at approval): its live unplanned_payout lines whose
 -- booking came back (reversed) followed the same way; none came back → its booked_on, « set_off » when it set off
--- something (settlement_minor > 0), else « netted » (its lines netted to nothing). Recursion bounded at depth 10:
--- deeper, a row with too_deep (private.run_settled_on gives no row; the nightly's advance_open says
+-- something (settlement_minor > 0), else « netted » (its lines netted to nothing). (Review round 1, M7A-MONEY-1) a
+-- return whose re-queued item is a line of the run itself is netted there and not followed (as if it had not come
+-- back): an N = 0 run holding an unplanned payout's −P row and its return's +P is settled on its own. Recursion
+-- bounded at depth 10: deeper, a row with too_deep (private.run_settled_on gives no row; the nightly's advance_open says
 -- settled_on_depth). Keyed: the run, its chain's bookings by bank_line_booking_transfer_idx, each re-queued item's line
 -- by remittance_line_live_uq, an N = 0 run's lines by its primary key prefix.
 create or replace function private.run_settled_at(p_run_id uuid, p_depth integer)
@@ -108,12 +110,18 @@ begin
     cross join lateral (select z.id from public.ledger_entry z where z.reverses_entry_id = l.ledger_entry_id offset 0) z
     where r.transfer_id is null
   loop
-    v_any := true;
     v_y := null;
     select l.run_id into v_y
     from (select q.run_id from public.remittance_line q where q.ledger_entry_id = v_rev and not q.released offset 0) l
     cross join lateral (select x.status from public.remittance_run x where x.id = l.run_id offset 0) x
     where x.status = 'booked';
+    -- (review round 1, M7A-MONEY-1) the return re-queued into this same run (an N = 0 run holding both the unplanned
+    -- payout's −P row and the +P its return re-queued) was netted in it: settled with the run, as a same-run pair is
+    -- (M7-MONEY-1) — never followed into the run itself (that recursion ended too_deep)
+    if v_y = p_run_id then
+      continue;
+    end if;
+    v_any := true;
     if v_y is null then
       v_all := false;
       continue;
@@ -700,8 +708,8 @@ $$;
 
 -- « Vérification complète des avances » on « Contrôles »: an admin of the servicer (aal2) asks for the full pass; the
 -- ordinary checks job is queued (as « Lancer les contrôles »), whose complete run takes the request and runs it — never a
--- run of its own that would hide the other checks. One open request per servicer (its partial unique index: two admins
--- at once get one row and one refusal).
+-- run of its own that would hide the other checks. One open request per servicer (read under the servicer's advisory
+-- lock, review round 1 CC-3; its partial unique index the last guard: two admins at once get one row and one refusal).
 create or replace function public.request_full_advance_check(p_idempotency_key text, p_organization_id uuid)
 returns jsonb
 language plpgsql
@@ -717,10 +725,19 @@ begin
   if p_organization_id is null or not private.has_role(p_organization_id, array['admin']) then
     raise exception 'not allowed' using errcode = 'insufficient_privilege';
   end if;
+  -- (review round 1, CC-3) one request at a time per servicer, before the replay: a double submit waits for the first
+  -- and replays its result; the open request is then read under this lock — one a running check run has taken (its
+  -- update not committed yet) still reads open, and is refused here at once instead of waiting on the unique index
+  -- for the whole check run; the index stays as the last guard
+  perform pg_advisory_xact_lock(hashtext('advance_full_check:' || p_organization_id::text));
   v_request := jsonb_build_object('organization_id', p_organization_id);
   v_result := private.command_replay('request_full_advance_check', p_idempotency_key, v_request);
   if v_result is not null then
     return v_result;
+  end if;
+  if exists (select 1 from private.advance_full_check_request r
+             where r.organization_id = p_organization_id and r.run_id is null) then
+    raise exception 'advance check refused: already_requested' using errcode = 'check_violation';
   end if;
   begin
     insert into private.advance_full_check_request (organization_id, requested_by)
@@ -744,8 +761,10 @@ $$;
 --   remitted_reversal_uncovered (violation, subject the reversal): gap(R) ≠ 0 over [critic] F9 the reversals posted since
 --     the servicer's last completed check run less one day (and, when they reverse a cover or an unplanned booking, the
 --     cover's reversal and the booking's items' reversals), the reversals of the live allocation and forward lines of
---     the runs booked since, the reversals of the items attributed since, the reversals covered since, and the
---     reversals the last run listed uncovered — the day's activity, not the history; with p_full ([check 2] the 1st
+--     the runs booked since (booked_on in the window, or — review round 1, CC-1 — their payout booking recorded in it,
+--     whatever the debit's date), the reversals of the items attributed since, the reversals covered since, and the
+--     reversals the last run listed uncovered — the day's activity, not the history, each window a key range whatever
+--     the plan (CC-2); with p_full ([check 2] the 1st
 --     of the month, Paris, or an admin's request: private.run_remittance_checks) every booked run's lines, every
 --     attribution and every cover of the servicer. No previous run: the full pass;
 --   advance_ledger (violation, subject the client): per client and currency, Σ (amount − settled) of its advances whose
@@ -768,6 +787,8 @@ declare
   v_since timestamptz;
   v_since_date date;
   v_full boolean := coalesce(p_full, false);
+  v_from_ts timestamptz;
+  v_from_date date;
 begin
   select r.id, r.started_at - interval '1 day' into v_prev, v_since
   from public.payment_check_run r
@@ -777,12 +798,29 @@ begin
     v_full := true;
   end if;
   v_since_date := (v_since at time zone 'Europe/Paris')::date;
+  -- (review round 1, CC-2) the window's lower bounds, -infinity for the full pass: a key range in every plan — a
+  -- « v_full or … » predicate is a filter under the generic plan PL/pgSQL caches after five calls in one backend, and
+  -- the delta pass would then read every booked run, attribution and cover of the servicer
+  v_from_ts := case when v_full then '-infinity'::timestamptz else v_since end;
+  v_from_date := case when v_full then '-infinity'::date else v_since_date end;
 
   insert into public.payment_check_result (run_id, organization_id, code, severity, subject_type, subject_id, currency,
                                            amount_minor, count, oldest_days, details)
   with day_rev as materialized (     -- the reversals posted since (ledger_entry_reversal_posted_idx)
     select x.id, x.reverses_entry_id from public.ledger_entry x
     where not v_full and x.organization_id = p_organization_id and x.entry_type = 'reversal' and x.posted_at >= v_since),
+  booked as materialized (           -- the runs booked since (remittance_run_booked_idx), every one in the full pass
+    select q.id from public.remittance_run q
+    where q.organization_id = p_organization_id and q.status = 'booked' and q.booked_on >= v_from_date
+    union
+    -- (review round 1, CC-1) and the runs whose payout booking was recorded since, whatever their booked_on (the
+    -- debit's date: a statement imported late, a late predecessor): bank_line_booking_org_idx, each transfer's run by key
+    select t.run_id
+    from (select b.transfer_id from public.bank_line_booking b
+          where not v_full and b.organization_id = p_organization_id and b.decided_at >= v_from_ts
+            and b.kind = 'payout' offset 0) b
+    cross join lateral (select t.run_id from public.bank_transfer t
+                        where t.id = b.transfer_id and t.run_id is not null offset 0) t),
   cand as materialized (
     select d.id as reversal_id from day_rev d
     union
@@ -796,20 +834,18 @@ begin
     cross join lateral (select z.id from public.ledger_entry z where z.reverses_entry_id = u.ledger_entry_id offset 0) z
     union
     select z.id
-    from (select q.id from public.remittance_run q
-          where q.organization_id = p_organization_id and q.status = 'booked'
-            and (v_full or q.booked_on >= v_since_date) offset 0) r
+    from booked r
     cross join lateral (select l.ledger_entry_id from public.remittance_line l
                         where l.run_id = r.id and not l.released and l.kind in ('allocation', 'forward') offset 0) l
     cross join lateral (select z.id from public.ledger_entry z where z.reverses_entry_id = l.ledger_entry_id offset 0) z
     union
     select z.id
     from (select u.ledger_entry_id from private.unplanned_paid_item u
-          where u.organization_id = p_organization_id and (v_full or u.created_at >= v_since) offset 0) u
+          where u.organization_id = p_organization_id and u.created_at >= v_from_ts offset 0) u
     cross join lateral (select z.id from public.ledger_entry z where z.reverses_entry_id = u.ledger_entry_id offset 0) z
     union
     select a.cause_entry_id from public.client_advance a
-    where a.organization_id = p_organization_id and a.cause = 'remitted_reversal' and (v_full or a.created_at >= v_since)
+    where a.organization_id = p_organization_id and a.cause = 'remitted_reversal' and a.created_at >= v_from_ts
     union
     select c.subject_id from public.payment_check_result c
     where c.run_id = v_prev and c.code = 'remitted_reversal_uncovered' and c.subject_id is not null)
@@ -947,7 +983,9 @@ $$;
 
 -- For « Désimputer » and « Retour »: the payment's live allocation and forward entries already remitted to the client
 -- (private.entry_remitted), with their run, its date, the line's amount and what that run settled and how ([check 1]
--- paid_on, paid_how, paid_run_number). Money staff of the payment's servicer (aal2); « not allowed » otherwise.
+-- paid_on, paid_how, paid_run_number). (Review round 1, M7A-MONEY-2) run_transfer: whether that run had a payout
+-- transfer of its own — false for an N = 0 run, whose payout that came back (run_settled_on rule 4) was an unplanned
+-- one, « hors reversement ». Money staff of the payment's servicer (aal2); « not allowed » otherwise.
 create or replace function public.allocation_remitted(p_payment_id uuid)
 returns jsonb
 language plpgsql
@@ -965,12 +1003,14 @@ begin
   end if;
   return (
     select coalesce(jsonb_agg(jsonb_build_object(
-             'entry_id', e.id, 'account_id', e.account_id, 'run_number', x.run_number, 'booked_on', x.booked_on,
+             'entry_id', e.id, 'account_id', e.account_id, 'run_number', x.run_number,
+             'run_transfer', r.transfer_id is not null, 'booked_on', x.booked_on,
              'amount_minor', x.amount_minor::text, 'paid_on', x.paid_on, 'paid_how', x.paid_how,
              'paid_run_number', x.paid_run_number) order by e.effective_date, e.id), '[]')
     from (select q.id, q.account_id, q.effective_date from public.ledger_entry q
           where q.payment_id = p_payment_id and q.entry_type in ('allocation', 'forward') offset 0) e
     cross join lateral private.entry_remitted(e.id) x
+    cross join lateral (select q.transfer_id from public.remittance_run q where q.id = x.run_id offset 0) r
     where not exists (select 1 from public.ledger_entry z where z.reverses_entry_id = e.id));
 end;
 $$;

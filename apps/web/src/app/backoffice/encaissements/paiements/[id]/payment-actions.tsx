@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { ActionForm } from "@/components/action-form";
 import { buttonClass, dangerButtonClass, inputClass } from "@/components/ui";
+import { advanceIdsParam } from "@/lib/payments/remitted";
 import { ConfirmSheet, secondaryClass } from "../../a-traiter/queue-actions";
 import { allocatePayment, forwardPayment, releaseHold, reverseAllocation, unassignFromPage } from "./actions";
 
@@ -85,8 +86,9 @@ export function ReverseAllocation({
             action={reverseAllocation}
             submitLabel="Confirmer l'annulation"
             buttonClassName={buttonClass}
-            // M2c-7a: the notice says the advance recorded (the page reads its amount from the URL, as text)
-            onDone={(r) => router.replace(`?avance=${encodeURIComponent(r.advanceMinor)}`)}
+            // M2c-7a: the notice says the advance recorded — review round 1 (M7A-MONEY-3): the URL names the advances,
+            // the page reads their amounts from the ledger
+            onDone={(r) => router.replace(`?desimpute=${encodeURIComponent(advanceIdsParam(r.advanceIds))}`)}
           >
             <input type="hidden" name="payment_id" value={paymentId} />
             <input type="hidden" name="account_id" value={accountId} />

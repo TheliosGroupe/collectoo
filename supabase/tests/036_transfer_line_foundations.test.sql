@@ -1028,8 +1028,8 @@ select is(pg_temp.isolated('c_overrun'),
     -- remitted_reversal), same amount: the share is the same, the file refused the same way
     'sweep', 'cancelled', 'payout', 'ordered', 'run', 'approved', 'advance', 'remitted_reversal',
     'regenerated', jsonb_build_object('sweep', null, 'late_reason', null, 'payout_in', true)),
-  'C: a payout_overrun cover posted by the job between generation and download → refused the same way (the share '
-  'negative); regenerated, the file carries no sweep');
+  'C: a cover posted by the job between generation and download (remitted_reversal since M2c-7a, payout_overrun '
+  'before) → refused the same way (the share negative); regenerated, the file carries no sweep');
 select is(pg_temp.isolated('c_pending'), to_jsonb('transfer file refused: not_ready'::text),
   'C (CSO-10): a file still pending is never served (not_ready)');
 select is(pg_temp.dirty(), '{}'::text[], 'C: clean (I8′, I12, I13, I14, I19, I20, bank_line_booked)');

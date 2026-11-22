@@ -17,15 +17,20 @@
 --         late predecessor booked as its run's payout;
 --   13    idempotency and roles of « Désimputer » and « Couvrir »;
 --   14, 19 the nightly checks: the delta window and its overlap, the monthly and requested full pass, its request table,
---         advance_ledger, advance_open at 30 days, the full list of codes;
+--         advance_ledger, advance_open at 30 days, the full list of codes; (review round 1) the runs whose booking was
+--         recorded since the last run, whatever their booked_on (CC-1), the window a key range under a generic plan
+--         (CC-2); and every scenario that posts, releases or re-posts a cover ends with no remitted_reversal_uncovered
+--         nor advance_ledger row (tests-ui-5);
 --   15    RLS and grants;
---   16    the overrun backstop (a forged 4670 debit) with its mandate;
---   17    paid_on (a payout come back then paid again, twice; set-off; still in flight; a late predecessor's return);
+--   16    the overrun backstop (a forged 4670 debit) with its mandate and its payout_overrun alert;
+--   17    paid_on (a payout come back then paid again, twice; set-off; still in flight; a late predecessor's return;
+--         (review round 1) an N = 0 run netting its own unplanned payout's return, switch off and on; a run without a
+--         transfer paid through a later run, run_transfer);
 --   §3.3  the worked example's 12/11 return through the job's mode.
 -- The cancellation-after-download switch stays off: every switch-on case runs in its own rolled-back scenario
 -- (pg_temp.isolated_on); a guard at the end checks it is off.
 begin;
-select plan(44);
+select plan(49);
 
 
 -- Fixtures and helpers (as 037_transfer_line_ops: its fixture, 035's helpers and its own) ---------------------
@@ -1331,6 +1336,73 @@ begin
   where k = 'lp-booked-' || p_s;
   return v_run;
 end $$;
+-- (review round 1) a run of client c prepared from its whole queue, its invoice (p_num / p_den of file n's collection,
+-- 20 % VAT) set off for the whole gross — the caller sizes it so that the invoice's TTC is the gross: N = 0, booked at
+-- approval with its settlement; the version
+create or replace function pg_temp.prepare_off(p_run uuid, p_c text, p_n text, p_num bigint, p_den bigint)
+returns integer language plpgsql as $$
+declare r public.remittance_run; v_files jsonb; v_keys jsonb; v_gross bigint; v_ht bigint; v_plan jsonb;
+begin
+  select * into r from public.remittance_run where id = p_run;
+  v_files := jsonb_build_object(p_n, (select amount_minor from public.payment where id = pg_temp.pay(p_n))::text);
+  v_keys := pg_temp.keys(p_c, v_files, p_num, p_den);
+  perform private.remittance_prepare_begin(p_run, r.job_token);
+  insert into private.remittance_draft_line (run_id, line_no, ledger_entry_id, kind, account_id, mandate_id,
+                                             mandate_terms_id, payment_id, encaissement_date, effective_date, posted_at,
+                                             deadline, latest_execution_date, amount_minor, basis, commission_minor,
+                                             commission_state, parts, invoiced)
+  select p_run, row_number() over (order by q.posted_at, q.ledger_entry_id), q.ledger_entry_id, q.kind, e.account_id,
+         pf.mandate_id, case when pf.mandate_id is not null
+                             then ('71000000-0000-0000-0000-0000000000' || right(pf.mandate_id::text, 2))::uuid end,
+         e.payment_id, e.effective_date, e.effective_date, q.posted_at,
+         case when q.amount_minor > 0 then e.effective_date + 30 end,
+         case when q.amount_minor > 0 then e.effective_date + 27 end, q.amount_minor,
+         jsonb_build_object('principal', q.amount_minor::text),
+         coalesce((select (k ->> 'commission')::bigint from jsonb_array_elements(v_keys) k
+                   where (k ->> 'account_id')::uuid = e.account_id), 0),
+         case when e.account_id is not distinct from pg_temp.f(p_n) then 'charged' else 'none' end, '[]',
+         e.account_id is not distinct from pg_temp.f(p_n)
+  from private.remittance_pending q
+  join public.ledger_entry e on e.id = q.ledger_entry_id
+  left join public.account a on a.id = e.account_id
+  left join public.portfolio pf on pf.id = a.portfolio_id
+  where q.draft_run_id = p_run;
+  v_gross := (select sum(amount_minor) from private.remittance_draft_line where run_id = p_run);
+  v_ht := (select sum((x.value)::bigint * p_num / p_den) from jsonb_each_text(v_files) x);
+  if v_ht + v_ht / 5 <> v_gross then
+    raise exception 'prepare_off: the invoice''s TTC % is not the gross %', v_ht + v_ht / 5, v_gross;
+  end if;
+  v_plan := pg_temp.plan(p_c, v_gross, v_ht, v_gross, v_ht / 5);
+  perform private.remittance_record_draft(p_run, r.job_token, jsonb_build_object(
+    'line_count', (select count(*) from private.remittance_draft_line where run_id = p_run),
+    'gross', v_gross::text,
+    'invoice_ht', v_plan ->> 'invoice_ht', 'invoice_vat', v_plan ->> 'invoice_vat', 'invoice_ttc', v_plan ->> 'invoice_ttc',
+    'credit_ht', '0', 'credit_vat', '0', 'credit_ttc', '0', 'taken', v_plan ->> 'dc', 'advances', '0', 'refunds', '0',
+    'settlement', v_plan ->> 'settlement', 'net', v_plan ->> 'net', 'vat_rate', '0.2',
+    'earliest_deadline', (select min(deadline) from private.remittance_draft_line where run_id = p_run),
+    'earliest_latest_execution_date', (select min(latest_execution_date) from private.remittance_draft_line
+                                       where run_id = p_run),
+    'unmeetable', 0, 'blockers', '[]'::jsonb, 'commission_blockers', '[]'::jsonb, 'engine_version', 'commission-1',
+    'inputs_hash', encode(sha256(convert_to(p_run::text || v_plan::text, 'UTF8')), 'hex'),
+    'payout_account_id', (select pa.id from public.client_payout_account pa
+                          where pa.client_organization_id = r.client_organization_id and pa.status = 'active'),
+    'history_seq', (select coalesce(max(seq), 0) from public.remittance_key_state
+                    where client_organization_id = r.client_organization_id),
+    'documents', pg_temp.doc(p_c, v_files, p_num, p_den), 'key_states', v_keys, 'plan', v_plan));
+  return (select version from public.remittance_run where id = p_run);
+end $$;
+-- (review round 1, tests-ui-5) the nightly's two violations of the advances after a scenario (a full pass of
+-- run_advance_checks): [code, amount] — none expected wherever the scenario posts, releases or re-posts a cover
+create or replace function pg_temp.nightly() returns jsonb language plpgsql as $$
+declare c uuid := pg_temp.adv_run(null, true);
+begin
+  return (select coalesce(jsonb_agg(jsonb_build_array(x.code, x.amount_minor) order by x.code, x.amount_minor), '[]')
+          from public.payment_check_result x
+          where x.run_id = c and x.code in ('remitted_reversal_uncovered', 'advance_ledger'));
+end $$;
+-- (review round 1, CC-2) the rows a table's index scans fetched so far in this transaction
+create or replace function pg_temp.fetched(p_table regclass) returns bigint language sql as $$
+  select coalesce((select x.idx_tup_fetch from pg_stat_xact_user_tables x where x.relid = p_table), 0) $$;
 grant execute on all functions in schema pg_temp to authenticated;
 
 -- The base: the account's cash (an unidentified payment of 10 000,00 €) and its statement of yesterday
@@ -1349,7 +1421,7 @@ begin
   v := pg_temp.unalloc('11');
   v_r := pg_temp.rev(pg_temp.alloc('11'));
   a := pg_temp.adv_of(v_r);
-  return jsonb_build_object(
+  return (jsonb_build_object(
     'result', jsonb_build_array(jsonb_array_length(v -> 'advances'), v -> 'advances' -> 0 ->> 'amount_minor',
                                 (v -> 'advances' -> 0 ->> 'advance_id')::uuid = a.id),
     'advance', jsonb_build_array(a.cause, a.amount_minor, a.mandate_id = pg_temp.mandate('a1'),
@@ -1363,14 +1435,15 @@ begin
     'today', jsonb_build_array(pg_temp.bal('client_payable', 'a1', d),
                                pg_temp.bal('client_advance_receivable', 'a1', d),
                                pg_temp.bal('due_to_servicer', null, d)),
-    'check', pg_temp.state('select private.ledger_check_now()'));
+    'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s1'),
   '{"result": [1, "200000", true], "advance": ["remitted_reversal", 200000, true, true], "dates": [true, true],
     "books": {"due_to_servicer": 200000, "client_payable": -200000, "client_advance_receivable": 200000,
               "due_from_client_funds": -200000},
     "queue": ["allocation:50000", "allocation_reversal:-200000", "client_advance:200000"],
-    "day_before_payout": [-50000, 0, 0], "today": [-50000, 200000, 200000], "check": "ok"}'::jsonb,
+    "day_before_payout": [-50000, 0, 0], "today": [-50000, 200000, 200000], "check": "ok", "nightly": []}'::jsonb,
   '1 (F3): a remitted allocation reversed → one advance (cause, R, line amount, its mandate, adv:<R>) dated at the payout, '
   'not at R''s back date; the queue holds R and A1, the other item unchanged; nothing of it shows before the payout');
 
@@ -1380,11 +1453,12 @@ declare v jsonb;
 begin
   perform pg_temp.remitted('a2', '21', 100000, 'a21');
   v := pg_temp.unalloc('21');
-  return jsonb_build_object('error', v -> 'error', 'advances', pg_temp.advs('a2'), 'owed', pg_temp.owed('a2'),
-                            'check', pg_temp.state('select private.ledger_check_now()'));
+  return (jsonb_build_object('error', v -> 'error', 'advances', pg_temp.advs('a2'), 'owed', pg_temp.owed('a2'),
+                            'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s2'),
-  '{"error": null, "advances": ["remitted_reversal:100000"], "owed": 0, "check": "ok"}'::jsonb,
+  '{"error": null, "advances": ["remitted_reversal:100000"], "owed": 0, "check": "ok", "nightly": []}'::jsonb,
   '2: with nothing else pending the cover keeps 4670 at 0 (no LG008), and no payout_overrun');
 
 -- 3. a pending allocation (in no run) reversed: no advance, the queue nets the pair
@@ -1441,17 +1515,18 @@ begin
   v_t := pg_temp.rtransfer(v_run);
   v_line := pg_temp.debit(v_run, 'b41');
   a := pg_temp.adv_of(v_r);
-  return w || jsonb_build_object(
+  return (w || jsonb_build_object(
     'booked', pg_temp.advs('a1'), 'run', pg_temp.rstatus(v_run),
     'key', pg_temp.ekey(a.entry_id) = 'adv:' || v_r || ':' || v_run, 'date', pg_temp.edate(a.entry_id) = d - 1,
     'transfer', a.transfer_id = v_t, 'line', a.bank_transaction_id = v_line, 'mandate', a.mandate_id = pg_temp.mandate('a1'),
     'owed', pg_temp.owed('a1'), 'check', pg_temp.state('select private.ledger_check_now()'),
-    'page', pg_temp.page_advances(v_run));
+    'page', pg_temp.page_advances(v_run)))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s4'),
   '{"run_sent": "sent", "sent": [], "after_sent": [], "booked": ["remitted_reversal:200000"],
     "run": "booked", "key": true, "date": true, "transfer": true, "line": true, "mandate": true, "owed": 0, "check": "ok",
-    "page": [["remitted_reversal", "200000"]]}'::jsonb,
+    "page": [["remitted_reversal", "200000"]], "nightly": []}'::jsonb,
   '4, 5d (F5): a line reversed after its run''s approval → no advance in flight; covered when the payout is booked '
   '(adv:<R>:<run>, the debit date, its transfer and line), never payout_overrun; the run page lists it');
 
@@ -1464,11 +1539,12 @@ begin
   v_run := pg_temp.request('a2', 'draft-run-p51');
   perform pg_temp.prepare_plain(v_run);
   a := pg_temp.approve_plain(v_run, 'approve-run-p51');
-  return jsonb_build_object('approval', a, 'advances', pg_temp.advs('a2'),
+  return (jsonb_build_object('approval', a, 'advances', pg_temp.advs('a2'),
                             'gap', private.remitted_cover_gap(pg_temp.rev(pg_temp.alloc('51'))),
-                            'check', pg_temp.state('select private.ledger_check_now()'));
+                            'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
-select is(pg_temp.iso('s5a'), '{"approval": "booked:booked", "advances": [], "gap": 0, "check": "ok"}'::jsonb,
+select is(pg_temp.iso('s5a'), '{"approval": "booked:booked", "advances": [], "gap": 0, "check": "ok", "nightly": []}'::jsonb,
   '5a (M7-MONEY-1): a same-run pair in an N = 0 run booked at approval → no advance, no LG009');
 
 -- 5b. the same pair in a run with another line, its payout booked by the job → no advance
@@ -1480,11 +1556,12 @@ begin
   perform pg_temp.pending('a2', '53', 30000);
   v_run := pg_temp.flight('a2', 'p52');
   perform pg_temp.debit(v_run, 'b52');
-  return jsonb_build_object('net', (select net_minor from public.remittance_run where id = v_run),
+  return (jsonb_build_object('net', (select net_minor from public.remittance_run where id = v_run),
                             'run', pg_temp.rstatus(v_run), 'advances', pg_temp.advs('a2'), 'owed', pg_temp.owed('a2'),
-                            'check', pg_temp.state('select private.ledger_check_now()'));
+                            'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
-select is(pg_temp.iso('s5b'), '{"net": 30000, "run": "booked", "advances": [], "owed": 0, "check": "ok"}'::jsonb,
+select is(pg_temp.iso('s5b'), '{"net": 30000, "run": "booked", "advances": [], "owed": 0, "check": "ok", "nightly": []}'::jsonb,
   '5b: a same-run pair beside another line, its payout booked → no advance for the pair');
 
 -- 5c. a run cancelled before download (E released), R posted, the next run carrying the pair → no advance
@@ -1498,11 +1575,12 @@ begin
   v_y := pg_temp.request('a2', 'draft-run-q54');
   perform pg_temp.prepare_plain(v_y);
   a := pg_temp.approve_plain(v_y, 'approve-run-q54');
-  return jsonb_build_object('cancelled', pg_temp.rstatus(v_x), 'result', v -> 'advances', 'approval', a,
-                            'advances', pg_temp.advs('a2'), 'check', pg_temp.state('select private.ledger_check_now()'));
+  return (jsonb_build_object('cancelled', pg_temp.rstatus(v_x), 'result', v -> 'advances', 'approval', a,
+                            'advances', pg_temp.advs('a2'), 'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s5c'),
-  '{"cancelled": "cancelled", "result": [], "approval": "booked:booked", "advances": [], "check": "ok"}'::jsonb,
+  '{"cancelled": "cancelled", "result": [], "approval": "booked:booked", "advances": [], "check": "ok", "nightly": []}'::jsonb,
   '5c: a run cancelled before download, the reversal then carried with its collection by the next run → no advance');
 
 -- 5e (switch on). E's run cancelled after download; its payout U executed late pays E (P = A, an attribution); E
@@ -1522,14 +1600,15 @@ begin
   w := w || jsonb_build_object('pair_run', pg_temp.approve_plain(v_y, 'approve-run-5e2'),
                                'pair_target', private.remitted_cover_target(v_r));
   w := w || jsonb_build_object('returned', pg_temp.late_return(v_x, '5e3'));
-  return w || jsonb_build_object(
+  return (w || jsonb_build_object(
     'after', pg_temp.live_advs('a4'), 'released', pg_temp.ekey(pg_temp.rev(a.entry_id)) like 'return:rr:%',
     'gap', private.remitted_cover_gap(v_r), 'owed', pg_temp.owed('a4'),
-    'check', pg_temp.state('select private.ledger_check_now()'));
+    'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s5e', true),
   '{"exec": "ok", "covered": ["remitted_reversal:40000"], "target": 40000, "pair_run": "booked:booked",
-    "pair_target": 40000, "returned": "ok", "after": [], "released": true, "gap": 0, "owed": 0, "check": "ok"}'::jsonb,
+    "pair_target": 40000, "returned": "ok", "after": [], "released": true, "gap": 0, "owed": 0, "check": "ok", "nightly": []}'::jsonb,
   '5e (switch on): a pair with an unplanned attribution of E: T = the attribution, covered; the unplanned payout back → '
   'the cover released, none left, no LG009');
 
@@ -1551,18 +1630,19 @@ begin
   w := w || jsonb_build_object('target', private.remitted_cover_target(v_r), 'covered', pg_temp.live_advs('a5'),
                                'key', pg_temp.ekey((pg_temp.adv_of(v_r)).entry_id) = 'adv:' || v_r);
   w := w || jsonb_build_object('returned', pg_temp.late_return(v_x, '5f3'));
-  return w || jsonb_build_object(
+  return (w || jsonb_build_object(
     'after', pg_temp.live_advs('a5'), 'gap', private.remitted_cover_gap(v_r),
     'queue_total', (select sum(q.amount_minor) from private.remittance_pending q
                     where q.client_organization_id = pg_temp.c('a5')),
     'paid_on', (select x.paid_on from private.entry_remitted(v_e) x),
     'remitted_in_y', (select x.run_id = v_y from private.entry_remitted(v_e) x),
-    'check', pg_temp.state('select private.ledger_check_now()'));
+    'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s5f', true),
   '{"exec": "ok", "y": "booked:booked", "how_before": "netted", "target": 40000, "covered": ["remitted_reversal:40000"],
     "key": true, "returned": "ok", "after": ["remitted_reversal:40000"], "gap": 0, "queue_total": 40000,
-    "paid_on": null, "remitted_in_y": true, "check": "ok"}'::jsonb,
+    "paid_on": null, "remitted_in_y": true, "check": "ok", "nightly": []}'::jsonb,
   '5f (switch on, Q17 a): E remitted in an N = 0 run netted by an unplanned payout; reversed → A1 = A; the payout back '
   '→ A re-queued, A1 kept, no release, no LG009; paid_on null (rule 4); before, « netted »');
 
@@ -1598,17 +1678,18 @@ begin
   perform pg_temp.stmt2('b62', d, jsonb_build_array(jsonb_build_object('amount', 300000, 'kind', 'return',
                                                                          'e2e', 'E2E-61')));
   k := pg_temp.link('link-key-61', pg_temp.l2('b62', 1), 'return', pg_temp.pay('61'), null, '300000');
-  return jsonb_build_object(
+  return (jsonb_build_object(
     'link', k, 'advances', pg_temp.advs('a1'),
     'mandates', (select jsonb_agg(a.mandate_id = pg_temp.mandate('a1') order by a.amount_minor desc)
                  from public.client_advance a where a.client_organization_id = pg_temp.c('a1')),
     'dated', (select bool_and(pg_temp.edate(a.entry_id) = d) from public.client_advance a
               where a.client_organization_id = pg_temp.c('a1')),
-    'owed', pg_temp.owed('a1'));
+    'owed', pg_temp.owed('a1')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s6'),
   '{"link": "return", "advances": ["remitted_reversal:200000", "remitted_reversal:100000"], "mandates": [true, null],
-    "dated": true, "owed": 0}'::jsonb,
+    "dated": true, "owed": 0, "nightly": []}'::jsonb,
   '6: an M2b return (ops) of a payment whose allocation and forward were remitted → two advances, at the return date');
 
 -- 6 (partial). a partial return of a remitted payment: every remitted entry covered in full
@@ -1619,9 +1700,10 @@ begin
   perform pg_temp.stmt2('b64', private.paris_today(), jsonb_build_array(jsonb_build_object(
     'amount', 150000, 'kind', 'return', 'e2e', 'E2E-63')));
   k := pg_temp.link('link-key-63', pg_temp.l2('b64', 1), 'return', pg_temp.pay('63'), null, '200000');
-  return jsonb_build_object('link', k, 'advances', pg_temp.advs('a1'), 'owed', pg_temp.owed('a1'));
+  return (jsonb_build_object('link', k, 'advances', pg_temp.advs('a1'), 'owed', pg_temp.owed('a1')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
-select is(pg_temp.iso('s6b'), '{"link": "return", "advances": ["remitted_reversal:200000"], "owed": 0}'::jsonb,
+select is(pg_temp.iso('s6b'), '{"link": "return", "advances": ["remitted_reversal:200000"], "owed": 0, "nightly": []}'::jsonb,
   '6: a partial return reverses every allocation (M2b), each remitted one covered in full (founder Q1 default)');
 
 -- 7. the job's mode: three returns in one chunk, one of a remitted payment → its advance, all three posted
@@ -1638,12 +1720,13 @@ begin
   perform pg_temp.job_returns(jsonb_build_array(jsonb_build_array(pg_temp.l2('b72', 1), '71'),
                                                 jsonb_build_array(pg_temp.l2('b72', 2), '72'),
                                                 jsonb_build_array(pg_temp.l2('b72', 3), '73')));
-  return jsonb_build_object(
+  return (jsonb_build_object(
     'linked', (select count(*) from public.bank_debit_link
                where bank_transaction_id in (pg_temp.l2('b72', 1), pg_temp.l2('b72', 2), pg_temp.l2('b72', 3))),
-    'advances', pg_temp.advs('a1') || pg_temp.advs('a2'), 'owed', pg_temp.owed('a1'));
+    'advances', pg_temp.advs('a1') || pg_temp.advs('a2'), 'owed', pg_temp.owed('a1')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
-select is(pg_temp.iso('s7a'), '{"linked": 3, "advances": ["remitted_reversal:100000"], "owed": 0}'::jsonb,
+select is(pg_temp.iso('s7a'), '{"linked": 3, "advances": ["remitted_reversal:100000"], "owed": 0, "nightly": []}'::jsonb,
   '7: the debit job''s chunk of three returns, one remitted → its advance, the three posted');
 
 -- 7. a planted forgotten cover in the chunk (the cover skips payment 76's reversals: a wrapper, rolled back) → that link
@@ -1691,11 +1774,12 @@ begin
   perform pg_temp.stmt2('b82', private.paris_today(), jsonb_build_array(jsonb_build_object(
     'amount', 120000, 'kind', 'return', 'e2e', 'E2E-81')));
   k := pg_temp.link('link-key-81', pg_temp.l2('b82', 1), 'loss', pg_temp.pay('81'), null, '100000');
-  return jsonb_build_object('link', k, 'advances', pg_temp.advs('a1'), 'bookings', pg_temp.bookings(pg_temp.l2('b82', 1)),
-                            'owed', pg_temp.owed('a1'));
+  return (jsonb_build_object('link', k, 'advances', pg_temp.advs('a1'), 'bookings', pg_temp.bookings(pg_temp.l2('b82', 1)),
+                            'owed', pg_temp.owed('a1')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s8'),
-  '{"link": "loss", "advances": ["remitted_reversal:100000"], "bookings": ["1 loss 20000"], "owed": 0}'::jsonb,
+  '{"link": "loss", "advances": ["remitted_reversal:100000"], "bookings": ["1 loss 20000"], "owed": 0, "nightly": []}'::jsonb,
   '8: a return beyond its remitted payment → its M2b part covered, the excess booked as the servicer''s loss');
 
 
@@ -1767,18 +1851,19 @@ begin
   a := pg_temp.adv_of(v_r);
   w := w || jsonb_build_object('cover', jsonb_build_array(a.cause, a.amount_minor),
                                'returned', pg_temp.late_return(v_x, 'ba2'));
-  return w || jsonb_build_object(
+  return (w || jsonb_build_object(
     'live', pg_temp.live_advs('a4'), 'key', pg_temp.ekey(pg_temp.rev(a.entry_id)) = 'return:rr:' || pg_temp.l2('ba2', 1)
                                              || ':' || a.id,
     'date', pg_temp.edate(pg_temp.rev(a.entry_id)) = private.paris_today(), 'gap', private.remitted_cover_gap(v_r),
     'owed', pg_temp.owed('a4'),
     'queue_total', (select sum(q.amount_minor) from private.remittance_pending q
                     where q.client_organization_id = pg_temp.c('a4')),
-    'check', pg_temp.state('select private.ledger_check_now()'));
+    'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s11a', true),
   '{"exec": "ok", "cover": ["remitted_reversal", 40000], "returned": "ok", "live": [], "key": true, "date": true,
-    "gap": 0, "owed": 0, "queue_total": 0, "check": "ok"}'::jsonb,
+    "gap": 0, "owed": 0, "queue_total": 0, "check": "ok", "nightly": []}'::jsonb,
   '11 (switch on): an attributed item reversed → covered for the attribution; the unplanned payout back → the cover '
   'released, queue and 4670 as without the pair');
 
@@ -1800,15 +1885,16 @@ begin
   v_r := pg_temp.rev(v_e);
   a := pg_temp.adv_of(v_r);
   w := w || jsonb_build_object('cover', a.amount_minor, 'returned', pg_temp.late_return(v_x, 'bb2'));
-  return w || jsonb_build_object(
+  return (w || jsonb_build_object(
     'advances', pg_temp.advs('a4'), 'live', pg_temp.live_advs('a4'),
     'repost', (select pg_temp.ekey(b.entry_id) like 'adv:' || v_r || ':rel:' || pg_temp.l2('bb2', 1) || ':%'
                from public.client_advance b where b.cause_entry_id = v_r and b.id <> a.id),
-    'gap', private.remitted_cover_gap(v_r), 'check', pg_temp.state('select private.ledger_check_now()'));
+    'gap', private.remitted_cover_gap(v_r), 'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s11b', true),
   '{"exec": "ok", "cover": 45000, "returned": "ok", "advances": ["remitted_reversal:45000", "remitted_reversal:5000"],
-    "live": ["remitted_reversal:5000"], "repost": true, "gap": 0, "check": "ok"}'::jsonb,
+    "live": ["remitted_reversal:5000"], "repost": true, "gap": 0, "check": "ok", "nightly": []}'::jsonb,
   '11: two bookings attributing one item, one returned → its cover released, the remainder re-posted');
 
 -- 11. a cover with a settlement (planted) → the unplanned return refused advance_settled, nothing booked
@@ -1881,15 +1967,16 @@ begin
   v_run := pg_temp.late_pred('a7', 'd2', 100000, 'bd2a', true);
   v_r := pg_temp.rev(pg_temp.alloc('d2'));
   a := pg_temp.adv_of(v_r);
-  return jsonb_build_object(
+  return (jsonb_build_object(
     'booked', pg_temp.v('lp-booked-bd2a') = v_run, 'run', pg_temp.rstatus(v_run),
     'x1', pg_temp.status(pg_temp.v('x1-bd2a')), 'x2', pg_temp.status(pg_temp.v('x2-bd2a')),
     'advances', pg_temp.advs('a7'), 'key', pg_temp.ekey(a.entry_id) = 'adv:' || v_r || ':' || v_run,
-    'transfer', a.transfer_id = pg_temp.v('x1-bd2a'), 'owed', pg_temp.owed('a7'));
+    'transfer', a.transfer_id = pg_temp.v('x1-bd2a'), 'owed', pg_temp.owed('a7')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s12', true),
   '{"booked": true, "run": "booked", "x1": "cancelled", "x2": "cancelled", "advances": ["remitted_reversal:100000"],
-    "key": true, "transfer": true, "owed": 0}'::jsonb,
+    "key": true, "transfer": true, "owed": 0, "nightly": []}'::jsonb,
   '12 (switch on): a late predecessor booked as its run''s payout covers its run''s reversed line at the booking');
 
 
@@ -1923,16 +2010,17 @@ begin
   a := pg_temp.adv_of(v_r);
   perform private.ledger_reverse(a.entry_id, 'return:rr:test:' || a.id, 'Avance annulée (test)', private.paris_today());
   c := pg_temp.cover('cover-key-6', v_r, '100000');
-  return w || jsonb_build_object(
+  return (w || jsonb_build_object(
     'after_release', c ->> 'amount_minor', 'gap_after', private.remitted_cover_gap(v_r),
     'own_key', pg_temp.ekey((c ->> 'entry_id')::uuid) like 'adv:' || v_r || ':cov:%',
-    'check', pg_temp.state('select private.ledger_check_now()'));
+    'check', pg_temp.state('select private.ledger_check_now()')))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s13'),
   '{"replay": true, "one": 1, "covered": "remitted cover refused: nothing_to_cover",
     "stale": "remitted cover refused: gap_changed", "ops": "not allowed", "aal1": "not allowed",
     "covered_now": "60000", "gap": 0, "key": true, "replay_cover": true,
-    "after_release": "100000", "gap_after": 0, "own_key": true, "check": "ok"}'::jsonb,
+    "after_release": "100000", "gap_after": 0, "own_key": true, "check": "ok", "nightly": []}'::jsonb,
   '13 (F18): « Désimputer » replayed → one advance; « Couvrir »: nothing_to_cover, gap_changed, admins at aal2 only, '
   'replayed once; after a release left a gap, its own key adv:<R>:cov:…');
 
@@ -2025,6 +2113,7 @@ select is(pg_temp.iso('s14c'), '{"second": [], "first": [[true, 50000]]}'::jsonb
 -- open; the next run_payment_checks takes it and finds the old gap, the run after it takes nothing; the row's guard
 create or replace function pg_temp.s14d() returns jsonb language plpgsql as $$
 declare v_r uuid; v1 jsonb; v2 jsonb; w jsonb; c uuid; r1 uuid; r2 uuid; m0 bigint;
+        v_org uuid := '00000000-0000-0000-0000-0000000000aa';  -- (review round 1) its requests only: other tests' servicers may hold some
 begin
   perform pg_temp.remitted('a2', 'e5', 50000, 'be5');
   perform private.ledger_reverse(pg_temp.alloc('e5'), 'raw-test-e5', 'Retour (test)', private.paris_today());
@@ -2036,14 +2125,14 @@ begin
   v2 := pg_temp.full_req('full-check-1');
   w := jsonb_build_object(
     'queued', v1 -> 'queued', 'replay', v1 = v2,
-    'rows', (select count(*) from private.advance_full_check_request),
+    'rows', (select count(*) from private.advance_full_check_request r where r.organization_id = v_org),
     'msgs', (select count(*) from pgmq.q_payments m where m.message ->> 'type' = 'invariants'
                and m.message ->> 'organization_id' = '00000000-0000-0000-0000-0000000000aa') - m0,
     'again', pg_temp.full_req('full-check-2') ->> 'error',
     'ops', pg_temp.full_req('full-check-3', '01') ->> 'error',
     'aal1', pg_temp.full_req('full-check-4', '04', 'aal1') ->> 'error',
     'other', pg_temp.full_req('full-check-5', '06') ->> 'error',
-    'rows_after', (select count(*) from private.advance_full_check_request));
+    'rows_after', (select count(*) from private.advance_full_check_request r where r.organization_id = v_org));
   insert into public.payment_check_run (organization_id) values ('00000000-0000-0000-0000-0000000000aa') returning id into c;
   begin
     perform private.run_remittance_checks(c, '00000000-0000-0000-0000-0000000000aa', null);
@@ -2052,15 +2141,19 @@ begin
     null;
   end;
   w := w || jsonb_build_object('open_after_failure',
-                               (select r.run_id is null from private.advance_full_check_request r));
+                               (select r.run_id is null from private.advance_full_check_request r
+                                where r.organization_id = v_org));
   r1 := (private.run_payment_checks('00000000-0000-0000-0000-0000000000aa') ->> 'run_id')::uuid;
   r2 := (private.run_payment_checks('00000000-0000-0000-0000-0000000000aa') ->> 'run_id')::uuid;
   return w || jsonb_build_object(
-    'taken', (select r.run_id = r1 and r.taken_at is not null from private.advance_full_check_request r),
+    'taken', (select r.run_id = r1 and r.taken_at is not null from private.advance_full_check_request r
+              where r.organization_id = v_org),
     'found', pg_temp.rows_of(r1, 'remitted_reversal_uncovered', v_r),
-    'still_r1', (select r.run_id = r1 from private.advance_full_check_request r),
-    'update', pg_temp.state(format('update private.advance_full_check_request set run_id = %L', r2)),
-    'delete', pg_temp.state('delete from private.advance_full_check_request'));
+    'still_r1', (select r.run_id = r1 from private.advance_full_check_request r where r.organization_id = v_org),
+    'update', pg_temp.state(format('update private.advance_full_check_request set run_id = %L where organization_id = %L',
+                                    r2, v_org)),
+    'delete', pg_temp.state(format('delete from private.advance_full_check_request where organization_id = %L',
+                                    v_org)));
 end $$;
 select is(pg_temp.iso('s14d'),
   '{"queued": true, "replay": true, "rows": 1, "msgs": 1, "again": "advance check refused: already_requested",
@@ -2068,6 +2161,67 @@ select is(pg_temp.iso('s14d'),
     "taken": true, "found": [[true, 50000]], "still_r1": true, "update": "23514", "delete": "23514"}'::jsonb,
   '14 (check 2): request_full_advance_check — one request, one checks message, replayed; refusals; taken by the next '
   'complete check run (the old gap found), once; a failing run leaves it open; its guard');
+
+-- 14 (review round 1, CC-1). The window reads the runs whose booking was recorded since the last check run, whatever
+-- their booked_on: Martin's X in flight, E reversed then (no cover due yet; recorded three days ago, before the window:
+-- planted); last night's run clean; the at-booking cover planted missing (its function a no-op, its commit-time check
+-- off: the bug the nightly backstops); X's payout debited five days ago, its statement imported and booked today → the
+-- delta pass finds the gap, as the full pass does
+create or replace function pg_temp.s14e() returns jsonb language plpgsql as $$
+declare v_run uuid; v_r uuid; w jsonb; d date := private.paris_today();
+begin
+  perform pg_temp.pending('a1', '9a', 100000, d - 9);
+  v_run := pg_temp.flight('a1', 'p9a');
+  perform pg_temp.handed_out('file-b9a', 'gen-file-b9a');
+  perform private.ledger_reverse(pg_temp.alloc('9a'), 'raw-test-9a', 'Retour (test)', d - 4);
+  v_r := pg_temp.rev(pg_temp.alloc('9a'));
+  set constraints all immediate;
+  set constraints all deferred;
+  alter table public.ledger_entry disable trigger ledger_entry_append_only;
+  update public.ledger_entry set posted_at = now() - interval '3 days' where id = v_r;
+  alter table public.ledger_entry enable always trigger ledger_entry_append_only;
+  perform pg_temp.prior_run_at(now() - interval '1 hour');
+  execute $q$ create or replace function private.cover_booked_run_reversals(p_run_ids uuid[], p_dates date[],
+              p_transfer_ids uuid[] default null, p_line_ids uuid[] default null) returns integer
+              language sql as 'select 0' $q$;
+  set constraints all immediate;
+  set constraints all deferred;
+  alter table public.remittance_run disable trigger remittance_run_booked_cover;
+  perform pg_temp.debit(v_run, 'b9a', d - 5);
+  return jsonb_build_object(
+    'run', pg_temp.rstatus(v_run), 'booked_on', (select q.booked_on = d - 5 from public.remittance_run q where q.id = v_run),
+    'gap', private.remitted_cover_gap(v_r),
+    'delta', pg_temp.rows_of(pg_temp.adv_run(), 'remitted_reversal_uncovered', v_r),
+    'full', pg_temp.rows_of(pg_temp.adv_run(null, true), 'remitted_reversal_uncovered', v_r));
+end $$;
+select is(pg_temp.iso('s14e'),
+  '{"run": "booked", "booked_on": true, "gap": 100000, "delta": [[true, 100000]], "full": [[true, 100000]]}'::jsonb,
+  '14 (review round 1, CC-1): a run booked today from a debit five days old, its line reversed before the window and '
+  'its cover planted missing → the delta pass finds the gap (the runs whose booking was recorded since), as the full '
+  'pass does');
+
+-- 14 (review round 1, CC-2). The delta window is a key range in every plan: six runs booked twenty days ago, the last
+-- check run's window starting forty days from now (nothing inside it); under a generic plan (as PL/pgSQL caches after
+-- five calls in one backend) the delta pass fetches no booked run, the full pass every one
+create or replace function pg_temp.s14f() returns jsonb language plpgsql as $$
+declare c text; i integer := 0; b bigint; w jsonb; d date := private.paris_today();
+begin
+  foreach c in array array['a1', 'a2', 'a3', 'a4', 'a5', 'a6'] loop
+    i := i + 1;
+    perform pg_temp.remitted(c, '9' || i, 10000 * i, 'b9' || i, d - 20, d - 25);
+  end loop;
+  perform pg_temp.prior_run(41);
+  set local plan_cache_mode = force_generic_plan;
+  b := pg_temp.fetched('public.remittance_run');
+  perform pg_temp.adv_run();
+  w := jsonb_build_object('delta', pg_temp.fetched('public.remittance_run') - b);
+  b := pg_temp.fetched('public.remittance_run');
+  perform pg_temp.adv_run(null, true);
+  return w || jsonb_build_object('full', pg_temp.fetched('public.remittance_run') - b >= 6);
+end $$;
+select is(pg_temp.iso('s14f'), '{"delta": 0, "full": true}'::jsonb,
+  '14 (review round 1, CC-2): under a generic plan the delta pass fetches no booked run outside its window (a key '
+  'range, not a filter), the full pass every one');
 
 -- 19 (F12). the full list of the codes run_advance_checks emits
 create or replace function pg_temp.s19() returns jsonb language plpgsql as $$
@@ -2162,11 +2316,16 @@ begin
   perform private.ledger_post_set();
   perform pg_temp.debit(v_run, 'bf1');
   a := (select x from public.client_advance x where x.client_organization_id = pg_temp.c('a1'));
+  -- (review round 1, tests-ui-3) and the backstop's P0 alert « Reversement au-delà du dû » (plan D6): the open advance
   return jsonb_build_object('advances', pg_temp.advs('a1'), 'mandate', a.mandate_id = pg_temp.mandate('a1'),
-                            'owed', pg_temp.owed('a1'));
+                            'owed', pg_temp.owed('a1'),
+                            'alert', (select jsonb_agg(jsonb_build_array(x ->> 0 = a.id::text, x -> 1))
+                                      from jsonb_array_elements(pg_temp.alerts('payout_overrun')) x));
 end $$;
-select is(pg_temp.iso('s16'), '{"advances": ["payout_overrun:3000"], "mandate": true, "owed": 0}'::jsonb,
-  '16: the overrun backstop stays — a forged 4670 debit no reversed line explains → payout_overrun, on its run''s mandate');
+select is(pg_temp.iso('s16'),
+  '{"advances": ["payout_overrun:3000"], "mandate": true, "owed": 0, "alert": [[true, 3000]]}'::jsonb,
+  '16: the overrun backstop stays — a forged 4670 debit no reversed line explains → payout_overrun, on its run''s '
+  'mandate, and its P0 alert payout_overrun for the open advance');
 
 
 -- 17. paid_on (run_settled_on, entry_remitted.paid_how) --------------------------------------------------------------------
@@ -2254,6 +2413,111 @@ select is(pg_temp.iso('s17d', true),
   'null until the later run pays the re-queued item');
 
 
+-- (e) (review round 1, M7A-MONEY-1; switch off) S03r: Petit's X (E1 30 000) debited, its payout T1 returned, executed
+-- again by the bank (an unplanned payout: its −30 000 row) and returned again (+30 000); the next run Y holds E2
+-- (150 000), both +30 000 and the −30 000 row, its invoice set off for the whole gross 180 000: N = 0, booked at
+-- approval. The second return is a line of Y itself: netted in Y, never followed into Y again (the recursion that ended
+-- too_deep) — Y settled by set-off on its booked_on, and X through Y; allocation_remitted says so for both collections
+create or replace function pg_temp.s17e() returns jsonb language plpgsql as $$
+declare v_x uuid; v_t uuid; v_y uuid; w jsonb; p1 jsonb; p2 jsonb; d date := private.paris_today();
+begin
+  v_x := pg_temp.remitted('a8', '8a', 30000, '8a0');
+  v_t := pg_temp.rtransfer(v_x);
+  perform pg_temp.bounce(v_x, '8a1');
+  w := jsonb_build_object('exec', pg_temp.late_exec(v_t, '8a2'), 'returned', pg_temp.late_return(v_t, '8a3'));
+  perform pg_temp.reconfirm('a8');
+  perform pg_temp.pending('a8', '8b', 150000);
+  v_y := pg_temp.request('a8', 'draft-run-8b');
+  perform pg_temp.prepare_off(v_y, 'a8', '8b', 1, 1);
+  w := w || jsonb_build_object('y', pg_temp.approve_plain(v_y, 'approve-run-8b'));
+  w := w || jsonb_build_object('y_lines', (select jsonb_agg(l.kind || ':' || l.amount_minor order by l.kind, l.amount_minor)
+                                           from public.remittance_line l where l.run_id = v_y),
+                               'y_net', (select jsonb_build_array(q.net_minor, q.settlement_minor, q.transfer_id is null)
+                                         from public.remittance_run q where q.id = v_y));
+  p1 := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('8a')));
+  p2 := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('8b')));
+  return w || jsonb_build_object(
+    'y_settled', (select jsonb_build_array(s.on_date = d, s.how, s.run_number = pg_temp.rnum(v_y))
+                  from private.run_settled_on(v_y) s),
+    'x_settled', (select jsonb_build_array(s.on_date = d, s.how, s.run_number = pg_temp.rnum(v_y))
+                  from private.run_settled_on(v_x) s),
+    'e1', jsonb_build_array(p1 -> 0 ->> 'run_number' = pg_temp.rnum(v_x), p1 -> 0 ->> 'paid_on' = d::text,
+                            p1 -> 0 ->> 'paid_how', p1 -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_y)),
+    'e2', jsonb_build_array(p2 -> 0 ->> 'run_number' = pg_temp.rnum(v_y), p2 -> 0 ->> 'paid_on' = d::text,
+                            p2 -> 0 ->> 'paid_how', p2 -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_y)),
+    'nightly', pg_temp.nightly());
+end $$;
+select is(pg_temp.iso('s17e'),
+  '{"exec": "ok", "returned": "ok", "y": "booked:booked",
+    "y_lines": ["allocation:150000", "payout_returned:30000", "payout_returned:30000", "unplanned_payout:-30000"],
+    "y_net": [0, 180000, true], "y_settled": [true, "set_off", true], "x_settled": [true, "set_off", true],
+    "e1": [true, true, "set_off", true], "e2": [true, true, "set_off", true], "nightly": []}'::jsonb,
+  '17 (e) (review round 1, M7A-MONEY-1; switch off): an N = 0 run holding an unplanned payout''s −P row and the +P its '
+  'return re-queued nets that return in itself — settled by set-off on its booked_on, never too_deep; the earlier '
+  'run whose payout came back is settled through it');
+
+-- (f) (review round 1, M7A-MONEY-1; switch on) Dupont's run cancelled after download (E released), its payout executed
+-- late (−60 000) and returned (+60 000) before the next run Y; Y holds E, both rows, its invoice set off for the whole
+-- gross: N = 0, booked at approval, settled by set-off (the return netted in Y itself)
+create or replace function pg_temp.s17f() returns jsonb language plpgsql as $$
+declare v_t uuid; v_y uuid; w jsonb; p jsonb; d date := private.paris_today();
+begin
+  v_t := pg_temp.late_cancel('a6', '6a', 60000, '6a0');
+  w := jsonb_build_object('exec', pg_temp.late_exec(v_t, '6a1'), 'returned', pg_temp.late_return(v_t, '6a2'));
+  v_y := pg_temp.request('a6', 'draft-run-6a');
+  perform pg_temp.prepare_off(v_y, 'a6', '6a', 5, 6);
+  w := w || jsonb_build_object('y', pg_temp.approve_plain(v_y, 'approve-run-6a'));
+  w := w || jsonb_build_object('y_lines', (select jsonb_agg(l.kind || ':' || l.amount_minor order by l.kind, l.amount_minor)
+                                           from public.remittance_line l where l.run_id = v_y));
+  p := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('6a')));
+  return w || jsonb_build_object(
+    'y_settled', (select jsonb_build_array(s.on_date = d, s.how, s.run_number = pg_temp.rnum(v_y))
+                  from private.run_settled_on(v_y) s),
+    'read', jsonb_build_array(p -> 0 ->> 'paid_on' = d::text, p -> 0 ->> 'paid_how',
+                              p -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_y)),
+    'nightly', pg_temp.nightly());
+end $$;
+select is(pg_temp.iso('s17f', true),
+  '{"exec": "ok", "returned": "ok", "y": "booked:booked",
+    "y_lines": ["allocation:60000", "payout_returned:60000", "unplanned_payout:-60000"],
+    "y_settled": [true, "set_off", true], "read": [true, "set_off", true], "nightly": []}'::jsonb,
+  '17 (f) (review round 1, M7A-MONEY-1; switch on): after a cancellation after download, the late payout executed and '
+  'returned before the next run: that N = 0 run settles the collection by set-off (« Désimputer » reads it so)');
+
+-- (g) (review round 1, M7A-MONEY-2; switch on) rule 4 paid through a later run: Durand's run cancelled after download
+-- (E released), its payout U executed late; Y holds E (+40 000) and U's −40 000 row (N = 0, booked at approval, no
+-- transfer); U comes back (+40 000 re-queued) and Z pays it (with another collection): allocation_remitted says E was
+-- remitted in Y — a run without a transfer of its own (run_transfer false: the payout that came back was U, « hors
+-- reversement ») — and paid by Z; Z's own collection was remitted in a run with its transfer
+create or replace function pg_temp.s17g() returns jsonb language plpgsql as $$
+declare v_t uuid; v_y uuid; v_z uuid; w jsonb; p jsonb; q jsonb; d date := private.paris_today();
+begin
+  v_t := pg_temp.late_cancel('a7', '7a', 40000, '7a0');
+  w := jsonb_build_object('exec', pg_temp.late_exec(v_t, '7a1'));
+  v_y := pg_temp.request('a7', 'draft-run-7a2');
+  perform pg_temp.prepare_plain(v_y);
+  w := w || jsonb_build_object('y', pg_temp.approve_plain(v_y, 'approve-run-7a2'));
+  w := w || jsonb_build_object('y_transfer', pg_temp.rtransfer(v_y));
+  w := w || jsonb_build_object('returned', pg_temp.late_return(v_t, '7a3'));
+  perform pg_temp.reconfirm('a7');
+  perform pg_temp.pending('a7', '7b', 25000);
+  v_z := pg_temp.flight('a7', '7a4');
+  perform pg_temp.debit(v_z, '7a4', d - 1);
+  p := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('7a')));
+  q := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('7b')));
+  return w || jsonb_build_object(
+    'e', jsonb_build_array(p -> 0 ->> 'run_number' = pg_temp.rnum(v_y), p -> 0 -> 'run_transfer', p -> 0 ->> 'paid_how',
+                           p -> 0 ->> 'paid_on' = (d - 1)::text, p -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_z)),
+    'z_own', jsonb_build_array(q -> 0 ->> 'run_number' = pg_temp.rnum(v_z), q -> 0 -> 'run_transfer',
+                               q -> 0 ->> 'paid_how', q -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_z)));
+end $$;
+select is(pg_temp.iso('s17g', true),
+  '{"exec": "ok", "y": "booked:booked", "y_transfer": null, "returned": "ok",
+    "e": [true, false, "paid", true, true], "z_own": [true, true, "paid", true]}'::jsonb,
+  '17 (g) (review round 1, M7A-MONEY-2; switch on): a collection remitted in an N = 0 run and paid by a later run after '
+  'the unplanned payout that netted it came back: allocation_remitted says the remitted run had no transfer of its own '
+  '(run_transfer false), and true for a run paid by its own payout');
+
 -- §3.3 The worked example's return of 12/11 (design §7.2): P1's return through the job's mode, one transaction ----------
 -- E2 (200 000) remitted in RV-1; P6 (300 000) allocated since; P1 returned → R(E2), the cash_out and A1 (adv:<R(E2)>,
 -- MAND-a1) at the return date; 4670[Martin] −300 000 (P6 owed in full); the queue P6 +300 000, R(E2) −200 000, A1 +200 000
@@ -2267,19 +2531,20 @@ begin
   perform pg_temp.job_returns(jsonb_build_array(jsonb_build_array(pg_temp.l2('be91', 1), 'e9')));
   v_r := pg_temp.rev(pg_temp.alloc('e9'));
   a := pg_temp.adv_of(v_r);
-  return jsonb_build_object(
+  return (jsonb_build_object(
     'r', jsonb_build_array(pg_temp.edate(v_r) = d, pg_temp.books(v_r) -> 'client_payable'),
     'a1', jsonb_build_array(pg_temp.ekey(a.entry_id) = 'adv:' || v_r, pg_temp.edate(a.entry_id) = d,
                             a.mandate_id = pg_temp.mandate('a1'), pg_temp.books(a.entry_id)),
     'owed', pg_temp.owed('a1'), 'queue', pg_temp.queue('a1'), 'due_to_servicer', pg_temp.bal('due_to_servicer', null, d),
-    'cash_out', (select count(*) from public.ledger_entry where idempotency_key = 'cash_out:' || pg_temp.l2('be91', 1)));
+    'cash_out', (select count(*) from public.ledger_entry where idempotency_key = 'cash_out:' || pg_temp.l2('be91', 1))))
+         || jsonb_build_object('nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s33'),
   '{"r": [true, 200000],
     "a1": [true, true, true, {"due_to_servicer": 200000, "client_payable": -200000, "client_advance_receivable": 200000,
                               "due_from_client_funds": -200000}],
     "owed": -300000, "queue": ["allocation:300000", "allocation_reversal:-200000", "client_advance:200000"],
-    "due_to_servicer": 200000, "cash_out": 1}'::jsonb,
+    "due_to_servicer": 200000, "cash_out": 1, "nightly": []}'::jsonb,
   '§3.3: P1''s return of 12/11 through the debit job — R(E2), the cash_out and A1 in one transaction; P6 owed in full');
 
 

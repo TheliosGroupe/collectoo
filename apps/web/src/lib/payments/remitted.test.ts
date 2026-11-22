@@ -4,13 +4,16 @@ import { allocationErrorCode } from "./allocation";
 import { CHECK_LABEL, checkLabel, debitErrorCode } from "./debits";
 import {
   FULL_CHECK,
+  advanceIdsParam,
   coverErrorCode,
   coverPrompt,
   fullCheckErrorCode,
+  parseAdvanceIds,
   parseAllocationRemitted,
   remittedHead,
   returnRemittedNote,
   reverseErrorCode,
+  reverseNotice,
   reverseRemittedEffect,
   reverseToast,
   type RemittedEntry,
@@ -25,6 +28,7 @@ const base: RemittedEntry = {
   entry_id: "00000000-0000-0000-0000-000000000001",
   account_id: "00000000-0000-0000-0000-000000000002",
   run_number: "RV-2026-000001",
+  run_transfer: true,
   booked_on: "2026-11-03",
   amount_minor: "200000",
   paid_on: "2026-11-03",
@@ -101,6 +105,29 @@ describe("« Désimputer » of a remitted entry (plan §3.7, §3.2.1)", () => {
     expect(parseAllocationRemitted([base])).toEqual([base]);
     expect(parseAllocationRemitted([{ ...base, amount_minor: 200000 }])).toBeNull();
     expect(parseAllocationRemitted({})).toBeNull();
+    // review round 1 (M7A-MONEY-2): whether the remitted run had a payout transfer is part of the read
+    const noTransfer: Record<string, unknown> = { ...base };
+    delete noTransfer.run_transfer;
+    expect(parseAllocationRemitted([noTransfer])).toBeNull();
+    expect(parseAllocationRemitted([{ ...base, run_transfer: "true" }])).toBeNull();
+  });
+  it("(review round 1, M7A-MONEY-2) names the payout that came back: the run's own, or one outside any run", () => {
+    // run_settled_on rule 3: the remitted run's own payout came back, a later run paid the re-queued item
+    expect(remittedHead({ ...base, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004" })).toContain(
+      "après le retour du virement du reversement RV-2026-000001",
+    );
+    // rule 4: the remitted run was an N = 0 run (no transfer): what came back was an unplanned payout
+    const rule4 = remittedHead({
+      ...base,
+      run_transfer: false,
+      paid_on: "2026-11-21",
+      paid_run_number: "RV-2026-000675",
+      run_number: "RV-2026-000674",
+    });
+    expect(rule4).toBe(
+      "Déjà reversé au client (reversement RV-2026-000675, débité le 21/11/2026, après le retour du virement hors reversement qui l'avait payé).",
+    );
+    expect(rule4).not.toContain("virement du reversement RV-2026-000674");
   });
   it("says it per paid_how, never « versé » or « débité » for a set-off or a net nil", () => {
     expect(remittedHead(base)).toBe("Déjà reversé au client (reversement RV-2026-000001, débité le 03/11/2026).");
@@ -138,6 +165,74 @@ describe("« Désimputer » of a remitted entry (plan §3.7, §3.2.1)", () => {
     );
     expect(returnRemittedNote([], "EUR")).toBeNull();
   });
+  it("(review round 1, tests-ui-1) words the return per paid_how: « reversé » only for a payout paid and kept", () => {
+    const back = returnRemittedNote([{ ...base, paid_on: null, paid_how: null, paid_run_number: null }], "EUR");
+    expect(plain(back)).toBe(
+      "Paiement compris dans le reversement RV-2026-000001 (revenu, à verser de nouveau) : au retour, le cabinet lui avance 2 000,00 €.",
+    );
+    const setOff = returnRemittedNote([{ ...base, paid_how: "set_off" }], "EUR");
+    expect(plain(setOff)).toBe(
+      "Paiement déjà réglé au client par compensation dans le relevé RV-2026-000001 du 03/11/2026 : au retour, le cabinet lui avance 2 000,00 €.",
+    );
+    const netted = returnRemittedNote([{ ...base, paid_how: "netted" }], "EUR");
+    expect(plain(netted)).toBe(
+      "Paiement déjà compris dans le relevé RV-2026-000001 du 03/11/2026 (montant net nul) : au retour, le cabinet lui avance 2 000,00 €.",
+    );
+    for (const t of [back, setOff, netted]) {
+      expect(t).not.toContain("reversé au client");
+      expect(t).not.toContain("versé le");
+      expect(t).not.toContain("débité");
+    }
+    // a payout paid through a later run, after its own came back (rule 3) or after an unplanned one did (rule 4)
+    expect(plain(returnRemittedNote([{ ...base, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004" }], "EUR"))).toBe(
+      "Paiement déjà reversé au client (RV-2026-000004, après le retour du virement du reversement RV-2026-000001) : au retour, le cabinet lui avance 2 000,00 €.",
+    );
+    expect(
+      plain(
+        returnRemittedNote(
+          [{ ...base, run_transfer: false, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004" }],
+          "EUR",
+        ),
+      ),
+    ).toBe(
+      "Paiement déjà reversé au client (RV-2026-000004, après le retour du virement hors reversement qui l'avait payé) : au retour, le cabinet lui avance 2 000,00 €.",
+    );
+    // two entries of different kinds: each clause once, one advance for the total
+    expect(
+      plain(returnRemittedNote([base, { ...base, entry_id: "x", amount_minor: "5000", paid_how: "set_off" }], "EUR")),
+    ).toBe(
+      "Paiement déjà reversé au client (RV-2026-000001) ; déjà réglé au client par compensation dans le relevé RV-2026-000001 du 03/11/2026 : au retour, le cabinet lui avance 2 050,00 €.",
+    );
+  });
+});
+
+describe("(review round 1, M7A-MONEY-3) the notice after « Désimputer » reads the advances back from the ledger", () => {
+  const adv = "11111111-1111-4111-8111-111111111111";
+  const rev = "22222222-2222-4222-8222-222222222222";
+  it("carries ids in the URL, never an amount", () => {
+    expect(advanceIdsParam([adv, adv])).toBe(`${adv},${adv}`);
+    expect(parseAdvanceIds(`${adv},${adv}`)).toEqual([adv, adv]);
+    expect(parseAdvanceIds("")).toEqual([]);
+    expect(parseAdvanceIds(undefined)).toBeNull();
+    expect(parseAdvanceIds("123456789")).toBeNull();
+    expect(parseAdvanceIds([adv])).toBeNull();
+    expect(parseAdvanceIds(Array.from({ length: 51 }, () => adv).join(","))).toBeNull();
+  });
+  it("totals only this payment's live advances, as the ledger holds them", () => {
+    const rows = [
+      { id: adv, amount_minor: "50000", cause_entry_id: rev, reversed: false },
+      // another payment's reversal (a crafted or stale link): not counted
+      { id: adv, amount_minor: "123456789", cause_entry_id: "33333333-3333-4333-8333-333333333333", reversed: false },
+      // released since (its entry reversed): not counted
+      { id: adv, amount_minor: "7000", cause_entry_id: rev, reversed: true },
+    ];
+    expect(plain(reverseNotice(rows, new Set([rev]), "EUR"))).toBe(
+      "Imputation annulée ; avance du cabinet de 500,00 € enregistrée.",
+    );
+    expect(reverseNotice([], new Set([rev]), "EUR")).toBe("Imputation annulée.");
+    // nothing of this payment was reversed: no notice at all
+    expect(reverseNotice(rows, new Set(), "EUR")).toBeNull();
+  });
 });
 
 describe("« Couvrir » and the full check (plan §3.7)", () => {
@@ -165,6 +260,22 @@ describe("« Couvrir » and the full check (plan §3.7)", () => {
     expect(errorText("full_check_already_requested")).toBe(
       "Une vérification complète est déjà demandée : elle passe avec les prochains contrôles.",
     );
+  });
+  it("(review round 1, CC-3) words a lock wait of the request as checks in progress", () => {
+    expect(fullCheckErrorCode("canceling statement due to lock timeout")).toBe("full_check_busy");
+    expect(fullCheckErrorCode("could not obtain lock on row in relation")).toBe("full_check_busy");
+    expect(errorText("full_check_busy")).toBe("Contrôles en cours : réessayez dans un instant.");
+  });
+});
+
+describe("(review round 1, tests-ui-2) the refusal of a return while a run takes the advance back", () => {
+  it("says what happens: not booked until that run is debited, then support", () => {
+    const code = transferLineErrorCode({ code: "55000", message: "transfer line booking refused: advance_in_flight" });
+    expect(code).toBe("advance_in_flight");
+    expect(transferLineErrorText(code)).toBe(
+      "L'avance liée à ce virement est en cours de récupération par un reversement validé : ce retour ne peut pas être comptabilisé tant que ce reversement n'est pas débité ; après son débit, prévenez le support.",
+    );
+    expect(transferLineErrorText(code)).not.toContain("se comptabilise après");
   });
 });
 

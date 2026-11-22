@@ -1546,8 +1546,9 @@ select is(pg_temp.isolated('d_ml1_cover'),
     "bounced": ["unplanned_payout", "0", "10000", "items"], "booked": "ok", "queue_after": 20000,
     "advances": ["double_payout:10000", "remitted_reversal:3000"], "dirty": []}'::jsonb,
   'D (ML-1, the plan''s example): a cancelled run''s released lines holding a bounced collection''s −X and its '
-  'payout_overrun cover''s +X count signed, the cover as an item — P = A while the collection is owed; once it bounces '
-  'too the net is 0: P = 0, the advance all of it, the new collection still owed (never the cover''s X)');
+  'remitted_reversal cover''s +X (payout_overrun before M2c-7a) count signed, the cover as an item — P = A while the '
+  'collection is owed; once it bounces too the net is 0: P = 0, the advance all of it, the new collection still owed '
+  '(never the cover''s X)');
 select is(pg_temp.dirty(), '{}'::text[], 'D: clean');
 
 -- C. ML-8's CSV form and its second line (plan §3.4.4 (iii); critic2 ML-8) ---------------------------------------------

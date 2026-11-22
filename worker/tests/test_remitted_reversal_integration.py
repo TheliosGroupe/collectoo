@@ -9,8 +9,11 @@ docs/design/m2c-7-plan.md §2.1, §3.3, §3.9 « Worker »; design §7.2; ADR-00
 * two connections, no deadlock and exactly one cover (`adv:<R>` or `adv:<R>:<run>`), never LG009:
   « Désimputer » of a remitted allocation against generate_transfer_file (which holds the remit
   lock) and against the client's approval job, each first; « Désimputer » and the funds pass
-  booking the run's payout, each first (critic F14); « Couvrir » and the at-booking cover of the
-  same reversal.
+  booking the run's payout, each first (critic F14); (review round 1, tests-ui-6) ops' strict link
+  of the bank's return of that collection and the same funds pass, each first; « Couvrir » and the
+  at-booking cover of the same reversal;
+* (review round 1, CC-3) « Vérification complète des avances »: a double submit replays, and a
+  request while a check run holds the open one's take is refused at once.
 """
 
 from __future__ import annotations
@@ -264,9 +267,13 @@ def _job(sql: str, *params: Any) -> Any:
     return call
 
 
-def _in_flight_run(tenant: dict[str, Any]) -> tuple[Any, str, str, str]:
+def _in_flight_run(
+    tenant: dict[str, Any], return_ref: str | None = None
+) -> tuple[Any, str, str, str]:
     """The client's run with one collection, approved and handed out (sent), and its payout's debit
-    on a statement imported without the debit job; (file, payment, run, debit line)."""
+    on a statement imported without the debit job; (file, payment, run, debit line). With
+    `return_ref`, the same statement also carries the bank's return of that collection (a debit
+    naming the payment's end-to-end id, bank reference `return_ref`), not linked either."""
     from remittance_helpers import _bank_catch_up  # noqa: PLC0415
 
     from collectoo_worker.synth.camt053 import Entry, Tx  # noqa: PLC0415
@@ -301,7 +308,11 @@ def _in_flight_run(tenant: dict[str, Any]) -> tuple[Any, str, str, str]:
     tx = Tx(int(t[2]), ref=ref, end_to_end_id=str(t[1]), name="CLIENT", ustrd=("REVERSEMENT",))
     entry = Entry(int(t[2]), False, paris_today(), paris_today(), ref=f"N{ref}",
                   code="PMNT/ICDT/ESCT", txs=(tx,))  # fmt: skip
-    _import_quiet(tenant, [entry])
+    entries = [entry]
+    if return_ref is not None:
+        e2e = str(_value("select end_to_end_id from public.payment where id = %s", p))
+        entries.append(return_entry(100_000, e2e, return_ref, paris_today()))
+    _import_quiet(tenant, entries)
     return f, p, run, line_id(tenant, ref)
 
 
@@ -368,6 +379,98 @@ def test_unalloc_and_the_payout_s_booking_cover_the_reversal_once(first: str) ->
     keys = _one_cover(tenant["client"], e)
     assert len(keys) == 1, out
     assert keys[0].endswith(f":{run}") == (first == "reverse"), keys
+
+
+@pytest.mark.parametrize("first", ["booking", "link"])
+def test_a_return_link_and_the_payout_s_booking_cover_the_reversal_once(first: str) -> None:
+    """(review round 1, tests-ui-6; plan §3.9 « Worker », critic F14) the M2b return path: ops'
+    strict link of the bank's return of a collection of run X (« Débits et retours », link_debit
+    'return') and the funds pass booking X's payout, each first. Linked first, the reversal is
+    posted while X is in flight and the booking covers it (adv:<R>:<X>); booked first, the link
+    covers it (adv:<R>); never a deadlock nor LG009, exactly one advance, X booked."""
+    tenant = remittance_tenant()
+    ret_ref = f"RT{uuid.uuid4().hex[:8].upper()}"
+    _f, p, run, line = _in_flight_run(tenant, return_ref=ret_ref)
+    ret_line = line_id(tenant, ret_ref)
+    transfer = str(_value("select transfer_id from public.remittance_run where id = %s", run))
+    e = _allocation(p)
+    booking = _funds_pass(tenant, line, transfer)
+    link = _as(
+        tenant["staff"],
+        "select public.link_debit(%s, %s, 'return', %s, null, %s, %s)",
+        str(uuid.uuid4()),
+        ret_line,
+        p,
+        "100000",
+        "retour du paiement (test)",
+    )
+    out = _hold(booking, link) if first == "booking" else _hold(link, booking)
+    seen = json.dumps(out, default=str)
+    assert "40P01" not in seen and "LG009" not in seen, out
+    assert link_of(ret_line) is not None and link_of(ret_line)[0] == "return", out  # type: ignore[index]
+    assert run_row(run)["status"] == "booked", out
+    keys = _one_cover(tenant["client"], e)
+    assert len(keys) == 1, out
+    assert keys[0].endswith(f":{run}") == (first == "link"), keys
+
+
+# -- « Vérification complète des avances »: its double submit, a running take ----------------------
+
+
+def _request_full(tenant: dict[str, Any], key: str) -> Any:
+    return _as(
+        tenant["admin"],
+        "select public.request_full_advance_check(%s, %s)",
+        key,
+        tenant["servicer"],
+    )
+
+
+def test_a_double_submit_of_the_full_check_request_replays() -> None:
+    """(review round 1, CC-3) the same key sent twice at once: the second waits for the first and
+    returns its recorded result — never the « already requested » refusal its own row would get."""
+    tenant = remittance_tenant()
+    key = str(uuid.uuid4())
+    out = _hold(_request_full(tenant, key), _request_full(tenant, key))
+    assert isinstance(out["a"], dict) and out["a"].get("queued") is True, out
+    assert out["b"] == out["a"], out
+    assert (
+        _value(
+            "select count(*) from private.advance_full_check_request where organization_id = %s",
+            tenant["servicer"],
+        )
+        == 1
+    )
+
+
+def test_a_full_check_request_while_a_check_run_takes_the_open_one_is_refused_at_once() -> None:
+    """(review round 1, CC-3) a check run has taken the open request and is still running: a new
+    request is answered « already requested » at once (the open request read under the servicer's
+    lock), never left waiting on the unique index until the check run commits."""
+    tenant = remittance_tenant()
+    with psycopg.connect(DB) as conn:
+        as_user(conn, tenant["admin"], "aal2")
+        conn.execute(
+            "select public.request_full_advance_check(%s, %s)",
+            (str(uuid.uuid4()), tenant["servicer"]),
+        )
+        conn.execute("reset role")
+
+    def take(conn: psycopg.Connection[Any]) -> Any:
+        run = conn.execute(
+            "insert into public.payment_check_run (organization_id) values (%s) returning id",
+            (tenant["servicer"],),
+        ).fetchone()
+        assert run is not None
+        row = conn.execute(
+            "select private.advance_full_check_take(%s, %s)", (tenant["servicer"], run[0])
+        ).fetchone()
+        return row[0] if row else None
+
+    out = _hold(take, _request_full(tenant, str(uuid.uuid4())))
+    assert out["a"] is True, out
+    assert out["b"] == ("23514", "advance check refused: already_requested"), out
+    assert out["b_waited"] is False, out
 
 
 def test_couvrir_and_the_at_booking_cover_of_one_reversal_post_one_advance() -> None:

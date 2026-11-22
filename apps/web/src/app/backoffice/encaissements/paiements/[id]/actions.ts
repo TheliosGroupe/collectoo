@@ -31,11 +31,12 @@ function done(paymentId: string, error: { message: string } | null): ActionResul
   return { ok: true };
 }
 
-/** « Désimputer »: the allocation entries the page showed, on one file, reversed at their date. M2c-7a: with the total
- * of the advances the command posted for the entries already remitted (minor units, from SQL), for the page's notice. */
+/** « Désimputer »: the allocation entries the page showed, on one file, reversed at their date. M2c-7a: with the ids of
+ * the advances the command posted for the entries already remitted — review round 1 (M7A-MONEY-3): ids only, never an
+ * amount; the page reads their amounts back from the ledger for its notice. */
 export async function reverseAllocation(
   formData: FormData,
-): Promise<{ ok: true; advanceMinor: string } | { error: ErrorCode }> {
+): Promise<{ ok: true; advanceIds: string[] } | { error: ErrorCode }> {
   const key = field(formData, "idempotency_key");
   const payment = field(formData, "payment_id");
   const account = field(formData, "account_id");
@@ -58,14 +59,12 @@ export async function reverseAllocation(
   }
   revalidatePath(`/backoffice/encaissements/paiements/${payment}`);
   revalidatePath("/backoffice/encaissements/a-traiter");
-  // the advances it posted (their amounts as text, from SQL): their total for the notice
-  const advances = (data as { advances?: { amount_minor?: unknown }[] } | null)?.advances ?? [];
-  const total = advances.reduce(
-    (s, a) =>
-      s + (typeof a.amount_minor === "string" && /^\d{1,16}$/.test(a.amount_minor) ? BigInt(a.amount_minor) : BigInt(0)),
-    BigInt(0),
-  );
-  return { ok: true, advanceMinor: total.toString() };
+  // the advances it posted: their ids for the page, which reads their amounts back from the ledger
+  const advances = (data as { advances?: { advance_id?: unknown }[] } | null)?.advances ?? [];
+  const advanceIds = advances
+    .map((a) => a.advance_id)
+    .filter((id): id is string => typeof id === "string" && UUID.test(id));
+  return { ok: true, advanceIds };
 }
 
 /** « Imputer »: send the payment to allocation again (from the reason the page showed), or use what is left

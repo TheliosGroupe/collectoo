@@ -105,6 +105,7 @@ export type ErrorCode =
   | "cover_gap_changed"
   | "cover_over_covered"
   | "full_check_already_requested"
+  | "full_check_busy"
   | "already_reversed"
   | "file_held"
   | "refund_reason_mismatch"
@@ -401,6 +402,8 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   cover_over_covered: "L'avance dépasse l'encaissement annulé : prévenez le support.",
   full_check_already_requested:
     "Une vérification complète est déjà demandée : elle passe avec les prochains contrôles.",
+  // review round 1 (CC-3): another request of the servicer being recorded at that instant
+  full_check_busy: "Contrôles en cours : réessayez dans un instant.",
   already_reversed:
     "Cette imputation a déjà été annulée entre-temps : rechargez la page.",
   file_held:

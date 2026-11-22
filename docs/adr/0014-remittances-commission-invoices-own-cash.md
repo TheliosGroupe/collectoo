@@ -5970,5 +5970,156 @@ house rule asks for (every redefined function restated whole).
   run page and « Contrôles » read the ledger).
 - The worker's `tests/ledger_machine.py` 7a part (Deviations): with 7f.
 
+## M2c-7a review fixes (2026-11-22)
+
+### Round 1
+
+The review of `c2d9375` raised twelve lows and no high or medium: three of the money lens (M7A-MONEY-1 … 3), six of
+tests and pages (tests-ui-1 … 6), three of concurrency and cost (CC-1 … 3). Each was checked against the code first
+(reproduced on the main stack, inside rolled-back transactions, the switch on only where the item needs it); all twelve
+hold. The migration `20261122090000_remitted_reversals_covered.sql` is unmerged and was edited in place; no function is
+redefined beyond the eight of the slice, no public signature changes (`allocation_remitted` returns `jsonb`: one key
+more), `database.types.ts` is unchanged. **The switch stays off**; `033` byte for byte unchanged; `034`–`042` keep every
+assertion, no expected value changed (four descriptions reworded, below); `043` keeps its 44 assertions, five of them
+extended (below), and gains five (#33, #34, #45–#47: 49).
+
+- **M7A-MONEY-1 (an N = 0 run netting its own unplanned payout's return; fixed).** `private.run_settled_at` rule 4
+  followed the reversal of the run's own `unplanned_payout` line to that reversal's live line — in the same run when
+  the return was re-queued into it (an N = 0 run holding the −P row and the +P its return re-queued) — and called
+  itself until depth 10: no `paid_on` for the run and for every run settled through it, so « Désimputer » said
+  « revenu, à verser de nouveau » of collections the run had set off, and `advance_open` said `settled_on_depth`.
+  Reached with the switch off (S03r: a returned payout executed again and returned again before the next run) and on
+  (a cancellation after download, the late payout executed and returned before the next run). Now a return whose
+  re-queued item is a line of the run itself is netted there and not followed (as a same-run pair is, M7-MONEY-1): the
+  run falls through to its own rule (`booked_on`, « set_off » or « netted »). Pinned: `043` #45 (17 e, switch off:
+  the run and the earlier run whose payout came back both settled by set-off on its date; « Désimputer »'s read says
+  so for both collections; the nightly clean) and #46 (17 f, switch on) — both failed first on `c2d9375`.
+- **M7A-MONEY-2 (« après le retour du virement du reversement » for a run with no transfer; fixed).** Under rule 4 the
+  remitted run is an N = 0 run: the payout that came back was an unplanned one, never that run's. `public.allocation_remitted`
+  gains `run_transfer` (whether the remitted run had a payout transfer of its own); the sheet and the return note word
+  rule 4 « … après le retour du virement hors reversement qui l'avait payé ». Pinned: `043` #47 (17 g, switch on: E
+  remitted in an N = 0 run, its unplanned payout back, the re-queued item paid by Z: `run_transfer` false, « paid », Z;
+  Z's own collection `run_transfer` true; failed first: no key); vitest (`remittedHead` rule 3 and rule 4; the parser
+  refuses a row without the key).
+- **M7A-MONEY-3 (the advance's amount carried in the address; fixed).** After « Désimputer » the address carries the
+  ids of the advances the command posted (`?desimpute=<ids>`, never an amount; anything else ignored); the page reads
+  them back from the ledger (`client_advance` by id, money staff's read) and keeps only those that cover a reversal of
+  this payment and whose entry is not reversed since; no reversal of the payment on the page → no notice. A crafted or
+  stale link shows no amount the ledger does not hold. vitest (`parseAdvanceIds`, `reverseNotice`: another payment's
+  advance and a released one not counted); the E2E (« Imputation annulée ; avance du cabinet de 500,00 € enregistrée. »)
+  passes through the new read. The 7a « Left open » item on `?avance=` is closed.
+- **tests-ui-1 (« Débits et retours » said « reversé » whatever `paid_how`; fixed).** The return note's clause now
+  follows `paid_how` as the « Désimputer » sheet does: « Paiement compris dans le reversement RV-… (revenu, à verser
+  de nouveau) », « Paiement déjà réglé au client par compensation dans le relevé RV-… du … », « Paiement déjà compris
+  dans le relevé RV-… du … (montant net nul) », and « déjà reversé au client (RV-…) » only for a payout paid and kept
+  (with « après le retour du virement … » when a later run paid it); each clause once, then the advance's total. The
+  plan's text for the paid case is unchanged. vitest: one case per `paid_how` and for `paid_on` null, none saying
+  « reversé au client », « versé le » or « débité » there; a later run's payment, rule 3 and rule 4; two entries.
+- **tests-ui-2 (the `advance_in_flight` text; fixed).** « L'avance liée à ce virement est en cours de récupération par
+  un reversement validé : ce retour ne peut pas être comptabilisé tant que ce reversement n'est pas débité ; après son
+  débit, prévenez le support. » — true of the code: once that run is debited its settlement of the advance makes the
+  same return `advance_settled` (`043` #24), never booked here. vitest.
+- **tests-ui-3 (the backstop's alert unpinned; fixed).** `043` #41 (16, the overrun backstop) also asserts
+  `payout_overrun`'s P0 alert for the open advance (`[[the advance, 3000]]`); the review's mutant (the alert's rows
+  dropped) now fails #41 (it passed every file before). The four stale descriptions are reworded to the cause they
+  assert (`035` l.1452, `036` C, `037b` `d_ml1_cover`, `040` F5b), their expected values unchanged.
+- **tests-ui-4 (`038`'s three Suivi scenarios on a planted state; left open, default below).**
+- **tests-ui-5 (the nightly after each path; fixed).** `pg_temp.nightly()` (a full pass of `run_advance_checks`: the
+  rows of `remitted_reversal_uncovered` and `advance_ledger`) ends every scenario that posts, releases or re-posts a
+  cover — 1, 2, 4, 5a–5c, 5e, 5f, 6 (both), 7, 8, 11 (both), 12, 13, §3.3 and the three new ones —, expected `[]`. The
+  `advance_ledger` mutant (its `not exists` inverted) now fails 16 of the 49 (two before).
+- **tests-ui-6 (the M2b return path in two sessions; fixed).** `test_a_return_link_and_the_payout_s_booking_cover_the_reversal_once[booking|link]`:
+  ops' strict link of the bank's return of a collection of run X (`link_debit … 'return'`) against the funds pass
+  booking X's payout, each first — no deadlock, no `LG009`, X booked, exactly one advance (`adv:<R>` when the booking
+  went first, `adv:<R>:<X>` when the link did). Killed: `debit_post_rows` without its cover call (the booking first:
+  the link refused `LG009`). The `ledger_machine.py` part stays with 7f (7a « Left open »).
+- **CC-1 (the delta window keyed on `booked_on`; fixed).** A run booked today from a debit dated earlier (a statement
+  imported late, a late predecessor) fell outside every delta window. The window now also reads the runs whose payout
+  booking was recorded since (`bank_line_booking` of kind `payout`, `decided_at` in the window, by
+  `bank_line_booking_org_idx`; each transfer's run by key), with the runs whose `booked_on` is in it. Pinned: `043` #33
+  (a run booked today from a debit five days old, its line reversed before the window, the at-booking cover planted
+  missing: the delta pass finds the gap, as the full pass does; failed first). Killed: that branch dropped.
+- **CC-2 (the window a filter under a generic plan; fixed).** `(v_full or <column> >= …)` cannot be an index
+  condition once PL/pgSQL caches a generic plan (after five calls in one backend): the delta pass then read every
+  booked run, attribution and cover of the servicer. The bounds are computed once (`-infinity` for the full pass) and
+  every branch reads a key range (`booked_on >= v_from_date`, `created_at >= v_from_ts`, `decided_at >= v_from_ts`; the
+  bookings branch and the day's reversals keep their one-time `not v_full`). Pinned: `043` #34 (six runs booked twenty
+  days ago, the window forty days ahead, `plan_cache_mode = force_generic_plan`: the delta pass fetches **0**
+  `remittance_run` rows, the full pass at least six; 6 before). Killed: the `or` filter restored.
+- **CC-3 (the full check's request: double submit and a running take; fixed).** `public.request_full_advance_check`
+  takes the servicer's advisory lock (`advance_full_check:<org>`) before its replay, then reads the open request under
+  it: a double submit waits for the first and replays its recorded result (it was refused `already_requested` by the
+  unique index); a request while a check run has taken the open one and not committed reads it open and is refused
+  `already_requested` at once (it waited on the unique index for the whole check run — up to its `lock_timeout`, then
+  55P03 — or, the run committed, inserted a second request). The unique index stays as the last guard. « Contrôles »
+  maps a lock wait (55P03) to « Contrôles en cours : réessayez dans un instant. » (`full_check_busy`). Pinned: worker
+  `test_a_double_submit_of_the_full_check_request_replays` and
+  `test_a_full_check_request_while_a_check_run_takes_the_open_one_is_refused_at_once` (both failed first), vitest. Killed:
+  the lock dropped (the first), the pre-check dropped (the second).
+
+`043` #32 (14, the request table) read the whole table; it now reads its own servicer's requests only (the worker's
+new tests commit requests of their own servicers, which a later local run of `043` would have counted) — its expected
+value unchanged.
+
+### Mutants
+
+SQL, each one function of the migration replaced inside `043`'s transaction (rolled back with it); worker, each applied
+to the stack, the named tests run, the function restored; web, `remitted.ts` with one change, vitest, the file restored.
+
+| Mutant | Killed by |
+|---|---|
+| `run_settled_at`: a same-run return followed (the guard dropped) | `043` #45, #46 |
+| `allocation_remitted`: `run_transfer` always true | `043` #47 |
+| `run_advance_checks`: the bookings branch dropped | `043` #33 |
+| `run_advance_checks`: `(v_full or booked_on >= v_since_date)` restored | `043` #34 |
+| `run_advance_checks`: `advance_ledger`'s `not exists` inverted | `043` #1, #2, #6, #10, #11, #13–#15, #17, #22, #23, #27–#30, #48 |
+| the `payout_overrun` alert's rows dropped (review's trigger) | `043` #41 |
+| `request_full_advance_check`: the pre-check dropped | worker `…_refused_at_once` |
+| `request_full_advance_check`: the advisory lock dropped | worker `…_replays` |
+| `debit_post_rows`: its cover call dropped | worker `…return_link…[booking]` |
+| web: `run_transfer` ignored | vitest (2 tests) |
+| web: the return note's clause ignoring `paid_how` | vitest |
+| web: the notice not scoped to the payment's reversals | vitest |
+| web: the notice counting a released advance | vitest |
+| web: the lock wait unmapped | vitest |
+
+14 of 14 killed.
+
+### Suites
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 45 files, **2,960 tests, PASS** (2,955 + `043`'s
+  five) in 455 s — `033` byte for byte; `034`–`042` every assertion and expected value kept.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 183 files) clean; unit pytest **1,094 passed, 5
+  xfailed**; the non-scale integration tests in CI's order, right after `supabase test db` without a reset: **257
+  passed** (253 + the four new) in 673 s.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic, **0** wrong.
+- Scale, each file once right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-7a review fixes, round
+  1 »): the transfer cancellation file 1 passed (51.2 s; the nightly checks 0.61 s); the 50,000-line run 1 passed
+  (258.3 s; the nightly checks with it booked 4.46 s, `run_advance_checks` 51 ms own); CI's `scale-payouts` command 6
+  passed in 20.2 min (the 5,000-member batch line's funds pass 22.2 s, the debit job 20.4 s, the nightly checks 1.03 s;
+  the 2,000 held chained runs' nightly checks 13.48 s, then 12.76 s) — within the 7a figures' spread.
+- `database.types.ts` unchanged (no public signature changed).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **27 files, 530 tests** passed (`remitted.test.ts` 16 → 22).
+- E2E (`./scripts/e2e.sh` after `supabase db reset`; desktop, mobile and switch-on projects): **61 passed** (5.8 min),
+  the « Désimputer » notice now read back from the ledger (« Imputation annulée ; avance du cabinet de 500,00 €
+  enregistrée. »); every screenshot's diff reverted (dates and ids only: no page they show changed — the notice is not
+  in a screenshot, the sheets' paid case reads as before).
+- Size: 178 non-test lines added and 38 removed (the migration 54 and 14, half of them comments; the web 124 and 24).
+
+### Left open (low), with its default
+
+- **tests-ui-4: `038`'s `d_queue`, `f_partial` and `d_twice`.** They still bounce a remitted collection by a raw
+  reversal with the cover trigger off around them, for the « Suivi » of a late payment bounded by the client's queue.
+  Rebuilding them as `037`'s `d_f5` was rebuilt (the bounced collection a line of a run in flight) cannot keep their
+  assertions: (i) `d_queue` and `d_twice` pin `executed_after_cancellation` with `p_bound` `queue` — after a cancellation
+  after download the cancelled run's lines go back to the queue and a client holds one open run at most, so the only
+  uncovered negative item (a reversal of a line in flight) cannot stand beside them: we found no path to that shape
+  under I23, the planted state keeps the builder's queue branch worded; (ii) `f_partial` (S03r) is reachable (as
+  `d_f5`), but only with a run approved between RV1's debit and its return, which moves the « Suivi » events across
+  two statements (its expectation split in two). Default: keep the three as wording pins of the builder on a planted
+  state (their comment says so), rebuild `f_partial` on two statements and drop the planted branch of the other two when
+  7f's property machine walks the reachable states; recorded here as the 7a block already listed it.
+- Everything the 7a block leaves open stays so, but its `?avance=` item (closed above, M7A-MONEY-3).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

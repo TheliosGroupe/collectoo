@@ -1450,7 +1450,8 @@ select is(pg_temp.owed('a8'), 0::bigint, 'Petit''s 4670 never in debit (no LG008
 -- M2c-7a (R3): the advance is the reversal's cover now, not an overrun: no payout_overrun alert (advance_open takes it
 -- after 30 days, plan §3.4)
 select is(pg_temp.alerts('payout_overrun'), '[]'::jsonb,
-  'payout_overrun alert while the advance is open (none since M2c-7a: the cover is remitted_reversal)');
+  'no payout_overrun alert while the advance is open: since M2c-7a it is the reversal''s remitted_reversal cover, not '
+  'an overrun (the alert itself is pinned by 043 #16, the overrun backstop)');
 select is(pg_temp.dirty(), '{}'::text[], 'clean after the cover (I13, I14: the advance item offsets the reversal)');
 create or replace function pg_temp.uncovered() returns text language plpgsql as $$
 begin
