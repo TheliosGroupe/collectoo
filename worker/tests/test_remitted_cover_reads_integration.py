@@ -24,7 +24,14 @@ collection reversed while its run is in flight, the same booking under generic p
 posted at the booking), and the night's advance checks: the rows read from remittance_line
 (pg_stat_xact_user_tables), a few per member or per run booked, never the planted lines once per
 member. On 245296d's bodies: 111,761 rows for the booking (the bound 120), 243,779 under generic
-plans, 111,717 for the advance checks (the bound 160)."""
+plans, 111,717 for the advance checks (the bound 160).
+
+A second 7a read had the same exposure: the double payout's advance (private.transfer_line_post,
+[critic] F10) reads the single mandate of its transfer's run's lines once per unplanned_payout
+part, and that function had no enable_seqscan off. The third test has the bank debit the lot's
+PmtInf twice (the cancellation switch off): the second line's parts are the members' unplanned
+payouts, each with its advance. On 7a's body: 240,588 rows, 12 sequential scans of remittance_line
+(one per member); fixed: 24, none — each advance still on the mandate its run's lines hold."""
 
 from __future__ import annotations
 
@@ -36,7 +43,7 @@ import pytest
 from explain_helpers import ADMIN
 from integration_helpers import one
 from psycopg.types.json import Jsonb
-from test_debit_bookings_scale_integration import _file_payouts
+from test_debit_bookings_scale_integration import _file_payouts, _statement
 from test_transfer_line_scale_integration import REASON, _as_ops, _insert_short_line
 
 pytestmark = pytest.mark.integration
@@ -96,14 +103,29 @@ def _lines_read(conn: psycopg.Connection[Any]) -> int:
     )
 
 
-def _book(conn: psycopg.Connection[Any], lot: dict[str, Any], line: str) -> tuple[int, int]:
-    """The lot's line booked as the API's session books it (options, then the command): the
-    bookings and the remittance_line rows the command read. The session's role reset after."""
+def _seq_scans(conn: psycopg.Connection[Any]) -> int:
+    """This transaction's sequential scans of remittance_line so far."""
+    return int(
+        one(
+            conn,
+            """select coalesce(sum(seq_scan), 0)
+               from pg_stat_xact_user_tables where relid = 'public.remittance_line'::regclass""",
+        )
+    )
+
+
+def _book(
+    conn: psycopg.Connection[Any], lot: dict[str, Any], line: str, kind: str = "payout"
+) -> tuple[list[dict[str, Any]], int, int]:
+    """The lot's line booked as the API's session books it (options, then the command), its single
+    proposal's parts all of `kind`: the bookings, and the remittance_line rows and sequential scans
+    the command read. The session's role reset after."""
     _as_ops(conn, lot["tenant"])
     opts = one(conn, "select public.transfer_line_options(%s)", (line,))
     assert (opts["class"], opts["member_count"], opts["refusal"]) == ("B", LOT, None), opts
     (proposal,) = opts["proposals"]
-    before = _lines_read(conn)
+    assert {p["kind"] for p in proposal["request"]} == {kind}, proposal["request"]
+    before, scans = _lines_read(conn), _seq_scans(conn)
     res = one(
         conn,
         "select public.book_transfer_line(%s, %s, %s, %s, %s)",
@@ -115,9 +137,9 @@ def _book(conn: psycopg.Connection[Any], lot: dict[str, Any], line: str) -> tupl
             REASON,
         ),
     )
-    read = _lines_read(conn) - before
+    read, scans = _lines_read(conn) - before, _seq_scans(conn) - scans
     conn.execute("reset role")
-    return len(res["bookings"]), read
+    return list(res["bookings"]), read, scans
 
 
 def _reverse_one(conn: psycopg.Connection[Any], lot: dict[str, Any], left: str) -> list[str]:
@@ -162,7 +184,8 @@ def test_a_lot_is_booked_reading_each_runs_lines_by_key_whatever_the_statistics(
         conn.execute("set role postgres")
         line, _left = _insert_short_line(conn, lot)
         conn.execute("reset role")
-        booked, read = _book(conn, lot, line)
+        bookings, read, _scans = _book(conn, lot, line)
+    booked = len(bookings)
     print(
         f"\n{LOT}-member lot short of one, {2 * PLANTED} lines planted in two runs: {booked}"
         f" bookings, {read} remittance_line rows read"
@@ -190,7 +213,8 @@ def test_the_runs_booked_and_the_night_after_read_by_key_under_generic_plans(
         conn.execute("reset role")
         reversals = _reverse_one(conn, lot, left)
         conn.execute("set local plan_cache_mode = force_generic_plan")
-        booked, read = _book(conn, lot, line)
+        bookings, read, _scans = _book(conn, lot, line)
+        booked = len(bookings)
         covered = one(
             conn,
             """select count(*) from public.client_advance
@@ -216,3 +240,78 @@ def test_the_runs_booked_and_the_night_after_read_by_key_under_generic_plans(
     assert run["violations"] == 0, run  # I23 holds: no remitted_reversal_uncovered
     assert read <= PER_MEMBER * LOT, read
     assert advance <= PER_RUN * LOT + SLACK, advance
+
+
+def _insert_whole_line(conn: psycopg.Connection[Any], lot: dict[str, Any], name: str) -> str:
+    """The file's PmtInf debited whole as one batch line, in `conn`'s transaction: the line."""
+    (pmt,) = lot["payouts"].payment_infos
+    st = _statement(conn, lot, name)
+    line = one(
+        conn,
+        """insert into public.bank_transaction (organization_id, bank_account_id,
+             statement_id, line_no, dedup_key, direction, amount_minor, currency,
+             booking_date, kind, payment_info_id)
+           values (%s, %s, %s, 1, %s, 'debit', %s, 'EUR', private.paris_today(),
+                   'batch_unsplit', %s) returning id""",
+        (lot["org"], lot["tenant"]["bank"], st, f"t:{st}:1", pmt.ctrl_sum_minor, pmt.pmt_inf_id),
+    )
+    conn.execute(
+        """update public.bank_statement set status = 'imported',
+             from_date = private.paris_today(), to_date = private.paris_today(),
+             opening_booked_minor = 0, closing_booked_minor = 0, counts = '{}',
+             finished_at = now() where id = %s""",
+        (st,),
+    )
+    return str(line)
+
+
+def _single_mandate(mandates: list[str | None]) -> str | None:
+    """[critic] F10: the single mandate of a run's lines (released or not), none when they hold
+    several, any line holds none, or there is no line."""
+    held = set(mandates)
+    return mandates[0] if len(held) == 1 and None not in held else None
+
+
+def test_a_lot_debited_twice_reads_each_advances_run_by_key(lot: dict[str, Any]) -> None:
+    """The bank debits the lot's PmtInf twice (the cancellation switch off): the first line books
+    the lot's payouts, the second's options propose each member as an unplanned payout of its
+    booked transfer (P = 0), each with its double_payout advance. The advance's mandate
+    (private.transfer_line_post, [critic] F10) is the single mandate of its transfer's run's
+    lines, read once per part — before the fix, under these statistics, by a sequential scan of
+    remittance_line per member (transfer_line_post had no enable_seqscan off: every planted line
+    once per member). Each advance still gets the mandate its run's lines hold."""
+    with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
+        _plant(conn)
+        conn.execute("set role postgres")
+        first = _insert_whole_line(conn, lot, "first.xml")
+        conn.execute("reset role")
+        paid, _read, _scans = _book(conn, lot, first)
+        conn.execute("set role postgres")
+        second = _insert_whole_line(conn, lot, "second.xml")
+        conn.execute("reset role")
+        twice, read, scans = _book(conn, lot, second, "unplanned_payout")
+        advances = conn.execute(
+            """select a.transfer_id::text, a.mandate_id::text,
+                      array(select q.mandate_id::text from public.remittance_line q
+                            where q.run_id = x.run_id order by q.line_no)
+               from public.client_advance a
+               join public.bank_transfer x on x.id = a.transfer_id
+               where a.bank_transaction_id = %s and a.cause = 'double_payout'""",
+            (second,),
+        ).fetchall()
+    print(
+        f"\n{LOT}-member lot debited twice, {2 * PLANTED} lines planted in two runs:"
+        f" {len(paid)} payouts, then {len(twice)} unplanned payouts"
+        f" ({sum(1 for b in twice if int(b.get('advance_minor') or 0) > 0)} with an advance):"
+        f" {read} remittance_line rows read, {scans} sequential scans"
+    )
+    assert len(paid) == LOT
+    assert len(twice) == LOT
+    assert all(int(b.get("advance_minor") or 0) > 0 for b in twice), twice
+    assert scans == 0, scans
+    assert read <= PER_MEMBER * LOT, read
+    # each advance on the single mandate its run's lines hold (one line, one mandate, per run here)
+    assert len(advances) == LOT, advances
+    for transfer, mandate, lines in advances:
+        assert lines and _single_mandate(lines) is not None, (transfer, lines)
+        assert mandate == _single_mandate(lines), (transfer, mandate, lines)

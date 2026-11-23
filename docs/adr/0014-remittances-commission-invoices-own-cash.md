@@ -6470,8 +6470,10 @@ the fix restored.
 | `run_advance_checks`: 7a's body | test 2's advance checks (111,188) |
 | `cover_booked_run_reversals`: only the `not exists` back to its old shape | test 2 (10,189: the hash of every live line, once) |
 | `run_booked_cover_check`: only the `not exists` back to its old shape | test 2 (10,201) |
+| `transfer_line_post`: 7a's body (no `enable_seqscan = off`; the second read, below) | test 3 (240,588 rows, 12 sequential scans) |
+| `transfer_line_post`: the fix with the advance's mandate read replaced by `null` | test 3 (the advance's mandate) |
 
-6 of 6 killed.
+8 of 8 killed.
 
 ### Suites
 
@@ -6494,6 +6496,87 @@ The second stack alone (the main stack was in use by 7b's build):
   2,000 held chained runs' nightly checks 14.97 s, then 15.24 s once the days are imported (7a round 3: 30.2, 1.20,
   26.1, 15.80 and 15.66 s).
 - Then `supabase db reset` (the second stack left running at this head's schema). No web code changed.
+
+### A second read: the double payout's advance (`private.transfer_line_post`)
+
+**What it was.** 7a ([critic] F10) gave the double payout's advance the single mandate of its transfer's run's lines:
+in `private.transfer_line_post` (`20261122090000` line 1602) the insert into `public.client_advance` reads, once per
+`unplanned_payout` part with an advance, `count(distinct q.mandate_id) … from public.remittance_line q where q.run_id =
+(select x.run_id from public.bank_transfer x where x.id = t.transfer_id)`. Neither that function nor its caller
+`public.book_transfer_line` sets `enable_seqscan = off`, so under the scale job's statistics (`n_distinct(run_id)` 2:
+the run's key estimated at half the table) each part read `remittance_line` by a sequential scan. Found by this round's
+verifier (VF-7A-TLP-MANDATE, medium).
+
+**How it is reached.** The bank debits a PmtInf twice (the cancellation-after-download switch off): the second line's
+options propose the lot as `unplanned_payout` parts of the booked transfers (P = 0), each with its advance. The
+verifier, a 500-member lot debited twice on the state the scale files leave: **51,502,500** rows in 500 sequential
+scans, **14.28 s** — cancelled at the API's 8 s.
+
+**Why not the fenced read alone.** The shape used above (the run by `bank_transfer`'s key, then its lines by `run_id`
+alone inside an `offset 0` fence, the aggregate outside) changes nothing here: under the test's planted statistics
+EXPLAIN still gives `Seq Scan on remittance_line` (cost 706, 10,000 rows estimated), below the bitmap of
+`remittance_line_pkey` (cost 2,574; no partial index's predicate is implied by the key) — a key estimated at half the
+table is cheaper by a sequential scan whatever the statement's shape. The three functions above already had
+`enable_seqscan = off`; their fence only kept a partial index from standing for the key.
+
+**Fix** (in `20261123080000`, the same unmerged migration): `private.transfer_line_post` redefined, copied whole from
+`20261122090000` line 1602 (nothing later redefines it; 7b's `20261123090000` does not), with `set enable_seqscan = off`
+beside `search_path ''` and the body unchanged — the same mandate or none in every case (several mandates, a line
+without one, no run, released lines counted). SECURITY DEFINER and the grants restated (EXECUTE revoked from public,
+anon, authenticated and service_role; the catalog's ACL `{postgres=X/postgres}` before and after). The setting also
+holds for the callees that set none of their own (`private.ledger_post_set_begin`, `private.ledger_post_set`,
+`private.ledger_reverse`, `private.transfer_file_release`, `private.bank_booking_begin`, `private.ledger_check_now`):
+measured below.
+
+**Test** (the same file, its third test, about 2 s): the 12-payout lot and the same planted statistics; the PmtInf
+debited whole and booked (the payouts), then debited again and booked as the API's session books it (the options'
+single proposal, every part an `unplanned_payout` with its advance): no sequential scan of `remittance_line` and
+≤ 10 rows read per member by the command, and each `double_payout` advance on the mandate its run's lines hold
+(computed from the lines in the test, so a fix that changed the result fails). On 7a's body: **240,588** rows, **12**
+sequential scans — it fails; fixed: **24**, none. Mutants: the two last rows of the table above.
+
+**At 500 members** (a probe, not a repo test: the scale file's fixture at 500, each command in a rolled-back
+transaction; 2 × 50,000 lines planted with `n_distinct(run_id)` 2 — about the table CI's scale order leaves — or the
+statistics as left; both bodies, two repeats in alternating order; every nested statement through `pg_stat_statements`,
+`track = all`):
+
+| Command (500 members) | 7a's body | fixed |
+|---|---|---|
+| second debit, planted: `remittance_line` rows / sequential scans | 50,286,500 / 500 | 1,000 / 0 |
+| — the command | 5.58 s, 18.54 s | 2.69 s, 2.79 s |
+| — `transfer_line_post` / its advance insert | 3.63 s, 16.69 s / 2.83 s, 15.76 s | 0.84 s, 0.90 s / 44 ms, 47 ms |
+| second debit, as left | 2.81 s, 2.74 s | 2.81 s, 2.67 s |
+| first debit (the payouts), planted / as left | 1.69 s, 1.84 s / 1.73 s, 1.98 s | 1.81 s, 1.83 s / 1.73 s, 1.79 s |
+| the lot short of one, planted / as left | 1.90 s, 2.00 s / 1.83 s, 1.83 s | 1.85 s, 1.83 s / 1.87 s, 1.85 s |
+
+Statement by statement (156 to 195 nested statements per command), none of `transfer_line_post`'s or its callees' is
+slower under the fix in both repeats by more than 10 % and 2 ms; the spread between runs is the same in functions this
+change does not touch (`private.transfer_line_check`'s own statements, up to +35 %). The plans that changed: in the
+second debit, 7a's body let the callees without a setting scan small tables (20 sequential scans: `organization` 3,
+`claim_ownership_period` 4, `ledger_entry` 3, and 2 each of `account`, `bank_account`, `payment`, `ledger_account`,
+`ledger_entry_type`), none with the fix; `ledger_post_set`'s check that each entry's client is one of the servicer's
+reads `organization` by key (1,500 buffers instead of a 10-page scan: 0.5 → 0.9 ms for 1,000 entries). The returns'
+and late predecessors' statements (credit lines, one by one) are not reached by these lots; pgTAP and the `db` job's
+transfer-line tests run them (below).
+
+Suites, the second stack alone:
+
+- `supabase test db` after `supabase db reset`: **Files=45, Tests=2,965, PASS** (455 s). A first run, after another
+  reset, failed `016`'s precondition 10 (« no page all-visible » of `bank_transaction`: most likely an autovacuum of the
+  seeded pages between the reset and that file; `016` reaches nothing this change touches) and passed alone.
+- Then, without a reset (CI's order), the `db` job's integration command: **260 passed** (792.9 s; the 259 above and
+  the new test).
+- `test_transfer_line_scale_integration.py` alone on a fresh `supabase db reset`: **7 passed** (187.6 s) — the
+  500-member lot short of one, rolled back: options 0.58 s, booking **1.72 s**, 2,995 `remittance_line` rows, no
+  sequential scan of a per-member table; through the API 0.54 s / **1.76 s**, the allocation lock held 1.53 s (budget
+  4 s); the saturating lots: options 2.33 / 2.60 s, the command 2.49 / 2.92 s (`parts_do_not_add_up`); 501 and 5,000
+  members 0.03 / 0.014 s (`lot_too_large`); the 50,000-item draft: options 0.10 s, command 0.19 s, lock 0.14 s.
+- The verifier's probe on that state (a new 500-member lot debited twice, rolled back), this head's body: the second
+  debit **3.67 s** with 2 × 10,000 lines planted (`n_distinct(run_id)` 2) and **3.23 s** as left, 1,000
+  `remittance_line` rows (2 per member), no sequential scan; the same body recreated in the transaction 2.69 / 2.91 s
+  (this VM's spread, another build running on the main stack); the first debit 1.80 to 2.70 s.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 184 files) clean.
+- Then `supabase db reset` (the second stack left running at this head's schema).
 
 ### Left open (low), with its default
 

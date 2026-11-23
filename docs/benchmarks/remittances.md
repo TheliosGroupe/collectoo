@@ -1765,3 +1765,35 @@ then the 2,000 held chained runs: the funds pass 21.8 s, the nightly checks **14
 12.91 s; round 3: 15.80 s), once the days are imported **15.24 s** (round 3: 15.66 s). Within the spread of the
 earlier rounds: there `remittance_line` holds about one line per run, so its statistics priced the run's key below the
 live index before the round too.
+
+### M2c-7a — CI round (main), the second read (2026-11-23, same VM, the second local stack — the main stack in use by another build meanwhile)
+
+What changes on a timed path: `private.transfer_line_post` (every `book_transfer_line`) runs under
+`enable_seqscan = off`, so the double payout's advance reads its run's lines by `remittance_line_pkey`'s prefix
+(ADR-0014 « M2c-7a — CI round (main) », « A second read »). Reached when the bank debits a PmtInf twice.
+
+The verifier's figure, before: a 500-member lot debited twice, on the state the scale files leave — **51,502,500**
+`remittance_line` rows in 500 sequential scans, **14.28 s** (past the API's 8 s); the setting alone 2.94 s, 1,000 rows.
+
+A probe at 500 members (the scale file's fixture; each command rolled back; 2 × 50,000 lines planted with
+`n_distinct(run_id)` 2, or the statistics as left; 7a's body and the fix, two repeats in alternating order,
+`pg_stat_statements` with `track = all`):
+
+| Command | 7a's body | fixed |
+|---|---|---|
+| second debit (500 unplanned payouts with advances), planted | 5.58 s, 18.54 s; 50,286,500 rows, 500 seq scans | 2.69 s, 2.79 s; 1,000 rows, none |
+| second debit, as left | 2.81 s, 2.74 s | 2.81 s, 2.67 s |
+| first debit (500 payouts), planted / as left | 1.69, 1.84 s / 1.73, 1.98 s | 1.81, 1.83 s / 1.73, 1.79 s |
+| the lot short of one (499 payouts), planted / as left | 1.90, 2.00 s / 1.83, 1.83 s | 1.85, 1.83 s / 1.87, 1.85 s |
+
+No nested statement slower under the fix in both repeats by more than 10 % and 2 ms; the only consistent plan change
+outside the mandate read, `ledger_post_set`'s client check by key, 0.5 → 0.9 ms for 1,000 entries.
+
+On the fix, `test_transfer_line_scale_integration.py` alone on a fresh `supabase db reset`: **7 passed** (187.6 s) —
+the 500-member lot short of one, rolled back: options 0.58 s, booking **1.72 s**, 2,995 `remittance_line` rows, no
+sequential scan of a per-member table; through the API 0.54 s / **1.76 s**, the allocation lock held 1.53 s; the
+saturating lots: options 2.33 / 2.60 s, the command 2.49 / 2.92 s; 501 and 5,000 members 0.03 / 0.014 s; the
+50,000-item draft: options 0.10 s, command 0.19 s, lock 0.14 s. Then the verifier's probe on that state, a new
+500-member lot debited twice: the second debit **3.67 s** planted (2 × 10,000 lines), **3.23 s** as left, 1,000 rows,
+no sequential scan (the same body recreated in the transaction: 2.69 / 2.91 s, this VM's spread); the first debit 1.80
+to 2.70 s.

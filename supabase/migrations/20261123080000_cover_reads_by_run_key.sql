@@ -16,6 +16,14 @@
 -- latest definition (20261122090000_remitted_reversals_covered.sql, lines 547, 731 and 895; its settings, SECURITY
 -- DEFINER, search_path '' and grants restated, the reads above the only change): private.cover_booked_run_reversals,
 -- private.run_booked_cover_check, private.run_advance_checks.
+--
+-- A second 7a read had the same exposure: the double payout's advance (private.transfer_line_post, [critic] F10) reads
+-- the single mandate of its transfer's run's lines once per unplanned_payout part, and that function had no
+-- enable_seqscan off — under the same statistics, a sequential scan of remittance_line per part (a 500-member PmtInf
+-- the bank debits twice: 51,502,500 rows, 14.28 s, above the API's 8 s). Redefined, copied whole from its latest
+-- definition (20261122090000 line 1602), with `set enable_seqscan = off` added and the body unchanged (its SECURITY
+-- DEFINER, search_path '' and grants restated): the run's lines by remittance_line_pkey's prefix, the same mandate or
+-- none.
 -- The cancellation-after-download switch stays off: nothing here writes private.feature_switch.
 
 ------------------------------------------------------------------------------------------
@@ -280,10 +288,210 @@ end;
 $$;
 
 ------------------------------------------------------------------------------------------
+-- The ops command's unplanned parts (20261122090000 line 1602)
+------------------------------------------------------------------------------------------
+
+-- private.transfer_line_post, redefined from 20261122090000_remitted_reversals_covered.sql (line 1602; same signature,
+-- SECURITY DEFINER and search_path '', its grants restated below): `set enable_seqscan = off` added, the body unchanged.
+-- (CI round, main, second read) The double payout's advance reads the single mandate of its transfer's run's lines
+-- ([critic] F10) once per unplanned_payout part with an advance; the function had no enable_seqscan off (nor has its
+-- caller public.book_transfer_line), so with remittance_line analysed at two runs the run's key (half the table
+-- estimated) was read by a sequential scan of remittance_line per part. A fence alone does not help: a key estimated at
+-- half the table is cheaper by a sequential scan whatever the shape. Under the setting, the run's lines by
+-- remittance_line_pkey's prefix (no partial index's predicate is implied by the key alone); the same rows, the same
+-- mandate or none. The setting also holds for its callees that have none of their own (the ledger's posting set and
+-- reversals, private.transfer_file_release, private.ledger_check_now): measured at the 500-member lots, ADR-0014.
+create or replace function private.transfer_line_post(p_line_id uuid, p_reason text)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  l public.bank_transaction;
+  v_date text;
+  v_ret record;
+  v_entry uuid;
+  v_adv uuid;
+  v_bad text;
+  v_lp record;
+begin
+  select * into l from public.bank_transaction where id = p_line_id;
+  v_date := to_char(l.booking_date, 'DD/MM/YYYY');
+
+  -- 1. the unplanned remittances and sweeps
+  if exists (select 1 from pg_temp._tl t where t.kind in ('unplanned_payout', 'unplanned_sweep')) then
+    perform private.ledger_post_set_begin();
+    insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key,
+                                    client_organization_id, source_type, source_id, reason)
+    select t.n, l.organization_id, case t.kind when 'unplanned_payout' then 'remittance' else 'servicer_sweep' end,
+           l.booking_date,
+           case t.kind when 'unplanned_payout' then 'remit:line:' else 'sweep:line:' end || l.id || ':' || t.n,
+           case when t.kind = 'unplanned_payout' then t.c end,
+           case when t.transfer_id is not null then 'bank_transfer' else 'bank_transaction' end,
+           coalesce(t.transfer_id, l.id)::text,
+           case t.kind when 'unplanned_payout' then 'Virement exécuté hors reversement (relevé du ' || v_date || ')'
+                       else 'Virement au compte propre hors ordre de Collectoo (relevé du ' || v_date || ')' end
+    from pg_temp._tl t where t.kind in ('unplanned_payout', 'unplanned_sweep');
+    insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency, bank_account_id)
+    select t.n, v.line_no, v.book, v.sign * t.a, l.currency,
+           case v.book when 'client_money_cash' then l.bank_account_id when 'own_cash' then t.own_bank end
+    from pg_temp._tl t
+    cross join lateral (
+      select * from (values
+        -- remittance: +4670[c] A / −5120 A
+        ('unplanned_payout', 1, 'client_payable', 1), ('unplanned_payout', 2, 'client_money_cash', -1),
+        -- servicer_sweep: +4679 S / −5120 S ‖ +5122[own] S / −4689 S
+        ('unplanned_sweep', 1, 'due_to_servicer', 1), ('unplanned_sweep', 2, 'client_money_cash', -1),
+        ('unplanned_sweep', 3, 'own_cash', 1), ('unplanned_sweep', 4, 'due_from_client_funds', -1)
+      ) w (kind, line_no, book, sign) where w.kind = t.kind) v
+    where t.kind in ('unplanned_payout', 'unplanned_sweep');
+    update pg_temp._tl t set entry_id = x.entry_id from private.ledger_post_set() x where x.entry_no = t.n;
+  end if;
+  -- their advances (A − P > 0), posted after the remittance (LG008 at ledger_check_now)
+  update pg_temp._tl t set adv_id = gen_random_uuid() where t.kind = 'unplanned_payout' and t.adv > 0;
+  if exists (select 1 from pg_temp._tl t where t.adv_id is not null) then
+    perform private.ledger_post_set_begin();
+    insert into pg_temp._lps_entry (entry_no, organization_id, entry_type, effective_date, idempotency_key,
+                                    client_organization_id, source_type, source_id, reason)
+    select t.n, l.organization_id, 'client_advance', l.booking_date, 'adv:line:' || l.id || ':' || t.n, t.c,
+           'client_advance', t.adv_id::text, 'Virement hors reversement : avance du cabinet'
+    from pg_temp._tl t where t.adv_id is not null;
+    -- client_advance: +4679 X / −4670[c] X ‖ +4112[c] X / −4689 X
+    insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency)
+    select t.n, v.line_no, v.book, v.sign * t.adv, l.currency
+    from pg_temp._tl t
+    cross join (values (1, 'due_to_servicer', 1), (2, 'client_payable', -1), (3, 'client_advance_receivable', 1),
+                       (4, 'due_from_client_funds', -1)) v (line_no, book, sign)
+    where t.adv_id is not null;
+    update pg_temp._tl t set adv_entry_id = x.entry_id from private.ledger_post_set() x where x.entry_no = t.n;
+    -- M2c-7a ([critic] F10): the advance's mandate is the single mandate of the lines (released or not) of its
+    -- transfer's run, computed once per part; none when they hold several, or no run
+    insert into public.client_advance (id, organization_id, client_organization_id, mandate_id, currency, amount_minor,
+                                       cause, cause_entry_id, entry_id, bank_transaction_id, transfer_id, p_bound)
+    select t.adv_id, l.organization_id, t.c,
+           (select case when count(distinct q.mandate_id) = 1 and count(q.mandate_id) = count(*)
+                        then (array_agg(q.mandate_id))[1] end
+            from public.remittance_line q
+            where q.run_id = (select x.run_id from public.bank_transfer x where x.id = t.transfer_id)),
+           l.currency, t.adv, 'double_payout', t.entry_id, t.adv_entry_id, l.id, t.transfer_id, t.p_bound
+    from pg_temp._tl t where t.adv_id is not null;
+  end if;
+  -- the −A pending rows (§3.6.2: with the advance's +(A − P), net −P in the queue) and the attributions (§3.6.4)
+  insert into private.remittance_pending (ledger_entry_id, organization_id, client_organization_id, currency, kind,
+                                          amount_minor, posted_at)
+  select t.entry_id, l.organization_id, t.c, l.currency, 'unplanned_payout', -t.a, e.posted_at
+  from pg_temp._tl t
+  cross join lateral (select q.posted_at from public.ledger_entry q where q.id = t.entry_id offset 0) e
+  where t.kind = 'unplanned_payout';
+  insert into private.unplanned_paid_item (booking_entry_id, ledger_entry_id, organization_id, client_organization_id,
+                                           currency, amount_minor)
+  select t.entry_id, i.ledger_entry_id, l.organization_id, t.c, l.currency, i.amount_minor
+  from pg_temp._tl_items i join pg_temp._tl t on t.n = i.n
+  where i.amount_minor > 0;
+  -- the returns and the unplanned returns (few: one by one)
+  for v_ret in select * from pg_temp._tl t
+               where t.kind in ('payout_returned', 'sweep_returned', 'unplanned_payout_returned',
+                                'unplanned_sweep_returned')
+               order by t.n loop
+    v_adv := null;
+    if v_ret.kind in ('payout_returned', 'sweep_returned') then
+      select x.entry_id into v_entry
+      from private.ledger_reverse(v_ret.tr_entry, 'return:' || l.id || ':' || v_ret.transfer_id,
+                                  case v_ret.kind when 'payout_returned' then 'Virement de reversement revenu impayé'
+                                                  else 'Virement au compte propre revenu impayé' end
+                                  || ' (relevé du ' || v_date || ')', l.booking_date) x;
+    else
+      select x.entry_id into v_entry
+      from private.ledger_reverse(v_ret.ub_entry, 'return:' || l.id || ':' || v_ret.n,
+                                  case v_ret.kind when 'unplanned_payout_returned' then 'Virement hors reversement revenu'
+                                                  else 'Virement au compte propre hors ordre de Collectoo revenu' end
+                                  || ' (relevé du ' || v_date || ')', l.booking_date) x;
+      if v_ret.ub_adv_entry is not null then
+        select x.entry_id into v_adv
+        from private.ledger_reverse(v_ret.ub_adv_entry, 'return:adv:' || l.id || ':' || v_ret.n,
+                                    'Avance du cabinet annulée : virement hors reversement revenu (relevé du '
+                                    || v_date || ')', l.booking_date) x;
+      end if;
+      -- M2c-7a (plan §3.2.8): the covers of the items this booking paid and that were reversed since, released
+      -- down to what the other live bookings still paid (refused while settled or taken by a run in flight)
+      perform private.remitted_cover_release(v_ret.ub_entry, l.id, l.booking_date);
+    end if;
+    update pg_temp._tl t set rev_entry_id = v_entry, rev_adv_entry_id = v_adv where t.n = v_ret.n;
+  end loop;
+  -- the bookings of these parts, then the transfers returned and the payout accounts returned
+  insert into public.bank_line_booking (bank_transaction_id, seq, organization_id, bank_account_id, kind, transfer_id,
+                                        entry_id, amount_minor, method, reason, decided_by)
+  select l.id,
+         coalesce((select max(k.seq) from public.bank_line_booking k where k.bank_transaction_id = l.id), 0)
+           + row_number() over (order by t.n),
+         l.organization_id, l.bank_account_id, t.kind, t.transfer_id,
+         case when t.kind in ('unplanned_payout', 'unplanned_sweep') then t.entry_id else t.rev_entry_id end,
+         t.a, 'ops', p_reason, auth.uid()
+  from pg_temp._tl t
+  where t.kind in ('unplanned_payout', 'unplanned_sweep', 'payout_returned', 'sweep_returned',
+                   'unplanned_payout_returned', 'unplanned_sweep_returned')
+  order by t.n;
+  update public.bank_transfer x set status = 'returned', return_entry_id = s.rev_entry_id
+  from (select t.transfer_id, t.rev_entry_id from pg_temp._tl t where t.kind in ('payout_returned', 'sweep_returned')) s
+  where x.id = any (array(select t.transfer_id from pg_temp._tl t where t.kind in ('payout_returned', 'sweep_returned')))
+    and x.id = s.transfer_id
+    -- M2c-6b-3a-2 (G): a late predecessor stays cancelled (its return is its payout_returned booking)
+    and x.status <> 'cancelled';
+  update public.client_payout_account a set status = 'returned'
+  where a.id = any (array(select t.payout_account from pg_temp._tl t where t.payout_account is not null))
+    and a.status = 'active';
+
+  -- M2c-6b-3a-2 (E): a late predecessor's live end withdrawn before its payout is booked — its file, not downloaded
+  -- yet, superseded (its other payouts and refunds back in the queue, its sweep cancelled: recomputed at the next file),
+  -- then the re-issue cancelled; checked and locked as private.transfer_line_check and private.transfer_line_locks
+  -- left them
+  for v_lp in select t.lp_cancel, t.lp_cancel_e2e, t.lp_file, t.tr_e2e from pg_temp._tl t
+              where t.lp and t.lp_cancel is not null order by t.n loop
+    if v_lp.lp_file is not null then
+      perform private.transfer_file_release(v_lp.lp_file, 'superseded',
+        left('Virement ' || coalesce(v_lp.lp_cancel_e2e, '') || ' retiré : le virement qu''il remplace a été débité '
+             || '(relevé du ' || v_date || ')', 2000), null, null);
+    end if;
+    update public.bank_transfer set status = 'cancelled', cancelled_at = clock_timestamp(), cancelled_by = auth.uid(),
+      cancel_reason = left('Réémission annulée : le virement ' || coalesce(v_lp.tr_e2e, '') || ' qu''elle remplace a '
+                           || 'été débité (relevé du ' || v_date || ')', 2000)
+    where id = v_lp.lp_cancel and status = 'ordered';
+  end loop;
+
+  -- 2. the planned parts, through the job's posting
+  if exists (select 1 from pg_temp._tl t where t.kind in ('payout', 'sweep', 'fee')) then
+    perform private.bank_booking_begin();
+    insert into pg_temp._bank_booking (ord, bank_transaction_id, kind, transfer_id, method, decided_by, reason)
+    select t.n, l.id, t.kind, t.transfer_id, 'ops', auth.uid(), p_reason
+    from pg_temp._tl t where t.kind in ('payout', 'sweep', 'fee');
+    -- pg_temp._bb, private.post_bank_bookings' select list copied (private.transfer_line_bb)
+    perform private.transfer_line_bb(l.id);
+    perform private.bank_booking_post_rows(l.organization_id);
+    update pg_temp._tl t set entry_id = e.entry_id
+    from pg_temp._bb_entry e where e.entry_no = t.n and t.kind in ('payout', 'sweep', 'fee');
+  else
+    -- 3. no planned part: the line's review deleted, the ledger's checks, the line booked whole (signed)
+    delete from public.bank_debit_review v where v.bank_transaction_id = l.id;
+    perform private.ledger_check_now();
+    if private.bank_line_cash_moved(l.id, l.bank_account_id)
+       <> (case l.direction when 'credit' then l.amount_minor else -l.amount_minor end) then
+      raise exception 'bank line %: not booked whole', l.id using errcode = 'LG001';
+    end if;
+    set constraints public.bank_line_booking_complete immediate;
+    set constraints public.bank_line_booking_complete deferred;
+  end if;
+end;
+$$;
+
+------------------------------------------------------------------------------------------
 -- Privileges (as 20261122090000 left them)
 ------------------------------------------------------------------------------------------
 
--- internal: the SECURITY DEFINER paths, the trigger and private.run_remittance_checks call them
+-- internal: the SECURITY DEFINER paths, the trigger, private.run_remittance_checks and public.book_transfer_line call
+-- them
 revoke execute on function private.cover_booked_run_reversals(uuid[], date[], uuid[], uuid[]),
-  private.run_booked_cover_check(), private.run_advance_checks(uuid, uuid, date, boolean)
+  private.run_booked_cover_check(), private.run_advance_checks(uuid, uuid, date, boolean),
+  private.transfer_line_post(uuid, text)
   from public, anon, authenticated, service_role;
