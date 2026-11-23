@@ -19,6 +19,11 @@ _Updated at every commit. New sessions: read `CLAUDE.md`, `docs/BRIEF.md`, then 
     - scale-payouts: 6 passed.
     - pgTAP 2,965 PASS; integration 260.
     - Two adversarial verifiers: fixed.
+  - **The PR's own CI run:** `e2e` failed once, in `remitted-reversal`, on the desktop project. The run stayed « Fichier transmis à la banque ».
+    - The dispatched run of the same commit was green.
+    - Cause: a race in the test. Its `importStatement` waited for « Importé », which was still on the page from the previous statement. The test then left the page while the browser was still uploading the debit statement, so that statement never got imported.
+    - Fix: 7b's helper fix, ported here. The helper now also polls that file's own `bank_statement.status`.
+    - Other specs use the same wait after a second import. Default: 7c-1 moves them onto one shared helper that waits for the statement's own page or status.
   - **Left open (low):** the double payout mandate's several-mandate and null cases have no test (code proven equivalent; 7c-1 adds them); `ledger_post_set`'s pooled-dimension lookup by prefix (pre-existing, bounded by the lot cap); `inflight_overdue_lines`' same shape (pre-existing, nights within budget).
 - PR #41 **M2c-7a merged 2026-11-23** (remitted reversals covered everywhere; plan `docs/design/m2c-7-plan.md` §3; the cancellation-after-download switch stays **OFF**, never written; ADR-0014 « M2c-7a » and « M2c-7a review fixes » rounds 1–3):
   - **Migration** `20261122090000_remitted_reversals_covered.sql`.

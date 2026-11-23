@@ -118,6 +118,21 @@ async function importStatement(page: Page, file: string, xml: string) {
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
   await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  // (M2c-7b) this statement's own import, never the previous statement's « Importé » still on the page: under load the
+  // upload of the second one was still running when the test went on (and left it awaiting its upload)
+  await expect
+    .poll(
+      async () => {
+        const { data } = await adminClient()
+          .from("bank_statement")
+          .select("status")
+          .eq("organization_id", tenant.servicerId)
+          .eq("file_name", file);
+        return (data ?? []).map((s) => s.status);
+      },
+      { timeout: 60_000 },
+    )
+    .toEqual(["imported"]);
 }
 
 test("« Désimputer » a collection already remitted: the servicer's advance, the run page, « Contrôles »", async ({
