@@ -6600,5 +6600,667 @@ Suites, the second stack alone:
   clients read 218,500 buffers in 62–87 ms. That is bounded by the 500-member lot cap and far from the 8 s timeout.
   Default: keep; make it an index-equality lookup in a later slice, with LG006 checked again.
 
+## M2c-7b: claw-back and write-off (2026-11-23)
+
+Plan: `docs/design/m2c-7-plan.md` §0 #4, §1.3, §1.4 (7b row and « Order, and why »), §2, §4 (4.1.1–4.1.11, 4.2–4.6) and
+their [critic] / [check 1–3] marks; founder questions §10 none answered — Q2 (an advance of no single mandate: a request
+only) and Q5 (a write-off: an admin's, with a motif and its evidence, nothing sent to the client) built as their defaults
+and left open, the others later slices'. Migration `20261123090000_advance_recovery.sql` (one file, forward-only). New:
+`private.advance_open`, `private.advance_mandate`, `private.advance_born_on`, `private.mandate_recovery`,
+`private.advance_recovery`, `private.advance_row`, `private.commission_settlement_advance_guard` (its statement trigger),
+`public.write_off_advance` (« Passer en perte »), `public.client_advances` (« Avances »), `public.client_space_advances`
+(the client space). Redefined, each copied whole from its latest definition across every migration file (verified by
+indexing every `create or replace function` / `create function` of the 47 files, the last one wins; the change only;
+settings, `search_path ''`, SECURITY DEFINER where it was and grants restated): `private.document_open`
+(`20261112090000:1715`), `private.item_settled_at` (`20261122090000:172`, 7a's), `private.run_advance_checks`
+(`20261122090000:895`, 7a's), `private.remittance_line_insert_guard` (`20261113090000:1860`),
+`private.transfer_line_check` (`20261119090000:739`, 801 lines), `public.register_client_document`
+(`20261111120000:579`), `private.can_read_client_document_object` (`20261111120000:555`) with the policy
+`document_client_money_scope` (`20261111120000:571`, dropped and created), `public.allocation_remitted`
+(`20261122090000:1111`) and `public.remittance_run_payout` (`20261122090000:2085`); the label of the entry type
+`advance_write_off` (`20261111090000:102`: « Abandon d'avance » → « Avance passée en perte », LEX-28). Worker: the
+prepare's facts and `run._plan`. Web: « Avances », the « Passer une avance en perte » sheet, the client space, the chip
+on the Reversements cards, the run page note, the « Désimputer » sentence, the texts made true. **The switch stays
+off**: nothing writes `private.feature_switch`; the rules reachable only with it on are tested with it on inside
+rolled-back scenarios (`044` `pg_temp.iso(name, true)`); `033` byte for byte unchanged.
+
+### Decisions
+
+- **D1 — what is open of an advance (plan §4.1.1–§4.1.3).** `private.advance_open`: 0 once its entry is reversed (a
+  cover released, 7a), else its amount less Σ its settlements of every kind (compensation, payment_own,
+  payment_dedicated, write_off); null for an id that is no advance. Its mandate is the one 7a sets at its insert
+  (`private.advance_mandate`, [critic] F10: never derived from the run's lines on each read); its claim is born on its
+  entry's date (`private.advance_born_on`: 7a dates a cover no earlier than the payout it covers).
+- **D2 — the claw-back in the plan (plan §4.2, §4.1.9 [critic] M7-MONEY-7).** The prepare reads the client's open
+  advances (`client_advance_client_idx`, each open by `private.advance_open`, its birth) and `run._plan` passes them to
+  `settlement.plan` (M2c-4's take_adv): after the invoices, oldest born first (then the order they were recorded), each
+  on its own mandate — never one of no mandate (NO_MANDATE: founder Q2's default, a repayment request, 7c) —, under the
+  claw-back clause of that mandate's terms in force today only, from that mandate's money only; one born before the
+  client's proceeding is not set off (L622-7 I, as an invoice issued before it; 7d changes the rule). An advance's own
+  queue item (`client_advance`, or its reversal's `client_advance_reversal`) has no file: the facts read its advance's
+  mandate (`client_advance` by its entry) and the line counts in that mandate's gross — in NO_MANDATE's, §7.2's RV-3
+  would give N 200 000 / D 100 000 with 118 000 left open instead of the design's 82 000 / 218 000. The terms of the
+  advances' mandates are loaded with the files' (a run whose only item of a mandate is an advance's). The inputs hash
+  names the open advances (id, open, mandate).
+- **D3 — re-checked at the approval (plan §4.1.4).** `private.document_open` reads an advance when no invoice has the
+  id, so `remittance_approval_refusal`'s `documents_changed` sends back a run whose planned advance settle no longer
+  matches (it read null and never refused). Posted at the payout's debit by `private.post_run_settlements`, unchanged
+  (compensation, −4112 Da), or at the approval for N = 0.
+- **D4 — the settlement guard (plan §4.1.5).** A statement trigger after insert on `public.commission_settlement`
+  (`enable always`): a row of document_kind advance names an advance of its servicer and client whose entry is not
+  reversed (« not an advance of its client, or its advance reversed »), and Σ its settlements stays within its amount
+  (« an advance settled beyond its amount »), for every poster (a run's settlements, 7c's payments, write-offs). One
+  keyed lookup per advance of the statement.
+- **D5 — « Passer en perte » (plan §4.1.6; founder Q5's default; D8).** `public.write_off_advance`: an admin of the
+  advance's servicer at aal2; replay + request hash; the amount in euros (`private.euros_to_minor`), within what is open,
+  compare and set on the open the page showed; under the allocation and remit locks; never while a run takes it back
+  (`in_flight`); its evidence an uploaded document of that client (kind `advance_write_off_evidence`); posts
+  `advance_write_off` (+6780 / −4112[c], its document the evidence, key `awo:<md5 of the idempotency key>`, reason
+  « Avance passée en perte (décision du JJ/MM/AAAA) ») and a `write_off` settlement; never reversed (`LG003`). Nothing
+  is sent to the client: not a remission of the debt.
+- **D6 — nothing reverses an advance a run is taking back ([critic] M7-MONEY-2, F2; plan §4.1.10).**
+  `private.transfer_line_check`'s `double_payout` rule refuses `advance_in_flight` while an approved or sent run's plan
+  names the advance (`private.advance_in_flight_run`); after the run's debit the same return is `advance_settled` (6b-2's
+  rule, now reachable). 7a's release of a remitted reversal's cover already refuses so (switch on); the write-off too
+  (`in_flight`).
+- **D7 — an advance's line on its mandate ([check 1]; plan §4.1.9).** `private.remittance_line_insert_guard` refuses a
+  line of kind client_advance or client_advance_reversal whose mandate is not its advance's (none with none).
+- **D8 — the evidence kind ([critic] F11; plan §4.1.11).** `advance_write_off_evidence`: registered by money staff
+  (`public.register_client_document`), read — row and file — by money staff only (the restrictive policy
+  `document_client_money_scope` and `private.can_read_client_document_object` list it; `private.can_read_client_document`
+  already gives every kind but the RIB and the mandate to money staff only).
+- **D9 — the pages and texts (plan §4.3).** « Avances » (Reversements): client, recording date, origin (« Paiement
+  repris après reversement (dossier …) », « Reversement au-delà du dû », « Virement hors reversement »), advanced,
+  recovered (with what was passed as a loss), left, recovery (« Reprise sur les prochains reversements (art. … du
+  mandat) », « Demande de remboursement (pas de clause de reprise) », « Demande de remboursement (avance rattachée à
+  aucun mandat unique) », « Reprise par RV-… en cours »), keyset-paged, « Passer en perte » for an admin; the sheet
+  states « Le cabinet enregistre une perte de X € (compte 6780). Collectoo ne réclame plus cette somme au client (ni
+  reprise, ni demande de remboursement) ; rien ne lui est envoyé : ce n'est pas une remise de dette. Irréversible. »; the
+  client space « Avances du cabinet à rembourser : X € » with each advance's date, origin, what is left and how it is
+  recovered (never what was passed as a loss); the chip « Avance à récupérer X » on the Reversements cards; the run page
+  note per advance and how it is recovered; the « Désimputer » sentence « Elle sera reprise sur ses prochains
+  reversements (art. … du mandat) » or « Une demande de remboursement pourra lui être adressée »; `advance_open`,
+  `payout_overrun` and `double_payout_open` gain « Avec une clause de reprise, elle est déduite des prochains
+  reversements du client ; sinon elle reste à récupérer (page « Avances »). Un administrateur peut la passer en
+  perte. »; `advance_settled` « Cette avance a déjà été en partie récupérée : ce retour ne peut pas être comptabilisé
+  dans Collectoo ; prévenez le support. »; the unplanned payout's effect sentence (`NOT_YET_RECOVERED`) « reprise sur les
+  prochains reversements du client si son mandat a une clause de reprise, sinon à récupérer (page « Avances ») ».
+  `terms.ts` (« Avances du cabinet reprises sur les reversements suivants ») is now true, unchanged.
+- **D10 — the 7a carry-over (ADR-0014 7a round 3 « Left open », « The return named for an item its run never
+  carried »).** `private.item_settled_at`: when the item's attributions not netted in its run (those of the unplanned
+  payouts that paid it, live or come back, whose return is not a line of the run itself) cover its line, the run's own
+  payout never carried it, so what came back on its way is « unplanned » once one of those payouts came back (it said
+  « run » while the money waited and once a later run paid it). `044` k (17 j, then U back, then W), seen failing first.
+- **`advance_open`'s detail (plan §4.1.8).** `run_advance_checks` adds `recovery` (the mandate's terms in force on the
+  day the checks hold the books to); its codes are unchanged (`044` h pins them, as `043` #33).
+
+### Deviations from the plan
+
+- **The migration's name** is the task's, `20261123090000_advance_recovery.sql`.
+- **The recovery of an advance of no mandate is `request_no_mandate`**, worded « Demande de remboursement (avance
+  rattachée à aucun mandat unique) » (the plan's `request_several_mandates`, « (plusieurs mandats) »): a null mandate
+  is also a forward on no file (a remitted reversal's cover) or a client part with no transfer (S13), never only a run
+  of several mandates.
+- **`private.can_read_client_document` is not redefined** (the plan names three functions): its body already gives
+  every kind but the RIB and the mandate to money staff only, so the new kind needs no change there; the two others
+  and the restrictive policy are redefined.
+- **The client space reads `public.client_space_advances`** (new; the plan: the page reads `client_advance` through its
+  RLS): what is open of an advance is SQL's (`private.advance_open`), never the page's subtraction; it is readable by
+  the client's whole-client members and by money staff, and never says what was passed as a loss.
+- **Helpers beyond the plan:** `private.mandate_recovery` (one rule for the page, the client space, the nightly, the
+  run page and « Désimputer »), `private.advance_recovery`, `private.advance_row` (one row of « Avances »).
+- **Two more redefinitions** than the plan's 7b list: `public.allocation_remitted` (each entry's `recovery` and
+  `clause_ref`, for the « Désimputer » sentence the plan asks back, [critic] L19 (d)) and `public.remittance_run_payout`
+  (each advance's id, open part from `private.advance_open`, `reversed`, `written_off_minor`, `recovery`, `clause_ref`,
+  for the run page note).
+- **The run page note is not « … déduite de ce reversement par compensation »** (plan §4.3): the advances it lists are
+  those recorded at this payout's debit (7a's `remittance_run_payout.advances`), which a later run takes back, never this
+  one. It reads « Avance du cabinet enregistrée le JJ/MM/AAAA (<cause>) : X €, » then « à reprendre sur les prochains
+  reversements du client (clause de reprise, art. … du mandat) », « à récupérer par une demande de remboursement (pas
+  de clause de reprise) » (or « (avance rattachée à aucun mandat unique) »), « reste Y € … » in part, « récupérée »,
+  « soldée (dont Z € passés en perte) », or « annulée (le virement hors reversement qui avait payé l'encaissement est
+  revenu) ». What this run itself recovered is still « Avances du cabinet récupérées par compensation le … » (M2c-6b).
+- **The client space says « une demande de remboursement pourra vous être adressée »** (plan « vous sera adressée »):
+  7c sends it; « pourra » is true now. The « Avances » intro and the checks' help say « elle reste à récupérer ».
+- **`advance_in_flight` keeps 7a's text** (review round 1, tests-ui-2: « … ne peut pas être comptabilisé tant que ce
+  reversement n'est pas débité ; après son débit, prévenez le support. »): the plan's « sera comptabilisable après son
+  débit (il sera alors refusé …) » contradicts itself; the refusal carries no run number.
+- **The write-off's key is `awo:<md5 of the idempotency key>`** (the plan's `awo:<key>`), as 7a's « Couvrir »: an entry's
+  key bounds its length. Two refusals more than the plan's: `bad_request` (the open text the page sent is not minor
+  units) and `reason_required` (the motif, 1–2,000 characters).
+- **Screenshots:** `m2c7-avances`, `m2c7-avance-perte` as planned; the Reversements page with the chip is
+  `m2c7-reversements-avance` (the plan retakes `m2c-reversements` and `m2c-reversement`: those files belong to
+  `remittances.spec.ts`, whose tenant holds no advance; `m2c-reversements` is retaken for its new « Avances » link,
+  `m2c-reversement` differs only by dates and ids and is kept; the run page's note shows in 7a's flow, which the 7b
+  steps extend, and `m2c7-desimputer-deja-reverse` is retaken for the sheet's recovery sentence).
+- **The E2E steps extend 7a's `remitted-reversal.spec.ts`** (its flow builds the remitted collection and its advance)
+  rather than a new spec; they were written with the code (the build), the other tests first.
+- **The 7a RV-3 integration flip** (`test_remitted_reversal_integration.py`, named by the plan): its tenant now carries
+  Martin's claw-back clause (design §7.2: MAND-MARTIN-2026, art. 7.4), so RV-3 gives N 82 000 / D 218 000; §7.3's
+  variant without the clause (282 000) stays pinned by `test_remittance_runs_integration.py::
+  test_the_worked_example_continues_a_credit_note_on_a_settled_invoice` (unchanged) and the unit
+  `test_without_the_claw_back_clause_the_advance_stays_open`.
+- **Not done:** `tests/ledger_machine.py`'s claw-back rule (the full property machine is 7f's, as 7a's part).
+
+### Assertions whose expected value changed (house rule R3)
+
+- `043` #50 (17 j, the planted second attribution): `e_also_back`'s `returned_via` « run » → « unplanned »: the planted
+  attribution (Y's payout booking, which came back) and U's now cover E's line, so by the carry-over (D10) what came
+  back on E's way is a payout counted as outside the run; `paid_on` stays null (the conservative reading the case pins).
+- `023`, `037`, `037b`, `038`, `043`: their emulated prepares wrote an advance's queue item with no mandate (the file's,
+  which it has none of); D7's guard refuses that line at the approval. Each file gains one trigger of its own
+  transaction (rolled back with it), `private.test_advance_item_mandate`, that puts such an item on its advance's
+  mandate as the job now reads it; no assertion of those files changed.
+- vitest (the texts the plan rewords, §4.3): `remitted.test.ts` (the three helps end with the recovery sentence; the
+  « Désimputer » effect ends with « Une demande de remboursement pourra lui être adressée. »; the run page note per
+  cause reworded; its fixtures carry `recovery` and `clause_ref`, which the parser now requires);
+  `transfer-line-pages.test.ts` (`NOT_YET_RECOVERED` reworded; the run note); `transfer-line-foundations.test.ts`
+  (`double_payout_open`'s help).
+- E2E `remitted-reversal.spec.ts`: the run page note's regular expression reworded; the « Désimputer » sheet also says
+  how the advance is recovered; 7a's `importStatement` helper also waits for that statement's own `imported` status in
+  the database (under load, the previous statement's « Importé » still on the page let the flow go on while the second
+  upload ran; Suites). No assertion weakened.
+- Worker: `test_remitted_reversal_integration.py`'s RV-3 (N 282 000 / D 18 000 → 82 000 / 218 000, named by the plan;
+  its tenant on Martin's terms, Deviations).
+
+### Tests
+
+- pgTAP `044_advance_recovery.test.sql` (new, **14**; fixtures and helpers as 043's, every scenario in a rolled-back
+  subtransaction, the switch on only inside those that need it): a (`advance_open`, `document_open`, `advance_mandate`,
+  `advance_born_on`: fresh, after a compensation, a write-off, a raw reversal; an unknown id), b (`advance_mandate`: a
+  one-mandate run's overrun on its mandate, a run of two mandates and a client part with no transfer on none), c (a
+  write-off between the prepare and the approval → `documents_changed`), d twice — switch off, then on (S03r: a double
+  payout's advance taken by an approved run: its unplanned return refused `advance_in_flight` — the preview's `why` too
+  —, nothing booked, the write-off refused `in_flight`; the run's debit posts the settlement, compensation, −4112 Da; the
+  return then `advance_settled`), e (switch on: a remitted reversal's cover the same way), f (`write_off_advance`: an ops
+  manager, an admin at aal1, another servicer's admin → not allowed; `bad_amount` ×4, `bad_request`, `open_changed`,
+  `amount_exceeds_open`, `evidence_required` ×3, `reason_required`, nothing written; the posting, its document, key,
+  reason, date, books; the settlement; the replay; the rest; `not_open`; LG003 on its reversal; the label; 4112 and
+  6780; the nightly clean), g (the guard: beyond, exact, one statement, two statements, another client, not an
+  advance, a reversed advance, an invoice), h (« Avances »: rows, recovery, in-flight run, totals, `can_write_off`, the
+  pages, one client, four refused roles; the client space and its four refused readers; « Désimputer »'s recovery; the
+  run pages' advances; the nightly's `recovery`; its codes), h F12 (the full list of codes, unchanged), i (the evidence
+  kind: registered by an ops manager, its row and its file read by money staff only, a bad kind refused), j (the line
+  insert guard, seven cases), k (the carry-over: 17 j, then U back, then W), the switch still off.
+- Worker unit: `test_remittance_run.py` (9 new: RV-3 through `_plan` with the facts as loaded, N 82 000 / D 218 000;
+  without the clause; an advance of no mandate; the proceeding; oldest born first; same day in recording order; a
+  reversal's item; the hash, also when nothing is taken), `test_settlement.py` (the Hypothesis property through
+  `prepare_run`: an advance taken only under its own mandate's clause, never of no mandate, never beyond its open,
+  never born before the proceeding, a mandate's take within its own money, its line on its mandate, N + D = gross; 500
+  examples), `test_statement_docs.py::test_a_run_that_recovers_an_advance_says_so`.
+- Worker integration (`test_remitted_reversal_integration.py`): **§7.2 end to end from 12/11**
+  (`test_the_worked_example_from_12_11_to_the_end_with_the_claw_back`: RV-1 and its sweep, P6, P1's return and A1, the
+  top-up, RV-3 through the real prepare — gross 300 000, refund 36 000, advances 200 000, N 82 000, D 218 000, A1's
+  draft line on its mandate —, E11 and E12 at its debit, the sweep E13, the positions row by row with I8′ and 5120 =
+  the bank at each, the servicer fund at the end — Martin's part: 5122 +54 000, 7060 −45 000, 44571 −9 000, 4111,
+  4112, 4689, 44574 at 0 —, Martin received 246 000); `test_an_advance_alone_on_its_mandate_is_taken_back_by_its_own_clause`
+  (the terms of an advance's mandate loaded with no file of it in the run). Helpers `own_account`, `book_sweep`,
+  `top_up` (`remittance_helpers.py`).
+- vitest `advances.test.ts` (new, 13: the read and its refusals, origins, recovery modes, the chip, the write-off
+  effect and every refusal, the client space never saying « abandon » nor « remise », the run page note per cause and
+  fate, « Désimputer »'s recovery and its parser, the texts made true).
+- E2E `remitted-reversal.spec.ts` (desktop and mobile), the 7b steps: the « Désimputer » sheet says how the advance is
+  recovered; the run page's note; « Avances » as an ops manager (no « Passer en perte »), the Reversements page and its
+  chip, an administrator's write-off of 200,00 € with its evidence (the sheet's effect sentence; the notice; 300,00 €
+  left, « dont 200,00 € passés en perte »; one `write_off` settlement of 20 000 in the ledger). Screenshots
+  `m2c7-avances`, `m2c7-avance-perte`, `m2c7-reversements-avance`.
+- Seen failing first (WIP `7e3d1d9`, the tests before the code): `044` 12 of 14 (the functions, the evidence kind and
+  the guard missing; k read « run »), the worker's unit files failed to import (`OpenAdvanceRow`), the §7.2 integration
+  failed at RV-3 (advances 0, N 282 000), vitest `advances.test.ts` failed (no module).
+
+### Mutants
+
+SQL: each mutant is one function of the migration replaced (`create or replace` with the change) — or the policy
+recreated without the new kind — inside the killer file's own transaction, rolled back with it (`psql`: `begin`, the
+mutant, `044`). Worker: the change applied to the source, the named tests run, the file restored. Web: one change to a
+lib file, vitest, the file restored.
+
+| Mutant (plan §4.5, then this slice's own) | Killed by |
+|---|---|
+| advances passed as `[]` (`run._plan`) | `test_rv3_takes_the_advance_back_from_its_mandate_s_money` |
+| `nettable` ignored | `test_an_advance_born_before_the_client_s_proceeding_is_not_set_off` |
+| `document_open`'s advance branch removed | `044` a, c (`documents_changed`) |
+| the guard's `<=` → `<` | `044` d (both), e, f, g (exact), h |
+| write-off allowed to ops managers | `044` f |
+| the advance item's mandate dropped (NO_MANDATE) | `test_rv3_takes_the_advance_back_from_its_mandate_s_money` (N 200 000) |
+| `transfer_line_check`'s in-flight test removed | `044` d (switch off and on) |
+| the new evidence kind left out of the restrictive policy | `044` i |
+| the kind left out of `can_read_client_document_object` | `044` i (the file) |
+| the line insert guard's mandate check removed | `044` j |
+| the write-off's in-flight check removed | `044` d (both) |
+| the write-off's evidence check reduced to « not null » | `044` f |
+| `advance_open` ignoring the entry's reversal | `044` a |
+| the carry-over dropped (`item_settled_at`) | `044` k |
+| the carry-over counting live attributions only | `044` k |
+| `advance_open`'s `recovery` detail dropped | `044` h |
+| `client_advances` open to collectors | `044` h |
+| `client_space_advances` open to any member | `044` h |
+| advances taken newest recorded first (the same day) | `test_advances_born_the_same_day_are_taken_in_the_order_they_were_recorded` — survived the first run; the test added |
+| the inputs hash without the advances | `test_the_inputs_hash_names_the_open_advances` (no clause: nothing taken) — survived the first run (the plan's settles change with the open); the case added |
+| the prepare not reading an advance item's mandate (`jobs/remittances.py`) | `test_the_worked_example_from_12_11_to_the_end_with_the_claw_back` |
+| the prepare not loading the open advances | `test_the_worked_example_from_12_11_to_the_end_with_the_claw_back` |
+| the prepare not loading the advances' mandates' terms | `test_an_advance_alone_on_its_mandate_is_taken_back_by_its_own_clause` (written for it: the §7.2 run loads M through E10's file) |
+| web: the claw-back worded as a request; the write-off effect without « ce n'est pas une remise de dette »; the client space promising the request (« sera »); the chip on a zero open; `in_flight` without its run; a loss said « récupérée »; the run note without how it is recovered; « Désimputer » without the recovery sentence; the parser not checking `recovery`; the checks' help reworded | vitest (`advances.test.ts`, `remitted.test.ts`) |
+
+33 of 33 killed (15 SQL, 8 worker, 10 web). Two survived the first run and are killed by the cases added after it (run
+again against the final files); the tests the others ran were not changed afterwards.
+
+### Suites
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 46 files, **2,979 tests, PASS** (2,965 + `044`'s 14)
+  in 483 s — `033` byte for byte; `034`–`042` every assertion and expected value kept (`037`, `037b`, `038` gain only
+  the emulated prepares' trigger); `043` one expected value changed (R3 above).
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 183 files) clean; unit pytest **1,104 passed, 5
+  xfailed** (1,094 + the 10 new); the non-scale integration tests in CI's order, right after
+  `supabase test db` without a reset: **258 passed** (257 + the new) in 838 s.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic, **0** wrong.
+- Scale, each file once right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-7b »): the transfer
+  cancellation file 1 passed (59.4 s; the nightly checks 0.89 s, the late predecessor's booking 2.39 s); the
+  50,000-line run 1 passed (355.8 s; prepared in 11.3 s, the re-run prepared and approved in 32.1 s, its payout booked
+  1.0 s, the nightly checks with it booked 5.9 s); CI's `scale-payouts` command 6 passed in 26.0 min (the 5,000-member batch line's funds pass 30.2 s, the debit job 29.3 s, the nightly checks 1.70 s; the 2,000 held chained runs' nightly checks 14.53 s, then 15.66 s) — the slower figures are the VM's (another session's scale files ran beside these; `document_open`'s redefinition, timed against 7a's body on the same data, costs nothing measurable).
+- `database.types.ts` regenerated: `client_advances`, `client_space_advances`, `write_off_advance`.
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **28 files, 545 tests** passed (`advances.test.ts` new, 13;
+  `remitted.test.ts`, `transfer-line-pages.test.ts`, `transfer-line-foundations.test.ts` reworded, R3).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61
+  passed** in 6.1 min. The two full runs before it each gave 59 passed, 1 failed, 1 did not run, in 7a's flow
+  (`remitted-reversal.spec.ts`, once on desktop, once on mobile): the run page stayed « Fichier transmis à la banque »
+  because the second statement was still awaiting its upload, the helper having taken the previous statement's
+  « Importé » for its own while another session's scale files loaded the VM; the spec alone passed (2 passed). The
+  helper now also waits for that statement's own status in the database (R3), and the third run passed whole.
+  Screenshot diffs showing only dates, ids or order reverted; kept: `m2c7-avances`, `m2c7-avance-perte`,
+  `m2c7-reversements-avance` (new), `m2c-reversements` (the « Avances » link), `m2c7-desimputer-deja-reverse` (the
+  recovery sentence).
+
+### Size
+
+**2,686 non-test lines added (and 16 removed): over the task's ~2,500, by the copies the house rule asks for.** The
+migration 1,889 — of which 1,309 are the nine redefined functions copied whole from their latest definitions
+(`transfer_line_check` alone 801; about 90 lines changed in them, with the headers naming file and line) and 40 the
+grants restated; the new SQL about 540 lines with its comments —, the web 709 (`advances.ts` 247, « Avances » 161,
+the write-off sheet 170, the Reversements cards' chip 45, the client space 14, the texts and the run note 63,
+`database.types.ts` 9), the worker 88 (the prepare's facts 30, `run._plan` 58). The plan's estimate (≈ 2,230) did not
+count the two extra redefinitions (`allocation_remitted`, `remittance_run_payout`: 155 lines) nor the client space's
+read. Nothing was dropped.
+
+### Left open (low), with its default
+
+- Founder questions (plan §10): Q2 (an advance of no single mandate: a repayment request, never clawed back) and Q5 (a
+  write-off: admin only, motif and evidence, nothing sent, a later repayment booked as a recovery in 7c) — defaults
+  built and open; the cancellation after download (6b-3 plan Q1) stays off.
+- **The run's gate on an item its attributions cover.** `private.item_settled_at` still gates such an item on its
+  run's own settlement: if U's return is paid by a later run while the run's own payout's return still waits, the item
+  reads `paid_on` null though the client has it again. Default: keep (conservative for 7c-2's `payout_not_received`; no
+  money path reads `paid_on`).
+- **A client's whole-client members can read the `write_off` settlement rows** through the API
+  (`commission_settlement_read`, M2c-4, unchanged); the client space shows only what is still claimed and never words a
+  write-off. Default: keep (their own account; nothing is sent; LEX-28 is about wording).
+- `038`'s three planted « Suivi » scenarios (7a « Left open », to rework « when 7b rewords the Suivi of a covered
+  bounce »): 7b does not reword the Suivi, so they stay planted (7f's machine).
+- **« Avances » reads open advances newest first through `client_advance_org_idx`, filtering the open ones by
+  `private.advance_open`** (no partial index on what is open): the page reads every closed advance it passes over.
+  Default: keep at today's volumes (advances are rare); an index on what is open needs a column the settlements update.
+- **A write-off's evidence uploaded and not registered** (the sheet uploads to the client's key, then registers): a
+  failure between the two leaves an unregistered object, as « Joindre un document ». Default: keep (a retry reuses the
+  same key).
+
+## M2c-7b review fixes (2026-11-23)
+
+### Round 1
+
+The review of `70796ea` raised thirteen items: one high and one medium of the money lens (M7B-MONEY-1, M7B-MONEY-2),
+the same medium twice more (tests-ui-1, CCS-1: one item, fixed once), seven lows of tests and pages (tests-ui-2 … 8) and
+one of cost (CCS-2). Each was checked against the code first (the worker's real prepare and the SQL on the main stack,
+inside rolled-back transactions, the switch on only where the item needs it); all hold. The migration
+`20261123090000_advance_recovery.sql` is unmerged and was edited in place: no function is redefined beyond the
+slice's nine, two helpers are new (`private.client_opening_on`, `private.advance_recovery_of`), no public signature
+changes (`recovery` is a value inside the reads' `jsonb`), `database.types.ts` is unchanged (regenerated, identical).
+**The switch stays off**; `033` byte for byte unchanged; `034`–`043` keep every assertion and expected value (`037`,
+`037b`, `038`, `043` change only their emulated prepares' trigger, below).
+
+- **M7B-MONEY-1 (high; fixed at the root: each pair of queue rows in one bucket).** 7b put every advance's queue row on
+  its advance's mandate. A remitted reversal's cover pairs with R(E), on E's file (the same mandate): right. A double
+  payout's advance (on the payout's run's single mandate M) pairs with its unplanned payout's −U row, which has no file
+  (NO_MANDATE): M's room grew by A and `settlement._cap_to_pool` then charged NO_MANDATE's −U to the whole client pool,
+  so M's claw-back took the advance out of another mandate's collections (no claw-back clause there) or out of a
+  re-queued `payout_returned` (never netted: Q17 / OQ-97), and M's netting set its invoices off against them too.
+  Reproduced through `run.prepare_run` with the facts as loaded: the review's M/M2 case (a double payout of 50 000 on
+  M, claw-back art. 7.4; a collection of 70 000 on M2, netting only) gave advances 50 000, N 7 400 — now 0 and 57 400.
+  Reached with the switch off (S03r: a returned payout paid again by a later run, then executed again by the bank).
+  The same root with the switch on: a cancelled run's released items its late execution paid stay on their mandate
+  while that payout's −U row sits in NO_MANDATE (M's room inflated by what the client already had). Fix:
+  - `run._advance_item_mandate`: an advance's row counts in its advance's mandate only for a remitted reversal's cover
+    (its release too); a double payout's or an overrun's counts in none, with the rows of no file it pairs with (as
+    before 7b). The facts carry the advance's cause (`jobs/remittances.py`: `ca.cause`), the rule is pure.
+    `private.remittance_line_insert_guard` expects the same (none for every other cause).
+  - `run._unplanned_paid_out`: what an unplanned payout of the run already paid of a line of the run — its live
+    attributions (`private.unplanned_paid_item` by its key, the booking not reversed: the prepare's new read, only when
+    the run holds an `unplanned_payout` row) — counts with that payout's row, outside every mandate; Σ gross unchanged.
+    With the switch off an attribution is always of a `payout_returned` item (NO_MANDATE already): a no-op; with it on,
+    a released item's mandate brings only what the late payout did not pay (`test_transfer_line_ops_more_integration`:
+    {M: 200 000 − A, none: 0}, was {M: 200 000, none: −A}). The inputs hash names the attributions.
+  - Pinned: pytest `test_a_double_payout_s_advance_is_never_taken_from_another_mandate_s_money` (the review's case),
+    `…_never_taken_from_a_re_queued_payout` and `test_a_mandate_s_netting_never_reaches_another_mandate_s_money_through_a_double_payout`
+    (its two variants), `test_a_double_payout_s_advance_is_taken_from_its_own_mandate_s_collections`,
+    `test_an_overrun_advance_s_item_counts_outside_every_mandate`, `test_what_an_unplanned_payout_paid_of_a_line_is_no_mandate_s_money`
+    (switch on); the Hypothesis property `test_a_mandate_takes_only_from_its_own_money_whatever_the_run_s_other_rows`
+    (500 examples: covers with their reversals, double payouts with attributions, returned payouts, earlier advances of
+    either mandate or none; each mandate's money in the plan equals its collections less what the run's unplanned
+    payouts paid of them, its takes stay within it); integration `test_an_overrun_advance_s_row_is_no_mandate_s_money`
+    (the real prepare and approval, a second mandate's collection: advance 0, N 127 400, the row on no mandate, the
+    approval's guard accepts it) and the switch-on assertion above; pgTAP `044` l (the insert guard: a double payout's
+    and an overrun's row, and the double payout's reversal's, on none; on the advance's mandate refused). All failed first
+    on 7b's code (WIP `6d96307`).
+- **M7B-MONEY-2 = tests-ui-1 = CCS-1 (medium; fixed).** `private.mandate_recovery` named the claw-back whenever the
+  mandate's terms held the clause, while the prepare never sets off an advance born before the client's proceeding
+  opened (`run._advances`' nettable rule, L622-7 I as the plan applies it): « Avances », the client space, the run page,
+  « Désimputer » and the nightly promised a « reprise » no run would make — toward a client in a collective proceeding.
+  Now every reader goes through `private.advance_recovery_of(mandate, client, born_on, on)`: `barred_proceeding` when
+  the client's earliest `proceeding_opened` in effect (`private.client_opening_on`, the date the prepare reads) is after
+  the advance's birth (`private.advance_born_on`; for « Désimputer », the cover's would-be date: greatest(the
+  allocation's date — the reversal's —, the payout's `booked_on`)), else the mandate's. Worded without « reprise »: staff
+  « Pas de reprise : avance née avant l'ouverture de la procédure collective du client » (« Avances »), « … non reprise
+  sur les reversements du client (avance née avant l'ouverture de sa procédure collective) » (run page), « … la somme
+  n'est pas déduite de ses autres encaissements (avance antérieure à l'ouverture de la procédure collective du
+  client) » (« Désimputer »); the client « … antérieure à l'ouverture de votre procédure collective, elle n'est pas
+  déduite de vos reversements » — no request promised either (founder Q18's default: neither taken nor requested while
+  the proceeding runs; OQ-41), no legal rule cited. Both parsers accept the code. Pinned: `044` m (a proceeding
+  recorded between the payouts and « Désimputer »: the cover born before it `barred_proceeding` on the « Désimputer »
+  read, « Avances », the client space, the run page and the nightly; one born since keeps `clawback`), vitest.
+- **tests-ui-2 (low; a test).** vitest: a released cover on the run page reads « annulée (…) », never « récupérée ».
+  No SQL state reaches it today: a cover on a run page has its payout's transfer, which only a remitted line's cover
+  gets, and T(R) of a remitted line never falls (booked is stable), so it is never released; the branch stays as a
+  guard, its text pinned.
+- **tests-ui-3 (low; fixed).** `advanceStatus` (lib): reversed « Annulée avec ce qu'elle couvrait »; nothing open and a
+  loss of all of it « Soldée (passée en perte) », of part « Soldée (dont X passés en perte) »; else « Récupérée » or how
+  the open part is recovered. « Récupéré » counts compensations and payments only; the loss is its own line « X passés
+  en perte » (`advance-written-off`). vitest; the E2E's expectation follows (R3 below).
+- **tests-ui-4 (low; fixed).** The E2E's chip assertion is unconditional, on the client's row of « Encaissements en
+  attente » or its draft's card.
+- **tests-ui-5 (low; fixed).** `write_off_advance`'s `in_flight` refusal carries the run's number in its detail
+  (message unchanged); the sheet maps it through `writeOffRefusalOf` (« … par le reversement RV-… en cours »). `044` n,
+  vitest.
+- **tests-ui-6 (low; fixed).** The E2E reads the client space as the client's administrator: 500,00 € and « une demande
+  de remboursement pourra vous être adressée » before the write-off, 300,00 € after it, never « abandon », « remise » nor
+  « perte »; screenshot `m2c7-client-avances` (mobile + desktop).
+- **tests-ui-7 (low; fixed).** « Avances » below `sm`: each advance a stacked card (every cell labelled, « Reste » and
+  « Récupération » in view, the action under them); the table from `sm`. Screenshots retaken.
+- **tests-ui-8 (low; fixed).** (a) « Désimputer » under a claw-back clause no longer says « pas déduite … Elle sera
+  reprise »: « … le cabinet lui en fait l'avance (X), qu'il reprendra sur ses prochains reversements (art. … du
+  mandat). »; entries recovered differently are worded part by part with their amounts. (b) The checks' helps
+  (`advance_open`, `payout_overrun`, `double_payout_open`) and `NOT_YET_RECOVERED` name the exclusions: a claw-back only
+  of an advance on a single mandate with the clause, never of one born before the client's proceeding.
+- **CCS-2 (low; left open, below).**
+
+### Assertions whose expected value changed (round 1, house rule R3)
+
+- Integration `test_an_advance_alone_on_its_mandate_is_taken_back_by_its_own_clause` → `test_an_overrun_advance_s_row_is_no_mandate_s_money`:
+  its planted overrun advance's row was M's only money, and 7b took the advance back from that row itself (N 0 /
+  D 70 000) — M7B-MONEY-1's shape. Now gross 140 000 with a second mandate's collection, advance 0, N 127 400. The 7b
+  mutant it killed (« the prepare not loading the advances' mandates' terms ») is equivalent in every reachable state
+  now: a mandate counts in the plan only through a file line or a cover row, whose R(E) brings that file's terms; the
+  loading is kept, defensively.
+- vitest: « Désimputer » under a claw-back clause (tests-ui-8 (a)); the three helps and the two `NOT_YET_RECOVERED`
+  sentences (`remitted.test.ts`, `transfer-line-foundations.test.ts`, `transfer-line-pages.test.ts`; tests-ui-8 (b)).
+- E2E: after the write-off, « Récupéré » reads 0,00 € and the loss its own line (« 200,00 € passés en perte »; 7b: « dont
+  200,00 € passés en perte » inside « Récupéré », tests-ui-3).
+- Test helpers only, no assertion: the emulated prepares of `023`, `037`, `037b`, `038`, `043` (their trigger) and `044`
+  (`prepare_adv`) put a remitted reversal's cover's row on its mandate and any other advance's on none, as the job now
+  writes them; the unit fixtures of advance rows carry their cause.
+
+### Mutants (round 1)
+
+| Mutant | Killed by |
+|---|---|
+| every advance row on its advance's mandate (`run._advance_item_mandate`: 7b's rule) | the four double payout / overrun unit tests, the Hypothesis property |
+| the attributions not moved (`_unplanned_paid_out` dropped) | `test_what_an_unplanned_payout_paid_of_a_line_is_no_mandate_s_money`, the property |
+| the prepare's facts giving every advance row the cover's cause (`jobs/remittances.py`) | `test_an_overrun_advance_s_row_is_no_mandate_s_money` (advance 70 000, N 57 400) |
+| the prepare not reading the attributions | `test_a_run_cancelled_after_download_then_its_late_debit_pays_its_items` ({none: −164 000}) |
+| the insert guard expecting the advance's mandate for every cause | `044` d (both), l |
+| `advance_recovery_of` ignoring the proceeding | `044` m |
+| « Désimputer »'s cover born today (not greatest(its date, the payout's)) | `044` m |
+| the client space reading no client for the opening | `044` m |
+| the nightly's birth taken as the check's day | `044` m |
+| the write-off's `in_flight` without its run in the detail | `044` n |
+| web: a loss in full said « Soldée (dont …) »; a loss in part « Récupérée »; « Récupéré » counting the loss; « Avances », the client space, the run note or « Désimputer » without the proceeding's wording; the sheet's `in_flight` without its run; either parser refusing `barred_proceeding`; a released cover « récupérée »; « Désimputer » saying « pas déduite » under a clause; the helps without the exclusions | vitest (`advances.test.ts`, `remitted.test.ts`, `transfer-line-*.test.ts`), 13 mutants |
+
+23 of 23 killed (worker 4: 2 unit, 2 through the real prepare; SQL 6, each the function replaced inside `044`'s own
+transaction; web 13).
+
+### Suites (round 1)
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 46 files, **2,982 tests, PASS** (2,979 + `044`'s
+  three: l, m, n) in 483 s — `033` byte for byte; `034`–`043` every assertion and expected value kept.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 183 files) clean; unit pytest **1,111 passed, 5
+  xfailed** (1,104 + the 7 new); the non-scale integration tests in CI's order, right after `supabase test db` without a
+  reset: **258 passed** in 823 s (one renamed, R3 above).
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic, **0** wrong.
+- Scale, each file once right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-7b review fixes, round
+  1 »): the 50,000-line run 1 passed (344.8 s; prepared in 11.9 s, the re-run prepared and approved in 33.0 s, the
+  nightly checks with it booked 5.6 s); the transfer cancellation file 1 passed (60.4 s; the nightly checks 0.76 s, the
+  late predecessor's booking 2.69 s); CI's `scale-payouts` command 6 passed in 23.8 min (the 5,000-member batch
+  line's funds pass 28.0 s, the debit job 24.9 s, the nightly checks 1.25 s; the 2,000 held chained runs' nightly
+  checks 15.81 s, then 14.99 s). No plan shape changed on a scale path (the attributions' read runs only for a run
+  holding an unplanned payout; the nightly's two keyed lookups only per open advance over 30 days old).
+- `database.types.ts` regenerated: identical (no public signature changed).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **28 files, 548 tests** passed (`advances.test.ts` 13 → 16;
+  `remitted.test.ts`, `transfer-line-pages.test.ts`, `transfer-line-foundations.test.ts` reworded, R3).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61
+  passed** in 6.4 min. Screenshot diffs showing only dates, ids or order reverted; kept: `m2c7-client-avances` (new),
+  `m2c7-avances` (the stacked cards below `sm`), `m2c7-avance-perte` (the page under the sheet).
+
+### Left open (low), with its default
+
+- **CCS-2: what is open of an advance is computed per row** (`private.advance_open`), so « Avances »' totals, its
+  open-only page, the client space and the prepare's open advances read every advance the servicer (or the client) ever
+  recorded, settled ones included (about 30 µs each: 5,000 settled advances, 147 ms for the chip's call). Default: keep
+  at today's volumes (advances are rare; no real remittance before M2c-7) — the 7b « Left open » on « Avances »' read
+  stands; 7f's hardening takes the chip's totals from the 4112[c] balances (the nightly `advance_ledger` proves them
+  equal) or a keyed set of open advances, and moves the chip read out of the page's auto-refresh.
+- **A portfolio moved to another mandate between E's run and R(E)** puts a cover's row (its advance's mandate: E's
+  line's) and R(E)'s (the file's mandate today) in two buckets. Default: keep (no command moves a portfolio's mandate in
+  M2c; 7f's property machine adds the case if one appears).
+- **A cover's release re-queued in a later run than the collection it covered** (switch on: the late payout that paid
+  E comes back after E, R(E) and the cover were remitted): the release's −A counts in the cover's mandate and the
+  unplanned return's +A outside every mandate (never netted, as any returned payout, Q17): that mandate's room is the
+  lower — less is set off, never more. Default: keep (conservative).
+- Founder questions Q2 and Q5 (plan §10) keep their defaults, open. Q18 stays 7d's: an advance born since the opening
+  is still taken back under its clause (the plan's 7b rule, as invoices), and the pages say so; only one born before
+  it is `barred_proceeding`. The switch stays off.
+
+### Round 2
+
+Round 2 raised three items: one high (REBASE-7B) and two mediums (advance-date-contradicts-barred, SWEEP-7B-STATS).
+Each was checked against the code first, on the main stack, inside rolled-back transactions. Since round 1, 7a was
+squash-merged to `main` as `245296d` (the same tree as `36a662d`, 7b's base), and main's scale job went red: the CI
+round `349fc3b` (« M2c-7a — CI round (main) » above, `20261123080000_cover_reads_by_run_key.sql`) is not merged yet.
+7b is rebuilt on it: branch `m2c7b-r2` from `349fc3b`, then `70796ea` and `78942f4` cherry-picked. Only the docs
+conflicted (this ADR and `docs/benchmarks/remittances.md`), and both sides were kept, with the 7a CI round's sections
+before 7b's. The migration `20261123090000_advance_recovery.sql` is still unmerged and was edited in place. It now has
+two new internal functions (`private.client_open_advances`, `private.unplanned_paid_live`). No public signature changes
+(`born_on` is a key inside the reads' `jsonb`), and `database.types.ts` was regenerated identical. **The switch stays
+off**; `033` is unchanged byte for byte; `034`–`043` keep every assertion and expected value.
+
+- **REBASE-7B (high; fixed).** The item holds. 7b's `private.run_advance_checks` was copied whole from
+  `20261122090000` line 895, with round 1 adding the details' `recovery`. Applied after `20261123080000`, it put back the
+  nightly's read of the booked runs' lines that the CI round removed: « run_id = r.id and not released and kind in
+  (…) » inside the fence, a bitmap of `remittance_line_live_uq` read whole once per run booked (VF-7B-RECOPY). Measured
+  with `test_remitted_cover_reads_integration.py` on 7b's old body: the advance checks read **110,265** rows for a
+  12-run lot, against a bound of 160. The function is now `20261123080000` line 138's body plus 7b's single hunk (the
+  `recovery` key of `advance_open`'s details). The diffs confirm it: diff(the CI body, 7b's new body) is exactly
+  diff(`20261122090000`'s body, 7b's old body), and diff(7b's old body, its new one) is exactly the CI round's hunk.
+  Its header now cites `20261123080000:138`. On 7b the cover-reads test passes 2/2: the booking reads 56 rows, the
+  booking under generic plans 57, and the advance checks **12** (the CI round's own number, the bound 160).
+  `20261123080000` redefines `private.cover_booked_run_reversals`, `private.run_booked_cover_check` and
+  `private.run_advance_checks`. 7b's other redefined functions are `private.document_open`, `private.item_settled_at`,
+  `private.remittance_line_insert_guard`, `private.transfer_line_check`, `public.register_client_document`,
+  `private.can_read_client_document_object`, `public.allocation_remitted` and `public.remittance_run_payout`. None of
+  them is redefined there, and each is still copied from its latest definition across every migration (checked file by
+  file). The CI round's second commit on `ci-fix-7a` (`245ce62`, `private.transfer_line_post` with `enable_seqscan`
+  off) redefines none of 7b's functions either. Rebasing onto it will conflict only in the docs.
+- **advance-date-contradicts-barred (medium; fixed).** The item holds. In `044` m's own case, the cover is born d − 2
+  (`private.advance_born_on`: its payout's debit, the date the barred rule reads) and recorded today, and the client's
+  proceeding opened d − 1. The client space then read « Avance du <today> (…) — antérieure à l'ouverture de votre
+  procédure collective … », a date after the opening beside a statement that the advance predates it. « Avances »
+  dated the row by its recording too (column « Date »). And the client space said « Avances du cabinet à rembourser »
+  over a list of `barred_proceeding` advances only: pre-opening claims the client may not pay outside the proceeding.
+  The fix:
+  - `private.advance_row` (hence `public.client_advances`) and `public.client_space_advances` return `born_on`
+    (`private.advance_born_on`, read once per advance and passed to the recovery).
+  - The client reads « Avance née le JJ/MM/AAAA (…) ».
+  - « Avances »' column is « Née le » (`born_on`); the recording date appears under it as « enregistrée le … », only
+    when it falls on another day (`advanceDates`).
+  - The client space heading says « à rembourser » only when no open advance is `barred_proceeding`. Otherwise it reads
+    « Avances du cabinet : <total> », and each line states its own fact. No rule is invented; the lines' wording is
+    unchanged.
+  - The rows' order is unchanged (by recording).
+  - Pinned by `044` m (round 2), a new assertion (plan 17 → 18), seen failing (`born_on` null): `born_on` = d − 2 =
+    `advance_born_on` < the opening (d − 1) < the recording (d), on both reads, both `barred_proceeding`.
+  - Pinned by vitest: the dates (born ≠ recorded, and the same day), the client lines « née le » with a fixture born
+    before its recording, the heading neutral for a barred-only list and for a mixed one, and both parsers refusing a
+    row without `born_on`.
+  - Pinned by the E2E: « Avance née le … » in the client space and the « Née le » cell on « Avances ».
+- **SWEEP-7B-STATS (medium as raised; the SQL is not exposed, the worker's loader was; fixed).** Every statement 7b
+  adds or redefines that reads `remittance_line`, `private.remittance_pending`, `ledger_entry`, `ledger_posting`,
+  `allocation`, `client_advance`, `commission_settlement`, `bank_transfer`, `private.unplanned_paid_item`,
+  `client_status_event` or `mandate_terms` by a parameter or a correlated key is listed below, with the rows it read
+  from the planted tables. The measurement is `worker/tests/test_advance_reads_integration.py` (db job, two tests,
+  about 8 s). Planting: `remittance_line` as the cover-reads test plants it (2 × 10,000 lines, one run released,
+  `n_distinct(run_id)` 2, and `remittance_line_live_uq` rebuilt); 10,000 rows each over two values of every key read
+  below (`commission_settlement`: `document_id`, client; `client_advance`: servicer, client, `cause_entry_id`;
+  `unplanned_paid_item`: `booking_entry_id`, `ledger_entry_id`, servicer; `remittance_pending`: `draft_run_id`, client;
+  `client_status_event`: client; `mandate_terms`: mandate). Each table is analysed with those columns' `n_distinct`
+  pinned at 2, and every plan is forced generic (`plan_cache_mode`). Then a 6-payout lot, its line booked short of
+  one, and three collections taken back (« Désimputer »: three covers). The rows counted are each table's sequential
+  reads plus the index entries its indexes returned (`pg_stat_get_xact_tuples_returned`), so an index-only or bitmap
+  read of a whole index counts. `ledger_entry` and `ledger_posting` are read only by unique keys (`id`,
+  `ledger_entry_reversed_once_uq`, `entry_id`); `allocation` and `bank_transfer` are not read by 7b's new statements.
+  None of them is planted.
+
+  | 7b statement (`20261123090000` line, or the worker) | table: key (index) | rows read |
+  |---|---|---|
+  | `advance_open` (51) | `client_advance`: id (pkey); its entry's reversal (unique); `commission_settlement`: `document_id` (`_document_idx`) | 1 |
+  | `advance_mandate` (69), `advance_born_on` (82) | `client_advance`: id; `ledger_entry`: id | 1, 1 |
+  | `advance_recovery` (154) → `advance_recovery_of` (138), `client_opening_on` (121), `mandate_recovery` (98) | `client_status_event`: client (`_client_idx`); `mandate_terms`: mandate (its exclusion index) | 3 |
+  | `document_open` (214), its advance branch | `commission_invoice`: id; then `advance_open` | 1 |
+  | `advance_row` (383) | `client_advance`: id; settlements by `document_id`; the recovery | 6 |
+  | `client_advances` (429), all three advances / one client | `client_advance`: servicer (`_org_idx`) or client; `advance_open` per row; the totals | 27 / 14 |
+  | `client_space_advances` (493) | `client_advance`: client and servicer (`_client_idx`) | 6 |
+  | `item_settled_at` (544; its 7b hunk) | `remittance_line`: `ledger_entry_id`, live (`_live_uq`, unique); `unplanned_paid_item`: `ledger_entry_id` (`_entry_idx`) | 0 |
+  | `run_advance_checks` (668; the CI body + the recovery) | the booked runs' lines by the run's key (CI's fence); `client_advance`: servicer; settlements by `document_id` | 17 |
+  | `commission_settlement_advance_guard` (242), in `write_off_advance` (296) | `new_rows`; `client_advance`: id; settlements by `document_id` | 6 |
+  | `remittance_line_insert_guard` (825; its 7b hunk), in the approval job | `client_advance`: `entry_id` (unique) | 1 (+ 2 settlements, `document_open`) |
+  | `transfer_line_check` (883; `advance_in_flight`), its statement prepared generic, seq scans off | `client_advance`: `cause_entry_id` (`_cause_idx`); `advance_in_flight_run` (`remittance_run_pending_uq`, unique) | 0 |
+  | `allocation_remitted` (1779), `remittance_run_payout` (1820) | the recovery; `client_advance`: transfer; settlements by `document_id` | 0, 4 |
+  | worker `load_facts`: the items' advances (7b's join) | `client_advance`: `entry_id` | **10,003** (a hash of the whole table) → 1 per item |
+  | worker `_open_advances` (7b) | `client_advance`: client, currency | **10,005** (a sequential scan) → 5 |
+  | worker `_unplanned_paid` (round 1), eight bookings | `unplanned_paid_item`: `booking_entry_id = any(…)` | **10,000** (a sequential scan) → 0 |
+
+  Every SQL function reads by key under these statistics. Most of them already have `enable_seqscan` off, and the rest
+  read by primary or unique keys only. The PostgreSQL 17 generic plan prices each non-unique probe at half the table,
+  and none of these tables' other indexes offers a cheaper read of the whole table. The worker's three 7b statements were
+  exposed: its session has sequential scans on, so the generic plan of the items' join hashed the whole of
+  `client_advance` (the queue's draft priced at half of `remittance_pending`), and the open advances and the
+  attributions were sequential scans. `load_facts` read **20,008** `client_advance` rows before the fix (WIP `521d9a3`,
+  seen failing). The fix:
+  - the items' advance is a fenced lateral probe by its entry (`client_advance_entry_id_key`, unique);
+  - the open advances go through `private.client_open_advances(client, currency)` (`client_advance_client_idx`, the
+    conditions outside the fence, `advance_open` once per advance, seq scans off);
+  - the attributions go through `private.unplanned_paid_live(bookings)` (the primary key's prefix, seq scans off).
+  - Both functions are internal: revoked from `public`, `anon` and `authenticated`, granted to `service_role` like
+    `advance_open`.
+  - After the fix, `load_facts` reads 6 `client_advance` rows, `_open_advances` 5 and `_unplanned_paid` 0.
+
+  By the severity rule this is low today. At the scale files' volumes, `client_advance` and `unplanned_paid_item` hold
+  a few rows (no scale file records an advance: `draft50k`'s 50,000 entries are of type `client_advance`, not
+  `client_advance` rows). The worker's statements also run custom plans: psycopg prepares a statement after five
+  executions, and the plan cache keeps the custom plan while the generic is priced higher, as it is under these
+  statistics. It is fixed anyway because the three statements are 7b's own and the fixes are small. The earlier
+  slices' reads that the same test sees are printed apart and not bounded (« Left open » below).
+
+### Assertions whose expected value changed (round 2, house rule R3)
+
+- vitest `advances.test.ts`, the client space: the lines read « Avance née le JJ/MM/AAAA » (was « Avance du
+  JJ/MM/AAAA », the recording date). The fixture's first advance is born 10/11 and recorded 12/11, so the line shows
+  10/11 (advance-date-contradicts-barred). The barred case's heading is now « Avances du cabinet : 2 000,00 € » (it was
+  not asserted, and read « … à rembourser … »).
+- E2E `remitted-reversal.spec.ts`: the client line's pattern now starts « Avance née le JJ/MM/AAAA » (stricter; the
+  rest unchanged), plus a new « Née le » cell assertion.
+- `044`: no expected value changed. m (round 2) is a new assertion, and m's own is unchanged.
+  `test_remitted_cover_reads_integration.py` is unchanged and passes on 7b.
+
+### Mutants (round 2)
+
+| Mutant | Killed by |
+|---|---|
+| 7b's `run_advance_checks` as copied from `20261122090000` (the round-1 body) | `test_remitted_cover_reads_integration.py` (the advance checks 110,265 > 160) |
+| `advance_row`'s `born_on` taken as the recording date | `044` m (round 2) |
+| `client_space_advances`' `born_on` taken as the recording date | `044` m, m (round 2) |
+| the worker's items' advances as a join (7b's form) | `test_advance_reads_integration.py` (prepare) |
+| `private.client_open_advances` without `enable_seqscan = off` | the same |
+| `private.unplanned_paid_live` without `enable_seqscan = off` | the same |
+| web: the client line dated by the recording; the heading always « à rembourser »; neutral only when every advance is barred (a mixed list « à rembourser »); the recording date always shown; « Née le » from the recording; the client space parser not requiring `born_on` | vitest `advances.test.ts`, 6 mutants |
+
+12 of 12 were killed: SQL 5, each function replaced in the main stack's database and the test file run against it; the
+worker 1; web 6. One mutant was equivalent and its code simplified: `unplanned_paid_live` as a lateral probe per
+booking instead of « = any(…) » read 0 rows either way under these statistics (two and eight bookings), so the simpler
+form is kept, with seq scans off.
+
+### Suites (round 2)
+
+- `supabase test db` after a fresh `supabase db reset`: 46 files, **2,983 tests, PASS** in 513 s (round 1's 2,982, plus
+  `044` m (round 2)). `033` is unchanged byte for byte, and `034`–`043` keep every assertion and expected value.
+- Worker:
+  - `ruff check .`, `ruff format --check .` and `mypy` (strict, 185 files) are clean.
+  - Unit pytest: **1,111 passed, 5 xfailed**.
+  - The non-scale integration tests in CI's order, right after `supabase test db` without a reset: **262 passed** in
+    766 s. That is round 1's 258, plus `test_remitted_cover_reads_integration.py`'s two (the CI round's file) and
+    `test_advance_reads_integration.py`'s two.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic (95,997 / 100,000), **0**
+  wrong.
+- Scale (docs/benchmarks/remittances.md « M2c-7b review fixes, round 2 »):
+  - The scale job's command as `ci.yml` lists it (its nine files, one pytest call), right after a fresh reset: **15
+    passed** in 1,543 s. The 500-member lot's booking took 1.93 s through the rolled-back path and 2.08 s through the
+    API (2,995 `remittance_line` rows). The 50,000-line run was prepared in 12.7 s, re-run in 33.5 s, and its nightly
+    checks with the run booked took 5.5 s (`run_advance_checks` 90 ms own).
+  - CI's `scale-payouts` command, after another fresh reset: **6 passed** in 23.2 min. The 5,000-member batch line's
+    funds pass took 28.0 s, the debit job 24.4 s, the nightly checks 1.27 s, and the 2,000 held chained runs' nightly
+    checks 14.60 s, then 15.18 s.
+- `database.types.ts` was regenerated identical (no public signature changed).
+- Web: `npm run lint` and `npm run typecheck` are clean; vitest **28 files, 549 tests** passed (`advances.test.ts`
+  16 → 17).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61
+  passed** in 5.9 min. Screenshot diffs showing only dates or ids were reverted. Kept: `m2c7-avances` (mobile and
+  desktop: « Née le 20/11/2026 », « enregistrée le 23/11/2026 »; the E2E's cover is born at its payout's debit, three
+  days before its recording), `m2c7-client-avances` (mobile and desktop: « Avance née le 20/11/2026 … ») and
+  `m2c7-avance-perte` desktop (the column under the sheet).
+
+### Left open (low), with its default
+
+- **The earlier slices' reads the sweep's test sees under the same planted statistics** (printed by
+  `test_advance_reads_integration.py`, not bounded): the worker's pending items by draft (`remittance_pending`
+  10,013), its terms by mandate (`mandate_terms` 10,098) and its blockers (`client_status_event` 10,000);
+  `write_draft`'s `remittance_pending` 10,006 (`private.remittance_prepare_begin` / `remittance_record_draft`); the
+  approval job's `remittance_pending` 20,012, `client_status_event` 10,000 and `mandate_terms` 10,099. The night's
+  other checks also read 10,036 `remittance_line` rows (`test_remitted_cover_reads_integration.py`'s print, beside
+  `run_advance_checks`' 12). Each is once per call, not per row, and none is 7b's statement. Default: keep. At the scale
+  files' volumes none nears a budget; the worker's statements run custom plans; 7f's hardening plants these the same
+  way.
+- **The client space's rows stay ordered by their recording** (the dates shown are births). Two advances recorded in
+  one order and born in the other read out of date order. Default: keep (rare; the amounts and dates are true).
+- **`transfer_line_check`'s `advance_settled` rule** (found by round 2's verifier; 6b-2's statement, copied unchanged into
+  7b's redefinition, line 1571). With planted statistics and generic plans, the preview and the booking of a double
+  payout's unplanned return read the whole `commission_settlement_document_idx`: 10,000 rows on the preview and 20,000
+  on the booking, with the switch off or on. At the scale files' volumes `document_id` is near-unique, so their
+  statistics do not give this plan, and the path is rare (milliseconds). Default: 7c-1 fences the advance first (by
+  `cause_entry_id`, with `cause` outside), then probes the settlement by `document_id`. The bound goes into
+  `test_advance_reads_integration.py`, through the real `transfer_line_options` / `book_transfer_line` of that return.
+- **`client_space_advances`' read of the client's advances** (found by round 2's verifier). It is unfenced
+  (`client_organization_id` and `organization_id` together). With 10,000 of the servicer's advances to other clients
+  planted (n_distinct 2, generic plans), one client's space read 10,005 rows; `private.client_open_advances`, which is
+  fenced, read 4. `client_advance` holds 1 row after the scale job, and current statistics choose the client's index.
+  Default: 7c-1 fences it on `client_advance_client_idx` as `client_open_advances` does, with a bound in the same test.
+- Everything rounds 1 and 2 leave open stays open: CCS-2 (what is open, computed per row), the portfolio moved between
+  E's run and R(E), the cover's release re-queued later, founder Q2, Q5 and Q18 at their defaults. The switch stays off.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

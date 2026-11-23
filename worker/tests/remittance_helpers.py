@@ -315,6 +315,116 @@ def book_payout(run: str) -> None:
     assert status == "booked", f"the run's debit was not booked: {status}"
 
 
+def own_account(tenant: dict[str, Any]) -> tuple[str, str]:
+    """The servicer's own account (sweeps go to it, top-ups come from it), in its billing
+    settings: (its id, its IBAN)."""
+    iban = iban_fr(random.Random(f"own-{tenant['servicer']}"))
+    with psycopg.connect(DB) as conn, conn.transaction():
+        own = one(
+            conn,
+            """insert into public.bank_account (organization_id, purpose, iban, currency, label,
+                 opened_on) values (%s, 'own', %s, 'EUR', 'Compte propre', '2026-01-01')
+               returning id""",
+            (tenant["servicer"], iban),
+        )
+        conn.execute(
+            """insert into public.servicer_billing_settings (organization_id, own_bank_account_id)
+               values (%s, %s) on conflict (organization_id)
+               do update set own_bank_account_id = excluded.own_bank_account_id""",
+            (tenant["servicer"], own),
+        )
+    return str(own), iban
+
+
+def _last_statement(tenant: dict[str, Any]) -> tuple[int, date]:
+    with psycopg.connect(DB) as conn:
+        last = conn.execute(
+            """select closing_booked_minor, to_date from public.bank_statement
+               where bank_account_id = %s order by to_date desc, created_at desc limit 1""",
+            (tenant["bank"],),
+        ).fetchone()
+    assert last is not None
+    return int(last[0]), last[1]
+
+
+def book_sweep(tenant: dict[str, Any]) -> int:
+    """The servicer's share swept (M2c-6): the next file generated (it carries the sweep), written
+    by the job and downloaded, then a one-day statement of the sweep's debit (by its SWP id,
+    chained to the account's last closing balance) imported and the payments queue drained — the
+    funds pass books it (servicer_sweep). Its amount."""
+    import hashlib  # noqa: PLC0415 - only this helper
+    import tempfile  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    from statement_helpers import upload  # noqa: PLC0415
+
+    from collectoo_worker.synth.camt053 import Entry, Tx, make_doc, render_camt053  # noqa: PLC0415
+
+    _bank_catch_up(tenant)
+    file_id = staff(tenant, "select public.generate_transfer_file(%s, %s, null)",
+                    str(uuid.uuid4()), tenant["bank"])["file_id"]  # fmt: skip
+    drain()
+    with psycopg.connect(DB) as conn:
+        f = conn.execute(
+            "select id, storage_path from public.transfer_file where id = %s", (file_id,)
+        ).fetchone()
+        s = conn.execute(
+            """select t.id, t.amount_minor, t.end_to_end_id, t.payee_name, t.payee_iban
+               from public.bank_transfer t
+               where t.transfer_file_id = %s and t.kind = 'sweep'""",
+            (file_id,),
+        ).fetchone()
+    assert f is not None and s is not None
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "f.xml"
+        storage().download("transfer-files", f[1], dest)
+        digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+    staff(tenant, "select public.transfer_file_download(%s, %s)", f[0], digest)
+    opening, day = _last_statement(tenant)
+    ref = f"SW{uuid.uuid4().hex[:10].upper()}"
+    debit = Entry(int(s[1]), False, day, day, ref=ref, code="PMNT/ICDT/ESCT",
+                  txs=(Tx(int(s[1]), end_to_end_id=s[2], name=s[3], iban=s[4]),))  # fmt: skip
+    doc = make_doc([debit], iban=tenant["iban"], from_date=day, to_date=day,
+                   opening_minor=opening, stmt_id=f"S-{ref}")  # fmt: skip
+    upload(tenant, storage(), render_camt053(doc, "08"), name=f"{ref}.xml")
+    drain_payments_queue()
+    with psycopg.connect(DB) as conn:
+        status = one(conn, "select status from public.bank_transfer where id = %s", (s[0],))
+    assert status == "booked", f"the sweep's debit was not booked: {status}"
+    return int(s[1])
+
+
+def top_up(tenant: dict[str, Any], own: str, own_iban: str, amount: int) -> None:
+    """A top-up of the dedicated account from the own account (design §13; ordered by hand until
+    7e): ordered by ops, its credit (its TOP id, from the own IBAN) on a statement of the day,
+    booked by the debit job (servicer_top_up)."""
+    from statement_helpers import upload  # noqa: PLC0415
+
+    from collectoo_worker.synth.camt053 import Entry, Tx, make_doc, render_camt053  # noqa: PLC0415
+
+    top = staff(
+        tenant,
+        "select public.request_top_up(%s, %s, %s, %s, 'couvrir l''avance du cabinet')",
+        str(uuid.uuid4()),
+        own,
+        tenant["bank"],
+        str(amount),
+    )
+    opening, day = _last_statement(tenant)
+    ref = f"TU{uuid.uuid4().hex[:10].upper()}"
+    tx = Tx(amount, ref=f"L{ref}", end_to_end_id=top["end_to_end_id"], iban=own_iban)
+    credit = Entry(amount, True, day, day, ref=ref, txs=(tx,))
+    doc = make_doc([credit], iban=tenant["iban"], from_date=day, to_date=day,
+                   opening_minor=opening, stmt_id=f"S-{ref}")  # fmt: skip
+    upload(tenant, storage(), render_camt053(doc, "08"), name=f"{ref}.xml")
+    drain_payments_queue()
+    with psycopg.connect(DB) as conn:
+        status = one(
+            conn, "select status from public.bank_transfer where id = %s", (top["transfer_id"],)
+        )
+    assert status == "booked", f"the top-up's credit was not booked: {status}"
+
+
 def _bank_catch_up(tenant: dict[str, Any]) -> None:
     """The tests' statements each open at zero; the cash check of a file reads the last closing
     balance. A statement without lines that opens and closes at the account's booked cash (5120)

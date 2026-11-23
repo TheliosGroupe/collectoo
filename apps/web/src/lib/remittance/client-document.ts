@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { createClient } from "@/lib/supabase/server";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const KINDS = new Set(["payout_rib", "mandate_document", "client_status_evidence"]);
+const KINDS = new Set(["payout_rib", "mandate_document", "client_status_evidence", "advance_write_off_evidence"]);
 
 type Supabase = Awaited<ReturnType<typeof createClient>>;
 

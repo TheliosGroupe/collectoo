@@ -31,12 +31,18 @@ export type RemittedEntry = {
    *  outside any run (« hors reversement ») that had paid it — with or without a transfer of the run's own —, null
    *  nothing came back */
   returned_via: "run" | "unplanned" | null;
+  /** (M2c-7b, plan §4.3 [critic] L19 (d)) how the advance its reversal would post is recovered: the claw-back clause of
+   *  its mandate (its reference), a request, or a request for want of a single mandate; (review round 1, M7B-MONEY-2)
+   *  neither when it would be born before the client's proceeding opened */
+  recovery: "clawback" | "request" | "request_no_mandate" | "barred_proceeding";
+  clause_ref: string | null;
 };
 
 const MINOR = /^-?\d{1,16}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const HOW = new Set(["paid", "set_off", "netted", "unplanned"]);
 const VIA = new Set(["run", "unplanned"]);
+const RECOVERY = new Set(["clawback", "request", "request_no_mandate", "barred_proceeding"]);
 
 function frenchDay(iso: string): string {
   const [y, m, d] = iso.split("-");
@@ -59,6 +65,8 @@ export function parseAllocationRemitted(x: unknown): RemittedEntry[] | null {
     if (o.paid_how !== null && (typeof o.paid_how !== "string" || !HOW.has(o.paid_how))) return null;
     if (o.paid_run_number !== null && typeof o.paid_run_number !== "string") return null;
     if (o.returned_via !== null && (typeof o.returned_via !== "string" || !VIA.has(o.returned_via))) return null;
+    if (typeof o.recovery !== "string" || !RECOVERY.has(o.recovery)) return null;
+    if (o.clause_ref !== null && typeof o.clause_ref !== "string") return null;
     out.push({
       entry_id: o.entry_id,
       account_id: o.account_id as string | null,
@@ -70,6 +78,8 @@ export function parseAllocationRemitted(x: unknown): RemittedEntry[] | null {
       paid_how: o.paid_how as RemittedEntry["paid_how"],
       paid_run_number: o.paid_run_number as string | null,
       returned_via: o.returned_via as RemittedEntry["returned_via"],
+      recovery: o.recovery as RemittedEntry["recovery"],
+      clause_ref: o.clause_ref as string | null,
     });
   }
   return out;
@@ -127,7 +137,39 @@ export function reverseRemittedEffect(entries: RemittedEntry[], currency: string
   if (entries.length === 0) return null;
   const total = entries.reduce((s, e) => s + BigInt(e.amount_minor), BigInt(0));
   const heads = [...new Set(entries.map(remittedHead))].join(" ");
-  return `${heads} En désimputant, le cabinet lui en fait l'avance (${money(total.toString(), currency)}) : la somme n'est pas déduite de ses autres encaissements.`;
+  const advance = `En désimputant, le cabinet lui en fait l'avance (${money(total.toString(), currency)})`;
+  // M2c-7b (plan §4.3 [critic] L19 (d)): how the advance is recovered, per its mandate — review round 1 (tests-ui-8 (a)):
+  // under a claw-back clause the client's next runs do deduct it (never « pas déduite » then); (M7B-MONEY-2) one born
+  // before the client's proceeding opened is neither set off nor requested
+  const parts = new Map<string, bigint>();
+  for (const e of entries) parts.set(recoveryKey(e), (parts.get(recoveryKey(e)) ?? BigInt(0)) + BigInt(e.amount_minor));
+  if (parts.size === 1) {
+    const [key] = [...parts.keys()];
+    if (key.startsWith("clawback:")) return `${heads} ${advance}, qu'il reprendra sur ses prochains reversements (${clause(key)}).`;
+    if (key === "barred")
+      return `${heads} ${advance} : la somme n'est pas déduite de ses autres encaissements (avance antérieure à l'ouverture de la procédure collective du client).`;
+    return `${heads} ${advance} : la somme n'est pas déduite de ses autres encaissements. Une demande de remboursement pourra lui être adressée.`;
+  }
+  const each = [...parts].map(([key, amount]) => {
+    const m = money(amount.toString(), currency);
+    if (key.startsWith("clawback:")) return `dont ${m} qu'il reprendra sur ses prochains reversements (${clause(key)})`;
+    if (key === "barred")
+      return `dont ${m} non déduits de ses autres encaissements (avance antérieure à l'ouverture de la procédure collective du client)`;
+    return `dont ${m} non déduits de ses autres encaissements (une demande de remboursement pourra lui être adressée)`;
+  });
+  return `${heads} ${advance}, ${each.join(" ; ")}.`;
+}
+
+/** How an entry's cover would be recovered: its mandate's claw-back clause (with its reference), not at all before the
+ *  client's proceeding, or a request (7c sends it: « pourra »). */
+function recoveryKey(e: RemittedEntry): string {
+  if (e.recovery === "clawback") return `clawback:${e.clause_ref ?? ""}`;
+  return e.recovery === "barred_proceeding" ? "barred" : "request";
+}
+
+function clause(key: string): string {
+  const ref = key.slice("clawback:".length);
+  return `${ref || "clause de reprise"} du mandat`;
 }
 
 /** The toast once « Désimputer » is done: the advances the command posted (its result's `advances`). */

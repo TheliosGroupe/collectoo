@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { Badge, InfoNote, Section, Stats, WidePage } from "@/components/ui";
 import type { SessionClaims } from "@/lib/auth/access";
 import { money } from "@/lib/payments/statements";
+import { clientSpaceAdvances, parseClientSpaceAdvances } from "@/lib/remittance/advances";
 import { clientOfUser } from "@/lib/remittance/client-space";
 import {
   type RemittanceSummary,
@@ -59,7 +60,7 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
     );
   }
   const list = listPage((await searchParams).page, PAGE_SIZE);
-  const [{ data: summaryData, error }, { data: statementRows }] = await Promise.all([
+  const [{ data: summaryData, error }, { data: statementRows }, { data: advancesData }] = await Promise.all([
     supabase.rpc("client_remittance_summary", { p_client_organization_id: client.id }),
     supabase
       .from("remittance_statement")
@@ -70,7 +71,10 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
       .order("issue_date", { ascending: false })
       .order("number", { ascending: false })
       .range(list.from, list.to),
+    // M2c-7b (plan §4.3): the servicer's advances still to repay, and how each is recovered
+    supabase.rpc("client_space_advances", { p_client_organization_id: client.id }),
   ]);
+  const advances = clientSpaceAdvances(parseClientSpaceAdvances(advancesData) ?? { rows: [], total: [] });
   const summary = (summaryData ?? null) as unknown as RemittanceSummary | null;
   const owed = summary?.owed ?? [];
   const notes = inFlightNotes(summary);
@@ -108,6 +112,15 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
           {s}
         </p>
       ))}
+      {advances.heading ? (
+        <Section title={advances.heading} testId="client-advances">
+          <ul className="flex flex-col gap-1 text-sm">
+            {advances.lines.map((l) => (
+              <li key={l}>{l}</li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
       <p className="text-xs text-zinc-600 dark:text-zinc-400">
         Un reversement peut intervenir plus tôt : chaque encaissement vous est reversé au plus tard dans le délai de votre
         mandat, et jamais plus d&apos;un mois après sa réception.

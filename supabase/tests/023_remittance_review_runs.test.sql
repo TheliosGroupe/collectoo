@@ -10,6 +10,23 @@
 begin;
 select plan(72);
 
+-- (M2c-7b, plan §4.1.9 [critic] M7-MONEY-7; ADR-0014 « M2c-7b », house rule R3) the emulated prepares of this file put
+-- a remitted reversal's cover's queue item (client_advance, or its reversal's) on its advance's mandate and any other
+-- advance's on none (review round 1, M7B-MONEY-1: they pair with rows of no file), as the job now reads them — the
+-- line insert guard refuses it elsewhere: a trigger of this file's transaction, rolled back with it
+create function private.test_advance_item_mandate() returns trigger language plpgsql as $$
+begin
+  if new.kind in ('client_advance', 'client_advance_reversal') then
+    new.mandate_id := (select case when a.cause = 'remitted_reversal' then a.mandate_id end from public.ledger_entry e
+                       join public.client_advance a
+                         on a.entry_id = case new.kind when 'client_advance' then e.id else e.reverses_entry_id end
+                       where e.id = new.ledger_entry_id);
+  end if;
+  return new;
+end $$;
+create trigger test_advance_item_mandate before insert on private.remittance_draft_line
+  for each row execute function private.test_advance_item_mandate();
+
 -- Fixtures (as 021, with a third client) ----------------------------------------------------------------
 insert into public.organization (id, kind, legal_name, siren) values
   ('00000000-0000-0000-0000-0000000000aa', 'servicer', 'Collectoo SAS', '732829320'),

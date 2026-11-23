@@ -34,6 +34,23 @@
 begin;
 select plan(54);
 
+-- (M2c-7b, plan §4.1.9 [critic] M7-MONEY-7; ADR-0014 « M2c-7b », house rule R3) the emulated prepares of this file put
+-- a remitted reversal's cover's queue item (client_advance, or its reversal's) on its advance's mandate and any other
+-- advance's on none (review round 1, M7B-MONEY-1: they pair with rows of no file), as the job now reads them — the
+-- line insert guard refuses it elsewhere: a trigger of this file's transaction, rolled back with it
+create function private.test_advance_item_mandate() returns trigger language plpgsql as $$
+begin
+  if new.kind in ('client_advance', 'client_advance_reversal') then
+    new.mandate_id := (select case when a.cause = 'remitted_reversal' then a.mandate_id end from public.ledger_entry e
+                       join public.client_advance a
+                         on a.entry_id = case new.kind when 'client_advance' then e.id else e.reverses_entry_id end
+                       where e.id = new.ledger_entry_id);
+  end if;
+  return new;
+end $$;
+create trigger test_advance_item_mandate before insert on private.remittance_draft_line
+  for each row execute function private.test_advance_item_mandate();
+
 
 -- Fixtures and helpers (as 037_transfer_line_ops: its fixture, 035's helpers and its own) ---------------------
 
@@ -2723,11 +2740,15 @@ begin
                from private.run_settled_on(v_y) s),
     'nightly_then', pg_temp.nightly());
 end $$;
+-- (M2c-7b, the 7a round 3 carry-over; ADR-0014 « M2c-7b », house rule R3) e_also_back's returned_via « run » →
+-- « unplanned »: the planted attribution (by Y's payout booking, which came back) and U's cover E's line, so what came
+-- back on E's way is a payout counted as outside the run, never Y's own; paid_on stays null (the conservative reading
+-- this case pins)
 select is(pg_temp.iso('s17j', true),
   '{"exec": "ok", "y_lines": ["allocation:25000", "allocation:40000", "unplanned_payout:-40000"],
     "y": ["booked", 25000], "before": [true, "paid", true, null], "queue": ["payout_returned:25000"],
     "e": [true, true, "unplanned", null, null], "f": [true, null, null, null, "run"], "y_settled": 0,
-    "nightly": [], "e_also_back": [null, null, "run"], "seq_scans": 0, "w_lines": ["payout_returned:25000"], "e_then": [true, "unplanned", null, null],
+    "nightly": [], "e_also_back": [null, null, "unplanned"], "seq_scans": 0, "w_lines": ["payout_returned:25000"], "e_then": [true, "unplanned", null, null],
     "f_then": [true, "paid", true, "run"], "y_then": [true, "paid", true], "nightly_then": []}'::jsonb,
   '17 (j) (review round 3; switch on): a collection an unplanned payout paid in full, in a run whose own payout came '
   'back: it stays with the client through that payout (paid on its debit, « unplanned »), the run''s other collection '

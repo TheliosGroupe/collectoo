@@ -317,7 +317,18 @@ export type RunPayout = {
   settlement_minor: string;
   commission_minor: string;
   advances_recovered_minor: string;
-  advances: { cause: string; amount_minor: string; open_minor: string; created_on: string }[];
+  /** M2c-7b (plan §4.3): its open part (0 once reversed), whether its entry is reversed (a cover released), what was
+   *  passed as a loss, how the rest is recovered (the mandate's claw-back clause, or a request) */
+  advances: {
+    cause: string;
+    amount_minor: string;
+    open_minor: string;
+    created_on: string;
+    reversed?: boolean | null;
+    written_off_minor?: string | null;
+    recovery?: string | null;
+    clause_ref?: string | null;
+  }[];
   unplanned: {
     line_id: string;
     kind: string;
@@ -334,6 +345,25 @@ export type RunPayout = {
 };
 
 const positive = (v: string | null | undefined): v is string => !!v && MINOR.test(v) && BigInt(v) > BigInt(0);
+
+/** M2c-7b (plan §4.3): what became of an advance recorded at this payout — released with its cause, recovered (in part
+ *  passed as a loss), or how what is open is recovered. */
+function advanceFate(a: RunPayout["advances"][number], currency: string): string {
+  if (a.reversed) return "annulée (le virement hors reversement qui avait payé l'encaissement est revenu)";
+  if (!positive(a.open_minor))
+    return positive(a.written_off_minor)
+      ? `soldée (dont ${money(a.written_off_minor, currency)} passés en perte)`
+      : "récupérée";
+  const rest = a.open_minor === a.amount_minor ? "" : `reste ${money(a.open_minor, currency)} `;
+  if (a.recovery === "clawback")
+    return `${rest}à reprendre sur les prochains reversements du client (clause de reprise, ${a.clause_ref ?? "clause"} du mandat)`;
+  // (review round 1, M7B-MONEY-2) born before the client's proceeding opened: no run takes it back
+  if (a.recovery === "barred_proceeding")
+    return `${rest}non reprise sur les reversements du client (avance née avant l'ouverture de sa procédure collective)`;
+  if (a.recovery === "request_no_mandate")
+    return `${rest}à récupérer par une demande de remboursement (avance rattachée à aucun mandat unique)`;
+  return `${rest}à récupérer par une demande de remboursement (pas de clause de reprise)`;
+}
 
 /** M2c-7a (plan §3.7): what each cause of an advance of the servicer says on the run page. */
 const ADVANCE_CAUSE: Record<string, string> = {
@@ -381,10 +411,14 @@ export function runPayoutNotes(p: RunPayout, currency: string): string[] {
   }
   // M2c-7a (plan §3.7 [critic] L19 (b), F5): each advance of this payout's chain, worded by its cause, with the date it
   // was recorded
+  // M2c-7b (plan §4.3): and what became of it — never « déduite de ce reversement » (an advance recorded at this
+  // payout's debit is recovered by the client's next runs, under the claw-back clause, or by a request)
   for (const a of p.advances) {
     const why = ADVANCE_CAUSE[a.cause];
     if (!why) continue;
-    notes.push(`Avance du cabinet enregistrée le ${frenchDate(a.created_on)} : ${why} (${money(a.amount_minor, currency)})`);
+    notes.push(
+      `Avance du cabinet enregistrée le ${frenchDate(a.created_on)} (${why}) : ${money(a.amount_minor, currency)}, ${advanceFate(a, currency)}`,
+    );
   }
   for (const t of p.transfers) {
     // M2c-6b-3a-2 (T18): also a late predecessor's return (its transfer stays cancelled)

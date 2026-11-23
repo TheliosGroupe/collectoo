@@ -457,6 +457,13 @@ def test_a_run_cancelled_after_download_then_its_late_debit_pays_its_items(
     approve(tenant, draft)
     drain_remittances()
     assert run_row(draft)["status"] in ("approved", "booked")
+    # (M2c-7b review round 1, M7B-MONEY-1) what the late debit paid of the released items is no
+    # mandate's money any more: it counts with that payout's own row (their attributions, read by
+    # the prepare), so Martin's mandate brings only what the payout did not pay
+    assert {m["mandate_id"]: m["gross"] for m in run_row(draft)["settlement_plan"]["mandates"]} == {
+        str(tenant["mandate"]): str(200_000 - a),
+        None: "0",
+    }
     # Martin's check: he received his collection less the commission invoiced net of credit notes
     with psycopg.connect(DB) as conn:
         row = conn.execute(

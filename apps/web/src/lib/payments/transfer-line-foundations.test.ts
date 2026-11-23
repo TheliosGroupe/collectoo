@@ -87,9 +87,11 @@ describe("the new alerts (critic L10, L14)", () => {
       "Paiement créé à partir d'un de nos virements revenus (il porte la référence d'un reversement, d'une quote-part du cabinet ou d'un lot de nos fichiers) : ces sommes ne sont reversées à personne tant qu'il n'est pas traité. Ne l'affectez pas, ne le remboursez pas, prévenez le support.",
     );
   });
-  // M2c-7a (plan §3.7): « ce recouvrement n'est pas encore géré » goes; 7b adds how it is recovered
+  // M2c-7a (plan §3.7): « ce recouvrement n'est pas encore géré » goes; M2c-7b (plan §4.3) adds how it is recovered
   it("double_payout_open says the servicer advanced it after a transfer executed outside a run", () => {
-    expect(checkLabel("double_payout_open").help).toBe("Avance du cabinet après un virement exécuté hors reversement.");
+    expect(checkLabel("double_payout_open").help).toBe(
+      "Avance du cabinet après un virement exécuté hors reversement. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
+    );
   });
   it("every new check has a label of its own", () => {
     for (const code of ["transfer_unknown", "own_transfer_payment", "double_payout_open"])

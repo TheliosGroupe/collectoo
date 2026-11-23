@@ -11,7 +11,7 @@ import {
   type Tenant,
 } from "./support/admin";
 import { camt053, camt053Lines, ibanFr, type Credit } from "./support/camt";
-import { loginAsStaff } from "./support/session";
+import { loginAsStaff, loginWithEmailCode } from "./support/session";
 import { reviewShot } from "./screenshot";
 
 /**
@@ -23,6 +23,12 @@ import { reviewShot } from "./screenshot";
  * remitted entry left uncovered cannot be committed: LG009): the sentence names the amount, the client and the date,
  * and the command refuses — the advance exists. Screenshots `m2c7-desimputer-deja-reverse`, `m2c-controles`,
  * `m2c7-controles-couvrir` (mobile + desktop). The switch stays off. Synthetic data.
+ *
+ * M2c-7b (plan §4.3, §4.5 E2E): the sheet also says how the advance is recovered (no claw-back clause in this mandate:
+ * a request); the run page words the advance with how it is recovered; « Avances » lists it (ops: no « Passer en
+ * perte »), an administrator passes part of it as a loss with its evidence — the sheet states every effect, the page
+ * then reads what is recovered and what is left; the Reversements page shows the chip « Avance à récupérer » while the
+ * client's queue waits. Screenshots `m2c7-avances`, `m2c7-avance-perte`, `m2c7-reversements-avance` (mobile + desktop).
  */
 const BANK_IBAN = ibanFr(616161);
 const PAYOUT_IBAN = ibanFr(616162);
@@ -226,6 +232,8 @@ test("« Désimputer » a collection already remitted: the servicer's advance, t
   await expect(remitted).toContainText(`Déjà reversé au client (reversement ${runNumber}, débité le ${dayFr}).`);
   await expect(remitted).toContainText(/En désimputant, le cabinet lui en fait l'avance \(500,00\s€\)/);
   await expect(remitted).toContainText("la somme n'est pas déduite de ses autres encaissements");
+  // M2c-7b ([critic] L19 (d)): how it is recovered — this mandate has no claw-back clause
+  await expect(remitted).toContainText("Une demande de remboursement pourra lui être adressée.");
   await reverse.getByLabel("Motif interne (non transmis au client)").fill("Paiement repris par la banque du débiteur (E2E)");
   await reviewShot(page, testInfo, "m2c7-desimputer-deja-reverse");
   await reverse.getByRole("button", { name: "Confirmer l'annulation" }).click();
@@ -238,7 +246,8 @@ test("« Désimputer » a collection already remitted: the servicer's advance, t
   // the run's page: the advance recorded, and why
   await page.goto(runPage);
   await expect(page.getByTestId("run-payout-notes")).toContainText(
-    /Avance du cabinet enregistrée le \d{2}\/\d{2}\/\d{4} : encaissement de ce reversement annulé ou repris \(500,00\s€\)/,
+    // M2c-7b (plan §4.3): worded with how it is recovered (no claw-back clause: a request)
+    /Avance du cabinet enregistrée le \d{2}\/\d{2}\/\d{4} \(encaissement de ce reversement annulé ou repris\) : 500,00\s€, à récupérer par une demande de remboursement \(pas de clause de reprise\)/,
   );
   // one advance: cause remitted_reversal, the line's amount (from the ledger, never computed here)
   const { data: advances } = await adminClient()
@@ -332,7 +341,90 @@ test("« Désimputer » a collection already remitted: the servicer's advance, t
   await reviewShot(admin, testInfo, "m2c7-controles-couvrir");
   await cover.getByRole("button", { name: "Couvrir" }).click();
   await expect(cover).toContainText("Rien à couvrir : l'avance existe déjà.");
+
+  // M2c-7b « Avances »: the ops manager reads the advance (no claw-back clause: a request), and cannot pass it as a loss
+  await page.goto("/backoffice/reversements/avances");
+  const row = page.getByTestId("advance-row").filter({ hasText: tenant.clientName });
+  await expect(row).toContainText("Paiement repris après reversement (dossier C2929)");
+  await expect(row.getByTestId("advance-open")).toHaveText(/500,00\s€/);
+  await expect(row.getByTestId("advance-recovery")).toContainText("Demande de remboursement (pas de clause de reprise)");
+  await expect(row.getByTestId("write-off-open")).toHaveCount(0);
+  // (review round 2) the advance's date is its birth (« Née le »)
+  await expect(row.getByTestId("advance-born")).toContainText(/\d{2}\/\d{2}\/\d{4}/);
+  await reviewShot(page, testInfo, "m2c7-avances");
+
+  // the Reversements page: the chip « Avance à récupérer » on the client waiting (its queue: the reversal and the cover),
+  // on its row of « Encaissements en attente » — or on its draft's card if the schedule prepared one meanwhile
+  // (review round 1, tests-ui-4: never conditional)
+  await page.goto("/backoffice/reversements");
+  const holder = page
+    .getByTestId("prepare-row")
+    .filter({ hasText: tenant.clientName })
+    .or(page.getByTestId("run-card").filter({ hasText: tenant.clientName }));
+  await expect(holder.getByTestId("advance-chip")).toHaveText(/Avance à récupérer 500,00\s€/);
+  await reviewShot(page, testInfo, "m2c7-reversements-avance");
+
+  // (review round 1, tests-ui-6) the client space: its administrator reads what it still owes and how it is recovered
+  const clientContext = await browser.newContext({
+    baseURL: use.baseURL,
+    viewport: use.viewport,
+    userAgent: use.userAgent,
+    deviceScaleFactor: use.deviceScaleFactor,
+    isMobile: use.isMobile,
+    hasTouch: use.hasTouch,
+  });
+  const client = await clientContext.newPage();
+  await loginWithEmailCode(client, await createMember(tenant.clientId, "client_admin"));
+  await expect(client).toHaveURL(/\/client$/);
+  await client.goto("/client/reversements");
+  const owed = client.getByTestId("client-advances");
+  await expect(owed).toContainText(/Avances du cabinet à rembourser : 500,00\s€/);
+  // (review round 2, advance-date-contradicts-barred) dated by its birth (« née le »), never by its recording alone
+  await expect(owed).toContainText(
+    /Avance née le \d{2}\/\d{2}\/\d{4} \(paiement repris après reversement\) : 500,00\s€ — une demande de remboursement pourra vous être adressée\./,
+  );
+
+  // an administrator passes 200,00 € of it as a loss, with its evidence: the sheet states every effect
+  await admin.goto("/backoffice/reversements/avances");
+  const adminRow = admin.getByTestId("advance-row").filter({ hasText: tenant.clientName });
+  await adminRow.getByTestId("write-off-open").click();
+  const lossSheet = admin.getByTestId("write-off-sheet");
+  await lossSheet.getByLabel("Montant (€)").fill("200,00");
+  await lossSheet.getByLabel("Motif (interne, non transmis au client)").fill("Créance déclarée irrécouvrable (E2E)");
+  await lossSheet.getByLabel(/Pièce justificative/).setInputFiles({
+    name: "decision.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.4\n% décision de passage en perte (E2E, synthétique)\n%%EOF\n", "utf-8"),
+  });
+  await expect(lossSheet.getByTestId("write-off-effect")).toHaveText(
+    /Le cabinet enregistre une perte de 200,00\s€ \(compte 6780\)\. Collectoo ne réclame plus cette somme au client \(ni reprise, ni demande de remboursement\) ; rien ne lui est envoyé : ce n'est pas une remise de dette\. Irréversible\./,
+  );
+  await reviewShot(admin, testInfo, "m2c7-avance-perte");
+  await lossSheet.getByTestId("write-off-confirm").click();
+  await expect(admin.getByTestId("write-off-notice")).toContainText(
+    "Avance passée en perte : Collectoo ne réclame plus cette somme au client.",
+    { timeout: 15_000 },
+  );
+  const after = admin.getByTestId("advance-row").filter({ hasText: tenant.clientName });
+  await expect(after.getByTestId("advance-open")).toHaveText(/300,00\s€/);
+  // (review round 1, tests-ui-3; R3) what was passed as a loss apart from what was recovered (nothing yet)
+  await expect(after.getByTestId("advance-recovered")).toHaveText(/^0,00\s€/);
+  await expect(after.getByTestId("advance-written-off")).toHaveText(/200,00\s€ passés en perte/);
   await context.close();
+  // the client space then: what is still claimed, never the loss (LEX-28: never « abandon » nor « remise »)
+  await client.reload();
+  await expect(owed).toContainText(/Avances du cabinet à rembourser : 300,00\s€/);
+  await expect(owed).toContainText(/: 300,00\s€ — une demande de remboursement pourra vous être adressée\./);
+  await expect(owed).not.toContainText(/abandon|remise|perte/i);
+  await reviewShot(client, testInfo, "m2c7-client-avances");
+  await clientContext.close();
+  // the loss in the ledger, from the command (never computed here): 6780 / 4112 of 20 000, one write_off settlement
+  const { data: settled } = await adminClient()
+    .from("commission_settlement")
+    .select("kind, amount_minor")
+    .eq("client_organization_id", tenant.clientId)
+    .eq("document_kind", "advance");
+  expect(settled).toEqual([{ kind: "write_off", amount_minor: 20000 }]);
   const { data: still } = await adminClient()
     .from("client_advance")
     .select("cause, amount_minor")

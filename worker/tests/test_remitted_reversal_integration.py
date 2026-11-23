@@ -4,8 +4,9 @@ docs/design/m2c-7-plan.md §2.1, §3.3, §3.9 « Worker »; design §7.2; ADR-00
 * §7.2 from 12/11 through the real debit job: P1's return line (its end-to-end id, a camt.053 of
   the day) reverses E2 — remitted in RV-1, whose payout was debited — and posts A1 in the same
   transaction (adv:<R>, the file's mandate); 4670 Martin -300 000 (P6 owed in full), 4679 up
-  by 200 000, 5120 = the bank; RV-3 prepared before the claw-back (7b): gross 300 000, refund
-  36 000, N 282 000, D 18 000 (design §7.3's first variant);
+  by 200 000, 5120 = the bank; (M2c-7b) the top-up, RV-3 through the real prepare with the
+  claw-back clause (N 82 000, D 218 000), its debit, the sweep, the positions and the servicer
+  fund to the end, Martin's 246 000;
 * two connections, no deadlock and exactly one cover (`adv:<R>` or `adv:<R>:<run>`), never LG009:
   « Désimputer » of a remitted allocation against generate_transfer_file (which holds the remit
   lock) and against the client's approval job, each first; « Désimputer » and the funds pass
@@ -25,18 +26,23 @@ from typing import Any
 import psycopg
 import pytest
 from debit_helpers import import_entries, line_id, link_of, return_entry
-from integration_helpers import DB, as_user, one, storage
+from integration_helpers import DB, as_user, one, ready_mandate, storage
 from remittance_helpers import (
+    TERMS,
     add_client,
     approve,
     book_payout,
+    book_sweep,
     drain,
+    entry_books,
+    own_account,
     paid_file,
     paris_today,
     remittance_tenant,
     request_run,
     run_row,
     staff,
+    top_up,
 )
 from test_transfer_line_concurrency_integration import _hold
 
@@ -113,19 +119,65 @@ def _unalloc(tenant: dict[str, Any], payment: str, account: str) -> Any:
     )
 
 
-def test_the_worked_example_s_return_of_12_11_is_covered_in_its_transaction() -> None:
-    """§7.2 from 12/11: RV-1 (E2 200 000) debited; P6 300 000 allocated since; P1 taken back by the
-    bank (a camt.053 return naming its end-to-end id), the debit job links it: R(E2), the cash_out
-    and A1 in one transaction; P6 owed in full; RV-3 prepared before 7b: N 282 000, D 18 000."""
-    tenant = remittance_tenant()
+def _positions(tenant: dict[str, Any]) -> dict[str, int]:
+    """The client fund's positions (design §7.2): 5120, 4710, 4670 of the client, 4679, and I8 (5120
+    + 4710 + every client's 4670 + 4679 = 0)."""
+    p = {
+        "5120": _book(tenant, "client_money_cash"),
+        "4710": _book(tenant, "unallocated_payment"),
+        "4670": _book(tenant, "client_payable", tenant["client"]),
+        "4679": _book(tenant, "due_to_servicer"),
+    }
+    p["I8"] = p["5120"] + p["4710"] + _book(tenant, "client_payable") + p["4679"]
+    return p
+
+
+def _last_closing(tenant: dict[str, Any]) -> int:
+    return int(
+        _value(
+            """select closing_booked_minor from public.bank_statement where bank_account_id = %s
+               order by to_date desc, created_at desc limit 1""",
+            tenant["bank"],
+        )
+    )
+
+
+def _run_entry(run: str, entry_type: str) -> dict[str, int]:
+    """The books of the run's entry of that type (its settlement: the run is its document; its
+    remittance: its payout transfer is)."""
+    entry = _value(
+        """select e.id from public.ledger_entry e
+           where e.entry_type = %s and e.source_id = case %s
+             when 'client_settlement' then %s::text
+             else (select r.transfer_id::text from public.remittance_run r where r.id = %s) end""",
+        entry_type,
+        entry_type,
+        run,
+        run,
+    )
+    return entry_books(str(entry))
+
+
+def test_the_worked_example_from_12_11_to_the_end_with_the_claw_back() -> None:  # noqa: PLR0915
+    """§7.2 end to end from 12/11 (plan §4.5): Martin's mandate has the claw-back clause (art. 7.4).
+    RV-1 (E2 200 000) debited and its share swept; P6 300 000 allocated since; P1 taken back by the
+    bank (a camt.053 return naming its end-to-end id): R(E2), the cash_out and A1 in one
+    transaction, P6 owed in full; the top-up T1; RV-3 through the real prepare (`run._plan` with the
+    facts as loaded: A1's item in its mandate's money) — N 82 000, D 218 000 (the 7a assertions, N
+    282 000 / D 18 000 before the claw-back, flip to these, house rule R3); E11, E12 at its debit,
+    the sweep E13; the positions row by row; the servicer fund at the end; Martin got 246 000."""
+    tenant = remittance_tenant(terms={**TERMS, "clawback": {"clause_ref": "art. 7.4"}})
+    own, own_iban = own_account(tenant)
     _f42, p1 = paid_file(tenant, 200_000)
     rv1 = request_run(tenant)
+    assert (run_row(rv1)["net_minor"], run_row(rv1)["settlement_minor"]) == (164_000, 36_000)
     approve(tenant, rv1)
     drain()
     book_payout(rv1)
     assert run_row(rv1)["status"] == "booked"
-    paid_file(tenant, 300_000)
-    share_before = _book(tenant, "due_to_servicer")
+    assert book_sweep(tenant) == 36_000  # E9
+    paid_file(tenant, 300_000)  # P6, E10
+    assert _positions(tenant)["4670"] == -300_000 and _positions(tenant)["4679"] == 0
     e2 = _allocation(p1)
     e2e = str(_value("select end_to_end_id from public.payment where id = %s", p1))
     ref = f"RT{uuid.uuid4().hex[:8].upper()}"
@@ -147,7 +199,7 @@ def test_the_worked_example_s_return_of_12_11_is_covered_in_its_transaction() ->
         assert rev is not None
         adv = conn.execute(
             """select a.amount_minor, a.cause, e.idempotency_key, e.effective_date,
-                      a.mandate_id = %s
+                      a.mandate_id = %s, a.id
                from public.client_advance a join public.ledger_entry e on e.id = a.entry_id
                where a.cause_entry_id = %s""",
             (tenant["mandate"], rev[0]),
@@ -163,17 +215,161 @@ def test_the_worked_example_s_return_of_12_11_is_covered_in_its_transaction() ->
     # after it.)
     assert _value("select private.remitted_cover_gap(%s)", rev[0]) == 0
     assert adv[3] == rev[1] == paris_today() and adv[4] is True
-    assert _book(tenant, "client_payable", tenant["client"]) == -300_000
-    assert _book(tenant, "due_to_servicer") - share_before == 200_000
-    assert _cash(tenant) == int(closing[0])
+    a1 = str(adv[5])
+    # 12/11 (the return, A1): P6 owed in full, the servicer owes the account A1; 5120 = the bank
+    bank = int(closing[0])
+    assert _positions(tenant) == {
+        "5120": bank,
+        "4710": 0,
+        "4670": -300_000,
+        "4679": 200_000,
+        "I8": 0,
+    }
+    # 13/11 (T1): the top-up brings 4679 back to 0
+    top_up(tenant, own, own_iban, 200_000)
+    bank += 200_000
+    assert _positions(tenant) == {"5120": bank, "4710": 0, "4670": -300_000, "4679": 0, "I8": 0}
+    assert _cash(tenant) == _last_closing(tenant)
+    # RV-3 (16/11) through the real prepare: gross 300 000 (E10, R(E2), A1), FC-3 54 000 TTC
+    # set off, FC-4's 36 000 refunded, A1 taken back by the claw-back clause
     rv3 = request_run(tenant)
     draft = run_row(rv3)
     assert (
         draft["gross_minor"],
         draft["refund_minor"],
+        draft["advance_recovered_minor"],
         draft["net_minor"],
         draft["settlement_minor"],
-    ) == (300_000, 36_000, 282_000, 18_000), draft["last_failure"]
+    ) == (300_000, 36_000, 200_000, 82_000, 218_000), draft["last_failure"]
+    with psycopg.connect(DB) as conn:
+        a1_line = conn.execute(
+            """select kind, mandate_id = %s, commission_minor, deadline
+               from private.remittance_draft_line
+               where run_id = %s and ledger_entry_id = (select entry_id from public.client_advance
+                                                         where id = %s)""",
+            (tenant["mandate"], rv3, a1),
+        ).fetchone()
+    assert a1_line == ("client_advance", True, 0, None)  # A1's item in its mandate's money
+    approve(tenant, rv3)
+    drain()
+    assert run_row(rv3)["status"] == "approved"
+    book_payout(rv3)
+    # 17/11 (E11, E12)
+    assert run_row(rv3)["status"] == "booked"
+    assert _run_entry(rv3, "remittance") == {"client_payable": 82_000, "client_money_cash": -82_000}
+    assert _run_entry(rv3, "client_settlement") == {
+        "client_payable": 218_000, "due_to_servicer": -218_000, "due_from_client_funds": 218_000,
+        "commission_receivable": -18_000, "client_advance_receivable": -200_000,
+        "vat_pending": 9_000, "vat_collected": -9_000,
+    }  # fmt: skip
+    bank -= 82_000
+    assert _positions(tenant) == {"5120": bank, "4710": 0, "4670": 0, "4679": -218_000, "I8": 0}
+    assert _cash(tenant) == _last_closing(tenant)
+    with psycopg.connect(DB) as conn:
+        settled = conn.execute(
+            """select document_kind, kind, amount_minor from public.commission_settlement
+               where document_id = %s""",
+            (a1,),
+        ).fetchall()
+    assert [tuple(r) for r in settled] == [("advance", "compensation", 200_000)]
+    assert _value("select private.advance_open(%s)", a1) == 0
+    # 18/11 (E13): the servicer's share swept
+    assert book_sweep(tenant) == 218_000
+    bank -= 218_000
+    assert _positions(tenant) == {"5120": bank, "4710": 0, "4670": 0, "4679": 0, "I8": 0}
+    assert _cash(tenant) == _last_closing(tenant)
+    # the servicer fund at the end (Martin's part of design §7.2's: 5122 = 36 000 - 200 000 +
+    # 218 000; 7060 -45 000; 44571 -9 000; 4111, 4112, 4689, 44574 at 0)
+    fund = {
+        b: _book(tenant, b)
+        for b in ("own_cash", "servicer_revenue", "vat_collected", "commission_receivable",
+                  "client_advance_receivable", "due_from_client_funds", "vat_pending")
+    }  # fmt: skip
+    assert fund == {"own_cash": 54_000, "servicer_revenue": -45_000, "vat_collected": -9_000,
+                    "commission_receivable": 0, "client_advance_receivable": 0,
+                    "due_from_client_funds": 0, "vat_pending": 0}  # fmt: skip
+    # Martin received 164 000 + 82 000 = 246 000: net collections 300 000 less 54 000 TTC
+    received = _value(
+        """select coalesce(sum(p.amount_minor), 0) from public.ledger_entry e
+           join public.ledger_posting p on p.entry_id = e.id
+           join public.ledger_account la on la.id = p.ledger_account_id
+             and la.book = 'client_payable'
+           where e.entry_type = 'remittance' and e.client_organization_id = %s""",
+        tenant["client"],
+    )
+    assert int(received) == 246_000
+
+
+def test_an_overrun_advance_s_row_is_no_mandate_s_money() -> None:
+    """M2c-7b review round 1 (M7B-MONEY-1; ADR-0014 « M2c-7b review fixes », R3: 7b's version of
+    this test took the advance back from its own row, N 0 / D 70 000 — the bug). An overrun
+    advance on M (+A 70 000, planted as the debit's booking posts it) is a document of M, but its
+    queue row pairs with rows of no file (whatever left 4670 in debit): it counts outside every
+    mandate. Under M's claw-back clause and with a collection of 70 000 on the client's second
+    mandate M2 (netting only), the real prepare takes nothing of the advance — not from its own
+    row, not from M2's collection: gross 140 000, M2's own invoice 12 600 set off, N 127 400; the
+    advance's draft line carries no mandate, and the approval's line insert guard accepts it."""
+    tenant = remittance_tenant(terms={**TERMS, "clawback": {"clause_ref": "art. 7.4"}})
+    with psycopg.connect(DB) as conn, conn.transaction():
+        portfolio = one(
+            conn,
+            """insert into public.portfolio (organization_id, client_organization_id, name)
+               values (%s, %s, 'P2') returning id""",
+            (tenant["servicer"], tenant["client"]),
+        )
+        second = {**tenant, "portfolio": portfolio}
+        second["mandate"] = ready_mandate(conn, second, f"MAND-{uuid.uuid4().hex[:6]}")
+    paid_file(second, 70_000)
+    adv_id = uuid.uuid4()
+    with psycopg.connect(DB) as conn, conn.transaction():
+        conn.execute("select private.ledger_post_set_begin()")
+        conn.execute(
+            """insert into pg_temp._lps_entry (entry_no, organization_id, entry_type,
+                 effective_date, idempotency_key, client_organization_id, source_type, source_id)
+               values (1, %s, 'client_advance', private.paris_today(), %s, %s, 'client_advance',
+                       %s)""",
+            (tenant["servicer"], f"adv:test-{uuid.uuid4()}", tenant["client"], str(adv_id)),
+        )
+        conn.execute(
+            """insert into pg_temp._lps_line (entry_no, line_no, book, amount_minor, currency)
+                 values (1, 1, 'due_to_servicer', 70000, 'EUR'),
+                 (1, 2, 'client_payable', -70000, 'EUR'),
+                 (1, 3, 'client_advance_receivable', 70000, 'EUR'),
+                 (1, 4, 'due_from_client_funds', -70000, 'EUR')"""
+        )
+        entry = one(conn, "select entry_id from private.ledger_post_set()")
+        conn.execute(
+            """insert into public.client_advance (id, organization_id, client_organization_id,
+                 mandate_id, currency, amount_minor, cause, cause_entry_id, entry_id)
+               values (%s, %s, %s, %s, 'EUR', 70000, 'payout_overrun', %s, %s)""",
+            # (its cause: its own entry stands for the debit's remittance it would cover)
+            (adv_id, tenant["servicer"], tenant["client"], tenant["mandate"], entry, entry),
+        )
+    run = request_run(tenant)
+    draft = run_row(run)
+    assert (
+        draft["gross_minor"],
+        draft["advance_recovered_minor"],
+        draft["commission_taken_minor"],
+        draft["net_minor"],
+        draft["settlement_minor"],
+    ) == (140_000, 0, 12_600, 127_400, 12_600), draft["last_failure"]
+    assert (
+        _value(
+            """select count(*) from private.remittance_draft_line
+           where run_id = %s and kind = 'client_advance' and mandate_id is null""",
+            run,
+        )
+        == 1
+    )
+    approve(tenant, run)
+    drain()
+    approved = run_row(run)
+    assert approved["status"] == "approved", approved["last_failure"]
+    assert {m["mandate_id"]: m["gross"] for m in approved["settlement_plan"]["mandates"]} == {
+        None: "70000",
+        str(second["mandate"]): "70000",
+    }
 
 
 # -- two connections ----------------------------------------------------------------------------
