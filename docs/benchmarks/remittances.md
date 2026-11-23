@@ -1720,3 +1720,48 @@ lowest. The files are run once each as the round's check.
 
 `test_allocation_scale_integration.py` (50,000 allocations) is not run: the allocation path is unchanged, as in rounds 1
 and 2.
+
+### M2c-7a — CI round (main) (2026-11-23, same VM, a second local stack beside the main one — 7b's build ran its suites on the main stack meanwhile —, each run right after `supabase db reset` with CI's logging settings)
+
+What the round changes on a timed path: `private.cover_booked_run_reversals` (each payout booking: the booked runs'
+reversed lines), `private.run_booked_cover_check` (each run set booked, fired by `ledger_check_now`) and the nightly's
+runs booked since in `private.run_advance_checks` read each run's lines by the run's key alone, their conditions outside
+the fence (ADR-0014 « M2c-7a — CI round (main) »).
+
+The failure first, on 245296d in the scale job's order (CI run 45206756541: 25,202,495 `remittance_line` rows, the
+booking 6.18 s): **2 failed, 13 passed** (1,694.1 s) — both lot tests past the API's 8 s, cancelled in the cover's
+statement. `remittance_line` analysed at the two 50,000-line runs (`n_distinct(run_id)` 2): that statement alone for
+the lot's 499 runs **8.7 s** (a bitmap of `remittance_line_live_uq` whole per run, 51,004 rows each), **5.8 ms** with
+the fixed body; the nightly's booked-runs read for the lot's 500 runs 8.9 s on 245296d.
+
+The scale job's command as `ci.yml` runs it (its nine files), on the fix: **15 passed** (1,603.1 s):
+
+- `test_transfer_line_scale_integration.py`, `remittance_line` analysed exactly as in the failing run (`n_distinct(run_id)`
+  2, MCV 0.501 / 0.499): the 500-member lot short of one, rolled back — options 0.60 s, booking **2.10 s**, **2,995**
+  `remittance_line` rows read (about 6 per member; bound 5,000; CI on 245296d: 25.2 million), no sequential scan of a
+  per-member table; through the API — options 0.58 s, booking **2.39 s**, the allocation lock held 2.11 s (budget 4 s;
+  PR #40's round: 0.41 s / 1.78 s, before 7a's per-run checks); the saturating lots: options 2.40 / 2.63 s, the command
+  2.47 / 2.78 s (`parts_do_not_add_up`); 501 and 5,000 members 0.04 / 0.014 s (`lot_too_large`); the 50,000-item draft:
+  options 0.09 s, command 0.23 s, lock 0.18 s.
+- `test_remittance_scale_integration.py` (50,000 lines): reserved 1.43 s, prepared 12.4 s; nightly checks 4.9 s (the
+  draft waiting 4.3 s); cancellation 4.13 s; the re-run prepared and approved 35.6 s, its payout booked 1.1 s; the
+  nightly checks with the run booked **6.3 s** (`run_payment_checks` 3.04 s own, `commission_key_open` 1.90 s,
+  `run_remittance_runs_checks` 0.62 s, `run_advance_checks` **101 ms** own; 7a round 3: 108 ms).
+- The others: 50,000 credits imported and matched 36.3 s, allocated 86.5 s; the statement 50,000 credits 47.3 s; 25
+  receipt jobs 79.9 s (16.0 ms per receipt); the 50k boarding 133 s; the camt.053 import job 31.9 s; the transfer
+  cancellation file's nightly checks 0.91 s (75,850 `bank_transfer` rows), the late predecessor's booking 2.74 s; the
+  5,000-transfer file's debit job 12.8 s, its nightly checks 0.37 s; 500 runs' approval jobs 154.2 s.
+
+This VM ran about 15–20 % slower than in PR #40's round on paths no change since touches (the 500 runs' approval jobs
+136.7 → 154.2 s, the 50k boarding 111 → 133 s, a receipt 14.3 → 16.0 ms), the other stack's suites running meanwhile.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), on another fresh reset: **6 passed** (1,418.6 s, 23.6 min) — 200 members'
+batch line 0.59 s, 200 RMT debits' job 0.76 s; « Générer le fichier » for 5,000 payouts (+50 cancelled) 4.19 s; the
+5,000-member batch line's funds pass **29.2 s** (29.1 s under auto_explain; 20,000 `remittance_line` rows, 4 per
+member, none by a sequential scan; 7a round 3: 30.2 s); the nightly checks **1.28 s** (1.40 s warm; round 3: 1.20 s);
+5,000 RMT debits imported in 1.6 s, the debit job **26.3 s** in chunks of 11.0, 10.2 and 4.8 s (round 3: 26.1 s);
+then the 2,000 held chained runs: the funds pass 21.8 s, the nightly checks **14.97 s** (the standalone reading
+12.91 s; round 3: 15.80 s), once the days are imported **15.24 s** (round 3: 15.66 s). Within the spread of the
+earlier rounds: there `remittance_line` holds about one line per run, so its statistics priced the run's key below the
+live index before the round too.

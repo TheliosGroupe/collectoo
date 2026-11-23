@@ -6396,5 +6396,115 @@ run, the body restored. Web: `remitted.ts` with one change, vitest, the file res
   'unplanned' instead of the run's `returned`, with a `043` case (17 j, then U back, then W). Default until then: keep.
 - Everything rounds 1 and 2 leave open stays open.
 
+## M2c-7a — CI round (main) (2026-11-23)
+
+**The failure.** CI run 45206756541 (the push of 245296d, PR #41's squash, to `main`), job « Scale runs (50k boarding,
+statement, matching, allocation; 5k receipts) », `test_transfer_line_scale_integration.py` in the job's order (after the
+50,000-line files): `test_the_command_reads_a_lot_by_key` — the 500-member lot short of one, in its rolled-back
+transaction, read **25,202,495** rows of `remittance_line` (its bound 10 × 500; every other per-member table within its
+own, no sequential scan), `book_transfer_line` 6.18 s; `test_a_lot_at_the_cap_short_of_one_member_is_booked_within_budget`
+— the same booking through the API 6.16 s (budget 4 s), the allocation lock held 5.99 s. The same commit's run
+dispatched on the PR's branch (45201431943) passed that job, and so did `main` before 7a (70bfa8f).
+
+**Root cause: a read 7a added, `private.cover_booked_run_reversals`.** Step 3b of `private.bank_booking_post_rows` calls
+it once per booking with every payout row's run; it read each run's live allocation and forward lines through
+`cross join lateral (select … from public.remittance_line q where q.run_id = u.run_id and not q.released and q.kind in
+('allocation', 'forward') offset 0)`. Reproduced on a second local stack (project `collectoo-cifix`, ports 553xx, the
+main stack untouched) in the scale job's order: `supabase db reset`, CI's logging settings, the job's nine files in one
+pytest call as `ci.yml` runs them — the same two tests failed (here both past the API's 8 s, at that statement: this VM,
+shared with another stack's suites, is slower than CI's runner). `remittance_line` had last been analysed by autovacuum
+when it held exactly the two runs of `test_remittance_scale_integration.py` — the cancelled 50,000-line run (every line
+released) and its re-run (every line live): `n_distinct(run_id)` 2 (MCV 0.500 / 0.500), `released` 0.5 / 0.5,
+`correlation(run_id)` 0.9999. The lateral's key is a parameter (the outer row's run), so its estimate is 1 / n_distinct:
+half the table, 50,000 rows. A probe of `remittance_line_pkey` for that many (a two-column index: its first column's
+correlation weighted down) was priced above a bitmap of the whole partial index `remittance_line_live_uq`, whose
+predicate `not released` the subquery's filter implies (49,997 entries, 271 pages; cost 16,173). EXPLAIN ANALYZE of the
+statement on the failing state, for the lot's 499 runs: `Bitmap Index Scan on remittance_line_live_uq (actual
+rows=51004 loops=499)`, then `Filter: … run_id = y.run_id`, `Rows Removed by Filter: 51003` — **8.7 s**. CI's figure is
+the same read: 25,202,495 = 499 × 50,506 + 1 (CI's table then held 50,506 live lines). Which plan the statement got
+rested on when autovacuum last analysed `remittance_line` — a matter of seconds in the job's order: with its statistics
+forgotten in the transaction (as before any analyse), the same statement took a BitmapAnd of the key and the live index
+(one row fetched per run, but still 51,004 index entries read per run: 1.0 s), within the test's row bound; the PR
+branch's run, whose log does not show the analyse, did not meet the bitmap. The same read in two other 7a bodies: `private.run_booked_cover_check`
+(the deferred LG009 check of a run set booked, which `private.ledger_check_now` fires inside the same booking: its custom
+plans keep the key — not what CI hit —, its generic plan of `new.id` takes the same bitmap, 20 ms per run on that state),
+and the nightly's runs booked since in `private.run_advance_checks` (a lateral like the cover's: the lot's 500 runs
+booked, **8.9 s** on that state). None of the three existed on 70bfa8f.
+
+**Fix** (`20261123080000_cover_reads_by_run_key.sql`, forward-only, sorted before 7b's `20261123090000`; behaviour
+unchanged): the three bodies copied whole from `20261122090000` (lines 547, 731 and 895; SECURITY DEFINER,
+`search_path ''`, `enable_seqscan off` and their grants restated), changed only in these reads. Each run's lines are read
+by the run's key alone inside the `offset 0` fence — no partial index's predicate is implied there, so
+`remittance_line_pkey`'s prefix is the only index the planner can use — and `not released` and the kinds are applied
+outside it. « R is itself a live line of that run » ([critic] M7-MONEY-1's same-run pair, the `not exists`) reads R's
+own live line by `remittance_line_live_uq` (unique) inside a fence, its run compared outside: under the same statistics
+its old shape hashed every live line once per statement (the cover) or once per run (the check's generic plan) as soon as
+a reversed line was met. The same rows: a live allocation or forward line of the run, and R's live line in that run —
+the same predicates, only where the planner may apply them moved; pgTAP `043` (the covers at the booking and at an
+N = 0 approval, LG009 at every commit, the nightly's codes) passes unchanged. On the failing state the statement took
+**5.8 ms** (a bitmap of `remittance_line_pkey` by run: one row per run).
+
+**Test** (`worker/tests/test_remitted_cover_reads_integration.py`, in the `db` job, about 7 s): a lot of 12 payouts made
+through the jobs (the scale file's fixture at 12 members); in each test's rolled-back transaction, 2 × 10,000 lines
+planted in two runs, one of them released (written without the insert guard and foreign keys: they belong to no run,
+entry or client), and `remittance_line` analysed with `run_id`'s `n_distinct` pinned at 2 (the column's attribute
+option, rolled back with the rest) — the statistics CI's scale order left. (1) The lot short of one booked as the API's
+session books it (`transfer_line_options`, then `book_transfer_line`): ≤ 10 `remittance_line` rows read per member
+(`pg_stat_xact_user_tables`). (2) One member's collection reversed while its run is in flight (« Désimputer »), the
+booking under `plan_cache_mode = force_generic_plan` (the check's generic plan), its cover posted at the booking, the
+night's checks free of violations (I23 holds), then `private.run_advance_checks` again on that check run (the
+servicer's first night: the full pass over its booked runs): the booking ≤ 10 rows per member, the advance checks
+≤ 5 per run + 100. On 245296d's bodies: **111,761** rows (1), **243,779** (2) and **111,717** for the advance checks — it
+fails; fixed: 56, 57 and 12.
+
+### Mutants
+
+Each change reverted alone (`create or replace` of the reverted body over the fix on the second stack), the test run,
+the fix restored.
+
+| Mutant | Killed by |
+|---|---|
+| the three bodies as 245296d left them | test 1 (111,761), test 2 (243,779; advance checks 111,717) |
+| `cover_booked_run_reversals`: 7a's body | test 1 (110,969), test 2 |
+| `run_booked_cover_check`: 7a's body | test 2 (111,101) |
+| `run_advance_checks`: 7a's body | test 2's advance checks (111,188) |
+| `cover_booked_run_reversals`: only the `not exists` back to its old shape | test 2 (10,189: the hash of every live line, once) |
+| `run_booked_cover_check`: only the `not exists` back to its old shape | test 2 (10,201) |
+
+6 of 6 killed.
+
+### Suites
+
+The second stack alone (the main stack was in use by 7b's build):
+
+- `supabase test db` after `supabase db reset` (the fix applied): **Files=45, Tests=2,965, PASS** (513 s); then, without a
+  reset (CI's order), the integration tests but the scale files: **259 passed** in about 14 min (257 and the new file's
+  two).
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 184 files) clean; unit pytest **1,094 passed, 5
+  xfailed**.
+- `database.types.ts`: regenerated from the second stack, no diff (no public signature changed).
+- Scale, on a fresh `supabase db reset` with CI's logging settings, the `scale` job's command as `ci.yml` runs it (its
+  nine files): **15 passed** (1,603.1 s), `remittance_line` analysed by autovacuum at the same two runs as in the
+  failing run (`n_distinct(run_id)` 2, MCV 0.501 / 0.499) — the 500-member lot short of one, rolled back: options
+  0.60 s, booking **2.10 s**, **2,995** `remittance_line` rows (about 6 per member; bound 5,000), no sequential scan;
+  through the API 0.58 s / **2.39 s**, the allocation lock held 2.11 s (budget 4 s) — `docs/benchmarks/remittances.md`
+  « M2c-7a — CI round (main) ».
+- The `scale-payouts` job's command on another fresh reset: **6 passed** (1,418.6 s) — the 5,000-member batch line's
+  funds pass 29.2 s (20,000 `remittance_line` rows: 4 per member), the nightly checks 1.28 s, the debit job 26.3 s; the
+  2,000 held chained runs' nightly checks 14.97 s, then 15.24 s once the days are imported (7a round 3: 30.2, 1.20,
+  26.1, 15.80 and 15.66 s).
+- Then `supabase db reset` (the second stack left running at this head's schema). No web code changed.
+
+### Left open (low), with its default
+
+- **`private.inflight_overdue_lines`** (20261112090000, not 7a) reads each run in flight's lines with the same shape
+  (`x.run_id = r.id and not x.released and …` inside its fence): under the test's planted statistics, the night's checks
+  read the planted live lines once per run approved or sent and not booked (10,048 rows for test 2's one run in flight).
+  The scale files' nights pass their bounds and budgets with it (above). Default: keep; give it the same shape in a
+  later slice, with the nightly's scale run measured.
+- **7b** (`20261123090000_advance_recovery.sql`, built in parallel) redefines `private.run_advance_checks` from
+  `20261122090000`: it must be re-copied from this migration's body (the booked runs' lateral), or the new test's
+  advance-check bound fails in the `db` job.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
