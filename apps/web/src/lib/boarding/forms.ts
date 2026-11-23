@@ -98,6 +98,14 @@ export type ErrorCode =
   | "not_same_debtor"
   | "not_forwardable"
   | "allocation_busy"
+  // M2c-7a (plan §3.7)
+  | "remitted_cover_failed"
+  | "transfers_busy"
+  | "cover_nothing_to_cover"
+  | "cover_gap_changed"
+  | "cover_over_covered"
+  | "full_check_already_requested"
+  | "full_check_busy"
   | "already_reversed"
   | "file_held"
   | "refund_reason_mismatch"
@@ -385,6 +393,17 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Ce paiement ne peut pas être reversé au client : seul un paiement sans imputation, sur un dossier rappelé ou antérieur à l'arrêté, peut l'être.",
   allocation_busy:
     "Une imputation est en cours pour ce servicer : réessayez dans un instant.",
+  // M2c-7a (plan §3.7): a reversal of a collection already remitted, its cover; « Couvrir » and the full check
+  remitted_cover_failed:
+    "L'encaissement avait déjà été reversé au client : l'avance du cabinet n'a pas pu être enregistrée. Réessayez ; si cela continue, prévenez le support.",
+  transfers_busy: "Opération en cours sur les virements : réessayez dans un instant.",
+  cover_nothing_to_cover: "Rien à couvrir : l'avance existe déjà.",
+  cover_gap_changed: "Le montant a changé : rechargez la page.",
+  cover_over_covered: "L'avance dépasse l'encaissement annulé : prévenez le support.",
+  full_check_already_requested:
+    "Une vérification complète est déjà demandée : elle passe avec les prochains contrôles.",
+  // review round 1 (CC-3): another request of the servicer being recorded at that instant
+  full_check_busy: "Contrôles en cours : réessayez dans un instant.",
   already_reversed:
     "Cette imputation a déjà été annulée entre-temps : rechargez la page.",
   file_held:

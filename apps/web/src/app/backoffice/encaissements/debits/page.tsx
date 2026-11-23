@@ -26,6 +26,7 @@ import {
   releaseEffect,
   returnEffect,
 } from "@/lib/payments/debits";
+import { parseAllocationRemitted, type RemittedEntry, returnRemittedNote } from "@/lib/payments/remitted";
 import { money, signedMoney } from "@/lib/payments/statements";
 import { offersTransferLineBooking } from "@/lib/payments/transfer-lines";
 import {
@@ -203,6 +204,21 @@ export default async function DebitsPage({
       ),
     );
   }
+  // M2c-7a (plan §3.7): of the payments a return may be linked to, what was already remitted to the client (one keyed
+  // read per payment offered; the return's sheet says the advance the servicer then makes)
+  const remitted = new Map<string, RemittedEntry[]>();
+  if (tab === "a-classer") {
+    const ids = [
+      ...new Set(
+        rows.flatMap((r) => [
+          ...r.candidates.map((c) => c.payment_id).filter((x): x is string => typeof x === "string"),
+          ...(options.get(r.bank_transaction_id)?.payments ?? []).map((p) => p.payment_id),
+        ]),
+      ),
+    ];
+    const reads = await Promise.all(ids.map((id) => supabase.rpc("allocation_remitted", { p_payment_id: id })));
+    ids.forEach((id, i) => remitted.set(id, parseAllocationRemitted(reads[i].data) ?? []));
+  }
   const href = (t: string, p = 1) =>
     `/backoffice/encaissements/debits?onglet=${t}${p > 1 ? `&page=${p}` : ""}`;
 
@@ -334,6 +350,7 @@ export default async function DebitsPage({
                     row={r}
                     options={options.get(r.bank_transaction_id)}
                     cancellationAfterDownload={cancellationAfterDownload}
+                    remitted={remitted}
                   />
                 ) : null}
                 {tab === "frais" && r.direction === "debit" ? (
@@ -416,10 +433,13 @@ function LineActions({
   row,
   options,
   cancellationAfterDownload = false,
+  remitted = new Map(),
 }: {
   row: Row;
   options: Options | undefined;
   cancellationAfterDownload?: boolean;
+  /** M2c-7a: per payment, its entries already remitted to the client */
+  remitted?: Map<string, RemittedEntry[]>;
 }) {
   const cur = row.currency;
   // the job's named payments, then those debit_link_options listed (one list with the queue's text: linkPayments)
@@ -505,16 +525,21 @@ function LineActions({
             leftMinor={p.left_minor}
             primary={p.named === true}
             label={`Retour du paiement de ${money(p.amount_minor, cur)} du ${frenchDate(p.booking_date)}${p.file_reference ? ` · ${p.file_reference}` : ""}${full ? "" : " (partiel)"}`}
-            effect={returnEffect({
-              amount: money(row.amount_minor, cur),
-              left: money(
-                (BigInt(p.left_minor) - BigInt(row.amount_minor)).toString(),
-                cur,
-              ),
-              full,
-              dateFr: frenchDate(row.booking_date),
-              hasFile: Boolean(p.file_reference),
-            })}
+            effect={[
+              returnEffect({
+                amount: money(row.amount_minor, cur),
+                left: money(
+                  (BigInt(p.left_minor) - BigInt(row.amount_minor)).toString(),
+                  cur,
+                ),
+                full,
+                dateFr: frenchDate(row.booking_date),
+                hasFile: Boolean(p.file_reference),
+              }),
+              returnRemittedNote(remitted.get(p.payment_id) ?? [], cur),
+            ]
+              .filter((x): x is string => x !== null)
+              .join(" ")}
             idempotencyKey={randomUUID()}
           />
         );

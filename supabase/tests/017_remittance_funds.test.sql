@@ -845,7 +845,9 @@ insert into t select 'run_cc', (private.run_payment_checks('00000000-0000-0000-0
 insert into t select 'run_aa', (private.run_payment_checks('00000000-0000-0000-0000-0000000000aa') ->> 'run_id')::uuid;
 select is((select string_agg(r.code, ' ') from public.payment_check_result r
            where r.run_id = (select v from t where k = 'run_cc') and r.severity = 'violation'),
-  'bank_cash_identity', 'servicer cc''s fee posted without its bank line is caught (I19: no 5120 movement without its line)');
+  -- M2c-7a (ADR-0014 « M2c-7a », R3): + advance_ledger — the test's advance of cc is a raw client_advance entry (4112) with
+  -- no advance row, which I18's advance half now flags
+  'bank_cash_identity advance_ledger', 'servicer cc''s fee posted without its bank line is caught (I19: no 5120 movement without its line)');
 select is((select array[r.amount_minor::text, r.currency::text, r.details ->> 'due_to_servicer_minor',
                         r.details ->> 'top_ups_ordered_minor']
            from public.payment_check_result r
@@ -854,7 +856,8 @@ select is((select array[r.amount_minor::text, r.currency::text, r.details ->> 'd
   'servicer cc''s fee and advance left it owing the dedicated account 200, no top-up ordered: an alert to top up');
 select is((select string_agg(distinct r.code, ' ' order by r.code) from public.payment_check_result r
            where r.run_id = (select v from t where k = 'run_aa') and r.severity = 'violation'),
-  'bank_cash_identity notification_missing payment_position remittance_completeness',
+  -- M2c-7a (R3): + advance_ledger — A1 is posted raw by pg_temp.fund (4112 200 000, no advance row)
+  'advance_ledger bank_cash_identity notification_missing payment_position remittance_completeness',
   'servicer aa, after the worked example: I8′, the servicer''s fund, I12 and I13 hold; only the test''s direct postings '
   || 'are flagged (no bank lines, a reversal without its notification, remittances outside a run)');
 update private.client_payable_balance set balance_minor = balance_minor - 1
@@ -872,7 +875,8 @@ values ('00000000-0000-0000-0000-0000000000cc', 'top_up', '80000000-0000-0000-00
 insert into t select 'run_cc2', (private.run_payment_checks('00000000-0000-0000-0000-0000000000cc') ->> 'run_id')::uuid;
 select is((select string_agg(distinct r.code, ' ' order by r.code) from public.payment_check_result r
            where r.run_id = (select v from t where k = 'run_cc2') and r.severity = 'violation'),
-  'bank_cash_identity client_payable_debit remittance_completeness',
+  -- M2c-7a (R3): + advance_ledger, as above (cc's raw advance)
+  'advance_ledger bank_cash_identity client_payable_debit remittance_completeness',
   'a running balance that drifts and a missing pending item are caught (I13, I14)');
 select is((select r.amount_minor::text || ' ' || (r.details ->> 'top_ups_ordered_minor') from public.payment_check_result r
            where r.run_id = (select v from t where k = 'run_cc2') and r.code = 'servicer_shortfall'), '50 150',

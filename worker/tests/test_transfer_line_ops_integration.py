@@ -57,6 +57,7 @@ from test_debit_bookings_integration import (
     _bank,
     _bookings,
     _deadline_cols,
+    _downloaded,
     _replace_payout_account,
     _reviews,
     _run_transfer,
@@ -586,23 +587,38 @@ def test_a_returned_second_debit_s_item_has_no_deadline_in_the_worker_nor_the_sq
 def test_p_is_the_twin_s_when_the_client_s_queue_binds(tmp_path: Path) -> None:
     """Review TESTS-1 (critic F5), the parity point where the queue binds (P < A): Martin's payout x
     booked and returned (its item owed again, A), a new collection of Martin's (500,00 €)
-    allocated, then the collection that x's run remitted comes back unpaid (its allocation
-    reversed: -2 000,00 € queued, the client money now covering it); x executed again — the queue
-    nets less than A: P is the queue's, the rest an advance, p_bound queue, as the twin gives it
-    on the SQL facts."""
+    allocated, then a collection of his run in flight R3 (2 000,00 €, its payout handed out in a
+    file) comes back unpaid (its allocation reversed: -2 000,00 € queued, the client money now
+    covering it); x executed again — the queue nets less than A: P is the queue's, the rest an
+    advance, p_bound queue, as the twin gives it on the SQL facts. (M2c-7a, ADR-0014 « M2c-7a »,
+    R3: the collection that came back was the one x's run remitted; that return is now covered by
+    the servicer's advance (design §13 #1) and leaves the queue whole, so the negative item is a
+    collection of a run in flight — uncovered until that run is debited, §13 #3.)"""
     tenant, _other, r1, _r2 = _two_runs()
     data, _paid = _booked(tenant, tmp_path)
     x = _run_transfer(r1)
     e2e, a = str(x["end_to_end_id"]), int(x["amount_minor"])
     client = str(tenant["client"])
+    c3 = _file(tenant, 200_000)
+    _statement(
+        tenant,
+        credit_entries(
+            [bank_credit(200_000, rf=c3.rf)],
+            start=_day(tenant),
+            prefix=f"C{uuid.uuid4().hex[:6].upper()}",
+        ),
+    )
+    r3 = request_run(tenant)
+    approve(tenant, r3)
+    drain_remittances()
+    assert run_row(r3)["status"] == "approved", run_row(r3)["last_failure"]
+    _downloaded(tenant, tmp_path)  # R3's payout handed out: R3 in flight, not booked
     _bank(tenant, data, returns=[e2e], return_date=_day(tenant), only_back=True)
     rho = str(_transfer(e2e)["return_entry_id"])
     with psycopg.connect(DB) as conn:
         paid = conn.execute(
-            """select p.end_to_end_id from public.payment p
-               join public.account c on c.id = p.account_id
-               where c.client_organization_id = %s and p.amount_minor = 200000""",
-            (client,),
+            "select p.end_to_end_id from public.payment p where p.account_id = %s",
+            (c3.id,),
         ).fetchone()
     assert paid is not None and paid[0]
     more = _file(tenant, 50_000)

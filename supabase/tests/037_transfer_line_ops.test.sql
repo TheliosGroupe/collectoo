@@ -2162,22 +2162,20 @@ select is(pg_temp.isolated('c_ml8'),
   '{"t2": [41000, "in_file"], "x": "returned", "proposed": true, "booked": "ok", "run": "booked", "dirty": []}'::jsonb,
   'C, D (review TESTS-8, ML-8): a reference-less debit to the client''s IBAN of a returned payout''s amount, while the run '
   're-paying its return item to that IBAN is in flight, is that run''s payout (the returned one is not a candidate)');
--- (review TESTS-1, critic F5) P is bounded by what the client's queue can net: Durand's R0 (c7, 10 000) remitted, R1's
--- payout x (41 000) booked and returned (its item 41 000 owed again), R2 (41 000) in flight; c7 bounces (−10 000): the
--- queue nets 31 000; x executed again → P 31 000 (queue), a double_payout advance of 10 000, the queue at 0; R2's own
--- debit then needs no payout_overrun cover
+-- (review TESTS-1, critic F5) P is bounded by what the client's queue can net: R1's payout x (41 000) booked and returned
+-- (its item 41 000 owed again); R2 (c7, 10 000) in flight; c7 bounces (−10 000, no cover while its run is in flight:
+-- design §13 #3): the queue nets 31 000; x executed again → P 31 000 (queue), a double_payout advance of 10 000, the
+-- queue at 0; R2's own debit then covers c7's reversal at the booking (M2c-7a, remitted_reversal 10 000; never
+-- payout_overrun), the queue at 10 000. (M2c-7a, ADR-0014 « M2c-7a », R3: c7 was remitted in a booked R0, whose raw
+-- reversal now fails LG009; the bounce of a line in flight keeps the test's purpose, plan §3.9 case 16.)
 create or replace function pg_temp.d_f5() returns jsonb language plpgsql as $$
-declare v_t0 uuid; v_x uuid; v_t2 uuid; v jsonb; q0 bigint; b text; w jsonb;
+declare v_x uuid; v_t2 uuid; v jsonb; q0 bigint; b text; w jsonb;
 begin
-  v_t0 := pg_temp.inflight('a7', 'c7', 10000, 'd-f5-r0');
-  perform pg_temp.stmt2('c70', private.paris_today() - 2, jsonb_build_array(
-    jsonb_build_object('amount', pg_temp.amt(v_t0), 'e2e', pg_temp.e2e(v_t0))));
-  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('c70', 1), 'payout', v_t0)));
   v_x := pg_temp.inflight('a7', '07', 50000, 'd-f5');
   perform pg_temp.stmt2('c71', private.paris_today() - 1, jsonb_build_array(
     jsonb_build_object('amount', 41000, 'e2e', pg_temp.e2e(v_x))));
   perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('c71', 1), 'payout', v_x)));
-  v_t2 := pg_temp.inflight('a7', 'b7', 50000, 'd-f5-r2');
+  v_t2 := pg_temp.inflight('a7', 'c7', 10000, 'd-f5-r2');
   perform pg_temp.stmt2('c72', private.paris_today(), jsonb_build_array(
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 41000, 'orig', pg_temp.e2e(v_x))));
   perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('c72', 1), 'payout_returned', v_x)));
@@ -2202,10 +2200,11 @@ end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.isolated('d_f5'),
   '{"queue_before": 31000, "part": ["unplanned_payout", "31000", "10000", "queue"], "booked": "ok", "queue_after": 0,
-    "t2": "booked", "advances": ["double_payout:10000"], "queue_end": 0, "dirty": []}'::jsonb,
+    "t2": "booked", "advances": ["double_payout:10000", "remitted_reversal:10000"], "queue_end": 10000,
+    "dirty": []}'::jsonb,
   'D (review TESTS-1, F5): a returned payout executed again while the client''s queue nets less than its item (a '
-  'remitted collection bounced) pays what the queue can net — P = 31 000 (queue), a double_payout advance of 10 000 — '
-  'and the run in flight''s own debit then needs no payout_overrun cover');
+  'collection of the run in flight bounced) pays what the queue can net — P = 31 000 (queue), a double_payout advance '
+  'of 10 000 — and the run in flight''s own debit then covers the bounced line (M2c-7a), never payout_overrun');
 -- (review TESTS-1) the queue shared by the parts of one call: R0's payout t0 (8 200) and R1's x (41 000) of Durand both
 -- booked and returned (39 200 queued once c7 bounces), then both executed again in one entry the bank kept unsplit —
 -- the first part pays 8 200, the second only the 31 000 the queue still nets
@@ -2220,13 +2219,16 @@ begin
   perform pg_temp.stmt2('c76', private.paris_today() - 1, jsonb_build_array(
     jsonb_build_object('amount', 41000, 'e2e', pg_temp.e2e(v_x))));
   perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('c76', 1), 'payout', v_x)));
+  -- (M2c-7a, R3) the collection that bounces is e7, in R2 in flight (no cover: design §13 #3) — c7, remitted in the
+  -- booked R0, would now be covered (its raw reversal fails LG009); the queue nets the same 39 200
+  perform pg_temp.inflight('a7', 'e7', 10000, 'd-qc-r2');
   perform pg_temp.stmt2('c77', private.paris_today(), jsonb_build_array(
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', pg_temp.amt(v_t0), 'orig', pg_temp.e2e(v_t0)),
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 41000, 'orig', pg_temp.e2e(v_x))));
   perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('c77', 1), 'payout_returned', v_t0),
                                          pg_temp.row(pg_temp.l2('c77', 2), 'payout_returned', v_x)));
-  perform private.ledger_reverse((select id from public.ledger_entry where payment_id = pg_temp.pay('c7')
-                                    and entry_type = 'allocation'), 'rev-d-qc-c7', 'Retour du paiement (test)',
+  perform private.ledger_reverse((select id from public.ledger_entry where payment_id = pg_temp.pay('e7')
+                                    and entry_type = 'allocation'), 'rev-d-qc-e7', 'Retour du paiement (test)',
                                  private.paris_today());
   q0 := pg_temp.queued_minor('a7');
   perform pg_temp.stmt2('c78', private.paris_today(), jsonb_build_array(
@@ -2322,20 +2324,24 @@ select is(pg_temp.isolated('d_ml1_own'),
   '{"y": 50000, "released": 3, "part": ["unplanned_payout", "50000", "0", "amount"], "booked": "ok", "dirty": []}'::jsonb,
   'D (review TESTS-5, ML-1): a cancelled run''s released lines holding an earlier unplanned booking''s −A row: that row '
   'is the booking''s own and never an item of the pool — the late execution pays the run''s items in full, P = A');
--- (review TESTS-5, critic2 ML-1) the pool's signed net, floored once: Durand's R0 (c7 10 000) remitted, c7 bounces
--- (r −10 000 waits); collections a (50 000) and b (10 000); Durand's R1 holds a, b and r (y = 50 000), handed out, then
--- cancelled after download with y; a bounces (its chain nets 0) and n (20 000) arrives; y executed late: P = 0 (the
--- signed net of y's items is 0 + 10 000 − 10 000), the whole of it an advance, n still owed
+-- (review TESTS-5, critic2 ML-1) the pool's signed net, floored once: Durand's R0 (c7 10 000) in flight, c7 bounces
+-- (r −10 000 waits, no cover while R0 is in flight), then R0's payout booked: c7 was remitted, r is covered at the booking
+-- (M2c-7a: A +10 000 waits too); collections a (50 000) and b (10 000); Durand's R1 holds r, A, a and b (y = 60 000),
+-- handed out, then cancelled after download with y; a bounces (its chain nets 0) and n (20 000) arrives; y executed late:
+-- P = 10 000 (the signed net of y's items is −10 000 + 10 000 + 0 + 10 000: the negative item offsets a positive one),
+-- the rest an advance, n still owed. (M2c-7a, ADR-0014 « M2c-7a », R3: before, r stood alone — a remitted collection
+-- bounced and netted against the others — and P was 0; the bounce now happens in flight and is covered at the booking,
+-- plan §3.9 case 16.)
 create or replace function pg_temp.d_ml1_signed() returns jsonb language plpgsql as $$
 declare v_t0 uuid; v_r1 uuid; v_y uuid; v_f uuid;
 begin
   v_t0 := pg_temp.inflight('a7', 'c7', 10000, 'd-sg-r0');
-  perform pg_temp.stmt2('c85', private.paris_today() - 2, jsonb_build_array(
-    jsonb_build_object('amount', pg_temp.amt(v_t0), 'e2e', pg_temp.e2e(v_t0))));
-  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('c85', 1), 'payout', v_t0)));
   perform private.ledger_reverse((select id from public.ledger_entry where payment_id = pg_temp.pay('c7')
                                     and entry_type = 'allocation'), 'rev-d-sg-c7', 'Retour du paiement (test)',
                                  private.paris_today() - 1);
+  perform pg_temp.stmt2('c85', private.paris_today() - 2, jsonb_build_array(
+    jsonb_build_object('amount', pg_temp.amt(v_t0), 'e2e', pg_temp.e2e(v_t0))));
+  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('c85', 1), 'payout', v_t0)));
   perform pg_temp.file('07', '20000000-0000-0000-0000-0000000000a7', 50000);
   perform pg_temp.collect('07', 50000, private.paris_today() - 1);
   perform pg_temp.file('17', '20000000-0000-0000-0000-0000000000a7', 10000);
@@ -2366,11 +2372,11 @@ begin
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.isolated('d_ml1_signed'),
-  '{"y": 50000, "queue": 20000, "part": ["unplanned_payout", "0", "50000", "items"], "booked": "ok",
+  '{"y": 60000, "queue": 30000, "part": ["unplanned_payout", "10000", "50000", "items"], "booked": "ok",
     "queue_after": 20000, "dirty": []}'::jsonb,
   'D (review TESTS-5, ML-1): the cap is the signed net of the items the late payout was meant to pay, floored once — a '
-  'negative item (a remitted collection bounced) offsets a positive one: P = 0 and the advance all of it; the new '
-  'collection n is still owed');
+  'negative item (a collection bounced in flight) offsets a positive one (its cover, M2c-7a): P = 10 000 and the rest '
+  'an advance; the new collection n is still owed');
 -- (review TESTS-5) a returned unplanned booking's attributions stop counting: Durand's x booked, returned (ρ), executed
 -- again (U1: P = A on ρ), that copy returned (U1 reversed: ρ owed again), then executed a third time → P = A on ρ again
 create or replace function pg_temp.d_paid_reversed() returns jsonb language plpgsql as $$
@@ -3800,19 +3806,17 @@ select is(pg_temp.isolated('p_draft_net'),
   'P — with P = 0 nothing, and its run page says nothing of it (P = A: p_unplanned_runs'' draft_unplanned)');
 -- (money-4) 0 < P < A: D's shape (a returned payout of Durand executed again while the queue nets 31 000 of its 41 000,
 -- a double_payout advance of 10 000), then a collection of Durand and his next run requested — the draft holds the
--- booking's −41 000 and +10 000 rows: it deducts 31 000, as the run page says
+-- booking's −41 000 and +10 000 rows: it deducts 31 000, as the run page says. (M2c-7a, ADR-0014 « M2c-7a », R3: as in
+-- D, the bounced collection c7 is in the run in flight R2, not remitted in a booked R0 — its raw reversal would now fail
+-- LG009 — and R2's booking covers it: the draft holds that cover, a remitted_reversal advance of 10 000, too)
 create or replace function pg_temp.p_draft_partial() returns jsonb language plpgsql as $$
-declare v_t0 uuid; v_x uuid; v_t2 uuid; v_d uuid; b text;
+declare v_x uuid; v_t2 uuid; v_d uuid; b text;
 begin
-  v_t0 := pg_temp.inflight('a7', 'c7', 10000, 'p-dp-r0');
-  perform pg_temp.stmt2('ae0', private.paris_today() - 2, jsonb_build_array(
-    jsonb_build_object('amount', pg_temp.amt(v_t0), 'e2e', pg_temp.e2e(v_t0))));
-  perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ae0', 1), 'payout', v_t0)));
   v_x := pg_temp.inflight('a7', '07', 50000, 'p-dp');
   perform pg_temp.stmt2('ae1', private.paris_today() - 1, jsonb_build_array(
     jsonb_build_object('amount', 41000, 'e2e', pg_temp.e2e(v_x))));
   perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ae1', 1), 'payout', v_x)));
-  v_t2 := pg_temp.inflight('a7', 'b7', 50000, 'p-dp-r2');
+  v_t2 := pg_temp.inflight('a7', 'c7', 10000, 'p-dp-r2');
   perform pg_temp.stmt2('ae2', private.paris_today(), jsonb_build_array(
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 41000, 'orig', pg_temp.e2e(v_x))));
   perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('ae2', 1), 'payout_returned', v_x)));
@@ -3840,7 +3844,8 @@ begin
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.isolated('p_draft_partial'),
-  '{"booked": "ok", "held": ["client_advance:10000", "unplanned_payout:-41000"], "draft_unplanned": ["31000", true, 1]}'::jsonb,
+  '{"booked": "ok", "held": ["client_advance:10000", "client_advance:10000", "unplanned_payout:-41000"],
+    "draft_unplanned": ["31000", true, 1]}'::jsonb,
   'P (review 6b-2c money-4): a draft holding an unplanned booking''s −A row (41 000) and its advance A − P (10 000) '
   'says it deducts P (31 000), never A');
 

@@ -21,6 +21,7 @@ from collectoo_worker.ledger import (
     Line,
     MirrorBrokenError,
     OverdrawnError,
+    RemittedReversalUncoveredError,
     ScopeError,
     UnbalancedEntryError,
     balance_by_currency,
@@ -287,6 +288,12 @@ def test_lg007_is_an_overdraft() -> None:
 def test_lg008_is_client_money_short() -> None:
     mapped = from_db_error(_DbError("LG008"))  # type: ignore[arg-type]
     assert isinstance(mapped, ClientMoneyShortError)
+
+
+def test_lg009_is_a_remitted_reversal_not_covered() -> None:
+    """M2c-7a (plan §3.1): I23 at commit — a reversal of a remitted entry without its advance."""
+    mapped = from_db_error(_DbError("LG009"))  # type: ignore[arg-type]
+    assert isinstance(mapped, RemittedReversalUncoveredError)
 
 
 # --- M2c: the funds (design m2c-remittances §5) -------------------------------------------------

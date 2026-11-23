@@ -1435,18 +1435,23 @@ select is(array[(select v ->> 'payouts' from j where k = 'b5'), (select v ->> 'f
 select results_eq(
   $$ select client_organization_id, amount_minor, cause, cause_entry_id, entry_id, transfer_id, bank_transaction_id
      from public.client_advance $$,
-  $$ values ('00000000-0000-0000-0000-0000000000a8'::uuid, 100000::bigint, 'payout_overrun'::text,
-             pg_temp.ek('remit:' || pg_temp.trid('r8')), pg_temp.ek('adv:payout:' || pg_temp.trid('r8')),
+  -- M2c-7a (ADR-0014 « M2c-7a », R3; plan §3.9 case 16): the reversal of Petit's line in flight is now covered at the
+  -- booking for itself (cause remitted_reversal, key adv:<R>:<run>, covering R), before the overrun cover, which then
+  -- finds nothing left in debit — same amount, the same payout and line
+  $$ values ('00000000-0000-0000-0000-0000000000a8'::uuid, 100000::bigint, 'remitted_reversal'::text,
+             pg_temp.ek('rev-test-0008'), pg_temp.ek('adv:' || pg_temp.ek('rev-test-0008') || ':' || pg_temp.v('r8')),
              pg_temp.trid('r8'), pg_temp.ln('06', 1)) $$,
-  'the booking-time cover: an advance of what the payout left in debit on Petit''s 4670 (cause payout_overrun)');
-select is(pg_temp.books(pg_temp.ek('adv:payout:' || pg_temp.trid('r8'))),
+  'the booking-time cover: an advance of what the payout left in debit on Petit''s 4670 (cause remitted_reversal since M2c-7a)');
+select is(pg_temp.books(pg_temp.ek('adv:' || pg_temp.ek('rev-test-0008') || ':' || pg_temp.v('r8'))),
           '{"due_to_servicer": 100000, "client_payable": -100000, "client_advance_receivable": 100000,
             "due_from_client_funds": -100000}'::jsonb,
   'client_advance: +4679 A / −4670[c] A ‖ +4112[c] A / −4689 A');
 select is(pg_temp.owed('a8'), 0::bigint, 'Petit''s 4670 never in debit (no LG008)');
-select is(pg_temp.alerts('payout_overrun'),
-          jsonb_build_array(jsonb_build_array((select id from public.client_advance), 100000)),
-  'payout_overrun alert while the advance is open');
+-- M2c-7a (R3): the advance is the reversal's cover now, not an overrun: no payout_overrun alert (advance_open takes it
+-- after 30 days, plan §3.4)
+select is(pg_temp.alerts('payout_overrun'), '[]'::jsonb,
+  'no payout_overrun alert while the advance is open: since M2c-7a it is the reversal''s remitted_reversal cover, not '
+  'an overrun (the alert itself is pinned by 043 #16, the overrun backstop)');
 select is(pg_temp.dirty(), '{}'::text[], 'clean after the cover (I13, I14: the advance item offsets the reversal)');
 create or replace function pg_temp.uncovered() returns text language plpgsql as $$
 begin

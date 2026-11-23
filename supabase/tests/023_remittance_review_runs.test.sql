@@ -186,7 +186,9 @@ begin
                                              deadline, latest_execution_date, unmeetable, amount_minor, basis,
                                              commission_minor, commission_state, parts, invoiced)
   select p_run, row_number() over (order by q.posted_at, q.ledger_entry_id), q.ledger_entry_id, q.kind, e.account_id,
-         pf.mandate_id, ('71000000-0000-0000-0000-0000000000' || right(pf.mandate_id::text, 2))::uuid, e.payment_id,
+         pf.mandate_id,
+         case when pf.mandate_id is not null
+              then ('71000000-0000-0000-0000-0000000000' || right(pf.mandate_id::text, 2))::uuid end, e.payment_id,
          e.effective_date, e.effective_date, q.posted_at,
          case when q.amount_minor > 0 then coalesce(dl.deadline, e.effective_date + 30) end,
          case when q.amount_minor > 0 then coalesce(dl.latest_execution_date, e.effective_date + 27) end,
@@ -197,8 +199,9 @@ begin
          '[]', coalesce((p_commissions ->> q.ledger_entry_id::text)::bigint, 0) > 0
   from private.remittance_pending q
   join public.ledger_entry e on e.id = q.ledger_entry_id
-  join public.account a on a.id = e.account_id
-  join public.portfolio pf on pf.id = a.portfolio_id
+  -- M2c-7a: an advance item (the cover of a remitted reversal) has no file: its line too (as the prepare job writes it)
+  left join public.account a on a.id = e.account_id
+  left join public.portfolio pf on pf.id = a.portfolio_id
   left join lateral (select d.deadline, d.latest_execution_date, d.unmeetable
                      from private.remittance_deadline(e.effective_date, p_days) d where p_days is not null) dl on true
   where q.draft_run_id = p_run;
@@ -515,7 +518,9 @@ select pg_temp.prepare((select v from t where k = 'r5'),
                        jsonb_build_object((select v from t where k = 'e6'), 45000, (select v from t where k = 'x1'), -30000),
                        jsonb_build_array(pg_temp.invoice('a1', '06', 45000), (select v from j where k = 'crn5')),
                        jsonb_build_array(pg_temp.key('01', 0, 0), pg_temp.key('06', 300000, 45000)),
-                       pg_temp.plan('a1', 100000, 45000));
+                       -- M2c-7a (ADR-0014 « M2c-7a », R3): file 01's collection was remitted in r1 (booked): « Désimputer »
+                       -- posts its cover A1 +200 000, a line of r5 (gross 100 000 → 300 000; no netting of the reversal)
+                       pg_temp.plan('a1', 300000, 45000));
 select is(pg_temp.approve('ap-r5-1-review', pg_temp.item((select v from t where k = 'r5'))) #>> '{results,0,status}', 'queued',
   'Martin''s second run (a collection and a reversal) queued');
 select is(pg_temp.job((select v from t where k = 'r5')) ->> 'status', 'approved', 'approved: an invoice and a credit note');
@@ -573,7 +578,8 @@ select is((select sum(private.document_open(i.id) * case i.kind when 'invoice' t
   'the open documents are 4111 (I18)');
 select results_eq($$ select released, count(*)::int from public.remittance_line
                      where run_id = (select v from t where k = 'r5') group by released $$,
-  $$ values (true, 2) $$, 'the lines released (the guard''s release path)');
+  -- M2c-7a (R3): r5 holds the cover A1 of x1's reversal too (three lines, all released)
+  $$ values (true, 3) $$, 'the lines released (the guard''s release path)');
 
 -- The corrective invoice's payment date (legal #4, round 2) and its service period (money #0, round 2) ---------------
 select results_eq($$ select settlement, due_date, (payload ->> 'due_date')::date, payload -> 'payment_reference',

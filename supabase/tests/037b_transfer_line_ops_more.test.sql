@@ -1538,14 +1538,17 @@ begin
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
 select is(pg_temp.isolated('d_ml1_cover'),
-  '{"t0": [23000, "booked"], "cover": ["payout_overrun:3000"], "r0_page": [["payout_overrun", "3000", "3000", true]],
+  -- M2c-7a (ADR-0014 « M2c-7a », R3; plan §3.9 case 16): the bounced line, reversed while R0 was in flight, is covered at
+  -- R0's booking for itself (remitted_reversal, same 3 000), listed on R0's page by its cause
+  '{"t0": [23000, "booked"], "cover": ["remitted_reversal:3000"], "r0_page": [["remitted_reversal", "3000", "3000", true]],
     "r1_items": ["allocation_reversal:-3000", "client_advance:3000", "allocation:10000"], "y": 10000,
     "owed": ["unplanned_payout", "10000", "0", "amount"], "queue": 20000,
     "bounced": ["unplanned_payout", "0", "10000", "items"], "booked": "ok", "queue_after": 20000,
-    "advances": ["double_payout:10000", "payout_overrun:3000"], "dirty": []}'::jsonb,
+    "advances": ["double_payout:10000", "remitted_reversal:3000"], "dirty": []}'::jsonb,
   'D (ML-1, the plan''s example): a cancelled run''s released lines holding a bounced collection''s −X and its '
-  'payout_overrun cover''s +X count signed, the cover as an item — P = A while the collection is owed; once it bounces '
-  'too the net is 0: P = 0, the advance all of it, the new collection still owed (never the cover''s X)');
+  'remitted_reversal cover''s +X (payout_overrun before M2c-7a) count signed, the cover as an item — P = A while the '
+  'collection is owed; once it bounces too the net is 0: P = 0, the advance all of it, the new collection still owed '
+  '(never the cover''s X)');
 select is(pg_temp.dirty(), '{}'::text[], 'D: clean');
 
 -- C. ML-8's CSV form and its second line (plan §3.4.4 (iii); critic2 ML-8) ---------------------------------------------

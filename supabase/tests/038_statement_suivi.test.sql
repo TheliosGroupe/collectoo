@@ -1344,6 +1344,25 @@ select is(pg_temp.iso('c_reversed'),
   'cause; its return is `unplanned_returned` (P owed again), here, and its line keeps the unplanned nature');
 
 -- D. P bounded by the queue (critic2 ML-9: all of the run still owed) ------------------------------------------------
+-- (M2c-7a, ADR-0014 « M2c-7a », R3) a remitted collection taken back WITHOUT its cover — the state M2c-7a forbids at every
+-- commit (LG009) — planted for the Suivi's wording of a payout whose P the client's queue bounds, which only such a state
+-- produced here: the cover's check is set aside while these three scenarios run (its trigger disabled at the top level
+-- around their calls, once the pending events are run, then enabled again; PostgreSQL refuses the ALTER inside the
+-- scenario's subtransaction); every assertion below is unchanged
+create or replace function pg_temp.raw_bounce(p_entry uuid, p_key text, p_day date) returns void language plpgsql as $$
+begin
+  perform private.ledger_reverse(p_entry, p_key, 'Retour du paiement (test)', p_day);
+end $$;
+create or replace function pg_temp.cover_check(p_on boolean) returns void language plpgsql as $$
+begin
+  set constraints all immediate;
+  set constraints all deferred;
+  if p_on then
+    alter table public.ledger_entry enable always trigger ledger_entry_remitted_cover;
+  else
+    alter table public.ledger_entry disable trigger ledger_entry_remitted_cover;
+  end if;
+end $$;
 -- Durand's R0 (127 920) booked, its collection then taken back (−156 000 waits); RV1 (164 000) handed out, then
 -- cancelled after download: the queue nets 44 000; the late execution's P = 44 000 (queue), the advance 120 000
 create or replace function pg_temp.d_queue() returns jsonb language plpgsql as $$
@@ -1358,7 +1377,7 @@ begin
   v_x := pg_temp.queued('a7', '71', 200000, 'd1');
   insert into t values ('RV1', pg_temp.v('run-d1'));
   perform pg_temp.handed_out('fd1', 'gen-x038-d1');
-  perform private.ledger_reverse(pg_temp.alloc('70'), 'rev-x038-d70', 'Retour du paiement (test)', private.paris_today() - 1);
+  perform pg_temp.raw_bounce(pg_temp.alloc('70'), 'rev-x038-d70', private.paris_today() - 1);
   update private.feature_switch set enabled = true where key = 'downloaded_file_cancellation';
   update public.bank_transfer set status = 'cancelled', cancelled_at = now(), cancel_reason = 'annulé (test)'
   where id = v_x;
@@ -1374,6 +1393,7 @@ begin
                                  'd71', pg_temp.lf(v_d, pg_temp.alloc('71')));
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
+select pg_temp.cover_check(false);
 select is(pg_temp.iso('d_queue'),
   '{"queue": 44000, "booked": "ok", "approved": ":booked",
     "suivi": {"since": ["RV1", true], "events": [
@@ -1384,6 +1404,7 @@ select is(pg_temp.iso('d_queue'),
   'D (critic2 ML-9): all of the cancelled run still owed, P bounded by the queue (44 000): `p_bound` queue and the '
   'advance (the clause the renderer words by it), the late line paid in part (its own cause kept, the amount and date '
   'beside it)');
+select pg_temp.cover_check(true);
 
 -- E. P bounded by the items --------------------------------------------------------------------------------------------
 -- Dupont: RV1 (164 000) cancelled after download; e2 taken back by the payer's bank (its chain nets 0), e3 (50 000)
@@ -1957,8 +1978,7 @@ begin
   perform pg_temp.stmt2('fa2', private.paris_today() - 1, jsonb_build_array(
     jsonb_build_object('dir', 'credit', 'kind', 'return', 'amount', 98400, 'orig', pg_temp.e2e(v_x))));
   perform pg_temp.book(jsonb_build_array(pg_temp.row(pg_temp.l2('fa2', 1), 'payout_returned', v_x)));
-  perform private.ledger_reverse(pg_temp.alloc('45'), 'rev-x038-f45', 'Retour du paiement (test)',
-                                 private.paris_today() - 1);
+  perform pg_temp.raw_bounce(pg_temp.alloc('45'), 'rev-x038-f45', private.paris_today() - 1);
   w := jsonb_build_object('queue', pg_temp.queued_minor('a4'));
   perform pg_temp.stmt2('fa3', private.paris_today() - 1, jsonb_build_array(
     jsonb_build_object('amount', 98400, 'e2e', pg_temp.e2e(v_x))));
@@ -1975,6 +1995,7 @@ begin
                                  'rv2', pg_temp.suivi(pg_temp.v('RV2')));
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
+select pg_temp.cover_check(false);
 select is(pg_temp.iso('f_partial'),
   '{"queue": 78400, "again": "ok", "back": "ok", "rv2_approved": "approved:approved",
     "rv2": {"since": ["RV1", true], "events": [
@@ -1987,6 +2008,7 @@ select is(pg_temp.iso('f_partial'),
        "owed_minor": "78400", "executed_on": "d-1", "on": "d0", "here": true}]}}'::jsonb,
   'F-partial (S03r; review round 1 tests-3): a returned payout executed again with 0 < P < A, then returned: the '
   'advance A − P and P owed again, the execution''s date apart from the return''s');
+select pg_temp.cover_check(true);
 
 -- D-twice (tests-3, legal-texts-1, legal-texts-3): D's cancelled run executed on d-1 (P = 44 000 by the queue), a new
 -- collection, executed again on d0 (P = 100 000): one late item paid by both, in part
@@ -2002,8 +2024,7 @@ begin
   v_x := pg_temp.queued('a7', '71', 200000, 'dt1');
   insert into t values ('RV1', pg_temp.v('run-dt1'));
   perform pg_temp.handed_out('fdt1', 'gen-x038-dt1');
-  perform private.ledger_reverse(pg_temp.alloc('70'), 'rev-x038-dt70', 'Retour du paiement (test)',
-                                 private.paris_today() - 1);
+  perform pg_temp.raw_bounce(pg_temp.alloc('70'), 'rev-x038-dt70', private.paris_today() - 1);
   update private.feature_switch set enabled = true where key = 'downloaded_file_cancellation';
   update public.bank_transfer set status = 'cancelled', cancelled_at = now(), cancel_reason = 'annulé (test)'
   where id = v_x;
@@ -2028,6 +2049,7 @@ begin
                    where q.ledger_entry_id = pg_temp.alloc('71')));
 end $$;
 grant execute on all functions in schema pg_temp to authenticated;
+select pg_temp.cover_check(false);
 select is(pg_temp.iso('d_twice'),
   '{"first": "ok", "second": "ok", "approved": ":booked",
     "suivi": {"since": ["RV1", true], "events": [
@@ -2043,6 +2065,7 @@ select is(pg_temp.iso('d_twice'),
   'D-twice (review round 1 tests-3, legal-texts-1, legal-texts-3): a cancelled run''s payout executed twice, each '
   'with its rank; the late item both paid in part keeps its own cause, the amounts added and the latest booking''s '
   'date');
+select pg_temp.cover_check(true);
 
 -- R-reads (SR-1): Lilas, Cyprès, Lambert, Dupont and Martin each with two booked runs, Martin's S13, Roux's run approved
 -- and not paid (another client's live lines); the « Suivi » of Martin's third run between two counts of the tuples read

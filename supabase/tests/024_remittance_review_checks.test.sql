@@ -472,6 +472,10 @@ select results_eq($$ select (select seq_scan from pg_temp.since_mark('public.led
   $$ values (0::bigint, 0::bigint, 0::bigint, 0::bigint) $$,
   'the unallocated money is read by key from each payment (no scan of the 4710 pool or the accounts)');
 -- a run approved long ago, not changed since the previous check run: I16 leaves its lines alone but on Sundays
+-- (M2c-7a: the runs booked above queued their deferred cover check, remittance_run_booked_cover; run it now, as a
+-- commit would, so the table can be altered — PostgreSQL refuses an ALTER while trigger events are pending)
+set constraints public.remittance_run_booked_cover immediate;
+set constraints public.remittance_run_booked_cover deferred;
 alter table public.remittance_run disable trigger remittance_run_touch;
 update public.remittance_run set updated_at = now() - interval '5 days' where id = (select v from t where k = 'r3');
 alter table public.remittance_run enable trigger remittance_run_touch;

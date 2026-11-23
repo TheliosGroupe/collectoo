@@ -13,7 +13,10 @@ duplicate): one transaction (the queue's, exactly once) under the servicer's deb
    notification, and replaces the reviews. A link refused on re-check (a command changed the
    payment meanwhile) is retried by a later run (`RETRIES` times at most, then left to ops). A
    link the posting itself refuses (a ledger check) is left to ops (`posting_failed`) and the
-   others are posted: one bad line never stops a servicer's returns and refunds.
+   others are posted: one bad line never stops a servicer's returns and refunds. M2c-7a: a return
+   of a payment whose allocation or forward was remitted to the client posts its cover (an advance
+   of the servicer, `client_advance`) in the same transaction; a link the cover could not post is
+   refused LG009 (I23), `posting_failed` as LG008, its detail in the review.
 
 4. M2c-1 (design m2c-remittances §12): the lines booked in the funds — the bank's charges
    (`bank_fee`) and the credits carrying the TOP id of a top-up we ordered (`servicer_top_up`);

@@ -365,6 +365,8 @@ export function allocationErrorCode(message: string): ErrorCode {
   if (message.includes("same debtor") || message.includes("open file of the same client")) return "not_same_debtor";
   if (message.includes("nothing was allocated from") || message.includes("only when the client recalled"))
     return "not_forwardable";
+  // M2c-7a: the cover of a remitted collection could not be recorded (LG009)
+  if (message.includes("is not covered by an advance") || message.includes("LG009")) return "remitted_cover_failed";
   if (message.includes("lock") || message.includes("canceling statement")) return "allocation_busy";
   if (message.includes("is allocated")) return "payment_allocated";
   return "unknown";

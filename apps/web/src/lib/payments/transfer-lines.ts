@@ -116,6 +116,13 @@ export const TRANSFER_LINE_REFUSAL: Record<string, string> = {
     "La situation a changé depuis l'affichage (sommes en attente, brouillon, virements) : rouvrez la ligne pour voir la nouvelle répartition.",
   posting_failed:
     "La comptabilisation a été refusée par les contrôles du grand livre : rien n'est enregistré. Prévenez le support.",
+  // M2c-7a (plan §3.7, §3.2.8): the cover of a remitted collection (LG009); a cover a run in flight is taking back
+  remitted_cover_failed:
+    "L'encaissement avait déjà été reversé au client : l'avance du cabinet n'a pas pu être enregistrée. Réessayez ; si cela continue, prévenez le support.",
+  // review round 1 (tests-ui-2): once that run is debited, its settlement of the advance makes the same return
+  // advance_settled (support), never booked here
+  advance_in_flight:
+    "L'avance liée à ce virement est en cours de récupération par un reversement validé : ce retour ne peut pas être comptabilisé tant que ce reversement n'est pas débité ; après son débit, prévenez le support.",
   // the two SQLSTATEs (§3.10): the lock wait, re-raised with the step it waited at (critic2 CSO2-6), and the statement
   // timeout (critic CSO-3)
   busy: "Cette ligne ou un virement qu'elle concerne est en cours de traitement : réessayez dans un instant.",
@@ -131,6 +138,8 @@ const REFUSED = /transfer line booking refused: ([a-z_]+)/;
 export function transferLineErrorCode(error: { code?: string | null; message?: string | null }): string {
   const message = error.message ?? "";
   const refused = REFUSED.exec(message);
+  // M2c-7a: a posting refused LG009 (the cover of a remitted collection)
+  if (refused && refused[1] === "posting_failed" && message.includes("LG009")) return "remitted_cover_failed";
   if (refused) return refused[1];
   // review CSR-1: a deadlock or a serialisation failure aborts the call and records nothing — retried like a lock wait
   if (

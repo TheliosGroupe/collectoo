@@ -599,7 +599,8 @@ describe("the run page (§7.4; critic CSO-6)", () => {
       EUR,
     );
     expect(notes).toContain(
-      `Avance du cabinet de ${money("5000", EUR)} au débit : le virement dépassait ce qui restait dû au client (une imputation annulée après la validation) ; à récupérer selon son mandat — ce recouvrement n'est pas encore géré dans Collectoo.`,
+      // M2c-7a (plan §3.7 [critic] L19 (b)): worded by its cause, with the date it was recorded
+      `Avance du cabinet enregistrée le 03/11/2026 : reversement débité au-delà de ce qui restait dû (${money("5000", EUR)})`,
     );
     expect(notes).toContain(
       `Virement revenu impayé le 05/11/2026 : ${money("164000", EUR)} de nouveau dus au client, proposés dans un prochain reversement ; son compte de reversement est bloqué jusqu'à son remplacement ou sa reconfirmation.`,

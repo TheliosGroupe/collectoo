@@ -1339,8 +1339,11 @@ begin
 end $$;
 insert into j select 'f5b', pg_temp.isolated('sc_f5b');
 select results_eq($$ select v ->> 'book', v -> 'advance', v -> 'page' from j where k = 'f5b' $$,
-  $$ values ('ok'::text, '[["payout_overrun", true]]'::jsonb, '[["payout_overrun", true]]'::jsonb) $$,
-  'F5b: the servicer''s advance at a late predecessor''s debit (payout_overrun) is listed on the run page with its amount');
+  -- M2c-7a (ADR-0014 « M2c-7a », R3; plan §3.9 case 16): the collection reversed after the approval is covered at the
+  -- late predecessor's booking for itself (remitted_reversal, same amount, the predecessor's transfer), listed by cause
+  $$ values ('ok'::text, '[["remitted_reversal", true]]'::jsonb, '[["remitted_reversal", true]]'::jsonb) $$,
+  'F5b: the servicer''s advance at a late predecessor''s debit (remitted_reversal since M2c-7a, payout_overrun before) '
+  'is listed on the run page with its amount');
 
 
 -- G (and F2–F5, F7): the return of a late predecessor --------------------------------------------------------------------

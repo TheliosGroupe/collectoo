@@ -1,7 +1,9 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { ActionForm } from "@/components/action-form";
 import { buttonClass, dangerButtonClass, inputClass } from "@/components/ui";
+import { advanceIdsParam } from "@/lib/payments/remitted";
 import { ConfirmSheet, secondaryClass } from "../../a-traiter/queue-actions";
 import { allocatePayment, forwardPayment, releaseHold, reverseAllocation, unassignFromPage } from "./actions";
 
@@ -49,6 +51,7 @@ export function ReverseAllocation({
   accountId,
   fileRef,
   effect,
+  remitted,
   entryIds,
   idempotencyKey,
 }: {
@@ -56,9 +59,12 @@ export function ReverseAllocation({
   accountId: string;
   fileRef: string;
   effect: string;
+  /** M2c-7a: what was already remitted to the client of these entries, and the advance the reversal posts */
+  remitted: string | null;
   entryIds: string[];
   idempotencyKey: string;
 }) {
+  const router = useRouter();
   return (
     <ConfirmSheet
       label={`Désimputer (${fileRef})`}
@@ -71,7 +77,19 @@ export function ReverseAllocation({
           <p className="text-sm" data-testid="sheet-effect">
             {effect}
           </p>
-          <ActionForm action={reverseAllocation} submitLabel="Confirmer l'annulation" buttonClassName={buttonClass}>
+          {remitted ? (
+            <p className="text-sm text-amber-900 dark:text-amber-200" data-testid="sheet-remitted">
+              {remitted}
+            </p>
+          ) : null}
+          <ActionForm
+            action={reverseAllocation}
+            submitLabel="Confirmer l'annulation"
+            buttonClassName={buttonClass}
+            // M2c-7a: the notice says the advance recorded — review round 1 (M7A-MONEY-3): the URL names the advances,
+            // the page reads their amounts from the ledger
+            onDone={(r) => router.replace(`?desimpute=${encodeURIComponent(advanceIdsParam(r.advanceIds))}`)}
+          >
             <input type="hidden" name="payment_id" value={paymentId} />
             <input type="hidden" name="account_id" value={accountId} />
             <input type="hidden" name="idempotency_key" value={idempotencyKey} />

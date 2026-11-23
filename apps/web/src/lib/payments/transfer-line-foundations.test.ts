@@ -87,10 +87,9 @@ describe("the new alerts (critic L10, L14)", () => {
       "Paiement créé à partir d'un de nos virements revenus (il porte la référence d'un reversement, d'une quote-part du cabinet ou d'un lot de nos fichiers) : ces sommes ne sont reversées à personne tant qu'il n'est pas traité. Ne l'affectez pas, ne le remboursez pas, prévenez le support.",
     );
   });
-  it("double_payout_open says the recovery is not handled in Collectoo yet", () => {
-    expect(checkLabel("double_payout_open").help).toBe(
-      "Avance du cabinet après un virement exécuté hors reversement : à récupérer auprès du client — ce recouvrement n'est pas encore géré dans Collectoo.",
-    );
+  // M2c-7a (plan §3.7): « ce recouvrement n'est pas encore géré » goes; 7b adds how it is recovered
+  it("double_payout_open says the servicer advanced it after a transfer executed outside a run", () => {
+    expect(checkLabel("double_payout_open").help).toBe("Avance du cabinet après un virement exécuté hors reversement.");
   });
   it("every new check has a label of its own", () => {
     for (const code of ["transfer_unknown", "own_transfer_payment", "double_payout_open"])

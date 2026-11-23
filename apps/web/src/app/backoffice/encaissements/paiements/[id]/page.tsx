@@ -37,6 +37,7 @@ import {
 } from "@/lib/payments/debits";
 import { METHOD_LABEL, RULE_LABEL, formatRf, reviewReason } from "@/lib/payments/matching";
 import { RECEIPT_KIND, type ReceiptVersion, receiptPending, receiptVersions, shortHash } from "@/lib/payments/receipts";
+import { parseAdvanceIds, parseAllocationRemitted, reverseNotice, reverseRemittedEffect } from "@/lib/payments/remitted";
 import { money } from "@/lib/payments/statements";
 import { Forward, Reallocate, ReleaseHold, ReverseAllocation, UnassignHere, UseForOtherFile } from "./payment-actions";
 import { CancelRefund, RequestRefund } from "./refund-actions";
@@ -56,8 +57,14 @@ function frenchDateTime(iso: string): string {
  * forward to the client, use an overpayment for another file of the debtor. Every action is a command checked in SQL
  * against what this page showed. M2b-5: the receipt (R124-6) and its versions, each PDF with its SHA-256.
  */
-export default async function PaymentPage({ params }: PageProps<"/backoffice/encaissements/paiements/[id]">) {
+export default async function PaymentPage({
+  params,
+  searchParams,
+}: PageProps<"/backoffice/encaissements/paiements/[id]">) {
   const { id } = await params;
+  // M2c-7a: « Désimputer » done — review round 1 (M7A-MONEY-3): the URL names the advances it posted (ids, never an
+  // amount; anything else is ignored), their amounts are read back from the ledger below
+  const desimpute = parseAdvanceIds((await searchParams).desimpute);
   const back = { href: "/backoffice/encaissements/a-traiter", label: "Paiements à traiter" };
   const { supabase } = await staffSession();
   // M2c-6b-3a: the cancellation-after-download switch, for the texts worded both ways
@@ -74,7 +81,7 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   }
   const p = d.payment;
   const cur = p.currency;
-  const [{ data: receiptRows }, { data: receiptJobQueued }] = await Promise.all([
+  const [{ data: receiptRows }, { data: receiptJobQueued }, { data: remittedData }] = await Promise.all([
     supabase
       .from("receipt")
       .select("id, number, version, kind, known_at, issued_at, pdf_sha256, account_id")
@@ -82,7 +89,39 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
       .order("version", { ascending: false }),
     // whether a receipts job naming this payment is still to run (review #18: the job's outcome ends the wait)
     supabase.rpc("receipt_job_pending", { p_payment_id: p.id }),
+    // M2c-7a: the entries of this payment already remitted to the client (the « Désimputer » sheet says it)
+    supabase.rpc("allocation_remitted", { p_payment_id: p.id }),
   ]);
+  const remitted = parseAllocationRemitted(remittedData) ?? [];
+  // the notice after « Désimputer »: the advances of the URL that cover a reversal of this payment and are still live,
+  // their amounts as the ledger holds them (client_advance; money staff read it)
+  let reversedNotice: string | null = null;
+  if (desimpute !== null) {
+    const reversalIds = new Set(d.entries.filter((e) => e.entry_type === "reversal").map((e) => e.entry_id));
+    const { data: advanceRows } =
+      desimpute.length > 0
+        ? await supabase
+            .from("client_advance")
+            .select("id, amount:amount_minor::text, cause_entry_id, entry_id")
+            .in("id", desimpute)
+        : { data: [] as { id: string; amount: string; cause_entry_id: string; entry_id: string }[] };
+    const advanceEntries = (advanceRows ?? []).map((a) => a.entry_id);
+    const { data: releasedRows } =
+      advanceEntries.length > 0
+        ? await supabase.from("ledger_entry").select("reverses_entry_id").in("reverses_entry_id", advanceEntries)
+        : { data: [] as { reverses_entry_id: string | null }[] };
+    const released = new Set((releasedRows ?? []).map((r) => r.reverses_entry_id));
+    reversedNotice = reverseNotice(
+      (advanceRows ?? []).map((a) => ({
+        id: a.id,
+        amount_minor: a.amount,
+        cause_entry_id: a.cause_entry_id,
+        reversed: released.has(a.entry_id),
+      })),
+      reversalIds,
+      cur,
+    );
+  }
   const receipts = receiptVersions((receiptRows ?? []) as ReceiptVersion[]);
   const figures = positionFigures(d.position);
   const forwarded = BigInt(figures.forwarded) > BigInt(0);
@@ -131,6 +170,11 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
   return (
     <WidePage title={`Paiement de ${money(p.amount_minor, cur)}`} back={back}>
       <AutoRefresh active={waiting || receiptWaiting} abandonable={false} everyMs={2000} maxMs={5 * 60_000} />
+      {reversedNotice !== null ? (
+        <p role="status" className="text-sm font-medium" data-testid="reverse-notice">
+          {reversedNotice}
+        </p>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={status.tone} testId="payment-status">
           {status.label}
@@ -423,6 +467,10 @@ export default async function PaymentPage({ params }: PageProps<"/backoffice/enc
                     ownFile: account === p.account_id,
                     othersRemain: live.size > 1,
                   })}
+                  remitted={reverseRemittedEffect(
+                    remitted.filter((r) => entries.some((e) => e.entry_id === r.entry_id)),
+                    cur,
+                  )}
                   entryIds={entries.map((e) => e.entry_id)}
                   idempotencyKey={randomUUID()}
                 />
