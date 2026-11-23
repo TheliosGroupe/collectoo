@@ -35,6 +35,9 @@ const base: RemittedEntry = {
   paid_how: "paid",
   paid_run_number: "RV-2026-000001",
   returned_via: null,
+  // M2c-7b (plan §4.3): how the cover would be recovered (the read's new keys)
+  recovery: "request",
+  clause_ref: null,
 };
 
 describe("M2c-7a checks (plan §3.7)", () => {
@@ -49,15 +52,15 @@ describe("M2c-7a checks (plan §3.7)", () => {
     });
     expect(CHECK_LABEL.advance_open).toEqual({
       label: "Avance du cabinet non récupérée depuis plus de 30 jours",
-      help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée.",
+      help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
     });
   });
   it("rewords the overrun and double payout helps (no « pas encore géré »)", () => {
     expect(checkLabel("payout_overrun").help).toBe(
-      "Un reversement débité dépassait ce qui restait dû au client : le cabinet lui a avancé la différence.",
+      "Un reversement débité dépassait ce qui restait dû au client : le cabinet lui a avancé la différence. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
     );
     expect(checkLabel("double_payout_open").help).toBe(
-      "Avance du cabinet après un virement exécuté hors reversement.",
+      "Avance du cabinet après un virement exécuté hors reversement. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
     );
     for (const code of ["payout_overrun", "double_payout_open", "advance_open"])
       expect(checkLabel(code).help).not.toContain("pas encore géré");
@@ -189,7 +192,7 @@ describe("« Désimputer » of a remitted entry (plan §3.7, §3.2.1)", () => {
       returned_via: "run",
     };
     expect(plain(reverseRemittedEffect([e, f], "EUR"))).toBe(
-      "Déjà reversé au client (payé par le virement hors reversement débité le 19/11/2026). Compris dans le reversement RV-2026-000088 (revenu, à verser de nouveau). En désimputant, le cabinet lui en fait l'avance (650,00 €) : la somme n'est pas déduite de ses autres encaissements.",
+      "Déjà reversé au client (payé par le virement hors reversement débité le 19/11/2026). Compris dans le reversement RV-2026-000088 (revenu, à verser de nouveau). En désimputant, le cabinet lui en fait l'avance (650,00 €) : la somme n'est pas déduite de ses autres encaissements. Une demande de remboursement pourra lui être adressée.",
     );
     // through rule 3 (the remitted run's own payout came back, its re-queued item paid by an unplanned payout), and
     // after an unplanned payout that had paid it came back: what came back is named, the run that carried it is not
@@ -249,7 +252,7 @@ describe("« Désimputer » of a remitted entry (plan §3.7, §3.2.1)", () => {
   });
   it("adds the advance and that nothing is deducted from the client's other collections", () => {
     expect(plain(reverseRemittedEffect([base], "EUR"))).toBe(
-      "Déjà reversé au client (reversement RV-2026-000001, débité le 03/11/2026). En désimputant, le cabinet lui en fait l'avance (2 000,00 €) : la somme n'est pas déduite de ses autres encaissements.",
+      "Déjà reversé au client (reversement RV-2026-000001, débité le 03/11/2026). En désimputant, le cabinet lui en fait l'avance (2 000,00 €) : la somme n'est pas déduite de ses autres encaissements. Une demande de remboursement pourra lui être adressée.",
     );
     expect(reverseRemittedEffect([], "EUR")).toBeNull();
     expect(reverseRemittedEffect([base], "EUR")).not.toContain("récupérée selon son mandat");
@@ -403,19 +406,21 @@ describe("the run page's advances, per cause (plan §3.7, F5)", () => {
     settlement_minor: "0",
     commission_minor: "0",
     advances_recovered_minor: "0",
-    advances: [{ cause, amount_minor: "5000", open_minor: "5000", created_on: "2026-11-12" }],
+    advances: [
+      { cause, amount_minor: "5000", open_minor: "5000", created_on: "2026-11-12", recovery: "request", clause_ref: null },
+    ],
     unplanned: [],
     draft_unplanned: [],
   });
   it("words each cause with its recording date", () => {
     expect(runPayoutNotes(payout("remitted_reversal"), "EUR").map(plain)).toEqual([
-      "Avance du cabinet enregistrée le 12/11/2026 : encaissement de ce reversement annulé ou repris (50,00 €)",
+      "Avance du cabinet enregistrée le 12/11/2026 (encaissement de ce reversement annulé ou repris) : 50,00 €, à récupérer par une demande de remboursement (pas de clause de reprise)",
     ]);
     expect(runPayoutNotes(payout("payout_overrun"), "EUR").map(plain)).toEqual([
-      "Avance du cabinet enregistrée le 12/11/2026 : reversement débité au-delà de ce qui restait dû (50,00 €)",
+      "Avance du cabinet enregistrée le 12/11/2026 (reversement débité au-delà de ce qui restait dû) : 50,00 €, à récupérer par une demande de remboursement (pas de clause de reprise)",
     ]);
     expect(runPayoutNotes(payout("double_payout"), "EUR").map(plain)).toEqual([
-      "Avance du cabinet enregistrée le 12/11/2026 : virement exécuté hors reversement (50,00 €)",
+      "Avance du cabinet enregistrée le 12/11/2026 (virement exécuté hors reversement) : 50,00 €, à récupérer par une demande de remboursement (pas de clause de reprise)",
     ]);
   });
   it("no longer says the recovery is not handled", () => {

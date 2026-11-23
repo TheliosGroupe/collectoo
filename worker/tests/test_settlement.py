@@ -7,10 +7,21 @@ a credit note applied within the invoice's open part, its VAT off the pending pa
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from collectoo_worker.remittance.commission import FileFacts, LineKind
+from collectoo_worker.remittance.run import (
+    Facts,
+    Item,
+    OpenAdvanceRow,
+    Terms,
+    UnplannedPaid,
+    prepare_run,
+)
 from collectoo_worker.remittance.settlement import (
     NO_MANDATE,
     Clauses,
@@ -238,3 +249,282 @@ def test_the_plan_holds_its_invariants(w: dict[str, object]) -> None:
     if p.deferred:
         assert p.settles == () and p.settlement_minor == 0
     assert (p.net_minor < 0) == ("negative_net" in p.blockers)
+
+
+# -- M2c-7b: the claw-back through run._plan, with the facts as the prepare loads them ------------
+# ([critic] M7-MONEY-7: an advance's queue item has no file and counts in its advance's mandate;
+# never settlement.plan alone, which the draft's tests fed `{'M': 300 000}`)
+
+_SCHEDULE = {
+    "schema": "commission-1",
+    "basis": {
+        "families": "all",
+        "forwards": {"file_recalled": False, "before_servicing_start": False,
+                     "client_ratification": False},
+        "on_reversal": "credit",
+    },
+    "rules": [{"id": "tout", "tier_key": "tout", "label_fr": "Toutes créances", "match": {},
+               "rate": {"kind": "flat", "rate": "0.15"}}],
+}  # fmt: skip
+_DAY = date(2026, 11, 16)
+
+
+def _at(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, 12, tzinfo=UTC)
+
+
+@st.composite
+def loaded_runs(draw: st.DrawFn) -> tuple[Facts, dict[str, OpenAdvanceRow]]:
+    """A run of a client of two mandates A and B: collections on a file of each, advance items (each
+    on its advance's mandate, A, B or none), the client's open advances (some of them the run's own
+    items), each mandate's netting and claw-back clauses, a proceeding opened or not."""
+    terms: dict[str, list[Terms]] = {}
+    for m in ("A", "B"):
+        rt = {
+            "schema": "remittance-1",
+            "frequency": "twice_monthly",
+            "netting": {"clause_ref": "art. 7.2"} if draw(st.booleans()) else None,
+            "clawback": {"clause_ref": "art. 7.4"} if draw(st.booleans()) else None,
+            "invoice_payment_days": 30,
+        }
+        terms[m] = [
+            Terms(f"T{m}", m, date(2026, 1, 1), None, 30, _SCHEDULE, rt, "art. 6", "art. 7")
+        ]
+    items: list[Item] = []
+    for n in range(draw(st.integers(0, 4))):
+        day = date(2026, 11, draw(st.integers(1, 15)))
+        amount = draw(st.integers(1, 200_000))
+        account = draw(st.sampled_from(("FA", "FB")))
+        items.append(
+            Item(
+                f"E{n}",
+                LineKind.ALLOCATION,
+                amount,
+                _at(day),
+                day,
+                account_id=account,
+                payment_id=f"P{n}",
+                encaissement_date=day,
+                basis={"principal": amount},
+            )
+        )
+    advances: dict[str, OpenAdvanceRow] = {}
+    for n in range(draw(st.integers(0, 4))):
+        born = date(2026, 11, draw(st.integers(1, 15)))
+        mandate = draw(st.sampled_from(("A", "B", None)))
+        amount = draw(st.integers(1, 300_000))
+        open_minor = draw(st.integers(1, amount))
+        row = OpenAdvanceRow(f"V{n}", mandate, "remitted_reversal", born, _at(born), open_minor)
+        advances[row.id] = row
+        if draw(st.booleans()):  # its +A item is in this run (an advance posted since the last run)
+            items.append(Item(row.id, LineKind.CLIENT_ADVANCE, amount, _at(born), born,
+                              advance_mandate_id=mandate,
+                              advance_cause="remitted_reversal"))  # fmt: skip
+    opening = draw(st.sampled_from((None, date(2026, 11, 8))))
+    facts = Facts(
+        run_id="RUN", number="RV-2026-000009", client_id="C", currency="EUR",
+        known_at=_at(_DAY), today=_DAY, service_from=date(2026, 11, 1), service_to=_DAY,
+        vat_rate=Decimal("0.2"), vat_on_debits=False, items=items, pending_lines=[],
+        files={"FA": FileFacts("FA", "A", "b2b_invoice", "PA"),
+               "FB": FileFacts("FB", "B", "b2b_invoice", "PB")},
+        mandate_refs={"A": "MAND-A", "B": "MAND-B"}, terms=terms, history={}, history_seq=0,
+        charges={}, invoices={}, invoice_numbers={}, line_invoices={}, open_documents=[],
+        payout_blockers=[], commission_blockers=[], payout_account_id="PA",
+        proceeding_opened_on=opening, open_advances=list(advances.values()),
+    )  # fmt: skip
+    return facts, advances
+
+
+@settings(max_examples=500, deadline=None)
+@given(w=loaded_runs())
+def test_the_claw_back_never_takes_beyond_its_open_its_mandate_or_its_clause(
+    w: tuple[Facts, dict[str, OpenAdvanceRow]],
+) -> None:
+    """Through prepare_run (its `_plan`), with the facts as loaded: an advance is taken only under
+    its own mandate's claw-back clause, never one of no mandate, never beyond its open, never one
+    born before the client's proceeding; a mandate's advances are taken only from its own money
+    (its gross with the advance items it holds, its refunds, less its invoices); N + D = gross; an
+    advance item's line carries its advance's mandate."""
+    facts, advances = w
+    d = prepare_run(facts)
+    p = d.plan
+    check(p)
+    assert (
+        p.net_minor + p.settlement_minor
+        == p.gross_minor
+        == sum(i.amount_minor for i in facts.items)
+    )
+    taken: dict[str, int] = defaultdict(int)
+    for s in p.settles:
+        if s.kind != "advance":
+            continue
+        adv = advances[s.ref]
+        assert adv.mandate_id is not None and s.mandate_id == adv.mandate_id != NO_MANDATE
+        assert facts.terms[adv.mandate_id][0].remittance_terms["clawback"] is not None  # type: ignore[index]
+        assert facts.proceeding_opened_on is None or adv.born_on >= facts.proceeding_opened_on
+        assert s.open_before_minor == adv.open_minor
+        taken[s.ref] += s.amount_minor
+    for ref, amount in taken.items():
+        assert amount <= advances[ref].open_minor
+    for m in p.mandates:
+        assert m.take_advance_minor <= max(0, m.gross_minor + m.excess_minor - m.take_minor)
+        assert m.take_advance_minor == sum(
+            t for ref, t in taken.items() if advances[ref].mandate_id == (m.mandate_id or None)
+        )
+    lines = {ln.item.entry_id: ln for ln in d.lines}
+    for ref, adv in advances.items():
+        if ref in lines:
+            assert lines[ref].mandate_id == adv.mandate_id
+            assert (lines[ref].commission_minor, lines[ref].deadline) == (0, None)
+
+
+# -- M2c-7b review round 1 (M7B-MONEY-1): a mandate's own money, with the run's other rows ---------
+# A remitted reversal R(E) on its file and its cover on the same mandate (they net to nothing); a
+# double payout's -U row (no file) and its advance's +(U - P) row (on its mandate as a document, its
+# row outside every mandate); what U paid of the run's collections (its attributions, the switch
+# on); a payout that came back (no file); earlier advances of either mandate or none. A mandate's
+# own money is its collections less what the run's unplanned payouts paid of them — never a row of
+# a double payout, of an overrun or of a returned payout.
+
+
+@st.composite
+def runs_with_unplanned(
+    draw: st.DrawFn,
+) -> tuple[Facts, dict[str, OpenAdvanceRow], dict[str, int]]:
+    terms: dict[str, list[Terms]] = {}
+    for m in ("A", "B"):
+        rt = {
+            "schema": "remittance-1",
+            "frequency": "twice_monthly",
+            "netting": {"clause_ref": "art. 7.2"} if draw(st.booleans()) else None,
+            "clawback": {"clause_ref": "art. 7.4"} if draw(st.booleans()) else None,
+            "invoice_payment_days": 30,
+        }
+        terms[m] = [
+            Terms(f"T{m}", m, date(2026, 1, 1), None, 30, _SCHEDULE, rt, "art. 6", "art. 7")
+        ]
+    mandate_of = {"FA": "A", "FB": "B"}
+    items: list[Item] = []
+    collections: list[Item] = []
+    for n in range(draw(st.integers(0, 4))):
+        day = date(2026, 11, draw(st.integers(1, 15)))
+        amount = draw(st.integers(1, 200_000))
+        e = Item(f"E{n}", LineKind.ALLOCATION, amount, _at(day), day,
+                 account_id=draw(st.sampled_from(("FA", "FB"))), payment_id=f"P{n}",
+                 encaissement_date=day, basis={"principal": amount})  # fmt: skip
+        collections.append(e)
+    items.extend(collections)
+    advances: dict[str, OpenAdvanceRow] = {}
+    # remitted reversals of earlier runs' collections, each with its cover on its file's mandate
+    for n in range(draw(st.integers(0, 2))):
+        day = date(2026, 11, draw(st.integers(1, 15)))
+        amount = draw(st.integers(1, 100_000))
+        file = draw(st.sampled_from(("FA", "FB")))
+        items.append(Item(f"R{n}", LineKind.ALLOCATION_REVERSAL, -amount, _at(day), day,
+                          account_id=file, payment_id=f"PR{n}", encaissement_date=date(2026, 10, 1),
+                          basis={"principal": -amount},
+                          original_entry_id=f"OLD{n}"))  # fmt: skip
+        cover = OpenAdvanceRow(
+            f"C{n}", mandate_of[file], "remitted_reversal", day, _at(day), amount
+        )
+        advances[cover.id] = cover
+        items.append(Item(cover.id, LineKind.CLIENT_ADVANCE, amount, _at(day), day,
+                          advance_mandate_id=cover.mandate_id,
+                          advance_cause="remitted_reversal"))  # fmt: skip
+    # double payouts: U paid P of the run's collections (attributions), its advance U - P
+    paid_of: dict[str, int] = defaultdict(int)
+    attributions: list[UnplannedPaid] = []
+    for n in range(draw(st.integers(0, 2))):
+        day = date(2026, 11, draw(st.integers(1, 15)))
+        p = 0
+        for e in collections:
+            left = e.amount_minor - paid_of[e.entry_id]
+            if left > 0 and draw(st.booleans()):
+                part = draw(st.integers(1, left))
+                paid_of[e.entry_id] += part
+                attributions.append(UnplannedPaid(f"U{n}", e.entry_id, part))
+                p += part
+        u = p + draw(st.integers(0 if p else 1, 100_000))
+        items.append(Item(f"U{n}", LineKind.UNPLANNED_PAYOUT, -u, _at(day), day))
+        if u > p:
+            mandate = draw(st.sampled_from(("A", "B", None)))
+            row = OpenAdvanceRow(f"V{n}", mandate, "double_payout", day, _at(day), u - p)
+            advances[row.id] = row
+            items.append(Item(row.id, LineKind.CLIENT_ADVANCE, u - p, _at(day), day,
+                              advance_mandate_id=mandate,
+                              advance_cause="double_payout"))  # fmt: skip
+    # a payout that came back, re-queued (no file)
+    if draw(st.booleans()):
+        day = date(2026, 11, draw(st.integers(1, 15)))
+        items.append(Item("PR", LineKind.PAYOUT_RETURNED, draw(st.integers(1, 100_000)), _at(day),
+                          day))  # fmt: skip
+    # earlier advances still open (their rows in earlier runs)
+    for n in range(draw(st.integers(0, 3))):
+        born = date(2026, 11, draw(st.integers(1, 15)))
+        row = OpenAdvanceRow(
+            f"W{n}", draw(st.sampled_from(("A", "B", None))),
+            draw(st.sampled_from(("remitted_reversal", "payout_overrun", "double_payout"))), born,
+            _at(born), draw(st.integers(1, 300_000)),
+        )  # fmt: skip
+        advances[row.id] = row
+    own: dict[str, int] = defaultdict(int)
+    for e in collections:
+        own[mandate_of[str(e.account_id)]] += e.amount_minor - paid_of[e.entry_id]
+    facts = Facts(
+        run_id="RUN", number="RV-2026-000010", client_id="C", currency="EUR",
+        known_at=_at(_DAY), today=_DAY, service_from=date(2026, 11, 1), service_to=_DAY,
+        vat_rate=Decimal("0.2"), vat_on_debits=False, items=items, pending_lines=[],
+        files={"FA": FileFacts("FA", "A", "b2b_invoice", "PA"),
+               "FB": FileFacts("FB", "B", "b2b_invoice", "PB")},
+        mandate_refs={"A": "MAND-A", "B": "MAND-B"}, terms=terms, history={}, history_seq=0,
+        charges={}, invoices={}, invoice_numbers={}, line_invoices={}, open_documents=[],
+        payout_blockers=[], commission_blockers=[], payout_account_id="PA",
+        proceeding_opened_on=draw(st.sampled_from((None, date(2026, 11, 8)))),
+        open_advances=list(advances.values()), unplanned_paid=attributions,
+    )  # fmt: skip
+    return facts, advances, dict(own)
+
+
+@settings(max_examples=500, deadline=None)
+@given(w=runs_with_unplanned())
+def test_a_mandate_takes_only_from_its_own_money_whatever_the_run_s_other_rows(
+    w: tuple[Facts, dict[str, OpenAdvanceRow], dict[str, int]],
+) -> None:
+    """Through prepare_run with the facts as loaded: each mandate's money in the plan is its
+    collections less what the run's unplanned payouts paid of them (a remitted reversal and its
+    cover net to nothing; a double payout's two rows, a returned payout and every advance row but a
+    cover's count outside every mandate); what a mandate takes (its invoices, then its advances)
+    stays within that money; an advance is taken only under its own mandate's claw-back clause,
+    within its open, never born before the proceeding; N + D = gross; an advance row's line is on
+    its advance's mandate only for a remitted reversal's cover."""
+    facts, advances, own = w
+    d = prepare_run(facts)
+    p = d.plan
+    check(p)
+    assert (
+        p.net_minor + p.settlement_minor
+        == p.gross_minor
+        == sum(i.amount_minor for i in facts.items)
+    )
+    for m in p.mandates:
+        if m.mandate_id == NO_MANDATE:
+            assert m.take_minor == m.take_advance_minor == 0
+            continue
+        assert m.gross_minor == own.get(m.mandate_id, 0), (m, own)
+        assert m.take_minor + m.take_advance_minor <= max(
+            0, own.get(m.mandate_id, 0) + m.excess_minor
+        )
+    for s in p.settles:
+        if s.kind != "advance":
+            continue
+        adv = advances[s.ref]
+        assert adv.mandate_id is not None and s.mandate_id == adv.mandate_id
+        assert facts.terms[adv.mandate_id][0].remittance_terms["clawback"] is not None  # type: ignore[index]
+        assert facts.proceeding_opened_on is None or adv.born_on >= facts.proceeding_opened_on
+        assert s.amount_minor <= adv.open_minor == s.open_before_minor
+    for ln in d.lines:
+        if ln.item.kind in (LineKind.CLIENT_ADVANCE, LineKind.CLIENT_ADVANCE_REVERSAL):
+            adv = advances[ln.item.entry_id]
+            assert ln.mandate_id == (adv.mandate_id if adv.cause == "remitted_reversal" else None)
+        elif ln.item.kind in (LineKind.UNPLANNED_PAYOUT, LineKind.PAYOUT_RETURNED):
+            assert ln.mandate_id is None

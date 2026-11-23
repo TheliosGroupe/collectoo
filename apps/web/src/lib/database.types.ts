@@ -2757,6 +2757,9 @@ isOneToOne: false
 "clear_payee_name_mismatch":
 { Args: { "p_check_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
                            },
+"client_advances":
+{ Args: { "p_after"?: Json,"p_client"?: string,"p_limit"?: number,"p_open_only"?: boolean,"p_organization_id": string }; Returns: Json
+                           },
 "client_money_balances":
 { Args: { "p_as_of"?: string,"p_client_organization_id": string,"p_known_at"?: string }; Returns: {
               "currency": string,"held_minor": number,"payable_minor": number,"unallocated_minor": number
@@ -2773,6 +2776,9 @@ isOneToOne: false
             }[]
                            },
 "client_remittance_summary":
+{ Args: { "p_client_organization_id": string }; Returns: Json
+                           },
+"client_space_advances":
 { Args: { "p_client_organization_id": string }; Returns: Json
                            },
 "close_bank_account":
@@ -3009,6 +3015,9 @@ isOneToOne: false
                            },
 "unassign_payment":
 { Args: { "p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
+                           },
+"write_off_advance":
+{ Args: { "p_advance_id": string,"p_amount_text": string,"p_evidence_document_id": string,"p_expected_open_text": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
                            }
           }
           Enums: {

@@ -251,7 +251,7 @@ describe("the effect sentences of « Virement hors reversement », worded from P
   it("0 < P < A: the rest is the servicer's advance, and why by the bound", () => {
     const items = unplanned({ paid_minor: "120000", advance_minor: "44000", p_bound: "items" });
     expect(items).toContain(
-      `${money("120000", EUR)} déjà reçus par MARTIN SAS seront déduits de son prochain reversement (sommes du reversement RV-2026-000012 annulé, encore à reverser) ; avance du cabinet de ${money("44000", EUR)} pour le reste (le reste dépasse ce qui reste dû au client sur ces sommes), à récupérer selon son mandat — ce recouvrement n'est pas encore géré dans Collectoo.`,
+      `${money("120000", EUR)} déjà reçus par MARTIN SAS seront déduits de son prochain reversement (sommes du reversement RV-2026-000012 annulé, encore à reverser) ; avance du cabinet de ${money("44000", EUR)} pour le reste (le reste dépasse ce qui reste dû au client sur ces sommes), reprise sur les prochains reversements du client si elle est rattachée à un seul mandat qui a une clause de reprise (jamais si elle est antérieure à l'ouverture d'une procédure collective du client), sinon à récupérer (page « Avances »).`,
     );
     const queue = unplanned({ paid_minor: "120000", advance_minor: "44000", p_bound: "queue" });
     expect(queue).toContain(
@@ -262,7 +262,7 @@ describe("the effect sentences of « Virement hors reversement », worded from P
   it("P = 0: nothing deducted, all of it an advance", () => {
     const text = unplanned({ paid_minor: "0", advance_minor: "164000", p_bound: "none" });
     expect(text).toContain(
-      `Rien n'est déduit du prochain reversement de MARTIN SAS ; avance du cabinet de ${money("164000", EUR)} : ce virement n'est rattaché à aucune somme en attente de ce client, à récupérer selon son mandat — ce recouvrement n'est pas encore géré dans Collectoo.`,
+      `Rien n'est déduit du prochain reversement de MARTIN SAS ; avance du cabinet de ${money("164000", EUR)} : ce virement n'est rattaché à aucune somme en attente de ce client, reprise sur les prochains reversements du client si elle est rattachée à un seul mandat qui a une clause de reprise (jamais si elle est antérieure à l'ouverture d'une procédure collective du client), sinon à récupérer (page « Avances »).`,
     );
   });
   it("the intro names the client and the mechanism, never a legal qualification", () => {
@@ -592,15 +592,19 @@ describe("the run page (§7.4; critic CSO-6)", () => {
       {
         ...payout,
         transfers: [{ ...payout.transfers[0], status: "returned", returned_on: "2026-11-05" }],
-        advances: [{ cause: "payout_overrun", amount_minor: "5000", open_minor: "5000", created_on: "2026-11-03" }],
+        advances: [
+          { cause: "payout_overrun", amount_minor: "5000", open_minor: "5000", created_on: "2026-11-03",
+            recovery: "request", clause_ref: null },
+        ],
         unplanned: [{ line_id: T, kind: "unplanned_payout", amount_minor: "164000", on: "2026-11-06",
                       paid_minor: "0", advance_minor: "164000", after_cancellation: false }],
       },
       EUR,
     );
     expect(notes).toContain(
-      // M2c-7a (plan §3.7 [critic] L19 (b)): worded by its cause, with the date it was recorded
-      `Avance du cabinet enregistrée le 03/11/2026 : reversement débité au-delà de ce qui restait dû (${money("5000", EUR)})`,
+      // M2c-7a (plan §3.7 [critic] L19 (b)): worded by its cause, with the date it was recorded; M2c-7b (plan §4.3): and
+      // how it is recovered
+      `Avance du cabinet enregistrée le 03/11/2026 (reversement débité au-delà de ce qui restait dû) : ${money("5000", EUR)}, à récupérer par une demande de remboursement (pas de clause de reprise)`,
     );
     expect(notes).toContain(
       `Virement revenu impayé le 05/11/2026 : ${money("164000", EUR)} de nouveau dus au client, proposés dans un prochain reversement ; son compte de reversement est bloqué jusqu'à son remplacement ou sa reconfirmation.`,

@@ -772,6 +772,34 @@ def test_a_run_that_transfers_nothing_is_worded_so() -> None:
     assert " payé" not in lower and " réglé" not in lower and "payée" not in lower
 
 
+def test_a_run_that_recovers_an_advance_says_so() -> None:
+    """M2c-7b (plan §4.2: the statement unchanged, its goldens gain a run that recovers an advance):
+    the claw-back clause takes an advance from the run (an `earlier_settled` row of kind advance);
+    the statement states it, at its date once set off, never as paid, and never names a remission;
+    the golden fixture's own bytes are not this payload's (test_the_golden_hashes unchanged)."""
+    p = statement_payload()
+    p["earlier_settled"] = [
+        *p["earlier_settled"],
+        {"kind": "advance", "document_kind": "advance", "amount_minor": "200000"},
+    ]
+    st = statement_text(p, "0" * 64)
+    assert (
+        "Remboursement d'une avance du cabinet : à régler par compensation sur le présent "
+        "reversement : 2\u202f000,00\u00a0€."
+    ) in st
+    done = zero_net_statement_payload()
+    done["earlier_settled"] = [
+        *done["earlier_settled"],
+        {"kind": "advance", "document_kind": "advance", "amount_minor": "20000"},
+    ]
+    st = statement_text(done, "0" * 64)
+    assert (
+        "Remboursement d'une avance du cabinet : compensation le 02/11/2026 : 200,00\u00a0€."
+    ) in st
+    lower = st.lower()
+    assert "abandon" not in lower and "remise" not in lower and " payé" not in lower
+
+
 def test_a_run_cancelled_before_its_statement_sets_nothing_off() -> None:
     """legal#2, figures#0: the statement says the run was cancelled; no net, no set-off, the gross
     still owed; the invoice annulled by the cancellation's credit note."""

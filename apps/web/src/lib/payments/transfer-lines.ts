@@ -102,8 +102,9 @@ export const TRANSFER_LINE_REFUSAL: Record<string, string> = {
   already_returned: "Ce virement est déjà revenu.",
   return_differs:
     "Ce retour ne correspond pas au virement (montant supérieur, virement sans débit comptabilisé, ou autre virement hors reversement à annuler d'abord).",
+  // M2c-7b (plan §4.3): reachable now that runs claw advances back
   advance_settled:
-    "L'avance liée à ce virement a déjà été en partie récupérée : ce retour ne peut pas être comptabilisé ici. Prévenez le support.",
+    "Cette avance a déjà été en partie récupérée : ce retour ne peut pas être comptabilisé dans Collectoo ; prévenez le support.",
   // critic F8, critic2 ML-6
   unsplit_detail_missing:
     "Le relevé ne détaille pas assez cette écriture (un montant ou les frais de la banque manquent, ou la ligne a été importée avant que Collectoo garde ce détail) : elle ne peut pas être comptabilisée ici. Demandez le détail à la banque et prévenez le support.",
@@ -496,7 +497,9 @@ export function membersMore(o: { members: unknown[] | null; member_count: number
 const STATED_CHARGES = "frais indiqués par le relevé";
 const UNSTATED_CHARGES =
   "Le relevé n'indique pas de frais pour cette ligne : l'écart n'est pas justifié par le relevé. Vérifiez dans la banque avant de comptabiliser.";
-const NOT_YET_RECOVERED = "à récupérer selon son mandat — ce recouvrement n'est pas encore géré dans Collectoo";
+// M2c-7b (plan §4.3): how the advance is recovered, now that it is (the claw-back; 7c the request)
+const NOT_YET_RECOVERED =
+  "reprise sur les prochains reversements du client si elle est rattachée à un seul mandat qui a une clause de reprise (jamais si elle est antérieure à l'ouverture d'une procédure collective du client), sinon à récupérer (page « Avances »)";
 const REFERENCE_LESS =
   "Cette ligne ne porte pas notre référence : seul ce virement du cabinet (en cours, ou annulé que la banque a pu exécuter) a ce montant vers ce compte. Vérifiez dans la banque avant de comptabiliser.";
 

@@ -26,6 +26,15 @@ the run's draft; the approval freezes it.
   every mandate's gross (no file), and its line keeps E and that terms version.
 * **A paired line** (a collection undone in its own run under `credit`) is stored with commission 0
   and no parts; the engine never prices it.
+* **Advances** (M2c-7b, plan §4.1.9, §4.2): the client's open advances are the plan's claw-back
+  documents (`settlement.plan` takes them after the invoices, under their mandate's claw-back
+  clause, from that mandate's money); an advance's own queue item (`client_advance`, or its
+  reversal's) has no file, no commission and no deadline. A remitted reversal's cover counts in
+  its advance's mandate, with R(E) ([critic] M7-MONEY-7: in NO_MANDATE's gross it would cap the
+  take at what the mandate's other lines leave); a double payout's or an overrun's counts outside
+  every mandate, with the rows of no file it pairs with (review round 1, M7B-MONEY-1).
+* **What an unplanned payout of the run already paid of a line** (its attributions; the switch on)
+  counts with that payout's -U row, outside every mandate: the client has had it (review round 1).
 """
 
 from __future__ import annotations
@@ -81,6 +90,7 @@ from collectoo_worker.remittance.terms import CommissionSchedule
 NBSP = "\u00a0"
 ONE_MONTH_DAYS = 30  # no terms on E: R124-6's « un mois » (the delay is at most 30 days anyway)
 COLLECTIONS = frozenset({LineKind.ALLOCATION, LineKind.FORWARD})
+ADVANCE_ITEMS = frozenset({LineKind.CLIENT_ADVANCE, LineKind.CLIENT_ADVANCE_REVERSAL})
 LATE = (1 << 30,)  # the run's own documents come after every earlier one
 
 
@@ -105,6 +115,39 @@ class Item:
     # that line's E. None: no dated line to hold it to (no date, as the SQL queue).
     held_terms_id: str | None = None
     held_days: int | None = None
+    # M2c-7b (plan §4.1.9 [critic] M7-MONEY-7): an advance's item (client_advance, or its
+    # reversal's) has no file: its advance's mandate (client_advance.mandate_id, set at its insert),
+    # None with none, and its advance's cause — review round 1 (M7B-MONEY-1): only a remitted
+    # reversal's cover counts in that mandate (it pairs with R(E) on E's file); a double payout's or
+    # an overrun's row pairs with rows of no file (the unplanned payout's -U, whatever left 4670 in
+    # debit) and counts outside every mandate with them
+    advance_mandate_id: str | None = None
+    advance_cause: str | None = None
+
+
+@dataclass(frozen=True)
+class UnplannedPaid:
+    """What an unplanned payout's P counted of an item (private.unplanned_paid_item, its booking not
+    reversed): `booking_entry_id` the unplanned payout's entry (its -U row), `entry_id` the item."""
+
+    booking_entry_id: str
+    entry_id: str
+    amount_minor: int
+
+
+@dataclass(frozen=True)
+class OpenAdvanceRow:
+    """An advance of the servicer to the client still open (M2c-7b, plan §4.2): its mandate (None:
+    never clawed back, founder Q2), its cause, when its claim was born (its entry's date,
+    private.advance_born_on), when it was recorded (the order of those born the same day) and its
+    open part (private.advance_open)."""
+
+    id: str
+    mandate_id: str | None
+    cause: str
+    born_on: date
+    created_at: datetime
+    open_minor: int
 
 
 @dataclass(frozen=True)
@@ -180,6 +223,9 @@ class Facts:
     commission_blockers: Sequence[str]
     payout_account_id: str | None = None
     proceeding_opened_on: date | None = None  # §9.6: documents before it are not netted
+    open_advances: Sequence[OpenAdvanceRow] = ()  # M2c-7b: the claw-back's documents (§4.2)
+    # review round 1 (M7B-MONEY-1): what the run's unplanned payouts paid of its items
+    unplanned_paid: Sequence[UnplannedPaid] = ()
 
 
 @dataclass(frozen=True)
@@ -260,6 +306,16 @@ def _versions(facts: Facts) -> dict[str, list[TermsVersion]]:
     return out
 
 
+def _advance_item_mandate(item: Item) -> str | None:
+    """The mandate an advance's queue row counts in (review round 1, M7B-MONEY-1: each pair of rows
+    in one bucket): a remitted reversal's cover (or its release) on its advance's mandate, where its
+    reversal R(E) sits (E's file); a double payout's or an overrun's on none, with the rows of no
+    file it pairs with (the unplanned payout's -U, whatever left 4670 in debit) — on its mandate it
+    would let that mandate take back its advances, or set off its invoices, from another mandate's
+    money or a re-queued payout."""
+    return item.advance_mandate_id if item.advance_cause == "remitted_reversal" else None
+
+
 def _pending_reasons(facts: Facts, items: Sequence[Item]) -> list[str]:
     reasons = list(facts.commission_blockers)
     for item in items:
@@ -329,7 +385,13 @@ def prepare_run(facts: Facts, cal: Calendar | None = None) -> Draft:
 
     def priced(item: Item) -> tuple[int, str, str | None, tuple[Part, ...], str | None, str | None]:
         file = facts.files.get(item.account_id) if item.account_id else None
-        mandate = file.mandate_id if file else None
+        # M2c-7b ([critic] M7-MONEY-7): an advance's item, no file — a remitted reversal's cover on
+        # its advance's mandate (with R(E)), any other advance's on none (review round 1)
+        mandate = (
+            _advance_item_mandate(item)
+            if item.kind in ADVANCE_ITEMS
+            else (file.mandate_id if file else None)
+        )
         lc = results.get(item.entry_id)
         if lc is None:  # the commission is pending (or the line never earns any)
             t = _terms_on(facts, mandate, item.encaissement_date)
@@ -554,6 +616,7 @@ def _plan(
     for line in lines:
         m = line.mandate_id or NO_MANDATE
         gross[m] = gross.get(m, 0) + line.item.amount_minor
+    _unplanned_paid_out(facts, lines, gross)
     invoices: list[OpenDocument] = []
     refunds: list[OpenDocument] = []
     opening = facts.proceeding_opened_on
@@ -595,7 +658,46 @@ def _plan(
                 )
     del docs, repriced
     clauses = {m: _clauses(facts, m)[0] for m in gross if m != NO_MANDATE}
-    return plan(gross, invoices, refunds, [], credits, clauses)
+    return plan(gross, invoices, refunds, _advances(facts), credits, clauses)
+
+
+def _unplanned_paid_out(facts: Facts, lines: Sequence[DraftLine], gross: dict[str, int]) -> None:
+    """Review round 1 (M7B-MONEY-1): what an unplanned payout of this run already paid of a line of
+    this run (its live attributions; the switch on: a cancelled run's released items its late
+    execution paid) is the client's already — no mandate's money to set off: it counts with that
+    payout's own -U row (outside every mandate), not in the line's mandate. Σ gross is unchanged."""
+    by_entry = {line.item.entry_id: line for line in lines}
+    for a in facts.unplanned_paid:
+        paid_by, item = by_entry.get(a.booking_entry_id), by_entry.get(a.entry_id)
+        if paid_by is None or item is None or paid_by.item.kind is not LineKind.UNPLANNED_PAYOUT:
+            continue
+        src, dst = item.mandate_id or NO_MANDATE, paid_by.mandate_id or NO_MANDATE
+        moved = min(a.amount_minor, max(0, item.item.amount_minor))
+        if src != dst and moved:
+            gross[src] = gross.get(src, 0) - moved
+            gross[dst] = gross.get(dst, 0) + moved
+
+
+def _advances(facts: Facts) -> list[OpenDocument]:
+    """M2c-7b (plan §4.2): the client's open advances, oldest born first (then the order they were
+    recorded), each on its own mandate (NO_MANDATE: never clawed back): the plan takes them after
+    the invoices, under that mandate's claw-back clause only, from that mandate's money (its advance
+    items count in it: `priced`); one born before the client's proceeding is not set off (L622-7 I,
+    as an invoice issued before it; 7d changes the rule)."""
+    opening = facts.proceeding_opened_on
+    rows = sorted(facts.open_advances, key=lambda a: (a.born_on, a.created_at, a.id))
+    return [
+        OpenDocument(
+            a.id,
+            a.mandate_id or NO_MANDATE,
+            (a.born_on.toordinal(), n),
+            a.open_minor,
+            0,
+            opening is None or a.born_on >= opening,
+        )
+        for n, a in enumerate(rows)
+        if a.open_minor > 0
+    ]
 
 
 def _apply_plan(facts: Facts, documents: Sequence[dict[str, Any]], p: SettlementPlan) -> None:
@@ -645,6 +747,12 @@ def _header(  # noqa: PLR0913, PLR0917 - the draft's totals and identity
             "settles": [(s.ref, s.kind, s.amount_minor, s.vat_moved_minor) for s in p.settles],
         },
         "open": sorted((d.id, d.open_minor, d.pending_vat_minor) for d in facts.open_documents),
+        # M2c-7b: the open advances the plan read (the approval re-reads each settled one)
+        "advances": sorted((a.id, a.open_minor, a.mandate_id or "") for a in facts.open_advances),
+        # (review round 1) and what the run's unplanned payouts paid of its items
+        "unplanned_paid": sorted(
+            (a.booking_entry_id, a.entry_id, a.amount_minor) for a in facts.unplanned_paid
+        ),
         "blockers": blockers,
         "commission": list(reasons),
         "payout_account": facts.payout_account_id,

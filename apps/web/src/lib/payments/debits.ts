@@ -1309,7 +1309,8 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   payout_overrun: {
     label: "Reversement au-delà du dû",
     // M2c-7a (plan §3.7)
-    help: "Un reversement débité dépassait ce qui restait dû au client : le cabinet lui a avancé la différence.",
+    // M2c-7b (plan §4.3): how it is recovered
+    help: "Un reversement débité dépassait ce qui restait dû au client : le cabinet lui a avancé la différence. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
   },
   bank_line_unbooked: {
     label: "Débits du cabinet non comptabilisés",
@@ -1333,7 +1334,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   double_payout_open: {
     label: "Avance du cabinet après un virement hors reversement",
     // M2c-7a (plan §3.7): « ce recouvrement n'est pas encore géré » goes (7b adds how it is recovered)
-    help: "Avance du cabinet après un virement exécuté hors reversement.",
+    help: "Avance du cabinet après un virement exécuté hors reversement. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
   },
   // M2c-7a (plan §3.4, §3.7): the advances' checks (private.run_advance_checks)
   remitted_reversal_uncovered: {
@@ -1346,7 +1347,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   advance_open: {
     label: "Avance du cabinet non récupérée depuis plus de 30 jours",
-    help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée.",
+    help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
   },
   top_up_pending: {
     label: "Approvisionnement attendu",

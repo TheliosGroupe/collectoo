@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useMemo, useState, useTransition } from "react";
 import { Badge, ErrorNote, InfoNote, buttonClass, inputClass } from "@/components/ui";
+import { advanceChip } from "@/lib/remittance/advances";
 import { errorText } from "@/lib/boarding/forms";
 import { money } from "@/lib/payments/statements";
 import {
@@ -46,8 +47,11 @@ export function ApprovePanel({
   today,
   nextBusinessDay,
   canApprove,
+  advances = {},
 }: {
   runs: RunCard[];
+  /** M2c-7b (design §17 #1): each client's open advances (`client:currency` → minor units as text), for the chip */
+  advances?: Record<string, string>;
   /** Today in Europe/Paris, as the database says it (`private.paris_today()`). */
   today: string;
   nextBusinessDay: string;
@@ -146,6 +150,11 @@ export function ApprovePanel({
                   </p>
                   <div className="flex flex-wrap gap-2">
                     {chip ? <Badge tone={chip.tone}>{chip.label}</Badge> : null}
+                    {advanceChip(advances[`${r.client_id}:${r.currency}`], r.currency) ? (
+                      <Badge tone="action" testId="advance-chip">
+                        {advanceChip(advances[`${r.client_id}:${r.currency}`], r.currency)}
+                      </Badge>
+                    ) : null}
                     {r.trigger !== "manual" ? <Badge tone="neutral">{TRIGGER_LABEL[r.trigger] ?? r.trigger}</Badge> : null}
                     {r.payout ? (
                       <Badge tone={r.payout.new_iban ? "action" : "neutral"}>

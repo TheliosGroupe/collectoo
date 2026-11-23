@@ -20,9 +20,11 @@ from collectoo_worker.remittance.documents import EarlierCharge, EarlierInvoice
 from collectoo_worker.remittance.run import (
     Facts,
     Item,
+    OpenAdvanceRow,
     OpenInvoiceRow,
     PendingLine,
     Terms,
+    UnplannedPaid,
     percent,
     prepare_run,
 )
@@ -420,3 +422,330 @@ def test_percent_is_french() -> None:
         "100\u00a0%",
         "10\u00a0%",
     ]
+
+
+# -- M2c-7b: the advances in the plan, with their mandate's money (plan §4.1.9, §4.2) -----------
+
+CLAWBACK = {**NETTING, "clawback": {"clause_ref": "art. 7.4"}}
+TERMS_CLAW = Terms("T1", "M", date(2026, 1, 1), None, 30, SCHEDULE, CLAWBACK, "art. 6", "art. 7")
+
+
+def _advance_item(entry: str, amount: int, day: date, mandate: str | None) -> Item:
+    """A remitted reversal's cover's queue item as the prepare loads it: no file, its advance's
+    mandate and cause (review round 1: the facts carry the cause)."""
+    return Item(
+        entry_id=entry,
+        kind=LineKind.CLIENT_ADVANCE,
+        amount_minor=amount,
+        posted_at=_at(day, 14),
+        effective_date=day,
+        advance_mandate_id=mandate,
+        advance_cause="remitted_reversal",
+    )
+
+
+def _open(ref: str, mandate: str | None, born: date, open_minor: int) -> OpenAdvanceRow:
+    return OpenAdvanceRow(ref, mandate, "remitted_reversal", born, _at(born, 14), open_minor)
+
+
+def _rv3(mandate: str | None = "M", **kw: Any) -> Facts:
+    """§7.2 RV-3 (16/11) with the facts as loaded: E10 +300 000 (F77), R(E2) -200 000 (F42), A1
+    +200 000 (the cover of R(E2), dated 12/11, on its line's mandate) and A1 open for 200 000."""
+    e2 = _alloc("E2", 200_000, date(2026, 10, 12))
+    e10 = _alloc("E10", 300_000, date(2026, 11, 10), account="F77")
+    r_e2 = _undo("RE2", e2, date(2026, 11, 12))
+    a1 = _advance_item("A1", 200_000, date(2026, 11, 12), mandate)
+    base: dict[str, Any] = {
+        "number": "RV-2026-000003",
+        "today": date(2026, 11, 16),
+        "terms": {"M": [TERMS_CLAW]},
+        "history": {("F42", "tout"): KeyState((("T1", 200_000),), commission_minor=30_000)},
+        "history_seq": 1,
+        "charges": {("F42", "tout"): [EarlierCharge("FC1", (2026, 1), 30_000, vat_rate=TAU)]},
+        "invoices": {"FC1": EarlierInvoice("FC1", 30_000, TAU)},
+        "invoice_numbers": {"FC1": ("FC-2026-000001", date(2026, 11, 2))},
+        "line_invoices": {"E2": "FC1"},
+        "open_advances": [_open("A1", mandate, date(2026, 11, 12), 200_000)],
+    }
+    base.update(kw)
+    items = base.pop("items", [e10, r_e2, a1])
+    return _facts(items, **base)
+
+
+def test_rv3_takes_the_advance_back_from_its_mandate_s_money() -> None:
+    """Design §7.2 RV-3 through `_plan` with the facts as loaded ([critic] M7-MONEY-7): A1 has
+    no file and counts in its advance's mandate, so the claw-back takes all of it: N 82 000, D
+    218 000 (Dc 18 000, Da 200 000). With A1's item outside M (NO_MANDATE) the take would be capped
+    at M's room: N 200 000, D 100 000, 118 000 left open."""
+    d = prepare_run(_rv3())
+    h = d.header
+    assert (h["gross"], h["refunds"], h["taken"], h["advances"], h["net"], h["settlement"]) == (
+        "300000",
+        "36000",
+        "54000",
+        "200000",
+        "82000",
+        "218000",
+    )
+    by_entry = {ln.item.entry_id: ln for ln in d.lines}
+    a1 = by_entry["A1"]
+    assert (a1.mandate_id, a1.commission_minor, a1.state, a1.deadline, a1.terms_id) == (
+        "M",
+        0,
+        "none",
+        None,
+        None,
+    )
+    advances = [s for s in d.plan.settles if s.kind == "advance"]
+    assert [(s.ref, s.mandate_id, s.amount_minor, s.open_before_minor) for s in advances] == [
+        ("A1", "M", 200_000, 200_000)
+    ]
+    (m,) = d.plan.mandates
+    assert (m.mandate_id, m.gross_minor, m.take_advance_minor) == ("M", 300_000, 200_000)
+
+
+def test_without_the_claw_back_clause_the_advance_stays_open() -> None:
+    """§7.3's first variant: no claw-back clause, nothing taken (N 282 000); A1 stays in M."""
+    d = prepare_run(_rv3(terms={"M": [TERMS]}))
+    assert (d.header["net"], d.header["advances"]) == ("282000", "0")
+    assert {ln.item.entry_id: ln.mandate_id for ln in d.lines}["A1"] == "M"
+    assert not [s for s in d.plan.settles if s.kind == "advance"]
+
+
+def test_an_advance_of_no_mandate_is_paid_gross_and_never_taken() -> None:
+    """Founder Q2's default: an advance on no mandate (a run of several mandates, a client part) is
+    recovered by a request only; its item is remitted gross outside every mandate's money."""
+    d = prepare_run(_rv3(mandate=None))
+    assert {ln.item.entry_id: ln.mandate_id for ln in d.lines}["A1"] is None
+    assert not [s for s in d.plan.settles if s.kind == "advance"]
+    gross = {m.mandate_id: m.gross_minor for m in d.plan.mandates}
+    assert gross == {"": 200_000, "M": 100_000}
+    assert d.header["net"] == "282000"
+
+
+def test_an_advance_born_before_the_client_s_proceeding_is_not_set_off() -> None:
+    """L622-7 I (the plan's nettable rule): an advance born before the opening is not taken; one
+    born on or after it is (7d changes the rule)."""
+    before = prepare_run(_rv3(proceeding_opened_on=date(2026, 11, 13)))
+    assert (before.header["net"], before.header["advances"]) == ("282000", "0")
+    same_day = prepare_run(_rv3(proceeding_opened_on=date(2026, 11, 12)))
+    assert (same_day.header["net"], same_day.header["advances"]) == ("82000", "200000")
+
+
+def test_advances_are_taken_oldest_first_within_their_mandate_s_room() -> None:
+    """Two open advances of M (the older born first) and less room than both: the older is taken
+    in full, the newer in part (N 0)."""
+    older = OpenAdvanceRow(
+        "A0", "M", "payout_overrun", date(2026, 11, 3), _at(date(2026, 11, 3)), 250_000
+    )
+    d = prepare_run(_rv3(open_advances=[_open("A1", "M", date(2026, 11, 12), 200_000), older]))
+    taken = [(s.ref, s.amount_minor) for s in d.plan.settles if s.kind == "advance"]
+    assert taken == [("A0", 250_000), ("A1", 32_000)]
+    assert d.header["net"] == "0"
+
+
+def test_an_advance_reversal_s_item_counts_in_its_advance_s_mandate() -> None:
+    """A released cover (its entry reversed) re-queues -A: that item counts in the advance's
+    mandate, as its +A did."""
+    base = _rv3(open_advances=[])
+    rev = replace(
+        _advance_item("RA1", -200_000, date(2026, 11, 13), "M"),
+        kind=LineKind.CLIENT_ADVANCE_REVERSAL,
+    )
+    d = prepare_run(replace(base, items=[*base.items, rev]))
+    assert {ln.item.entry_id: ln.mandate_id for ln in d.lines}["RA1"] == "M"
+    assert {m.mandate_id: m.gross_minor for m in d.plan.mandates} == {"M": 100_000}
+
+
+def test_the_inputs_hash_names_the_open_advances() -> None:
+    """An advance's open or mandate changed since the prepare changes the hash (the approval also
+    re-reads its open: documents_changed)."""
+    base = _rv3()
+    h = prepare_run(base).header["inputs_hash"]
+    less = [replace(base.open_advances[0], open_minor=150_000)]
+    assert prepare_run(replace(base, open_advances=less)).header["inputs_hash"] != h
+    other = [replace(base.open_advances[0], mandate_id="M2")]
+    assert prepare_run(replace(base, open_advances=other)).header["inputs_hash"] != h
+    # (even when the plan takes none of it: no claw-back clause, the same settles either way)
+    plain = _rv3(terms={"M": [TERMS]})
+    h = prepare_run(plain).header["inputs_hash"]
+    less = [replace(plain.open_advances[0], open_minor=150_000)]
+    assert prepare_run(replace(plain, open_advances=less)).header["inputs_hash"] != h
+
+
+def test_advances_born_the_same_day_are_taken_in_the_order_they_were_recorded() -> None:
+    """Two advances of M born on 12/11 (the one recorded first is taken first): the room left after
+    the invoice (282 000) takes the first in full and the second in part."""
+    first = OpenAdvanceRow(
+        "A9", "M", "payout_overrun", date(2026, 11, 12), _at(date(2026, 11, 12), 9), 250_000
+    )
+    d = prepare_run(_rv3(open_advances=[_open("A1", "M", date(2026, 11, 12), 200_000), first]))
+    taken = [(s.ref, s.amount_minor) for s in d.plan.settles if s.kind == "advance"]
+    assert taken == [("A9", 250_000), ("A1", 32_000)]
+
+
+# -- M2c-7b review round 1 (M7B-MONEY-1): each pair in one bucket ------------------------------
+# A double payout's queue rows are its unplanned payout's -U (no file) and its advance's +(U - P):
+# both count outside every mandate, so the advance (a document of its mandate M) is taken back only
+# from M's own collections — never from another mandate's money, never from a re-queued payout. And
+# what an unplanned payout of the run already paid of a line (its live attributions, the switch on)
+# is no mandate's money any more: it counts with that payout's row.
+
+NO_CLAUSE = {**NETTING, "netting": None}
+
+
+def _terms(mandate: str, remittance_terms: dict[str, Any]) -> Terms:
+    return Terms(
+        f"T-{mandate}", mandate, date(2026, 1, 1), None, 30, SCHEDULE, remittance_terms, "art. 6",
+        "art. 7",
+    )  # fmt: skip
+
+
+def _unplanned(entry: str, amount: int, day: date) -> Item:
+    """An unplanned payout's -U row as the prepare loads it: no file, no payment."""
+    return Item(entry, LineKind.UNPLANNED_PAYOUT, -amount, _at(day, 15), day)
+
+
+def _double_payout_item(entry: str, amount: int, day: date, mandate: str | None) -> Item:
+    """Its double_payout advance's +(U - P) row: no file, the advance's mandate and cause."""
+    return Item(
+        entry, LineKind.CLIENT_ADVANCE, amount, _at(day, 15), day, advance_mandate_id=mandate,
+        advance_cause="double_payout",
+    )  # fmt: skip
+
+
+def _m_m2(items: list[Item], m_terms: dict[str, Any], m2_terms: dict[str, Any], **kw: Any) -> Facts:
+    """Roux's two mandates: M (file F1) and M2 (file F2), each with its own terms; the double
+    payout's advance V (50 000, born 20/11) open on M."""
+    base: dict[str, Any] = {
+        "today": date(2026, 11, 23),
+        "files": {
+            "F1": FileFacts("F1", "M", "b2b_invoice", "PF1"),
+            "F2": FileFacts("F2", "M2", "b2b_invoice", "PF2"),
+        },
+        "mandate_refs": {"M": "MAND-ROUX-1", "M2": "MAND-ROUX-2"},
+        "terms": {"M": [_terms("M", m_terms)], "M2": [_terms("M2", m2_terms)]},
+        "open_advances": [
+            OpenAdvanceRow(
+                "V", "M", "double_payout", date(2026, 11, 20), _at(date(2026, 11, 20), 15), 50_000
+            )
+        ],
+    }
+    base.update(kw)
+    return _facts(items, **base)
+
+
+def _settled(d: Any) -> list[tuple[str, str, int]]:
+    return [(s.ref, s.kind, s.amount_minor) for s in d.plan.settles]
+
+
+def test_a_double_payout_s_advance_is_never_taken_from_another_mandate_s_money() -> None:
+    """The review's M/M2 case: X's payout paid again, the bank executes X again (-50 000, no file;
+    its advance V +50 000 on X's mandate M, claw-back art. 7.4); a new collection of 70 000 on M2
+    (netting only). M brings no money of its own: V stays open, M2 sets off only its own invoice
+    (12 600), N 57 400. With V's row in M (7b), M's room took V out of M2's collection (N 7 400)."""
+    day = date(2026, 11, 20)
+    items = [
+        _unplanned("U", 50_000, day),
+        _double_payout_item("V", 50_000, day, "M"),
+        _alloc("E5", 70_000, date(2026, 11, 21), account="F2"),
+    ]
+    d = prepare_run(_m_m2(items, CLAWBACK, NETTING))
+    h = d.header
+    assert (h["gross"], h["advances"], h["taken"], h["net"]) == ("70000", "0", "12600", "57400")
+    assert {ln.item.entry_id: ln.mandate_id for ln in d.lines}["V"] is None
+    assert {m.mandate_id: m.gross_minor for m in d.plan.mandates} == {"": 0, "M2": 70_000}
+    assert _settled(d) == [("new:M2", "compensation", 12_600)]
+
+
+def test_a_double_payout_s_advance_is_never_taken_from_a_re_queued_payout() -> None:
+    """The review's first variant: the client's only money a payout that came back (+60 000, no
+    file, never netted: Q17's default) beside the double payout: V is not taken (N 60 000)."""
+    day = date(2026, 11, 20)
+    items = [
+        Item("PR", LineKind.PAYOUT_RETURNED, 60_000, _at(day, 9), day),
+        _unplanned("U", 50_000, day),
+        _double_payout_item("V", 50_000, day, "M"),
+    ]
+    d = prepare_run(_m_m2(items, CLAWBACK, NETTING))
+    assert (d.header["advances"], d.header["net"]) == ("0", "60000")
+    assert not _settled(d)
+
+
+def test_a_mandate_s_netting_never_reaches_another_mandate_s_money_through_a_double_payout() -> (
+    None
+):
+    """The review's second variant: M with netting and no claw-back, an open invoice of M of
+    40 000, the money on M2 only (no clause): M's invoice is not set off (N 70 000)."""
+    day = date(2026, 11, 20)
+    items = [
+        _unplanned("U", 50_000, day),
+        _double_payout_item("V", 50_000, day, "M"),
+        _alloc("E5", 70_000, date(2026, 11, 21), account="F2"),
+    ]
+    invoice = OpenInvoiceRow(
+        "FM", "M", "invoice", "FC-2026-000040", date(2026, 11, 2), (2026, 40), 40_000, 6_667
+    )
+    d = prepare_run(_m_m2(items, NETTING, NO_CLAUSE, open_documents=[invoice]))
+    assert (d.header["taken"], d.header["advances"], d.header["net"]) == ("0", "0", "70000")
+    assert not _settled(d)
+
+
+def test_a_double_payout_s_advance_is_taken_from_its_own_mandate_s_collections() -> None:
+    """The same double payout and a collection of 70 000 on M itself: V is taken from M's money
+    under M's clause after M's own invoice (12 600): 50 000, N 7 400."""
+    day = date(2026, 11, 20)
+    items = [
+        _unplanned("U", 50_000, day),
+        _double_payout_item("V", 50_000, day, "M"),
+        _alloc("E5", 70_000, date(2026, 11, 21), account="F1"),
+    ]
+    d = prepare_run(_m_m2(items, CLAWBACK, NETTING))
+    assert (d.header["taken"], d.header["advances"], d.header["net"]) == ("12600", "50000", "7400")
+    assert _settled(d) == [("new:M", "compensation", 12_600), ("V", "advance", 50_000)]
+
+
+def test_an_overrun_advance_s_item_counts_outside_every_mandate() -> None:
+    """A payout_overrun advance's +A row pairs with whatever left 4670 in debit (no file of it by
+    construction): outside every mandate, as a double payout's; only a remitted reversal's cover
+    pairs with its reversal on the cover's mandate."""
+    day = date(2026, 11, 20)
+    over = replace(_double_payout_item("O", 30_000, day, "M"), advance_cause="payout_overrun")
+    d = prepare_run(_m_m2([over], CLAWBACK, NETTING, open_advances=[]))
+    assert {ln.item.entry_id: ln.mandate_id for ln in d.lines}["O"] is None
+    assert {m.mandate_id: m.gross_minor for m in d.plan.mandates} == {"": 30_000}
+
+
+def test_what_an_unplanned_payout_paid_of_a_line_is_no_mandate_s_money() -> None:
+    """The switch on: a run cancelled after download released E1 (100 000 on M), the bank executed
+    its payout late (U -82 000, which paid 82 000 of E1: its attribution); a new collection of
+    70 000 on M2 (no clause); M's claw-back and an advance of 50 000 open on M. What U paid is the
+    client's already: M's money is 18 000, which its own invoice takes (18 000); the advance is not
+    taken from M2's collection (N 70 000). Without the attribution M's room was 100 000 (N
+    20 000)."""
+    day = date(2026, 11, 20)
+    items = [
+        _alloc("E1", 100_000, date(2026, 11, 10), account="F1"),
+        _unplanned("U", 82_000, day),
+        _alloc("E5", 70_000, date(2026, 11, 21), account="F2"),
+    ]
+    v = OpenAdvanceRow(
+        "V", "M", "payout_overrun", date(2026, 11, 3), _at(date(2026, 11, 3)), 50_000
+    )
+    d = prepare_run(
+        _m_m2(items, CLAWBACK, NO_CLAUSE, open_advances=[v],
+              unplanned_paid=[UnplannedPaid("U", "E1", 82_000)])
+    )  # fmt: skip
+    h = d.header
+    assert (h["taken"], h["advances"], h["net"]) == ("18000", "0", "70000")
+    assert {m.mandate_id: m.gross_minor for m in d.plan.mandates} == {
+        "": 0,
+        "M": 18_000,
+        "M2": 70_000,
+    }
+    # an attribution of a booking that is not a line of this run moves nothing
+    other = prepare_run(
+        _m_m2(items, CLAWBACK, NO_CLAUSE, open_advances=[v],
+              unplanned_paid=[UnplannedPaid("U-old", "E1", 82_000)])
+    )  # fmt: skip
+    assert {m.mandate_id: m.gross_minor for m in other.plan.mandates}["M"] == 100_000
