@@ -6386,6 +6386,14 @@ run, the body restored. Web: `remitted.ts` with one change, vitest, the file res
   bound still filters what the pass reads next (the lines of runs outside the window are never read).
 - Round 2's second open low stands: while the run's own settlement stands, an item an unplanned payout paid and kept is
   dated by its run.
+- **The return named for an item its run never carried** (found by round 3's verification, already on round 2's
+  ordering of `returned_via`). Collection E paid in full by an unplanned payout U; E's run Y's payout comes back; then U
+  itself comes back and its re-queued 40 000 is paid by a later run W. E reads `returned_via` 'run' (« revenu, à verser
+  de nouveau », then « …après le retour du virement du reversement RV-Y ») instead of 'unplanned': the run, the date and
+  the « paid » state are true, the payout named as come back is not (Y's payout never carried E; U's return is not
+  named). No money moves and the nightly is clean: no money path reads `returned_via`. Fix proposed for 7b (which
+  reworks 038's Suivi scenarios anyway): when the item's attributions not netted in the run cover its line, take
+  'unplanned' instead of the run's `returned`, with a `043` case (17 j, then U back, then W). Default until then: keep.
 - Everything rounds 1 and 2 leave open stays open.
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
