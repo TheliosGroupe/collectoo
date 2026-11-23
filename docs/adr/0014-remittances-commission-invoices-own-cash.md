@@ -6588,6 +6588,17 @@ Suites, the second stack alone:
 - **7b** (`20261123090000_advance_recovery.sql`, built in parallel) redefines `private.run_advance_checks` from
   `20261122090000`: it must be re-copied from this migration's body (the booked runs' lateral), or the new test's
   advance-check bound fails in the `db` job.
+- **The double payout advance's mandate is tested on one line per run only** (the second read's verifier). Two mutants of
+  `transfer_line_post`'s mandate expression survive every test: one drops `count(q.mandate_id) = count(*)`, the other
+  drops `count(distinct q.mandate_id) = 1`. The new test's lot has one line per run, and no other test books a twice-debited
+  lot. The code is right: an equivalence probe over 12 cases gave 7a's body and the fix the same mandate or none in each
+  (several mandates, a null `mandate_id`, released lines, no run). Default: 7c-1 adds the two cases to the new test, a run
+  holding a second mandate and a line with no mandate, both expecting no mandate.
+- **`private.ledger_post_set`'s pooled-dimension lookup** (pre-existing since `20261111090000`; outside 7a). Each
+  dimension is found by the `(organization_id, book, currency)` prefix of `ledger_account_pooled_uq`, and the other
+  columns only filter. Its cost therefore grows with the lot's members × the servicer's clients: 500 dimensions with 500
+  clients read 218,500 buffers in 62–87 ms. That is bounded by the 500-member lot cap and far from the 8 s timeout.
+  Default: keep; make it an index-equality lookup in a later slice, with LG006 checked again.
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
