@@ -7247,6 +7247,18 @@ form is kept, with seq scans off.
   way.
 - **The client space's rows stay ordered by their recording** (the dates shown are births). Two advances recorded in
   one order and born in the other read out of date order. Default: keep (rare; the amounts and dates are true).
+- **`transfer_line_check`'s `advance_settled` rule** (found by round 2's verifier; 6b-2's statement, copied unchanged into
+  7b's redefinition, line 1571). With planted statistics and generic plans, the preview and the booking of a double
+  payout's unplanned return read the whole `commission_settlement_document_idx`: 10,000 rows on the preview and 20,000
+  on the booking, with the switch off or on. At the scale files' volumes `document_id` is near-unique, so their
+  statistics do not give this plan, and the path is rare (milliseconds). Default: 7c-1 fences the advance first (by
+  `cause_entry_id`, with `cause` outside), then probes the settlement by `document_id`. The bound goes into
+  `test_advance_reads_integration.py`, through the real `transfer_line_options` / `book_transfer_line` of that return.
+- **`client_space_advances`' read of the client's advances** (found by round 2's verifier). It is unfenced
+  (`client_organization_id` and `organization_id` together). With 10,000 of the servicer's advances to other clients
+  planted (n_distinct 2, generic plans), one client's space read 10,005 rows; `private.client_open_advances`, which is
+  fenced, read 4. `client_advance` holds 1 row after the scale job, and current statistics choose the client's index.
+  Default: 7c-1 fences it on `client_advance_client_idx` as `client_open_advances` does, with a bound in the same test.
 - Everything rounds 1 and 2 leave open stays open: CCS-2 (what is open, computed per row), the portfolio moved between
   E's run and R(E), the cover's release re-queued later, founder Q2, Q5 and Q18 at their defaults. The switch stays off.
 
