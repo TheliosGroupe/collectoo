@@ -6,7 +6,8 @@ import { money } from "./statements";
 // M2c-7a (plan docs/design/m2c-7-plan.md §3.7): a collection already remitted to the client and then undone. The
 // amounts, dates and run numbers come from SQL (public.allocation_remitted, private.entry_remitted and
 // private.item_settled_at); these sentences only word them. Dates are recording dates (§2.1): the run's debit
-// (booked_on) or what its settlement read gives.
+// (booked_on) or what its settlement read gives (a later run's debit, or the debit of a payout outside any run that
+// paid the entry).
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** One entry of public.allocation_remitted: an allocation or forward of the payment remitted in a booked run. */
@@ -21,8 +22,10 @@ export type RemittedEntry = {
   amount_minor: string;
   /** null: the client has not kept it yet (the payout came back, not paid again) */
   paid_on: string | null;
-  /** paid: a payout paid it and stayed paid; set_off: an N = 0 run set it off; netted: an N = 0 run netted to nothing */
-  paid_how: "paid" | "set_off" | "netted" | null;
+  /** paid: a payout paid it and stayed paid; set_off: an N = 0 run set it off; netted: an N = 0 run netted to nothing;
+   *  (review round 3) unplanned: payouts outside any run paid it in full and stayed paid while its run's own payout came
+   *  back — paid_on their debit, no paid_run_number */
+  paid_how: "paid" | "set_off" | "netted" | "unplanned" | null;
   paid_run_number: string | null;
   /** (review round 2) what came back first of what had paid the entry: `run` its run's own payout, `unplanned` a payout
    *  outside any run (« hors reversement ») that had paid it — with or without a transfer of the run's own —, null
@@ -32,7 +35,7 @@ export type RemittedEntry = {
 
 const MINOR = /^-?\d{1,16}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
-const HOW = new Set(["paid", "set_off", "netted"]);
+const HOW = new Set(["paid", "set_off", "netted", "unplanned"]);
 const VIA = new Set(["run", "unplanned"]);
 
 function frenchDay(iso: string): string {
@@ -89,9 +92,22 @@ function backAgain(e: RemittedEntry): string {
     : "revenu, à verser de nouveau";
 }
 
+/** (review round 3) an entry payouts outside any run paid in full, its run's own payout having come back: the payout
+ *  that paid it and its debit date — never the later run that carried the run's net (it never carried this entry) —,
+ *  and what came back before it, if anything did. */
+function unplannedPaid(e: RemittedEntry, paidOn: string): string {
+  const day = frenchDay(paidOn);
+  if (e.returned_via === "run")
+    return `payé par un virement hors reversement débité le ${day}, après le retour du virement du reversement ${e.run_number}`;
+  if (e.returned_via === "unplanned")
+    return `payé par un autre virement hors reversement débité le ${day}, après le retour de celui qui l'avait payé`;
+  return `payé par le virement hors reversement débité le ${day}`;
+}
+
 /** What the client received of the entry, by `paid_how` (plan §3.2.1): never « versé » nor « débité » for a set-off or a
  *  net nil, and « revenu, à verser de nouveau » while a payout that came back is not paid again. */
 export function remittedHead(e: RemittedEntry): string {
+  if (e.paid_how === "unplanned" && e.paid_on) return `Déjà reversé au client (${unplannedPaid(e, e.paid_on)}).`;
   if (e.paid_how === "paid" && e.paid_on) {
     const run = e.paid_run_number ?? e.run_number;
     const back = run === e.run_number ? null : returnedPayout(e);
@@ -125,6 +141,7 @@ export function reverseToast(advances: { amount_minor: string }[], currency: str
 /** The return note's clause for one entry, by `paid_how` (review round 1, tests-ui-1: « reversé » only for a payout
  *  paid and kept, as `remittedHead` says it); `first` capitalises it. */
 function returnClause(e: RemittedEntry): string {
+  if (e.paid_how === "unplanned" && e.paid_on) return `déjà reversé au client (${unplannedPaid(e, e.paid_on)})`;
   if (e.paid_how === "paid" && e.paid_on) {
     const run = e.paid_run_number ?? e.run_number;
     const back = run === e.run_number ? null : returnedPayout(e);

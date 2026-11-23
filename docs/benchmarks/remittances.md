@@ -1683,3 +1683,40 @@ path. The files are run once each as the round's check.
     everything else ran this session (the fixture alone: 5,050 runs' approval jobs 557.7 s).
 
 `test_allocation_scale_integration.py` (50,000 allocations) is not run: the allocation path is unchanged, as in round 1.
+
+### M2c-7a review fixes, round 3 (2026-11-23, same VM, the main stack alone, each run right after `supabase db reset`)
+
+No timed path changes in the round. `private.item_settled_at` reads, for an item whose run's own payout came back,
+what the unplanned payouts that stayed paid paid of it (its attributions by `unplanned_paid_item_entry_idx`, each
+booking by its key and its reversal by `ledger_entry_reversed_once_uq`, the item's line by `remittance_line_live_uq`).
+On a timed path it is read only by the nightly's `advance_open` detail, for remitted-reversal advances over 30 days old;
+these files have none. `043` #50 proves the new read scans no table sequentially under statistics that price a scan
+lowest. The files are run once each as the round's check.
+
+- `test_transfer_cancellation_scale_integration.py`: **1 passed** (65.8 s). Set-up took 48.7 s, the evidence of the
+  5,000-transfer file 0.49 s, and generation with the holds 3.90 s (20 held, 5,021 in the file). The nightly checks
+  took **0.84 s** (75,849 `bank_transfer` rows read; round 2: 0.95 s). The late predecessor's options took 0.03 s and
+  its booking **2.95 s** (round 2: 2.63 s).
+- `test_remittance_scale_integration.py` (50,000 lines): **1 passed** (370.4 s). Reserved in 1.35 s, prepared in
+  11.4 s. Nightly checks 4.9 s (the draft waiting 4.6 s). Cancellation 4.57 s. The re-run prepared and approved in
+  35.1 s, its payout booked in **1.0 s** (the funds pass 0.4 s). The nightly checks with the run booked took **6.8 s**
+  (5.95 s warm; round 2: 6.3 s): `run_payment_checks` 3.59 s, `commission_key_open` (50,000 calls) 1.73 s,
+  `run_remittance_runs_checks` 0.61 s, `run_advance_checks` **108 ms** own (round 2: 126 ms). The night read
+  `ledger_entry` 211,528 rows by index (round 2: 211,626) and `bank_line_booking` 7 by index, and neither by a
+  sequential scan.
+- CI's `scale-payouts` command as the workflow runs it (`test_debit_bookings_scale_integration.py` then
+  `test_breach_held_scale_integration.py`), after `supabase db reset`: **6 passed** in 1,432.5 s (23.9 min).
+  - The 200 members' batch line took 0.76 s and the 200 RMT debits' job 0.81 s. « Générer le fichier » for 5,000
+    payouts (+50 cancelled) took 3.86 s.
+  - The 5,000-member batch line's funds pass took **30.2 s** (29.8 s under auto_explain; round 2: 27.7 s). The nightly
+    checks took **1.20 s** (1.36 s warm; round 2: 1.42 s).
+  - 5,000 RMT debits were imported in 1.9 s, and the debit job took **26.1 s** in chunks of 10.7, 10.3 and 4.8 s (round
+    2: 26.1 s).
+  - Then the 2,000 held chained runs: the funds pass took 22.5 s and the nightly checks **15.80 s** (the standalone
+    reading 13.28 s; round 2: 14.93 s). Once the days were imported, they took **15.66 s** (round 2: 15.13 s).
+  - None of these paths changed in the round: the funds pass and the debit job read 0 `client_advance` rows, as in
+    rounds 1 and 2, and every table they read was read by index (no sequential scan). The differences from round 2 are
+    within this VM's run-to-run spread (the fixture alone: 5,050 runs' approval jobs 593.9 s; round 2: 557.7 s).
+
+`test_allocation_scale_integration.py` (50,000 allocations) is not run: the allocation path is unchanged, as in rounds 1
+and 2.

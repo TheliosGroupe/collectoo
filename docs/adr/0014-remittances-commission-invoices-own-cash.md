@@ -6244,5 +6244,149 @@ re-queued item cannot be a line of the run itself. Without the guard, such a sta
   débité le … »), which is true of RV-Y. 7c's letter, which prints posting dates (§2.1), reads its dates on its own.
 - Everything round 1 leaves open stays open.
 
+### Round 3
+
+The review of `3a91b47` raised one medium, `item-paid-by-live-unplanned-payout-run-payout-returned`, the converse of
+round 2's fix (the switch on). Checked against the code first, it holds: the reviewer's probe, rerun on the main stack
+inside a rolled-back transaction on `043`'s preamble after a fresh `supabase db reset`, gave the same reads.
+`private.item_settled_at` gated every item on its run's own settlement (`v_all := s.on_date is not null`). It did so
+even for an item that a live (unreversed) unplanned payout had paid in full, which the run's own payout therefore never
+carried. The scenario: `late_cancel` (E 40 000 released), U booked on 19/11 and never back; run Y with E, F (25 000)
+and U's −40 000 row, net 25 000, debited on 20/11 and returned on 21/11 (the queue holds `payout_returned:25000`, F's
+money); W pays it, debited on 22/11. While the money waited, « Désimputer » said of E « Compris dans le reversement RV-Y
+(revenu, à verser de nouveau) ». Once W was debited it said « Déjà reversé au client (reversement RV-W, débité le
+22/11/2026, après le retour du virement du reversement RV-Y) ». That run and that date are false for E: W never carried
+it, and the client had it from U on 19/11. This broke the ⇐ direction of the plan's « `paid_on` null ⇔ the client has
+not received the item », which 7c-2's `payout_not_received` will rely on. The plan's §3.2.1 takes `paid_on` from the
+run, so this is a departure from the plan, recorded here. It is not round 2's second open low: that low assumes the
+run's own settlement stands, and here Y's payout came back. No money moves through this read: no cover, release, check
+amount or posting reads `paid_on`, and E's cover is its line (T(R) unchanged).
+
+The migration `20261122090000_remitted_reversals_covered.sql` is unmerged and was edited in place. Only
+`private.item_settled_at` changes in body; the comments of `run_settled_at` and `allocation_remitted` say the new value.
+No function is added, no public signature changes (`allocation_remitted` returns `jsonb`), so `database.types.ts` is
+unchanged. **The switch stays off.** `033` is unchanged byte for byte, and `034`–`042` are untouched. `043` goes from
+51 to 54 assertions: #50 (17 j), #51 (17 k) and #52 (17 l) are new, and the worked example and the switch guard move
+from #50 and #51 to #53 and #54. No existing expectation changed; #34's set-up gains one `analyze` (below).
+
+- **`item-paid-by-live-unplanned-payout-run-payout-returned` (fixed, at the item, as the remaining fix proposed).**
+  Before applying its run's gate, `private.item_settled_at` now reads what the unplanned payouts that stayed paid paid
+  of the item: the sum of its `unplanned_paid_item` rows whose booking is not reversed (`unplanned_paid_item_entry_idx`,
+  each booking by its key, its reversal by `ledger_entry_reversed_once_uq`), against the item's live line
+  (`remittance_line_live_uq`). Two conditions must hold: that sum reaches the line, and nothing the item follows came
+  back (no return of a payout that had paid it, waiting or paid outside its run). Then two cases:
+  - While the run's own settlement stands (rules 2 and 4: `returned` null), the run's row is kept (round 2's default).
+  - When the run is not settled, or is settled only through later runs because its own payout came back (rule 3:
+    `returned` « run »), the item gets its own row. That row is dated by the latest attributing booking's effective
+    date (that payout's debit), with `how` « unplanned », no run number and `returned` null.
+
+  An item those payouts paid only in part keeps the run's reading (conservative; below). Rule 3 of `run_settled_at`
+  carries the new row as it carries any followed item's. So a run whose re-queued item such a payout paid in full is
+  settled on that payout's date, « unplanned », with no run number and `returned` « run ». It is keyed as before and
+  bounded at depth 10, with `enable_seqscan` off.
+- **`paid_how` « unplanned »** (`private.entry_remitted`, `public.allocation_remitted`; the `how` of
+  `run_settled_on`). `parseAllocationRemitted` accepts it and still refuses any other value. `remittedHead` words it
+  « Déjà reversé au client (payé par le virement hors reversement débité le JJ/MM/AAAA). ». When a payout came back on
+  the way, it adds what came back: with `returned_via` « run », « (payé par un virement hors reversement débité le …,
+  après le retour du virement du reversement RV-X) »; with « unplanned », « (payé par un autre virement hors
+  reversement débité le …, après le retour de celui qui l'avait payé) ». `returnClause` (« Débits et retours ») gives
+  the same clause in lower case. Neither names the run that carried the item, nor a later run, nor its date. DOMAIN's
+  I23 paragraph and COMPLIANCE OQ-97 say the new reading.
+- **Pinned.**
+  - `043` #50 is 17 j (switch on), the reviewer's scenario with the probe's dates (U on d − 4, Y debited d − 3 and
+    returned d − 2, W debited d − 1). Before the return, E keeps Y's row (« paid », d − 3). After it, E is « unplanned »
+    on d − 4 with no run and `returned_via` null, while F has `paid_on` null with `returned_via` « run ». Y is not
+    settled, and the nightly is clean. A planted second attribution of E, by a payout that came back and whose return
+    waits (Y's payout booking, rolled back at once), keeps E conservative (`paid_on` null). The item's read scans no
+    table sequentially after an `analyze` of the five tables it reads (the forced-statistics proof). Once W pays the
+    re-queued 25 000, F is paid by W on d − 1 after the return of Y's payout, E is unchanged, and Y is settled through
+    W.
+  - `043` #51 is 17 k (switch off): S03r with Y's own payout returned. E1 stays paid through X's chain (T1's
+    re-execution: rule 2, as before). R1, the returned item that the re-execution paid, reads « unplanned » on its
+    date. E2 waits with `returned_via` « run ».
+  - `043` #52 is 17 l (switch on), the partial case. X's commission is set off (N = 82 %), so U pays 32 800 of E's
+    40 000. Y holds E, F and U's −32 800 row (net 32 200, with E's 7 200 in it), and Y's payout comes back: E reads
+    `paid_on` null, `returned_via` « run ».
+  - #50 and #51 failed first on `3a91b47`: E read null, then paid by W; R1 read null. #52 passes on `3a91b47` too: it
+    pins the conservative default. The vitest suite gains one case: the three wordings in both texts, the sheet with E
+    and F side by side, the parser accepting « unplanned » and refusing another value, and no « payé par » without a
+    date.
+- **`043` #34 depended on leftover statistics (found while running this round's mutants; low, a test).** #34 (14,
+  round 1's CC-2) forces a generic plan and counts the `remittance_run` rows the delta pass fetches. In one mutant run
+  it counted 6 instead of 0, under a mutant that does not touch that read. The plan is built from what the planner
+  believes of `remittance_run` at that moment. That belief is what an earlier rolled-back `analyze`, or a vacuum of the
+  rows those transactions left dead, wrote in place (`pg_class` is not rolled back), and autovacuum can invalidate a
+  cached plan at any moment. A probe reproduced it: `remittance_run` analysed while it held no run, then the six
+  booked runs, then the generic plan. It read all six through the primary key, a full index scan: for a table believed
+  empty, every index costs the same. The test now analyses `remittance_run` once its rows are in place, before it
+  forces the generic plan. The assertion is unchanged, and round 1's mutant (the window as a filter, `v_full or …`)
+  still fails it. The code is unchanged: in production that belief lasts only while the table is nearly empty
+  (autovacuum analyses it after about 50 changes), and reading every run then costs nothing.
+
+### Mutants (round 3)
+
+As in rounds 1 and 2. SQL: the migration's `item_settled_at` replaced by `create or replace` on the main stack, `043`
+run, the body restored. Web: `remitted.ts` with one change, vitest, the file restored.
+
+| Mutant | Killed by |
+|---|---|
+| `item_settled_at`: the run's gate kept for an item paid in full (the new branch dropped) | `043` #50, #51 |
+| `item_settled_at`: a part counted as the whole (any live attribution) | `043` #52 |
+| `item_settled_at`: the item's own row only when the run is not settled (not when settled through later runs) | `043` #50 |
+| `item_settled_at`: the own row's `returned` the run's (« run ») | `043` #50, #51 |
+| `item_settled_at`: the own row worded « paid » | `043` #50, #51 |
+| `item_settled_at`: the own row dated by the run's settlement | `043` #50, #51 |
+| `item_settled_at`: « nothing it follows came back » dropped | `043` #50 (the planted attribution) |
+| `item_settled_at`: `enable_seqscan` on | `043` #49, #50 (sequential scans) |
+| web: the parser without « unplanned » | vitest |
+| web: `remittedHead` without the « unplanned » sentence | vitest |
+| web: the return note's clause without it | vitest |
+| web: `returned_via` « run » ignored in it | vitest |
+| web: `returned_via` « unplanned » ignored in it | vitest |
+
+13 of 13 killed. Round 1's mutant of the delta window (the window as a filter, `v_full or …`) was run again against
+#34's new set-up and still fails it.
+
+### Suites (round 3)
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 45 files, **2,965 tests, PASS** (2,962 + `043`'s
+  three) in 471 s. `033` is unchanged byte for byte, and `034`–`042` are untouched.
+- Worker: `ruff check .`, `ruff format --check .` and `mypy` (strict, 183 files) are clean. Unit pytest: **1,094 passed,
+  5 xfailed**. The non-scale integration tests in CI's order, right after `supabase test db` without a reset:
+  **257 passed** in 786 s.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic, **0** wrong.
+- Scale, each file once right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-7a review fixes, round
+  3 »): the transfer cancellation file 1 passed (65.8 s; the nightly checks 0.84 s); the 50,000-line run 1 passed
+  (370.4 s; the nightly checks with it booked 6.8 s, `run_advance_checks` 108 ms own); CI's `scale-payouts` command
+  6 passed in 23.9 min (the 5,000-member batch line's funds pass 30.2 s, the debit job 26.1 s, the nightly checks
+  1.20 s; the 2,000 held chained runs' nightly checks 15.80 s, then 15.66 s). No timed path changed.
+- `database.types.ts` unchanged (no public signature changed; regenerated, no diff).
+- Web: `npm run lint` and `npm run typecheck` are clean. vitest: **27 files, 532 tests** passed (`remitted.test.ts` goes
+  from 23 to 24).
+- E2E (`./scripts/e2e.sh` after `supabase db reset`; desktop, mobile and switch-on projects): **61 passed** (6.1 min).
+  Every screenshot's diff was reverted because it showed only dates and ids. No E2E scenario reaches the new wording;
+  the « Désimputer » sheet's screenshot shows a collection paid by its own run's payout, worded as before.
+- Size: 63 non-test lines added and 15 removed: the migration 42 and 11 (most of them comments), the web 21 and 4.
+
+### Left open (low), with its default
+
+- **A collection an unplanned payout paid only in part, in a run whose own payout came back** reads `paid_on` null as
+  a whole (« revenu, à verser de nouveau »). That is true when the rest came back with the run's payout (17 l: the next
+  run carries it). It is only conservative when the run set the rest off, for example the commission the cancelled run
+  had set off, taken by the next run's invoice: the item is then with the client in full. A set-off is per run, not per
+  item, so 7a has no exact per-item split. Default: keep it. 7c-2 asks no repayment of an advance whose item reads not
+  received. Proposed as a question for the plan's §10 at 7c-2: should a run's set-off be shared out over its items for
+  this read?
+- **A collection paid in full by an unplanned payout that stayed paid and by one that came back**, whose return waits
+  or was paid outside its run, also reads not settled (the « nothing it follows came back » guard). It needs two late
+  executions that each paid the item, the first having come back before the second paid it: the attribution rule
+  (M2c-6b-3a-2 J) leaves out an item that a live one paid. `043` #50 plants it. Default: keep it (conservative).
+- **The delta pass's generic plan for a `remittance_run` believed empty** may read every booked run through the
+  primary key (above). Default: keep it. It lasts only until autovacuum first analyses the table, and the window's
+  bound still filters what the pass reads next (the lines of runs outside the window are never read).
+- Round 2's second open low stands: while the run's own settlement stands, an item an unplanned payout paid and kept is
+  dated by its run.
+- Everything rounds 1 and 2 leave open stays open.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

@@ -47,15 +47,17 @@ create index unplanned_paid_item_org_idx on private.unplanned_paid_item (organiz
 -- debit), « paid »; (3) a chain that stayed unpaid after a return: the chain's returns, read from its bookings
 -- (bank_line_booking of kind payout_returned of a transfer of the chain — a late predecessor that came back keeps no
 -- return_entry_id, the switch on), each followed through its re-queued item's live line in a booked run Y as an item
--- (private.item_settled_at): when every one is settled, the latest; else none; returned « run » (the run's own payout
+-- (private.item_settled_at): when every one is settled, the latest (« unplanned », no run, when payouts outside any
+-- run paid that item in full and stayed paid: review round 3); else none; returned « run » (the run's own payout
 -- came back); (4) an N = 0 run (no transfer, booked at approval) → its booked_on, « set_off » when it set off something
 -- (settlement_minor > 0), else « netted » (its lines netted to nothing). (Review round 2,
 -- run-settled-transfer-run-unplanned-return) What an unplanned payout paid of a run's items and that came back is no
 -- longer a rule of the run (plan §3.2.1 rule 4 followed it for an N = 0 run only, and for the whole run): it is the
 -- item's own (private.item_settled_at, by the payout's attributions), for a run with or without a transfer — the run's
--- other items, which its own payout or its set-off paid, stay settled. Recursion bounded at depth 10: deeper, a row with
--- too_deep (private.run_settled_on gives no row; the nightly's advance_open says settled_on_depth). Keyed: the run, its
--- chain's bookings by bank_line_booking_transfer_idx, each re-queued item's line by remittance_line_live_uq.
+-- other items, which its own payout or its set-off paid, stay settled; and (review round 3) an item such payouts paid in
+-- full and kept stays with the client when the run's own payout comes back. Recursion bounded at depth 10: deeper, a
+-- row with too_deep (private.run_settled_on gives no row; the nightly's advance_open says settled_on_depth). Keyed: the
+-- run, its chain's bookings by bank_line_booking_transfer_idx, each re-queued item's line by remittance_line_live_uq.
 create or replace function private.run_settled_at(p_run_id uuid, p_depth integer)
 returns table (on_date date, how text, run_number text, too_deep boolean, returned text)
 language plpgsql
@@ -157,8 +159,16 @@ $$;
 -- followed are settled: the latest of those followed, with its how and run number (as rule 3 dates a run by its
 -- returns' re-queued items), else the run's own. returned: what came back
 -- first on the way — « run » the run's own payout, else « unplanned » a payout outside any run that had paid the item,
--- else null — the texts name it. Bounded and keyed as private.run_settled_at; the attributions by
--- unplanned_paid_item_entry_idx, each booking's reversal by ledger_entry_reversed_once_uq.
+-- else null — the texts name it. (Review round 3, item-paid-by-live-unplanned-payout-run-payout-returned) An item the
+-- unplanned payouts paid in full (the sum of its attributions whose booking is not reversed reaches its line), with
+-- nothing it follows come back (no return of a payout that had paid it waiting or paid outside its run), is with the
+-- client whatever its run's own payout did: while that run's own settlement stands, the run's row is kept (round 2's
+-- default); when the run is not settled, or is settled only through later runs because its own payout came back
+-- (returned « run »: those runs carried the run's net, never this item), the item has its own row — the latest of those
+-- payouts' bookings' dates, « unplanned », no run, nothing came back on its way. An item they paid only in part keeps
+-- the run's reading (conservative). Bounded and keyed as private.run_settled_at; the attributions by
+-- unplanned_paid_item_entry_idx, each booking by its key and its reversal by ledger_entry_reversed_once_uq, the item's
+-- line by remittance_line_live_uq.
 create or replace function private.item_settled_at(p_entry_id uuid, p_run_id uuid, p_depth integer)
 returns table (on_date date, how text, run_number text, too_deep boolean, returned text)
 language plpgsql
@@ -179,6 +189,9 @@ declare
   v_how text;
   v_num text;
   v_ret text;
+  v_line bigint;
+  v_live bigint;
+  v_live_on date;
 begin
   if p_depth > 10 then
     return query select null::date, null::text, null::text, true, null::text;
@@ -226,6 +239,23 @@ begin
       v_num := t.run_number;
     end if;
   end loop;
+  -- (review round 3) paid in full by unplanned payouts that stayed paid, the run's own payout came back: the item's own
+  -- row, never a later run's (it carried the run's net, not this item)
+  if not v_followed and (s.on_date is null or s.returned is not null) then
+    select q.amount_minor into v_line
+    from (select l.amount_minor, l.run_id from public.remittance_line l
+          where l.ledger_entry_id = p_entry_id and not l.released offset 0) q
+    where q.run_id = p_run_id;
+    select coalesce(sum(u.amount_minor), 0), max(b.effective_date) into v_live, v_live_on
+    from (select y.booking_entry_id, y.amount_minor from private.unplanned_paid_item y
+          where y.ledger_entry_id = p_entry_id offset 0) u
+    cross join lateral (select q.effective_date from public.ledger_entry q where q.id = u.booking_entry_id offset 0) b
+    where not exists (select 1 from public.ledger_entry z where z.reverses_entry_id = u.booking_entry_id);
+    if v_line > 0 and v_live >= v_line then
+      return query select v_live_on, 'unplanned'::text, null::text, false, null::text;
+      return;
+    end if;
+  end if;
   if v_deep then
     return query select null::date, null::text, null::text, true, v_ret;
   elsif v_all and v_followed then
@@ -1072,11 +1102,12 @@ $$;
 
 -- For « Désimputer » and « Retour »: the payment's live allocation and forward entries already remitted to the client
 -- (private.entry_remitted), with their run, its date, the line's amount and what that run settled and how ([check 1]
--- paid_on, paid_how, paid_run_number). (Review round 1, M7A-MONEY-2) run_transfer: whether that run had a payout
--- transfer of its own. (Review round 2) returned_via: what came back first of what had paid the entry — « run » its run's
--- own payout, « unplanned » a payout outside any run (« hors reversement ») whose P had paid it, null nothing — so the
--- texts name the payout that came back, with or without a transfer of the run's own. Money staff of the payment's
--- servicer (aal2); « not allowed » otherwise.
+-- paid_on, paid_how, paid_run_number; review round 3: paid_how « unplanned », no paid_run_number, for an entry payouts
+-- outside any run paid in full and kept while its run's own payout came back). (Review round 1, M7A-MONEY-2)
+-- run_transfer: whether that run had a payout transfer of its own. (Review round 2) returned_via: what came back first
+-- of what had paid the entry — « run » its run's own payout, « unplanned » a payout outside any run (« hors
+-- reversement ») whose P had paid it, null nothing — so the texts name the payout that came back, with or without a
+-- transfer of the run's own. Money staff of the payment's servicer (aal2); « not allowed » otherwise.
 create or replace function public.allocation_remitted(p_payment_id uuid)
 returns jsonb
 language plpgsql
