@@ -4,8 +4,9 @@ import { money } from "./statements";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // M2c-7a (plan docs/design/m2c-7-plan.md §3.7): a collection already remitted to the client and then undone. The
-// amounts, dates and run numbers come from SQL (public.allocation_remitted, private.run_settled_on); these sentences only
-// word them. Dates are recording dates (§2.1): the run's debit (booked_on) or what its settlement read gives.
+// amounts, dates and run numbers come from SQL (public.allocation_remitted, private.entry_remitted and
+// private.item_settled_at); these sentences only word them. Dates are recording dates (§2.1): the run's debit
+// (booked_on) or what its settlement read gives.
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** One entry of public.allocation_remitted: an allocation or forward of the payment remitted in a booked run. */
@@ -13,8 +14,8 @@ export type RemittedEntry = {
   entry_id: string;
   account_id: string | null;
   run_number: string;
-  /** (review round 1, M7A-MONEY-2) whether that run had a payout transfer of its own: false for an N = 0 run, whose
-   *  payout that came back (run_settled_on rule 4) was an unplanned one, « hors reversement » */
+  /** (review round 1, M7A-MONEY-2) whether that run had a payout transfer of its own (false for an N = 0 run). Kept in
+   *  the read; since review round 2 the texts name the payout that came back by `returned_via`. */
   run_transfer: boolean;
   booked_on: string;
   amount_minor: string;
@@ -23,11 +24,16 @@ export type RemittedEntry = {
   /** paid: a payout paid it and stayed paid; set_off: an N = 0 run set it off; netted: an N = 0 run netted to nothing */
   paid_how: "paid" | "set_off" | "netted" | null;
   paid_run_number: string | null;
+  /** (review round 2) what came back first of what had paid the entry: `run` its run's own payout, `unplanned` a payout
+   *  outside any run (« hors reversement ») that had paid it — with or without a transfer of the run's own —, null
+   *  nothing came back */
+  returned_via: "run" | "unplanned" | null;
 };
 
 const MINOR = /^-?\d{1,16}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const HOW = new Set(["paid", "set_off", "netted"]);
+const VIA = new Set(["run", "unplanned"]);
 
 function frenchDay(iso: string): string {
   const [y, m, d] = iso.split("-");
@@ -49,6 +55,7 @@ export function parseAllocationRemitted(x: unknown): RemittedEntry[] | null {
     if (o.paid_on !== null && (typeof o.paid_on !== "string" || !ISO.test(o.paid_on))) return null;
     if (o.paid_how !== null && (typeof o.paid_how !== "string" || !HOW.has(o.paid_how))) return null;
     if (o.paid_run_number !== null && typeof o.paid_run_number !== "string") return null;
+    if (o.returned_via !== null && (typeof o.returned_via !== "string" || !VIA.has(o.returned_via))) return null;
     out.push({
       entry_id: o.entry_id,
       account_id: o.account_id as string | null,
@@ -59,17 +66,27 @@ export function parseAllocationRemitted(x: unknown): RemittedEntry[] | null {
       paid_on: o.paid_on as string | null,
       paid_how: o.paid_how as RemittedEntry["paid_how"],
       paid_run_number: o.paid_run_number as string | null,
+      returned_via: o.returned_via as RemittedEntry["returned_via"],
     });
   }
   return out;
 }
 
-/** (review round 1, M7A-MONEY-2) the payout that came back before a later run paid the entry: the remitted run's own
- *  (run_settled_on rule 3), or — for an N = 0 run, which had none — the unplanned payout that had paid it (rule 4). */
-function returnedPayout(e: RemittedEntry): string {
-  return e.run_transfer
-    ? `après le retour du virement du reversement ${e.run_number}`
-    : "après le retour du virement hors reversement qui l'avait payé";
+/** (review round 1, M7A-MONEY-2; review round 2) the payout that came back before a later run paid the entry, by
+ *  `returned_via`: the remitted run's own, or a payout outside any run that had paid it — in an N = 0 run, which had
+ *  none, or in a run whose own payout paid its other collections. null: nothing came back (a state the read does not
+ *  give with a later run): no clause. */
+function returnedPayout(e: RemittedEntry): string | null {
+  if (e.returned_via === "run") return `après le retour du virement du reversement ${e.run_number}`;
+  if (e.returned_via === "unplanned") return "après le retour du virement hors reversement qui l'avait payé";
+  return null;
+}
+
+/** (review round 2) while what came back is not paid again (`paid_on` null): what came back, in the parentheses. */
+function backAgain(e: RemittedEntry): string {
+  return e.returned_via === "unplanned"
+    ? "le virement hors reversement qui l'avait payé est revenu, à verser de nouveau"
+    : "revenu, à verser de nouveau";
 }
 
 /** What the client received of the entry, by `paid_how` (plan §3.2.1): never « versé » nor « débité » for a set-off or a
@@ -77,15 +94,16 @@ function returnedPayout(e: RemittedEntry): string {
 export function remittedHead(e: RemittedEntry): string {
   if (e.paid_how === "paid" && e.paid_on) {
     const run = e.paid_run_number ?? e.run_number;
-    return run === e.run_number
+    const back = run === e.run_number ? null : returnedPayout(e);
+    return back === null
       ? `Déjà reversé au client (reversement ${run}, débité le ${frenchDay(e.paid_on)}).`
-      : `Déjà reversé au client (reversement ${run}, débité le ${frenchDay(e.paid_on)}, ${returnedPayout(e)}).`;
+      : `Déjà reversé au client (reversement ${run}, débité le ${frenchDay(e.paid_on)}, ${back}).`;
   }
   if (e.paid_how === "set_off" && e.paid_on)
     return `Déjà réglé au client par compensation dans le relevé ${e.paid_run_number ?? e.run_number} du ${frenchDay(e.paid_on)}.`;
   if (e.paid_how === "netted" && e.paid_on)
     return `Déjà compris dans le relevé ${e.paid_run_number ?? e.run_number} du ${frenchDay(e.paid_on)} (montant net nul).`;
-  return `Compris dans le reversement ${e.run_number} (revenu, à verser de nouveau).`;
+  return `Compris dans le reversement ${e.run_number} (${backAgain(e)}).`;
 }
 
 /** The « Désimputer » sheet's sentences when the file's entries were remitted (null when none was). */
@@ -109,15 +127,14 @@ export function reverseToast(advances: { amount_minor: string }[], currency: str
 function returnClause(e: RemittedEntry): string {
   if (e.paid_how === "paid" && e.paid_on) {
     const run = e.paid_run_number ?? e.run_number;
-    return run === e.run_number
-      ? `déjà reversé au client (${run})`
-      : `déjà reversé au client (${run}, ${returnedPayout(e)})`;
+    const back = run === e.run_number ? null : returnedPayout(e);
+    return back === null ? `déjà reversé au client (${run})` : `déjà reversé au client (${run}, ${back})`;
   }
   if (e.paid_how === "set_off" && e.paid_on)
     return `déjà réglé au client par compensation dans le relevé ${e.paid_run_number ?? e.run_number} du ${frenchDay(e.paid_on)}`;
   if (e.paid_how === "netted" && e.paid_on)
     return `déjà compris dans le relevé ${e.paid_run_number ?? e.run_number} du ${frenchDay(e.paid_on)} (montant net nul)`;
-  return `compris dans le reversement ${e.run_number} (revenu, à verser de nouveau)`;
+  return `compris dans le reversement ${e.run_number} (${backAgain(e)})`;
 }
 
 /** « Débits et retours »: a return of a payment some of which was remitted (null when nothing was). Its first clause

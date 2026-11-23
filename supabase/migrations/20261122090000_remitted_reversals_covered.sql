@@ -9,7 +9,8 @@
 -- an item an unplanned payout paid is covered for that part (OQ-82's residual), and the cover goes when that payout
 -- comes back (D4). Its target T(R), its cover C(R) and I23 (C(R) = T(R)) are plan §2.1's.
 --
--- New: private.run_settled_at / run_settled_on ([check 1] [check 2]), private.entry_remitted (M3c-2's predicate),
+-- New: private.run_settled_at / run_settled_on ([check 1] [check 2]), private.item_settled_at (review round 2: an
+-- item's own, through the unplanned payouts that paid it), private.entry_remitted (M3c-2's predicate),
 -- private.remitted_cover_fact / _held / _target / _gap, private.remitted_cover_begin / _post,
 -- private.cover_remitted_reversals (at the reversal), private.cover_booked_run_reversals (at the booking: D2),
 -- private.advance_in_flight_run ([critic] M7-MONEY-2), private.remitted_cover_release (the unplanned return),
@@ -39,22 +40,24 @@ create index unplanned_paid_item_org_idx on private.unplanned_paid_item (organiz
 -- What a run settled, and when (plan §3.2.1 [check 1] [check 2])
 ------------------------------------------------------------------------------------------
 
--- The date a booked run's items reached the client, how, and through which run: (1) a run not booked → no row; (2) a
--- run with a transfer whose chain paid the client and stayed paid (private.remittance_chain_paid, as
--- private.remittance_run_paid_on reads it) → that date, « paid », its number; a chain none of whose transfers came back
--- on the statements → the run's booked_on (its payout's debit), « paid »; (3) a chain that stayed unpaid after a return: the chain's returns, read from its bookings (bank_line_booking
--- of kind payout_returned of a transfer of the chain — a late predecessor that came back keeps no return_entry_id, the
--- switch on), each followed through its re-queued item's live line in a booked run Y: when every one has a row, the
--- latest; else no row; (4) an N = 0 run (no transfer, booked at approval): its live unplanned_payout lines whose
--- booking came back (reversed) followed the same way; none came back → its booked_on, « set_off » when it set off
--- something (settlement_minor > 0), else « netted » (its lines netted to nothing). (Review round 1, M7A-MONEY-1) a
--- return whose re-queued item is a line of the run itself is netted there and not followed (as if it had not come
--- back): an N = 0 run holding an unplanned payout's −P row and its return's +P is settled on its own. Recursion
--- bounded at depth 10: deeper, a row with too_deep (private.run_settled_on gives no row; the nightly's advance_open says
--- settled_on_depth). Keyed: the run, its chain's bookings by bank_line_booking_transfer_idx, each re-queued item's line
--- by remittance_line_live_uq, an N = 0 run's lines by its primary key prefix.
+-- What a booked run itself paid out, when, how and through which run — one row for a booked run (on_date null: not
+-- settled), none for a run not booked: (1) a run not booked → no row; (2) a run with a transfer whose chain paid the
+-- client and stayed paid (private.remittance_chain_paid, as private.remittance_run_paid_on reads it) → that date,
+-- « paid », its number; a chain none of whose transfers came back on the statements → the run's booked_on (its payout's
+-- debit), « paid »; (3) a chain that stayed unpaid after a return: the chain's returns, read from its bookings
+-- (bank_line_booking of kind payout_returned of a transfer of the chain — a late predecessor that came back keeps no
+-- return_entry_id, the switch on), each followed through its re-queued item's live line in a booked run Y as an item
+-- (private.item_settled_at): when every one is settled, the latest; else none; returned « run » (the run's own payout
+-- came back); (4) an N = 0 run (no transfer, booked at approval) → its booked_on, « set_off » when it set off something
+-- (settlement_minor > 0), else « netted » (its lines netted to nothing). (Review round 2,
+-- run-settled-transfer-run-unplanned-return) What an unplanned payout paid of a run's items and that came back is no
+-- longer a rule of the run (plan §3.2.1 rule 4 followed it for an N = 0 run only, and for the whole run): it is the
+-- item's own (private.item_settled_at, by the payout's attributions), for a run with or without a transfer — the run's
+-- other items, which its own payout or its set-off paid, stay settled. Recursion bounded at depth 10: deeper, a row with
+-- too_deep (private.run_settled_on gives no row; the nightly's advance_open says settled_on_depth). Keyed: the run, its
+-- chain's bookings by bank_line_booking_transfer_idx, each re-queued item's line by remittance_line_live_uq.
 create or replace function private.run_settled_at(p_run_id uuid, p_depth integer)
-returns table (on_date date, how text, run_number text, too_deep boolean)
+returns table (on_date date, how text, run_number text, too_deep boolean, returned text)
 language plpgsql
 stable
 security definer
@@ -68,15 +71,15 @@ declare
   v_rev uuid;
   v_y uuid;
   s record;
-  v_any boolean := false;
   v_all boolean := true;
+  v_any boolean := false;
   v_deep boolean := false;
   v_date date;
   v_how text;
   v_num text;
 begin
   if p_depth > 10 then
-    return query select null::date, null::text, null::text, true;
+    return query select null::date, null::text, null::text, true, null::text;
     return;
   end if;
   select q.status, q.transfer_id, q.booked_on, q.number, q.settlement_minor into r
@@ -84,40 +87,37 @@ begin
   if not found or r.status <> 'booked' then
     return;
   end if;
-  if r.transfer_id is not null then
-    select c.paid_on, c.returned into v_paid, v_returned from private.remittance_chain_paid(r.transfer_id) c;
-    if v_paid is not null then
-      return query select v_paid, 'paid'::text, r.number, false;
-      return;
-    end if;
-    -- nothing of the chain came back on the statements: the debit that booked the run paid the client (a debit the
-    -- chain rule does not count — dated before its transfer's requested execution date — is still that payout)
-    if not coalesce(v_returned, false) then
-      return query select r.booked_on, 'paid'::text, r.number, false;
-      return;
-    end if;
+  -- (4) an N = 0 run: what it settled itself, on the day it was booked
+  if r.transfer_id is null then
+    return query select r.booked_on, case when coalesce(r.settlement_minor, 0) > 0 then 'set_off' else 'netted' end,
+                        r.number, false, null::text;
+    return;
   end if;
+  -- (2)
+  select c.paid_on, c.returned into v_paid, v_returned from private.remittance_chain_paid(r.transfer_id) c;
+  if v_paid is not null then
+    return query select v_paid, 'paid'::text, r.number, false, null::text;
+    return;
+  end if;
+  -- nothing of the chain came back on the statements: the debit that booked the run paid the client (a debit the
+  -- chain rule does not count — dated before its transfer's requested execution date — is still that payout)
+  if not coalesce(v_returned, false) then
+    return query select r.booked_on, 'paid'::text, r.number, false, null::text;
+    return;
+  end if;
+  -- (3)
   for v_rev in
     select k.entry_id
     from (select c.transfer_id from private.transfer_chain(r.transfer_id) c offset 0) c
     cross join lateral (select b.entry_id from public.bank_line_booking b
                         where b.transfer_id = c.transfer_id and b.kind = 'payout_returned' offset 0) k
-    where r.transfer_id is not null
-    union all
-    select z.id
-    from (select l.ledger_entry_id from public.remittance_line l
-          where l.run_id = p_run_id and l.kind = 'unplanned_payout' and not l.released offset 0) l
-    cross join lateral (select z.id from public.ledger_entry z where z.reverses_entry_id = l.ledger_entry_id offset 0) z
-    where r.transfer_id is null
   loop
     v_y := null;
     select l.run_id into v_y
     from (select q.run_id from public.remittance_line q where q.ledger_entry_id = v_rev and not q.released offset 0) l
     cross join lateral (select x.status from public.remittance_run x where x.id = l.run_id offset 0) x
     where x.status = 'booked';
-    -- (review round 1, M7A-MONEY-1) the return re-queued into this same run (an N = 0 run holding both the unplanned
-    -- payout's −P row and the +P its return re-queued) was netted in it: settled with the run, as a same-run pair is
-    -- (M7-MONEY-1) — never followed into the run itself (that recursion ended too_deep)
+    -- (a return re-queued into the run itself would be netted there: settled with it, never followed into it)
     if v_y = p_run_id then
       continue;
     end if;
@@ -126,8 +126,8 @@ begin
       v_all := false;
       continue;
     end if;
-    select * into s from private.run_settled_at(v_y, p_depth + 1) limit 1;
-    if not found then
+    select * into s from private.item_settled_at(v_rev, v_y, p_depth + 1) limit 1;
+    if not found or (s.on_date is null and not s.too_deep) then
       v_all := false;
     elsif s.too_deep then
       v_deep := true;
@@ -138,22 +138,107 @@ begin
     end if;
   end loop;
   if v_deep then
-    return query select null::date, null::text, null::text, true;
-    return;
-  end if;
-  if not v_any then
-    if r.transfer_id is null then
-      return query select r.booked_on, case when coalesce(r.settlement_minor, 0) > 0 then 'set_off' else 'netted' end,
-                          r.number, false;
-    end if;
-    return;
-  end if;
-  if v_all then
-    return query select v_date, v_how, v_num, false;
+    return query select null::date, null::text, null::text, true, 'run'::text;
+  elsif v_any and v_all then
+    return query select v_date, v_how, v_num, false, 'run'::text;
+  else
+    return query select null::date, null::text, null::text, false, 'run'::text;
   end if;
 end;
 $$;
 
+-- When an item of a booked run reached the client and stayed with it (review round 2,
+-- run-settled-transfer-run-unplanned-return): one row for an item of a booked run (on_date null: not with the client),
+-- none for a run not booked. Its run's own settlement (private.run_settled_at), and — for each unplanned payout whose P
+-- paid this item (private.unplanned_paid_item: an attribution, the switch off for a returned payout executed again, on
+-- also for an item a cancelled run released) and that came back (its booking reversed: its return re-queued the item's
+-- money, +P) — that return followed as an item through its live line in a booked run: none → not with the client; a line
+-- of this run itself → netted in it, settled with the run (review round 1, M7A-MONEY-1). When the run and every one
+-- followed are settled: the latest of those followed, with its how and run number (as rule 3 dates a run by its
+-- returns' re-queued items), else the run's own. returned: what came back
+-- first on the way — « run » the run's own payout, else « unplanned » a payout outside any run that had paid the item,
+-- else null — the texts name it. Bounded and keyed as private.run_settled_at; the attributions by
+-- unplanned_paid_item_entry_idx, each booking's reversal by ledger_entry_reversed_once_uq.
+create or replace function private.item_settled_at(p_entry_id uuid, p_run_id uuid, p_depth integer)
+returns table (on_date date, how text, run_number text, too_deep boolean, returned text)
+language plpgsql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  s record;
+  t record;
+  v_z uuid;
+  v_y uuid;
+  v_all boolean;
+  v_deep boolean := false;
+  v_followed boolean := false;
+  v_date date;
+  v_how text;
+  v_num text;
+  v_ret text;
+begin
+  if p_depth > 10 then
+    return query select null::date, null::text, null::text, true, null::text;
+    return;
+  end if;
+  select * into s from private.run_settled_at(p_run_id, p_depth) limit 1;
+  if not found then
+    return;
+  end if;
+  if s.too_deep then
+    return query select null::date, null::text, null::text, true, s.returned;
+    return;
+  end if;
+  v_all := s.on_date is not null;
+  v_ret := s.returned;
+  for v_z in
+    select z.id
+    from (select u.booking_entry_id from private.unplanned_paid_item u
+          where u.ledger_entry_id = p_entry_id offset 0) u
+    cross join lateral (select z.id from public.ledger_entry z
+                        where z.reverses_entry_id = u.booking_entry_id offset 0) z
+  loop
+    v_y := null;
+    select l.run_id into v_y
+    from (select q.run_id from public.remittance_line q where q.ledger_entry_id = v_z and not q.released offset 0) l
+    cross join lateral (select x.status from public.remittance_run x where x.id = l.run_id offset 0) x
+    where x.status = 'booked';
+    if v_y = p_run_id then
+      continue;
+    end if;
+    v_ret := coalesce(v_ret, 'unplanned');
+    v_followed := true;
+    if v_y is null then
+      v_all := false;
+      continue;
+    end if;
+    select * into t from private.item_settled_at(v_z, v_y, p_depth + 1) limit 1;
+    if not found or (t.on_date is null and not t.too_deep) then
+      v_all := false;
+    elsif t.too_deep then
+      v_deep := true;
+    elsif v_date is null or t.on_date > v_date then
+      v_date := t.on_date;
+      v_how := t.how;
+      v_num := t.run_number;
+    end if;
+  end loop;
+  if v_deep then
+    return query select null::date, null::text, null::text, true, v_ret;
+  elsif v_all and v_followed then
+    return query select v_date, v_how, v_num, false, v_ret;
+  elsif v_all then
+    return query select s.on_date, s.how, s.run_number, false, v_ret;
+  else
+    return query select null::date, null::text, null::text, false, v_ret;
+  end if;
+end;
+$$;
+
+-- What a booked run itself paid out (private.run_settled_at): no row while it is not settled or deeper than the bound
 create or replace function private.run_settled_on(p_run_id uuid)
 returns table (on_date date, how text, run_number text)
 language sql
@@ -162,27 +247,31 @@ security definer
 set search_path = ''
 set enable_seqscan = off
 as $$
-  select s.on_date, s.how, s.run_number from private.run_settled_at(p_run_id, 0) s where not s.too_deep;
+  select s.on_date, s.how, s.run_number from private.run_settled_at(p_run_id, 0) s
+  where not s.too_deep and s.on_date is not null;
 $$;
 
 -- An entry remitted to its client (design §13 #1, plan §2.1 [critic] M7-MONEY-1): its live line (remittance_line_live_uq)
 -- in a booked run, unless p_reversal_id — its reversal — is a live line of that same run (a same-run pair nets to 0 in
--- it: never paid out). With what that run settled and when (private.run_settled_on, [check 1]). The predicate M3c-2
--- calls (m3 §10 #7 (e)).
+-- it: never paid out). With when it reached the client and stayed with it, how and through which run ([check 1]; review
+-- round 2: the item's own, private.item_settled_at — null while it is not with the client), and returned_via, what came
+-- back first on the way (« run » its run's own payout, « unplanned » a payout outside any run that had paid it). The
+-- predicate M3c-2 calls (m3 §10 #7 (e)).
 create or replace function private.entry_remitted(p_entry_id uuid, p_reversal_id uuid default null)
 returns table (run_id uuid, run_number text, amount_minor bigint, mandate_id uuid, booked_on date, paid_on date,
-               paid_how text, paid_run_number text)
+               paid_how text, paid_run_number text, returned_via text)
 language sql
 stable
 security definer
 set search_path = ''
 set enable_seqscan = off
 as $$
-  select l.run_id, x.number, l.amount_minor, l.mandate_id, x.booked_on, s.on_date, s.how, s.run_number
+  select l.run_id, x.number, l.amount_minor, l.mandate_id, x.booked_on, s.on_date, s.how, s.run_number, s.returned
   from (select q.run_id, q.amount_minor, q.mandate_id from public.remittance_line q
         where q.ledger_entry_id = p_entry_id and not q.released offset 0) l
   cross join lateral (select x.number, x.status, x.booked_on from public.remittance_run x where x.id = l.run_id offset 0) x
-  left join lateral (select y.on_date, y.how, y.run_number from private.run_settled_on(l.run_id) y limit 1) s on true
+  left join lateral (select y.on_date, y.how, y.run_number, y.returned
+                     from private.item_settled_at(p_entry_id, l.run_id, 0) y limit 1) s on true
   where x.status = 'booked'
     and (p_reversal_id is null
          or not exists (select 1 from public.remittance_line z
@@ -771,7 +860,7 @@ $$;
 --     entry is not reversed ≠ Σ its 4112 postings (I18's advance half, design §5.4); amount: 4112 less the advances;
 --   advance_open (alert, subject the advance): open > 0, its entry not reversed, created more than 30 days before the
 --     day the checks hold the books to (Paris); amount: open; details: its client, cause, mandate, recording date (and
---     settled_on_depth when its run's settlement chain is deeper than run_settled_on follows).
+--     settled_on_depth when the reversed item's settlement chain is deeper than private.item_settled_at follows).
 -- Later slices redefine it with this signature (7b … 7e), and pgTAP 043 pins the full list of its codes ([critic] F12).
 create or replace function private.run_advance_checks(p_check_run_id uuid, p_organization_id uuid,
                                                       p_today date default null, p_full boolean default false)
@@ -900,7 +989,7 @@ begin
                                   cross join lateral (select l.run_id from public.remittance_line l
                                                       where l.ledger_entry_id = z.reverses_entry_id and not l.released
                                                       offset 0) l
-                                  cross join lateral private.run_settled_at(l.run_id, 0) t
+                                  cross join lateral private.item_settled_at(z.reverses_entry_id, l.run_id, 0) t
                                   where t.too_deep)
                  then jsonb_build_object('settled_on_depth', true) else '{}'::jsonb end
   from (select q.id, q.client_organization_id, q.currency, q.amount_minor, q.cause, q.mandate_id, q.created_at,
@@ -984,8 +1073,10 @@ $$;
 -- For « Désimputer » and « Retour »: the payment's live allocation and forward entries already remitted to the client
 -- (private.entry_remitted), with their run, its date, the line's amount and what that run settled and how ([check 1]
 -- paid_on, paid_how, paid_run_number). (Review round 1, M7A-MONEY-2) run_transfer: whether that run had a payout
--- transfer of its own — false for an N = 0 run, whose payout that came back (run_settled_on rule 4) was an unplanned
--- one, « hors reversement ». Money staff of the payment's servicer (aal2); « not allowed » otherwise.
+-- transfer of its own. (Review round 2) returned_via: what came back first of what had paid the entry — « run » its run's
+-- own payout, « unplanned » a payout outside any run (« hors reversement ») whose P had paid it, null nothing — so the
+-- texts name the payout that came back, with or without a transfer of the run's own. Money staff of the payment's
+-- servicer (aal2); « not allowed » otherwise.
 create or replace function public.allocation_remitted(p_payment_id uuid)
 returns jsonb
 language plpgsql
@@ -1006,7 +1097,8 @@ begin
              'entry_id', e.id, 'account_id', e.account_id, 'run_number', x.run_number,
              'run_transfer', r.transfer_id is not null, 'booked_on', x.booked_on,
              'amount_minor', x.amount_minor::text, 'paid_on', x.paid_on, 'paid_how', x.paid_how,
-             'paid_run_number', x.paid_run_number) order by e.effective_date, e.id), '[]')
+             'paid_run_number', x.paid_run_number, 'returned_via', x.returned_via) order by e.effective_date, e.id),
+                    '[]')
     from (select q.id, q.account_id, q.effective_date from public.ledger_entry q
           where q.payment_id = p_payment_id and q.entry_type in ('allocation', 'forward') offset 0) e
     cross join lateral private.entry_remitted(e.id) x
@@ -2091,7 +2183,8 @@ $$;
 ------------------------------------------------------------------------------------------
 
 -- the new internals (PostgreSQL grants EXECUTE to PUBLIC by default): the SECURITY DEFINER paths and checks use them
-revoke execute on function private.run_settled_at(uuid, integer), private.run_settled_on(uuid),
+revoke execute on function private.run_settled_at(uuid, integer), private.item_settled_at(uuid, uuid, integer),
+  private.run_settled_on(uuid),
   private.entry_remitted(uuid, uuid), private.remitted_cover_fact(uuid, boolean), private.remitted_cover_held(uuid),
   private.remitted_cover_target(uuid), private.remitted_cover_gap(uuid), private.remitted_cover_begin(),
   private.remitted_cover_post(), private.cover_remitted_reversals(uuid[], uuid[]),

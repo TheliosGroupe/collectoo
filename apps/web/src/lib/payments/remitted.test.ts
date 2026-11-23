@@ -34,6 +34,7 @@ const base: RemittedEntry = {
   paid_on: "2026-11-03",
   paid_how: "paid",
   paid_run_number: "RV-2026-000001",
+  returned_via: null,
 };
 
 describe("M2c-7a checks (plan §3.7)", () => {
@@ -110,16 +111,60 @@ describe("« Désimputer » of a remitted entry (plan §3.7, §3.2.1)", () => {
     delete noTransfer.run_transfer;
     expect(parseAllocationRemitted([noTransfer])).toBeNull();
     expect(parseAllocationRemitted([{ ...base, run_transfer: "true" }])).toBeNull();
+    // review round 2: what came back first is part of the read too, one of its two values or null
+    for (const via of ["run", "unplanned"] as const)
+      expect(parseAllocationRemitted([{ ...base, returned_via: via }])).toEqual([{ ...base, returned_via: via }]);
+    const noVia: Record<string, unknown> = { ...base };
+    delete noVia.returned_via;
+    expect(parseAllocationRemitted([noVia])).toBeNull();
+    expect(parseAllocationRemitted([{ ...base, returned_via: "transfer" }])).toBeNull();
+  });
+  it("(review round 2) names an unplanned payout that came back, also in a run with its own transfer", () => {
+    // 043 17 (i): E remitted in Y (a run with its own transfer), paid by an unplanned payout U that came back
+    const back: RemittedEntry = {
+      ...base,
+      run_number: "RV-2026-000140",
+      paid_on: null,
+      paid_how: null,
+      paid_run_number: null,
+      returned_via: "unplanned",
+    };
+    expect(remittedHead(back)).toBe(
+      "Compris dans le reversement RV-2026-000140 (le virement hors reversement qui l'avait payé est revenu, à verser de nouveau).",
+    );
+    expect(plain(returnRemittedNote([back], "EUR"))).toBe(
+      "Paiement compris dans le reversement RV-2026-000140 (le virement hors reversement qui l'avait payé est revenu, à verser de nouveau) : au retour, le cabinet lui avance 2 000,00 €.",
+    );
+    for (const t of [remittedHead(back), returnRemittedNote([back], "EUR")]) {
+      expect(t).not.toContain("reversé au client");
+      expect(t).not.toContain("débité");
+    }
+    // then Z paid the re-queued item: the run had a transfer of its own, yet what came back was U's
+    const paid: RemittedEntry = { ...back, paid_on: "2026-11-23", paid_how: "paid", paid_run_number: "RV-2026-000141" };
+    expect(remittedHead(paid)).toBe(
+      "Déjà reversé au client (reversement RV-2026-000141, débité le 23/11/2026, après le retour du virement hors reversement qui l'avait payé).",
+    );
+    expect(remittedHead(paid)).not.toContain("virement du reversement RV-2026-000140");
+    expect(plain(returnRemittedNote([paid], "EUR"))).toBe(
+      "Paiement déjà reversé au client (RV-2026-000141, après le retour du virement hors reversement qui l'avait payé) : au retour, le cabinet lui avance 2 000,00 €.",
+    );
+    // 043 17 (h), switch off: X's own payout came back, its re-execution came back too — not paid again
+    const own: RemittedEntry = { ...base, paid_on: null, paid_how: null, paid_run_number: null, returned_via: "run" };
+    expect(remittedHead(own)).toBe("Compris dans le reversement RV-2026-000001 (revenu, à verser de nouveau).");
+    expect(remittedHead(own)).not.toContain("Déjà reversé");
   });
   it("(review round 1, M7A-MONEY-2) names the payout that came back: the run's own, or one outside any run", () => {
     // run_settled_on rule 3: the remitted run's own payout came back, a later run paid the re-queued item
-    expect(remittedHead({ ...base, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004" })).toContain(
+    expect(
+      remittedHead({ ...base, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004", returned_via: "run" }),
+    ).toContain(
       "après le retour du virement du reversement RV-2026-000001",
     );
     // rule 4: the remitted run was an N = 0 run (no transfer): what came back was an unplanned payout
     const rule4 = remittedHead({
       ...base,
       run_transfer: false,
+      returned_via: "unplanned",
       paid_on: "2026-11-21",
       paid_run_number: "RV-2026-000675",
       run_number: "RV-2026-000674",
@@ -131,7 +176,9 @@ describe("« Désimputer » of a remitted entry (plan §3.7, §3.2.1)", () => {
   });
   it("says it per paid_how, never « versé » or « débité » for a set-off or a net nil", () => {
     expect(remittedHead(base)).toBe("Déjà reversé au client (reversement RV-2026-000001, débité le 03/11/2026).");
-    expect(remittedHead({ ...base, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004" })).toBe(
+    expect(
+      remittedHead({ ...base, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004", returned_via: "run" }),
+    ).toBe(
       "Déjà reversé au client (reversement RV-2026-000004, débité le 17/11/2026, après le retour du virement du reversement RV-2026-000001).",
     );
     const setOff = remittedHead({ ...base, paid_how: "set_off" });
@@ -184,13 +231,28 @@ describe("« Désimputer » of a remitted entry (plan §3.7, §3.2.1)", () => {
       expect(t).not.toContain("débité");
     }
     // a payout paid through a later run, after its own came back (rule 3) or after an unplanned one did (rule 4)
-    expect(plain(returnRemittedNote([{ ...base, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004" }], "EUR"))).toBe(
+    expect(
+      plain(
+        returnRemittedNote(
+          [{ ...base, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004", returned_via: "run" }],
+          "EUR",
+        ),
+      ),
+    ).toBe(
       "Paiement déjà reversé au client (RV-2026-000004, après le retour du virement du reversement RV-2026-000001) : au retour, le cabinet lui avance 2 000,00 €.",
     );
     expect(
       plain(
         returnRemittedNote(
-          [{ ...base, run_transfer: false, paid_on: "2026-11-17", paid_run_number: "RV-2026-000004" }],
+          [
+            {
+              ...base,
+              run_transfer: false,
+              returned_via: "unplanned",
+              paid_on: "2026-11-17",
+              paid_run_number: "RV-2026-000004",
+            },
+          ],
           "EUR",
         ),
       ),

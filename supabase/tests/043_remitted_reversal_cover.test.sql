@@ -30,7 +30,7 @@
 -- The cancellation-after-download switch stays off: every switch-on case runs in its own rolled-back scenario
 -- (pg_temp.isolated_on); a guard at the end checks it is off.
 begin;
-select plan(49);
+select plan(51);
 
 
 -- Fixtures and helpers (as 037_transfer_line_ops: its fixture, 035's helpers and its own) ---------------------
@@ -1400,6 +1400,12 @@ begin
           from public.payment_check_result x
           where x.run_id = c and x.code in ('remitted_reversal_uncovered', 'advance_ledger'));
 end $$;
+-- (review round 2) the sequential scans of the tables an item's settlement reads, so far in this transaction
+create or replace function pg_temp.seqs() returns bigint language sql as $$
+  select coalesce(sum(x.seq_scan), 0)::bigint from pg_stat_xact_user_tables x
+  where x.relid in ('private.unplanned_paid_item'::regclass, 'public.remittance_line'::regclass,
+                    'public.remittance_run'::regclass, 'public.bank_line_booking'::regclass,
+                    'public.ledger_entry'::regclass) $$;
 -- (review round 1, CC-2) the rows a table's index scans fetched so far in this transaction
 create or replace function pg_temp.fetched(p_table regclass) returns bigint language sql as $$
   select coalesce((select x.idx_tup_fetch from pg_stat_xact_user_tables x where x.relid = p_table), 0) $$;
@@ -2269,10 +2275,11 @@ select is(array[has_function_privilege('authenticated', 'private.cover_remitted_
                 has_function_privilege('authenticated', 'private.advance_full_check_take(uuid, uuid)', 'execute'),
                 has_function_privilege('authenticated', 'private.entry_remitted(uuid, uuid)', 'execute'),
                 has_function_privilege('authenticated', 'private.run_settled_on(uuid)', 'execute'),
+                has_function_privilege('authenticated', 'private.item_settled_at(uuid, uuid, integer)', 'execute'),
                 has_function_privilege('anon', 'public.cover_remitted_reversal(text, uuid, text)', 'execute'),
                 has_function_privilege('anon', 'public.request_full_advance_check(text, uuid)', 'execute'),
                 has_function_privilege('anon', 'public.allocation_remitted(uuid)', 'execute')],
-          array[false, false, false, false, false, false, false, false, false, false, false],
+          array[false, false, false, false, false, false, false, false, false, false, false, false],
   '15: the cover''s internals, the checks and the take are out of reach of authenticated; the commands of anon');
 select is(array[has_function_privilege('authenticated', 'public.cover_remitted_reversal(text, uuid, text)', 'execute'),
                 has_function_privilege('authenticated', 'public.request_full_advance_check(text, uuid)', 'execute'),
@@ -2445,13 +2452,16 @@ begin
                             p1 -> 0 ->> 'paid_how', p1 -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_y)),
     'e2', jsonb_build_array(p2 -> 0 ->> 'run_number' = pg_temp.rnum(v_y), p2 -> 0 ->> 'paid_on' = d::text,
                             p2 -> 0 ->> 'paid_how', p2 -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_y)),
+    -- (review round 2) what came back first: X's own payout for E1, nothing for E2
+    'via', jsonb_build_array(p1 -> 0 -> 'returned_via', p2 -> 0 -> 'returned_via'),
     'nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s17e'),
   '{"exec": "ok", "returned": "ok", "y": "booked:booked",
     "y_lines": ["allocation:150000", "payout_returned:30000", "payout_returned:30000", "unplanned_payout:-30000"],
     "y_net": [0, 180000, true], "y_settled": [true, "set_off", true], "x_settled": [true, "set_off", true],
-    "e1": [true, true, "set_off", true], "e2": [true, true, "set_off", true], "nightly": []}'::jsonb,
+    "e1": [true, true, "set_off", true], "e2": [true, true, "set_off", true], "via": ["run", null],
+    "nightly": []}'::jsonb,
   '17 (e) (review round 1, M7A-MONEY-1; switch off): an N = 0 run holding an unplanned payout''s −P row and the +P its '
   'return re-queued nets that return in itself — settled by set-off on its booked_on, never too_deep; the earlier '
   'run whose payout came back is settled through it');
@@ -2475,12 +2485,14 @@ begin
                   from private.run_settled_on(v_y) s),
     'read', jsonb_build_array(p -> 0 ->> 'paid_on' = d::text, p -> 0 ->> 'paid_how',
                               p -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_y)),
+    -- (review round 2) the unplanned payout's return netted in Y itself: nothing came back on E's way
+    'via', p -> 0 -> 'returned_via',
     'nightly', pg_temp.nightly());
 end $$;
 select is(pg_temp.iso('s17f', true),
   '{"exec": "ok", "returned": "ok", "y": "booked:booked",
     "y_lines": ["allocation:60000", "payout_returned:60000", "unplanned_payout:-60000"],
-    "y_settled": [true, "set_off", true], "read": [true, "set_off", true], "nightly": []}'::jsonb,
+    "y_settled": [true, "set_off", true], "read": [true, "set_off", true], "via": null, "nightly": []}'::jsonb,
   '17 (f) (review round 1, M7A-MONEY-1; switch on): after a cancellation after download, the late payout executed and '
   'returned before the next run: that N = 0 run settles the collection by set-off (« Désimputer » reads it so)');
 
@@ -2509,14 +2521,126 @@ begin
     'e', jsonb_build_array(p -> 0 ->> 'run_number' = pg_temp.rnum(v_y), p -> 0 -> 'run_transfer', p -> 0 ->> 'paid_how',
                            p -> 0 ->> 'paid_on' = (d - 1)::text, p -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_z)),
     'z_own', jsonb_build_array(q -> 0 ->> 'run_number' = pg_temp.rnum(v_z), q -> 0 -> 'run_transfer',
-                               q -> 0 ->> 'paid_how', q -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_z)));
+                               q -> 0 ->> 'paid_how', q -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_z)),
+    -- (review round 2) what came back first: U, outside any run, for E; nothing for Z's own collection
+    'via', jsonb_build_array(p -> 0 -> 'returned_via', q -> 0 -> 'returned_via'));
 end $$;
 select is(pg_temp.iso('s17g', true),
   '{"exec": "ok", "y": "booked:booked", "y_transfer": null, "returned": "ok",
-    "e": [true, false, "paid", true, true], "z_own": [true, true, "paid", true]}'::jsonb,
+    "e": [true, false, "paid", true, true], "z_own": [true, true, "paid", true], "via": ["unplanned", null]}'::jsonb,
   '17 (g) (review round 1, M7A-MONEY-2; switch on): a collection remitted in an N = 0 run and paid by a later run after '
   'the unplanned payout that netted it came back: allocation_remitted says the remitted run had no transfer of its own '
   '(run_transfer false), and true for a run paid by its own payout');
+
+-- (h) (review round 2, run-settled-transfer-run-unplanned-return; switch off) S03r with a run debited between the two
+-- returns: Petit's X (E1 30 000) debited, its payout T1 returned (R1 +30 000 re-queued), executed again by the bank (an
+-- unplanned payout U whose P paid R1: its −30 000 row); the next run Y holds E2 (150 000), R1 and U's row (net
+-- 150 000), its payout debited today; then U comes back (+30 000 re-queued). Y's own payout paid E2 and stayed paid; R1
+-- was paid by U, which came back: E1 is not with the client (paid_on null; what came back first is X's own payout) and
+-- run X is not settled; once Z pays the re-queued +30 000, E1 is paid on Z's debit
+create or replace function pg_temp.s17h() returns jsonb language plpgsql as $$
+declare v_x uuid; v_t uuid; v_y uuid; v_z uuid; w jsonb; p1 jsonb; p2 jsonb; d date := private.paris_today();
+begin
+  v_x := pg_temp.remitted('a8', '8c', 30000, 'c80', d - 2, d - 3);
+  v_t := pg_temp.rtransfer(v_x);
+  perform pg_temp.bounce(v_x, 'c81', d - 1);
+  w := jsonb_build_object('exec', pg_temp.late_exec(v_t, 'c82'));
+  perform pg_temp.reconfirm('a8');
+  perform pg_temp.pending('a8', '8d', 150000);
+  v_y := pg_temp.flight('a8', 'c83');
+  perform pg_temp.debit(v_y, 'c84', d);
+  w := w || jsonb_build_object(
+    'y_lines', (select jsonb_agg(l.kind || ':' || l.amount_minor order by l.kind, l.amount_minor)
+                from public.remittance_line l where l.run_id = v_y),
+    'y', jsonb_build_array(pg_temp.rstatus(v_y), (select q.net_minor from public.remittance_run q where q.id = v_y)),
+    -- (before U comes back, X's chain paid again by T1's late execution, today: run_settled_on rule 2)
+    'before', (select jsonb_build_array(x.paid_on = d, x.paid_how, x.paid_run_number = pg_temp.rnum(v_x))
+               from private.entry_remitted(pg_temp.alloc('8c')) x));
+  w := w || jsonb_build_object('returned', pg_temp.late_return(v_t, 'c85'), 'queue', pg_temp.queue('a8'));
+  p1 := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('8c')));
+  p2 := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('8d')));
+  w := w || jsonb_build_object(
+    'e1', jsonb_build_array(p1 -> 0 ->> 'run_number' = pg_temp.rnum(v_x), p1 -> 0 -> 'run_transfer', p1 -> 0 -> 'paid_on',
+                            p1 -> 0 -> 'paid_how', p1 -> 0 -> 'paid_run_number', p1 -> 0 -> 'returned_via'),
+    'x_settled', (select count(*) from private.run_settled_on(v_x)),
+    'e2', jsonb_build_array(p2 -> 0 ->> 'run_number' = pg_temp.rnum(v_y), p2 -> 0 ->> 'paid_on' = d::text,
+                            p2 -> 0 ->> 'paid_how', p2 -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_y),
+                            p2 -> 0 -> 'returned_via'),
+    'nightly', pg_temp.nightly());
+  -- (the unplanned return marks the payout account of X's run returned: retired already, the current one stays)
+  v_z := pg_temp.flight('a8', 'c86');
+  perform pg_temp.debit(v_z, 'c87', d);
+  p1 := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('8c')));
+  return w || jsonb_build_object(
+    'z', jsonb_build_array(p1 -> 0 ->> 'paid_on' = d::text, p1 -> 0 ->> 'paid_how',
+                           p1 -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_z), p1 -> 0 -> 'returned_via'),
+    'x_then', (select jsonb_build_array(s.on_date = d, s.how, s.run_number = pg_temp.rnum(v_z))
+               from private.run_settled_on(v_x) s));
+end $$;
+select is(pg_temp.iso('s17h'),
+  '{"exec": "ok", "y_lines": ["allocation:150000", "payout_returned:30000", "unplanned_payout:-30000"],
+    "y": ["booked", 150000], "before": [true, "paid", true], "returned": "ok", "queue": ["payout_returned:30000"],
+    "e1": [true, true, null, null, null, "run"], "x_settled": 0, "e2": [true, true, "paid", true, null],
+    "nightly": [], "z": [true, "paid", true, "run"], "x_then": [true, "paid", true]}'::jsonb,
+  '17 (h) (review round 2; switch off): a run debited with its own payout and the −P row of an unplanned payout that '
+  'paid an earlier run''s return: once that unplanned payout comes back, the earlier run''s collection is not with the '
+  'client (paid_on null) while the run''s own collection stays paid; a later run paying the re-queued item settles it');
+
+-- (i) (review round 2; switch on) Durand's run cancelled after download (E released), its payout U executed late (its
+-- P paid E); Y holds E (40 000), F (25 000) and U's −40 000 row (net 25 000), its payout debited today; then U comes back
+-- (+40 000 re-queued). Y's payout paid F; E was paid by U, which came back: E's paid_on null (returned_via « unplanned »:
+-- what came back was the payout outside any run, not Y's), F paid by Y, Y's own settlement « paid »; once Z pays the
+-- re-queued +40 000, E is paid on Z's debit
+create or replace function pg_temp.s17i() returns jsonb language plpgsql as $$
+declare v_t uuid; v_y uuid; v_z uuid; v_e uuid; b bigint; w jsonb; p jsonb; q jsonb; d date := private.paris_today();
+begin
+  v_t := pg_temp.late_cancel('a7', '7c', 40000, 'c70');
+  w := jsonb_build_object('exec', pg_temp.late_exec(v_t, 'c71'));
+  perform pg_temp.pending('a7', '7d', 25000);
+  v_y := pg_temp.flight('a7', 'c72');
+  perform pg_temp.debit(v_y, 'c73', d);
+  w := w || jsonb_build_object(
+    'y_lines', (select jsonb_agg(l.kind || ':' || l.amount_minor order by l.kind, l.amount_minor)
+                from public.remittance_line l where l.run_id = v_y),
+    'y', jsonb_build_array(pg_temp.rstatus(v_y), (select q.net_minor from public.remittance_run q where q.id = v_y)),
+    'before', (select jsonb_build_array(x.paid_on = d, x.paid_how, x.paid_run_number = pg_temp.rnum(v_y))
+               from private.entry_remitted(pg_temp.alloc('7c')) x));
+  w := w || jsonb_build_object('returned', pg_temp.late_return(v_t, 'c74'), 'queue', pg_temp.queue('a7'));
+  p := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('7c')));
+  q := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('7d')));
+  w := w || jsonb_build_object(
+    'e', jsonb_build_array(p -> 0 ->> 'run_number' = pg_temp.rnum(v_y), p -> 0 -> 'run_transfer', p -> 0 -> 'paid_on',
+                           p -> 0 -> 'paid_how', p -> 0 -> 'paid_run_number', p -> 0 -> 'returned_via'),
+    'f', jsonb_build_array(q -> 0 ->> 'run_number' = pg_temp.rnum(v_y), q -> 0 ->> 'paid_on' = d::text,
+                           q -> 0 ->> 'paid_how', q -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_y), q -> 0 -> 'returned_via'),
+    'y_settled', (select jsonb_build_array(s.on_date = d, s.how, s.run_number = pg_temp.rnum(v_y))
+                  from private.run_settled_on(v_y) s),
+    'nightly', pg_temp.nightly());
+  -- the item's read keyed whatever the statistics: analysed as they stand (a few rows: a scan priced lowest), it scans
+  -- none of the tables it reads
+  v_e := pg_temp.alloc('7c');
+  analyze private.unplanned_paid_item, public.remittance_line, public.remittance_run, public.bank_line_booking,
+          public.ledger_entry;
+  b := pg_temp.seqs();
+  perform x.paid_on from private.entry_remitted(v_e) x;
+  w := w || jsonb_build_object('seq_scans', pg_temp.seqs() - b);
+  perform pg_temp.reconfirm('a7');
+  v_z := pg_temp.flight('a7', 'c75');
+  perform pg_temp.debit(v_z, 'c76', d);
+  p := pg_temp.read_as('01', format('select public.allocation_remitted(%L)', pg_temp.pay('7c')));
+  return w || jsonb_build_object(
+    'z', jsonb_build_array(p -> 0 ->> 'paid_on' = d::text, p -> 0 ->> 'paid_how',
+                           p -> 0 ->> 'paid_run_number' = pg_temp.rnum(v_z), p -> 0 -> 'returned_via'));
+end $$;
+select is(pg_temp.iso('s17i', true),
+  '{"exec": "ok", "y_lines": ["allocation:25000", "allocation:40000", "unplanned_payout:-40000"],
+    "y": ["booked", 25000], "before": [true, "paid", true], "returned": "ok", "queue": ["payout_returned:40000"],
+    "e": [true, true, null, null, null, "unplanned"], "f": [true, true, "paid", true, null],
+    "y_settled": [true, "paid", true], "nightly": [], "seq_scans": 0, "z": [true, "paid", true, "unplanned"]}'::jsonb,
+  '17 (i) (review round 2; switch on): a run debited with its own payout and the −P row of an unplanned payout that '
+  'paid one of its collections: once that payout comes back, that collection is not with the client (returned_via '
+  '« unplanned »), the run''s other collection stays paid by its payout; a later run paying the re-queued item settles it');
+
 
 -- §3.3 The worked example's return of 12/11 (design §7.2): P1's return through the job's mode, one transaction ----------
 -- E2 (200 000) remitted in RV-1; P6 (300 000) allocated since; P1 returned → R(E2), the cash_out and A1 (adv:<R(E2)>,
