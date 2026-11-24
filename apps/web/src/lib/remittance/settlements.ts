@@ -373,15 +373,32 @@ export function writtenOffChoice(w: WrittenOffAdvance, currency: string): string
     : `Avance passée en perte le ${frenchDay(w.written_off_on)} (${money(w.available_minor, currency)} ; créance antérieure à l'ouverture de la procédure : mise de côté pour la procédure)`;
 }
 
+/** (M2c-7c-2 review round 1, MONEY-2) What the dedicated line's sheet says when its label designates nothing. */
+export const NO_DESIGNATION =
+  "Le libellé ne désigne aucune facture ni demande de remboursement : ordre par défaut (factures échues, avances, autres factures).";
+
 /**
  * (review round 1, TUI-3) The dedicated line's sentence on what its label designates, from SQL's plan: a named invoice
  * is « imputé » only when a part settles it; a pre-opening one (L622-7 I) is never; one the amount does not reach is
- * said so. Null when the label designates nothing.
+ * said so. Null when the label designates nothing. (M2c-7c-2 review round 1, MONEY-2) An advance the label designates
+ * by naming its repayment request (public.client_payment_line's `named_requests`) reads « l'avance du JJ/MM/AAAA
+ * (demande DRA-…) ».
  */
-export function designationSentence(named: readonly string[], p: PaymentPreview | null, docs: OpenDocuments): string | null {
+export function designationSentence(
+  named: readonly string[],
+  p: PaymentPreview | null,
+  docs: OpenDocuments,
+  requests: readonly { number: string; advance_ids: readonly string[] }[] = [],
+): string | null {
   if (named.length === 0) return null;
+  const advanceName = (id: string): string | null => {
+    const a = docs.advances.find((x) => x.id === id);
+    const q = requests.find((r) => r.advance_ids.includes(id));
+    if (!a) return null;
+    return q ? `l'avance du ${frenchDay(a.born_on)} (demande ${q.number})` : `l'avance du ${frenchDay(a.born_on)}`;
+  };
   const parts = named.map((id) => {
-    const number = docs.invoices.find((i) => i.id === id)?.number ?? "document";
+    const number = docs.invoices.find((i) => i.id === id)?.number ?? advanceName(id) ?? "document";
     const row = p?.rows.find((r) => r.document_id === id);
     if (row?.document_kind === "client_credit")
       return `${number} : créance antérieure à l'ouverture de la procédure du client, la somme n'est pas imputée`;

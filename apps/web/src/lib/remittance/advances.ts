@@ -1,4 +1,5 @@
 import { money } from "@/lib/payments/statements";
+import type { RepaymentRequestRow } from "./requests";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // M2c-7b (plan docs/design/m2c-7-plan.md §4.3): the advances of the servicer — the « Avances » page, the « Passer en
@@ -37,6 +38,8 @@ export type AdvanceRow = {
   recovery: AdvanceRecovery;
   clause_ref: string | null;
   in_flight_run: { run_id: string; number: string } | null;
+  /** (M2c-7c-2) the request not withdrawn that names it while it is open (« Demandé le »), else null */
+  request?: { request_id: string; number: string; issue_date: string } | null;
 };
 
 export type ClientAdvances = {
@@ -74,6 +77,9 @@ function parseRow(x: unknown): AdvanceRow | null {
   if (!orNull(o.file_ref, isText) || !orNull(o.mandate_reference, isText) || !orNull(o.clause_ref, isText)) return null;
   const run = o.in_flight_run as Record<string, unknown> | null | undefined;
   if (run !== null && run !== undefined && (!isText(run.run_id) || !isText(run.number))) return null;
+  const req = o.request as Record<string, unknown> | null | undefined;
+  if (req !== null && req !== undefined && (!isText(req.request_id) || !isText(req.number) || !isDay(req.issue_date)))
+    return null;
   return {
     advance_id: o.advance_id,
     client_id: o.client_id,
@@ -94,6 +100,9 @@ function parseRow(x: unknown): AdvanceRow | null {
     recovery: o.recovery as AdvanceRecovery,
     clause_ref: (o.clause_ref as string | null | undefined) ?? null,
     in_flight_run: run ? { run_id: run.run_id as string, number: run.number as string } : null,
+    request: req
+      ? { request_id: req.request_id as string, number: req.number as string, issue_date: req.issue_date as string }
+      : null,
   };
 }
 
@@ -117,6 +126,42 @@ export function parseClientAdvances(x: unknown): ClientAdvances | null {
   const n = o.next as Record<string, unknown> | null | undefined;
   if (n !== null && n !== undefined && (!isText(n.created_at) || !isText(n.id))) return null;
   return { rows, next: n ? { created_at: n.created_at as string, id: n.id as string } : null, totals, can_write_off: o.can_write_off };
+}
+
+function daysBefore(iso: string, days: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d - days)).toISOString().slice(0, 10);
+}
+
+/** (M2c-7c-2, plan §5.2.7) Whether « Demander le remboursement » applies to an advance: open, taken by no run in flight,
+ *  recovered by a request (no claw-back clause, or no single mandate) and not requested in the last 30 days (a reminder
+ *  after them is a new request). SQL decides on submit (public.request_advance_repayment); this only offers it. */
+export function requestable(r: Pick<AdvanceRow, "open_minor" | "in_flight_run" | "recovery" | "request">, today: string): boolean {
+  if (!MINOR.test(r.open_minor) || BigInt(r.open_minor) <= BigInt(0) || r.in_flight_run) return false;
+  if (r.recovery !== "request" && r.recovery !== "request_no_mandate") return false;
+  return !r.request || r.request.issue_date <= daysBefore(today, 30);
+}
+
+/** An advance as the request sheet names it: its birth and its origin (the file's reference as it is). */
+export function requestLabel(x: Pick<AdvanceRow, "born_on" | "cause" | "file_ref">): string {
+  const o = advanceOrigin(x);
+  return `Avance née le ${frenchDay(x.born_on)} (${o.charAt(0).toLowerCase()}${o.slice(1)})`;
+}
+
+/** The sheet's advances for row r: the requestable advances of its client and currency on the page, r first. */
+export function requestCandidates(
+  rows: readonly AdvanceRow[],
+  r: AdvanceRow,
+  today: string,
+): { advance_id: string; label: string; open_minor: string }[] {
+  if (!requestable(r, today)) return [];
+  return [r, ...rows.filter((x) => x.advance_id !== r.advance_id)]
+    .filter((x) => x.client_id === r.client_id && x.currency === r.currency && requestable(x, today))
+    .map((x) => ({
+      advance_id: x.advance_id,
+      label: requestLabel(x),
+      open_minor: x.open_minor,
+    }));
 }
 
 /** (review round 2, advance-date-contradicts-barred) « Née le » on the « Avances » page: the advance's birth (the date
@@ -284,14 +329,20 @@ const CLIENT_ORIGIN: Record<AdvanceCause, string> = {
  *  and how it is recovered — the claw-back clause of its mandate, or a request (7c sends it: « pourra »); (review round
  *  1, M7B-MONEY-2) for one born before its collective proceeding opened, that it is not deducted (never « reprise »).
  *  (Review round 2) The total is said « à rembourser » only when no advance it holds predates the client's proceeding (a
- *  claim the client may not pay outside it): otherwise the heading is neutral and each line says its own fact. */
-export function clientSpaceAdvances(s: ClientSpaceAdvances): { heading: string | null; lines: string[] } {
+ *  claim the client may not pay outside it): otherwise the heading is neutral and each line says its own fact.
+ *  (M2c-7c-2) An advance a request not withdrawn names says the request was sent (its number and day). */
+export function clientSpaceAdvances(
+  s: ClientSpaceAdvances,
+  requests: readonly RepaymentRequestRow[] = [],
+): { heading: string | null; lines: string[] } {
   if (s.rows.length === 0 || s.total.length === 0) return { heading: null, lines: [] };
   const owed = s.rows.every((r) => r.recovery !== "barred_proceeding");
   const heading = `Avances du cabinet${owed ? " à rembourser" : ""} : ${s.total.map((t) => money(t.open_minor, t.currency)).join(" · ")}`;
   const lines = s.rows.map((r) => {
-    const how =
-      r.recovery === "clawback"
+    const sent = requests.find((q) => q.withdrawn_on === null && q.advance_ids.includes(r.advance_id));
+    const how = sent
+      ? `demande de remboursement ${sent.number} adressée le ${frenchDay(sent.issue_date)}`
+      : r.recovery === "clawback"
         ? `reprise sur vos prochains reversements (${r.clause_ref ?? "clause de reprise"} du mandat)`
         : r.recovery === "barred_proceeding"
           ? "antérieure à l'ouverture de votre procédure collective, elle n'est pas déduite de vos reversements"

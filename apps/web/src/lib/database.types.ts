@@ -113,6 +113,82 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"advance_repayment_request": {
+                  Row: {
+                    "client_organization_id": string,"created_at": string,"currency": string,"document_id": string | null,"id": string,"issue_date": string,"issued_by": string,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"pdf_sha256": string | null,"renderer_version": string | null,"template_version": string,"total_minor": number,"withdrawal_reason": string | null,"withdrawn_at": string | null,"withdrawn_by": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "client_organization_id": string,"created_at"?: string,"currency": string,"document_id"?: string | null,"id"?: string,"issue_date": string,"issued_by": string,"number": string,"organization_id": string,"payload": NonNullable<Json>,"payload_sha256": string,"pdf_sha256"?: string | null,"renderer_version"?: string | null,"template_version": string,"total_minor": number,"withdrawal_reason"?: string | null,"withdrawn_at"?: string | null,"withdrawn_by"?: string | null
+                  }
+                  Update: {
+                    "client_organization_id"?: string,"created_at"?: string,"currency"?: string,"document_id"?: string | null,"id"?: string,"issue_date"?: string,"issued_by"?: string,"number"?: string,"organization_id"?: string,"payload"?: NonNullable<Json>,"payload_sha256"?: string,"pdf_sha256"?: string | null,"renderer_version"?: string | null,"template_version"?: string,"total_minor"?: number,"withdrawal_reason"?: string | null,"withdrawn_at"?: string | null,"withdrawn_by"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "advance_repayment_request_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "advance_repayment_request_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "advance_repayment_request_document_id_fkey"
+      columns: ["document_id"]
+isOneToOne: false
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "advance_repayment_request_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"advance_repayment_request_item": {
+                  Row: {
+                    "advance_id": string,"client_organization_id": string,"open_minor": number,"organization_id": string,"request_id": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "advance_id": string,"client_organization_id": string,"open_minor": number,"organization_id": string,"request_id": string
+                  }
+                  Update: {
+                    "advance_id"?: string,"client_organization_id"?: string,"open_minor"?: number,"organization_id"?: string,"request_id"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "advance_repayment_request_item_advance_id_fkey"
+      columns: ["advance_id"]
+isOneToOne: false
+      referencedRelation: "client_advance"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "advance_repayment_request_item_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "advance_repayment_request_item_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "advance_repayment_request_item_request_id_fkey"
+      columns: ["request_id"]
+isOneToOne: false
+      referencedRelation: "advance_repayment_request"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"advance_write_off_recovery": {
                   Row: {
                     "advance_id": string,"amount_minor": number,"client_organization_id": string,"created_at": string,"currency": string,"entry_id": string,"organization_id": string
@@ -2794,6 +2870,9 @@ isOneToOne: false
 "add_boarding_file":
 { Args: { "p_batch_id": string,"p_file_name": string,"p_sha256": string,"p_size_bytes": number }; Returns: Json
                            },
+"advance_repayment_preview":
+{ Args: { "p_advance_ids": (string)[],"p_client_organization_id": string,"p_currency": string }; Returns: Json
+                           },
 "allocate_payment":
 { Args: { "p_account_id": string,"p_evidence_document_id": string,"p_expected_reason": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
                            },
@@ -2870,6 +2949,9 @@ isOneToOne: false
             }[]
                            },
 "client_remittance_summary":
+{ Args: { "p_client_organization_id": string }; Returns: Json
+                           },
+"client_repayment_requests":
 { Args: { "p_client_organization_id": string }; Returns: Json
                            },
 "client_space_advances":
@@ -3023,6 +3105,9 @@ isOneToOne: false
 "remittance_run_payout":
 { Args: { "p_run_id": string }; Returns: Json
                            },
+"request_advance_repayment":
+{ Args: { "p_advance_ids": (string)[],"p_client_organization_id": string,"p_currency": string,"p_expected_total_text": string,"p_idempotency_key": string }; Returns: Json
+                           },
 "request_full_advance_check":
 { Args: { "p_idempotency_key": string,"p_organization_id": string }; Returns: Json
                            },
@@ -3118,6 +3203,9 @@ isOneToOne: false
                            },
 "unassign_payment":
 { Args: { "p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
+                           },
+"withdraw_advance_repayment_request":
+{ Args: { "p_idempotency_key": string,"p_reason": string,"p_request_id": string }; Returns: Json
                            },
 "write_off_advance":
 { Args: { "p_advance_id": string,"p_amount_text": string,"p_evidence_document_id": string,"p_expected_open_text": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json

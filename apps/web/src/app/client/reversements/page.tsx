@@ -5,6 +5,7 @@ import type { SessionClaims } from "@/lib/auth/access";
 import { money } from "@/lib/payments/statements";
 import { clientSpaceAdvances, parseClientSpaceAdvances } from "@/lib/remittance/advances";
 import { clientOfUser } from "@/lib/remittance/client-space";
+import { parseClientRepaymentRequests, requestLetterNote, spaceRequestLine } from "@/lib/remittance/requests";
 import { clientSpaceCreditSections, parseClientSpaceCredits } from "@/lib/remittance/settlements";
 import {
   type RemittanceSummary,
@@ -61,7 +62,13 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
     );
   }
   const list = listPage((await searchParams).page, PAGE_SIZE);
-  const [{ data: summaryData, error }, { data: statementRows }, { data: advancesData }, { data: creditsData }] = await Promise.all([
+  const [
+    { data: summaryData, error },
+    { data: statementRows },
+    { data: advancesData },
+    { data: creditsData },
+    { data: requestsData },
+  ] = await Promise.all([
     supabase.rpc("client_remittance_summary", { p_client_organization_id: client.id }),
     supabase
       .from("remittance_statement")
@@ -76,11 +83,14 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
     supabase.rpc("client_space_advances", { p_client_organization_id: client.id }),
     // M2c-7c-1 (plan §5.5): what the servicer owes the client back (a surplus of its payment)
     supabase.rpc("client_space_credits", { p_client_organization_id: client.id }),
+    // M2c-7c-2 (plan §5.5): the servicer's repayment requests, each with its letter
+    supabase.rpc("client_repayment_requests", { p_client_organization_id: client.id }),
   ]);
+  const requests = parseClientRepaymentRequests(requestsData)?.rows ?? [];
   const creditRows = parseClientSpaceCredits(creditsData) ?? { rows: [], total: [] };
   // (review round 1, TUI-1) each section titled by what it holds: « vous doit » only over what is owed to the client
   const creditSections = clientSpaceCreditSections(creditRows);
-  const advances = clientSpaceAdvances(parseClientSpaceAdvances(advancesData) ?? { rows: [], total: [] });
+  const advances = clientSpaceAdvances(parseClientSpaceAdvances(advancesData) ?? { rows: [], total: [] }, requests);
   const summary = (summaryData ?? null) as unknown as RemittanceSummary | null;
   const owed = summary?.owed ?? [];
   const notes = inFlightNotes(summary);
@@ -123,6 +133,30 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
           <ul className="flex flex-col gap-1 text-sm">
             {advances.lines.map((l) => (
               <li key={l}>{l}</li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
+      {requests.length > 0 ? (
+        // M2c-7c-2: « Demande de remboursement d'avances DRA-… du … » and its letter (PDF), « demande retirée le … »
+        <Section title="Demandes de remboursement d'avances" testId="client-requests">
+          <ul className="flex flex-col gap-2 text-sm">
+            {requests.map((q) => (
+              <li key={q.request_id} className="flex flex-col gap-1" data-testid="request-row">
+                <span>{spaceRequestLine(q)}</span>
+                {q.document_id ? (
+                  <a
+                    href={`/client/reversements/documents/${q.document_id}`}
+                    className="font-medium underline underline-offset-4"
+                    data-testid="request-pdf"
+                  >
+                    Lettre (PDF)
+                  </a>
+                ) : requestLetterNote(q, "client") ? (
+                  // (review round 1, TUI-4) none for a request withdrawn before its letter was drawn
+                  <span className="text-xs text-zinc-600 dark:text-zinc-400">{requestLetterNote(q, "client")}</span>
+                ) : null}
+              </li>
             ))}
           </ul>
         </Section>

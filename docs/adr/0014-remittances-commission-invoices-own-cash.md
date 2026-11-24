@@ -8252,5 +8252,473 @@ after). Web: 8.
 - Everything rounds 1 to 3 list stays open; founder Q4 (a), Q5's recovery (a), Q7 (a) and Q11 keep their defaults,
   open; the switch stays off.
 
+## M2c-7c-2: repayment requests (2026-11-24)
+
+Plan: `docs/design/m2c-7-plan.md` §0, §1.3 D1, §1.4 (7c-2 row), §2, §5.1 (the request tables, the PDF's RLS and key),
+§5.2.7 (the request, the withdrawal, the payload), §5.2.8 (`repayment_request_document_missing`, `requested_on`), §5.3
+(the letter `demande-remboursement-avance-fr-1`), §5.4 (the letter and its job), §5.5 (the request's web), §5.6, §5.7
+`045b` (a), (g), (h), (m), (n), the letter's goldens and design §7.3 variant (i), §5.8, with their [critic] / [check
+1–3] marks. Founder questions (plan §10), none answered: Q6 (a: no due date, no formal notice, no legal article on
+the letter), Q20 (a: no expiry; « Retirer la demande ») and the new Q22 (below) built as their defaults and left open.
+Migration `20261125090000_repayment_requests.sql` (one file, forward-only). New: the tables
+`public.advance_repayment_request` (DRA-AAAA-NNNNNN, its total, its frozen payload and hash, the template, its
+letter's document once drawn, its withdrawal) and `public.advance_repayment_request_item` (the advances it names, each
+with its open part then) — RLS, change log, append-only but for the request's document and withdrawal, each set
+once —; the commands `public.request_advance_repayment` and `public.withdraw_advance_repayment_request`; the reads
+`public.advance_repayment_preview` (the sheet) and `public.client_repayment_requests` (the client's requests, staff
+and client space); the worker's `private.client_requested_advances`, `private.repayment_request_job`,
+`private.repayment_request_document_done`; their helpers (`advance_live_request`, `advance_payout_not_received`,
+`advance_repayment_refusal`, `advance_repayment_client_refusal`, `advance_reversal_origin`, `advance_repayment_row`,
+`advance_repayment_payload`). Redefined, each copied whole from its latest definition across every migration file
+(indexed: the last `create or replace function` of each name wins; each copy diffed against the live `prosrc` before
+the change; only the change; settings, `search_path ''`, SECURITY DEFINER and grants restated):
+`private.remittance_approval_refusal` (`20261114090000:688`), `private.run_advance_checks` (`20261124090000:2281`,
+7c-1's), `private.advance_row` (`20261123090000:387`), `private.can_read_remittance_document_object`
+(`20261113090000:1552`), the policies `remittance_document_object_read` and `document_remittance_scope`
+(`20261113090000:1565`, `:1569`). Worker: the letter (`remittance/repayment_request.py`, its PDF
+`remittance/repayment_request_pdf.py`), its job (`jobs/repayment_requests.py`, handler `repayment_request` on the
+`remittances` queue), the prepare's requested flag (`jobs/remittances.py` `_open_advances`, `remittance/run.py`).
+Web: « Demander le remboursement », « Retirer la demande » and the column « Demandé le » on « Avances »; the request
+sheet and the client's requests on « Ce que le client doit au cabinet »; the client's requests and their letters in
+the client space (`/client/reversements`); the nightly's new label. **The switch stays off**: nothing writes
+`private.feature_switch`; the rules reachable only with it on (a run cancelled after download no longer holds its
+advances; 043's cases 5f, 11 and 17 (d) whose request halves are `045b` n) run inside rolled-back scenarios with it on
+(`pg_temp.iso(…, true)`); `045b`'s guard asserts it is off at the end; `033` byte for byte unchanged; `034`–`045`
+unchanged.
+
+### Decisions
+
+- **D1 — a request is a letter, not a movement.** `request_advance_repayment` inserts the request and its items and
+  queues the letter's job; it posts nothing, settles nothing and changes no advance. The client's repayment is 7c-1's
+  « Règlement du client » (design §7.3 (i): `test_the_first_variant_of_7_3_…` pays the request's 200 000 that way:
+  4112[Martin] = 0, `advance_open` silent). The number is unique per servicer, not gapless (design §3.2 #4: the run
+  numbers' sequence). The letter states what the payload froze when the request was made; the PDF is a function of
+  that payload alone (`test_the_pdf_depends_on_the_payload_only`), stored once by its bytes' hash.
+- **D2 — who and under which locks.** Admins and ops managers of the client's servicer at aal2; replay and request
+  hash (`command_replay` / `command_record`); 1–200 advances of one client and currency, none twice, none null, and the
+  total the sheet showed (`bad_request` otherwise). Under `private.remittance_command_locks(org, true)` — the locks an
+  approval takes — so a request and an approval reading the same advance never interleave (`lock_timeout` 2 s).
+- **D3 — the refusals and their order.** Per advance (`private.advance_repayment_refusal`): `not_open` (unknown, another
+  client's or currency's, nothing open), `in_flight` (an approved or sent run's plan takes it: the run's number),
+  `before_opening` (born before the client's proceeding opened: 7c-1's `document_before_opening`, a liquidation alone
+  opening it), `recently_requested` (a request not withdrawn issued less than 30 days ago: its day; day 29 refused,
+  day 30 accepted — a reminder after 30 days is a new request), `clawback_applies` ([critic] M7-MONEY-3, L7: the
+  mandate's terms in force that day hold a claw-back clause and set-off is not barred — the next run takes it; the
+  clause), `payout_not_received` (D5); then `total_changed`, then the client's
+  (`private.advance_repayment_client_refusal`): `no_own_account` (none active in the currency), `identity_incomplete`
+  (`billing_identity_gaps`), `recipient_unknown` ([critic] L12: a death, guardianship, liquidation or mandate end in
+  effect — 7c-2 sends nothing then; 7d-1 names who receives). Each is French on the page (`requests.ts`).
+- **D4 — a requested advance is never also clawed back ([critic] M7-MONEY-3, L7).** An advance is *requested* while it
+  is open and an item of a request not withdrawn names it (`private.advance_live_request`: the latest such request).
+  The prepare reads them (`private.client_requested_advances`, keyed) and `_plan` leaves each to its request (it stays
+  in its mandate's money, as an advance no clause recovers); the inputs hash names the flag only when set (the hashes
+  of drafts that name no requested advance are unchanged). A request made after a prepare that planned the advance is
+  caught by the approval: `remittance_approval_refusal` returns `documents_changed` when a planned advance settle names
+  a requested advance (`045b` a; approved once the request is withdrawn). Under a clause the request itself is refused
+  (`clawback_applies`), so the two meet only when the terms change after the request (`045b` a: the prepare's read
+  still marks it requested).
+- **D5 — never ask for what the client did not receive ([critic] M7-MONEY-8, L5; [check 1]).** For a remitted
+  reversal's cover, `payout_not_received` exactly while `private.entry_remitted(E, R).paid_on` is null — a payout come
+  back and not paid again, or an unplanned payout that had paid it come back —, not while the run's own payout is
+  merely unpaid (the plan's mutant: read from `remittance_run_paid_on`). An N = 0 run (set off, netted) is received; a
+  returned payout a later run paid is received (« … après le retour du virement du relevé RV-… »). The detail is
+  « RV-…:run » or « RV-…:unplanned » (what came back: the run's payout, or a payout outside any run). (Beyond the
+  plan) a `payout_overrun` advance whose run's payout came back and is not paid again is refused the same way
+  (`private.run_settled_on`: no row) — asking the client to repay more than it was paid by a payout it never kept
+  would be false.
+- **D6 — the letter (plan §5.3).** Deterministic (reportlab pinned, invariant, DejaVu, no clock, no model, no LLM);
+  every amount and date is the payload's, built in SQL from the ledger and the advances. Issuer: the servicer's billing
+  identity (`private.receipt_issuer`); recipient: the client's name and billing address, else its registered office;
+  « Objet : Demande de remboursement — référence DRA-… »; the rows by recording, each with its recording date, its
+  mandate, its origin in the real order of events, « Versé », « Déjà remboursé », « Demandé »; « Total à rembourser »;
+  the own account (holder, IBAN, BIC) and the reference; « Ce document n'est pas une facture. ». Origins per cause, as
+  the plan words them: « versé le … (relevé RV-…) » only when `paid_how` is `paid`; « réglé par compensation dans le
+  relevé RV-… du … » (`set_off`), « compris dans le relevé RV-… du … (montant net nul) » (`netted`) — never « versé »
+  for an N = 0 run (house rule 26); the reversal first when it was recorded while the run was in flight (the cover
+  posted at the booking, `adv:<R>:<run>`) or before the client was paid; a partial bank return « paiement repris en
+  partie par la banque (X) ; imputation annulée en entier (Y) »; a payout outside any run « par un virement hors
+  reversement » (no run named). Never a payer's name or IBAN, never an RMT, SWP or TOP id, no legal article, interest, penalty,
+  due date or formal notice (founder Q6; OQ-95). The renderer refuses a payload whose rows do not add up to its total,
+  an unknown template or cause, or a « versé » without its day.
+- **D7 — the letter's job.** `{type: repayment_request}` on `remittances`, in the queue's transaction:
+  `private.repayment_request_job` holds the request's row (two jobs never draw it at once; a request already drawn is
+  left as it is); the PDF uploaded to `documents` at `repayment-requests/<servicer>/<request>.pdf`;
+  `private.repayment_request_document_done` records the document (kind `advance_repayment_request_pdf`) only once the
+  object is stored at its key, with the bytes' hash — again with the same bytes the same document, with other bytes
+  refused. A failed attempt removes what it uploaded and fails the job (the queue retries it); the nightly raises
+  `repayment_request_document_missing` (alert) for a letter still not drawn one hour after its request.
+- **D8 — who reads the letter ([critic] F11).** The remittance documents' rule: money staff of the servicer and the
+  client's whole-client members (`document_remittance_scope`, `remittance_document_object_read` with the letters'
+  keys); never another tenant, a portfolio-restricted member or a collector (`045b` h, row and file). The request and
+  item rows follow the same rule (their RLS); they are written only by the SECURITY DEFINER commands and the worker's
+  functions.
+- **D9 — the pages.** Every amount and date is SQL's (the preview's total, the requests' totals and days), the pages
+  only word them. « Avances »: « Demander le remboursement » on a requestable advance (open, not in flight, recovered
+  by a request — no claw-back clause, not born before the client's proceeding —, not requested in the last 30 days;
+  the command decides), the sheet listing the requestable advances of its client and currency on
+  the page with the preview's live total and refusals; « Demandé le JJ/MM/AAAA (DRA-…) » and « Retirer la demande »
+  (sheet with its motif). « Ce que le client doit au cabinet »: the same sheet over the client's advances and the
+  client's requests. The client space: « Demande de remboursement d'avances DRA-… du JJ/MM/AAAA : X € » with its letter
+  (PDF), « — demande retirée le … » once withdrawn; an advance requested reads « demande de remboursement DRA-…
+  adressée le … ». LEX-28: no text says « abandon » or « remise » (`requests.test.ts`).
+- **D10 — reads keyed whatever the statistics.** Every new read is by a key with `enable_seqscan = off` and `offset 0`
+  fences (the request by its client, by its servicer and document, the items by request and by advance); the night's
+  undrawn letters by a plain index read with the literal predicate (never a partial index a parameter's filter would
+  have to imply). `test_repayment_request_reads_integration.py` (Tests) bounds them under planted statistics.
+- **The carried default (ADR-0014 « M2c-7a review fixes » Left open).** A collection an unplanned payout paid only in
+  part, the rest in a run whose own payout came back, reads « not received » in full (7a's `entry_remitted`: the
+  run's set-off is per run, not per item). 7c-2 asks no repayment of such an advance (`payout_not_received`) until the
+  returned sum is paid again — `045b` cd (switch on). Plan §10 Q22 asks whether a run's set-off should be shared out
+  over its items. Default (a): no.
+
+### Deviations from the plan
+
+- **The letter's last column is « Demandé », not « Reste dû »**: a part of an advance passed as a loss is no longer
+  claimed (7b) but is not repaid either; « Reste dû » would state it owed, and « Déjà remboursé » counts only what was
+  repaid (a compensation, a payment to the own or the dedicated account), never a write-off.
+- **« Mandat »**: the advance's mandate; « plusieurs mandats » only for an overrun or a double payout of a run (a run
+  pays several mandates); « — » for an advance with no mandate and no run (a payout outside any run): « plusieurs
+  mandats » would be false there.
+- **`recipient_unknown`'s text** says what the code does (« … aucune demande ne lui est adressée tant que la personne
+  qui agit pour lui n'est pas enregistrée »): the plan's « indiquez d'abord qui agit pour le client » names an action
+  that does not exist before 7d-1.
+- **`payout_not_received` for an overrun** (D5) is beyond the plan's list; the detail `RV-…:run|unplanned` lets the
+  page say which payout came back.
+- **The request's columns**: `withdrawal_reason` (the motif the sheet asks for); the items carry the servicer and the
+  client (their RLS reads them without a join to the request); `issued_by` without a foreign key (as the earlier
+  slices' `*_by` columns).
+- **`repayment_request_document_done(request, sha256, renderer)`**, not the plan's `(request, document_id, sha256,
+  renderer)`: the function inserts the document itself, once it has checked the object is stored at its key, and
+  returns it — the worker never writes `public.document`, and a document row never exists without its file.
+- **`register_client_document` and `can_read_client_document(_object)` are not redefined**: the letter is a document
+  the worker draws, read under the remittance documents' rule (D8), not a client document staff register.
+- **The client space shows the requests on « Reversements » (`/client/reversements`, section « Demandes de
+  remboursement d'avances »)**: the client space has no « Documents » page (only `/client/documents/[id]`, the
+  download route of a client's RIB or mandate); the section sits beside « Sommes que le cabinet vous doit » and the
+  advances the requests name. The screenshot keeps the plan's name `m2c7-client-documents`.
+- **Beyond the plan**: `public.advance_repayment_preview` (the sheet's total and refusals from SQL, so the browser
+  computes no amount; it states no open part of another client's advance) and `public.client_repayment_requests` (the
+  pages' list). `private.advance_live_request` serves the approval's re-check, the prepare's read, « Avances » and the
+  nightly's `requested_on`.
+
+### Assertions whose expected value changed (house rule R3)
+
+None. `033`–`045` are byte for byte unchanged; the existing worker, vitest and E2E tests are unchanged (the new tests
+are added; `remitted-reversal.spec.ts` gains steps at its end).
+
+### Tests
+
+- pgTAP `045b_repayment_requests.test.sql` (new, **23**, five of them with the switch on in rolled-back scenarios; 045's
+  fixture and helpers copied, each scenario in a rolled-back subtransaction): q (the request: number, total, payload —
+  amounts as text, no payer data — and hash, template, items, the job queued; replay, a key reused for another
+  request; roles and aal2; the change log); r ×4 (every refusal, nothing written; the window's boundary; the preview
+  of another client's advance states 0, `not_open`); a ×2 (refused under a clause; the terms gaining one after the
+  request; the approval's `documents_changed`, then approved once withdrawn); w (the withdrawal, once, its motif,
+  roles; requested anew at once; the guard); g, m, o ×3 (`payout_not_received` exactly while `paid_on` is null: a
+  payout back, re-queued in a draft, in an approved run, paid by RV-2 → accepted; an N = 0 run; the at-booking cover; an
+  overrun whose payout came back); n ×3 (043 5f, 17 (d) and 11's request halves, switch on); cd (the carried default,
+  switch on); s ×2 (in flight with the switch off; requestable once cancelled after download, switch on); d (the
+  document set once from the stored bytes); h (who reads the row and the file); p (the preview, « Avances », the
+  client's requests); c, x (`requested_on`, `repayment_request_document_missing` after one hour, 045 x's list of codes
+  extended); the switch's guard.
+- Worker unit: `test_repayment_request.py` (new, 11: the letter's text snapshot, each origin in the real order, the
+  mandate column, a multi-mandate request, no RMT/SWP/TOP id nor legal mention, an N = 0 run never « versé », a payout
+  back never stated received, a payload that does not add up refused, Hypothesis: the amounts are the payload's, the
+  golden hashes `GOLDEN_REQUEST_PDF` and `GOLDEN_EVERY_ORIGIN_PDF`, the PDF a function of the payload only);
+  `test_remittance_run.py` +3 (a requested advance never taken under the clause; only the requested one left; the
+  inputs hash names the flag — also when the plan is the same).
+- Worker integration: `test_repayment_requests_integration.py` (new, 3: design §7.3 (i) end to end — RV-3 N = 282 000,
+  DRA for 200 000, its PDF stored, the client's payment, 4112 = 0, `advance_open` silent; the real prepare leaves a
+  requested advance; the job draws once, a failed upload records nothing and removes its file, a replay draws nothing);
+  `test_repayment_request_reads_integration.py` (new, 1; the db job, not a scale file: Benchmarks).
+- vitest `requests.test.ts` (new, 13: the parsers, the sheets' effects, every refusal's text, « Demandé le », the
+  labels, the client space's lines with and without a withdrawal, the PDF kind served, the nightly's label, LEX-28).
+- E2E `remitted-reversal.spec.ts` (desktop and mobile): the own account set, « Demander le remboursement » on
+  « Avances », the client downloads its letter; screenshots `m2c7-demande-remboursement`, `m2c7-client-documents`.
+- Seen failing first at the tests-first commit (`045b` at its first call, the worker's and vitest's tests at import,
+  `test_remittance_run.py`'s on `requested`), each then passing on the code.
+
+### Mutants
+
+SQL: one function of the migration (or a policy) replaced on the stack with the change, `045b` run, the original
+restored. Worker and web: the change applied to the source, the named tests run, the file restored. Every mutant was
+killed; none is argued equivalent but one (last row).
+
+| Mutant (plan §5.7 for 7c-2 first, then this slice's own) | Killed by |
+|---|---|
+| `in_flight` check removed | `045b` r (in flight), s (switch off) |
+| the 30-day window off by one (`>=`) | `045b` r (day 30 accepted) |
+| `clawback_applies` removed | `045b` r, a |
+| the `requested` flag ignored by `_plan` | `test_a_requested_advance_is_never_taken_back_…`, `test_only_the_requested_advance_…` |
+| `payout_not_received` read from `remittance_run_paid_on` | `045b` g, m, n ×2 |
+| `payout_not_received` removed | `045b` g, o, n ×2, cd |
+| the overrun's `payout_not_received` removed | `045b` o |
+| `before_opening` removed | `045b` r |
+| `recipient_unknown` without liquidation; `no_own_account` / `identity_incomplete` removed | `045b` r (each) |
+| `total_changed` removed | `045b` r |
+| a withdrawn request still live | `045b` a, w, o, n, p |
+| the oldest live request read first | `045b` r (the reminder's window) |
+| the approval's re-check removed | `045b` a |
+| `already_withdrawn` removed | `045b` w |
+| the document recorded without its stored object; with other bytes | `045b` d (each) |
+| the preview states another client's open part | `045b` r |
+| `requested_on` dropped; the missing letter alerted at once; not alerted | `045b` c (each), x |
+| the payload names the payer | `045b` q |
+| the origin never « in flight » | `045b` m |
+| the request's guard letting any column change | `045b` w |
+| the items readable by anyone; the file's policy without the letters' keys; the scope without the kind | `045b` h (each) |
+| the inputs hash without the flag | `test_the_inputs_hash_names_whether_an_advance_is_requested` (added: the same plan, another hash) |
+| `_open_advances` reads no request | `test_a_requested_advance_is_never_also_taken_by_the_real_prepare` |
+| the job removes nothing on failure; the handler missing | `test_the_letter_s_job_draws_once_…` |
+| `set_off` / `netted` worded « versé »; the payment always first; in flight not said; the partial return ignored; a later run's return not said; the total not checked; a payout back stated received; « plusieurs mandats » for every null mandate | `test_repayment_request.py` (each) |
+| web: the unplanned return worded as the run's; a withdrawn request still sent; the file's reference lowercased; any message read as a refusal; the PDF kind not served; the nightly's label missing | `requests.test.ts` (each; the PDF kind's test now reads `REMITTANCE_KINDS`, not the file's text) |
+| equivalent: the job drawing again a request already drawn | — the same bytes (D1) give the same document (`repayment_request_document_done` returns it), so only work is repeated |
+
+### Suites
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 48 files, **3,038 tests, PASS** in 587 s — `045b`'s
+  23 among them; `033` byte for byte; `034`–`045` unchanged.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 198 files) clean; unit pytest **1,154 passed, 5
+  xfailed**; the non-scale integration tests in CI's order, right after that `supabase test db` without a reset:
+  **280 passed** in 795 s.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic (95,997 of 100,000), **0**
+  wrong.
+- Scale, each command right after `supabase db reset` with CI's logging settings (docs/benchmarks/remittances.md
+  « M2c-7c-2 »): the scale job's nine files in one call as `ci.yml` runs them (`RECEIPT_FILES=5000`) **15 passed** in
+  1,433.1 s (the 50,000-line run prepared in 12.1 s of its 14.9 s, re-run prepared and approved in 31.2 s, its nightly
+  checks 7.1 s — a second reading of that file alone: 5.7 s, `run_advance_checks` 58 ms own; the VM's variance: the
+  checks 7c-2 does not touch slowed by the same factor); CI's `scale-payouts` command **6 passed** in 1,298.1 s
+  (21.6 min). No Paris date change fell in them. The stale-statistics test's measurements are there too.
+- `database.types.ts` regenerated from the final schema: identical to the committed file.
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **30 files, 597 tests** passed (`requests.test.ts` new, 13).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61 passed** in 6.2 min, twice (the second after « Avances » stopped showing a
+  lone « — » on a phone, where the cell has no column head).
+  Screenshot diffs showing only dates, ids or order reverted; kept: `m2c7-demande-remboursement` and
+  `m2c7-client-documents` (new), `m2c7-avances` and `m2c7-avance-perte` (retaken: « Avances » gains « Demandé le » and
+  « Demander le remboursement »), mobile and desktop.
+- Then `supabase db reset`, the stack left running.
+
+### Size
+
+**2,475 non-test lines added (and 17 removed), 88 of them the generated `database.types.ts`: just under the task's
+~2,500, about twice the plan's ≈ 1,150. Nothing was dropped.** The migration 1,204 — of which 392 are the four
+functions redefined whole from their latest definitions (`run_advance_checks` 231, `remittance_approval_refusal` 103,
+`advance_row` 44, `can_read_remittance_document_object` 14; with their headers 414), 566 the new functions with
+their comments (the two commands, the two reads, the refusals, the payload and its origins, the job's two), 119 the
+two tables with their guard, triggers and policies, 17 the two policies recreated, 38 the grants, 50 the header —, the
+worker 493 (the letter's text 275, its PDF 118, the job 68, the prepare's flag 32), the web 778 (the two sheets 276,
+`requests.ts` 175, the generated types 88, « Ce que le client doit au cabinet » 84, `advances.ts` 55, « Avances » 42,
+the client space 35, the rest 23). The plan's estimate counted the approval's re-check as a 94-line copy only (not
+`run_advance_checks`, `advance_row` nor the storage helper), no preview and no list of the client's requests.
+
+### Left open (low), with its default
+
+- Founder questions (plan §10): Q6 (a), Q20 (a) and Q22 (a) — defaults built and open; the cancellation after
+  download (6b-3 plan Q1) stays off. OQ-95 (the request's basis and wording) and OQ-97's 7c-2 part stay with counsel.
+- **A letter whose job died after its retries is not re-queued automatically**: the nightly alerts it
+  (`repayment_request_document_missing`) and ops withdraw and request again. Default: keep until 7f.
+- **A requested advance can still be passed as a loss** (7b's write-off does not read the request): the letter stays
+  in the client space; the client space's advance line then disappears with the advance. Default: keep; withdraw the
+  request first (ops' practice).
+- **A request whose advances all closed (paid, written off) stays « not withdrawn »**: nothing reads it then (an
+  advance is requested only while open). Default: keep.
+- **« Avances »'s totals** still read the servicer's advances once (7b's `client_advances`, CCS-2): the request adds a
+  keyed probe per row shown. Default: 7f's hardening with CCS-2.
+- Everything 7a, 7b and 7c-1 leave open stays open.
+
+## M2c-7c-2 review fixes (2026-11-24)
+
+### Round 1
+
+The review of `f0a8da0` raised thirteen items: two mediums and two lows of the money lens (MONEY-1, MONEY-2; NIGHT-1,
+UI-1), three mediums and three lows of tests and pages (TUI-1 … TUI-3; TUI-4 … TUI-6), and three lows of concurrency
+and cost (CC-1 … CC-3). NIGHT-1, TUI-4 and CC-1 are one fault (a withdrawn request's letter and alert),
+TUI-3 and CC-2 another (the motif readable by the client): each fixed once. Each item was checked against the code
+first — MONEY-1 and MONEY-2 reproduced on the main stack inside rolled-back transactions with `045b`'s fixture (switch
+off and on), the others read in the migration, the worker's letter and the pages; all hold. The migration
+`20261125090000_repayment_requests.sql` is unmerged and was edited in place. **The switch stays off** (nothing writes
+`private.feature_switch`; MONEY-1's release path, reachable only with it on, is tested with it on in a rolled-back
+scenario, and the double payout's return off and on); `033` byte for byte unchanged; `034`–`045` byte for byte
+unchanged.
+
+- **MONEY-1 (medium; fixed at the root: refused while a request names the advance, option (a)).** The two paths that
+  reverse an advance's entry — the double payout's return (`return:adv:`, gated by `private.transfer_line_check`) and
+  the release of an unplanned payout's covers when it comes back (`return:rr:`, `private.remitted_cover_release`) —
+  refused while a run takes the advance back (`advance_in_flight`) or after it was settled (`advance_settled`), never
+  while a repayment request names it. The advance was then reversed (its open part 0) while the request stayed live
+  and the client space kept the letter asking for a payout the client never kept (plan §0 #1, D5); a client paying as
+  asked would have had a credit owed back to refund. Reproduced: the double payout's return (switch off and on) and
+  `045b` sn3's path without its withdrawal (switch on): 50 000 → 0 and 40 000 → 0, the request not withdrawn. Fix: both
+  refuse **`advance_requested`** while `private.advance_live_request(advance)` returns a row — `transfer_line_check`
+  (redefined whole from `20261123090000:889`, one rule after `advance_in_flight`: the preview and the booking) and
+  `remitted_cover_release` (redefined whole from `20261122090000:614`, raised as the command's refusal, SQLSTATE
+  55000, as `advance_in_flight`). Both run under the transfer line's locks (… → `remit:`), the lock the request takes:
+  a request and such a return never interleave. The page says « L'avance liée à ce virement fait l'objet d'une demande
+  de remboursement adressée au client : retirez d'abord cette demande (« Avances », « Retirer la demande »), puis
+  comptabilisez ce retour ; l'avance sera alors annulée. » (`transfer-lines.ts`). `045b` v ×3: refused (preview and
+  booking, nothing booked, the advance open), then booked once the request is withdrawn (the advance reversed), the
+  nightly's ledger checks clean. Every `ledger_reverse` of the migrations was read: no third path reverses an
+  advance's entry (below, Left open, the reviewer's backstop alert).
+- **MONEY-2 (medium; fixed: plan §5.2.5, [critic] L16, the 7c-1 ADR's « the DRA-… numbers are 7c-2's »).** A
+  dedicated-account line labelled with the client's DRA number designated nothing: the page named no document, naming
+  the advance without an evidence document was refused `designation_evidence_required`, and booking as the page
+  proposed followed the default order — a due invoice paid first (its VAT 44574 → 44571), the requested advance left
+  open and requested. New `private.label_requested_advances(org, client, currency, label, on)`: the client's requests
+  in that currency whose number the label names as a whole token (`DRA-AAAA-N…`, all its digits: never a prefix of a
+  longer number), issued on or before the line's day (a later one the label cannot name), withdrawn or not (the client
+  names the debt a letter asked for), their advances in the letter's order; read by the request's number
+  (`advance_repayment_request_number_uq`), its items by the primary key's prefix, each advance by its key.
+  `public.client_payment_line` (redefined whole from `20261124090000:1722`) names, after the invoices its label names,
+  those advances open on the line's day, and returns `named_requests`; `public.book_client_payment_line` (redefined
+  whole from `20261124090000:2046`) accepts them as the client's designation without other evidence, exactly as an
+  `FC-…` number. The page says « Le libellé désigne l'avance du JJ/MM/AAAA (demande DRA-…) : le règlement lui est
+  imputé. », or « Le libellé ne désigne aucune facture ni demande de remboursement : ordre par défaut (…) ». `045b` l:
+  the advance paid (30 000), the due invoice untouched (18 000 open, its 3 000 of VAT still pending), the advance no
+  longer requested; another client's DRA, and a line dated before the request, designate nothing. COMPLIANCE OQ-89,
+  DOMAIN, the plan's §5.2.5 note.
+- **TUI-1 (medium; fixed).** `origin_text` put a reversal recorded while its run was in flight (the cover posted at the
+  booking) before the payment, whatever the dates: with the debit's bank date the day before the « Désimputer » (D − 1's
+  statement imported on D), the letter said « imputation annulée le 24/11 alors que le reversement … était en cours,
+  puis versé le 23/11 ». Now the dates' order decides: « alors que le reversement … était en cours » only when the
+  reversal is not dated after the payout's bank date; otherwise « versé le … (relevé …), puis annulé le … (imputation
+  corrigée) ». A row of that shape joins `EVERY_ORIGIN` (`repayment_cases.py`), with a unit test on the three orders.
+- **TUI-2 (medium; fixed; a conflict of the plan's template with its own [check 1] rule).** The opening « … vous ont été
+  versées au-delà de ce qui vous revenait » and the column « Versé » were fixed, so a request of set-off or netted rows
+  (an N = 0 run) said « versé ». The letter keeps the template's words when every row was paid out (a run's payout, a
+  payout outside any run, an overrun, a double payout) and says « … vous a été réglée / vous ont été réglées … » and
+  « Montant » otherwise (`RequestView.head`, the PDF's header the same). A unit test: a request made only of set-off or
+  netted rows has no « versé » anywhere; a request of payouts keeps « versée » and « Versé » (the snapshot, unchanged).
+  `GOLDEN_EVERY_ORIGIN_PDF` regenerated (the new origin row and the neutral words; `demande-remboursement-avance-fr-1`
+  has never been issued); `GOLDEN_REQUEST_PDF` unchanged.
+- **TUI-3 / CC-2 (medium; fixed once).** `public.advance_repayment_request` granted SELECT on every column to
+  `authenticated`, so a client's whole-client member read the withdrawal's motif (the sheet says « Motif (interne, non
+  transmis au client) ») and the staff's user ids (`issued_by`, `withdrawn_by`) over PostgREST. Column privileges now:
+  `authenticated` reads every column but those three; the service role all; no page read the table directly (the pages
+  read `client_repayment_requests`, which never returned them). The motif is kept for the audit (the row, the change
+  log), read by no page. `045b` h2: the client's administrator and money staff get « permission denied » on the three
+  columns, the client reads its request's number, total, payload and withdrawal; `has_column_privilege` pinned.
+- **NIGHT-1 / TUI-4 / CC-1 (low; one-line guards and texts).** A request withdrawn before its letter was drawn was
+  alerted every night forever (`repayment_request_document_missing` read `document_id is null` only) — the ADR's own
+  remedy for a dead job (withdraw, request again) left the alert behind — and its letter was still drawn by a pending
+  job and offered next to « demande retirée le … ». Now: `private.repayment_request_job` returns `withdrawn_on` (the
+  request's row held: a withdrawal never interleaves) and the job draws nothing for a request withdrawn before its
+  letter; `private.repayment_request_document_done` refuses one (« … the request was withdrawn before its letter was
+  drawn »); the nightly reads `document_id is null and withdrawn_at is null`. Its index
+  `advance_repayment_request_undrawn_idx` becomes partial on those two literal predicates `(organization_id,
+  created_at) where document_id is null and withdrawn_at is null`: the 4-column plain index lost, under the planted
+  statistics, to `advance_repayment_request_number_uq` (the servicer's key analysed as unique: both priced at one row;
+  10,002 rows read, `test_repayment_request_reads_integration.py`); the partial one holds only the letters still to
+  draw, and its predicate is implied by the nightly's literal clauses whatever its parameters (not the class of a
+  parameter's filter that must imply it). The client space shows nothing more for such a request (no « Lettre en
+  préparation »), « Ce que le client doit au cabinet » « Lettre non produite : la demande a été retirée avant. »
+  (`requestLetterNote`); the nightly's help says what happens (« Après un échec, sa production n'est réessayée que
+  quelques fois : retirez la demande (« Retirer la demande ») et adressez-en une nouvelle ; si l'alerte revient pour la
+  nouvelle demande, prévenez le support. »: the queue archives a job after five attempts). `045b` c2; the integration
+  test `test_a_request_withdrawn_before_its_letter_is_drawn_gets_none` (nothing uploaded, no document).
+- **UI-1 (low; text fixed, and the command says it).** « Retirer la demande » told ops « l'avance pourra être reprise ou
+  demandée de nouveau » also when withdrawing a reminder leaves the first request live. The withdrawal returns
+  `still_requested_by` (the numbers of the other requests not withdrawn naming one of its open advances: items by
+  advance, each request by its key; the function gains `set enable_seqscan = off`); the notice after it says « La
+  demande DRA-… est retirée. La demande DRA-… nomme encore ses avances : elles restent demandées au client. » (the
+  page's `reste` parameter), and the sheet before it a sentence true either way. `045b` w2, vitest.
+- **TUI-5 (low; fixed).** « Ce que le client doit au cabinet » never offered a reminder: it excluded any advance a live
+  request named, however old. `requests.owesRequestCandidates` applies « Avances »'s rule (excluded only while the
+  last request is less than 30 days old) and labels the sheet « Relancer » when every advance offered was requested.
+  vitest.
+- **TUI-6 (low; tests added).** `045b` b ×2: a bank return's origin in full (the debit job's return: `bank_return`, the
+  return line's date, `returned_minor` null) and in part (25 000 of 40 000 linked by ops, every allocation reversed:
+  `returned_minor` « 25000 », `reversed_minor` « 40000 »). They pass on `f0a8da0` (a test gap, not a fault).
+- **CC-3 (low; a one-line guard).** `private.remittance_approval_refusal` had no `set enable_seqscan = off`: under the
+  scale files' statistics (draft_run_id at two values) its first statement counted the run's items by a sequential
+  scan of the whole queue (10,003 rows of `private.remittance_pending` per approval). Redefined with the setting (the
+  count by `remittance_pending_run_idx`: `draft_run_id = $1` implies its predicate; the in-flight runs' sum by
+  `remittance_run_client_idx`); 7d-2 copies it with the setting (plan's redefinition table). The reads test plants the
+  queue (10,000 rows over two draft runs) and bounds the approval's re-check on it: 3 rows.
+
+**Deviations from the plan (round 1).** The letter's opening and amount column are the template's only when every row
+was paid out (TUI-2: the template contradicts [check 1]'s « never « versé » for an N = 0 run »); the in-flight wording
+follows the dates (TUI-1); a label's DRA designates also a withdrawn request's advances (the client names the debt; a
+withdrawn request's advance still open is still owed); `advance_repayment_request_undrawn_idx` is partial (literal
+predicates); the withdrawal returns `still_requested_by`. The plan's §5.2.5, §5.2.7, §5.3 notes and its redefinition
+table record them (`transfer_line_check`: 7e-3 now copies 7c-2's body; `client_payment_line`,
+`book_client_payment_line`, `remitted_cover_release` and `remittance_approval_refusal`'s setting likewise).
+
+### Assertions whose expected value changed (round 1, house rule R3)
+
+- `033`–`045`: none (byte for byte unchanged). `045b` (this slice's own, unmerged): none changed; nine added (v ×3, l,
+  c2, w2, h2, b ×2: 32 tests).
+- Worker `test_repayment_request.py` (this slice's own): `every_origin_payload` gains the in-flight row dated after the
+  payout (TUI-1), so `test_the_mandate_column` reads eleven « MAND-MARTIN-2026 » (ten), `test_a_multi_mandate_…` 15 rows
+  (14) and 3 030,00 € (2 990,00 €); its opening is « … réglées … » (TUI-2: the request holds set-off and netted rows —
+  the old expectation was the fault); `GOLDEN_EVERY_ORIGIN_PDF` regenerated. `GOLDEN_REQUEST_PDF` and the text snapshot
+  unchanged.
+- vitest `settlements.test.ts` (7c-1's source guard of the dedicated line): the call it requires now passes the
+  requests the label names, `designationSentence(facts.named_documents, preview, docs, facts.named_requests ?? [])`.
+  `requests.test.ts`: `withdrawEffect(number)` unchanged; eleven cases added.
+
+### Mutants (round 1)
+
+SQL: the function replaced on the stack with the change, `045b` run, the original restored (`mutant.py`). Worker and
+web: the source changed, the named tests run, the file restored. Every mutant killed.
+
+| Mutant | Killed by |
+|---|---|
+| `transfer_line_check` without `advance_requested` | `045b` v (double payout, switch off and on) |
+| `remitted_cover_release` without `advance_requested` | `045b` v (release, switch on) |
+| `book_client_payment_line` ignoring the label's requests | `045b` l |
+| `client_payment_line` naming no advance | `045b` l |
+| `label_requested_advances` of any client | `045b` l (another client's DRA) |
+| `label_requested_advances` without the issue-date bound | `045b` l (a line of the day before) |
+| the nightly alerting a withdrawn request | `045b` c2 |
+| the document of a request withdrawn before its letter recorded | `045b` c2 |
+| the job never saying withdrawn | `045b` c2 |
+| worker: the job drawing a request withdrawn before its letter | `test_a_request_withdrawn_before_its_letter_is_drawn_gets_none` |
+| `still_requested_by` always empty | `045b` w2 |
+| the request's every column readable | `045b` h2 |
+| `remittance_approval_refusal` without `enable_seqscan = off` | `test_repayment_request_reads_integration.py` (10,003 rows of the queue) |
+| the letter: in flight always first; « versé » always; the « Versé » head always | `test_repayment_request.py` (each) |
+| web: no 30-day reminder; « Relancer » never; a withdrawn undrawn request « en préparation »; `still_requested_by` ignored; a DRA's advance unnamed | `requests.test.ts` (each) |
+
+### Suites (round 1)
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 48 files, **3,047 tests, PASS** in 578 s — `045b`'s
+  32 among them; `033` byte for byte; `034`–`045` unchanged.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 198 files) clean; unit pytest **1,156 passed, 5
+  xfailed**; the non-scale integration tests in CI's order, right after that `supabase test db` without a reset:
+  **281 passed** in 755 s.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic (95,997 of 100,000), **0**
+  wrong.
+- Scale, each command right after `supabase db reset` with CI's logging settings (docs/benchmarks/remittances.md
+  « M2c-7c-2 review fixes, round 1 »): the scale job's nine files in one call as `ci.yml` runs them
+  (`RECEIPT_FILES=5000`) **15 passed** in 1,334.1 s (the 500-member lot's booking 1.59 s, the 500 approval jobs
+  129.0 s, the 50,000-line run prepared in 12.0 s, re-run prepared and approved in 30.3 s, its nightly checks 5.4 s);
+  CI's `scale-payouts` command **6 passed** in 1,299.2 s (21.7 min; the 5,050 approval jobs 533.9 s). No Paris date
+  change fell in them. The stale-statistics test's measurements are there too.
+- `database.types.ts` regenerated from the final schema: identical to the committed file (no public signature
+  changed: the new return keys are inside `jsonb`).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **30 files, 608 tests** passed.
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61 passed** in 6.1 min. No screenshot changes text in this round (the dedicated line's E2E label names an invoice: its sentence unchanged); every diff showed only dates, ids or order and was reverted.
+- Then `supabase db reset`, the stack left running.
+
+### Left open (low), with its default
+
+- **No backstop nightly alert for a request naming a reversed advance** (MONEY-1's « in both cases »): both paths
+  that reverse an advance's entry refuse while a request names it, under the lock the request takes, and a request is
+  refused `not_open` for an advance already reversed; an alert would read every request not withdrawn each night for
+  a state the refusals rule out. Default: none; 7f's hardening may add it with the other invariants.
+- **A request made, then the payout that had paid its collection comes back** (found while fixing MONEY-1; plan §10
+  Q23, new): the letter said true (« versé le … »), the advance stays open and owed again once a later run pays the
+  re-queued sum, but meanwhile the client does not hold it; the request stays live. Default (Q23 a): keep; ops may
+  withdraw it. Alternative b: refuse that return's booking while a request names an advance of its run, as
+  `advance_requested`.
+- **The withdrawal notice can overstate what stays requested** (round 1's verifier, `requests.ts` `withdrawEffect`).
+  A reminder names A (also in an earlier live request) and B (only in the reminder); withdrawing the reminder returns
+  `still_requested_by = [the earlier request]` and the notice says « … nomme encore ses avances : elles restent
+  demandées », which is false for B (B may be requested anew, and is). Staff page only; no amount, date or legal
+  mention. Default: 7f's hardening returns which advances stay requested and words the notice per advance.
+- Founder questions Q6, Q20, Q22 and Q23 (plan §10): defaults built, open. The cancellation after download stays off.
+- Everything M2c-7c-2's « Left open » lists stays open (the dead job's re-queue: ops withdraw and request again — now
+  with no alert left behind).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

@@ -124,6 +124,10 @@ export const TRANSFER_LINE_REFUSAL: Record<string, string> = {
   // advance_settled (support), never booked here
   advance_in_flight:
     "L'avance liée à ce virement est en cours de récupération par un reversement validé : ce retour ne peut pas être comptabilisé tant que ce reversement n'est pas débité ; après son débit, prévenez le support.",
+  // M2c-7c-2 review round 1 (MONEY-1): booked, the return would cancel an advance a letter still asks the client to
+  // repay (a sum it did not keep)
+  advance_requested:
+    "L'avance liée à ce virement fait l'objet d'une demande de remboursement adressée au client : retirez d'abord cette demande (« Avances », « Retirer la demande »), puis comptabilisez ce retour ; l'avance sera alors annulée.",
   // the two SQLSTATEs (§3.10): the lock wait, re-raised with the step it waited at (critic2 CSO2-6), and the statement
   // timeout (critic CSO-3)
   busy: "Cette ligne ou un virement qu'elle concerne est en cours de traitement : réessayez dans un instant.",

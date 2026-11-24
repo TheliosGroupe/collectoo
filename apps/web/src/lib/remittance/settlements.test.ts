@@ -552,7 +552,8 @@ describe("(review round 1, TUI-2, CC-1, TUI-3) the sheets record on the current 
   });
   it("the dedicated line: its sentences from SQL's plan, the note from the command's result", () => {
     const line = src("app/backoffice/encaissements/debits/client-payment-line.tsx");
-    expect(line).toContain("designationSentence(facts.named_documents, preview, docs)");
+    // (M2c-7c-2 review round 1, MONEY-2) with the repayment requests the label names, from SQL too
+    expect(line).toContain("designationSentence(facts.named_documents, preview, docs, facts.named_requests ?? [])");
     expect(line).toContain("dedicatedLineEffect(preview, facts.currency)");
     expect(line).not.toContain("{DEDICATED_LINE_EFFECT}");
     expect(line).toContain("resultEffect(result, docs)");
