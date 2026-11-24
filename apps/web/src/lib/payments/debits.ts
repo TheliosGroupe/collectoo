@@ -1365,6 +1365,11 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Recouvrements d'avances passées en perte ≠ compte 7714",
     help: "Les remboursements d'avances passées en perte enregistrés ne valent pas le solde du compte 7714 du cabinet.",
   },
+  // M2c-7c-2 (plan §5.2.8): a repayment request's letter not drawn
+  repayment_request_document_missing: {
+    label: "Lettre de demande de remboursement non produite",
+    help: "Une demande de remboursement d'avance a été enregistrée il y a plus d'une heure et sa lettre (PDF) n'est pas encore produite : le client ne la trouve pas dans son espace et elle ne peut pas être imprimée. Après un échec, sa production n'est réessayée que quelques fois : retirez la demande (« Retirer la demande ») et adressez-en une nouvelle ; si l'alerte revient pour la nouvelle demande, prévenez le support.",
+  },
   top_up_pending: {
     label: "Approvisionnement attendu",
     help: "Un approvisionnement du compte dédié depuis le compte propre du cabinet a été demandé il y a plus d'un jour ouvré et son crédit n'apparaît pas encore sur les relevés importés. Vérifiez le virement depuis le compte propre : il couvre ce que le cabinet doit au compte dédié (frais bancaires, avances).",

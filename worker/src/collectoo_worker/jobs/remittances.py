@@ -24,6 +24,9 @@
 - `transfer_file {file_id, token}` (M2c-6a): the pain.001 file `generate_transfer_file` reserved,
   written, checked, uploaded and recorded (`jobs.transfer_files`); a data error fails the file and
   its transfers wait for the next one.
+- `repayment_request {request_id}` (M2c-7c-2): the letter « Demande de remboursement d'avance »
+  drawn from its frozen payload, stored and recorded once (`jobs.repayment_requests`); a failure is
+  retried by the queue, and the nightly alerts a letter not drawn one hour after its request.
 
 No model, no LLM: every amount comes from the ledger and the engines (CLAUDE.md).
 """
@@ -42,7 +45,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Jsonb
 
-from collectoo_worker.jobs import transfer_files
+from collectoo_worker.jobs import repayment_requests, transfer_files
 from collectoo_worker.jobs.remittance_documents import run_documents
 from collectoo_worker.remittance.calendar import Calendar, CalendarHorizonError, conservative
 from collectoo_worker.remittance.commission import (
@@ -126,6 +129,10 @@ def make_handler(storage: Storage | None = None) -> Any:
             if storage is None:
                 raise RuntimeError("the transfer file job needs the storage")
             transfer_files.run_transfer_file(conn, storage, payload)
+        elif kind == "repayment_request":
+            if storage is None:
+                raise RuntimeError("the repayment request job needs the storage")
+            repayment_requests.run_repayment_request(conn, storage, payload)
         else:
             raise ValueError(f"unknown remittances job type: {kind!r}")
 
@@ -296,9 +303,17 @@ def _open_advances(conn: Conn, client: str, currency: str) -> list[OpenAdvanceRo
     """M2c-7b (plan §4.2): the client's open advances in a currency, the claw-back's documents:
     each one's mandate, cause, birth, recording and open part. Review round 2 (SWEEP-7B-STATS):
     read by private.client_open_advances (client_advance_client_idx, enable_seqscan off) — this
-    session's own statement, generic under stale statistics, scanned the whole table."""
+    session's own statement, generic under stale statistics, scanned the whole table.
+    (M2c-7c-2, plan §5.2.7 [critic] M7-MONEY-3) and those a repayment request not withdrawn names
+    (private.client_requested_advances, keyed): requested, never set off."""
+    requested = {
+        str(a)
+        for (a,) in conn.execute(
+            "select advance_id from private.client_requested_advances(%s, %s)", (client, currency)
+        ).fetchall()
+    }
     return [
-        OpenAdvanceRow(str(a), _uuid(m), cause, born, created, int(o))
+        OpenAdvanceRow(str(a), _uuid(m), cause, born, created, int(o), str(a) in requested)
         for a, m, cause, born, created, o in conn.execute(
             """select advance_id, mandate_id, cause, born_on, created_at, open_minor
                from private.client_open_advances(%s, %s)""",

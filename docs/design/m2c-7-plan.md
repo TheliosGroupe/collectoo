@@ -67,7 +67,7 @@ M2c-7 slice is copied from that slice's merged body (« from 7x »), never from 
 | `private.ledger_check_now` (7a; [check 1] 7d-2 from 7a) | `20261111090000_remittance_funds.sql:1335` | 10 |
 | `private.document_open` (7b) | `20261112090000_remittance_runs.sql:1715` | 18 |
 | `private.approve_remittance_run` (7a) | `20261114090000_manual_credit_note.sql:786` | 161 |
-| `private.remittance_approval_refusal` (7c-2; 7d-2 from 7c-2) | `20261114090000_manual_credit_note.sql:688` | 94 |
+| `private.remittance_approval_refusal` (7c-2; 7d-2 from 7c-2 — [7c-2 review round 1] with its `set enable_seqscan = off`) | `20261114090000_manual_credit_note.sql:688` | 94 |
 | `private.remittance_payout_blockers` (7d-1) | `20261115090000_transfers_files.sql:900` | 31 |
 | `private.run_remittance_checks` (7a) | `20261115090000_transfers_files.sql:3710` | 11 |
 | `private.remittance_statement_build` (7d-3) | `20261117120000_statement_suivi.sql:363` | 447 |
@@ -80,7 +80,8 @@ M2c-7 slice is copied from that slice's merged body (« from 7x »), never from 
 | `private.payout_court_appointed`, `public.record_client_status_event`, `public.propose_payout_account` (7d-1) | `20261111120000_identities_terms.sql:1062`, `:1076`, `:742` | 11, 55, 77 |
 | [check 1] `private.bank_line_refined_kind` (7e-2): the eight-argument classifier, and the six-argument wrapper the draft named | `20261116090000_debit_bookings.sql:5384`; wrapper `:5419` | 32; 12 |
 | [critic] `public.remittance_run_payout` (7a) | `20261118100000_switch_on_prerequisites_2.sql:4380` | 128 |
-| [critic] `private.transfer_line_check` (7b; [check 1] [check 2] 7e-3 from 7b) | `20261119090000_switch_on_prerequisites_3.sql:739` | 801 |
+| [critic] `private.transfer_line_check` (7b; [7c-2 review round 1] 7c-2 from 7b: `advance_requested`; [check 1] [check 2] 7e-3 from 7c-2) | `20261119090000_switch_on_prerequisites_3.sql:739` | 801 |
+| [7c-2 review round 1] `private.remitted_cover_release` (7c-2: `advance_requested`), `public.client_payment_line` and `public.book_client_payment_line` (7c-2 from 7c-1: a label naming a `DRA-…`; 7e-3 from 7c-2) | `20261122090000_remitted_reversals_covered.sql:614`; `20261124090000_client_payments.sql:1722`, `:2046` | 64; 39, 97 |
 | [critic] `public.register_client_document`, `private.can_read_client_document(_object)` (7b, 7c-1, 7c-2, 7d-1) | `20261111120000_identities_terms.sql:579`, `:543`, `:555` | 50, —, — |
 | [critic] `private.can_read_remittance_document_object` and its policies (7c-2) | `20261113090000_remittance_documents.sql:1552`, `:1565`, `:1569` | — |
 | [check 1] `private.remittance_line_insert_guard` (7b only: the advance mandate check, §4.1.9; 7d-2 needs no change, §6.2.11) | `20261113090000_remittance_documents.sql:1860` | 34 |
@@ -1223,6 +1224,10 @@ or rejected account never attributes a credit) (`ambiguous_client` when several 
 the plan, designation and refusals as 5.2.4; a label naming document numbers of that client (« FC-2026-000004 »,
 « DRA-2026-000001 ») counts as the client's designation ([critic] L16). [critic] F7 locks, in the funds pass's order:
 `payments:<org>`, then the line `for no key update`, the line re-read (neither linked nor booked), then `remit:<org>`.
+[7c-2 review round 1, MONEY-2] 7c-1 named invoices only (« FC-… »); 7c-2 redefines `client_payment_line` and this
+command for the `DRA-…` numbers: a label naming one of the client's repayment requests (issued on or before the line's
+day; the number as a whole token) designates that request's open advances, in the letter's order, without other
+evidence (`private.label_requested_advances`).
 Posts `client_payment_dedicated` (+5120[b] P / −4679 P ‖ +4689 P / −4111 / −4112 / −419[c] surplus / −7714 recoveries
 ‖ VAT pair; `source_type 'bank_transaction'`; key `cpayd:<line>`; date the line's booking date), one
 `bank_line_booking` (kind `client_payment`, the entry, amount P, method `ops`, the motif), the line's review deleted
@@ -1231,7 +1236,8 @@ The servicer's share on 4679 grows by P: the next file's sweep takes it (S = −
 and a surplus credit is then refunded from the own account (5.2.6). The posting guard
 (`private.bank_line_booking_guard`, `20261121090000:641`) already pre-shapes this kind (inventory PAY-1): a test proves
 it; any gap is a redefinition named in the PR. [check 1] [check 2] 7e-3 redefines this command (from 7c-1's body)
-for a line of kind `label_reference` (§7.3, exit (b)), and the guard's `client_payment` arm with it (its kind list is
+for a line of kind `label_reference` (§7.3, exit (b)) — [7c-2 review round 1] from 7c-2's body —, and the guard's
+`client_payment` arm with it (its kind list is
 `client_transfer_in` only, `20261121090000:784-787`); in 7c-1 the line must be `client_transfer_in`.
 
 **5.2.6 `public.record_client_refund(p_idempotency_key text, p_document_id uuid, p_amount_text text, p_paid_on date,
@@ -1271,6 +1277,14 @@ requested after the draft was prepared. This covers terms that gain a claw-back 
 admins and ops managers at aal2: sets `withdrawn_at` once (« repayment request refused: already_withdrawn »); its
 advances can then be clawed back again or requested anew. No automatic expiry (founder Q20). The client space shows
 « Demande retirée le JJ/MM/AAAA ».
+**[7c-2 review round 1]** (MONEY-1) A return that would reverse an advance a request not withdrawn names — the double
+payout's return (`transfer_line_check`) or the release of an unplanned payout's covers (`remitted_cover_release`) — is
+refused `advance_requested` until the request is withdrawn, as `advance_in_flight`. (UI-1) The withdrawal returns
+`still_requested_by` (the other requests not withdrawn naming one of its advances: a reminder withdrawn leaves the
+first). (NIGHT-1) A request withdrawn before its letter was drawn gets no letter (`repayment_request_job` says it,
+`repayment_request_document_done` refuses) and no `repayment_request_document_missing`. (TUI-3) The motif and the
+staff's ids are not readable over the API (column privileges). (CC-3) `remittance_approval_refusal` gains `set
+enable_seqscan = off`: its count of the run's items read the whole queue under the scale files' statistics.
 **`private.repayment_request_document_done(p_request_id uuid, p_document_id uuid, p_pdf_sha256 text, p_renderer
 text)`** (worker; the stored bytes hash to it) sets the document once.
 
@@ -1333,6 +1347,11 @@ Veuillez agréer, Madame, Monsieur, l'expression de nos salutations distinguées
 - `payout_overrun` « Reversement RV-… versé le … pour un montant supérieur à ce qui vous restait dû »;
 - `double_payout` « Virement exécuté par notre banque le … en plus du reversement RV-… (ou : hors de tout reversement),
   au-delà de ce qui vous restait dû » — no RMT reference.
+- [7c-2 review round 1] TUI-1: « alors que le reversement RV-… était en cours » only when the reversal is not dated after
+  the payout's bank date (the debit's booking date precedes a « Désimputer » when its statement is imported the next
+  day: then « versé le … (relevé …), puis … le … »). TUI-2: the template's opening (« … vous ont été versées … ») and
+  column « Versé » contradict [check 1]'s « never « versé » for an N = 0 run » for a set-off or netted row: such a
+  request says « … vous ont été réglées … » and « Montant »; a request of payouts only keeps the template's words.
 No legal article, no interest, no penalty, no due date, no formal notice (founder Q6; OQ-95 asks counsel: 1999 or
 1302-1, 1302-3 al. 2, 1352-7, 2001). Delivery: the client space (« Documents ») and post by ops (no email before M4/M7).
 
@@ -2765,6 +2784,19 @@ listed beside them.
 21. [check 1] **Compte d'un majeur protégé dont le RIB n'a pas exactement le nom du client** (« M. », ordre des
     noms…). a : accepté seulement avec une explication écrite, vérifiée par le second administrateur ; jamais le
     compte du tuteur ou du curateur. b : refusé tant que le nom n'est pas identique.
+22. (7c-2; ADR-0014 « M2c-7a review fixes » Left open, « M2c-7c-2 ») **Encaissement payé en partie par un virement
+    hors reversement, le reste dans un reversement dont le virement est revenu.** Le relevé de ce reversement a pu
+    régler une partie par compensation (la commission d'un reversement annulé, reprise par la facture suivante) :
+    l'encaissement est alors en entier chez le client, mais Collectoo le lit « non reçu » en entier (la compensation
+    est faite par reversement, pas par encaissement). a (défaut) : ne pas répartir la compensation d'un reversement sur
+    ses encaissements ; l'avance d'un tel encaissement n'est pas demandée (refus `payout_not_received`) tant que la
+    somme revenue n'est pas versée de nouveau. b : répartir la compensation au prorata des encaissements du reversement,
+    pour lire « reçu » la part compensée (et demander l'avance plus tôt).
+23. (7c-2 review round 1; ADR-0014 « M2c-7c-2 review fixes ») **Demande de remboursement adressée, puis le virement du
+    reversement qui avait versé l'encaissement revient.** La lettre disait vrai (« versé le … ») ; le client n'a plus la
+    somme jusqu'à ce qu'un reversement suivant la lui verse de nouveau (l'avance reste due ensuite). a (défaut) : la
+    demande reste en cours ; l'équipe peut la retirer. b : refuser de comptabiliser ce retour tant que la demande n'est
+    pas retirée (comme le retour qui annulerait l'avance : refus `advance_requested`).
 
 The 6b-2 plan's questions 1–16 and the 6b-3 plan's 1–6 keep their defaults; 6b-2 Q13 is answered by Q15 and §5.2.5
 (a client's repayment credit is a client payment) and by D10 (S23). Known limit with no question: an unplanned return

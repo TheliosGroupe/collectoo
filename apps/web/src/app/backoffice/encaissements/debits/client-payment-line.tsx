@@ -5,6 +5,7 @@ import { type FormEvent, useRef, useState } from "react";
 import { ErrorNote, InfoNote, buttonClass, inlineButtonClass, inputClass } from "@/components/ui";
 import { money } from "@/lib/payments/statements";
 import {
+  NO_DESIGNATION,
   type OpenDocuments,
   type PaymentPreview,
   clientPaymentRefusal,
@@ -27,6 +28,8 @@ type LineFacts = {
   booking_date: string;
   label: string | null;
   named_documents: string[];
+  /** (M2c-7c-2 review round 1, MONEY-2) the client's repayment requests its label names (DRA-…) */
+  named_requests?: { number: string; advance_ids: string[] }[];
   refusal: string | null;
   preview: unknown;
 };
@@ -39,7 +42,8 @@ function frenchDay(iso: string): string {
 /**
  * M2c-7c-1 (plan §5.2.5, §5.5): « Règlement d'une facture ou d'une avance du cabinet » on a credit of the dedicated account
  * from a client's confirmed payout IBAN — the client paying the servicer there. The client, what its label designates
- * ([critic] L16: the invoices whose number it names) and the payment's effect are SQL's (public.client_payment_line,
+ * ([critic] L16: the invoices whose number it names; (M2c-7c-2 review round 1, MONEY-2) the advances of the repayment
+ * requests whose DRA-… number it names) and the payment's effect are SQL's (public.client_payment_line,
  * public.client_open_documents), read on open; public.book_client_payment_line books it (« Règlement du client »): the
  * servicer's share on 4679 grows by it and the next file sweeps it to the own account. The sheet stays open on its
  * result; the list reloads when it closes. (review round 1, TUI-3, TUI-7) What the label designates and where the money
@@ -110,7 +114,7 @@ export function ClientPaymentLine({ lineId }: { lineId: string }) {
     setDone(result ? `Règlement du client enregistré : ${resultEffect(result, docs)}.` : "Règlement du client enregistré.");
   }
 
-  const named = facts && docs ? designationSentence(facts.named_documents, preview, docs) : null;
+  const named = facts && docs ? designationSentence(facts.named_documents, preview, docs, facts.named_requests ?? []) : null;
   const effect =
     preview && docs
       ? preview.refusal
@@ -146,9 +150,7 @@ export function ClientPaymentLine({ lineId }: { lineId: string }) {
             {named ? (
               <p className="text-sm">{named}</p>
             ) : facts && facts.client_id ? (
-              <p className="text-sm">
-                Le libellé ne désigne aucune facture : ordre par défaut (factures échues, avances, autres factures).
-              </p>
+              <p className="text-sm">{NO_DESIGNATION}</p>
             ) : null}
             {effect ? (
               <p className="text-sm" data-testid="client-payment-effect">

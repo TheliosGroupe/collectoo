@@ -33,6 +33,7 @@ import {
   setInsuranceClause,
   setMandateTerms,
 } from "../../actions";
+import { parseClientRepaymentRequests, stillRequestedParam } from "@/lib/remittance/requests";
 import { parseOpenDocuments } from "@/lib/remittance/settlements";
 import { ClientOwes } from "./client-owes";
 import { ClientDocumentUpload } from "./document-upload";
@@ -118,7 +119,7 @@ export default async function ClientRemittancePage({
   const isAdmin = role === "admin";
   const isMoney = isAdmin || role === "ops_manager";
 
-  const [identityRes, gapsRes, readinessRes, payoutRes, docsRes, eventsRes, mandatesRes, claimTypesRes, owesRes] = await Promise.all([
+  const [identityRes, gapsRes, readinessRes, payoutRes, docsRes, eventsRes, mandatesRes, claimTypesRes, owesRes, requestsRes] = await Promise.all([
     // the capital as text: integer minor units never pass through a JS number (review M2c-2)
     supabase.from("billing_identity").select(BILLING_IDENTITY_COLUMNS).eq("organization_id", id).maybeSingle(),
     supabase.rpc("billing_identity_gaps", { p_organization_id: id }),
@@ -145,8 +146,13 @@ export default async function ClientRemittancePage({
     isMoney
       ? supabase.rpc("client_open_documents", { p_client_organization_id: id, p_currency: "EUR" })
       : Promise.resolve({ data: null }),
+    // M2c-7c-2 (plan §5.5): its repayment requests (money staff)
+    isMoney
+      ? supabase.rpc("client_repayment_requests", { p_client_organization_id: id })
+      : Promise.resolve({ data: null }),
   ]);
   const owes = parseOpenDocuments(owesRes.data);
+  const requests = parseClientRepaymentRequests(requestsRes.data)?.rows ?? [];
   const identity = identityRes.data as unknown as BillingIdentity | null;
   const gaps = (gapsRes.data ?? []) as string[];
   const readiness = (readinessRes.data ?? []) as { portfolio_id: string; portfolio_name: string; blockers: string[] }[];
@@ -258,6 +264,10 @@ export default async function ClientRemittancePage({
           servicerId={client.servicer_organization_id}
           clientName={client.legal_name}
           refunded={query.remboursement === "1"}
+          requests={requests}
+          requested={typeof query.demande === "string" ? query.demande : null}
+          withdrawn={typeof query.retrait === "string" ? query.retrait : null}
+          stillRequested={stillRequestedParam(query.reste)}
         />
       ) : null}
 

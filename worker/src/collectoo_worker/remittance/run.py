@@ -140,7 +140,9 @@ class OpenAdvanceRow:
     """An advance of the servicer to the client still open (M2c-7b, plan §4.2): its mandate (None:
     never clawed back, founder Q2), its cause, when its claim was born (its entry's date,
     private.advance_born_on), when it was recorded (the order of those born the same day) and its
-    open part (private.advance_open)."""
+    open part (private.advance_open). (M2c-7c-2, plan §5.2.7 [critic] M7-MONEY-3) `requested`: a
+    repayment request not withdrawn names it (private.client_requested_advances) — the client is
+    asked to repay it, so no run sets it off."""
 
     id: str
     mandate_id: str | None
@@ -148,6 +150,7 @@ class OpenAdvanceRow:
     born_on: date
     created_at: datetime
     open_minor: int
+    requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -683,7 +686,9 @@ def _advances(facts: Facts) -> list[OpenDocument]:
     recorded), each on its own mandate (NO_MANDATE: never clawed back): the plan takes them after
     the invoices, under that mandate's claw-back clause only, from that mandate's money (its advance
     items count in it: `priced`); one born before the client's proceeding is not set off (L622-7 I,
-    as an invoice issued before it; 7d changes the rule)."""
+    as an invoice issued before it; 7d changes the rule); (M2c-7c-2 [critic] M7-MONEY-3) one a
+    repayment request names is never set off — the client is asked to repay it (the approval
+    re-checks it: documents_changed)."""
     opening = facts.proceeding_opened_on
     rows = sorted(facts.open_advances, key=lambda a: (a.born_on, a.created_at, a.id))
     return [
@@ -693,7 +698,7 @@ def _advances(facts: Facts) -> list[OpenDocument]:
             (a.born_on.toordinal(), n),
             a.open_minor,
             0,
-            opening is None or a.born_on >= opening,
+            (opening is None or a.born_on >= opening) and not a.requested,
         )
         for n, a in enumerate(rows)
         if a.open_minor > 0
@@ -748,7 +753,12 @@ def _header(  # noqa: PLR0913, PLR0917 - the draft's totals and identity
         },
         "open": sorted((d.id, d.open_minor, d.pending_vat_minor) for d in facts.open_documents),
         # M2c-7b: the open advances the plan read (the approval re-reads each settled one)
-        "advances": sorted((a.id, a.open_minor, a.mandate_id or "") for a in facts.open_advances),
+        # (M2c-7c-2) and whether a request names one (only then: the hashes of drafts that name
+        # none are unchanged)
+        "advances": sorted(
+            (a.id, a.open_minor, a.mandate_id or "", *(("requested",) if a.requested else ()))
+            for a in facts.open_advances
+        ),
         # (review round 1) and what the run's unplanned payouts paid of its items
         "unplanned_paid": sorted(
             (a.booking_entry_id, a.entry_id, a.amount_minor) for a in facts.unplanned_paid

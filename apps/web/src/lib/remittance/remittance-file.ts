@@ -2,8 +2,14 @@ import { createHash } from "node:crypto";
 import type { createClient } from "@/lib/supabase/server";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-/** The documents M2c-5 draws: a run's statement (PDF, CSV) and the PDF of an invoice or credit note. */
-export const REMITTANCE_KINDS = new Set(["remittance_statement_pdf", "remittance_statement_csv", "commission_invoice_pdf"]);
+/** The documents M2c-5 draws: a run's statement (PDF, CSV) and the PDF of an invoice or credit note; (M2c-7c-2) the
+ *  letter « Demande de remboursement d'avance » (advance_repayment_request_pdf). */
+export const REMITTANCE_KINDS = new Set([
+  "remittance_statement_pdf",
+  "remittance_statement_csv",
+  "commission_invoice_pdf",
+  "advance_repayment_request_pdf",
+]);
 
 type Supabase = Awaited<ReturnType<typeof createClient>>;
 

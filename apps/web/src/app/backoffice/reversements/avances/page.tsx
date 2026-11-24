@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { RepaymentRequestSheet, WithdrawRequestSheet } from "@/components/settlements/repayment-request-sheet";
 import { InfoNote, WidePage } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { money } from "@/lib/payments/statements";
@@ -8,7 +9,9 @@ import {
   advanceRecovered,
   advanceStatus,
   parseClientAdvances,
+  requestCandidates,
 } from "@/lib/remittance/advances";
+import { requestedOn, stillRequestedParam, withdrawEffect } from "@/lib/remittance/requests";
 import { WriteOffSheet } from "./write-off-sheet";
 
 const PAGE = 50;
@@ -20,6 +23,9 @@ const PAGE = 50;
  * remittances), a repayment request (no clause, or no single mandate: 7c sends it), or the run in flight that takes it
  * back. Open ones by default (« Toutes » lists the others), newest first, a page at a time. « Passer en perte » for an
  * administrator. Money staff at aal2; the database decides (public.client_advances).
+ *
+ * M2c-7c-2 (plan §5.5): « Demander le remboursement » on an advance no claw-back clause recovers (the sheet ticks that
+ * client's other advances on the page; its total from SQL), the column « Demandé le », « Retirer la demande ».
  */
 export default async function AdvancesPage({
   searchParams,
@@ -46,6 +52,7 @@ export default async function AdvancesPage({
   }
   const after =
     typeof q.apres === "string" && typeof q.id === "string" ? { created_at: q.apres, id: q.id } : null;
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(new Date());
   const { data, error } = await supabase.rpc("client_advances", {
     p_organization_id: staff.organization_id,
     p_open_only: !all,
@@ -73,6 +80,19 @@ export default async function AdvancesPage({
         par une demande de remboursement — jamais déduites quand elles sont nées avant l&apos;ouverture d&apos;une
         procédure collective du client. Un administrateur peut en passer une en perte.
       </p>
+      {typeof q.demande === "string" ? (
+        <div role="status" aria-live="polite" data-testid="request-notice">
+          <InfoNote>
+            Demande {q.demande} adressée au client : la lettre est déposée dans son espace client ; imprimez-la pour un
+            envoi postal.
+          </InfoNote>
+        </div>
+      ) : null}
+      {typeof q.retrait === "string" ? (
+        <div role="status" aria-live="polite" data-testid="withdraw-notice">
+          <InfoNote>{withdrawEffect(q.retrait, stillRequestedParam(q.reste))}</InfoNote>
+        </div>
+      ) : null}
       {typeof q.perte === "string" ? (
         <div role="status" aria-live="polite" data-testid="write-off-notice">
           <InfoNote>Avance passée en perte : Collectoo ne réclame plus cette somme au client.</InfoNote>
@@ -107,6 +127,7 @@ export default async function AdvancesPage({
                 <th className="py-2 pr-3 text-right font-medium">Récupéré</th>
                 <th className="py-2 pr-3 text-right font-medium">Reste</th>
                 <th className="py-2 pr-3 font-medium">Récupération</th>
+                <th className="py-2 pr-3 font-medium">Demandé le</th>
                 {read.can_write_off ? <th className="py-2 font-medium" /> : null}
               </tr>
             </thead>
@@ -151,6 +172,27 @@ export default async function AdvancesPage({
                     {advanceStatus(r)}
                     {r.mandate_reference ? (
                       <span className="block text-xs text-zinc-600 dark:text-zinc-400">mandat {r.mandate_reference}</span>
+                    ) : null}
+                  </td>
+                  {/* M2c-7c-2 (plan §5.5): the request that names it, its withdrawal; or the request itself */}
+                  <td className="col-span-2 flex flex-col items-start gap-1 sm:table-cell sm:py-2 sm:pr-3">
+                    {/* on a phone the cell has no column head: « — » alone would say nothing, so it shows only wider */}
+                    <span data-testid="advance-requested" className={r.request ? undefined : "hidden sm:inline"}>
+                      {requestedOn(r.request ?? null) ?? "—"}
+                    </span>
+                    {r.request ? (
+                      <WithdrawRequestSheet requestId={r.request.request_id} number={r.request.number} back={view(all ? "toutes" : "ouvertes")} />
+                    ) : null}
+                    {requestCandidates(read.rows, r, today).length > 0 ? (
+                      <RepaymentRequestSheet
+                        clientId={r.client_id}
+                        clientName={r.client_name}
+                        currency={r.currency}
+                        candidates={requestCandidates(read.rows, r, today)}
+                        initial={[r.advance_id]}
+                        label={r.request ? "Relancer" : "Demander le remboursement"}
+                        back={view(all ? "toutes" : "ouvertes")}
+                      />
                     ) : null}
                   </td>
                   {read.can_write_off ? (

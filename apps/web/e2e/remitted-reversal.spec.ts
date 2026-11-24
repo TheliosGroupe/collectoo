@@ -417,4 +417,82 @@ test("« Désimputer » a collection already remitted: the servicer's advance, t
     .select("cause, amount_minor")
     .eq("client_organization_id", tenant.clientId);
   expect(still).toEqual([{ cause: "remitted_reversal", amount_minor: 50000 }]);
+
+  // M2c-7c-2 (plan §5.5): « Demander le remboursement » of what is left (no claw-back clause): the sheet's total from
+  // SQL and what it does; then « Demandé le » on the row, and the letter in the client space (drawn by the worker). The
+  // letter names the servicer's own account to repay to: set in its billing settings (Paramètres › Facturation)
+  const { data: own, error: ownError } = await adminClient()
+    .from("bank_account")
+    .insert({
+      organization_id: tenant.servicerId,
+      purpose: "own",
+      iban: ibanFr(616163),
+      currency: "EUR",
+      label: "Compte propre",
+      opened_on: "2026-01-01",
+    })
+    .select("id")
+    .single();
+  if (ownError) throw ownError;
+  const { error: settingsError } = await adminClient()
+    .from("servicer_billing_settings")
+    .upsert({ organization_id: tenant.servicerId, own_bank_account_id: own.id }, { onConflict: "organization_id" });
+  if (settingsError) throw settingsError;
+  await page.goto("/backoffice/reversements/avances");
+  const toRequest = page.getByTestId("advance-row").filter({ hasText: tenant.clientName });
+  await toRequest.getByTestId("request-open").click();
+  const requestSheet = page.getByTestId("request-sheet");
+  await expect(requestSheet.getByTestId("request-total")).toHaveText(/Total demandé : 300,00\s€/);
+  await expect(requestSheet.getByTestId("request-effect")).toHaveText(
+    /Une demande de remboursement de 300,00\s€ est adressée au client\. La lettre est déposée dans l'espace du client ; imprimez-la pour un envoi postal\./,
+  );
+  await reviewShot(page, testInfo, "m2c7-demande-remboursement");
+  await requestSheet.getByTestId("request-confirm").click();
+  await expect(page.getByTestId("request-notice")).toContainText(/Demande DRA-\d{4}-\d{6} adressée au client/, {
+    timeout: 15_000,
+  });
+  const requestedRow = page.getByTestId("advance-row").filter({ hasText: tenant.clientName });
+  await expect(requestedRow.getByTestId("advance-requested")).toHaveText(
+    new RegExp(`Demandé le ${parisToday().split("-").reverse().join("/")} \\(DRA-\\d{4}-\\d{6}\\)`),
+  );
+  // nothing moved: the advance's open part is unchanged, no new settlement
+  await expect(requestedRow.getByTestId("advance-open")).toHaveText(/300,00\s€/);
+  const { data: request } = await adminClient()
+    .from("advance_repayment_request")
+    .select("number, total_minor")
+    .eq("client_organization_id", tenant.clientId)
+    .single();
+  expect(request!.total_minor).toBe(30000);
+
+  // the client's administrator: its request in the client space, its letter to download (once the worker drew it)
+  const spaceContext = await browser.newContext({
+    baseURL: use.baseURL,
+    viewport: use.viewport,
+    userAgent: use.userAgent,
+    deviceScaleFactor: use.deviceScaleFactor,
+    isMobile: use.isMobile,
+    hasTouch: use.hasTouch,
+  });
+  const space = await spaceContext.newPage();
+  await loginWithEmailCode(space, await createMember(tenant.clientId, "client_admin"));
+  await expect(space).toHaveURL(/\/client$/);
+  await space.goto("/client/reversements");
+  const requests = space.getByTestId("client-requests");
+  await expect(async () => {
+    await space.reload();
+    await expect(requests.getByTestId("request-pdf")).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 60_000 });
+  await expect(requests.getByTestId("request-row")).toContainText(
+    new RegExp(`Demande de remboursement d'avances ${request!.number} du \\d{2}/\\d{2}/\\d{4} : 300,00\\s€`),
+  );
+  await expect(space.getByTestId("client-advances")).toContainText(
+    new RegExp(`: 300,00\\s€ — demande de remboursement ${request!.number} adressée le \\d{2}/\\d{2}/\\d{4}\\.`),
+  );
+  await reviewShot(space, testInfo, "m2c7-client-documents");
+  const href = await requests.getByTestId("request-pdf").getAttribute("href");
+  const pdf = await space.request.get(href!);
+  expect(pdf.status()).toBe(200);
+  expect(pdf.headers()["content-type"]).toBe("application/pdf");
+  expect((await pdf.body()).subarray(0, 4).toString()).toBe("%PDF");
+  await spaceContext.close();
 });

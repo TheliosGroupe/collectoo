@@ -749,3 +749,52 @@ def test_what_an_unplanned_payout_paid_of_a_line_is_no_mandate_s_money() -> None
               unplanned_paid=[UnplannedPaid("U-old", "E1", 82_000)])
     )  # fmt: skip
     assert {m.mandate_id: m.gross_minor for m in other.plan.mandates}["M"] == 100_000
+
+
+# -- M2c-7c-2 (plan §5.2.7 [critic] M7-MONEY-3, L7): a requested advance is never clawed back too -
+
+
+def test_a_requested_advance_is_never_taken_back_under_the_claw_back_clause() -> None:
+    """A1 is named by a repayment request not withdrawn: the client is asked to repay it, so no run
+    sets it off — under the claw-back clause RV-3 takes nothing (N 282 000), as without the clause;
+    its item still counts in its mandate's money."""
+    requested = [replace(_open("A1", "M", date(2026, 11, 12), 200_000), requested=True)]
+    d = prepare_run(_rv3(open_advances=requested))
+    assert (d.header["net"], d.header["advances"]) == ("282000", "0")
+    assert not [s for s in d.plan.settles if s.kind == "advance"]
+    assert {ln.item.entry_id: ln.mandate_id for ln in d.lines}["A1"] == "M"
+    # not requested (withdrawn): taken as before (N 82 000, D 218 000)
+    again = prepare_run(_rv3())
+    assert (again.header["net"], again.header["advances"]) == ("82000", "200000")
+
+
+def test_only_the_requested_advance_is_left_to_its_request() -> None:
+    """Two advances of M: the older requested, the newer not — the run takes the newer only."""
+    older = replace(
+        OpenAdvanceRow(
+            "A0", "M", "payout_overrun", date(2026, 11, 3), _at(date(2026, 11, 3)), 50_000
+        ),
+        requested=True,
+    )
+    d = prepare_run(_rv3(open_advances=[_open("A1", "M", date(2026, 11, 12), 200_000), older]))
+    taken = [(s.ref, s.amount_minor) for s in d.plan.settles if s.kind == "advance"]
+    assert taken == [("A1", 200_000)]
+
+
+def test_the_inputs_hash_names_whether_an_advance_is_requested() -> None:
+    """A request made, or withdrawn, since the prepare changes the hash (the approval also re-checks
+    it: documents_changed)."""
+    base = _rv3()
+    h = prepare_run(base).header["inputs_hash"]
+    asked = [replace(base.open_advances[0], requested=True)]
+    assert prepare_run(replace(base, open_advances=asked)).header["inputs_hash"] != h
+    # without a claw-back clause no run takes A1, requested or not: the plans are the same, the
+    # hash still differs — it names the request itself, not only what the request changed
+    plain = _rv3(terms={"M": [TERMS]})
+    d0 = prepare_run(plain)
+    d1 = prepare_run(
+        replace(plain, open_advances=[replace(plain.open_advances[0], requested=True)])
+    )
+    assert (d0.header["net"], d0.header["advances"]) == (d1.header["net"], d1.header["advances"])
+    assert d0.plan == d1.plan
+    assert d0.header["inputs_hash"] != d1.header["inputs_hash"]
