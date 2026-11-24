@@ -151,8 +151,9 @@ export const DEBIT_REVIEW: Record<string, string> = {
     "Crédit venant du compte propre sans approvisionnement demandé : approvisionnement du cabinet, ou paiement d'un débiteur reçu par le cabinet et relayé sur ce compte (il devient alors un paiement à affecter). Ne le classez avec une explication que s'il n'est ni l'un ni l'autre.",
   top_up_differs:
     "Crédit portant la référence d'un approvisionnement, mais d'un autre montant ou sur un autre compte : vérifiez dans la banque.",
+  // M2c-7c-1 (plan §5.5): « Règlement d'une facture ou d'une avance du cabinet » books it
   client_credit:
-    "Virement reçu du compte de reversement d'un client : règlement d'une facture du cabinet (à classer, comptabilisé avec les factures à venir), ou paiement d'un débiteur que le client relaie (il devient alors un paiement à affecter).",
+    "Virement reçu du compte de reversement d'un client : règlement d'une facture ou d'une avance du cabinet (« Règlement du client »), ou paiement d'un débiteur que le client relaie (il devient alors un paiement à affecter).",
   // M2c-6b-2c (plan §4.3): the screen books it
   // review 6b-2c (pages-4): a sweep of its amount in flight is booked as that sweep's debit (the sheet's « Débit de la
   // quote-part du cabinet »; the command refuses « Virement au compte propre » then: sweep_in_flight_matches)
@@ -1049,7 +1050,8 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   // review M2c-5b (legal#0, F2): what a credit note owes the client beyond what its invoice still owed, still unsettled
   credit_refund_owed: {
     label: "Avoir à rembourser au client depuis plus de 30 jours",
-    help: "Un avoir (le plus souvent manuel) dépasse ce que sa facture devait encore : le surplus est dû au client. Un reversement suivant le règle avec son virement, mais aucun ne l'a réglé depuis 30 jours. Préparez le reversement du client si des encaissements l'attendent ; sinon, le remboursement par virement depuis le compte propre n'est pas encore disponible dans l'outil : prévenez le support.",
+    // M2c-7c-1 (plan §5.5): the refund from the own account is recorded on the credit note
+    help: "Un avoir (le plus souvent manuel) dépasse ce que sa facture devait encore : le surplus est dû au client. Un reversement suivant le règle avec son virement, mais aucun ne l'a réglé depuis 30 jours. Préparez le reversement du client si des encaissements l'attendent ; sinon, remboursez-le par virement depuis le compte propre et enregistrez-le (« Enregistrer le remboursement » sur l'avoir).",
   },
   invoice_numbering: {
     label: "Numérotation des factures discontinue",
@@ -1348,6 +1350,20 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   advance_open: {
     label: "Avance du cabinet non récupérée depuis plus de 30 jours",
     help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
+  },
+  // M2c-7c-1 (plan §5.2.8, §5.0 (7)): what the servicer owes a client back (419) and the recoveries of advances passed
+  // as a loss (7714)
+  client_credit_owed: {
+    label: "Somme à rembourser au client ou à rendre à sa procédure",
+    help: "Un client a versé au cabinet plus que ce qui était ouvert (trop-perçu), ou a payé alors que sa procédure collective court (une créance antérieure à son ouverture, ou plus que ce qui était ouvert) : la somme est inscrite au compte 419, à rendre. Un trop-perçu est signalé après 15 jours : remboursez-le au client par virement depuis le compte propre et enregistrez-le (« Enregistrer le remboursement », page du client). Une somme mise de côté pour la procédure est signalée tout de suite : elle est à rendre à la procédure (administrateur, mandataire ou liquidateur), pas au client ; à qui et quand se décide avec l'avocat (OQ-98).",
+  },
+  client_credit_ledger: {
+    label: "Sommes dues aux clients ≠ compte 419",
+    help: "Pour ce client, les sommes que le cabinet lui doit encore (trop-perçus, sommes mises de côté) ne valent pas le solde de son compte 419.",
+  },
+  written_off_recovery_ledger: {
+    label: "Recouvrements d'avances passées en perte ≠ compte 7714",
+    help: "Les remboursements d'avances passées en perte enregistrés ne valent pas le solde du compte 7714 du cabinet.",
   },
   top_up_pending: {
     label: "Approvisionnement attendu",

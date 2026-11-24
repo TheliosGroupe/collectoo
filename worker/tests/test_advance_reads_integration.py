@@ -323,6 +323,10 @@ def test_the_advance_reads_stay_keyed_whatever_the_statistics(lot: dict[str, Any
         today = "private.paris_today()"
         reads.call("client_opening_on", 1, None, f"select private.client_opening_on(%s, {today})",
                    client)  # fmt: skip
+        # (M2c-7c-1 review round 2) the opening 7c-1's client payments read: a proceeding_opened or
+        # a liquidation (plan §6.2.2), by the same index
+        reads.call("client_opening_date", 1, None,
+                   f"select private.client_opening_date(%s, {today})", client)  # fmt: skip
         reads.call("document_open", 1, None, "select private.document_open(%s)", adv)
         reads.call("advance_row", 1, None, "select private.advance_row(%s)", adv)
         # the pages (the API's session)
@@ -364,6 +368,40 @@ def test_the_advance_reads_stay_keyed_whatever_the_statistics(lot: dict[str, Any
             str(uuid.uuid4()), adv, str(open_minor), doc,
         )  # fmt: skip
         assert int(out["open_after_minor"]) == int(open_minor) - 100, out
+        # (M2c-7c-1 review round 1, MONEY-1) the loss to recover as « Ce que le client doit au
+        # cabinet » and a client's payment read it: what is left to recover, and whether the client
+        # may repay it on the day (private.document_client_payable, per loss); (review round 4)
+        # the day the loss was passed, its write-off settlements read by the advance's key — a
+        # payment of an earlier day is no recovery
+        owes = reads.call("client_open_documents (a loss to recover)", 2, ops,
+                          "select public.client_open_documents(%s, 'EUR')", client)  # fmt: skip
+        assert [(w["id"], w["available_minor"], w["payable"]) for w in owes["written_off"]] == [
+            (adv, "100", True)
+        ], owes
+        recoveries = reads.call(
+            "client_payment_recoveries", 1, None,
+            """select private.client_payment_recoveries(%s, 'EUR', array[%s]::uuid[],
+                                                         private.paris_today())""",
+            client, adv,
+        )  # fmt: skip
+        paris_day = one(conn, "select private.paris_today()::text")
+        assert recoveries == [
+            {
+                "id": adv,
+                "available": "100",
+                "payable": True,
+                "written_off_on": paris_day,
+                "open_on": True,
+            }
+        ], recoveries
+        preview = reads.call(
+            "client_payment_preview (a recovery)", 2, ops,
+            "select public.client_payment_preview(%s, 'EUR', '1,00', null, array[%s]::uuid[])",
+            client, adv,
+        )  # fmt: skip
+        assert [(r["document_kind"], r["amount_minor"]) for r in preview["rows"]] == [
+            ("written_off", "100")
+        ], preview
         # transfer_line_check's advance_in_flight rule: a PL/pgSQL statement by its variable,
         # here prepared (generic) under the function's settings
         conn.execute("set local enable_seqscan = off")
@@ -433,4 +471,50 @@ def test_the_claw_back_s_prepare_and_approval_read_by_key_whatever_the_statistic
         conn.execute("reset role")
         status = one(conn, "select status from public.remittance_run where id = %s", (draft,))
         assert status == "approved", status
+    reads.check()
+
+
+def _plant_servicer_advances(conn: psycopg.Connection[Any], org: str) -> None:
+    """(M2c-7c-1, ADR-0014 7b round 2 « Left open ») PLANTED advances of the lot's own servicer to
+    two other clients (no trigger, no foreign key: they name no entry of ours), client_advance
+    analysed with its client column's n_distinct pinned at 2 and its servicer column's at -1 (the
+    statistics of a table analysed while each servicer had a few advances): the servicer's index,
+    priced at one row, then returns every one of them; the client's index a handful."""
+    conn.execute("set local session_replication_role = replica")
+    conn.execute("alter table public.client_advance disable trigger client_advance_guard")
+    conn.execute(
+        """insert into public.client_advance (organization_id, client_organization_id, currency,
+             amount_minor, cause, cause_entry_id, entry_id)
+           select %s, k.client[1 + g %% 2], 'EUR', 100, 'double_payout', gen_random_uuid(),
+                  gen_random_uuid()
+           from (select (array[gen_random_uuid(), gen_random_uuid()]) client) k,
+                generate_series(1, %s) g""",
+        (org, PLANTED),
+    )
+    conn.execute("alter table public.client_advance enable always trigger client_advance_guard")
+    conn.execute("set local session_replication_role = origin")
+    conn.execute(
+        "alter table public.client_advance alter column organization_id set (n_distinct = -1)"
+    )
+    conn.execute(
+        "alter table public.client_advance alter column client_organization_id set (n_distinct = 2)"
+    )
+    conn.execute("analyze public.client_advance")
+
+
+def test_the_client_space_reads_its_client_s_advances_by_its_key(lot: dict[str, Any]) -> None:
+    """(M2c-7c-1, the 7b round 2 verifier's item) public.client_space_advances read its client's
+    advances unfenced, the client and the servicer together: with PLANTED of the servicer's
+    advances to other clients and generic plans, one client's space read them all through the
+    servicer's index (10,005 rows on 7b's body). Read on client_advance_client_idx, the servicer
+    checked outside the fence (as private.client_open_advances): a few rows per advance."""
+    tenant = lot["tenant"]
+    with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
+        reads = _Reads(conn)
+        a0 = _take_back(conn, lot)[0]
+        _plant_servicer_advances(conn, lot["org"])
+        space = reads.call("client_space_advances (the servicer's other clients planted)", 1,
+                           tenant["staff"], "select public.client_space_advances(%s)",
+                           a0["client"])  # fmt: skip
+        assert [r["advance_id"] for r in space["rows"]] == [a0["advance"]], space
     reads.check()

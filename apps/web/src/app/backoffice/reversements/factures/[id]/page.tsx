@@ -14,7 +14,9 @@ import {
   reasonCategoryLabel,
   refusalText,
 } from "@/lib/remittance/credit-notes";
+import { ClientRefundSheet } from "@/components/settlements/client-refund-sheet";
 import { frenchDate } from "@/lib/remittance/runs";
+import { parseOpenDocuments } from "@/lib/remittance/settlements";
 import { CreditNotePanel } from "./credit-note-panel";
 
 const REASON_LABEL: Record<string, string> = {
@@ -35,8 +37,15 @@ const REASON_LABEL: Record<string, string> = {
  * (`public.commission_invoice_files`, tests-ui#2); a credit note's own page names the invoices it rectifies, with what it
  * took off each, a manual one's category and reason, and goes back to the invoice when no run issued it (tests-ui#3).
  */
-export default async function CommissionInvoicePage({ params }: { params: Promise<{ id: string }> }) {
+export default async function CommissionInvoicePage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { id } = await params;
+  const query = await searchParams;
   if (!/^[0-9a-f-]{36}$/.test(id)) notFound();
   const { supabase } = await staffSession();
   // M2c-6b-3a: the cancellation-after-download switch, for the texts worded both ways
@@ -69,6 +78,36 @@ export default async function CommissionInvoicePage({ params }: { params: Promis
   // `reason_text`: one read, money staff at aal2)
   const { corrected, manual } = creditNoteFacts(d);
 
+  // M2c-7c-1 (plan §5.2.6, §5.5): a credit note on a paid invoice owes the client back what it took off beyond what the
+  // invoice still owed (its open part, SQL's); « Enregistrer le remboursement » records the servicer's transfer, and the
+  // refunds recorded are listed. The in-flight run and the own account are client_open_documents' (money staff).
+  type RefundDone = { id: string; amount: string; settled_on: string; run_id: string | null };
+  let refund: { servicerId: string; today: string; ownAccount: boolean; inFlight: string | null; done: RefundDone[] } | null =
+    null;
+  if (!invoice) {
+    const [orgRes, owesRes, doneRes] = await Promise.all([
+      supabase.from("organization").select("servicer_organization_id").eq("id", d.client_id).maybeSingle(),
+      supabase.rpc("client_open_documents", { p_client_organization_id: d.client_id, p_currency: "EUR" }),
+      supabase
+        .from("commission_settlement")
+        .select("id, amount:amount_minor::text, settled_on, run_id")
+        .eq("document_id", d.id)
+        .eq("document_kind", "credit_note")
+        .eq("kind", "refund")
+        .order("settled_on"),
+    ]);
+    const owes = parseOpenDocuments(owesRes.data);
+    if (orgRes.data?.servicer_organization_id && owes) {
+      refund = {
+        servicerId: orgRes.data.servicer_organization_id,
+        today: owes.today,
+        ownAccount: owes.own_account,
+        inFlight: owes.refunds_owed.find((f) => f.id === d.id)?.in_flight_run?.number ?? null,
+        done: (doneRes.data ?? []) as unknown as RefundDone[],
+      };
+    }
+  }
+
   return (
     <WidePage title={title} back={creditNoteBack(d, invoice ? [] : corrected)}>
       <div className="flex flex-wrap gap-2">
@@ -95,6 +134,53 @@ export default async function CommissionInvoicePage({ params }: { params: Promis
             : []),
         ]}
       />
+
+      {refund ? (
+        <Section title="Remboursement au client" testId="credit-note-refund">
+          {query.remboursement === "1" ? (
+            <div role="status" aria-live="polite" className="mb-2" data-testid="client-refund-done">
+              <InfoNote>Remboursement enregistré.</InfoNote>
+            </div>
+          ) : null}
+          {refund.done.length > 0 ? (
+            <ul className="mb-2 flex flex-col gap-1 text-sm">
+              {refund.done.map((r) => (
+                <li key={r.id}>
+                  Remboursé : {money(r.amount, "EUR")} le {frenchDate(r.settled_on)}
+                  {r.run_id ? " (avec un reversement)" : " (virement du cabinet)"}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {BigInt(d.open_ttc) > BigInt(0) ? (
+            <div className="flex flex-col gap-2">
+              <p className="text-sm">
+                {money(d.open_ttc, "EUR")} à rembourser au client (avec son prochain reversement, sinon par virement du
+                cabinet).
+              </p>
+              {refund.inFlight ? (
+                <InfoNote>Remboursé avec le reversement {refund.inFlight} en cours : attendez son débit.</InfoNote>
+              ) : refund.ownAccount ? (
+                <ClientRefundSheet
+                  servicerId={refund.servicerId}
+                  clientId={d.client_id}
+                  documentId={d.id}
+                  kind="credit_note"
+                  title={title}
+                  owedMinor={d.open_ttc}
+                  currency="EUR"
+                  today={refund.today}
+                  earliest={d.issue_date}
+                />
+              ) : (
+                <InfoNote>Aucun compte propre n&apos;est enregistré (Paramètres › Facturation).</InfoNote>
+              )}
+            </div>
+          ) : refund.done.length === 0 ? (
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">Cet avoir ne doit rien au client.</p>
+          ) : null}
+        </Section>
+      ) : null}
 
       {invoice ? (
         <Section title="Émettre un avoir" testId="credit-note">

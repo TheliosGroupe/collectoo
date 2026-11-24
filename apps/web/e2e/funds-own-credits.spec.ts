@@ -10,6 +10,7 @@ import {
 import { camt053Lines, ibanFr, type Credit, type Debit } from "./support/camt";
 import { loginAsStaff } from "./support/session";
 import { reviewShot } from "./screenshot";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2c-1 review: our own transfers and credits on « Débits et retours ». A statement of the dedicated account carries a
@@ -100,9 +101,7 @@ test("our own transfers offer no payment links; a debtor's payment relayed by th
     ),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
-    timeout: 60_000,
-  });
+  await expectOwnImport(page);
 
   await page.goto("/backoffice/encaissements/debits");
   const rows = page.getByTestId("debit-row");
@@ -205,9 +204,7 @@ test("a debtor's payment relayed by the client, from its confirmed payout IBAN, 
     ),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
-    timeout: 60_000,
-  });
+  await expectOwnImport(page);
 
   // never taken for a debtor's payment automatically: the line waits in « À classer »
   await page.goto("/backoffice/encaissements/debits");
@@ -327,9 +324,7 @@ test("a credit carrying our SWP or RMT id, unflagged, is neither a top-up nor a 
     ),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
-    timeout: 60_000,
-  });
+  await expectOwnImport(page);
 
   await page.goto("/backoffice/encaissements/debits");
   const rows = page.getByTestId("debit-row");
@@ -391,7 +386,7 @@ test("a credit carrying our SWP or RMT id from an unknown IBAN is a return, neve
     buffer: Buffer.from(camt053Lines(bankIban, "2026-11-09", credits, [], BigInt(0)), "utf-8"),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
 
   // no payment to assign
   await page.goto("/backoffice/encaissements/a-traiter");

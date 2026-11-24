@@ -165,10 +165,33 @@ def paid_file(
     return f, next(iter(ids.values()))
 
 
-def drain() -> None:
+def _drain_queue() -> None:
     consumer = QueueConsumer(DB, "remittances", make_handler(storage()), on_dead=record_dead_job)
     while consumer.poll_once():
         pass
+
+
+def drain() -> None:
+    """The remittances queue drained — then (M2c-7c-1, carried low 4) the runs approve() queued with
+    their default execution date that a change of the Paris date alone sent back to draft are
+    validated again, as ops would the next morning (revalidate_after_date_change), and drained."""
+    _drain_queue()
+    while _VALIDATED:
+        groups: dict[tuple[str, date], tuple[dict[str, Any], list[str]]] = {}
+        for run, (tenant, since) in _VALIDATED.items():
+            groups.setdefault((str(tenant["servicer"]), since), (tenant, []))[1].append(run)
+        _VALIDATED.clear()
+        today = paris_today()
+        again = False
+        for (_servicer, since), (tenant, runs) in groups.items():
+            if since == today:
+                continue  # no date change: every refusal is the caller's to see
+            for run in revalidate_after_date_change(tenant, runs, since):
+                _VALIDATED[run] = (tenant, today)
+                again = True
+        if not again:
+            break
+        _drain_queue()
 
 
 def staff(tenant: dict[str, Any], sql: str, *params: Any, user: str | None = None) -> Any:
@@ -199,9 +222,16 @@ def run_row(run: str) -> dict[str, Any]:
         return {d.name: v for d, v in zip(cur.description, row, strict=True)}
 
 
+# (M2c-7c-1, carried low 4) the runs approve() queued with their default execution date, each with
+# its tenant and the Paris day « Valider » was issued: drain() validates again those a date change
+# alone sent back to draft. A run approved for an explicit day is the test's: never re-validated.
+_VALIDATED: dict[str, tuple[dict[str, Any], date]] = {}
+
+
 def approve(
     tenant: dict[str, Any], *runs: str, day: date | None = None, late_reason: str | None = None
 ) -> dict[str, Any]:
+    since = paris_today()
     items = []
     for r in runs:
         row = run_row(r)
@@ -216,7 +246,55 @@ def approve(
         day,
         late_reason,
     )
+    if day is None:
+        for x in result["results"]:
+            if x["status"] == "queued":
+                _VALIDATED[str(x["run_id"])] = (tenant, since)
     return dict(result)
+
+
+# (M2c-7c-1, ADR-0014 « M2c-7c-1 », carried low 4) The approval job's refusals a change of the Paris
+# date alone causes: « Valider » shortly before midnight (Paris) asks for the next business day by
+# default, and a job run after midnight finds that day is today with no cut-off recorded
+# (execution_date_after_cutoff), or already passed (execution_date_passed).
+DATE_CHANGE_REFUSALS = ("execution_date_after_cutoff", "execution_date_passed")
+
+
+def date_change_refusals(runs: list[str], since: date) -> list[tuple[str, str, str]]:
+    """The runs of `runs` a Paris date change sent back to draft: refused by the approval job with
+    one of DATE_CHANGE_REFUSALS, on a Paris day after `since` (the day « Valider » was issued),
+    while today is no longer `since`. Their (id, inputs_hash, net) as « Valider » sends them. Any
+    other refusal is never returned: the caller's own assertions see it."""
+    with psycopg.connect(DB) as conn:
+        if one(conn, "select private.paris_today()") == since:
+            return []
+        rows = conn.execute(
+            """select r.id::text, r.inputs_hash, r.net_minor::text from public.remittance_run r
+               where r.id = any(%s::uuid[]) and r.status = 'draft' and r.job is null
+                 and r.last_failure ->> 'step' = 'approve'
+                 and r.last_failure ->> 'code' = any(%s::text[])
+                 and ((r.last_failure ->> 'at')::timestamptz at time zone 'Europe/Paris')::date > %s
+               order by r.id""",
+            (runs, list(DATE_CHANGE_REFUSALS), since),
+        ).fetchall()
+    return [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
+
+
+def revalidate_after_date_change(tenant: dict[str, Any], runs: list[str], since: date) -> list[str]:
+    """What ops do the next morning: each run a date change sent back to draft
+    (date_change_refusals) validated again with a fresh « Valider » (its default execution date,
+    200 runs a command). The runs re-validated; the caller drains the approval jobs again."""
+    rows = date_change_refusals(runs, since)
+    for k in range(0, len(rows), 200):
+        items = [{"run_id": r, "inputs_hash": h, "net_text": t} for r, h, t in rows[k : k + 200]]
+        out = staff(
+            tenant,
+            "select public.approve_remittance_runs(%s, %s)",
+            str(uuid.uuid4()),
+            json.dumps(items),
+        )
+        assert {x["status"] for x in out["results"]} == {"queued"}, out
+    return [r for r, _h, _t in rows]
 
 
 def documents(run: str) -> list[dict[str, Any]]:

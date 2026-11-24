@@ -34,7 +34,9 @@ from remittance_helpers import (
     book_payout,
     confirm_payout,
     drain,
+    paris_today,
     recent_business_day,
+    revalidate_after_date_change,
     run_row,
     staff,
 )
@@ -106,6 +108,7 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
         {"run_id": run, "inputs_hash": draft["inputs_hash"], "net_text": str(draft["net_minor"])}
     ]
     approving = time.monotonic()
+    since = paris_today()
     queued = staff(
         tenant,
         "select public.approve_remittance_runs(%s, %s)",
@@ -115,6 +118,9 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
     commanded = time.monotonic()
     assert queued["results"][0]["status"] == "queued", queued
     drain()  # the approval job, then the documents job it queues (M2c-5)
+    # (M2c-7c-1) refused for a Paris date change alone (midnight during the job): « Valider » again
+    if revalidate_after_date_change(tenant, [run], since):
+        drain()
     approved = time.monotonic()
     done = run_row(run)
     assert done["status"] == "approved", done["last_failure"]
@@ -244,11 +250,14 @@ def test_a_run_of_50k_lines(  # noqa: PLR0915 - one scenario, its timings printe
             "net_text": str(redrafted["net_minor"]),
         }
     ]
+    since = paris_today()
     queued = staff(
         tenant, "select public.approve_remittance_runs(%s, %s)", str(uuid.uuid4()), json.dumps(item)
     )
     assert queued["results"][0]["status"] == "queued", queued
     drain()  # the approval job, then the documents job
+    if revalidate_after_date_change(tenant, [rerun], since):  # (M2c-7c-1) a date change alone
+        drain()
     redone = time.monotonic()
     assert run_row(rerun)["status"] == "approved"
     booking = time.monotonic()

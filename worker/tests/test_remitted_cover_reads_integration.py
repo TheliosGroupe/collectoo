@@ -272,6 +272,27 @@ def _single_mandate(mandates: list[str | None]) -> str | None:
     return mandates[0] if len(held) == 1 and None not in held else None
 
 
+def _second_line(conn: psycopg.Connection[Any], run: str, mandate: str | None) -> None:
+    """(M2c-7c-1, ADR-0014 7a CI round « Left open ») A second line in a booked run of the lot, on
+    `mandate` (another member's) or on none, after the run's own: written as _plant writes its
+    lines (no trigger, no foreign key: the line names no entry of ours), in `conn`'s transaction."""
+    conn.execute("set local session_replication_role = replica")
+    conn.execute("alter table public.remittance_line disable trigger remittance_line_insert_guard")
+    conn.execute(
+        """insert into public.remittance_line (run_id, line_no, organization_id,
+             client_organization_id, currency, ledger_entry_id, kind, mandate_id, effective_date,
+             posted_at, amount_minor, commission_state)
+           select r.id, 99, r.organization_id, r.client_organization_id, r.currency,
+                  gen_random_uuid(), 'allocation', %s, private.paris_today(), now(), 100, 'none'
+           from public.remittance_run r where r.id = %s""",
+        (mandate, run),
+    )
+    conn.execute(
+        "alter table public.remittance_line enable always trigger remittance_line_insert_guard"
+    )
+    conn.execute("set local session_replication_role = origin")
+
+
 def test_a_lot_debited_twice_reads_each_advances_run_by_key(lot: dict[str, Any]) -> None:
     """The bank debits the lot's PmtInf twice (the cancellation switch off): the first line books
     the lot's payouts, the second's options propose each member as an unplanned payout of its
@@ -279,13 +300,30 @@ def test_a_lot_debited_twice_reads_each_advances_run_by_key(lot: dict[str, Any])
     (private.transfer_line_post, [critic] F10) is the single mandate of its transfer's run's
     lines, read once per part — before the fix, under these statistics, by a sequential scan of
     remittance_line per member (transfer_line_post had no enable_seqscan off: every planted line
-    once per member). Each advance still gets the mandate its run's lines hold."""
+    once per member). Each advance still gets the mandate its run's lines hold.
+
+    (M2c-7c-1, the 7a CI round's « Left open ») One member's run then holds a second line on
+    another member's mandate, and another's a line on no mandate: those two advances are on no
+    mandate (several mandates; a line without one), the others keep their run's — the two
+    mutants of the mandate expression, « count(q.mandate_id) = count(*) » dropped and
+    « count(distinct q.mandate_id) = 1 » dropped, each give one of those two the run's first
+    line's mandate."""
     with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
         _plant(conn)
         conn.execute("set role postgres")
         first = _insert_whole_line(conn, lot, "first.xml")
         conn.execute("reset role")
         paid, _read, _scans = _book(conn, lot, first)
+        runs = conn.execute(
+            """select r.id::text, (select l.mandate_id::text from public.remittance_line l
+                                   where l.run_id = r.id order by l.line_no limit 1)
+               from public.remittance_run r where r.id = any(%s::uuid[]) order by r.id""",
+            (lot["paid"],),
+        ).fetchall()
+        (several, other_mandate), (no_mandate, _m) = runs[0], runs[1]
+        assert runs[2][1] is not None and runs[2][1] != other_mandate, runs
+        _second_line(conn, several, runs[2][1])  # a second mandate in the run
+        _second_line(conn, no_mandate, None)  # a line on no mandate
         conn.execute("set role postgres")
         second = _insert_whole_line(conn, lot, "second.xml")
         conn.execute("reset role")
@@ -293,7 +331,7 @@ def test_a_lot_debited_twice_reads_each_advances_run_by_key(lot: dict[str, Any])
         advances = conn.execute(
             """select a.transfer_id::text, a.mandate_id::text,
                       array(select q.mandate_id::text from public.remittance_line q
-                            where q.run_id = x.run_id order by q.line_no)
+                            where q.run_id = x.run_id order by q.line_no), x.run_id::text
                from public.client_advance a
                join public.bank_transfer x on x.id = a.transfer_id
                where a.bank_transaction_id = %s and a.cause = 'double_payout'""",
@@ -310,8 +348,14 @@ def test_a_lot_debited_twice_reads_each_advances_run_by_key(lot: dict[str, Any])
     assert all(int(b.get("advance_minor") or 0) > 0 for b in twice), twice
     assert scans == 0, scans
     assert read <= PER_MEMBER * LOT, read
-    # each advance on the single mandate its run's lines hold (one line, one mandate, per run here)
+    # each advance on the single mandate its run's lines hold; the run of two mandates and the run
+    # with a line on none: no mandate (7c-1)
     assert len(advances) == LOT, advances
-    for transfer, mandate, lines in advances:
+    for transfer, mandate, lines, run in advances:
+        if run in (several, no_mandate):
+            assert len(lines) == 2 and lines[0] is not None, (transfer, lines)
+            assert _single_mandate(lines) is None and mandate is None, (transfer, mandate, lines)
+            continue
         assert lines and _single_mandate(lines) is not None, (transfer, lines)
         assert mandate == _single_mandate(lines), (transfer, mandate, lines)
+    assert {run for *_x, run in advances} >= {several, no_mandate}

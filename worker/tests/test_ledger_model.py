@@ -308,6 +308,7 @@ def _l(book: Book, amount: int, *, bank: bool = False) -> Line:
             Book.SERVICER_REVENUE,
             Book.COMMISSION_RECEIVABLE,
             Book.CLIENT_ADVANCE_RECEIVABLE,
+            Book.CLIENT_CREDIT_OWED,
         )
         else None
     )
@@ -394,6 +395,81 @@ FUND_VALID: dict[EntryType, tuple[Line, ...]] = {
 CLIENT_TYPES = frozenset(
     t for t, lines in FUND_VALID.items() if any(x.client_organization_id is not None for x in lines)
 )
+# M2c-7c-1 (plan §5.0, [check 1] gap 2; pgTAP 045 j): the shapes that 419 (credits owed back) and
+# 7714 (recoveries of written-off advances) widen — every one is a client's (its payment names it)
+FUND_VALID_7C1: dict[str, tuple[EntryType, tuple[Line, ...]]] = {
+    "wholly a credit": (
+        EntryType.CLIENT_PAYMENT_OWN,
+        (_l(B.OWN_CASH, 500), _l(B.CLIENT_CREDIT_OWED, -500)),
+    ),
+    "a recovery alone": (
+        EntryType.CLIENT_PAYMENT_OWN,
+        (_l(B.OWN_CASH, 700), _l(B.WRITTEN_OFF_RECOVERED, -700)),
+    ),
+    "an advance and a recovery": (
+        EntryType.CLIENT_PAYMENT_OWN,
+        (
+            _l(B.OWN_CASH, 100000),
+            _l(B.CLIENT_ADVANCE_RECEIVABLE, -70000),
+            _l(B.WRITTEN_OFF_RECOVERED, -30000),
+        ),
+    ),
+    "all five": (
+        EntryType.CLIENT_PAYMENT_OWN,
+        (
+            _l(B.OWN_CASH, 1500),
+            _l(B.COMMISSION_RECEIVABLE, -600),
+            _l(B.CLIENT_ADVANCE_RECEIVABLE, -400),
+            _l(B.CLIENT_CREDIT_OWED, -300),
+            _l(B.WRITTEN_OFF_RECOVERED, -200),
+            _l(B.VAT_PENDING, 100),
+            _l(B.VAT_COLLECTED, -100),
+        ),
+    ),
+    "the dedicated account, a surplus": (
+        EntryType.CLIENT_PAYMENT_DEDICATED,
+        (
+            _l(B.CLIENT_MONEY_CASH, 36500),
+            _l(B.DUE_TO_SERVICER, -36500),
+            _l(B.DUE_FROM_CLIENT_FUNDS, 36500),
+            _l(B.COMMISSION_RECEIVABLE, -36000),
+            _l(B.CLIENT_CREDIT_OWED, -500),
+            _l(B.VAT_PENDING, 6000),
+            _l(B.VAT_COLLECTED, -6000),
+        ),
+    ),
+    "the refund of a credit": (
+        EntryType.CLIENT_REFUND_OWN,
+        (_l(B.CLIENT_CREDIT_OWED, 300), _l(B.OWN_CASH, -300)),
+    ),
+}
+# ... and the malformed ones (045 j: LG001)
+FUND_MALFORMED_7C1: dict[str, tuple[EntryType, tuple[Line, ...]]] = {
+    "a debit on 419": (
+        EntryType.CLIENT_PAYMENT_OWN,
+        (_l(B.OWN_CASH, 500), _l(B.CLIENT_CREDIT_OWED, 100), _l(B.COMMISSION_RECEIVABLE, -600)),
+    ),
+    "two 419 lines": (
+        EntryType.CLIENT_PAYMENT_OWN,
+        (_l(B.OWN_CASH, 500), _l(B.CLIENT_CREDIT_OWED, -200), _l(B.CLIENT_CREDIT_OWED, -300)),
+    ),
+    "a debit on 7714": (
+        EntryType.CLIENT_PAYMENT_OWN,
+        (_l(B.OWN_CASH, 500), _l(B.WRITTEN_OFF_RECOVERED, 100), _l(B.COMMISSION_RECEIVABLE, -600)),
+    ),
+    "two 7714 lines": (
+        EntryType.CLIENT_PAYMENT_OWN,
+        (_l(B.OWN_CASH, 500), _l(B.WRITTEN_OFF_RECOVERED, -200), _l(B.WRITTEN_OFF_RECOVERED, -300)),
+    ),
+    "a refund with +4111 and +419": (
+        EntryType.CLIENT_REFUND_OWN,
+        (_l(B.COMMISSION_RECEIVABLE, 100), _l(B.CLIENT_CREDIT_OWED, 200), _l(B.OWN_CASH, -300)),
+    ),
+    "a refund's sides swapped": (
+        EntryType.CLIENT_REFUND_OWN,
+        (_l(B.CLIENT_CREDIT_OWED, -300), _l(B.OWN_CASH, 300)),
+    ),
+}
 
 
 def _fund(entry_type: EntryType, lines: tuple[Line, ...], **kw: Any) -> EntryDraft:
@@ -463,6 +539,58 @@ def test_fund_entry_rules() -> None:
         Line(Book.OWN_CASH, 100, "EUR")
     with pytest.raises(InvalidRequestError):
         Line(Book.DUE_TO_SERVICER, 100, "EUR", client_organization_id=CLIENT)
+
+
+def test_the_two_books_of_7c1_and_who_may_post_them() -> None:
+    """419 per client and 7714 pooled, in the servicer's fund; only the two client payments post
+    both, the refund 419 (045 cat)."""
+    assert BOOKS[Book.CLIENT_CREDIT_OWED].account_number == "419"
+    assert BOOKS[Book.WRITTEN_OFF_RECOVERED].account_number == "7714"
+    assert {Book.CLIENT_CREDIT_OWED, Book.WRITTEN_OFF_RECOVERED} <= SERVICER_FUND_BOOKS
+    posting = {
+        b: {t for t, books in ALLOWED_BOOKS.items() if b in books}
+        for b in (Book.CLIENT_CREDIT_OWED, Book.WRITTEN_OFF_RECOVERED)
+    }
+    payments = {EntryType.CLIENT_PAYMENT_OWN, EntryType.CLIENT_PAYMENT_DEDICATED}
+    assert posting == {
+        Book.CLIENT_CREDIT_OWED: payments | {EntryType.CLIENT_REFUND_OWN},
+        Book.WRITTEN_OFF_RECOVERED: payments,
+    }
+    with pytest.raises(InvalidRequestError):  # 419 names its client
+        Line(Book.CLIENT_CREDIT_OWED, -100, "EUR")
+    with pytest.raises(InvalidRequestError):  # 7714 is pooled
+        Line(Book.WRITTEN_OFF_RECOVERED, -100, "EUR", client_organization_id=CLIENT)
+    with pytest.raises(ScopeError):  # a write-off never touches 419
+        _fund(
+            EntryType.ADVANCE_WRITE_OFF,
+            (_l(B.SERVICER_LOSSES, 300), _l(B.CLIENT_CREDIT_OWED, -300)),
+        ).validate_set()
+
+
+@pytest.mark.parametrize("case", sorted(FUND_VALID_7C1))
+def test_the_shapes_7c1_widens_validate(case: str) -> None:
+    """A payment wholly a credit or a recovery names its client although no other line does."""
+    entry_type, lines = FUND_VALID_7C1[case]
+    assert has_fund_shape(entry_type, lines)
+    _fund(entry_type, lines, client_organization_id=CLIENT).validate_set()
+    assert not has_fund_shape(entry_type, mirror(lines))
+
+
+@pytest.mark.parametrize("case", sorted(FUND_MALFORMED_7C1))
+def test_the_malformed_shapes_7c1_refuses(case: str) -> None:
+    entry_type, lines = FUND_MALFORMED_7C1[case]
+    assert not has_fund_shape(entry_type, lines)
+    with pytest.raises(UnbalancedEntryError):
+        _fund(entry_type, lines, client_organization_id=CLIENT).validate_set()
+
+
+@given(st.sampled_from(sorted(FUND_VALID_7C1)), st.integers(min_value=1, max_value=10**9))
+def test_the_shapes_7c1_widens_hold_at_any_scale(case: str, k: int) -> None:
+    entry_type, lines = FUND_VALID_7C1[case]
+    scaled = tuple(replace(x, amount_minor=x.amount_minor * k) for x in lines)
+    if any(abs(x.amount_minor) > 10**15 for x in scaled):
+        return
+    _fund(entry_type, scaled, client_organization_id=CLIENT).validate_set()
 
 
 @given(st.sampled_from(sorted(FUND_VALID)), st.integers(min_value=1, max_value=10**9))

@@ -6,6 +6,7 @@ import { adminClient, createMandate, createMember, createTenant, type Tenant } f
 import { camt053, ibanFr, type Credit } from "./support/camt";
 import { loginAsStaff, loginWithEmailCode } from "./support/session";
 import { reviewShot } from "./screenshot";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2b-5 (M2-10, M2-11): receipts and the client payment feed. An ops manager boards three B2B files (synthetic), imports
@@ -106,7 +107,7 @@ test("receipts on the payment page; the client reads its payment feed", async ({
     buffer: Buffer.from(camt053(BANK_IBAN, DAY, credits), "utf-8"),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
 
   // Diallo: allocated in part; its receipt is issued from the ledger, PDF and SHA-256
   const diallo = await paymentOf("QT-1");

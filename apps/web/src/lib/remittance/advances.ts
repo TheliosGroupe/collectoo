@@ -12,7 +12,8 @@ import { money } from "@/lib/payments/statements";
 export type AdvanceCause = "remitted_reversal" | "payout_overrun" | "double_payout";
 /** How SQL says an advance is recovered (private.advance_recovery_of): its mandate's claw-back clause, a request (no
  *  clause, or no single mandate), or (review round 1, M7B-MONEY-2) neither — born before the client's proceeding opened,
- *  it is never set off (the prepare's rule). */
+ *  it is never set off (the prepare's rule); (M2c-7c-1 review round 3) nor, without a claw-back clause, born before a
+ *  proceeding_opened or a liquidation recorded alone: the client may not pay it (L641-3 al. 1 → L622-7 I al. 1). */
 export type AdvanceRecovery = "clawback" | "request" | "request_no_mandate" | "barred_proceeding";
 
 export type AdvanceRow = {

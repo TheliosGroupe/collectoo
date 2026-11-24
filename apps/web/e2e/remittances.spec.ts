@@ -12,6 +12,7 @@ import {
 import { camt053, camt053Lines, ibanFr, type Credit } from "./support/camt";
 import { loginAsStaff, loginWithEmailCode } from "./support/session";
 import { reviewShot } from "./screenshot";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2c-4 « Reversements » (M2-14 core, M2-15 numbering; design §17.1–§17.2): an ops manager boards B2B files, imports
@@ -173,9 +174,7 @@ test("ops prepare, read and approve a client's remittance run", async ({
     ),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
-    timeout: 60_000,
-  });
+  await expectOwnImport(page);
 
   // « Reversements »: the client's collections wait; prepare its run now. The hourly schedule (xx:07) may have
   // prepared it first on a run day of the mandate (the 1st, the 16th): its draft is then the one read and approved.
@@ -531,9 +530,7 @@ test("ops prepare, read and approve a client's remittance run", async ({
     /\/backoffice\/encaissements\/releves\/[0-9a-f-]{36}/,
     { timeout: 30_000 },
   );
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
-    timeout: 60_000,
-  });
+  await expectOwnImport(page);
   await page.goto(runPage);
   await expect(async () => {
     await page.reload();
@@ -599,9 +596,7 @@ test("ops prepare, read and approve a client's remittance run", async ({
     /\/backoffice\/encaissements\/releves\/[0-9a-f-]{36}/,
     { timeout: 30_000 },
   );
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
-    timeout: 60_000,
-  });
+  await expectOwnImport(page);
   await page.goto("/backoffice/encaissements/debits");
   const debitedTwice = page
     .getByTestId("debit-row")
@@ -726,9 +721,7 @@ test("ops prepare, read and approve a client's remittance run", async ({
       /\/backoffice\/encaissements\/releves\/[0-9a-f-]{36}/,
       { timeout: 30_000 },
     );
-    await expect(page.getByTestId("statement-status")).toHaveText("Importé", {
-      timeout: 60_000,
-    });
+    await expectOwnImport(page);
   };
   await statementOf(
     "releve-retour-reversement.xml",

@@ -12,6 +12,7 @@ import {
 } from "./support/admin";
 import { camt053, camt053Lines, ibanFr, type Credit } from "./support/camt";
 import { loginAsStaff } from "./support/session";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2c-6b-3a-2 (plan m2c-6b-3 §3.7; ADR-0014 « M2c-6b-3a-2 »): the cancellation of a downloaded file with the switch
@@ -228,7 +229,7 @@ async function importStatement(page: Page, name: string, xml: string): Promise<v
   await form.getByRole("button", { name: "Importer le relevé" }).click();
   // (the statement's own page: « Encaissements » lists every statement of the servicer, each with its status)
   await expect(page).toHaveURL(/\/backoffice\/encaissements\/releves\/[0-9a-f-]{36}/, { timeout: 30_000 });
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
 }
 
 /**
@@ -437,7 +438,7 @@ test("with the switch on, a downloaded file offers its cancellation, asked only 
     buffer: Buffer.from(camt053(BANK_IBAN, await statementDay(), credits), "utf-8"),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
   await prepareAndApprove(page);
 
   // « Virements »: the payout in a file, generated and downloaded (not marked as sent)

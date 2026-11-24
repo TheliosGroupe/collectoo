@@ -33,6 +33,8 @@ import {
   setInsuranceClause,
   setMandateTerms,
 } from "../../actions";
+import { parseOpenDocuments } from "@/lib/remittance/settlements";
+import { ClientOwes } from "./client-owes";
 import { ClientDocumentUpload } from "./document-upload";
 
 type Payout = {
@@ -90,8 +92,15 @@ function frenchDateTime(iso: string | null): string {
  * the IBAN read on the RIB), the money terms of its mandates (R124-3 2°–4°, versions in words) and its status events
  * (C. civ. 2003, C. com. L622-7, L641-9), with what still keeps each portfolio from being confirmed (§9.1).
  */
-export default async function ClientRemittancePage({ params }: { params: Promise<{ id: string }> }) {
+export default async function ClientRemittancePage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { id } = await params;
+  const query = await searchParams;
   if (!UUID.test(id)) notFound();
   const { supabase, claims } = await staffSession();
   const { data: client } = await supabase
@@ -109,7 +118,7 @@ export default async function ClientRemittancePage({ params }: { params: Promise
   const isAdmin = role === "admin";
   const isMoney = isAdmin || role === "ops_manager";
 
-  const [identityRes, gapsRes, readinessRes, payoutRes, docsRes, eventsRes, mandatesRes, claimTypesRes] = await Promise.all([
+  const [identityRes, gapsRes, readinessRes, payoutRes, docsRes, eventsRes, mandatesRes, claimTypesRes, owesRes] = await Promise.all([
     // the capital as text: integer minor units never pass through a JS number (review M2c-2)
     supabase.from("billing_identity").select(BILLING_IDENTITY_COLUMNS).eq("organization_id", id).maybeSingle(),
     supabase.rpc("billing_identity_gaps", { p_organization_id: id }),
@@ -132,7 +141,12 @@ export default async function ClientRemittancePage({ params }: { params: Promise
       .eq("client_organization_id", id)
       .order("signed_on"),
     supabase.from("claim_type").select("code, label_fr"),
+    // M2c-7c-1 (plan §5.5): what the client owes the servicer and what it owes the client back (money staff)
+    isMoney
+      ? supabase.rpc("client_open_documents", { p_client_organization_id: id, p_currency: "EUR" })
+      : Promise.resolve({ data: null }),
   ]);
+  const owes = parseOpenDocuments(owesRes.data);
   const identity = identityRes.data as unknown as BillingIdentity | null;
   const gaps = (gapsRes.data ?? []) as string[];
   const readiness = (readinessRes.data ?? []) as { portfolio_id: string; portfolio_name: string; blockers: string[] }[];
@@ -237,6 +251,15 @@ export default async function ClientRemittancePage({ params }: { params: Promise
           </details>
         ) : null}
       </Section>
+
+      {owes ? (
+        <ClientOwes
+          docs={owes}
+          servicerId={client.servicer_organization_id}
+          clientName={client.legal_name}
+          refunded={query.remboursement === "1"}
+        />
+      ) : null}
 
       {isMoney ? (
         <Section title="Documents du client" testId="client-documents">

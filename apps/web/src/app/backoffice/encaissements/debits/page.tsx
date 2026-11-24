@@ -38,6 +38,7 @@ import {
   ReleaseOwnCredit,
   ResolveDuplicate,
 } from "./debit-actions";
+import { ClientPaymentLine } from "./client-payment-line";
 import { BookTransferLine } from "./transfer-line-sheet";
 
 const PAGE_SIZE = 20;
@@ -484,6 +485,8 @@ function LineActions({
           idempotencyKey={randomUUID()}
         />
       ) : null}
+      {/* M2c-7c-1 (plan §5.5): the client paying the servicer on the dedicated account, beside its relayed payment */}
+      {clientRelayable(row) ? <ClientPaymentLine lineId={row.bank_transaction_id} /> : null}
       {clientRelayable(row) ? (
         <ReleaseOwnCredit
           by="client"

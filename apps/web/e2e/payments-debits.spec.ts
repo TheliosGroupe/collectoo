@@ -13,6 +13,7 @@ import {
 import { camt053, camt053Lines, ibanFr, type Credit, type Debit } from "./support/camt";
 import { loginAsStaff } from "./support/session";
 import { reviewShot } from "./screenshot";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2b-6: money leaving the client-funds account. An ops manager boards three B2B files (synthetic), imports the statement
@@ -106,7 +107,7 @@ async function importStatement(page: Page, name: string, xml: string) {
   const form = page.getByTestId("statement-upload");
   await form.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({ name, mimeType: "application/xml", buffer: Buffer.from(xml, "utf-8") });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
 }
 
 test("refund, bank return, lines to classify, direct payment and the checks", async ({ page }, testInfo) => {
@@ -405,7 +406,7 @@ async function importOn(page: Page, name: string, xml: string) {
     .setInputFiles({ name, mimeType: "application/xml", buffer: Buffer.from(xml, "utf-8") });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
   await expect(page).toHaveURL(/\/backoffice\/encaissements\/releves\/[0-9a-f-]{36}/, { timeout: 30_000 });
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
 }
 
 /** A client's run prepared now (or by the hourly schedule, if it came first) and approved from its page. */
