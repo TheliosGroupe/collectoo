@@ -1,10 +1,11 @@
 """Ledger model (M2-04): entries, lines and their invariants, without I/O.
 
 The database enforces the same rules (supabase/migrations/20261108170000_ledger.sql, for
-payments 20261109090000_payments_ledger.sql, and for the two funds of M2c
-20261111090000_remittance_funds.sql); this module lets the worker build and check an entry before
-sending it, and is the reference for the property tests. Amounts are signed integer minor units
-(+ debit, - credit). No floats.
+payments 20261109090000_payments_ledger.sql, for the two funds of M2c
+20261111090000_remittance_funds.sql, and for M2c-7c-1's books 419 and 7714 and the shapes they
+widen 20261124090000_client_payments.sql); this module lets the worker build and check an entry
+before sending it, and is the reference for the property tests. Amounts are signed integer minor
+units (+ debit, - credit). No floats.
 """
 
 from __future__ import annotations
@@ -42,6 +43,10 @@ class Book(StrEnum):
     VAT_PENDING = "vat_pending"
     BANK_FEES = "bank_fees"
     SERVICER_LOSSES = "servicer_losses"
+    # M2c-7c-1 (plan §5.0): what the servicer owes a client back (419), and what a client's payment
+    # recovers of an advance passed as a loss (7714)
+    CLIENT_CREDIT_OWED = "client_credit_owed"
+    WRITTEN_OFF_RECOVERED = "written_off_recovered"
 
 
 class Component(StrEnum):
@@ -102,6 +107,8 @@ BOOKS: Mapping[Book, BookSpec] = {
     Book.VAT_PENDING: BookSpec("44574", "pooled", "servicer", -1, False),
     Book.BANK_FEES: BookSpec("6270", "pooled", "servicer", 1, False),
     Book.SERVICER_LOSSES: BookSpec("6780", "pooled", "servicer", 1, False),
+    Book.CLIENT_CREDIT_OWED: BookSpec("419", "client", "servicer", -1, False),
+    Book.WRITTEN_OFF_RECOVERED: BookSpec("7714", "pooled", "servicer", -1, False),
 }
 CLAIM_BOOKS = frozenset({Book.DEBTOR_RECEIVABLE, Book.OWNER_CLAIM})
 # The dedicated-account fund (money_of = client: 5120, 4710, 4670, 4679) and the servicer's fund:
@@ -118,6 +125,7 @@ CLIENT_BOOKS = frozenset(
         Book.SERVICER_REVENUE,
         Book.COMMISSION_RECEIVABLE,
         Book.CLIENT_ADVANCE_RECEIVABLE,
+        Book.CLIENT_CREDIT_OWED,
     }
 )
 # Mirrors public.ledger_entry_type.allowed_books (a test compares them). Since M2b an adjustment
@@ -174,6 +182,8 @@ ALLOWED_BOOKS: Mapping[EntryType, frozenset[Book]] = {
             Book.DUE_FROM_CLIENT_FUNDS,
         }
     ),
+    # (M2c-7c-1) the client payments also post a credit owed back (419) and a recovery (7714); the
+    # refund pays back a credit note's excess (4111) or a credit owed back (419)
     EntryType.CLIENT_PAYMENT_OWN: frozenset(
         {
             Book.OWN_CASH,
@@ -181,6 +191,8 @@ ALLOWED_BOOKS: Mapping[EntryType, frozenset[Book]] = {
             Book.CLIENT_ADVANCE_RECEIVABLE,
             Book.VAT_PENDING,
             Book.VAT_COLLECTED,
+            Book.CLIENT_CREDIT_OWED,
+            Book.WRITTEN_OFF_RECOVERED,
         }
     ),
     EntryType.CLIENT_PAYMENT_DEDICATED: frozenset(
@@ -192,9 +204,13 @@ ALLOWED_BOOKS: Mapping[EntryType, frozenset[Book]] = {
             Book.CLIENT_ADVANCE_RECEIVABLE,
             Book.VAT_PENDING,
             Book.VAT_COLLECTED,
+            Book.CLIENT_CREDIT_OWED,
+            Book.WRITTEN_OFF_RECOVERED,
         }
     ),
-    EntryType.CLIENT_REFUND_OWN: frozenset({Book.COMMISSION_RECEIVABLE, Book.OWN_CASH}),
+    EntryType.CLIENT_REFUND_OWN: frozenset(
+        {Book.COMMISSION_RECEIVABLE, Book.CLIENT_CREDIT_OWED, Book.OWN_CASH}
+    ),
     EntryType.ADVANCE_WRITE_OFF: frozenset({Book.SERVICER_LOSSES, Book.CLIENT_ADVANCE_RECEIVABLE}),
 }
 # Posted only by private.ledger_post_set (from other definer functions), never by ledger_post.
@@ -447,8 +463,8 @@ def client_money_by_currency(lines: Iterable[Line]) -> dict[str, int]:
 
 
 def servicer_fund_by_currency(lines: Iterable[Line]) -> dict[str, int]:
-    """Net movement of the servicer's fund (4689, 5122, 4111, 4112, 4457x, 7060, 6270, 6780):
-    zero in every entry (I2')."""
+    """Net movement of the servicer's fund (4689, 5122, 4111, 4112, 4457x, 7060, 6270, 6780,
+    419, 7714): zero in every entry (I2')."""
     out: dict[str, int] = defaultdict(int)
     for line in lines:
         if line.book in SERVICER_FUND_BOOKS:
@@ -489,6 +505,22 @@ def _settled(n: dict[Book, int], d: dict[Book, int]) -> bool:
     return n[com] <= 1 and n[adv] <= 1 and n[com] + n[adv] >= 1 and d[adv] == 0
 
 
+_PAID = (
+    Book.COMMISSION_RECEIVABLE,
+    Book.CLIENT_ADVANCE_RECEIVABLE,
+    Book.CLIENT_CREDIT_OWED,
+    Book.WRITTEN_OFF_RECOVERED,
+)
+
+
+def _paid(n: dict[Book, int], d: dict[Book, int]) -> int | None:
+    """(M2c-7c-1) A client's payment: 4111, 4112, 419 and 7714 at most once each, each credited
+    only, at least one of them. Their number of lines, or None."""
+    if any(n[b] > 1 or d[b] for b in _PAID) or sum(n[b] for b in _PAID) < 1:
+        return None
+    return sum(n[b] for b in _PAID)
+
+
 # The four-line types: the debit and credit book of each fund, + debit / - credit (§5.2).
 _FOUR_LINES: Mapping[EntryType, tuple[Book, Book, Book, Book]] = {
     # debit (client fund), credit (client fund), debit (servicer fund), credit (servicer fund)
@@ -526,7 +558,6 @@ _FOUR_LINES: Mapping[EntryType, tuple[Book, Book, Book, Book]] = {
 # The two-line types: (debit book, credit book).
 _TWO_LINES: Mapping[EntryType, tuple[Book, Book]] = {
     EntryType.REMITTANCE: (Book.CLIENT_PAYABLE, Book.CLIENT_MONEY_CASH),
-    EntryType.CLIENT_REFUND_OWN: (Book.COMMISSION_RECEIVABLE, Book.OWN_CASH),
     EntryType.ADVANCE_WRITE_OFF: (Book.SERVICER_LOSSES, Book.CLIENT_ADVANCE_RECEIVABLE),
 }
 
@@ -577,13 +608,13 @@ def has_fund_shape(entry_type: EntryType, lines: Iterable[Line]) -> bool:  # noq
             and _vat_pair(n, d, ls)
             and total == 3 + n[com] + n[adv] + n[vatp] + n[vatc]
         )
+    paid = _paid(n, d)
     if entry_type is EntryType.CLIENT_PAYMENT_OWN:
         return (
             n[own] == d[own] == 1
-            and _settled(n, d)
-            and d[com] == 0
+            and paid is not None
             and _vat_pair(n, d, ls)
-            and total == 1 + n[com] + n[adv] + n[vatp] + n[vatc]
+            and total == 1 + paid + n[vatp] + n[vatc]
         )
     if entry_type is EntryType.CLIENT_PAYMENT_DEDICATED:
         return (
@@ -591,10 +622,18 @@ def has_fund_shape(entry_type: EntryType, lines: Iterable[Line]) -> bool:  # noq
             and n[dts] == 1
             and d[dts] == 0
             and n[dfc] == d[dfc] == 1
-            and _settled(n, d)
-            and d[com] == 0
+            and paid is not None
             and _vat_pair(n, d, ls)
-            and total == 3 + n[com] + n[adv] + n[vatp] + n[vatc]
+            and total == 3 + paid + n[vatp] + n[vatc]
+        )
+    if entry_type is EntryType.CLIENT_REFUND_OWN:
+        # (M2c-7c-1) +4111 R (a credit note's refund) or +419 R (a credit owed back) / -5122 R
+        cco = Book.CLIENT_CREDIT_OWED
+        return (
+            total == 2
+            and n[own] == 1
+            and d[own] == 0
+            and ((n[com] == d[com] == 1 and n[cco] == 0) or (n[cco] == d[cco] == 1 and n[com] == 0))
         )
     return False
 
@@ -718,7 +757,12 @@ class EntryDraft:
             raise InvalidRequestError("allocation, forward and cash_out (only) name their payment")
         if (self.account_id is not None) != (t in (EntryType.ALLOCATION, EntryType.NETTING)):
             raise InvalidRequestError("allocation and netting (only) name their account")
-        client_lines = any(x.book in CLIENT_BOOKS for x in self.lines)
+        # (M2c-7c-1) a client's payment names its client whatever it settles (a recovery alone posts
+        # only 7714, a pooled book)
+        client_lines = any(x.book in CLIENT_BOOKS for x in self.lines) or t in (
+            EntryType.CLIENT_PAYMENT_OWN,
+            EntryType.CLIENT_PAYMENT_DEDICATED,
+        )
         if self.client_organization_id is not None and (
             t in (EntryType.ALLOCATION, EntryType.NETTING) or not client_lines
         ):

@@ -222,6 +222,23 @@ describe("the client space (4.3)", () => {
     expect(clientSpaceAdvances(parseClientSpaceAdvances(mixed)!).heading).toBe("Avances du cabinet : 2 050,00 €");
   });
 
+  // (M2c-7c-1 review round 3) 045 sl9: a liquidation recorded alone, an advance born before it under a mandate without a
+  // claw-back clause — SQL says barred_proceeding (the client may not pay it: L641-3 al. 1), so the client space never
+  // says it is to be repaid nor that a request will come, even beside the sum it paid, held for its procedure
+  it("never says a pre-judgment advance of a liquidation is to be repaid", () => {
+    const liquidation = {
+      rows: [{ advance_id: "a9", currency: "EUR", cause: "remitted_reversal", created_on: "2026-11-24", born_on: "2026-11-22",
+               open_minor: "20000", recovery: "barred_proceeding", clause_ref: null }],
+      total: [{ currency: "EUR", open_minor: "20000" }],
+    };
+    const t = clientSpaceAdvances(parseClientSpaceAdvances(liquidation)!);
+    expect(t.heading).toBe("Avances du cabinet : 200,00 €");
+    expect(t.lines).toEqual([
+      "Avance née le 22/11/2026 (paiement repris après reversement) : 200,00 € — antérieure à l'ouverture de votre procédure collective, elle n'est pas déduite de vos reversements.",
+    ]);
+    for (const line of [t.heading, ...t.lines]) expect(line).not.toMatch(/rembourser|remboursement|demande/i);
+  });
+
   it("says nothing without an open advance, and refuses another shape", () => {
     expect(clientSpaceAdvances({ rows: [], total: [] })).toEqual({ heading: null, lines: [] });
     expect(parseClientSpaceAdvances({ rows: [{ ...space.rows[0], open_minor: 1 }], total: [] })).toBeNull();

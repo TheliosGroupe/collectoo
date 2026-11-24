@@ -61,6 +61,7 @@ from remittance_helpers import (
     paris_today,
     recent_business_day,
     remittance_tenant,
+    revalidate_after_date_change,
     run_row,
     staff,
 )
@@ -345,6 +346,7 @@ def _runs(tenant: dict[str, Any], clients: list[str]) -> list[str]:
             (runs,),
         ).fetchall()
     assert len(rows) == len(runs), (len(rows), len(runs))
+    since = paris_today()  # « Valider »'s day (Paris): its default execution date follows from it
     for k in range(0, len(rows), 200):  # « Valider »: 200 runs a command
         items = [{"run_id": r, "inputs_hash": h, "net_text": t} for r, h, t in rows[k : k + 200]]
         out = staff(
@@ -356,9 +358,15 @@ def _runs(tenant: dict[str, Any], clients: list[str]) -> list[str]:
         assert {x["status"] for x in out["results"]} == {"queued"}, out
     commanded = time.monotonic()
     _drain_remittances()  # the approval jobs
+    # (M2c-7c-1, carried low 4) midnight in Paris while the jobs ran: the runs refused for the date
+    # alone (back to draft) validated again, as ops would the next morning — no other refusal
+    again = revalidate_after_date_change(tenant, runs, since)
+    if again:
+        _drain_remittances()
     print(
         f"\n{len(runs)} runs: prepare jobs {prepared - requested:.1f}s, approval commands"
         f" {commanded - prepared:.1f}s, approval jobs {time.monotonic() - commanded:.1f}s"
+        + (f" ({len(again)} validated again after midnight in Paris)" if again else "")
     )
     with psycopg.connect(DB) as conn:
         approved = one(

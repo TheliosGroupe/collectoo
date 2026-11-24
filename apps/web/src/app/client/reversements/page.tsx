@@ -5,6 +5,7 @@ import type { SessionClaims } from "@/lib/auth/access";
 import { money } from "@/lib/payments/statements";
 import { clientSpaceAdvances, parseClientSpaceAdvances } from "@/lib/remittance/advances";
 import { clientOfUser } from "@/lib/remittance/client-space";
+import { clientSpaceCreditSections, parseClientSpaceCredits } from "@/lib/remittance/settlements";
 import {
   type RemittanceSummary,
   frenchDay,
@@ -60,7 +61,7 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
     );
   }
   const list = listPage((await searchParams).page, PAGE_SIZE);
-  const [{ data: summaryData, error }, { data: statementRows }, { data: advancesData }] = await Promise.all([
+  const [{ data: summaryData, error }, { data: statementRows }, { data: advancesData }, { data: creditsData }] = await Promise.all([
     supabase.rpc("client_remittance_summary", { p_client_organization_id: client.id }),
     supabase
       .from("remittance_statement")
@@ -73,7 +74,12 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
       .range(list.from, list.to),
     // M2c-7b (plan §4.3): the servicer's advances still to repay, and how each is recovered
     supabase.rpc("client_space_advances", { p_client_organization_id: client.id }),
+    // M2c-7c-1 (plan §5.5): what the servicer owes the client back (a surplus of its payment)
+    supabase.rpc("client_space_credits", { p_client_organization_id: client.id }),
   ]);
+  const creditRows = parseClientSpaceCredits(creditsData) ?? { rows: [], total: [] };
+  // (review round 1, TUI-1) each section titled by what it holds: « vous doit » only over what is owed to the client
+  const creditSections = clientSpaceCreditSections(creditRows);
   const advances = clientSpaceAdvances(parseClientSpaceAdvances(advancesData) ?? { rows: [], total: [] });
   const summary = (summaryData ?? null) as unknown as RemittanceSummary | null;
   const owed = summary?.owed ?? [];
@@ -121,6 +127,16 @@ export default async function ClientRemittancesPage({ searchParams }: PageProps<
           </ul>
         </Section>
       ) : null}
+      {creditSections.map((s) => (
+        <Section key={s.testId} title={s.title} testId={s.testId}>
+          <ul className="flex flex-col gap-1 text-sm">
+            {s.lines.map((l) => (
+              <li key={l.id}>{l.text}</li>
+            ))}
+          </ul>
+          {s.note ? <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">{s.note}</p> : null}
+        </Section>
+      ))}
       <p className="text-xs text-zinc-600 dark:text-zinc-400">
         Un reversement peut intervenir plus tôt : chaque encaissement vous est reversé au plus tard dans le délai de votre
         mandat, et jamais plus d&apos;un mois après sa réception.

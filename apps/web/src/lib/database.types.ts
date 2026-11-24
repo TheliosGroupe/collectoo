@@ -113,6 +113,50 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"advance_write_off_recovery": {
+                  Row: {
+                    "advance_id": string,"amount_minor": number,"client_organization_id": string,"created_at": string,"currency": string,"entry_id": string,"organization_id": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "advance_id": string,"amount_minor": number,"client_organization_id": string,"created_at"?: string,"currency": string,"entry_id": string,"organization_id": string
+                  }
+                  Update: {
+                    "advance_id"?: string,"amount_minor"?: number,"client_organization_id"?: string,"created_at"?: string,"currency"?: string,"entry_id"?: string,"organization_id"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "advance_write_off_recovery_advance_id_fkey"
+      columns: ["advance_id"]
+isOneToOne: false
+      referencedRelation: "client_advance"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "advance_write_off_recovery_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "advance_write_off_recovery_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "advance_write_off_recovery_entry_id_fkey"
+      columns: ["entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "advance_write_off_recovery_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"allocation_policy": {
                   Row: {
                     "accessory_rank": string,"client_organization_id": string | null,"created_at": string,"created_by": string | null,"effective_from": string,"id": string,"organization_id": string,"portfolio_id": string | null,"reason": string,"unclassified": string,"version": number
@@ -764,6 +808,44 @@ isOneToOne: false
       columns: ["transfer_id"]
 isOneToOne: false
       referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"client_credit": {
+                  Row: {
+                    "amount_minor": number,"cause": string,"client_organization_id": string,"created_at": string,"currency": string,"details": Json | null,"entry_id": string,"id": string,"organization_id": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "amount_minor": number,"cause": string,"client_organization_id": string,"created_at"?: string,"currency": string,"details"?: Json | null,"entry_id": string,"id"?: string,"organization_id": string
+                  }
+                  Update: {
+                    "amount_minor"?: number,"cause"?: string,"client_organization_id"?: string,"created_at"?: string,"currency"?: string,"details"?: Json | null,"entry_id"?: string,"id"?: string,"organization_id"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "client_credit_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_credit_currency_fkey"
+      columns: ["currency"]
+isOneToOne: false
+      referencedRelation: "currency"
+      referencedColumns: ["code"]
+    },{
+      foreignKeyName: "client_credit_entry_id_fkey"
+      columns: ["entry_id"]
+isOneToOne: false
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_credit_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
       referencedColumns: ["id"]
     }
                   ]
@@ -2736,6 +2818,9 @@ isOneToOne: false
 "boarding_batch_readiness":
 { Args: { "p_batch_id": string }; Returns: (string)[]
                            },
+"book_client_payment_line":
+{ Args: { "p_bank_transaction_id": string,"p_designation_document_id": string,"p_documents": (string)[],"p_expected_open_text": string,"p_idempotency_key": string,"p_reason": string,"p_recover_written_off": (string)[] }; Returns: Json
+                           },
 "book_transfer_line":
 { Args: { "p_bank_transaction_id": string,"p_expected_text": string,"p_idempotency_key": string,"p_parts": Json,"p_reason": string }; Returns: Json
                            },
@@ -2765,10 +2850,19 @@ isOneToOne: false
               "currency": string,"held_minor": number,"payable_minor": number,"unallocated_minor": number
             }[]
                            },
+"client_open_documents":
+{ Args: { "p_client_organization_id": string,"p_currency": string }; Returns: Json
+                           },
 "client_payment_feed":
 { Args: { "p_after"?: string,"p_client": string,"p_limit"?: number }; Returns: {
               "account_id": string,"amount_minor": string,"booking_date": string,"created_at": string,"currency": string,"cursor": string,"debtor_name": string,"delivered_at": string,"effective_date": string,"file_reference": string,"first_view": boolean,"kind": string,"lines": Json,"notification_id": string,"reason": string,"receipt_id": string,"receipt_kind": string,"receipt_number": string,"receipt_version": number
             }[]
+                           },
+"client_payment_line":
+{ Args: { "p_bank_transaction_id": string,"p_documents"?: (string)[],"p_recover_written_off"?: (string)[] }; Returns: Json
+                           },
+"client_payment_preview":
+{ Args: { "p_amount_text": string,"p_client_organization_id": string,"p_currency": string,"p_documents": (string)[],"p_on"?: string,"p_recover_written_off": (string)[] }; Returns: Json
                            },
 "client_readiness":
 { Args: { "p_client_organization_id": string }; Returns: {
@@ -2779,6 +2873,9 @@ isOneToOne: false
 { Args: { "p_client_organization_id": string }; Returns: Json
                            },
 "client_space_advances":
+{ Args: { "p_client_organization_id": string }; Returns: Json
+                           },
+"client_space_credits":
 { Args: { "p_client_organization_id": string }; Returns: Json
                            },
 "close_bank_account":
@@ -2883,6 +2980,12 @@ isOneToOne: false
                            },
 "receipt_job_pending":
 { Args: { "p_payment_id": string }; Returns: boolean
+                           },
+"record_client_payment":
+{ Args: { "p_amount_text": string,"p_client_organization_id": string,"p_currency": string,"p_designation_document_id": string,"p_documents": (string)[],"p_evidence_document_id": string,"p_expected_open_text": string,"p_idempotency_key": string,"p_reason": string,"p_recover_written_off": (string)[],"p_value_date": string }; Returns: Json
+                           },
+"record_client_refund":
+{ Args: { "p_amount_text": string,"p_document_id": string,"p_evidence_document_id": string,"p_expected_owed_text": string,"p_idempotency_key": string,"p_paid_on": string,"p_reason": string }; Returns: Json
                            },
 "record_client_status_event":
 { Args: { "p_client_organization_id": string,"p_effective_date": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string,"p_note": string,"p_payout_account_id"?: string }; Returns: Json

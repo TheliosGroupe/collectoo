@@ -5,6 +5,7 @@ import { adminClient, createMandate, createMember, createTenant, type Tenant } f
 import { camt053, ibanFr, type Credit } from "./support/camt";
 import { loginAsStaff } from "./support/session";
 import { reviewShot } from "./screenshot";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2b-4 (M2-09, M2-11): an ops manager boards three B2B files (synthetic invoices: one with a credit note),
@@ -114,7 +115,7 @@ test("ops follow how payments are allocated and act on them", async ({ page }, t
     buffer: Buffer.from(camt053(BANK_IBAN, DAY, credits), "utf-8"),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
   await expect(page.getByTestId("match-counts")).toContainText("Rapprochés automatiquement 100 %", { timeout: 60_000 });
 
   // The overpayment: allocated in part, the rest kept for the payer (founder #8)

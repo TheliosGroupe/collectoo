@@ -47,6 +47,7 @@ from remittance_helpers import (
     recent_business_day,
     remittance_tenant,
     request_run,
+    revalidate_after_date_change,
     run_row,
     staff,
 )
@@ -230,8 +231,11 @@ def test_transfers_cancelled_out_of_a_downloaded_file_and_reissued_beside_a_larg
     # the client's run, approved: its payout x goes in the small file with the CANCELLED refunds,
     # and is cancelled and re-issued with them (y)
     rr = request_run(tenant)
+    since = paris_today()
     approve(tenant, rr)
     drain()  # the approval job
+    if revalidate_after_date_change(tenant, [rr], since):  # (M2c-7c-1) a Paris date change alone
+        drain()
     assert run_row(rr)["status"] == "approved"
     assert _refund(tenant, CANCELLED) == CANCELLED
     small = _file(tenant, CANCELLED + 1)

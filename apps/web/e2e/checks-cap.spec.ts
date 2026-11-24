@@ -4,6 +4,7 @@ import path from "node:path";
 import { adminClient, createMember, createTenant, type Tenant } from "./support/admin";
 import { camt053Lines, ibanFr, type Credit, type Debit } from "./support/camt";
 import { loginAsStaff } from "./support/session";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2c-6b-3b part 3 (ADR-0014 « M2c-6b-3b part 3 »; PR #39's known limit): « Contrôles » lists at most 200 results of a
@@ -74,7 +75,7 @@ test("« Contrôles » beyond its 200 results says, per check, how many are not 
     buffer: Buffer.from(camt053Lines(BANK_IBAN, DAY, [credit], debits, total), "utf-8"),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
   // the debit job reviews every line « Référence du cabinet inconnue » (P0), books none
   await expect
     .poll(

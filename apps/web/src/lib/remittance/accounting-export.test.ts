@@ -1,5 +1,8 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  BOOK_LABEL,
   EXPORT_DOCUMENT_HEADER,
   EXPORT_DOCUMENT_TEXT_COLUMNS,
   EXPORT_ENTRY_HEADER,
@@ -214,5 +217,33 @@ describe("the export's CSV never carries a formula (review M2c-5 security#0 = te
     expect(at("date")).toBe("2026-11-02");
     expect(at("compte")).toBe("7060");
     expect(at("libelle_compte")).toBe("Commissions de recouvrement");
+  });
+});
+
+// (review M2c-7c-1 round 1, MONEY-3) the accountant's CSV names every book the SQL export returns in French, never its
+// internal code: the book list of the latest public.accounting_export_entries read from the migrations
+const DEFINES = /create (?:or replace )?function public\.accounting_export_entries\(/;
+
+describe("every book of the export has its French label", () => {
+  it("reads the export's book list from its latest definition", () => {
+    const dir = join(__dirname, "../../../../../supabase/migrations");
+    const latest = readdirSync(dir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort()
+      .map((f) => readFileSync(join(dir, f), "utf8"))
+      .filter((s) => DEFINES.test(s))
+      .pop()!;
+    const at = [...latest.matchAll(new RegExp(DEFINES.source, "g"))].pop()!.index!;
+    const body = latest.slice(at).replace(/--[^\n]*/g, "");
+    const list = /la\.book in \(([^)]*)\)/.exec(body)![1];
+    const books = [...list.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+    expect(books).toContain("client_credit_owed");
+    expect(books).toContain("written_off_recovered");
+    expect(books.filter((b) => !BOOK_LABEL[b])).toEqual([]);
+    expect(BOOK_LABEL.client_credit_owed).toBe("Mandants — sommes à leur rembourser");
+    expect(BOOK_LABEL.written_off_recovered).toBe("Rentrées sur avances passées en perte");
+    const csv = exportEntriesCsv([entry(1, { book: "client_credit_owed", account_number: "419" })]);
+    expect(csv).toContain(";419;Mandants — sommes à leur rembourser;");
+    expect(csv).not.toContain("client_credit_owed");
   });
 });

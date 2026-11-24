@@ -4,6 +4,7 @@ import path from "node:path";
 import { adminClient, createMember, createTenant, type Tenant } from "./support/admin";
 import { loginAsStaff } from "./support/session";
 import { reviewShot } from "./screenshot";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2b-2: an ops manager imports the client-funds account's camt.053 statements; the payments of each
@@ -58,7 +59,7 @@ test("an ops manager imports a statement, the same file again, then an overlappi
 
   const first = manifest(FIRST);
   await importFile(page, FIRST);
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
   await expect(page.getByTestId("count-lines")).toHaveText(String(first.lines.length));
   await expect(page.getByTestId("count-known")).toHaveText("0");
   await expect(page.getByTestId("count-payments")).toContainText(`${paidCount(first)} ·`);
@@ -81,7 +82,7 @@ test("an ops manager imports a statement, the same file again, then an overlappi
   // An overlapping statement (its first day was in the first one): only the new lines count.
   const overlap = manifest(OVERLAP);
   await importFile(page, OVERLAP);
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
   const known = overlap.lines.filter((l) => l.booking_date === "2026-10-02").length;
   await expect(page.getByTestId("count-known")).toHaveText(String(known));
   await expect(page.getByText("Chevauche un relevé déjà importé")).toBeVisible();

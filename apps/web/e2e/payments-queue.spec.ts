@@ -6,6 +6,7 @@ import { adminClient, createMandate, createMember, createTenant, type Tenant } f
 import { camt053, ibanFr, type Credit } from "./support/camt";
 import { loginAsStaff } from "./support/session";
 import { reviewShot } from "./screenshot";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2b-3 (M2-08): an ops manager boards a client file (40 synthetic invoices, the boarding E2E's fixture),
@@ -136,7 +137,7 @@ test("ops resolve the payments the rules leave to them", async ({ page }, testIn
     buffer: Buffer.from(camt053(BANK_IBAN, DAY, paid), "utf-8"),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
   const counts = page.getByTestId("match-counts");
   await expect(counts).toContainText("Rapprochés automatiquement 40 %", { timeout: 60_000 });
   await expect(counts).toContainText("2 sur 5 paiements");

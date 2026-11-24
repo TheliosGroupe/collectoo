@@ -6593,7 +6593,8 @@ Suites, the second stack alone:
   drops `count(distinct q.mandate_id) = 1`. The new test's lot has one line per run, and no other test books a twice-debited
   lot. The code is right: an equivalence probe over 12 cases gave 7a's body and the fix the same mandate or none in each
   (several mandates, a null `mandate_id`, released lines, no run). Default: 7c-1 adds the two cases to the new test, a run
-  holding a second mandate and a line with no mandate, both expecting no mandate.
+  holding a second mandate and a line with no mandate, both expecting no mandate. **Closed by 7c-1** (ADR « M2c-7c-1 »,
+  carried low 1).
 - **`private.ledger_post_set`'s pooled-dimension lookup** (pre-existing since `20261111090000`; outside 7a). Each
   dimension is found by the `(organization_id, book, currency)` prefix of `ledger_account_pooled_uq`, and the other
   columns only filter. Its cost therefore grows with the lot's members × the servicer's clients: 500 dimensions with 500
@@ -7251,16 +7252,1005 @@ form is kept, with seq scans off.
   7b's redefinition, line 1571). With planted statistics and generic plans, the preview and the booking of a double
   payout's unplanned return read the whole `commission_settlement_document_idx`: 10,000 rows on the preview and 20,000
   on the booking, with the switch off or on. At the scale files' volumes `document_id` is near-unique, so their
-  statistics do not give this plan, and the path is rare (milliseconds). Default: 7c-1 fences the advance first (by
-  `cause_entry_id`, with `cause` outside), then probes the settlement by `document_id`. The bound goes into
-  `test_advance_reads_integration.py`, through the real `transfer_line_options` / `book_transfer_line` of that return.
+  statistics do not give this plan, and the path is rare (milliseconds). Default (moved by 7c-1, ADR « M2c-7c-1 »):
+  **7e-3 fences it in its redefinition** — the advance first (by `cause_entry_id`, with `cause` outside), then the
+  settlement by `document_id`, the bound in `test_advance_reads_integration.py` through the real
+  `transfer_line_options` / `book_transfer_line` of that return. Reason: `transfer_line_check` is an 801-line copy that
+  7e-3 redefines anyway (plan §1.4), and nothing in 7c-1's scope touches it.
 - **`client_space_advances`' read of the client's advances** (found by round 2's verifier). It is unfenced
   (`client_organization_id` and `organization_id` together). With 10,000 of the servicer's advances to other clients
   planted (n_distinct 2, generic plans), one client's space read 10,005 rows; `private.client_open_advances`, which is
   fenced, read 4. `client_advance` holds 1 row after the scale job, and current statistics choose the client's index.
   Default: 7c-1 fences it on `client_advance_client_idx` as `client_open_advances` does, with a bound in the same test.
+  **Closed by 7c-1** (ADR « M2c-7c-1 », carried low 3).
 - Everything rounds 1 and 2 leave open stays open: CCS-2 (what is open, computed per row), the portfolio moved between
   E's run and R(E), the cover's release re-queued later, founder Q2, Q5 and Q18 at their defaults. The switch stays off.
+
+## M2c-7c-1: client payments and refunds (2026-11-24)
+
+Plan: `docs/design/m2c-7-plan.md` §0 #5, §1.3, §1.4 (7c-1 row and « Order, and why »), §2 (2.1–2.4, with 7c-1's widened
+shapes), §5.0, §5.1 (`client_credit` and the recovery table), §5.2.1–§5.2.6, the checks of §5.2.8 that concern them,
+§5.5 but the request, §5.7's `045` (b)–(f), (i), (j)–(l), §5.8 (7c-1's part), and their [critic] / [check 1–3] marks.
+The request (7c-2: its tables, `request_advance_repayment`, the letter, `045b`) is not in this slice. Founder questions
+(plan §10), none answered: Q4 (a: the client designates with its evidence, else invoices due, advances, the other
+invoices; the surplus a credit owed back; a client in a proceeding never pays a pre-opening claim), Q5's recovery part
+(a: a later repayment of a written-off advance booked as income) and Q7 (a: the servicer's own transfer, recorded after
+the fact with its proof) built as their defaults and left open. Migration `20261124090000_client_payments.sql` (one
+file, forward-only). New: the books 419 (`client_credit_owed`, per client) and 7714 (`written_off_recovered`, pooled),
+Collectoo's labels; the tables `public.client_credit` and `public.advance_write_off_recovery` (RLS, change log,
+append-only, a statement guard each) and the settlements' guard of a credit's refunds
+(`private.commission_settlement_credit_guard`); the reads `public.client_open_documents` (« Ce que le client doit au
+cabinet »), `public.client_payment_preview` (the sheet's live effect), `public.client_payment_line` (a dedicated-account
+line), `public.client_space_credits` (the client space); the commands `public.record_client_payment`,
+`public.book_client_payment_line`, `public.record_client_refund`; the plan (`private.client_payment_order`,
+`private.client_payment_plan`, `private.client_settlement_plan`) and its helpers. Redefined, each copied whole from its
+latest definition across every migration file (verified by indexing every `create or replace function` /
+`create function` of the 43 files, the last one wins, and diffing each copy against it: only the change; settings,
+`search_path ''`, SECURITY DEFINER where it was and grants restated): `private.ledger_post_set` (`20261111090000:889`),
+`private.ledger_entry_verify` (`20261111090000:295`), `public.ledger_balance` (`20261111090000:1416`),
+`public.accounting_export_entries` (`20261116090000:4494`), `private.run_advance_checks` (`20261123090000:674`, 7b's:
+PR #42's body and 7b's recovery), `public.register_client_document` (`20261123090000:1701`, 7b's),
+`private.can_read_client_document_object` (`20261123090000:1757`, 7b's), `public.client_space_advances`
+(`20261123090000:497`, carried low 3); the constraint `ledger_account_shape` (`20261111090000:161`), the policies
+`ledger_account_read` (`20261111090000:1394`) and `document_client_money_scope` (`20261123090000:1776`), the check
+`commission_settlement_document_kind_check` (`20261112090000:435`); the three client-money types' allowed books
+(`20261111090000:75`). Worker: the plan's pure twin `remittance/client_payments.py`, and the ledger model's mirror of
+the chart (`ledger/model.py`: the two books, the allowed books, the three widened shapes, a client's payment naming
+its client; `test_ledger_integration.py` compares it with the database). Web: « Ce que le client doit au cabinet » on
+the client's « Reversement » page with « Enregistrer un règlement » and « Enregistrer le remboursement »,
+« Règlement d'une facture ou d'une avance du cabinet » on a client's line of « Débits et retours », « Enregistrer le
+remboursement » on a credit note, the client space's « Sommes que le cabinet vous doit », the texts made true. **The
+switch stays off**: nothing writes `private.feature_switch`. The commands read approved and sent runs' plans (plan
+§5.6): with the switch off a downloaded payout's run stays in flight and its documents with it (`045` p2); the rule
+reachable only with it on — a run cancelled after download no longer holds them, and the client's payment settles
+them — is tested with it on inside a rolled-back scenario (`045` p2, `pg_temp.iso('sf3', true)`); the file's guard
+asserts the switch is off at the end; `033` byte for byte unchanged; `034`–`044` unchanged.
+
+### Decisions
+
+- **D1 — the books and the shapes ([check 1] gap 2; plan §5.0).** Two rows of `public.ledger_book`: `419`
+  « Mandants — sommes à leur rembourser » (`client_credit_owed`, dimension client, the servicer's fund, normal side
+  credit, not client-visible) and `7714` « Rentrées sur avances passées en perte » (`written_off_recovered`, pooled) —
+  the numbers are Collectoo's labels (`account_number` is NOT NULL unique), the accountant maps them (OQ-88, OQ-98).
+  `client_payment_own` and `client_payment_dedicated` may post both, `client_refund_own` 419; no other type touches
+  either (their allowed books refuse it, `LG002`). The account shape puts 419 with the per-client books (the client
+  set, nothing else) and 7714 with the pooled ones. `ledger_post_set`: 419 joins the per-client lists (the line's
+  client, the given-client rule, the client check) and both books the servicer fund's closure list. I3′
+  (`ledger_entry_verify`): two counts each (`n_cco`/`d_cco`, `n_rec`/`d_rec`); a client payment has at most one credit
+  line on each of 4111, 4112, 419, 7714 and none in debit, at least one of the four, the VAT pair as before, and
+  `n = 1 (or 3 on the dedicated account) + n_com + n_adv + n_cco + n_rec + n_vatp + n_vatc`; `client_refund_own` is two
+  lines, −5122 and exactly one of +4111 or +419. The read policy `ledger_account_read` and `public.ledger_balance` give
+  both books to money staff only; `accounting_export_entries` lists them with the servicer's fund (a payment with a
+  surplus, a recovery or a credit's refund balances in the export).
+- **D2 — what a payment settles (plan §5.2.3; founder Q4; [critic] L16, M7-MONEY-10, L21; [check 1] gap 11).**
+  `private.client_payment_plan` (pure, plpgsql; twin `remittance.client_payments.plan_client_payment`, Hypothesis
+  parity through the database): with the client's designation, the documents it names in its order, each up to its open
+  part — one it may not pay (`private.document_client_payable` false: born before its proceeding opened, L622-7 I al. 1)
+  becomes a credit of cause `procedure` naming it (`details`), never a settlement —, then the written-off advances it
+  names, each up to what is left to recover; without a designation, the default order (`private.client_payment_order`:
+  invoices due on or before the payment's date by (due date, year, number), advances by (birth, recording, id), the
+  other invoices by (due date nulls last, year, number)) over what the client may pay — a pre-opening document is
+  skipped, never paid. What is left is one credit owed back, of cause `procedure` while a `proceeding_opened` or a
+  `liquidation` of the client stands on the payment's date (`private.client_proceeding_stands`), else `overpayment`:
+  never refused. Documents an approved or sent run settles are never planned (`private.client_payment_free`, from
+  `private.document_in_flight_run`, the twin of `advance_in_flight_run` for every document); named, they are refused
+  `in_flight` with the run's number. VAT moved per invoice part: `private.vat_part` = R(pending × part / open), all of
+  it when the part closes the invoice (the run plan's rule). The client's documents are read once
+  (`private.client_payment_docs`: its invoices by `commission_invoice_client_idx`, its open advances by
+  `private.client_open_advances`, each one's open part, pending VAT, payability and run in flight).
+- **D3 — « Règlement du client » on the own account (plan §5.2.4).** `public.record_client_payment`: admins and ops
+  managers at aal2; replay and request hash; the amount in euros (`bad_amount`), its value date not in the future
+  (`bad_date`), the evidence a `client_payment_evidence` of that client (`evidence_required`), the own account active,
+  purpose own, in the currency (`no_own_account`), the designation (documents or recoveries named) only with a
+  `payment_designation_evidence` of that client (`designation_evidence_required`: ops never choose, C. civ. 1342-10
+  al. 1); under the allocation and remit locks (`remittance_command_locks(org, true)`: the plans of approved runs read
+  under the locks approvals take) — a named document with nothing open, of another client or currency, or a named
+  written-off advance with nothing left to recover → `not_open`; in flight → `in_flight`; what it may settle ≠ what the
+  page showed → `open_changed`. Posts `client_payment_own` (+5122[own] P / −4111 Σ invoice parts / −4112 Σ advance parts
+  / −419 Σ credits / −7714 Σ recoveries ‖ +44574 v / −44571 v), dated the value date, its document the evidence, key
+  `cpay:<md5 of the idempotency key>`, reason « Règlement du client par virement sur le compte du cabinet (valeur
+  JJ/MM/AAAA) »; one `commission_settlement` per document part (`payment_own`, its VAT moved), one `client_credit` per
+  cause (their sum the −419 line), one `advance_write_off_recovery` per recovery; then `ledger_check_now()`. No R124-6
+  receipt: not a debtor's payment (CPCE-07).
+- **D4 — the dedicated account (plan §5.2.5; [critic] F7, M7-MONEY-12, L16).** `public.book_client_payment_line`: the
+  funds pass's lock order — the allocation lock, the line `for no key update`, then the remit lock — and the line's facts
+  read under them (`private.client_line_facts`): a credit of kind `client_transfer_in` (or released as one) on an active
+  `client_funds` account, not a held duplicate (`not_a_client_credit`), carrying none of our references (our transfers,
+  our lots, an unsplit part of ours, a `TOP` id, an RMT/SWP/TOP id in its label: `our_reference`), neither linked, booked,
+  released nor a payment (`line_booked`), from the IBAN of exactly one client's **confirmed** payout account (active,
+  returned or retired; never a proposed or rejected one: `not_a_client_credit`, `ambiguous_client`). The whole line is
+  the amount; a designation as D3, or a label naming each designated invoice's number. Posts
+  `client_payment_dedicated` (+5120[b] P / −4679 P ‖ +4689 P / −4111 / −4112 / −419 / −7714 ‖ VAT), dated the line's
+  booking date, key `cpayd:<line>`, one `bank_line_booking` (`client_payment`, method ops, the motif) — the booking
+  guard's `client_payment` arm already admits it (`20261121090000:784-787`, not redefined; `045` d) —, the line's
+  review deleted, the settlements (`payment_dedicated`), credits and recoveries, `ledger_check_now()` and the line's
+  booking check. The servicer's share on 4679 grows by P; the next file's sweep takes it (S unchanged).
+- **D5 — refunds (plan §5.2.6; founder Q7).** `public.record_client_refund`: a credit note's refund still owed
+  (`private.document_open`) or a credit owed back (its amount less its refunds, `private.client_credit_open`); admins and
+  ops managers at aal2; replay and hash; `bad_amount`, `bad_date`, `bad_request`, `evidence_required` (a
+  `client_refund_evidence` of that client), `no_own_account`, then under the locks `nothing_owed`, `in_flight` (a credit
+  note an approved or sent run refunds; a credit is never in a run's plan), `owed_changed`, `amount_exceeds_owed`. Posts
+  `client_refund_own` (+4111 or +419 / −5122), key `crfd:<md5>`, and a `refund` settlement (`document_kind`
+  `credit_note` or `client_credit`): `credit_refund_owed` stops; a credit's refunds never exceed it (the guard).
+- **D6 — what the servicer owes back ([critic] M7-MONEY-10, L21; [check 1] gap 8).** `public.client_credit` (cause
+  `overpayment` or `procedure`, `details` for a designated pre-opening document, `entry_id` the payment that posted its
+  −419 line, unique (entry_id, cause)); its statement guard: each payment's rows sum to minus its 419 posting, for its
+  client, and only a client payment holds them. `public.advance_write_off_recovery` (primary key (entry_id,
+  advance_id)): its guard keeps Σ per advance ≤ what was passed as a loss and the payment's −7714 line = Σ its rows. Both
+  append-only (`refuse_change`, `enable always`), change-logged, RLS on with every privilege revoked but the read
+  policies: credits for money staff and the client's whole-client members (never a restricted member, a collector or
+  another tenant), recoveries for money staff only.
+- **D7 — the nightly (plan §5.2.8, §5.0 (7)).** `run_advance_checks` adds `client_credit_owed` (alert: a credit with an
+  open part more than 15 days after its recording; at once and `p0` for cause `procedure`), `client_credit_ledger`
+  (violation, per client and currency: Σ the credits' open parts = −Σ 419) and `written_off_recovery_ledger` (violation,
+  the servicer: Σ recoveries = −Σ 7714). `045` x asserts the full list of codes (043 #33, 044 h's, extended).
+- **D8 — the evidence kinds ([critic] L16; plan §5.1).** `client_payment_evidence`, `client_refund_evidence`,
+  `payment_designation_evidence`: registered by money staff (`register_client_document`), read — row and file — by money
+  staff only (`document_client_money_scope`, `can_read_client_document_object`; `can_read_client_document` already
+  gives every kind but the RIB and the mandate to money staff only). The web uploads to the client's key, then registers
+  (`lib/remittance/evidence.ts`), as « Joindre un document ».
+- **D9 — the pages and texts (plan §5.5 but the request).** « Ce que le client doit au cabinet »: invoices (open, VAT
+  pending, « Créance antérieure à l'ouverture de la procédure du client » when it is), advances (and how each is
+  recovered), written-off advances with something left to recover, refunds owed, credits owed back, the default order;
+  « Enregistrer un règlement » (« Montant reçu (€) », « Date de valeur », « Preuve du virement », « Le client a-t-il
+  désigné ce qu'il règle ? » with « Pièce de la désignation » and the documents in the client's order) and its live
+  effect from SQL (« FC-… : X € réglés (dont TVA Y € devenue exigible) ; avance du JJ/MM/AAAA : X € remboursés ;
+  trop-perçu de X € à rembourser au client »; a pre-opening part, a procedure's surplus and a recovery worded as plan
+  §5.5 says); « Enregistrer le remboursement » on a credit owed back and on a credit note; on « Débits et retours », a
+  client's credit gets « Règlement d'une facture ou d'une avance du cabinet » beside « Paiement relayé par le client »
+  (« La somme revient au cabinet : elle sera virée sur son compte propre avec la prochaine quote-part. »); the review
+  text `client_credit` and `credit_refund_owed`'s help reworded as the plan says; the three checks worded; the client
+  space « Trop-perçu du JJ/MM/AAAA : X € que le cabinet vous doit » (or « Somme reçue le …, mise de côté pour votre
+  procédure collective »). Refusals in French per code (`lib/remittance/settlements.ts`). No text words a write-off
+  « abandon » or « remise » (LEX-28).
+
+### Deviations from the plan
+
+- **The migration's name** is the task's, `20261124090000_client_payments.sql`; pgTAP `045_client_payments.test.sql`
+  (the plan's `045_client_settlements`; `045b` is 7c-2's).
+- **`client_credit` has no `payment_entry_id`**: its `entry_id` is the payment's own entry (the payment posts the −419
+  line), so the second column would always equal it.
+- **`advance_write_off_recovery` is keyed (entry_id, advance_id)**, not `entry_id unique`: one payment may repay several
+  written-off advances. It carries the servicer, client and currency (the guard and RLS read them).
+- **`private.client_settlement_plan` takes the written-off advances named** (`p_recover uuid[]`, one argument more than
+  the plan's) — the recoveries are part of what the payment settles.
+- **The keys are `cpay:<md5 of the idempotency key>` and `crfd:<md5>`** (plan: the key itself), as 7b's `awo:`: an
+  entry's key bounds its length. `cpayd:<line>` as planned.
+- **More refusals than the plan's**: `bad_request` (the open the page sent is not minor units, a document named twice,
+  a null in a list), `reason_required` on the dedicated line (its booking's motif, 1–2,000 characters).
+- **A client's payment names its client whatever it settles** (`ledger_post_set`'s given-client rule): a payment that
+  only recovers a written-off advance posts 5122 and 7714, a pooled book, and the rule (a client given only for an entry
+  with a client line) would have refused it.
+- **(k) through the command is unreachable in 7c-1**: a designated pre-opening document implies a standing proceeding,
+  whose surplus is `procedure` too (plan §5.2.3), so one payment makes one row. The key (entry_id, cause) and the guard
+  are tested with planted rows (two causes on one entry summing to its −419 line accepted; a second row of a cause, one
+  short of the line, another client's or no payment's refused); a replay creates none (`045` b). 7d's closure events
+  make the two-cause payment reachable.
+- **A label designates invoices only** (« FC-… »): the `DRA-…` numbers are 7c-2's.
+- **`client_open_documents` lists no « Demandé le »** and no « Demander le remboursement »: 7c-2's.
+- **Reads beyond the plan**: `public.client_payment_preview` (the sheet's live effect from SQL, never computed by the
+  page), `public.client_payment_line` (the line's client, its label's invoices, the preview), `public.client_space_credits`
+  (the client space reads its credits through SQL, as 7b's `client_space_advances`). Helpers beyond the plan:
+  `private.client_credit_open`, `written_off_available`, `document_in_flight_run`, `client_proceeding_stands`,
+  `vat_part`, `client_payment_considered`, `client_payment_docs`, `client_payment_free`, `client_payment_recoveries`,
+  `client_payment_named_refusal`, `client_line_facts`, `client_payment_post`, `client_payment_rows`.
+- **`advance_write_off`'s label** was already « Avance passée en perte » (7b, LEX-28): §5.0 (2)'s last item needs no
+  change.
+- **Screenshots**: `m2c7-reglement-client`, `m2c7-reglement-compte-dedie`, `m2c7-remboursement-avoir` (mobile and
+  desktop); `m2c7-demande-remboursement` and `m2c7-client-documents` are 7c-2's. `m2c-client-credit-relay` (mobile and
+  desktop, `funds-own-credits.spec.ts`) is retaken: a client's line now shows « Règlement d'une facture ou d'une avance
+  du cabinet » and the reworded review text. The E2E steps extend `credit-notes.spec.ts` (its tenant has a paid invoice
+  and its credit note).
+- **Carried low 4 goes beyond the scale files**: `remittance_helpers.approve()` records each run it queues with its
+  default execution date, and `drain()` validates again, as ops would the next morning, those a Paris date change alone
+  sent back to draft — so every integration test's `approve()`/`drain()` is covered, not only the three scale fixtures
+  that call `approve_remittance_runs` themselves (they call `revalidate_after_date_change` after their own « Valider »).
+  A run approved for an explicit day is the test's own and never re-validated.
+
+### Carried lows closed
+
+1. **The double payout advance's mandate on a twice-debited lot** (7a CI round « Left open »).
+   `test_remitted_cover_reads_integration.py::test_a_lot_debited_twice_reads_each_advances_run_by_key`: one member's run
+   gets a second line on another mandate, another member's run a line with a null `mandate_id`; those two double-payout
+   advances have no mandate, the others keep their run's. Both mutants of `transfer_line_post`'s mandate expression (drop
+   `count(q.mandate_id) = count(*)`; drop `count(distinct q.mandate_id) = 1`) are killed by it.
+2. **The E2E import race** (PR #42's red e2e). One shared helper, `apps/web/e2e/support/statements.ts`
+   `expectOwnImport`: after « Importer le relevé », that statement's own page (`/backoffice/encaissements/releves/<id>`,
+   never « Encaissements » with the previous statement's « Importé »), its `bank_statement.status` `imported` in the
+   database, then « Importé » on its page. Used by every spec that imports a statement (`checks-cap`, `credit-notes`,
+   `funds-own-credits`, `payments-allocation`, `payments-debits`, `payments-queue`, `payments-receipts`, `remittances`,
+   `remitted-reversal` — its 7b `importStatement` now calls it —, `statements`, `switch-on`); `statements.spec.ts`'s
+   duplicate (`?deja=1`) keeps its own assertion.
+3. **`client_space_advances`' unfenced read** (7b round 2 « Left open »): redefined, copied whole from
+   `20261123090000:497`, its client's advances read on `client_advance_client_idx` alone (`offset 0`), the servicer
+   outside. `test_advance_reads_integration.py::test_the_client_space_reads_its_client_s_advances_by_its_key` bounds it
+   under 10,000 planted advances of the servicer's other clients (n_distinct 2, generic plans): seen failing on 7b's body
+   (10,005 `client_advance` rows), passing on 7c-1's.
+4. **The scale-payouts fixture across midnight in Paris** (PR #43's dispatched run: 1,755 of 5,050 runs refused
+   `execution_date_after_cutoff`). `remittance_helpers.date_change_refusals` / `revalidate_after_date_change`: the runs
+   of the fixture back in draft, refused at the approval with `execution_date_after_cutoff` or `execution_date_passed`
+   on a Paris day after the command's while `private.paris_today()` is no longer it, validated again with a fresh
+   « Valider » (200 a command), then drained; any other refusal is left to the fixture's own assertion. Used after every
+   « Valider » of `test_debit_bookings_scale_integration.py`, `test_remittance_scale_integration.py` (both),
+   `test_transfer_cancellation_scale_integration.py`, and by `drain()` for `approve()` (Deviations). Tested by
+   `test_date_change_revalidation_integration.py` with the change simulated (the run's requested execution date moved to
+   yesterday or today, committed on the test's own tenant with the run's guard set aside for that update — review
+   round 1, TUI-9: not a rolled-back transaction; the command's day given as yesterday): validated again and approved;
+   the same day, nothing; a run refused for its payout account, never — and through `drain()`.
+5. **`transfer_line_check`'s `advance_settled` rule**: the default moves to **7e-3 fences it in its redefinition** (7b
+   round 2 « Left open », updated): it is an 801-line copy that 7e-3 redefines anyway (plan §1.4), and 7c-1's scope does
+   not touch it.
+
+### Assertions whose expected value changed (house rule R3)
+
+None. `033`–`044` are byte for byte unchanged. The E2E specs of carried low 2 replace their wait for « Importé » on
+« Encaissements » with the shared helper, which asserts more (the statement's own page and status); no assertion was
+removed or weakened. `debits.test.ts`'s and `transfer-line-*.test.ts`' expectations are unchanged (the reworded texts
+are pinned in the new `settlements.test.ts`).
+
+### Tests
+
+- pgTAP `045_client_payments.test.sql` (new, **23**, one of them with the switch on; its own fixture — the servicer Cabinet, nine clients on their
+  mandates, runs and invoices made by emulated prepares as `044`'s, each scenario in a rolled-back subtransaction):
+  cat ×2 (the two books, the types' allowed books); j (the shapes: wholly a credit, a recovery, an advance and a
+  recovery, all five, the dedicated account wholly a credit, a credit's and a credit note's refund post; a debit on 419
+  or 7714, two lines on either, a refund with +4111 and +419 or its sides swapped `LG001`; 7714 on a refund, a
+  settlement, 419 on a write-off, 419 without its client `LG002`; the accounts' shape; a planted 419 and 7714 posting
+  without its row seen by the nightly); p (every refusal and role but `no_own_account` — added in review round 1,
+  TUI-5 —, nothing written; the default order FC-1 due, the
+  advance, FC-2, VAT pro rata and in full; the entry, its document, date, key, reason; settlements; replay and hash
+  conflict; 7b's advance guard refusing an over-settlement; I18 and the nightly clean); p2 ×3 (the designation in its
+  order; an advance a sent run takes back, switch off: named `in_flight` with its run, skipped by the default order;
+  switch on: that run's payout cancelled after download and the run cancelled, the payment settles the advance); b ×2 (365,00 €
+  for 360,00 € open: the credit, the export with 419 balanced, `client_credit_owed` silent on the 15th day and alerted on
+  the 16th, the refund of the credit stops it, `nothing_owed`; money for an advance a run already took back, all a
+  credit; a written-off advance repaid as a recovery capped at the loss, never again; the recovery guard); l ×3 (a
+  client in a proceeding: the post-opening invoice paid and the pre-opening one untouched; a larger payment's rest held
+  for the procedure, P0 at once; a client in liquidation alone); c (a designated pre-opening invoice: all held, the
+  invoice still open); k (one row per cause); d ×2 (the dedicated line labelled with the invoice's number: its
+  designation, `open_changed`, the shape, the booking, the review gone, no `payment` row, I9 and I19 clean, the next
+  sweep takes P, booked once; a line already explained is not booked); e (the client of the confirmed IBAN, a rejected
+  proposal of Lilas carrying Martin's IBAN never; several → `ambiguous_client`; a debtor's credit, an own credit from a
+  client's IBAN, our RMT id in the label, roles and aal refused; nothing booked); r (a credit note's refund: partial,
+  full, every refusal, `in_flight` while a run refunds it, `credit_refund_owed` stops); o (« Ce que le client doit au
+  cabinet », the preview, staff only); i (RLS on both tables and the 419 and 7714 accounts and balances, append-only,
+  change log, the client space, the evidence kinds registered and read by money staff only); x (the codes); d (the
+  default order itself: due invoices by due date whatever their numbers, advances oldest born first and by recording);
+  the switch still off.
+- Worker unit `test_client_payments.py` (new, 15 with 3 Hypothesis properties): the default order (and an invoice not yet
+  due after the advances, due invoices by due date, advances by birth and recording), VAT pro rata and in full, the
+  surplus, the designation, a recovery capped, what the client may not pay skipped or held, a data error, what is
+  considered open, the entry's lines; properties: Σ parts = the amount, each part within its document, VAT within its
+  pending and all of it on closing, the default order never pays a later document while an earlier one stays open,
+  never a document the client may not pay without a designation, the entry balances in the servicer's fund.
+- Worker unit `test_ledger_model.py` (14 new): the two books and who may post them (419 names its client, 7714 is
+  pooled, a write-off never touches 419), the six shapes 7c-1 widens validate (wholly a credit, a recovery alone, an
+  advance and a recovery, all five, the dedicated account with a surplus, the refund of a credit) and their mirror is
+  refused, the six malformed ones refused (`045` j's), and a Hypothesis property: the widened shapes hold at any scale.
+- Worker integration: `test_client_payments_integration.py` (new) — §7.3 (ii) a due invoice paid to the own account
+  (VAT moved, `invoice_overdue` silent after its due date, the nightly clean); §7.3 (iii) the same received on the
+  dedicated account (booked, then swept); F7 both orders against `link_debit` (no deadlock, decided once) and the
+  three-session staging (a third session holds the allocation lock, `link_debit` then the payment queue on it: no
+  deadlock, the payment refused `line_booked`); Hypothesis through the real `record_client_payment` (random amounts and
+  designations, each rolled back: what it settles is the twin's plan; after it 4111 = open invoices, 4112 = open
+  advances, −419 = credits, 44574 = pending VAT, the entry balanced). `test_client_payment_plan_parity_integration.py`
+  (new, Hypothesis: `private.client_payment_plan` and `plan_client_payment` agree on random documents, amounts, orders,
+  payability, recoveries and proceedings). `test_client_payment_reads_integration.py` (new, the stale-statistics bounds:
+  benchmarks « M2c-7c-1 »). `test_date_change_revalidation_integration.py` (new, carried low 4). The carried lows' cases
+  in `test_remitted_cover_reads_integration.py` and `test_advance_reads_integration.py`.
+- vitest `settlements.test.ts` (new, 15: the reads and their refusals of shape, the live effect part by part, the
+  pre-opening part never « réglés », the recovery, the procedure's surplus, every refusal in French, another command's
+  refusal never read as one of these, the texts made true, the client space never saying « vous doit » of a
+  procedure's sum).
+- E2E `credit-notes.spec.ts` (desktop and mobile), the 7c-1 steps: a client's credit of 50,00 € on the dedicated account
+  labelled with the invoice's number — its review, « Règlement d'une facture ou d'une avance du cabinet », the effect,
+  booked —; « Ce que le client doit au cabinet », « Enregistrer un règlement » of 63,00 € (58,00 € with 9,67 € VAT due,
+  5,00 € owed back), the client space's « Trop-perçu … que le cabinet vous doit », the 5,00 € refunded; a credit note of
+  10,00 € HT on the paid invoice refunded (12,00 €); the ledger at the end. Screenshots `m2c7-reglement-compte-dedie`,
+  `m2c7-reglement-client`, `m2c7-remboursement-avoir`.
+- Seen failing first (WIP `6710b5e`, the tests before the code; checked again on a database reset without the
+  migration): `045` failed at its helpers (`public.client_credit` does not exist, 0 of 23); every new integration test
+  failed (9 of the 18 the six files hold: the functions missing; the client space's bound read 10,005 rows on 7b's body),
+  the carried-low cases of `test_remitted_cover_reads_integration.py` and `test_date_change_revalidation_integration.py`
+  passed there (they pin behaviour; their mutants are below); the worker unit file failed to import
+  (`collectoo_worker.remittance.client_payments`); vitest `settlements.test.ts` failed (no module). The ledger model's
+  mirror of the chart was missed by the WIP build: the first run of the integration tests in CI's order failed
+  `test_ledger_integration.py::test_python_books_match_the_chart_of_accounts` (the database's two new books absent from
+  `BOOKS`); `test_ledger_model.py`'s 14 cases were then written and seen failing (`Book` has no `CLIENT_CREDIT_OWED`)
+  before `ledger/model.py` changed.
+
+### Mutants
+
+SQL: each mutant is one function of the migration (or of the latest migration that defines it) replaced on the stack
+with the change (`create or replace`), or a constraint, a trigger or a policy changed, the killer run, the original
+restored. Worker: the change applied to the source, the named tests run, the file restored. Web: one change to a lib
+file, vitest, the file restored.
+
+| Mutant (plan §5.7 for 7c-1, then this slice's own) | Killed by |
+|---|---|
+| default order advances-first (SQL; twin) | `045` p, o; `test_the_default_order_is_due_invoices_then_advances_then_the_others` |
+| VAT moved on the open part instead of pro rata (all the pending VAT on any part; SQL; twin) | `045` p, o; `test_vat_moves_pro_rata_and_in_full_on_the_part_that_closes_the_invoice` |
+| `in_flight` check removed (a named document; the default order not skipping it; the refund's) | `045` p2 (both); `045` r |
+| `book_client_payment_line` accepting an own credit (and a debtor's credit; our RMT id in the label not refused) | `045` e |
+| the surplus refused instead of credited | `045` p2, b ×2, l |
+| a rejected account matched | `045` e |
+| `remit:` before the line lock (the allocation lock kept first) | **equivalent** (below) |
+| the line locked before the allocation lock (the order §2.2 rules out) | `test_a_client_payment_queued_behind_an_explanation_of_its_line_never_deadlocks` (40P01) |
+| the shapes' `n_cco`/`n_rec` terms dropped from `n` (own; dedicated) | `045` j, p2, b ×2; `045` j, d |
+| `d_cco = 0` dropped; `n_cco ≤ 1` dropped | `045` j |
+| `client_refund_own` accepting both lines | `045` j |
+| 419 missing from `ledger_post_set`'s closure list | `045` j, p2, b ×2 (LG001 « leaves a fund open ») |
+| the export's book list without 419 | `045` b (the export) |
+| `client_credit` keyed on `entry_id` alone | `045` k |
+| the default order ignoring `document_client_payable` (SQL; twin) | `045` l ×2; `test_the_default_order_skips_what_the_client_may_not_pay` |
+| the surplus always `overpayment` (SQL; twin) | `045` l; `test_the_default_order_skips_what_the_client_may_not_pay` |
+| a named pre-opening document settled, not held (SQL; twin) | `045` c; `test_with_a_designation_only_what_the_client_named_is_paid_in_its_order` |
+| a liquidation alone not a standing proceeding | `045` l (liquidation) — survived the first run; the case added |
+| the designation's evidence not required (own account) | `045` p |
+| any named invoice taken as the label's designation | `045` d |
+| a named document with nothing open accepted | `045` p, p2, b, o |
+| the compare and set removed (own; dedicated) | `045` p; `045` d — the dedicated one survived the first run; the case added |
+| a refund beyond what is owed | `045` r |
+| a credit's open part ignoring its refunds | `045` b |
+| a recovery not capped by what was recovered (SQL; twin) | `045` b; `test_a_written_off_advance_the_client_repays_is_a_recovery_capped_at_what_was_written_off` |
+| `client_credit_owed` after 14 days | `045` b (the 15th day) — survived the first run; the case added |
+| `client_credit_owed` not at once for a procedure | `045` l |
+| `client_credit_ledger` / `written_off_recovery_ledger` silent | `045` j, x |
+| the credit guard off; the recovery guard off | `045` b, k; `045` b (the guard) — the recovery guard survived the first run; the case added |
+| 419 left out of `ledger_account_read`; of `ledger_balance`; 7714 of `ledger_balance` | `045` i — 419's balance survived the first run; the balances' case added (7714's mutant written with it) |
+| advances newest born first; same day newest recorded first; due invoices by number (SQL; twin) | `045` d; `test_due_invoices_by_due_date_then_advances_oldest_born_first_in_recording_order` — the twin's « newest born first » survived the first run (no case had two advances or two due invoices); both cases added, the others written with them |
+| model (`ledger/model.py`): a debit on 419 or 7714 accepted; two 419 lines; the refund accepting both lines; a payment naming its client only with a client line; 419 pooled | `test_the_malformed_shapes_7c1_refuses` (the first three), `test_the_shapes_7c1_widens_validate` and the design's entries, `test_the_two_books_of_7c1_and_who_may_post_them` |
+| twin: not-due invoices before the advances; considered open counting what may not be paid; the designation's order ignored | `test_an_invoice_not_yet_due_on_the_payment_s_date_comes_after_the_advances`; `test_what_is_considered_open_is_what_the_plan_may_settle`; `test_the_client_s_designation_is_followed_in_its_order` |
+| carried low 1: `transfer_line_post` without `count(q.mandate_id) = count(*)`; without `count(distinct q.mandate_id) = 1` | `test_a_lot_debited_twice_reads_each_advances_run_by_key` (both) |
+| carried low 3: `client_space_advances` as 7b wrote it | `test_the_client_space_reads_its_client_s_advances_by_its_key` (10,005 rows) |
+| carried low 4: any refusal re-validated; `drain()` never re-validating; `approve()` recording nothing | `test_a_run_refused_for_anything_else_is_never_validated_again`; `test_drain_validates_again_what_approve_queued_before_a_date_change` (both; the second survived the first run, the assertion added) |
+| web: a pre-opening part worded « réglés »; the VAT made due left out; a procedure's surplus said owed to the client; a recovery worded as an advance repaid; `in_flight` without its run; `amount_exceeds_owed` without what is owed; the refusal code read from any message; the client space calling a procedure's sum « vous doit »; the read accepting an amount as a number; the `client_credit` review text and `credit_refund_owed`'s help left as before | vitest `settlements.test.ts` — the refusal-code one survived the first run; the case added |
+
+**Equivalent mutants, argued.** (1) `remit:` before the line lock with the allocation lock kept first: every path that
+locks a dedicated-account line and then takes the remit lock (`post_debit_links` through `link_debit`,
+`post_bank_bookings` through the debit job and `link_debit`) takes the allocation lock first, and so does
+`book_client_payment_line`; under that lock no other session can hold the line while waiting for the remit lock, so the
+order of the line and the remit lock is not observable (`release_own_credit` locks a line without the allocation lock
+but takes no remit lock). The order the plan rules out (the line before the allocation lock, §2.2's « not
+`remittance_command_locks` after the line ») deadlocks and is killed by the staged test. (2) `vat_part` without its
+« all of it on the closing part » branch: the plan caps a part at the open part, and R(pending × open / open) = pending
+exactly, so the closing part moves all the pending VAT either way (the branch states the rule). (3) The helper's
+same-day guard dropped: `date_change_refusals` also requires the refusal's Paris day after the command's, which the
+same day never is.
+
+80 mutants: 77 killed (46 SQL — 42 through `045`, 4 through the worker's integration tests —, 12 of the twin, 5 of
+the ledger model, 3 of the date-change helper, 11 web), 3 equivalent. Eight survived their first run and are killed by the cases added after it
+(run again against the final files): 419's balance, the dedicated compare and set, the 15th day, a liquidation alone,
+the recovery guard, the twin's birth order, `approve()`'s record, the refusal code. The tests the others ran were not
+changed afterwards except by these additions.
+
+### Suites
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 47 files, **3,006 tests, PASS** (2,983 + `045`'s 23)
+  in 559 s — `033` byte for byte; `034`–`044` unchanged.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 191 files) clean; unit pytest **1,139 passed, 5
+  xfailed** (`test_client_payments.py` 15 and `test_ledger_model.py`'s 14 new among them); the non-scale integration
+  tests in CI's order, right after that `supabase test db` without a reset: **276 passed** in 868 s. The first such run
+  (before the ledger model's change) gave 275 passed and 1 failed:
+  `test_ledger_integration.py::test_python_books_match_the_chart_of_accounts` (Tests, « Seen failing first »).
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic (95,997 of 100,000), **0**
+  wrong.
+- Scale, each command right after `supabase db reset` (docs/benchmarks/remittances.md « M2c-7c-1 »): the scale job's
+  nine files in one call as `ci.yml` runs them (`RECEIPT_FILES=5000`) **15 passed** in 1,526.1 s (the 50,000-line run
+  prepared in 12.9 s, re-run prepared and approved in 33.1 s, its nightly checks 5.9 s, `run_advance_checks` 91 ms
+  own); CI's `scale-payouts` command **6 passed** in 1,298.6 s (21.6 min: the 5,000-member funds pass 27.7 s, the debit
+  job 24.9 s, the nightly checks 1.21 s; the 2,000 held chained runs' nightly checks 14.52 s). No Paris date change
+  fell in them (carried low 4's helper validated nothing again).
+- `database.types.ts` regenerated from the final schema: identical to the committed file (the four reads and three
+  commands, `client_space_credits` included).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **29 files, 564 tests** passed (`settlements.test.ts` new, 15).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61
+  passed** in 6.1 min, first run. Screenshot diffs showing only dates, ids or order reverted; kept:
+  `m2c7-reglement-client`, `m2c7-reglement-compte-dedie`, `m2c7-remboursement-avoir` (new), `m2c-client-credit-relay`
+  (retaken, Deviations).
+- Then `supabase db reset`, the stack left running.
+
+### Size
+
+**4,251 non-test lines added (and 21 removed): well over the task's ~2,500 and the plan's ≈ 1,950. Nothing was
+dropped.** The migration 2,551 — of which 1,028 are the eight functions redefined whole from their latest definitions
+(`ledger_post_set` 323, `ledger_entry_verify` 274, `run_advance_checks` 214, `accounting_export_entries` 83,
+`register_client_document` 52, `client_space_advances` 41, `ledger_balance` 27, `can_read_client_document_object` 14;
+107 lines added or changed in them, the headers naming file and line), about 1,050 the new functions (the plan, its
+helpers, the four reads, the three commands, the three guards), the rest the tables, the constraint, the policies, 20
+grant lines and 340 comment lines —, the web 1,447 (`settlements.ts` 372, the payment sheet 258, the dedicated line's
+action 189, « Ce que le client doit au cabinet » 182, the refund sheet 147, `database.types.ts` 103, the credit note's
+refund 86, the evidence upload 43, the pages and texts 67), the worker 253 (the twin 194, the ledger model 59). The
+plan's estimate counted ≈ 720 copied lines (not `run_advance_checks`, the document kinds' two functions nor carried
+low 3's copy), no read beyond `client_open_documents` (the preview, the line and the client space: about 200 SQL lines
+the pages need so that no amount is computed in the browser), and less web.
+
+### Left open (low), with its default
+
+- Founder questions (plan §10): Q4 (a), Q5's recovery (a) and Q7 (a) — defaults built and open; the cancellation after
+  download (6b-3 plan Q1) stays off.
+- **A payment's surplus while a proceeding stands is always `procedure`**, so the plan's (k) (a designated pre-opening
+  part and an `overpayment` surplus on one entry) is unreachable until 7d's closure events (Deviations). Default: keep;
+  the key and the guard already take two causes.
+- **What is open of a credit is computed per row** (`private.client_credit_open`), as 7b's CCS-2 for advances: the
+  page, the client space and the nightly read every credit of the client (or the servicer) ever recorded. Default: keep
+  at today's volumes (credits are rare); 7f's hardening with CCS-2.
+- **A credit owed back has no expiry and no automatic refund**: ops refund it on proof (founder Q7 a); the alert
+  repeats every night after 15 days. Default: keep.
+- **A payment whose value date precedes an invoice's issue date settles that invoice** (the default order reads every
+  open invoice): the entry posts −4111 and moves the VAT on its value date, so balances as of a day in between show the
+  receivable in credit and the VAT due before the invoice — an advance payment, whose VAT is due at encaissement (CGI
+  269 2 c, OQ-90). Default: keep (the money was received that day; today's balances and the nightly are exact).
+- **Who receives a sum held for a procedure is not recorded** beyond the refund's evidence (the administrator, the
+  mandataire or the liquidator, OQ-98). Default: keep until 7d-1's representatives.
+- Everything 7a and 7b leave open stays open (CCS-2, the portfolio moved between E's run and R(E), the cover's release
+  re-queued later, Q2, Q18; `transfer_line_check`'s `advance_settled` read now 7e-3's).
+
+## M2c-7c-1 review fixes (2026-11-24)
+
+### Round 1
+
+The review of `7e987a7` raised thirteen items: one medium and two lows of the money lens (MONEY-1, MONEY-2, MONEY-3),
+two mediums and seven lows of tests and pages (TUI-1 … TUI-9), and one medium of concurrency and cost (CC-1, the same
+fault as TUI-2: one item, fixed once). Each was checked against the code first (the SQL on the main stack inside
+rolled-back transactions, the sheets' code, vitest); all hold. The migration `20261124090000_client_payments.sql` is
+unmerged and was edited in place: no function is redefined beyond the slice's own, no public signature changes (the
+written-off rows' payability and the commands' `credits` are values inside their `jsonb`;
+`private.client_payment_recoveries` gains `p_on`, a private helper of this file), `database.types.ts` is unchanged
+(regenerated, identical). **The switch stays off** (no item depends on it: judged off and on, every fixed path is the
+same with it on); `033` byte for byte unchanged; `034`–`044` byte for byte unchanged.
+
+- **MONEY-1 (medium; fixed at the root: a loss the client may not repay is held for the procedure).** A client in a
+  collective proceeding that named, for recovery, an advance passed as a loss born before the opening had that part
+  booked as income on 7714 (`written_off_recovered`, an `advance_write_off_recovery`), while L622-7 I al. 1 forbids
+  paying a pre-opening claim (HOLD-02; founder Q4 a: « jamais une créance d'avant le jugement »). The open part of the
+  same advance was right (held, cause `procedure`); only the recovery loop of `private.client_payment_plan` never read
+  any payability, and the twin did the same. Reproduced with `045`'s fixture (Dupont, the advance born before an
+  opening of today): 300,00 € named for its recovery posted +5122 / −7714 30 000, no credit. Fix:
+  - `private.client_payment_recoveries(…, p_on)` carries `payable` (`private.document_client_payable(advance, p_on)` —
+    7c-1's « not born before the opening », and 7d-2's redefinition of that function applies here too), on the
+    payment's date: the value date (own account), the line's booking date (dedicated account), the preview's day.
+  - `private.client_payment_plan`'s recovery loop: a recovery the client may not repay is a `client_credit` part of
+    cause `procedure` naming the advance, as a named document it may not pay; never `written_off`. Its loss stays to
+    recover (`written_off_available` unchanged), the P0 alert follows (`client_credit_owed`), the credit's `details`
+    name the advance (`document_kind` `advance` when it is no longer open: `client_payment_post` reads it so).
+  - The twin: `WrittenOff.payable` and the same branch (`_recovery`); Hypothesis: the parity property draws it, the
+    plan's properties assert income only for what may be repaid and the recoveries in the client's order after its
+    documents.
+  - « Ce que le client doit au cabinet »: its written-off rows carry `before_opening` / `payable`; the row, the sheet's
+    choice and the live effect say « créance antérieure à l'ouverture de la procédure du client : … n'est pas encaissée
+    en recette, … mise de côté pour la procédure » (OQ-98), never « 7714 ».
+  - Tests: `045` c (`sl5`: the own account and the dedicated one, the page, the preview, the books, the credit and its
+    details, no recovery, the loss still to recover, the P0 alert; the line booked today, the proceeding open on its
+    date; a line booked the day before the opening is still a recovery, 7714), the twin's unit case, the parity
+    property, vitest.
+  - Reads: the payability is one keyed call per named loss and per written-off row of the page (the advance and its
+    entry by their keys, the client's opening by `client_status_event_client_idx`). `test_advance_reads_integration.py`
+    reads the written-off branch of `client_open_documents`, `client_payment_recoveries` and a recovery's preview under
+    its planted statistics (10,000 rows per table, n_distinct 2, generic plans): 23, 7 and 16 rows (bounds 84, 72, 84).
+- **TUI-1 (medium; fixed).** The client space drew one section « Sommes que le cabinet vous doit » over every credit,
+  so a client in redressement or liquidation read that the servicer owed it the sums held for its procedure — a false
+  statement on a client page (plan §5.2.6: they go to the administrator, mandataire or liquidator; OQ-98).
+  `settlements.clientSpaceCreditSections` titles each section by what it holds: « Sommes que le cabinet vous doit »
+  over overpaid sums only (with its note on the refund), « Sommes reçues pendant votre procédure collective » over the
+  procedure's (no note, never « vous doit »). vitest pins a client with only procedure rows and one with both.
+- **TUI-2 / CC-1 (medium; fixed once).** « Enregistrer un règlement » could record an amount it never previewed: the
+  preview (debounced 300 ms) was never cleared when an input changed, the button only asked that some preview exist,
+  Enter in « Montant reçu » submitted at once, and the compare and set (`open_minor`, independent of the amount)
+  passed; the note « Règlement enregistré : … » then stated the old preview's amounts, and a late answer to earlier
+  inputs could overwrite a newer one. The ledger was right; the page was not. Fix:
+  - `settlements.previewInputs` / `currentPreview`: a preview is kept with the inputs it was computed for (the amount as
+    typed, the value date, and with a designation the documents in the client's order and the losses); only the one of
+    the current inputs is shown and recorded on. Until it is back: « Calcul de l'effet du règlement… », no button; the
+    submit handler refuses too. A request counter drops an answer to earlier inputs.
+  - The note is built from the command's result (`settlements.parsePaymentResult` / `resultEffect`): the parts it
+    settled and, new in its result, its credits by cause (`credits: [{cause, amount_minor}]`, `client_payment_post`;
+    `045` b and c assert it). The dedicated line's note the same.
+  - vitest: the gating helpers (the amount typed on, another value date, a designation or its order changed), the note
+    from a result (a surplus, a procedure's sum), and a source guard on both sheets (no component renderer here).
+- **MONEY-3 (low; text fixed).** The accountant's CSV printed `client_credit_owed` and `written_off_recovered` in
+  « libelle_compte »: `BOOK_LABEL` gains « Mandants — sommes à leur rembourser » and « Rentrées sur avances passées en
+  perte » (the books' labels). vitest reads the book list of the latest `accounting_export_entries` from the migrations
+  and requires a label for each (seen failing on `7e987a7`'s map).
+- **TUI-3 (low; text fixed).** On the dedicated line, a label naming a pre-opening invoice read « le règlement lui est
+  imputé » and « La somme revient au cabinet ». `settlements.designationSentence` words each named invoice from SQL's
+  plan (imputé; « créance antérieure à l'ouverture de la procédure du client, la somme n'est pas imputée »; or « rien ne
+  lui est imputé » when the amount does not reach it), and `dedicatedLineEffect` says, when the plan holds money back,
+  « La somme sera virée sur le compte propre du cabinet avec la prochaine quote-part ; X € y restent à rendre à la
+  procédure collective du client » (or « à rembourser au client »). `DEDICATED_LINE_EFFECT` stays for a line that
+  settles only (the E2E's).
+- **TUI-4 (low; text fixed).** A credit held for the procedure was worded as owed to the client on staff pages. « Ce
+  que le client doit au cabinet » lists it under « Sommes mises de côté pour la procédure collective du client », « X €
+  à rendre à la procédure »; the refund sheet takes the credit's cause: « … à rendre à la procédure (administrateur,
+  mandataire ou liquidateur nommé dans la preuve), par virement depuis le compte propre du cabinet »; its
+  `nothing_owed` and `amount_exceeds_owed` texts the same; the nightly's label « Somme à rembourser au client ou à
+  rendre à sa procédure » and its help (« … pas au client ; à qui et quand se décide avec l'avocat (OQ-98) »).
+- **TUI-5 (low; test added).** `045` p gains `record_client_payment`'s `no_own_account` (the own account unset, then
+  restored, nothing written). The mutant without the check (the reviewer's: `045` 23/23 ok) is killed. The 7c-1
+  « Tests » line no longer says « every refusal » without it.
+- **TUI-6 (low; test added).** `045` c (`sl3`) asserts the designated pre-opening part's P0 alert at once. A mutant
+  alerting at once only a procedure's surplus (credits without `details`) survived `7e987a7`'s `045` (only `sl2`'s
+  surplus pinned the alert) and is killed by `sl3` and `sl5`.
+- **TUI-7 (low; text fixed).** The dedicated line's `in_flight` offered « enregistrez le règlement sans désigner de
+  document », which that sheet cannot: `clientPaymentRefusal(…, "line")` says « Le libellé désigne un document que le
+  reversement RV-… en cours règle déjà : attendez son débit. » (and `not_open` « … rechargez la page. »).
+- **TUI-8 (low; text fixed).** Five staff texts and two SQL comments cited OQ-92, which COMPLIANCE does not hold (the
+  plan files it with 7d); the open question 7c-1 records for these sums is OQ-98. vitest now requires every « OQ-nn »
+  a web source cites to be a row of COMPLIANCE.md.
+- **TUI-9 (low; doc fixed).** Carried low 4's sentence: the date-change test commits its update on the test's own
+  tenant (the run's guard set aside for it), not in a rolled-back transaction.
+- **MONEY-2 (low; left open, below).** The same proof recorded twice is not refused.
+
+### Assertions whose expected value changed (round 1, house rule R3)
+
+- `033`–`044`: none (byte for byte unchanged).
+- `045` (this slice's own, unmerged): p's `none_written` also counts the client's `client_payment_own` entries (the
+  refusals' « nothing written », now including `no_own_account`'s); c (`sl3`) gains `today`; b (`sb`) gains
+  `result_credits`; c (`sl5`) is new (24 tests).
+- vitest `settlements.test.ts` (this slice's own): the procedure texts cite OQ-98 (not OQ-92); the effect's parts lose
+  their trailing period (a note ends with one; « …OQ-88). ; trop-perçu … » read twice punctuated); the fixture's
+  written-off row carries `before_opening` and `payable`. Nothing else changed; the new cases are additions.
+- Worker `test_client_payments.py`: the designation property separates the named documents' parts from the
+  recoveries' (a loss held for the procedure is a `client_credit` naming it, no longer only `written_off`), and the
+  strategies draw `payable` for the losses; the parity test passes it to SQL.
+
+### Mutants (round 1)
+
+| Mutant | Killed by |
+|---|---|
+| `client_payment_plan`'s recovery loop ignoring `payable` (SQL) | `045` c (`sl5`); `test_the_sql_plan_and_its_twin_agree` |
+| `client_payment_recoveries`' `payable` always true | `045` c (`sl5`) |
+| the twin's `_recovery` always `written_off` | `test_a_written_off_advance_the_client_may_not_repay_is_held_for_the_procedure`, two Hypothesis properties |
+| the credit's details without the advance's kind when it is no longer open | `045` c (`sl5`) |
+| `client_open_documents`' written-off `payable` always true | `045` c (`sl5`) |
+| the commands' result without `credits` | `045` b, c |
+| `record_client_payment` without `no_own_account` | `045` p — survived `7e987a7`'s `045` (TUI-5) |
+| a designated procedure part not alerted at once | `045` c (`sl3`, `sl5`) — survived `7e987a7`'s `045` (TUI-6) |
+| web: the export without the two labels; a procedure's sum under « vous doit »; a preview counted whatever its inputs; the value date not among them; the note without the command's credits; a pre-opening invoice « imputé »; « revient au cabinet » whatever is held back; the refund header, its refusals, the client page's groups and a row's amount ignoring the cause; the check label as before; the line's `in_flight` offering « sans désigner »; a text citing OQ-92; a pre-opening loss's row, part and choice worded as income | vitest (`settlements.test.ts`, `accounting-export.test.ts`), 17 mutants |
+
+25 of 25 killed (SQL 7, each the function replaced on the stack, `045` run, the original restored — the plan's also
+through the parity test —; the twin 1; web 17). Two survived `7e987a7`'s tests (TUI-5's, TUI-6's) and are the items'
+own.
+
+### Suites (round 1)
+
+- `supabase test db` (fresh `supabase db reset`): 47 files, **3,007 tests, PASS** (3,006 + `045`'s `sl5`) in 572 s —
+  `033`–`044` byte for byte unchanged. `045` was then extended (`sl5`'s day before the opening): the final files, on
+  another fresh reset after the scale runs, 47 files, **3,007 tests, PASS** in 598 s.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 191 files) clean; unit pytest **1,140 passed, 5
+  xfailed** (1,139 + the twin's new case); the non-scale integration tests in CI's order, right after that `supabase
+  test db` without a reset: **276 passed** in 845 s.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic, **0** wrong.
+- Scale, each command right after `supabase db reset` with CI's logging settings (docs/benchmarks/remittances.md
+  « M2c-7c-1 review fixes, round 1 »): the scale job's nine files in one call as `ci.yml` runs them
+  (`RECEIPT_FILES=5000`) **15 passed** in 1,488.1 s; CI's `scale-payouts` command **6 passed** in 1,430.0 s. No Paris
+  date change fell in them. No timed path changed in the round.
+- `database.types.ts` regenerated from the final schema: identical.
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **29 files, 578 tests** passed (`settlements.test.ts` 15 →
+  28, `accounting-export.test.ts` 8 → 9).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61
+  passed** in 6.3 min, first run. Every screenshot diff showed only dates, ids or order: all reverted (the round
+  changes no text the E2E's screens show — a line or a payment that settles, a credit note's refund; the procedure's
+  wordings are pinned in vitest).
+- Then `supabase db reset`, the stack left running.
+
+### Left open (low), with its default
+
+- **MONEY-2: the same proof recorded twice is not refused.** `record_client_payment` checks that its evidence is a
+  `client_payment_evidence` of the client; its ledger key is per request. A second recording of one transfer (two
+  staff, or after a reload: the sheet uploads the proof again, a new document) posts a second +5122 and settles more,
+  or credits the client more, for money received once; own-account statements are not imported (design R12), so no
+  bank line catches it. Default: keep for now (ops record a transfer once, on its proof; the client's credit owed back
+  is then refunded only on a proof of the servicer's own transfer, and the nightly `client_credit_owed` lists it);
+  7f's hardening (plan §8.1) adds `evidence_already_used`, keyed on the proof's content (its sha256 among the client's
+  payment evidence, as two uploads of one file are two documents) with a partial unique index on the entries' source,
+  and a stale-statistics bound for that read. `record_client_refund` the same, bounded by what is owed; one transfer
+  refunding two documents is then two recordings of one proof, which the guard must still allow.
+- **7d-2 redefines `private.client_payment_docs`' payability with `private.document_client_payable`**: the docs read
+  it inline as « not before the opening » (one read per document), while the losses' payability (MONEY-1) calls the
+  function. Default: 7d-2, when it widens `document_client_payable` (an advance while a proceeding stands), redefines
+  both reads with it.
+- Everything 7c-1's « Left open » lists stays open; founder Q4 (a), Q5's recovery (a) and Q7 (a) keep their defaults,
+  open; the switch stays off.
+
+### Round 2
+
+The review of `fb82136` raised one item, a medium of the legal and money lenses (« a liquidation alone: the
+pre-judgment claim paid »). It was checked against the code first and holds: on the main stack, inside `045`'s harness
+in a rolled-back transaction, Roux (`a5`) with an invoice issued d − 5 and a `liquidation` event recorded alone at
+d − 3 (« a liquidation opened at once », as `045`'s own `sl4` says): `client_open_documents` returned `procedure` true
+— the page's note « Une procédure collective du client est en cours : une somme reçue pour une créance antérieure à son
+ouverture n'est pas imputée » — and the invoice `before_opening` false, `payable` true; 360,00 € with no designation
+settled it in full (−4111 36 000, VAT 6 000 moved, open 0, no credit); designated, 100,00 € settled 10 000. The
+migration `20261124090000_client_payments.sql` is unmerged and was edited in place; no public signature changes
+(`database.types.ts` regenerated, identical); **the switch stays off** (judged off and on: what the client may pay
+reads no switch); `033`–`044` byte for byte unchanged.
+
+- **The cause.** `private.document_before_opening` and `private.client_payment_docs`' inline advance test read 7b's
+  `private.client_opening_on`, which reads `proceeding_opened` only, while `private.client_proceeding_stands` counts a
+  `liquidation` too: 7c-1 held a surplus for the procedure but paid the pre-judgment claim. C. com.
+  [L641-3](https://librejustice.fr/norm/fr/code-de-commerce/l641-3) al. 1 (read 2026-11-24, version in force since
+  2019-05-24): « Le jugement qui ouvre la liquidation judiciaire a les mêmes effets que ceux qui sont prévus en cas de
+  sauvegarde par les premier et troisième alinéas du I et par le III de l'article L. 622-7 … » — L622-7 I al. 1:
+  « interdiction de payer toute créance née antérieurement au jugement d'ouverture » (COMPLIANCE HOLD-02, OQ-17). The plan
+  defers the reading to 7d-2 (§6.2.2), which would have left the law broken and the page's note false until then.
+- **The fix (the item's first option, at the root).** `private.client_opening_date(p_client uuid, p_on date)`: plan
+  §6.2.2's function brought forward from 7d-2, with its signature and its rule — the earliest effective date of a
+  `proceeding_opened` or `liquidation` event on or before `p_on`, null without one (`client_status_event_client_idx`:
+  the client and the day in the index, the kind outside; SECURITY DEFINER, `search_path ''`, `enable_seqscan` off;
+  revoked from public, anon, authenticated and service_role). `document_before_opening` (its comment: 7d-2 redefines
+  it with `document_born_on`) and `client_payment_docs`' advance test read it; through them `document_client_payable`,
+  `client_payment_recoveries`' `payable` (round 1's MONEY-1), « Ce que le client doit au cabinet » (invoices, advances,
+  written-off rows), the preview, `record_client_payment`, `client_payment_line` and `book_client_payment_line` (on the
+  line's booking date). Untouched, as the item asks: 7b's `private.client_opening_on` and
+  `private.advance_recovery_of` (the claw-back's `barred_proceeding`), the prepare (`load_facts`' `proceeding_opened_on`)
+  and `client_proceeding_stands`. 7d-2's §6.2.2 becomes a `create or replace` of the same body, and its §6.2.5
+  (`document_born_on(doc) < client_opening_date(client, p_on)`) stands as planned. No web change: the page reads
+  `procedure`, `before_opening` and `payable` from SQL, so its note and its « Créance antérieure à l'ouverture de la
+  procédure du client » are now true of a liquidation recorded alone.
+- **Tests (seen failing on `fb82136`'s bodies).** `045` l, c (27 tests):
+  - `sl6`: Roux, FC-R1 issued d − 5 and an advance born d − 2, both before its liquidation at d − 1, and FC-R2 issued
+    d. The page marks FC-R1 and the advance « antérieure à l'ouverture », not payable, and FC-R2 payable. 740,00 € with
+    no designation pays FC-R2 only (18 000), and holds 56 000 for the procedure (P0 at once). FC-R1 has no settlement,
+    the advance is still open, and nothing is dirty. On `fb82136`, the advance (20 000) and FC-R1 (36 000) were settled
+    too.
+  - `sl7`: FC-R1 and the advance designated (400,00 €) are all held for the procedure (+5122 / −419 40 000), each
+    named in the credit's details. A dedicated-account line of 50,00 €, booked on the judgment's day and labelled with
+    FC-R1's number, is held the same way (−419 5 000). On `fb82136`, FC-R1 was settled and 4 000 of the advance.
+  - `sl8`: `client_opening_date` takes the judgment's own day, is null before it, and takes the earliest of a
+    redressement and a liquidation; a client with none has null. On `fb82136`, the function was missing.
+- **Reads.** `client_opening_date` is one keyed read per call (per document of the client's open documents, per named
+  loss). `test_client_payment_reads_integration.py` now plants half of its 10,000 `client_status_event` rows as
+  liquidations (n_distinct 2, generic plans): every read and command still reads none of them (its bounds unchanged).
+  `test_advance_reads_integration.py` measures `client_opening_date` beside 7b's `client_opening_on`: 0 planted rows
+  (bound 72). A mutant reading it unkeyed (the client OR'ed away) reads 9,824 to 39,296 planted rows and fails both.
+
+### Assertions whose expected value changed (round 2, house rule R3)
+
+- `033`–`044`: none (byte for byte unchanged).
+- `045` (this slice's own, unmerged): three tests added (`sl6`, `sl7`, `sl8`; 24 → 27) and the header's l, c line;
+  no existing expectation changed.
+- `test_client_payment_reads_integration.py`: its planted `client_status_event` rows alternate `proceeding_opened` and
+  `liquidation` (they were all `proceeding_opened`); no bound changed. `test_advance_reads_integration.py`: one measured
+  read added.
+
+### Mutants (round 2)
+
+| Mutant | Killed by |
+|---|---|
+| `document_before_opening` reading 7b's `client_opening_on` (`fb82136`'s body) | `045` `sl6`, `sl7` |
+| `client_payment_docs`' advance test reading `client_opening_on` (`fb82136`'s body) | `045` `sl6`, `sl7` |
+| `client_opening_date` without `liquidation` | `045` `sl6`, `sl7`, `sl8` |
+| `client_opening_date` strictly before the day (`<`) | `045` `sl5` (the dedicated line of the opening's day), `sl7`, `sl8` |
+| `client_opening_date` the latest event (`max`) | `045` `sl8` |
+| `client_opening_date` whatever the day | `045` `sl`, `sl5`, `sl6`, `sl8` |
+| `client_opening_date` unkeyed (the client OR'ed away) | `test_the_client_payment_reads_stay_keyed_whatever_the_statistics`, `test_the_advance_reads_stay_keyed_whatever_the_statistics` |
+
+7 of 7 killed (each the function replaced on the stack, the killer run, the original restored).
+
+### Suites (round 2)
+
+- `supabase test db` (fresh `supabase db reset`): 47 files, **3,010 tests, PASS** (3,007 + `045`'s three) in 635 s
+  — `033`–`044` byte for byte unchanged.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 191 files) clean; unit pytest **1,140 passed, 5
+  xfailed** (unchanged: the round adds no worker code); the non-scale integration tests in CI's order, right after that
+  `supabase test db` without a reset: **276 passed** in 853 s.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic, **0** wrong.
+- Scale, each command right after `supabase db reset` with CI's logging settings (docs/benchmarks/remittances.md
+  « M2c-7c-1 review fixes, round 2 »): the scale job's nine files in one call as `ci.yml` runs them
+  (`RECEIPT_FILES=5000`) **15 passed** in 1,338.9 s; CI's `scale-payouts` command **6 passed** in 1,348.5 s. No Paris
+  date change fell in them. No timed path changed in the round.
+- `database.types.ts` regenerated from the final schema: identical (the new function is private).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **29 files, 578 tests** passed (unchanged: no web change).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61
+  passed** in 6.1 min, first run. Every screenshot diff showed only dates, ids or order: all reverted (the round
+  changes no page text; the liquidation case is pinned in `045`).
+- Then `supabase db reset`, the stack left running.
+
+### Left open (low), with its default
+
+- **The servicer's own set-off and claw-back still read `proceeding_opened` only.** For a client whose liquidation is
+  recorded alone, a run still sets off its invoices and claws back its advances, whenever they were born: the prepare
+  reads `proceeding_opened_on`, and `advance_recovery_of` reads `client_opening_on`. Both were so before 7c-1. A
+  set-off of connected claims is L622-7 I al. 1's own exception (whether the runs' are connected is OQ-41); that
+  nothing is set off in liquidation is founder Q11's default (LEX-09, plan §6.2.6). The client space and the staff
+  pages state what those runs do. Default: 7d-2, as planned, moves the prepare's facts and `advance_recovery_of` to
+  `client_opening_date` (§6.2.2, LEX-07 (2)) and adds `client_set_off_barred` (`liquidation`, §6.2.6).
+- Everything round 1's « Left open » lists stays open; founder Q4 (a), Q5's recovery (a), Q7 (a) and Q11 keep their
+  defaults, open; the switch stays off.
+
+### Round 3
+
+The review of `b181d65` raised two mediums. Each was checked against the code first, on the main stack inside `045`'s
+harness in rolled-back transactions; both hold. The migration `20261124090000_client_payments.sql` is unmerged and was
+edited in place. **The switch stays off**: judged off and on, neither path reads it. `033`–`044` are byte for byte
+unchanged, and `044` passes against the redefined `private.advance_recovery_of` with no expectation changed.
+
+- **A pre-judgment advance of a liquidation said « à rembourser » (medium; fixed at the root, the item's first
+  option).**
+  - Reproduced with `045`'s `roux()`. Roux's advance (20 000) was born d − 2 under a mandate with no claw-back clause.
+    Its liquidation is recorded alone at d − 1.
+  - Every page read `request`: `client_space_advances` (the client's « Avances du cabinet à rembourser : 200,00 € » and
+    « … une demande de remboursement pourra vous être adressée »), the staff « Avances », and `client_open_documents`.
+    The same page also said `before_opening` true, `payable` false.
+  - Paid as designated (200,00 €), the money was held for the procedure (`client_credit` 20 000) and the advance stayed
+    open and said to be repaid. The cause: 7b's `private.advance_recovery_of` reads `client_opening_on`
+    (`proceeding_opened` only).
+  - The law: under C. com. [L641-3](https://librejustice.fr/norm/fr/code-de-commerce/l641-3) al. 1 (read 2026-11-24,
+    version in force since 2019-05-24) → L622-7 I al. 1, the client may not pay this claim. Al. 4: « Les créanciers
+    déclarent leurs créances au liquidateur … ». No run takes such an advance (claw-back only), and 7c-2's request
+    refuses `before_opening`. So the page stated a legal falsehood, and round 2's payability contradicted it.
+  - Fix: `private.advance_recovery_of` is redefined, copied from `20261123090000:142` (same signature and settings,
+    its revoke restated). An advance whose recovery would be `request` or `request_no_mandate` is now
+    `barred_proceeding` when born before `private.client_opening_date(client, p_on)`, the opening 7c-1's payments read.
+  - A `clawback` keeps 7b's rule (born before `client_opening_on`), as the item asks and round 2 recorded. The runs
+    still take it until 7d-2, so the pages stay true of the runs. One keyed read of the opening either way.
+  - Through the one function, every reader follows: the client space, « Avances » (`advance_row`), « Ce que le client
+    doit au cabinet », the run page, « Désimputer » (`allocation_remitted`'s cover) and the nightly's `advance_open`
+    details.
+  - The web's wordings of `barred_proceeding` are already true of a liquidation: « Avances du cabinet : … » with no
+    « à rembourser »; « antérieure à l'ouverture de votre procédure collective, elle n'est pas déduite de vos
+    reversements »; « Pas de reprise : avance née avant l'ouverture de la procédure collective du client ». The web
+    changes only a type comment.
+- **A credit dated by its recording (medium; fixed).**
+  - Reproduced: Lilas, in redressement since d − 3. An own-account payment value-dated d − 2 (its entry
+    `effective_date` 22/11) and a dedicated-account line booked d − 1 (23/11) were both recorded today.
+    `client_space_credits` and `client_open_documents.credits` gave `created_on` 24/11 (`client_credit.created_at`).
+  - The pages then read « Somme reçue le 24/11/2026 … » (the client space and staff), and an overpayment value-dated
+    20/11 read « Trop-perçu du 24/11/2026 ». For a sum held because it was paid after the judgment, the receipt date is
+    the one that matters.
+  - Fix: both reads carry `received_on`. That is the payment's own entry's `effective_date` (the value date on the own
+    account, the line's booking date on the dedicated one), read by primary key through `client_credit.entry_id`, one
+    per output row.
+  - `settlements.creditLabel` and `clientSpaceCreditLines` word « Somme reçue le … » and « Trop-perçu du … » with it.
+    The parsers require it. `created_on` stays (the recording); the nightly's 15-day alert still reads `created_at`.
+  - `client_open_documents` and `client_space_credits` keep their signatures (a new key in their `jsonb`), so
+    `database.types.ts` is regenerated identical.
+- **Tests (seen failing on `b181d65`'s bodies).** `045` l, c (29 tests):
+  - `sl9` (the first item). On `b181d65`: `request` on the client space, the staff list, the page, the run page,
+    « Désimputer » and the nightly; `request_no_mandate` read `advance_recovery_of(null, …)`.
+    - It now reads `barred_proceeding` on every one of these, before and after the client pays it (held for the
+      procedure).
+    - Born on the judgment's day, read the day before it, or a cover born with its payout's debit on that day: a
+      request.
+    - A claw-back clause in Roux's terms: `clawback`.
+  - `sl10` (the second item). Lilas's two credits read `received_on` d − 2 and d − 1, and Moreau's overpayment d − 4,
+    on both pages, with `created_on` today. On `b181d65`, `received_on` was missing.
+  - vitest:
+    - `settlements.test.ts`: the client space's and the staff page's lines dated by `received_on`, and a row without
+      it refused (seen failing on `b181d65`'s web).
+    - `advances.test.ts`: the client space's heading and line for `sl9`'s row (passes on `b181d65`'s web, which never
+      said « à rembourser » of a `barred_proceeding` row: it pins the page SQL now feeds).
+- **Reads.** `test_client_payment_reads_integration.py` plants `ledger_entry` too: 10,000 of the servicer's own
+  entries for two other clients, five always-triggers off while planting, n_distinct 2 and −1, generic plans.
+  - It reads `client_space_credits` and, new, `client_open_documents` with a credit: 1 planted-table row of
+    `ledger_entry` each (bound 72).
+  - A mutant reading the entry not by its key (`e.id::text = c.entry_id::text`) reads 10,064 and 10,069 rows and fails.
+  - In `test_advance_reads_integration.py`, `advance_recovery`, `advance_row`, `client_advances`,
+    `client_space_advances` and `remittance_run_payout` (all through the redefined function) are unchanged: 0 planted
+    `client_status_event` rows.
+
+### Assertions whose expected value changed (round 3, house rule R3)
+
+- `033`–`044`: none (byte for byte unchanged; `044` passes on the redefined `advance_recovery_of`, which widens
+  `barred_proceeding` only for a client with a `liquidation` and no earlier `proceeding_opened`, a case `044` never
+  builds).
+- `045` (this slice's own, unmerged): two tests added (`sl9`, `sl10`; 27 → 29) and the header's l, c line. No existing
+  expectation changed.
+- vitest `settlements.test.ts` (this slice's own): every credit fixture gains `received_on`, equal to its `created_on`,
+  so every existing expectation is unchanged. The new cases are additions.
+- `test_client_payment_reads_integration.py`: `ledger_entry` planted and watched, and one measured read added. No bound
+  changed.
+
+### Mutants (round 3)
+
+| Mutant | Killed by |
+|---|---|
+| `advance_recovery_of` as 7b's body (`client_opening_on` whatever the recovery: `b181d65`'s) | `045` `sl9` |
+| only `request` barred by `client_opening_date` (`request_no_mandate` read on `client_opening_on`) | `045` `sl9` |
+| a claw-back barred by `client_opening_date` too | `045` `sl9` |
+| born on the opening's day barred (`<=`) | `045` `sl9` |
+| `client_space_credits`' `received_on` the recording day | `045` `sl10` |
+| `client_open_documents`' `received_on` the recording day | `045` `sl10` |
+| `client_space_credits`' entry read not by its key | `test_the_client_payment_reads_stay_keyed_whatever_the_statistics` (10,064 rows) |
+| `client_open_documents`' entry read not by its key | `test_the_client_payment_reads_stay_keyed_whatever_the_statistics` (10,069 rows) |
+| web: `creditLabel` by `created_on`; `clientSpaceCreditLines` by `created_on`; either parser without `received_on` | vitest `settlements.test.ts`, 4 mutants |
+
+12 of 12 killed. SQL: 8, each the function replaced on the stack, the killer run, the original restored. Web: 4.
+
+### Suites (round 3)
+
+- `supabase test db` (fresh `supabase db reset`): 47 files, **3,012 tests, PASS** (3,010 + `045`'s two) in 565 s —
+  `033`–`044` byte for byte unchanged.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 191 files) clean; unit pytest **1,140 passed, 5
+  xfailed** (unchanged: the round adds no worker code); the non-scale integration tests in CI's order, right after that
+  `supabase test db` without a reset: **276 passed** in 797 s.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic, **0** wrong.
+- Scale, each command right after `supabase db reset` with CI's logging settings (docs/benchmarks/remittances.md
+  « M2c-7c-1 review fixes, round 3 »): the scale job's nine files in one call as `ci.yml` runs them
+  (`RECEIPT_FILES=5000`) **15 passed** in 1,411.7 s; CI's `scale-payouts` command **6 passed** in 1,333.5 s. No Paris
+  date change fell in them. No timed path changed in the round.
+- `database.types.ts` regenerated from the final schema: identical (no public signature changed).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **29 files, 581 tests** passed (578 + three:
+  `settlements.test.ts` 28 → 30, `advances.test.ts` + 1).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61
+  passed** in 6.2 min, first run. Every screenshot diff showed only dates, ids or order: all reverted. The E2E's
+  credits are value-dated on their recording day, so their text is unchanged; the liquidation case is pinned in `045`
+  and vitest.
+- Then `supabase db reset`, the stack left running.
+
+### Left open (low), with its default
+
+- **The claw-back still reads `proceeding_opened` only.**
+  - Round 2's first « Left open » now holds for claw-back advances alone. For a client whose liquidation is recorded
+    alone, a run still claws back an advance under a claw-back clause, and still sets off its invoices, whenever they
+    were born. The pages say so (`clawback`, `sl9`).
+  - An advance without a clause born before the judgment is no longer said to be repaid (this round).
+  - Default: 7d-2, as planned, moves the prepare's facts and the claw-back's rule to `client_opening_date` (§6.2.2) and
+    adds `client_set_off_barred` (§6.2.6).
+- **What happens to an advance the client may not pay is not stated beyond « not deducted ».** The client space says
+  « antérieure à l'ouverture de votre procédure collective, elle n'est pas déduite de vos reversements ». Staff read
+  « Pas de reprise ». The declaration to the liquidator (L641-3 al. 4) or to the mandataire is not tracked: claim
+  declaration is a later module (BRIEF §3.8, COMPLIANCE HOLD-02).
+  - Default: keep the wording (true, and no legal step is invented). Whether to tell staff « à déclarer au passif » is
+    counsel's to word (OQ-17).
+- Everything rounds 1 and 2 list stays open; founder Q4 (a), Q5's recovery (a), Q7 (a) and Q11 keep their defaults,
+  open; the switch stays off.
+
+### Round 4
+
+The review of `d486559` raised one medium. It was checked against the code first, on the main stack inside `045`'s
+harness in rolled-back transactions: it holds, and the item's « also check » found the same class on the payment
+paths. The migration `20261124090000_client_payments.sql` is unmerged and was edited in place: no function of an
+earlier migration is redefined, no public signature changes (`database.types.ts` regenerated, identical). **The switch
+stays off**: judged off and on, no path of the round reads it. `033`–`044` are byte for byte unchanged.
+
+- **A refund dated before what it pays back existed (medium; fixed at the root).**
+  - Reproduced with the verifier's probe `pq1`. Moreau, nothing open, pays 5,00 € today: a credit of 500 received d.
+    Refunded with `p_paid_on` d − 40, it was accepted (owed after 0) and `client_refund_own` was dated d − 40. Roux's
+    credit note issued today: 50,00 € refunded at d − 40 accepted too (owed after 7 000).
+  - As of d − 20, Moreau's 419 was +500 (a debit), Roux's 4111 +5 000 above what it owed, 5122 −5 500. Today 419 is
+    0, so the nightly `client_credit_ledger` never sees it; the credit note page read « Remboursé : 50,00 € le
+    <d − 40> » for a credit note issued at d. One wrong date in « Enregistrer le remboursement » did it.
+  - The cause: `record_client_refund` only refused a date in the future (`bad_date`); the sheet had `max={today}`
+    and no `min`.
+  - Fix: under the locks, after `nothing_owed`, `record_client_refund` refuses `bad_date` when `p_paid_on` is before
+    what it pays back existed — a client credit's receipt (its payment's entry's `effective_date`, read by the
+    entry's primary key through `client_credit.entry_id`), a credit note's `issue_date` (its entry's date, by
+    `issue_commission_documents`). The detail is that day, `YYYY-MM-DD`: the earliest allowed. The day itself is
+    accepted.
+  - Web: `ClientRefundSheet` takes `earliest` — the credit's `received_on` on the client's page, the credit note's
+    `issue_date` there and on the credit note's page — as its date input's `min`. `clientRefundRefusal` words
+    `bad_date` with that day: « Le virement ne peut pas être daté avant le JJ/MM/AAAA, jour où la somme a été reçue »
+    (a credit, either cause) or « … jour où l'avoir a été émis »; with no day, the future-date wording, unchanged.
+- **The same class on the payment paths (medium; fixed at the root).** The item asked whether another path accepts a
+  date before what it settles existed. Probed the same way:
+  - « Enregistrer un règlement » value-dated d − 40 settled Cyprès's invoice issued today: −4111 dated d − 40, and its
+    VAT made due (44574 → 44571) then. As of d − 20, Cyprès's 4111 read −36 000.
+  - The dedicated account's line booked d − 10, its label naming that invoice, settled it the same way (4111 −36 000
+    as of d − 5).
+  - A payment value-dated d − 10 settled Lambert's advance born d − 2 (4112 −50 000 as of d − 5).
+  - A payment value-dated d − 1 designating the recovery of Dupont's advance passed as a loss today was a recovery:
+    as of d − 1, 7714 −100 000 while 4112 still held the advance open.
+  - Each is a client payment booked to a document on a date when it was not open — the review's medium. Fix, in the
+    plan's shared reads (`private.client_payment_docs` and its users), not per command:
+    - each document carries `since` (an invoice's issue, an advance's birth: its entry's date) and `open_on` (on or
+      before the payment's date). An open part only falls after that day (settlements are never undone), so a
+      document existing on the date with an open part now was open by at least as much on every day since: no
+      upper check is needed.
+    - `private.client_payment_free` leaves out what did not exist then. The default order never settles it: the
+      money is a trop-perçu, as it was that day (the invoice stays open).
+    - `private.client_payment_named_refusal` refuses a named one `bad_date`, its `since` in the detail (before
+      `in_flight`); a named recovery whose last write-off (`private.client_payment_recoveries`' new `written_off_on`,
+      the advance's settlements by `commission_settlement_document_idx`) is after the date, `bad_date` with that day.
+    - `public.client_payment_line`'s `named_documents` (the label's designation) leaves out an invoice issued after
+      the line's booking date: the client cannot have designated it, and the line stays bookable (all a trop-perçu).
+  - Web: `clientPaymentRefusal` words `bad_date` with a day: on the sheet « Un document ou une perte désignés
+    n'existaient pas encore à cette date de valeur : désigné ainsi, le règlement ne peut pas être daté avant le
+    JJ/MM/AAAA. »; on the line « Ce crédit a été reçu avant le JJ/MM/AAAA, jour où naît un document désigné : il ne
+    peut pas le régler. » The sheet's preview shows it before « Enregistrer le règlement ».
+  - The plan's pure core (`private.client_payment_plan`) and its twin are unchanged: what they are given is.
+- **Checked, not the class:**
+  - The dedicated account has no refund path in 7c-1 (refunds are from the own account only); its line pays the
+    servicer, fixed above.
+  - A credit note (or a credit) refunded twice on different dates: each refund is now on or after its issue (or
+    receipt), and its owed part only falls after that day, so the 4111 (or 419) stays within what was owed on every
+    day. No change.
+  - A payment value-dated before another payment recorded earlier: it settles at most what is open now, never more
+    than was open on its day (the same monotony). No change.
+- **Tests (seen failing on `d486559`'s bodies).** `045` p, d, r (32 tests):
+  - `sp4`: Cyprès's invoice issued today — the preview of d − 1 considers nothing; paid d − 1, all a trop-perçu
+    (+5122 / −419 only; the invoice still open 36 000); named d − 1, refused `bad_date` with today (the command and
+    the preview); paid today, settled. Lambert's advance born d − 2: named d − 3 refused with d − 2; paid d − 3, a
+    credit; paid d − 2, settled. Dupont's loss passed today: its recovery named d − 1 refused with today; today, a
+    recovery. On `d486559`: every one settled.
+  - `sd4`: a line booked d − 1 labelled with an invoice issued today — no designation, its preview 0 open and all a
+    credit; named anyway, refused `bad_date` with today; booked, all a trop-perçu (no 4111, no VAT moved); a line of
+    the issue day settles it.
+  - `sr2`: Moreau's credit received d − 4 refunded d − 5, and Roux's credit note issued today refunded d − 1, refused
+    `bad_date` with d − 4 and today; the probe's d − 40 refused for both; on the receipt day and the issue day,
+    recorded (dated d − 4 and d); Moreau's 419 never in debit, Roux's 4111 untouched on d − 1.
+  - vitest `settlements.test.ts` (+3): both refusals' wordings with a day and without; the sheet's `min={earliest}`
+    and its three callers' floors (a source guard, as the file's others).
+- **Reads.** The new reads are keyed, in functions with seq scans off: the refund's receipt by `ledger_entry`'s
+  primary key (`test_client_payment_reads_integration.py`, `record_client_refund`: 6 planted-table rows of
+  `ledger_entry`, bound 72; the mutant below reads 10,095), the recovery's write-offs by the advance's key
+  (`test_advance_reads_integration.py`, `client_payment_recoveries`: 3 planted rows of `commission_settlement`, bound
+  72). `record_client_refund` and the payment commands are on no timed path.
+
+### Assertions whose expected value changed (round 4, house rule R3)
+
+- `033`–`044`: none (byte for byte unchanged).
+- `045` (this slice's own, unmerged): three tests added (`sp4`, `sd4`, `sr2`; 29 → 32) and the header's p, d, r lines.
+  Three fixtures moved a date back, test only, as Lilas's FC-3 already does (`pg_temp.issued`), so that what they test
+  stays dated on or after what it settles:
+  - `sd`: its invoice issued d − 1, the day its lines are booked (its expectations unchanged);
+  - `sr`: its credit note issued d − 2 before `r14`, paid back d − 1 (its expectations unchanged);
+  - `sl5`: gains `loss_later` (yesterday's line designating the loss passed today: `bad_date`); its loss's write-off
+    settlement then moved to d − 2 for `day_before` (a recovery: unchanged). Its description says « once the loss was
+    passed ».
+- vitest `settlements.test.ts`: three cases added; no existing expectation changed.
+- `test_advance_reads_integration.py` (7c-1's lines): the recoveries' expected row gains `written_off_on` (today) and
+  `open_on` (true). No bound changed.
+
+### Mutants (round 4)
+
+| Mutant | Killed by |
+|---|---|
+| `record_client_refund` without the floor | `045` `sr2` |
+| the floor with `<=` in place of `<` (the receipt or issue day refused) | `045` `sb`, `sr`, `sr2` |
+| a credit's floor its recording day (`created_at`), not its receipt | `045` `sr2` |
+| a credit note with no floor (a credit's only) | `045` `sr2` |
+| the receipt's entry read not by its key (`q.id::text = c.entry_id::text`) | `test_the_client_payment_reads_stay_keyed_whatever_the_statistics` (10,095 rows) |
+| `client_payment_free` without `open_on` | `045` `sp4`, `sd4` |
+| an invoice open only after its issue day (`<` in place of `<=`) | `045` 11 tests (`sp4`, `sd4`, `sd`, `sb`, `sl`, …) |
+| an advance open whatever its birth | `045` `sp4` |
+| a named document born later not refused `bad_date` | `045` `sp4`, `sd4` |
+| `bad_date`'s detail not the day | `045` `sp4`, `sd4` |
+| a loss recoverable whatever the day it was passed | `045` `sp4`, `sl5` |
+| the line's label naming an invoice issued after it | `045` `sd4` |
+| web: the refund's `bad_date` without its day; worded by the other kind; the payment's without its day; the line worded as the sheet | vitest `settlements.test.ts`, 4 mutants |
+| web: the sheet's date with no `min`; a credit's floor `created_on`; a credit note's floor today (client page, credit note page) | vitest `settlements.test.ts`, 4 mutants |
+
+20 of 20 killed. SQL: 12, each the function replaced on the stack, the killer run, the original restored (045 passes
+after). Web: 8.
+
+### Suites (round 4)
+
+- `supabase test db` (fresh `supabase db reset`): 47 files, **3,015 tests, PASS** (3,012 + `045`'s three) in 581 s —
+  `033`–`044` byte for byte unchanged.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 191 files) clean; unit pytest **1,140 passed, 5
+  xfailed** (unchanged: the round adds no worker code, only an integration test's expected row); the non-scale
+  integration tests in CI's order, right after that `supabase test db` without a reset: **276 passed** in 821 s.
+- Scale and scale-payouts: **not run this round**. `record_client_refund`, `record_client_payment`,
+  `book_client_payment_line` and the payment's reads are on no timed path (no scale file calls them); the PR's
+  dispatched CI run covers both jobs.
+- `database.types.ts` regenerated from the final schema: identical (no public signature changed).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **29 files, 584 tests** passed (581 + `settlements.test.ts`'s
+  three).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **61
+  passed** in 6.0 min, first run. Every screenshot diff showed only dates, ids or order: all reverted (the round
+  changes no rendered text: the sheet's `min` is not drawn, and the E2E's refunds and line are dated on or after
+  what they settle).
+- Then `supabase db reset`, the stack left running.
+
+### Left open (low), with its default
+
+- **A loss written off in parts on different days is recoverable from its last write-off only.** A payment dated
+  between two write-offs designating the recovery is refused, though the first part was already a loss. Conservative
+  (never more income than was lost on any day) and rare. Default: keep.
+- **A payment received before an invoice existed stays a trop-perçu.** 7c-1 refunds a credit; it does not apply it to a
+  later invoice (the M2c-7 plan has no such command). The invoice stays open: a run may set it off, the client may pay
+  it, and the credit is refunded. Default: keep; whether to add « imputer un trop-perçu » is the founder's.
+- **The payment sheet's value date has no `min`.** Its floor depends on what is designated, and the preview names
+  the day before the sheet can record. Default: keep.
+- **A `bad_date` names the first refused designation's day, not the latest** (round 4's verifier, probe q6).
+  `private.client_payment_named_refusal` returns the first refusal in the client's order. An advance born d−2 and an
+  invoice issued today, both designated at d−5, are refused with « … pas être daté avant le 22/11 ». Redated d−2, the
+  payment is refused a second time with the invoice's day. Nothing is booked wrongly; it costs ops a second try.
+  Default: keep; 7f's hardening names the greatest day among the refused designations.
+- Everything rounds 1 to 3 list stays open; founder Q4 (a), Q5's recovery (a), Q7 (a) and Q11 keep their defaults,
+  open; the switch stays off.
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

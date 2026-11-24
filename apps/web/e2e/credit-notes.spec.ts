@@ -2,9 +2,10 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { adminClient, createConfirmedPayoutAccount, createMandate, createMember, createTenant, type Tenant } from "./support/admin";
-import { camt053, ibanFr, type Credit } from "./support/camt";
+import { camt053, camt053Lines, ibanFr, type Credit } from "./support/camt";
 import { loginAsStaff, loginWithEmailCode } from "./support/session";
 import { reviewShot } from "./screenshot";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2c-5b « Émettre un avoir » (design §14.1, risk R2): a client whose mandate has no netting clause (its invoices are
@@ -101,7 +102,7 @@ async function rfOf(externalRef: string): Promise<string> {
 }
 
 test("an admin issues a manual credit note on an invoice and the client reads it", async ({ page, browser }, testInfo) => {
-  test.setTimeout(300_000);
+  test.setTimeout(480_000);
   await loginAsStaff(page, await createMember(tenant.servicerId, "admin"));
   await boardAndConfirm(page);
   const credits: Credit[] = [
@@ -116,7 +117,7 @@ test("an admin issues a manual credit note on an invoice and the client reads it
     buffer: Buffer.from(camt053(BANK_IBAN, await statementDay(), credits), "utf-8"),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
+  await expectOwnImport(page);
 
   // the client's run, prepared (by the click or the hourly schedule) and approved: its invoice is due (no netting)
   await page.goto("/backoffice/reversements");
@@ -233,5 +234,130 @@ test("an admin issues a manual credit note on an invoice and the client reads it
   await expect(creditRow).toContainText("36,00");
   await expect(client.getByText("11,25 %")).toHaveCount(0);
   await reviewShot(client, testInfo, "m2c5b-client-factures");
+
+  // M2c-7c-1 (plan §5.5): the client pays the servicer — 50,00 € on the dedicated account from its payout IBAN, the
+  // invoice's number in the label (its designation), then 63,00 € to the own account (the invoice's 58,00 € and 5,00 €
+  // owed back to it); the 5,00 € refunded; a credit note of 10,00 € HT on the paid invoice, refunded too
+  const { data: own, error: ownError } = await adminClient()
+    .from("bank_account")
+    .insert({
+      organization_id: tenant.servicerId,
+      purpose: "own",
+      iban: ibanFr(454547),
+      currency: "EUR",
+      label: "Compte propre",
+      opened_on: "2026-01-01",
+    })
+    .select("id")
+    .single();
+  if (ownError) throw ownError;
+  const { error: settingsError } = await adminClient()
+    .from("servicer_billing_settings")
+    .upsert({ organization_id: tenant.servicerId, own_bank_account_id: own.id }, { onConflict: "organization_id" });
+  if (settingsError) throw settingsError;
+  const evidence = {
+    name: "preuve.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.4\n% preuve de virement (E2E)\n", "utf-8"),
+  };
+
+  // the dedicated account's line: « Règlement d'une facture ou d'une avance du cabinet »
+  await page.goto("/backoffice/encaissements");
+  const second = page.getByTestId("statement-upload");
+  await second.getByLabel("Relevé CAMT.053 (XML)").setInputFiles({
+    name: "releve-reglement-client.xml",
+    mimeType: "application/xml",
+    buffer: Buffer.from(
+      camt053Lines(
+        BANK_IBAN,
+        parisToday(),
+        [{ ref: "RC-1", amountMinor: BigInt(5000), name: "BOULANGERIE DURAND", iban: ibanFr(454546), ustrd: [`Reglement ${invoiceNumber}`] }],
+        [],
+        BigInt(80001),
+      ),
+      "utf-8",
+    ),
+  });
+  await second.getByRole("button", { name: "Importer le relevé" }).click();
+  await expectOwnImport(page);
+  await page.goto("/backoffice/encaissements/debits");
+  const clientLine = page.getByTestId("debit-row").filter({ hasText: "50,00" });
+  await expect(async () => {
+    await page.reload();
+    await expect(clientLine).toBeVisible({ timeout: 5_000 });
+  }).toPass({ timeout: 60_000 });
+  await expect(clientLine.getByTestId("debit-review")).toContainText("règlement d'une facture ou d'une avance du cabinet");
+  await clientLine.getByTestId("client-payment-line-open").click();
+  const lineSheet = page.getByTestId("client-payment-line-sheet");
+  await expect(lineSheet).toContainText(tenant.clientName);
+  await expect(lineSheet).toContainText(`Le libellé désigne ${invoiceNumber}`);
+  await expect(lineSheet.getByTestId("client-payment-effect")).toContainText(`${invoiceNumber} : 50,00 € réglés`);
+  await expect(lineSheet).toContainText("La somme revient au cabinet : elle sera virée sur son compte propre avec la prochaine quote-part.");
+  await lineSheet.getByLabel("Motif").fill("Règlement de la facture par le client (E2E)");
+  await reviewShot(page, testInfo, "m2c7-reglement-compte-dedie");
+  await lineSheet.getByTestId("client-payment-line-confirm").click();
+  await expect(page.getByTestId("client-payment-line-done")).toContainText(`${invoiceNumber} : 50,00 € réglés`, { timeout: 30_000 });
+
+  // « Ce que le client doit au cabinet » on the client's page: the invoice's 58,00 €, then « Enregistrer un règlement »
+  await page.goto(`/backoffice/clients/${tenant.clientId}/reversement`);
+  const owes = page.getByTestId("client-owes");
+  await expect(owes.getByTestId("owes-invoice").filter({ hasText: invoiceNumber })).toContainText("58,00");
+  await owes.getByTestId("client-payment-open").click();
+  const paySheet = page.getByTestId("client-payment-sheet");
+  await paySheet.getByLabel("Montant reçu (€)").fill("63,00");
+  await paySheet.getByLabel("Preuve du virement").setInputFiles(evidence);
+  await expect(paySheet.getByLabel(/Non : ordre par défaut/)).toBeChecked();
+  await expect(paySheet.getByTestId("client-payment-effect")).toContainText(
+    `${invoiceNumber} : 58,00 € réglés (dont TVA 9,67 € devenue exigible) ; trop-perçu de 5,00 € à rembourser au client`,
+  );
+  await reviewShot(page, testInfo, "m2c7-reglement-client");
+  await paySheet.getByTestId("client-payment-confirm").click();
+  await expect(page.getByTestId("client-payment-done")).toBeVisible({ timeout: 30_000 });
+  await expect(owes.getByTestId("owes-invoice")).toHaveCount(0);
+  const credit = owes.getByTestId("owes-credit");
+  await expect(credit).toContainText("Trop-perçu");
+  await expect(credit).toContainText("5,00");
+
+  // the client's administrator (still signed in above) reads what the servicer owes it back
+  await client.goto("/client/reversements");
+  await expect(client.getByTestId("client-space-credits")).toContainText(
+    /Trop-perçu du \d{2}\/\d{2}\/\d{4} : 5,00\s€ que le cabinet vous doit/,
+  );
+
+  // the 5,00 € refunded from the own account, on proof
+  await credit.getByTestId("client-refund-open").click();
+  const refundSheet = page.getByTestId("client-refund-sheet");
+  await expect(refundSheet.getByLabel("Montant remboursé (€)")).toHaveValue("5,00");
+  await refundSheet.getByLabel("Preuve").setInputFiles(evidence);
+  await refundSheet.getByTestId("client-refund-confirm").click();
+  await expect(page.getByTestId("client-refund-done")).toBeVisible({ timeout: 30_000 });
+  await expect(owes.getByTestId("owes-credit")).toHaveCount(0);
+
+  // a credit note of 10,00 € HT on the invoice now paid: 12,00 € owed back to the client, refunded from its page
+  await page.goto(invoiceUrl);
+  const panel2 = page.getByTestId("credit-note-form");
+  await panel2.getByLabel("Montant HT de l'avoir (€)").fill("10,00");
+  await panel2.getByLabel(/Erreur de facturation/).check();
+  await panel2.getByLabel(/Motif détaillé/).fill("Frais de dossier facturés à tort (E2E)");
+  await panel2.getByTestId("credit-note-preview").click();
+  await page.getByTestId("credit-note-confirm").click();
+  await expect(page.getByTestId("credit-note-issued")).toContainText(/Avoir FC-\d{4}-000003 émis/, { timeout: 30_000 });
+  await page.getByTestId("invoice-credit-note").filter({ hasText: /Avoir FC-\d{4}-000003/ }).getByRole("link").click();
+  await expect(page.getByTestId("credit-note-refund")).toContainText("12,00");
+  await page.getByTestId("client-refund-open").click();
+  const cnSheet = page.getByTestId("client-refund-sheet");
+  await expect(cnSheet.getByLabel("Montant remboursé (€)")).toHaveValue("12,00");
+  await cnSheet.getByLabel("Preuve").setInputFiles(evidence);
+  await reviewShot(page, testInfo, "m2c7-remboursement-avoir");
+  await cnSheet.getByTestId("client-refund-confirm").click();
+  await expect(page.getByTestId("client-refund-done")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("credit-note-refund")).toContainText("Remboursé");
+
+  // the ledger: the two payments and the two refunds, nothing owed back any more
+  const { data: credits2 } = await adminClient()
+    .from("client_credit")
+    .select("cause, amount_minor")
+    .eq("client_organization_id", tenant.clientId);
+  expect(credits2).toEqual([{ cause: "overpayment", amount_minor: 500 }]);
   await context.close();
 });

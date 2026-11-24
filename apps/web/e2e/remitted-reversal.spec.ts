@@ -13,6 +13,7 @@ import {
 import { camt053, camt053Lines, ibanFr, type Credit } from "./support/camt";
 import { loginAsStaff, loginWithEmailCode } from "./support/session";
 import { reviewShot } from "./screenshot";
+import { expectOwnImport } from "./support/statements";
 
 /**
  * M2c-7a (plan docs/design/m2c-7-plan.md §3.7, §3.9 E2E; ADR-0014 « M2c-7a »): a collection already remitted to the
@@ -123,22 +124,8 @@ async function importStatement(page: Page, file: string, xml: string) {
     buffer: Buffer.from(xml, "utf-8"),
   });
   await form.getByRole("button", { name: "Importer le relevé" }).click();
-  await expect(page.getByTestId("statement-status")).toHaveText("Importé", { timeout: 60_000 });
-  // (M2c-7b) this statement's own import, never the previous statement's « Importé » still on the page: under load the
-  // upload of the second one was still running when the test went on (and left it awaiting its upload)
-  await expect
-    .poll(
-      async () => {
-        const { data } = await adminClient()
-          .from("bank_statement")
-          .select("status")
-          .eq("organization_id", tenant.servicerId)
-          .eq("file_name", file);
-        return (data ?? []).map((s) => s.status);
-      },
-      { timeout: 60_000 },
-    )
-    .toEqual(["imported"]);
+  // (M2c-7b, the shared helper since 7c-1) this statement's own import, never the previous statement's « Importé »
+  await expectOwnImport(page);
 }
 
 test("« Désimputer » a collection already remitted: the servicer's advance, the run page, « Contrôles »", async ({

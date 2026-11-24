@@ -139,6 +139,9 @@ export const BOOK_LABEL: Record<string, string> = {
   commission_receivable: "Mandants — factures et avoirs",
   client_advance_receivable: "Mandants — avances",
   own_cash: "Compte propre (mouvements constatés)",
+  // (M2c-7c-1 review round 1, MONEY-3) the two books 7c-1 adds to the export: their ledger_book labels
+  client_credit_owed: "Mandants — sommes à leur rembourser",
+  written_off_recovered: "Rentrées sur avances passées en perte",
 };
 
 export const DOC_TYPE: Record<string, string> = { invoice: "facture", credit_note: "avoir" };
