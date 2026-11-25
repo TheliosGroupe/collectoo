@@ -96,6 +96,8 @@ class FileFacts:
     holds: int
     credit_note: bool = False
     balances: FileBalances = field(default_factory=FileBalances)
+    # (M2c-7d-1, plan §6.2.8) the end of the client's mandate, if any: private.client_end_event
+    ended_on: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,13 +124,17 @@ class Plan:
 # -- pure decisions ------------------------------------------------------------------------------
 
 
-def gate(t: Target, f: FileFacts) -> str | None:
+def gate(t: Target, f: FileFacts) -> str | None:  # noqa: PLR0911 - one return per gate
     """What keeps a payment from allocation on this file now (design §8.4, first that applies),
     unless ops let it pass that gate (the judge's authorisation, the cut-off checked with the
     client, a credit note not invoked); every gate ops released is passed. The hold comes before
     the cut-off: a payment booked before the servicing start on a held file is reported held, and
     the client told (founder #12, #17). Mirrors private.gate_assignments and the backstop in
-    private.post_allocations."""
+    private.post_allocations. (M2c-7d-1) A payment booked on or after the end of the client's
+    mandate (a death, a tutelle, a mandate end) is held first, as in private.gate_assignments,
+    whatever ops released: the end may be recorded after the payment was gated ready."""
+    if f.ended_on is not None and t.booking_date >= f.ended_on:
+        return "client_mandate_ended"  # C. civ. 2003; forwarded or restored by ops (founder Q10)
     if f.status in CLOSED:
         return "account_closed"
     if t.currency != f.currency:
@@ -342,6 +348,19 @@ def load_files(conn: Conn, org: str, ids: Iterable[str]) -> dict[str, FileFacts]
         (org,),
     ).fetchall():
         files[r[0]] = FileFacts(r[0], r[1], str(r[2]).strip(), r[3], r[4], r[5], r[6], int(r[7]))
+    # (M2c-7d-1) the end of each client's mandate, one keyed read per client of the files
+    ends: dict[str, date | None] = dict(
+        conn.execute(
+            """select c.id::text, (select e.effective_date
+                                   from private.client_end_event(c.id, 'infinity') e)
+               from (select distinct a.client_organization_id as id
+                     from pg_temp._alloc_file f join public.account a on a.id = f.id
+                     where a.organization_id = %s) c""",
+            (org,),
+        ).fetchall()
+    )
+    for facts in files.values():
+        facts.ended_on = ends.get(facts.client_id)
     points: dict[tuple[str, str, str], dict[date, int]] = {}
     meta: dict[tuple[str, str, str], Component] = {}
     for account, item, comp, family, order, due, issue, day, amount in conn.execute(

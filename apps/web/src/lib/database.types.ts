@@ -819,6 +819,38 @@ isOneToOne: false
                   Relationships: [
                     
                   ]
+                },"claims_declared_item": {
+                  Row: {
+                    "amount_minor": number,"client_organization_id": string,"document_id": string,"document_kind": string,"event_id": string,"organization_id": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "amount_minor": number,"client_organization_id": string,"document_id": string,"document_kind": string,"event_id": string,"organization_id": string
+                  }
+                  Update: {
+                    "amount_minor"?: number,"client_organization_id"?: string,"document_id"?: string,"document_kind"?: string,"event_id"?: string,"organization_id"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "claims_declared_item_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "claims_declared_item_event_id_fkey"
+      columns: ["event_id"]
+isOneToOne: false
+      referencedRelation: "client_status_event"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "claims_declared_item_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"client_advance": {
                   Row: {
                     "amount_minor": number,"bank_transaction_id": string | null,"cause": string,"cause_entry_id": string,"client_organization_id": string,"created_at": string,"currency": string,"entry_id": string,"id": string,"mandate_id": string | null,"organization_id": string,"p_bound": string | null,"top_up_transfer_id": string | null,"transfer_id": string | null
@@ -941,17 +973,23 @@ isOneToOne: false
                   ]
                 },"client_payout_account": {
                   Row: {
-                    "bic": string | null,"client_organization_id": string,"closed_at": string | null,"closed_by": string | null,"closed_reason": string | null,"confirmed_at": string | null,"confirmed_by": string | null,"confirmed_via": string | null,"created_at": string,"currency": string,"evidence_document_id": string,"holder_name": string,"iban": string,"id": string,"kind": string,"organization_id": string,"proposed_at": string,"proposed_by": string,"status": string,"updated_at": string
+                    "authority_document_id": string | null,"bic": string | null,"client_organization_id": string,"closed_at": string | null,"closed_by": string | null,"closed_reason": string | null,"confirmed_at": string | null,"confirmed_by": string | null,"confirmed_via": string | null,"created_at": string,"currency": string,"evidence_document_id": string,"holder_attestation": string | null,"holder_name": string,"iban": string,"id": string,"kind": string,"organization_id": string,"proposed_at": string,"proposed_by": string,"status": string,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "bic"?: string | null,"client_organization_id": string,"closed_at"?: string | null,"closed_by"?: string | null,"closed_reason"?: string | null,"confirmed_at"?: string | null,"confirmed_by"?: string | null,"confirmed_via"?: string | null,"created_at"?: string,"currency": string,"evidence_document_id": string,"holder_name": string,"iban": string,"id"?: string,"kind"?: string,"organization_id": string,"proposed_at"?: string,"proposed_by": string,"status"?: string,"updated_at"?: string
+                    "authority_document_id"?: string | null,"bic"?: string | null,"client_organization_id": string,"closed_at"?: string | null,"closed_by"?: string | null,"closed_reason"?: string | null,"confirmed_at"?: string | null,"confirmed_by"?: string | null,"confirmed_via"?: string | null,"created_at"?: string,"currency": string,"evidence_document_id": string,"holder_attestation"?: string | null,"holder_name": string,"iban": string,"id"?: string,"kind"?: string,"organization_id": string,"proposed_at"?: string,"proposed_by": string,"status"?: string,"updated_at"?: string
                   }
                   Update: {
-                    "bic"?: string | null,"client_organization_id"?: string,"closed_at"?: string | null,"closed_by"?: string | null,"closed_reason"?: string | null,"confirmed_at"?: string | null,"confirmed_by"?: string | null,"confirmed_via"?: string | null,"created_at"?: string,"currency"?: string,"evidence_document_id"?: string,"holder_name"?: string,"iban"?: string,"id"?: string,"kind"?: string,"organization_id"?: string,"proposed_at"?: string,"proposed_by"?: string,"status"?: string,"updated_at"?: string
+                    "authority_document_id"?: string | null,"bic"?: string | null,"client_organization_id"?: string,"closed_at"?: string | null,"closed_by"?: string | null,"closed_reason"?: string | null,"confirmed_at"?: string | null,"confirmed_by"?: string | null,"confirmed_via"?: string | null,"created_at"?: string,"currency"?: string,"evidence_document_id"?: string,"holder_attestation"?: string | null,"holder_name"?: string,"iban"?: string,"id"?: string,"kind"?: string,"organization_id"?: string,"proposed_at"?: string,"proposed_by"?: string,"status"?: string,"updated_at"?: string
                   }
                   Relationships: [
                     {
+      foreignKeyName: "client_payout_account_authority_document_id_fkey"
+      columns: ["authority_document_id"]
+isOneToOne: false
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
       foreignKeyName: "client_payout_account_client_organization_id_fkey"
       columns: ["client_organization_id"]
 isOneToOne: false
@@ -997,14 +1035,14 @@ isOneToOne: false
                   ]
                 },"client_status_event": {
                   Row: {
-                    "client_organization_id": string,"effective_date": string,"evidence_document_id": string,"id": string,"kind": string,"note": string | null,"organization_id": string,"payout_account_id": string | null,"recorded_at": string,"recorded_by": string
+                    "client_organization_id": string,"effective_date": string,"evidence_document_id": string,"id": string,"kind": string,"note": string | null,"organization_id": string,"payout_account_id": string | null,"publication_date": string | null,"qualified_at": string | null,"recorded_at": string,"recorded_by": string,"refers_to_event_id": string | null
                   }
                   ComputedFields: never
                   Insert: {
-                    "client_organization_id": string,"effective_date": string,"evidence_document_id": string,"id"?: string,"kind": string,"note"?: string | null,"organization_id": string,"payout_account_id"?: string | null,"recorded_at"?: string,"recorded_by": string
+                    "client_organization_id": string,"effective_date": string,"evidence_document_id": string,"id"?: string,"kind": string,"note"?: string | null,"organization_id": string,"payout_account_id"?: string | null,"publication_date"?: string | null,"qualified_at"?: string | null,"recorded_at"?: string,"recorded_by": string,"refers_to_event_id"?: string | null
                   }
                   Update: {
-                    "client_organization_id"?: string,"effective_date"?: string,"evidence_document_id"?: string,"id"?: string,"kind"?: string,"note"?: string | null,"organization_id"?: string,"payout_account_id"?: string | null,"recorded_at"?: string,"recorded_by"?: string
+                    "client_organization_id"?: string,"effective_date"?: string,"evidence_document_id"?: string,"id"?: string,"kind"?: string,"note"?: string | null,"organization_id"?: string,"payout_account_id"?: string | null,"publication_date"?: string | null,"qualified_at"?: string | null,"recorded_at"?: string,"recorded_by"?: string,"refers_to_event_id"?: string | null
                   }
                   Relationships: [
                     {
@@ -1033,6 +1071,106 @@ isOneToOne: false
       referencedColumns: ["id"]
     },{
       foreignKeyName: "client_status_event_recorded_by_fkey"
+      columns: ["recorded_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_refers_to_event_id_fkey"
+      columns: ["refers_to_event_id"]
+isOneToOne: false
+      referencedRelation: "client_status_event"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"client_status_event_qualification": {
+                  Row: {
+                    "client_organization_id": string,"curatorship_event_id": string | null,"event_id": string,"evidence_document_id": string,"kind": string,"organization_id": string,"recorded_at": string,"recorded_by": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "client_organization_id": string,"curatorship_event_id"?: string | null,"event_id": string,"evidence_document_id": string,"kind": string,"organization_id": string,"recorded_at"?: string,"recorded_by": string
+                  }
+                  Update: {
+                    "client_organization_id"?: string,"curatorship_event_id"?: string | null,"event_id"?: string,"evidence_document_id"?: string,"kind"?: string,"organization_id"?: string,"recorded_at"?: string,"recorded_by"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "client_status_event_qualification_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_qualification_curatorship_event_id_fkey"
+      columns: ["curatorship_event_id"]
+isOneToOne: false
+      referencedRelation: "client_status_event"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_qualification_event_id_fkey"
+      columns: ["event_id"]
+isOneToOne: true
+      referencedRelation: "client_status_event"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_qualification_evidence_document_id_fkey"
+      columns: ["evidence_document_id"]
+isOneToOne: false
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_qualification_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_qualification_recorded_by_fkey"
+      columns: ["recorded_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"client_status_event_representative": {
+                  Row: {
+                    "client_organization_id": string,"event_id": string,"evidence_document_id": string,"id": string,"organization_id": string,"recorded_at": string,"recorded_by": string,"representative": NonNullable<Json>
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "client_organization_id": string,"event_id": string,"evidence_document_id": string,"id"?: string,"organization_id": string,"recorded_at"?: string,"recorded_by": string,"representative": NonNullable<Json>
+                  }
+                  Update: {
+                    "client_organization_id"?: string,"event_id"?: string,"evidence_document_id"?: string,"id"?: string,"organization_id"?: string,"recorded_at"?: string,"recorded_by"?: string,"representative"?: NonNullable<Json>
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "client_status_event_representative_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_representative_event_id_fkey"
+      columns: ["event_id"]
+isOneToOne: false
+      referencedRelation: "client_status_event"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_representative_evidence_document_id_fkey"
+      columns: ["evidence_document_id"]
+isOneToOne: false
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_representative_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "client_status_event_representative_recorded_by_fkey"
       columns: ["recorded_by"]
 isOneToOne: false
       referencedRelation: "app_user"
@@ -2924,6 +3062,9 @@ isOneToOne: false
 "client_advances":
 { Args: { "p_after"?: Json,"p_client"?: string,"p_limit"?: number,"p_open_only"?: boolean,"p_organization_id": string }; Returns: Json
                            },
+"client_events_view":
+{ Args: { "p_client_organization_id": string }; Returns: Json
+                           },
 "client_money_balances":
 { Args: { "p_as_of"?: string,"p_client_organization_id": string,"p_known_at"?: string }; Returns: {
               "currency": string,"held_minor": number,"payable_minor": number,"unallocated_minor": number
@@ -3058,7 +3199,10 @@ isOneToOne: false
 { Args: { "p_account_id": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string,"p_legal_basis": string,"p_reason": string }; Returns: string
                            },
 "propose_payout_account":
-{ Args: { "p_bic": string,"p_client_organization_id": string,"p_currency": string,"p_evidence_document_id": string,"p_holder_name": string,"p_iban": string,"p_idempotency_key": string,"p_kind"?: string }; Returns: Json
+{ Args: { "p_authority_document_id"?: string,"p_bic": string,"p_client_organization_id": string,"p_currency": string,"p_evidence_document_id": string,"p_holder_attestation"?: string,"p_holder_name": string,"p_iban": string,"p_idempotency_key": string,"p_kind"?: string }; Returns: Json
+                           },
+"qualify_protection_event":
+{ Args: { "p_event_id": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string }; Returns: Json
                            },
 "receipt_job_pending":
 { Args: { "p_payment_id": string }; Returns: boolean
@@ -3070,7 +3214,7 @@ isOneToOne: false
 { Args: { "p_amount_text": string,"p_document_id": string,"p_evidence_document_id": string,"p_expected_owed_text": string,"p_idempotency_key": string,"p_paid_on": string,"p_reason": string }; Returns: Json
                            },
 "record_client_status_event":
-{ Args: { "p_client_organization_id": string,"p_effective_date": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string,"p_note": string,"p_payout_account_id"?: string }; Returns: Json
+{ Args: { "p_client_organization_id": string,"p_declared"?: Json,"p_effective_date": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string,"p_note": string,"p_payout_account_id"?: string,"p_publication_date"?: string,"p_refers_to"?: string,"p_representative"?: Json }; Returns: Json
                            },
 "record_direct_payment":
 { Args: { "p_account_id": string,"p_amount_minor": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_item_ids": (string)[],"p_paid_on": string,"p_reason": string }; Returns: Json
@@ -3157,6 +3301,9 @@ isOneToOne: false
                            },
 "set_billing_identity":
 { Args: { "p_expected_version": number,"p_idempotency_key": string,"p_identity": Json,"p_organization_id": string }; Returns: Json
+                           },
+"set_client_representative":
+{ Args: { "p_event_id": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_representative": Json }; Returns: Json
                            },
 "set_control_totals":
 { Args: { "p_batch_id": string,"p_rows": number,"p_total_minor": number }; Returns: undefined

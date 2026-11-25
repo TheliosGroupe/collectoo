@@ -104,6 +104,8 @@ export const FEED_REASON: Record<string, string> = {
   before_servicing_start:
     "Paiement antérieur à la date d'arrêté du portefeuille : il vous est reversé sans être imputé.",
   client_ratification: "Paiement reversé sur votre ratification.",
+  // M2c-7d-1 (§6.2.8): a payment received after the end of the mandate, forwarded without allocation (no commission)
+  mandate_ended: "Paiement reçu après la fin du mandat : il vous est reversé sans être imputé.",
   // the return's own row (`payment_returned`), whatever the payment was before: allocated, forwarded, held or waiting
   bank_return: "La banque du payeur a repris ce montant (retour ou contestation).",
 };

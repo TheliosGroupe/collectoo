@@ -1370,6 +1370,17 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Lettre de demande de remboursement non produite",
     help: "Une demande de remboursement d'avance a été enregistrée il y a plus d'une heure et sa lettre (PDF) n'est pas encore produite : le client ne la trouve pas dans son espace et elle ne peut pas être imprimée. Après un échec, sa production n'est réessayée que quelques fois : retirez la demande (« Retirer la demande ») et adressez-en une nouvelle ; si l'alerte revient pour la nouvelle demande, prévenez le support.",
   },
+  // M2c-7d-1 (plan §6.3; [critic] L14, L17): an old « Tutelle ou curatelle » row to qualify; a seizure served on the
+  // servicer and not released (review round 1, MONEY-LAW-3, TUI-1: the payouts only — the set-off bar is 7d-2's, ops
+  // refuse an N = 0 run by hand meanwhile; texts read 2026-11-24: CPCE L211-2, C. civ. 1347-7)
+  protection_event_to_qualify: {
+    label: "Tutelle ou curatelle à préciser",
+    help: "Un événement « Tutelle ou curatelle » enregistré avant la distinction des deux mesures n'est pas encore précisé : les reversements du client restent bloqués et ses courriers ne sont pas envoyés. Sur la page du client, « Préciser : tutelle ou curatelle » avec le jugement : une tutelle met fin au mandat (art. 2003 C. civ.) et le tuteur reçoit les courriers ; une curatelle bloque les reversements (règle du cabinet) et ses courriers vont au client, avec copie au curateur.",
+  },
+  seizure_standing: {
+    label: "Saisie entre les mains du cabinet en cours",
+    help: "Une saisie des sommes que le cabinet doit à ce client est enregistrée et n'est pas levée : aucun virement de reversement tant que la mainlevée n'est pas enregistrée. Collectoo ne bloque pas encore les compensations : un reversement sans virement (entièrement compensé) serait validé avec ses compensations ; ne le validez pas tant que la saisie court (l'acte de saisie emporte, « à concurrence des sommes pour lesquelles elle est pratiquée, attribution immédiate au profit du saisissant de la créance saisie », art. L211-2 du code des procédures civiles d'exécution ; « La compensation ne préjudicie pas aux droits acquis par des tiers » (art. 1347-7 C. civ.)). La déclaration au commissaire de justice et le paiement des causes de la saisie se font hors de Collectoo, avec l'avocat (art. L211-3 et R211-4 du code des procédures civiles d'exécution : le tiers saisi déclare « sur-le-champ » l'étendue de ses obligations). Prioritaire pendant 15 jours après son enregistrement.",
+  },
   top_up_pending: {
     label: "Approvisionnement attendu",
     help: "Un approvisionnement du compte dédié depuis le compte propre du cabinet a été demandé il y a plus d'un jour ouvré et son crédit n'apparaît pas encore sur les relevés importés. Vérifiez le virement depuis le compte propre : il couvre ce que le cabinet doit au compte dédié (frais bancaires, avances).",

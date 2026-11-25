@@ -12,7 +12,6 @@ import {
   CONFIRMED_VIA,
   DOCUMENT_KIND,
   EVENT_BLOCKERS,
-  EVENT_KIND,
   GAP_LABEL,
   PAYOUT_STATUS,
   addressText,
@@ -26,7 +25,6 @@ import {
 import {
   confirmPayoutAccount,
   proposePayoutAccount,
-  recordClientEvent,
   rejectPayoutAccount,
   retirePayoutAccount,
   saveBillingIdentity,
@@ -35,6 +33,8 @@ import {
 } from "../../actions";
 import { parseClientRepaymentRequests, stillRequestedParam } from "@/lib/remittance/requests";
 import { parseOpenDocuments } from "@/lib/remittance/settlements";
+import { PAYOUT_KIND, declarableDocuments, parseClientEvents } from "@/lib/remittance/client-events";
+import { ClientEventsSection } from "./client-events-section";
 import { ClientOwes } from "./client-owes";
 import { ClientDocumentUpload } from "./document-upload";
 
@@ -119,7 +119,7 @@ export default async function ClientRemittancePage({
   const isAdmin = role === "admin";
   const isMoney = isAdmin || role === "ops_manager";
 
-  const [identityRes, gapsRes, readinessRes, payoutRes, docsRes, eventsRes, mandatesRes, claimTypesRes, owesRes, requestsRes] = await Promise.all([
+  const [identityRes, gapsRes, readinessRes, payoutRes, docsRes, mandatesRes, claimTypesRes, owesRes, requestsRes, eventsViewRes] = await Promise.all([
     // the capital as text: integer minor units never pass through a JS number (review M2c-2)
     supabase.from("billing_identity").select(BILLING_IDENTITY_COLUMNS).eq("organization_id", id).maybeSingle(),
     supabase.rpc("billing_identity_gaps", { p_organization_id: id }),
@@ -129,13 +129,8 @@ export default async function ClientRemittancePage({
       .from("document")
       .select("id, kind, file_name, created_at")
       .eq("client_organization_id", id)
-      .in("kind", ["payout_rib", "mandate_document", "client_status_evidence"])
+      .in("kind", ["payout_rib", "mandate_document", "client_status_evidence", "payout_authority_evidence"])
       .order("created_at", { ascending: false }),
-    supabase
-      .from("client_status_event")
-      .select("id, kind, effective_date, note, evidence_document_id, recorded_at")
-      .eq("client_organization_id", id)
-      .order("effective_date", { ascending: false }),
     supabase
       .from("mandate")
       .select("id, reference, signed_on, insurance_clause_ref, mandate_terms(*)")
@@ -150,7 +145,11 @@ export default async function ClientRemittancePage({
     isMoney
       ? supabase.rpc("client_repayment_requests", { p_client_organization_id: id })
       : Promise.resolve({ data: null }),
+    // M2c-7d-1 (plan §6.4): its events, who acts for it, the payee they require, the letters' addressees (money staff)
+    isMoney ? supabase.rpc("client_events_view", { p_client_organization_id: id }) : Promise.resolve({ data: null }),
   ]);
+  const eventsView = parseClientEvents(eventsViewRes.data);
+  const accountReview = new Map((eventsView?.accounts ?? []).map((a) => [a.payout_account_id, a]));
   const owes = parseOpenDocuments(owesRes.data);
   const requests = parseClientRepaymentRequests(requestsRes.data)?.rows ?? [];
   const identity = identityRes.data as unknown as BillingIdentity | null;
@@ -158,7 +157,6 @@ export default async function ClientRemittancePage({
   const readiness = (readinessRes.data ?? []) as { portfolio_id: string; portfolio_name: string; blockers: string[] }[];
   const payouts = (payoutRes.data ?? []) as Payout[];
   const docs = docsRes.data ?? [];
-  const events = eventsRes.data ?? [];
   const mandates = (mandatesRes.data ?? []) as unknown as {
     id: string;
     reference: string;
@@ -172,6 +170,7 @@ export default async function ClientRemittancePage({
   const ribs = docs.filter((d) => d.kind === "payout_rib");
   const mandateDocs = docs.filter((d) => d.kind === "mandate_document");
   const evidence = docs.filter((d) => d.kind === "client_status_evidence");
+  const authority = docs.filter((d) => d.kind === "payout_authority_evidence");
   const courtAccounts = payouts.filter((p) => p.kind === "court_appointed");
   const docName = new Map(docs.map((d) => [d.id, d.file_name ?? DOCUMENT_KIND[d.kind]]));
 
@@ -321,6 +320,33 @@ export default async function ClientRemittancePage({
                       {p.status === "active" && !p.paid_before ? <Badge tone="action">Nouvel IBAN : premier virement à vérifier</Badge> : null}
                     </span>
                   </div>
+                  {p.kind !== "client" ? (
+                    <p className="text-sm font-medium" data-testid="payout-kind">
+                      {PAYOUT_KIND[p.kind] ?? p.kind}
+                    </p>
+                  ) : null}
+                  {accountReview.get(p.id) ? (
+                    // M2c-7d-1 (plan §6.2.7, [check 1] gap 10): the holder's name beside the client's, as the payout file
+                    // writes them, the explanation and the document that proves who may receive — for the second admin
+                    <p className="text-sm" data-testid="payout-names">
+                      Titulaire du RIB : {p.holder_name} · Nom du client : {accountReview.get(p.id)!.client_name} —{" "}
+                      {accountReview.get(p.id)!.names_match ? "même nom" : "noms différents"}
+                      {accountReview.get(p.id)!.holder_attestation
+                        ? ` · Explication : ${accountReview.get(p.id)!.holder_attestation}`
+                        : ""}
+                      {accountReview.get(p.id)!.authority_document_id ? (
+                        <>
+                          {" · "}
+                          <a
+                            href={`/backoffice/documents/${accountReview.get(p.id)!.authority_document_id}`}
+                            className="underline underline-offset-4"
+                          >
+                            Pièce désignant qui peut recevoir
+                          </a>
+                        </>
+                      ) : null}
+                    </p>
+                  ) : null}
                   <p className="text-sm text-zinc-600 dark:text-zinc-400">
                     {p.holder_name} · {p.currency}
                     {p.kind === "court_appointed" ? " · mandataire de justice" : ""} · proposé par {p.proposed_by_name ?? "—"} le{" "}
@@ -442,9 +468,33 @@ export default async function ClientRemittancePage({
                 <label className="flex flex-col gap-1 text-sm">
                   Compte de
                   <select name="kind" defaultValue="client" className={inputClass}>
-                    <option value="client">Le client</option>
-                    <option value="court_appointed">Un mandataire de justice (liquidateur, administrateur)</option>
+                    {Object.entries(PAYOUT_KIND).map(([k, label]) => (
+                      <option key={k} value={k}>
+                        {label}
+                      </option>
+                    ))}
                   </select>
+                </label>
+                {/* M2c-7d-1 (plan §6.2.7): after an event, the document that proves who may receive, and why the RIB's
+                    holder is not written as the client's name (a protected adult's account is in the client's name) */}
+                <label className="flex flex-col gap-1 text-sm">
+                  Pièce désignant qui peut recevoir
+                  <select name="authority_document_id" defaultValue="" className={inputClass}>
+                    <option value="">— (compte du client)</option>
+                    {authority.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.file_name ?? "pièce"} · {frenchDateTime(d.created_at)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                  Nom du client : {client.legal_name}. Un compte de majeur protégé est à son nom (art. 427 C. civ.) : si le
+                  RIB l&apos;écrit autrement, expliquez pourquoi.
+                </p>
+                <label className="flex flex-col gap-1 text-sm">
+                  Explication (facultative, 500 caractères au plus)
+                  <textarea name="holder_attestation" maxLength={500} rows={2} className={inputClass} />
                 </label>
                 <input type="hidden" name="currency" value="EUR" readOnly />
               </ActionForm>
@@ -684,94 +734,17 @@ export default async function ClientRemittancePage({
         )}
       </Section>
 
-      {isMoney ? (
-        <Section title="Événements du client" testId="client-events" id="evenements">
-          {events.length === 0 ? (
-            <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucun événement enregistré.</p>
-          ) : (
-            <ul className="mb-3 flex flex-col gap-1 text-sm">
-              {events.map((e) => (
-                <li key={e.id} data-testid="client-event">
-                  {frenchDate(e.effective_date)} · {EVENT_KIND[e.kind] ?? e.kind}
-                  {e.note ? ` · ${e.note}` : ""} ·{" "}
-                  <a href={`/backoffice/documents/${e.evidence_document_id}`} className="underline underline-offset-4">
-                    justificatif
-                  </a>
-                </li>
-              ))}
-            </ul>
-          )}
-          {isAdmin ? (
-            <details className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
-              <summary className="cursor-pointer text-sm font-medium">Enregistrer un événement</summary>
-              {evidence.length === 0 ? (
-                <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">Joignez d&apos;abord le justificatif (« Documents du client »).</p>
-              ) : (
-                <ActionForm
-                  action={recordClientEvent}
-                  submitLabel="Enregistrer l'événement"
-                  pendingLabel="Enregistrement…"
-                  buttonClassName={buttonClass}
-                  className="mt-3 flex max-w-xl flex-col gap-3"
-                  resetOnSuccess
-                >
-                  <input type="hidden" name="client_organization_id" value={id} readOnly />
-                  <input type="hidden" name="idempotency_key" value={randomUUID()} readOnly />
-                  <label className="flex flex-col gap-1 text-sm">
-                    Événement
-                    <select name="kind" className={inputClass}>
-                      {Object.entries(EVENT_KIND).map(([k, label]) => (
-                        <option key={k} value={k}>
-                          {label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="flex flex-col gap-1 text-sm">
-                    Date d&apos;effet
-                    <input type="date" name="effective_date" required max={today} className={inputClass} />
-                  </label>
-                  <label className="flex flex-col gap-1 text-sm">
-                    Justificatif
-                    <select name="evidence_document_id" className={inputClass}>
-                      {evidence.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.file_name ?? "justificatif"}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {courtAccounts.length > 0 ? (
-                    <label className="flex flex-col gap-1 text-sm">
-                      Compte du mandataire de justice (facultatif)
-                      <select name="payout_account_id" defaultValue="" className={inputClass}>
-                        <option value="">—</option>
-                        {courtAccounts.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.holder_name} · {p.iban_masked}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
-                  <label className="flex flex-col gap-1 text-sm">
-                    Note (facultative)
-                    <input name="note" maxLength={2000} className={inputClass} />
-                  </label>
-                  <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                    Dès leur date d&apos;effet, une fin de mandat, une tutelle, un décès (art. 2003 C. civ.) ou une liquidation
-                    judiciaire (règle du cabinet) empêchent de confirmer un portefeuille de ce client. Une fois une liquidation,
-                    ou le compte d&apos;un mandataire de justice, enregistré, les comptes de reversement ne se confirment, ne se
-                    refusent et ne se retirent plus que par un second administrateur du cabinet, jamais depuis l&apos;espace du
-                    client (règle du cabinet ; en liquidation, les droits du client sont exercés par le liquidateur, art. L641-9
-                    C. com.). Les effets des événements sur les reversements viendront avec les reversements (payeur,
-                    compensation : question ouverte OQ-41).
-                  </p>
-                </ActionForm>
-              )}
-            </details>
-          ) : null}
-        </Section>
+      {isMoney && eventsView ? (
+        <ClientEventsSection
+          clientId={id}
+          view={eventsView}
+          evidence={evidence}
+          authority={authority}
+          courtAccounts={courtAccounts}
+          declarable={declarableDocuments(owes)}
+          isAdmin={isAdmin}
+          today={today}
+        />
       ) : null}
 
       <p className="text-sm">

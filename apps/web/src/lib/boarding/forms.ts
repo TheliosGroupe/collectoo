@@ -169,6 +169,26 @@ export type ErrorCode =
   | "evidence_required"
   | "court_account_only"
   | "payout_court_appointed"
+  // M2c-7d-1 (plan §6.4): the client's events, who acts for it, the payee after each event
+  | "event_claims_without_proceeding"
+  | "event_bad_publication_date"
+  | "event_release_without_seizure"
+  | "event_refers_not_allowed"
+  | "event_not_declarable"
+  | "representative_not_allowed"
+  | "representative_bad"
+  | "representative_role_mismatch"
+  | "representative_evidence_required"
+  | "qualification_not_old"
+  | "qualification_already"
+  | "qualification_evidence_required"
+  | "qualification_bad_kind"
+  | "payout_estate_without_death"
+  | "payout_protected_without_measure"
+  | "payout_holder_not_client"
+  | "payout_authority_required"
+  | "payout_bad_attestation"
+  | "payout_accounts_busy"
   | "terms_past"
   | "terms_too_early"
   | "terms_start_taken"
@@ -512,8 +532,35 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Le justificatif (document « Justificatif » de ce client) est obligatoire.",
   court_account_only:
     "Seul le compte d'un mandataire de justice (liquidateur) peut être indiqué ici.",
+  // M2c-7d-1 (plan §6.2.7): every event that takes the client's users off its accounts, our rule and the law apart
   payout_court_appointed:
-    "Un mandataire de justice est enregistré pour ce client (liquidation judiciaire, ou compte d'un mandataire désigné) : ses comptes de reversement sont confirmés, refusés ou retirés par un second administrateur du cabinet, et non depuis l'espace du client (règle du cabinet ; en liquidation, les droits du client sont exercés par le liquidateur, art. L641-9 C. com.).",
+    "Un événement est enregistré pour ce client (liquidation judiciaire, décès, tutelle ou curatelle, fin du mandat, saisie entre les mains du cabinet en cours), ou ce compte est celui d'une succession, d'un majeur protégé ou d'un mandataire de justice : ses comptes de reversement sont confirmés, refusés ou retirés par un second administrateur du cabinet, et non depuis l'espace du client (règle du cabinet ; en liquidation, les droits du client sont exercés par le liquidateur, art. L641-9 C. com.).",
+  event_claims_without_proceeding: "Aucune procédure collective n'est enregistrée pour ce client.",
+  event_bad_publication_date: "La date de publication ne peut précéder le jugement ni être dans le futur.",
+  event_release_without_seizure:
+    "Désignez la saisie levée : une saisie de ce client encore en cours, antérieure à la mainlevée.",
+  event_refers_not_allowed: "Seule une mainlevée désigne un autre événement : la saisie qu'elle lève.",
+  event_not_declarable:
+    "Déclarez seulement des factures ou des avances de ce client, chacune pour un montant positif, avec une déclaration de créances.",
+  representative_not_allowed: "Cet événement ne désigne personne qui agisse pour le client.",
+  representative_bad: "Indiquez le rôle, le nom et l'adresse (quatre lignes au plus).",
+  representative_role_mismatch:
+    "Ce rôle ne correspond pas à l'événement (tuteur pour une tutelle, curateur pour une curatelle, notaire ou héritiers pour un décès, liquidateur pour une liquidation, administrateur pour une procédure).",
+  representative_evidence_required: "Joignez la pièce justificative.",
+  qualification_not_old: "Seuls les événements « Tutelle ou curatelle » enregistrés avant cette version sont à préciser.",
+  qualification_already: "Cet événement est déjà précisé.",
+  qualification_evidence_required: "Joignez le jugement.",
+  qualification_bad_kind: "Choisissez : tutelle, ou curatelle.",
+  payout_estate_without_death: "Un compte de succession suppose un décès enregistré.",
+  payout_protected_without_measure: "Un compte de majeur protégé suppose une tutelle ou une curatelle enregistrée.",
+  payout_holder_not_client:
+    "Le titulaire du RIB n'a pas le nom du client. Le compte doit être au nom du client (art. 427 C. civ.) ; si le RIB l'écrit autrement, expliquez pourquoi : un second administrateur vérifiera.",
+  payout_authority_required:
+    "Joignez la pièce qui désigne qui peut recevoir (attestation du notaire ou désignation par tous les héritiers, jugement nommant le tuteur, le curateur ou le liquidateur).",
+  payout_bad_attestation: "L'explication tient en 500 caractères au plus.",
+  // M2c-7d-1 review round 1 (CC-3): the event and payout-account commands wait 2 s at most for the servicer's lock
+  payout_accounts_busy:
+    "Une décision sur les comptes de reversement ou les événements des clients du cabinet est en cours : réessayez dans un instant.",
   terms_past:
     "Une nouvelle version commence au plus tôt demain : les conditions ne sont jamais rétroactives.",
   terms_too_early:

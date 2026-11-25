@@ -30,6 +30,9 @@ export type RepaymentRequestRow = {
   withdrawn_on: string | null;
   document_id: string | null;
   advance_ids: string[];
+  /** (M2c-7d-1 review round 1, MONEY-LAW-2) its letter is addressed to the person who acts for the client: the client's
+   * members are not shown it (SQL lists its document to staff only). Absent when false. */
+  to_representative?: boolean;
 };
 
 /** public.client_repayment_requests, or null when it is not its shape — never a guess. */
@@ -45,6 +48,7 @@ export function parseClientRepaymentRequests(x: unknown): { rows: RepaymentReque
     if (r.withdrawn_on !== null && r.withdrawn_on !== undefined && !isDay(r.withdrawn_on)) return null;
     if (r.document_id !== null && r.document_id !== undefined && !isText(r.document_id)) return null;
     if (!Array.isArray(r.advance_ids) || !r.advance_ids.every(isText)) return null;
+    if (r.to_representative !== undefined && typeof r.to_representative !== "boolean") return null;
     rows.push({
       request_id: r.request_id,
       number: r.number,
@@ -54,6 +58,7 @@ export function parseClientRepaymentRequests(x: unknown): { rows: RepaymentReque
       withdrawn_on: (r.withdrawn_on as string | null | undefined) ?? null,
       document_id: (r.document_id as string | null | undefined) ?? null,
       advance_ids: r.advance_ids as string[],
+      ...(r.to_representative === true ? { to_representative: true } : {}),
     });
   }
   return { rows };
@@ -181,6 +186,12 @@ export function owesRequestCandidates(
  */
 export function requestLetterNote(r: RepaymentRequestRow, audience: "client" | "staff"): string | null {
   if (r.document_id) return null;
+  // (review round 1, MONEY-LAW-2, TUI-3) addressed to the person who acts for the client: its name and address are
+  // not the client's members' to read (plan §6.1)
+  if (audience === "client" && r.to_representative)
+    return r.withdrawn_on === null
+      ? "Lettre adressée à la personne qui agit pour le client : elle n'est pas affichée ici."
+      : null;
   if (r.withdrawn_on === null) return "Lettre en préparation.";
   return audience === "staff" ? "Lettre non produite : la demande a été retirée avant." : null;
 }
@@ -240,7 +251,9 @@ export function refusalText(code: string | null, detail?: string | null): string
     case "before_opening":
       return "Avance née avant l'ouverture de la procédure collective du client : le client ne peut pas la payer, aucune demande ne lui est adressée.";
     case "recipient_unknown":
-      return "Un événement (décès, tutelle, liquidation, fin de mandat) est enregistré pour ce client : aucune demande ne lui est adressée tant que la personne qui agit pour lui n'est pas enregistrée.";
+      // M2c-7d-1 (plan §6.4, §6.2.12): who acts for the client is recorded on its page (« Événements du client »);
+      // (review round 1, TUI-6) an old « Tutelle ou curatelle » row takes nobody before it is qualified
+      return "Indiquez d'abord qui agit pour le client (notaire ou héritiers, tuteur, curateur ou liquidateur ; une « Tutelle ou curatelle » enregistrée avant leur distinction se précise d'abord) : la lettre lui est adressée, ou en copie au curateur.";
     case "already_withdrawn":
       return "Cette demande est déjà retirée.";
     case "reason_required":

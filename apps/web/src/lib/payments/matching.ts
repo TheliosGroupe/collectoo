@@ -76,6 +76,12 @@ export const REVIEW_REASON: Record<string, { label: string; tone: Tone; help: st
     help: "Une imputation de ce paiement a été annulée : imputez-le à nouveau, ou désaffectez-le s'il ne concerne pas ce dossier.",
   },
   partial_return: { label: "Retour partiel", tone: "action", help: "La banque a retourné une partie du paiement." },
+  // M2c-7d-1 (plan §6.2.8, §6.4; founder Q10): received on or after the end of the client's mandate, held for ops
+  client_mandate_ended: {
+    label: "Reçu après la fin du mandat",
+    tone: "action",
+    help: "Reçu après la fin du mandat du client : à reverser au client (ou à son bénéficiaire) ou à restituer au payeur.",
+  },
 };
 
 export function reviewReason(reason: string | null): { label: string; tone: Tone; help: string } {
@@ -96,6 +102,7 @@ export const REASON_FILTERS: { value: string; label: string }[] = [
   "overpayment",
   "credit_note_to_apply",
   "allocation_reversed",
+  "client_mandate_ended",
   "waiting",
 ].map((value) => ({ value, label: reviewReason(value).label }));
 

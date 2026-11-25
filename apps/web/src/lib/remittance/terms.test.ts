@@ -237,9 +237,16 @@ describe("READINESS_LABEL", () => {
       "client_mandate_ended",
       "client_deceased",
       "client_in_liquidation",
+      // M2c-7d-1 review round 1 (TUI-2; ADR-0014, house rule R3): an old « Tutelle ou curatelle » row to qualify
+      "client_protection_to_qualify",
     ];
     expect(Object.keys(READINESS_LABEL).sort()).toEqual([...sqlReasons].sort());
-    expect([...EVENT_BLOCKERS].sort()).toEqual(["client_deceased", "client_in_liquidation", "client_mandate_ended"]);
+    expect([...EVENT_BLOCKERS].sort()).toEqual([
+      "client_deceased",
+      "client_in_liquidation",
+      "client_mandate_ended",
+      "client_protection_to_qualify",
+    ]);
   });
   it("reads a reason with its event's date, whatever the separator", () => {
     expect(readinessReason("client_in_liquidation:2026-11-05")).toEqual({ code: "client_in_liquidation", on: "2026-11-05" });

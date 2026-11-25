@@ -7,7 +7,8 @@
 --   r     every refusal, nothing written: bad_request, not_open (another client's, nothing open), in_flight (with its
 --         run), before_opening (born before the client's proceeding opened), recently_requested (with the day; [the
 --         30-day window: 29 days refused, 30 accepted]), clawback_applies (with the clause), total_changed,
---         no_own_account, identity_incomplete, recipient_unknown (death, guardianship, liquidation, mandate end);
+--         no_own_account, identity_incomplete, recipient_unknown (death, guardianship, liquidation; since M2c-7d-1 a
+--         mandate end is no longer refused: the letter goes to the client);
 --         the preview states no amount of another client's advance (0, not_open);
 --   a     ([critic] M7-MONEY-3, L7) a request is never also a claw-back: refused under a claw-back clause; a request
 --         sent, then the terms gain a clause: the prepare's read still marks it requested; a draft whose plan takes an
@@ -2129,11 +2130,13 @@ begin
 end $$;
 select is(pg_temp.iso('sr4'),
   '{"no_own_account": "no_own_account", "identity": "identity_incomplete", "death": "recipient_unknown",
-    "guardianship": "recipient_unknown", "liquidation": "recipient_unknown", "mandate_ended": "recipient_unknown",
+    "guardianship": "recipient_unknown", "liquidation": "recipient_unknown", "mandate_ended": "ok",
     "written": 0, "then": "ok"}'::jsonb,
   'r: no own account to repay to → no_own_account; the servicer''s billing identity incomplete → identity_incomplete; a '
-  'death, a guardianship, a liquidation or a mandate end recorded → recipient_unknown (7c-2 sends nothing then); '
-  'nothing written, then the request once the client''s status is plain');
+  'death, a guardianship or a liquidation recorded with nobody who acts for the client → recipient_unknown; '
+  '(M2c-7d-1, ADR-0014 « M2c-7d-1 », house rule R3: the refusal narrowed, plan §6.2.12) after a mandate end the '
+  'letter goes to the client: made (rolled back with its event); nothing written, then the request once the client''s '
+  'status is plain');
 
 
 -- a. ([critic] M7-MONEY-3, L7) a requested advance is never also clawed back -----------------------------------------

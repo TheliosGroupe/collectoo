@@ -5,6 +5,7 @@ import { staffSession } from "@/lib/auth/staff";
 import { type ActionResult, parseEurosToMinor } from "@/lib/boarding/forms";
 import type { Json } from "@/lib/database.types";
 import { cleanTypedCode } from "@/lib/payments/iban";
+import { declaredFromForm, representativeFromForm } from "@/lib/remittance/client-events";
 import { addressFromForm, cleanSiren, identityErrorCode } from "@/lib/remittance/terms";
 
 /**
@@ -99,11 +100,19 @@ export async function saveBillingSettings(formData: FormData): Promise<ActionRes
   return done(error, "/backoffice/parametres/facturation");
 }
 
-/** « Proposer un IBAN de reversement » (admin or ops manager): the IBAN and holder as on the client's RIB. */
+const PAYOUT_KINDS = new Set(["client", "court_appointed", "estate", "protected_adult"]);
+
+/**
+ * « Proposer un IBAN de reversement » (admin or ops manager): the IBAN and holder as on the client's RIB; (M2c-7d-1, plan
+ * §6.2.7) its kind after an event (an estate, a protected adult, a court-appointed payee), the document that proves who
+ * may receive, and why the RIB's holder is spelt otherwise than the client's name (the second admin checks it).
+ */
 export async function proposePayoutAccount(formData: FormData): Promise<ActionResult> {
   const key = field(formData, "idempotency_key");
   const client = field(formData, "client_organization_id");
   const rib = field(formData, "evidence_document_id");
+  const authority = field(formData, "authority_document_id");
+  const kind = field(formData, "kind");
   if (!UUID.test(key) || !UUID.test(client)) return { error: "unknown" };
   if (!UUID.test(rib)) return { error: "rib_required" };
   const { supabase } = await staffSession();
@@ -115,7 +124,9 @@ export async function proposePayoutAccount(formData: FormData): Promise<ActionRe
     p_holder_name: field(formData, "holder_name"),
     p_bic: cleanTypedCode(field(formData, "bic")),
     p_evidence_document_id: rib,
-    p_kind: field(formData, "kind") === "court_appointed" ? "court_appointed" : "client",
+    p_kind: PAYOUT_KINDS.has(kind) ? kind : "client",
+    p_authority_document_id: (UUID.test(authority) ? authority : null) as unknown as string,
+    p_holder_attestation: (field(formData, "holder_attestation") || null) as unknown as string,
   });
   return done(error, clientPath(formData));
 }
@@ -160,24 +171,71 @@ export async function retirePayoutAccount(formData: FormData): Promise<ActionRes
   return done(error, clientPath(formData));
 }
 
-/** « Enregistrer un événement » (admin): procedure, liquidation, death, guardianship, end of the mandate. */
+/**
+ * « Enregistrer un événement » (admin): procedure, liquidation, death, tutelle, curatelle, end of the mandate, a
+ * declaration of claims, a seizure and its release (M2c-7d-1, plan §6.2.1): with the BODACC publication date, the person
+ * who acts for the client, the seizure a release lifts and the documents a declaration names, each only when filled.
+ */
 export async function recordClientEvent(formData: FormData): Promise<ActionResult> {
   const key = field(formData, "idempotency_key");
   const client = field(formData, "client_organization_id");
   const evidence = field(formData, "evidence_document_id");
   const date = field(formData, "effective_date");
   const payout = field(formData, "payout_account_id");
+  const kind = field(formData, "kind");
+  const publication = field(formData, "publication_date");
+  const refers = field(formData, "refers_to");
   if (!UUID.test(key) || !UUID.test(client) || !DATE.test(date)) return { error: "unknown" };
   if (!UUID.test(evidence)) return { error: "evidence_required" };
+  if (publication && !DATE.test(publication)) return { error: "event_bad_publication_date" };
+  const representative = representativeFromForm(formData);
   const { supabase } = await staffSession();
   const { error } = await supabase.rpc("record_client_status_event", {
     p_idempotency_key: key,
     p_client_organization_id: client,
-    p_kind: field(formData, "kind"),
+    p_kind: kind,
     p_effective_date: date,
     p_evidence_document_id: evidence,
     p_note: field(formData, "note"),
     p_payout_account_id: (UUID.test(payout) ? payout : null) as unknown as string,
+    p_publication_date: (publication || null) as unknown as string,
+    p_representative: representative as unknown as Json,
+    p_refers_to: (kind === "seizure_released" && UUID.test(refers) ? refers : null) as unknown as string,
+    p_declared: (kind === "claims_declared" ? declaredFromForm(formData) : null) as unknown as Json,
+  });
+  return done(error, clientPath(formData));
+}
+
+/** « Personne qui agit pour le client » (admin, M2c-7d-1 [check 1] gap 3): a new row, the history kept. */
+export async function setClientRepresentative(formData: FormData): Promise<ActionResult> {
+  const key = field(formData, "idempotency_key");
+  const event = field(formData, "event_id");
+  const evidence = field(formData, "evidence_document_id");
+  if (!UUID.test(key) || !UUID.test(event)) return { error: "unknown" };
+  if (!UUID.test(evidence)) return { error: "representative_evidence_required" };
+  const { supabase } = await staffSession();
+  const { error } = await supabase.rpc("set_client_representative", {
+    p_idempotency_key: key,
+    p_event_id: event,
+    p_representative: (representativeFromForm(formData) ?? {}) as unknown as Json,
+    p_evidence_document_id: evidence,
+  });
+  return done(error, clientPath(formData));
+}
+
+/** « Préciser : tutelle ou curatelle » (admin, M2c-7d-1 [critic] L17): an old « Tutelle ou curatelle » row. */
+export async function qualifyProtectionEvent(formData: FormData): Promise<ActionResult> {
+  const key = field(formData, "idempotency_key");
+  const event = field(formData, "event_id");
+  const evidence = field(formData, "evidence_document_id");
+  if (!UUID.test(key) || !UUID.test(event)) return { error: "unknown" };
+  if (!UUID.test(evidence)) return { error: "qualification_evidence_required" };
+  const { supabase } = await staffSession();
+  const { error } = await supabase.rpc("qualify_protection_event", {
+    p_idempotency_key: key,
+    p_event_id: event,
+    p_kind: field(formData, "qualified_kind"),
+    p_evidence_document_id: evidence,
   });
   return done(error, clientPath(formData));
 }

@@ -125,7 +125,10 @@ describe("runs (M2c-4 « Reversements »)", () => {
       "prepare_failed",
     ])
       expect(failureLabel(code), code).not.toBe(code);
-    expect(failureLabel("payout_blocked:client_status:death")).toBe("virement bloqué — Décès du client enregistré");
+    // M2c-7d-1 (plan §6.4; ADR-0014 « M2c-7d-1 », house rule R3): the blocker now says what lifts it
+    expect(failureLabel("payout_blocked:client_status:death")).toBe(
+      "virement bloqué — Décès du client : confirmez le compte du notaire, ou celui que tous les héritiers désignent, avec la pièce (second administrateur)",
+    );
     const { summary } = approvalSummary([
       { number: "RV-2026-000003", status: "refused", reason: "approval_in_progress" },
       { number: "RV-2026-000004", status: "refused", reason: "busy" },

@@ -7,7 +7,10 @@ form, no model or LLM is involved (CLAUDE.md).
 What the letter states, and only that ([critic] L6: facts per cause, no characterisation; founder
 Q6 a; OQ-95 leaves its legal basis to counsel):
 * the issuer's identity (R123-237/238: name, form, capital, SIREN, RCS city, registered office) and
-  the recipient (the client's name and billing address; 7d-1 adds who acts for it);
+  the recipient (the client's name and billing address; from M2c-7d-1 the person recorded who acts
+  for it after a liquidation, a death or a tutelle, with its role for the client (« Tuteur de … »),
+  and after a curatelle the client with « Copie : » its curator — private.client_addressee, frozen
+  in the payload);
 * the date, the subject and its reference (DRA-…);
 * that the sums below were paid to the client beyond what was its due and remain to be repaid
   (« versées » when every row was paid out; « réglées » when an N = 0 run set one off or netted it);
@@ -41,6 +44,20 @@ HEAD = ("Date", "Mandat", "Origine", "Versé", "Déjà remboursé", "Demandé")
 # (review round 1, TUI-2) a request one of whose rows was set off or netted (an N = 0 run): no
 # « Versé » head, no « versée » opening — [check 1], ADR D6: never « versé » for an N = 0 run
 HEAD_SETTLED = ("Date", "Mandat", "Origine", "Montant", "Déjà remboursé", "Demandé")
+# M2c-7d-1 (plan §6.2.12): the addressee who acts for the client, and the copy of a curatelle
+ROLE_OF = {
+    "notary": "Notaire — succession de",
+    "heirs": "Héritiers — succession de",
+    "tutor": "Tuteur de",
+    "liquidator": "Liquidateur de",
+}
+COPY_ROLE = {"curator": "curateur"}
+
+
+def _lines(lines: Any, what: str) -> str:
+    if not isinstance(lines, list) or not lines or not all(isinstance(x, str) and x for x in lines):
+        raise RepaymentRequestPayloadError(f"a {what} without its address")
+    return ", ".join(lines)
 
 
 class RepaymentRequestPayloadError(ValueError):
@@ -233,22 +250,48 @@ def request_view(doc: RepaymentRequestDocument) -> RequestView:
     issuer = p.get("issuer") or {}
     issuer_lines = tuple(issuer_block(issuer)) or (str(issuer.get("name", "")),)
     recipient = p.get("recipient") or {}
+    # M2c-7d-1 (plan §6.2.12; [critic] L12, [check 1] gap 7): after a death, a tutelle or a
+    # liquidation the person who acts for the client is the addressee (its role, for the client);
+    # after a curatelle the client, with a copy to its curator — private.client_addressee
+    role = recipient.get("role")
     recipient_lines = [str(recipient.get("name", ""))]
-    if recipient.get("address"):
+    if role is not None:
+        if role not in ROLE_OF:
+            raise RepaymentRequestPayloadError(f"unknown addressee {role!r}")
+        recipient_lines.append(f"{ROLE_OF[role]} {recipient.get('client_name', '')}")
+        recipient_lines.append(_lines(recipient.get("address_lines"), "addressee"))
+    elif recipient.get("address"):
         recipient_lines.append(address(recipient["address"]))
+    for c in p.get("copies") or ():
+        if c.get("role") not in COPY_ROLE:
+            raise RepaymentRequestPayloadError(f"unknown copy {c.get('role')!r}")
+        where = _lines(c.get("address_lines"), "copy")
+        recipient_lines.append(f"Copie : {c.get('name', '')}, {COPY_ROLE[c['role']]}, {where}")
     own = p.get("own_account") or {}
     one = len(rows) == 1
     # (review round 1, TUI-2) « versée(s) » and « Versé » only when every row was paid out; a
     # request with a row an N = 0 run set off or netted says « réglée(s) » and « Montant »
     paid_out = all(_paid_out(r) for r in rows)
     how = ("versée", "versées") if paid_out else ("réglée", "réglées")
-    opening = (
-        f"La somme ci-dessous vous a été {how[0]} au-delà de ce qui vous revenait. Elle reste à "
-        "rembourser au cabinet."
-        if one
-        else f"Les sommes ci-dessous vous ont été {how[1]} au-delà de ce qui vous revenait. Elles "
-        "restent à rembourser au cabinet."
-    )
+    if role is not None:
+        # (M2c-7d-1) the sums were paid to the client, not to the person who acts for it
+        client = str(recipient.get("client_name", ""))
+        opening = (
+            f"La somme ci-dessous a été {how[0]} à {client} au-delà de ce qui lui revenait. Elle "
+            "reste à rembourser au cabinet."
+            if one
+            else f"Les sommes ci-dessous ont été {how[1]} à {client} au-delà de ce qui lui "
+            "revenait. "
+            "Elles restent à rembourser au cabinet."
+        )
+    else:
+        opening = (
+            f"La somme ci-dessous vous a été {how[0]} au-delà de ce qui vous revenait. Elle reste "
+            "à rembourser au cabinet."
+            if one
+            else f"Les sommes ci-dessous vous ont été {how[1]} au-delà de ce qui vous revenait. "
+            "Elles restent à rembourser au cabinet."
+        )
     holder = own.get("holder") or issuer.get("name", "")
     return RequestView(
         issuer_lines=issuer_lines,

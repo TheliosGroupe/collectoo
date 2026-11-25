@@ -114,6 +114,9 @@ export default async function ClientMandatePage() {
                 <p className="text-sm text-zinc-600 dark:text-zinc-400">
                   Titulaire : {p.holder_name}
                   {p.kind === "court_appointed" ? " · compte du mandataire de justice" : ""}
+                  {/* M2c-7d-1 (plan §6.2.7): the payee after an event */}
+                  {p.kind === "estate" ? " · compte de la succession" : ""}
+                  {p.kind === "protected_adult" ? " · compte ouvert au nom du client (art. 427 C. civ.)" : ""}
                   {p.confirmed_at ? ` · confirmé ${CONFIRMED_VIA[p.confirmed_via ?? ""] ?? ""}` : ""}
                   {p.status !== "proposed" && p.evidence_document_id ? (
                     <>
@@ -129,6 +132,12 @@ export default async function ClientMandatePage() {
                     Compte d&apos;un mandataire de justice : c&apos;est un second administrateur du cabinet qui le confirme, le
                     refuse ou le retire, et non votre espace (règle du cabinet ; en liquidation judiciaire, les droits de la
                     société sont exercés par le liquidateur, art. L641-9 C. com.).
+                  </p>
+                ) : null}
+                {p.kind === "estate" || p.kind === "protected_adult" ? (
+                  <p className="text-sm text-zinc-600 dark:text-zinc-400" data-testid="client-payout-court">
+                    Compte désigné après un événement enregistré (décès, tutelle ou curatelle) : c&apos;est un second
+                    administrateur du cabinet qui le confirme, le refuse ou le retire, et non votre espace (règle du cabinet).
                   </p>
                 ) : null}
                 {p.status === "proposed" && p.kind === "client" ? (

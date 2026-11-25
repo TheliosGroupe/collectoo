@@ -132,6 +132,27 @@ def epc_text(text: str, limit: int) -> str:
     return out[:limit].rstrip()
 
 
+# M2c-7d-1 (plan docs/design/m2c-7-plan.md §6.2.7; [check 1] gap 10, [check 2] gap 4): the marks of
+# U+0300-U+036F but U+034F (its combining class is 0: the writer keeps it), dropped from a key
+_KEY_MARKS = re.compile("[̀-͎͐-ͯ]")
+_NOT_KEY = re.compile(r"[^A-Z0-9]+")
+
+
+def name_key(name: str) -> str | None:
+    """The name as this writer spells it, to compare a payout account's holder with the client's
+    legal name — the twin of `private.epc_name_key` (parity: test_name_key_parity_integration.py).
+    `_SPELLED` (œ → oe, ß → ss, þ → th, the apostrophes, dashes and no-break spaces), NFKD, the
+    marks of U+0300-U+036F but U+034F dropped, `_SPELLED` again (as `epc_text` translates before and
+    after NFKD); None when a character outside Basic Latin is left (another script, another mark,
+    U+034F): such a name is never compared, so no false match; upper-cased, every run of characters
+    outside A-Z and 0-9 one space, trimmed, no length cut; None when nothing is left."""
+    spelled = unicodedata.normalize("NFKD", name.translate(_SPELLED))
+    basic = _KEY_MARKS.sub("", spelled).translate(_SPELLED)
+    if any(not 0 < ord(ch) <= 0x7F for ch in basic):
+        return None
+    return _NOT_KEY.sub(" ", basic.upper()).strip() or None
+
+
 def is_epc(text: str) -> bool:
     return _EPC.fullmatch(text) is not None
 

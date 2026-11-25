@@ -47,6 +47,12 @@ describe("the reads", () => {
     expect(parseClientRepaymentRequests({ rows: [{ ...REQUEST, issue_date: "25/11/2026" }] })).toBeNull();
     expect(parseClientRepaymentRequests({ rows: [{ ...REQUEST, advance_ids: "x" }] })).toBeNull();
     expect(parseClientRepaymentRequests(null)).toBeNull();
+    // (review round 1, MONEY-LAW-2, TUI-3) a letter addressed to the person who acts for the client
+    expect(parseClientRepaymentRequests({ rows: [{ ...REQUEST, to_representative: true }] })?.rows).toEqual([
+      { ...REQUEST, to_representative: true },
+    ]);
+    expect(parseClientRepaymentRequests({ rows: [{ ...REQUEST, to_representative: false }] })?.rows).toEqual([REQUEST]);
+    expect(parseClientRepaymentRequests({ rows: [{ ...REQUEST, to_representative: "yes" }] })).toBeNull();
   });
   it("parses the preview: the total from SQL, each advance's refusal", () => {
     const p = parseRepaymentPreview({
@@ -116,8 +122,10 @@ describe("the refusals, in French per code", () => {
     expect(r("before_opening")).toBe(
       "Avance née avant l'ouverture de la procédure collective du client : le client ne peut pas la payer, aucune demande ne lui est adressée.",
     );
+    // M2c-7d-1 (plan §6.4; ADR-0014 « M2c-7d-1 », house rule R3): who acts for the client can now be recorded; (review
+    // round 1, TUI-6; R3) an old « Tutelle ou curatelle » row is qualified first, the heirs named too
     expect(r("recipient_unknown")).toBe(
-      "Un événement (décès, tutelle, liquidation, fin de mandat) est enregistré pour ce client : aucune demande ne lui est adressée tant que la personne qui agit pour lui n'est pas enregistrée.",
+      "Indiquez d'abord qui agit pour le client (notaire ou héritiers, tuteur, curateur ou liquidateur ; une « Tutelle ou curatelle » enregistrée avant leur distinction se précise d'abord) : la lettre lui est adressée, ou en copie au curateur.",
     );
     expect(r("already_withdrawn")).toBe("Cette demande est déjà retirée.");
     expect(r("reason_required")).toBe("Indiquez le motif du retrait.");
@@ -279,6 +287,14 @@ describe("(review round 1, TUI-4, NIGHT-1) a request withdrawn before its letter
     );
     expect(requestLetterNote(REQUEST, "client")).toBeNull();
     expect(requestLetterNote({ ...REQUEST, withdrawn_on: "2026-11-26" }, "client")).toBeNull();
+  });
+  it("(review round 1, MONEY-LAW-2, TUI-3) a letter to the person who acts for the client is not shown to the client", () => {
+    const toRep = { ...REQUEST, document_id: null, to_representative: true };
+    expect(requestLetterNote(toRep, "client")).toBe(
+      "Lettre adressée à la personne qui agit pour le client : elle n'est pas affichée ici.",
+    );
+    expect(requestLetterNote({ ...toRep, withdrawn_on: "2026-11-26" }, "client")).toBeNull();
+    expect(requestLetterNote({ ...REQUEST, to_representative: true }, "staff")).toBeNull();
   });
   it("the nightly's help says what happens to a letter not drawn, and what ops do", () => {
     const help = CHECK_LABEL.repayment_request_document_missing.help;

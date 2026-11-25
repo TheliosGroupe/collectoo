@@ -432,6 +432,10 @@ def _file_payouts(
             user=tenant["admin"],
         )
         assert out["status"] == "cancelled", out
+    # (M2c-7d-1 review round 1, CC-1) « Virements » with the payouts queued: the blockers per payout
+    mark = time.monotonic()
+    staff(tenant, "select public.transfer_overview()")
+    timings["overview"] = time.monotonic() - mark
     mark = time.monotonic()
     generated = staff(
         tenant, "select public.generate_transfer_file(%s, %s, null)", str(uuid.uuid4()),
@@ -449,14 +453,17 @@ def _file_payouts(
     storage().download("transfer-files", str(path), dest)
     data = dest.read_bytes()
     assert hashlib.sha256(data).hexdigest() == digest
+    mark = time.monotonic()
     staff(tenant, "select public.transfer_file_download(%s, %s)", generated["file_id"], digest)
+    timings["download"] = time.monotonic() - mark
     payouts = pain001.read(data)
     assert payouts.nb_of_txs == size
     print(
         f"\n{size} payouts (+{cancelled} cancelled), the fixture: clients"
         f" {timings['clients']:.1f}s, collections {timings['collections']:.1f}s, runs"
-        f" requested/prepared/approved {timings['runs']:.1f}s; « Générer le fichier »"
-        f" {timings['generate']:.2f}s"
+        f" requested/prepared/approved {timings['runs']:.1f}s; « Virements »"
+        f" {timings['overview']:.2f}s, « Générer le fichier » {timings['generate']:.2f}s,"
+        f" its first download {timings['download']:.2f}s"
     )
     return {
         "size": size,
