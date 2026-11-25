@@ -46,15 +46,20 @@ export const READINESS_LABEL: Readonly<Record<string, string>> = {
   client_deceased: "Décès du client enregistré : le mandat prend fin (art. 2003 C. civ.)",
   client_in_liquidation:
     "Client en liquidation judiciaire : pas de nouveau portefeuille pour ce client (règle du cabinet ; ses droits sont exercés par le liquidateur, art. L641-9 C. com.)",
+  // M2c-7d-1 review round 1 (TUI-2): an old « Tutelle ou curatelle » row still to qualify — no end of mandate stated
+  client_protection_to_qualify:
+    "« Tutelle ou curatelle » à préciser : pas de nouveau portefeuille pour ce client avant (règle du cabinet ; une tutelle met fin au mandat, art. 2003 C. civ., une curatelle non)",
 };
 
-/** The same three reasons, with the event's effective date (« le 05/11/2026 »). */
+/** The same event reasons, with the event's effective date (« le 05/11/2026 »). */
 const DATED_READINESS: Readonly<Record<string, (on: string) => string>> = {
   client_mandate_ended: (on) =>
     `Mandat terminé le ${on} : fin du mandat ou tutelle enregistrée pour ce client (art. 2003 C. civ.)`,
   client_deceased: (on) => `Décès du client le ${on} : le mandat prend fin (art. 2003 C. civ.)`,
   client_in_liquidation: (on) =>
     `Client en liquidation judiciaire depuis le ${on} : pas de nouveau portefeuille pour ce client (règle du cabinet ; ses droits sont exercés par le liquidateur, art. L641-9 C. com.)`,
+  client_protection_to_qualify: (on) =>
+    `« Tutelle ou curatelle » du ${on} à préciser : pas de nouveau portefeuille pour ce client avant (règle du cabinet ; une tutelle met fin au mandat, art. 2003 C. civ., une curatelle non)`,
 };
 
 /** The reasons that come from an event recorded for the client (« Événements du client »). */
@@ -102,18 +107,26 @@ export const CONFIRMED_VIA: Readonly<Record<string, string>> = {
   second_admin: "par un second administrateur du cabinet",
 };
 
+// M2c-7d-1 (plan §6.4; LEX-25): « Tutelle » alone (C. civ. 2003 names « la tutelle des majeurs »); the old rows recorded
+// as « Tutelle ou curatelle » are qualified first (« Préciser : tutelle ou curatelle »); a curatelle is a payout hold by
+// the servicer's rule only
 export const EVENT_KIND: Readonly<Record<string, string>> = {
   proceeding_opened: "Ouverture d'une procédure collective",
   liquidation: "Liquidation judiciaire",
   death: "Décès",
-  guardianship: "Tutelle ou curatelle",
+  guardianship: "Tutelle",
+  curatorship: "Curatelle ou autre mesure de protection (règle du cabinet)",
   mandate_ended: "Fin du mandat",
+  claims_declared: "Créances du cabinet déclarées au mandataire judiciaire (ou au liquidateur)",
+  seizure: "Saisie entre les mains du cabinet",
+  seizure_released: "Mainlevée de la saisie",
 };
 
 export const DOCUMENT_KIND: Readonly<Record<string, string>> = {
   payout_rib: "RIB",
   mandate_document: "Mandat signé ou avenant",
   client_status_evidence: "Justificatif d'événement",
+  payout_authority_evidence: "Pièce désignant qui peut recevoir (attestation du notaire, jugement)",
 };
 
 const FAMILY: Readonly<Record<string, string>> = {
@@ -351,6 +364,28 @@ export function cleanSiren(text: string): string {
 export function identityErrorCode(message: string): ErrorCode {
   const rules: [string, ErrorCode][] = [
     ["not allowed", "not_allowed"],
+    // M2c-7d-1 (plan §6.4): the events', the representatives', the qualifications' and the payee's refusals (before the
+    // older, wider needles below)
+    ["refused: claims_declared_without_proceeding", "event_claims_without_proceeding"],
+    ["refused: bad_publication_date", "event_bad_publication_date"],
+    ["refused: release_without_seizure", "event_release_without_seizure"],
+    ["refused: refers_to_not_allowed", "event_refers_not_allowed"],
+    ["refused: not_declarable", "event_not_declarable"],
+    ["refused: not_an_event_with_representative", "representative_not_allowed"],
+    ["refused: bad_representative", "representative_bad"],
+    ["refused: role_mismatch", "representative_role_mismatch"],
+    ["client representative refused: evidence_required", "representative_evidence_required"],
+    ["protection qualification refused: not_an_old_guardianship", "qualification_not_old"],
+    ["protection qualification refused: already_qualified", "qualification_already"],
+    ["protection qualification refused: evidence_required", "qualification_evidence_required"],
+    ["protection qualification refused: bad_kind", "qualification_bad_kind"],
+    ["payout account refused: estate_without_death", "payout_estate_without_death"],
+    ["payout account refused: protected_adult_without_measure", "payout_protected_without_measure"],
+    ["payout account refused: holder_not_client", "payout_holder_not_client"],
+    ["payout account refused: authority_evidence_required", "payout_authority_required"],
+    ["payout account refused: bad_attestation", "payout_bad_attestation"],
+    // (review round 1, CC-3) the event and payout-account commands wait 2 s at most for the payout_accounts: lock
+    ["lock timeout", "payout_accounts_busy"],
     ["changed since", "changed_since_read"],
     ["a legal name is required", "legal_name_required"],
     ["invalid SIREN", "siren_invalid"],

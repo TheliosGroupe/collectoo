@@ -82,7 +82,10 @@ select pg_temp.d(n), case c when 'b1' then '00000000-0000-0000-0000-0000000000bb
        'application/pdf', k || '.pdf'
 from (values ('01', 'a1', 'payout_rib'), ('02', 'a1', 'payout_rib'), ('03', 'a1', 'payout_rib'),
              ('04', 'a1', 'mandate_document'), ('05', 'a1', 'client_status_evidence'), ('06', 'a2', 'mandate_document'),
-             ('07', 'a2', 'payout_rib'), ('08', 'b1', 'payout_rib'), ('09', 'a2', 'client_status_evidence')) v (n, c, k);
+             ('07', 'a2', 'payout_rib'), ('08', 'b1', 'payout_rib'), ('09', 'a2', 'client_status_evidence'),
+             -- (M2c-7d-1, ADR-0014 « M2c-7d-1 », house rule R3) the judgment naming the liquidator: a court-appointed
+             -- account carries it from 7d on (propose_payout_account refuses authority_evidence_required without it)
+             ('10', 'a1', 'payout_authority_evidence')) v (n, c, k);
 
 -- The money terms of the §8.1 / §8.2 examples (clause references are columns of the version).
 create temporary table j (k text primary key, v jsonb) on commit drop;
@@ -737,7 +740,8 @@ set local role authenticated;
 select lives_ok($$ select public.retire_payout_account('payout-ret-0001', (select v from t where k = 'pa2'), 'Liquidation') $$,
   'an admin retires the current account');
 insert into t select 'pa4', (public.propose_payout_account('payout-prop-0030', '00000000-0000-0000-0000-0000000000a1',
-  'EUR', 'FR7643625512382429355294717', 'SELARL MANDATAIRE ès qualités', null, pg_temp.d('03'), 'court_appointed')
+  'EUR', 'FR7643625512382429355294717', 'SELARL MANDATAIRE ès qualités', null, pg_temp.d('03'), 'court_appointed',
+  pg_temp.d('10'))
   ->> 'payout_account_id')::uuid;
 reset role;
 select pg_temp.as_user('03');

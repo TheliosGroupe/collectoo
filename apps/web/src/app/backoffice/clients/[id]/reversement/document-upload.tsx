@@ -76,6 +76,9 @@ export function ClientDocumentUpload({ servicerId, clientId }: { servicerId: str
           <option value="payout_rib">RIB du client</option>
           <option value="mandate_document">Mandat signé ou avenant</option>
           <option value="client_status_evidence">Justificatif d&apos;événement (jugement, acte…)</option>
+          <option value="payout_authority_evidence">
+            Pièce désignant qui peut recevoir (attestation du notaire, jugement nommant le tuteur ou le liquidateur)
+          </option>
         </select>
       </label>
       <label className="flex flex-col gap-1 text-sm">

@@ -8720,5 +8720,534 @@ web: the source changed, the named tests run, the file restored. Every mutant ki
 - Everything M2c-7c-2's « Left open » lists stays open (the dead job's re-queue: ops withdraw and request again — now
   with no alert left behind).
 
+## M2c-7d-1: client events, payees and recipients (2026-11-24)
+
+Plan: `docs/design/m2c-7-plan.md` §0, §1.3, §1.4 (7d-1 row) and « Order, and why », §2, §6.1 but the withheld kind and
+the disposition table (`claims_declared_item` is 7d-1's, with the kind `claims_declared` and `p_declared`), §6.2.1,
+§6.2.3, §6.2.7, §6.2.8's gate and forward, §6.2.10's 7d-1 part, §6.2.12, §6.2.13, §6.3's `protection_event_to_qualify`
+and `seizure_standing`, the request's recipient (7c-2's `recipient_unknown` narrowed, `advance_repayment_payload` with
+two addressees for a curatelle), §6.3–§6.4, §6.6's `046a`, §6.7's 7d-1 part, with their [critic] / [check 1–3] marks.
+Founder questions (plan §10), none answered: Q8 (a), Q10 (a), Q12 (a), Q21 (a) built as their defaults and left open;
+counsel's OQ-41, OQ-91, OQ-93, OQ-94 stay open (COMPLIANCE). Migration `20261126090000_client_events.sql` (one file,
+forward-only). **The switch stays off**: nothing writes `private.feature_switch` and no 7d-1 rule reads it; the
+switch-on scenarios of `046a` (sp1, sp5, sp7, sp8, sg1, sa1) run in rolled-back subtransactions
+(`pg_temp.iso(…, true)`) and equal their switch-off twins; `046a`'s last test asserts it is off; `033` byte for byte
+unchanged.
+
+What it builds:
+- **The events** (§6.1): `client_status_event` gains `curatorship`, `claims_declared`, `seizure`, `seizure_released`;
+  `refers_to_event_id` (a release names its seizure; `client_status_event_release_uq`, one release per seizure),
+  `publication_date` (a proceeding's or a liquidation's BODACC publication), `qualified_at` (added without a default,
+  so the rows from before keep null, then `default now()`; the guard refuses a null). The event table stays
+  append-only: who acts for the client (`client_status_event_representative`) and the qualification of an old
+  « Tutelle ou curatelle » row (`client_status_event_qualification`) are side tables, and a declaration's documents
+  and amounts are `claims_declared_item` — each with RLS (money staff of the servicer), an insert guard, the change
+  log and `refuse_change`. `record_client_status_event` dropped and recreated once (four parameters more:
+  `p_publication_date`, `p_representative`, `p_refers_to`, `p_declared`); new commands `set_client_representative`
+  and `qualify_protection_event` (admins at aal2, replayed by key).
+- **What an event counts as** (`private.client_event_effective`): an old row not qualified is
+  `guardianship_to_qualify` (payouts held, no mandate end, no addressee); qualified as a tutelle it is a
+  `guardianship`; qualified as a curatelle it counts as nothing and its new `curatorship` event counts.
+- **The payee** (§6.2.7; [critic] F16, L2, L10): `private.client_payee_rule` — the strictest of the events in effect
+  (liquidation → `court_appointed`, death → `estate`, tutelle or curatelle → `protected_adult`, mandate end →
+  `client`), the event that requires it and the latest recording among them. `private.remittance_payout_blockers`
+  blocks `client_status:<that event's kind>` unless the client's current account is of that kind, confirmed via
+  `second_admin` after that latest recording and, but for `client`, with its authority evidence; a standing seizure
+  blocks `client_status:seizure` whatever the account. `propose_payout_account` (dropped and recreated: two
+  parameters more, `p_authority_document_id`, `p_holder_attestation`) takes the kinds `estate` and
+  `protected_adult` (a death, a measure recorded; the authority evidence; a protected adult's holder equal to the
+  client's name by `private.epc_name_key`, or explained); `payout_court_appointed` keeps the client's users from
+  every account after any of these events.
+- **After the end of the mandate** (§6.2.3, §6.2.8; founder Q10): `private.client_end_event` (the earliest death,
+  tutelle or mandate end on or before the day). `private.gate_assignments` holds a payment of the client's file
+  booked on or after it `client_mandate_ended`; so does the allocation job's own gate (below, D6). « Reverser au
+  client » (`forward_payment`) takes it with the reason `mandate_ended`: no schedule key, so no commission; the client
+  reads « Reversement sans imputation : paiement reçu après la fin du mandat ».
+- **Who receives the letters** (§6.2.12; [critic] L12, [check 1] gap 7): `private.client_addressee`. The repayment
+  request refuses `recipient_unknown` only while it returns nothing (7c-2 refused every death, tutelle, liquidation
+  or mandate end); its payload's `recipient` names the addressee's role, name and address lines, and a curatelle's
+  payload adds `copies` (the curator). The letter (template `demande-remboursement-avance-fr-1`, no new template:
+  none was issued with a role) prints « Tuteur de … », « Notaire — succession de … », « Héritiers — succession de … »,
+  « Liquidateur de … » and « Copie : …, curateur, … », and words the opening in the third person when someone acts
+  for the client.
+- **The nightly** (§6.3): `protection_event_to_qualify` (alert) and `seizure_standing` (alert, `p0` while fewer than
+  15 days since its recording), in `run_advance_checks` redefined from 7c-2's body.
+- **The client's events page** (`public.client_events_view`, money staff): every event with what it counts as, a
+  seizure standing or its release date, a row to qualify and its qualification, the representative in force and how
+  many were recorded, a declaration's documents; the payee required today; whether a seizure stands; the letters'
+  addressees; each account's kind, holder and client names compared as the writer spells them, explanation and
+  authority evidence. The web words it (« Événements du client », « Personne qui agit pour le client », « Préciser :
+  tutelle ou curatelle », « Compte exigé : … », « Demandes de remboursement d'avance adressées à : »; names corrected
+  in review round 1, TUI-8), proposes the new kinds with the
+  authority evidence and the explanation, and names each new blocker with what lifts it.
+- Columns for 7d-2 only (§6.1): `private.remittance_draft.set_off_barred`, `opening_on`, and the index
+  `remittance_line_repricing_invoice_idx` — written and read from 7d-2.
+
+Redefined, each copied whole from its latest definition across every migration file (indexed: the last
+`create or replace function` / `create function` of each name wins; each copy diffed against the live `prosrc` before
+the change; only the change; SECURITY DEFINER, `set` clauses, `search_path ''` and grants restated):
+`private.client_payout_account_guard` (`20261111120000:692`), `public.propose_payout_account` (`:742`),
+`private.client_status_event_guard` (`:1031`), `private.payout_court_appointed` (`:1062`),
+`public.record_client_status_event` (`:1076`), `private.remittance_payout_blockers` (`20261115090000:900`),
+`private.gate_assignments` (`20261109190000:506`), `private.allocation_begin` (`:618`), `public.forward_payment`
+(`:1161`), `public.register_client_document` (`20261124090000:2501`), `private.can_read_client_document_object`
+(`:2557`) with the policy `document_client_money_scope` (`:2574`), `private.run_advance_checks`
+(`20261125090000:896`, 7c-2's), `private.advance_repayment_client_refusal` (`:311`),
+`private.advance_repayment_payload` (`:428`); the checks `client_status_event_kind_check`,
+`client_payout_account_kind_check`, `payment_review_reason_check`, `client_notification_reason_check`.
+
+### Decisions
+
+- **D1 — the strictest payee, and only after every event was recorded.** The plan's mapping, read over every event
+  in effect, not the latest (F16: a mandate end recorded after a tutelle must not let the client's own account
+  through). The account lifts the block only when confirmed by a second admin after the latest recording among the
+  events in effect (C. civ. 2008: what was done before is valid; what is done after must follow the event), so a
+  death recorded after a liquidation asks the liquidator's account confirmed again. The code is the requiring
+  event's (`client_status:death`, `…:guardianship`, `…:curatorship`, `…:liquidation`, `…:mandate_ended`), so the
+  page says which payee it waits for.
+- **D2 — the authority evidence is required for every non-client payee, `court_appointed` included.** A liquidator's
+  account confirmed before 7d-1 without it no longer lifts the block (L641-9 I: the payee is the one the judgment
+  names; the evidence is how the second admin checks it). `019`'s court-appointed proposal now carries one (R3,
+  below).
+- **D3 — the holder's name for a protected adult** (427 al. 5; Q21 a): compared as the pain.001 writer spells it
+  (`private.epc_name_key`, twin `pain001.name_key`: the writer's spellings, accents dropped, upper-cased, every run of
+  other characters one space; null when a character outside Basic Latin is left, so never a false match); different
+  → refused `holder_not_client` unless explained (`holder_attestation`, 1–500 characters, shown to the confirming
+  admin with both names). The tutor's or curator's own account is refused `holder_not_client` (`046a` sp2) unless
+  explained; Q21 a's « jamais le compte du tuteur ou du curateur » then rests on the confirming admin, who reads the
+  explanation (OQ-94).
+- **D4 — an old « Tutelle ou curatelle » row holds payouts and ends nothing until qualified** ([critic] L17): it
+  cannot be told apart from a curatelle, so it is not treated as a tutelle (no mandate end, no payment held after it);
+  the nightly lists it until an admin qualifies it with the judgment. (Review round 1, MONEY-LAW-1: as built, a
+  protected adult's account confirmed after it lifted its hold — a deviation from §6.1 and §6.2.13 « until then the
+  row keeps today's effect (payouts held) »; now no account lifts it before it is qualified,
+  `client_status:guardianship_to_qualify`.) Qualified as a curatelle, a `curatorship` event is recorded with the old row's date and
+  evidence (its `recorded_at` today, so an account confirmed before is confirmed again: conservative).
+- **D5 — a seizure stands from its effective date until a release naming it is effective** ([check 2] gap 6; Q12 a):
+  `private.client_seizures_standing` is the one place that reads it (blockers, the client's users' rights, the
+  nightly, the page). A release is refused unless the seizure is the client's, effective on or before it and not
+  released (checked under the `payout_accounts:` lock; the unique index is the backstop, its violation the same
+  refusal).
+- **D6 — the allocation job's gate twin holds `client_mandate_ended` too** (beyond the plan's list, which names
+  `gate_assignments` only): the job gates again in Python (`jobs.allocation.gate`) before it allocates, so an end
+  recorded after a payment was gated ready, before the job ran, would have let it be allocated and priced.
+  `FileFacts.ended_on` is read once per client of the job's files (`private.client_end_event`), the rule comes first
+  as in SQL, no release opens it; `private.allocation_begin` admits the outcome. `post_allocations`' backstop is not
+  redefined (Left open).
+- **D7 — who receives the letters**: the governing event in our order (liquidation, death, tutelle, curatelle; the
+  earliest of its kind) and its representative in force; a curatelle's letter goes to the client at its billing
+  address with the curator in copy (our rule by analogy with 467 al. 3, OQ-94). A mandate end or a proceeding keeps
+  the client as addressee. No addressee while the person is unknown or the row is to qualify: the request is refused
+  rather than sent to the wrong person.
+- **D8 — what representatives store**: role, name (1–140) and 1–4 address lines (1–70), nothing else
+  (`private.representative_clean`; personal data — no birth date, no phone, no email), with the evidence; read by
+  money staff only (`046a` i).
+
+### Deviations from the plan
+
+- **`client_events_view`** (beyond the plan): the page's one read, so every rule (what counts, standing, the payee,
+  the addressees, the name comparison) stays in SQL and the page only words it.
+- **`private.client_payout_account_guard` redefined** (not in the plan's list): the two new columns are immutable once
+  proposed, as the other columns are; the guard also checks the authority document is the client's
+  `payout_authority_evidence`.
+- **Two refusals beyond the plan's list**: `bad_attestation` (an explanation over 500 characters; a blank one is
+  none) and `qualify_protection_event`'s `bad_kind`. `holder_not_client`'s text is static (the page shows both names
+  where the admin confirms, never in an error).
+- **`forward_payment` re-reads the end** to choose the reason: a payment held for the cut-off and booked after an end
+  recorded since is forwarded with `mandate_ended`, not the cut-off's reason, so it earns no commission either. The
+  copy also closes a hole of the merged body: `p.review_reason in (…)` on a null reason let a payment ready for
+  allocation be forwarded; it is now `coalesce(…, false)` (`046a` sg2's last key).
+- **A client-keyed partial index for seizures** (`client_status_event_client_seizure_idx`, beyond §6.1's servicer
+  index): under stale statistics the per-client read chose the servicer's partial index read whole (5,008 planted rows
+  per blocker check in the reads test); keyed by the client it reads the client's seizures only.
+- **The « no release naming it » and « no qualification » checks are fenced** (`not exists (… offset 0)`, in
+  `client_seizures_standing` and the nightly's two statements): in CI's order (the reads test after the earlier db-job
+  files) the nightly's `seizure_standing` ran its NOT EXISTS as an anti-join reading `client_status_event_release_uq`
+  whole (8,302 planted rows in the suite, 1,075 in the reproduction); the fence keeps it a correlated probe by key (3).
+- **`portfolio_confirmation_blockers` is not redefined**: an old row qualified as a curatelle still keeps the client's
+  portfolios from being confirmed (`client_mandate_ended`, as before 7d-1) — Left open. (Superseded in review round 1,
+  TUI-2: redefined, it reads what each event counts as.)
+- **No new letter template**: `demande-remboursement-avance-fr-1` gains the addressee and copy lines; no letter was
+  issued with a role before, so the template's earlier bytes are unchanged (`GOLDEN_REQUEST_PDF` and
+  `GOLDEN_EVERY_ORIGIN_PDF` unchanged; `GOLDEN_CURATELLE_PDF` new).
+
+### Assertions whose expected value changed (house rule R3)
+
+- `019_identities_terms`: a court-appointed proposal now needs its authority evidence (D2): the fixture adds a
+  `payout_authority_evidence` document (`'10'`) and the proposal passes it; every assertion keeps its expected value.
+- `024_remittance_review_checks` (legal#0): the fixture confirmed the client's account at `now()` and records each
+  event an hour earlier. Under D1 a client account confirmed by a second admin after a mandate end is the payee that
+  end requires, so « a mandate's end too » would no longer block. The case means events recorded after the payee was
+  confirmed: the fixture now confirms it two hours before (`now() - interval '2 hours'`, before the events); every
+  expected value is unchanged.
+- `045b_repayment_requests` sr4: after a mandate end the request was refused `recipient_unknown`; it is now made
+  (`"mandate_ended": "ok"`): the plan narrows the refusal (§6.2.12; the client stays the addressee).
+- vitest `runs.test.ts`: `payout_blocked:client_status:death` now says what lifts it (« Décès du client : confirmez le
+  compte du notaire, ou celui que tous les héritiers désignent, avec la pièce (second administrateur) »);
+  `requests.test.ts`: `recipient_unknown`'s text is the plan's (« Indiquez d'abord qui agit pour le client … »), now
+  that the action exists.
+- `033` and every other assertion of `034`–`045b` unchanged.
+
+### Tests
+
+- pgTAP `046a_client_events.test.sql` (new, **36**; 045b's fixture and helpers copied, each scenario in a rolled-back
+  subtransaction; six with the switch on): `qualified_at` added without a missing value; e (se1: every new kind with
+  its columns, a replay; se2: every refusal, nothing written); x (raw inserts: the column checks, the guard, the
+  unique release, `refuse_change`); s (ss1: standing until the release naming it is effective, the day before both;
+  ss2: P0 for 15 days); rp (representatives: rows, the one in force, the event row unchanged, refusals, roles); q
+  (sq1, sq2: the old rows, the qualification either way, the alert); i (isolation: money staff only, not servicer B,
+  the client's users nor a collector; append-only; one change-log row each; the privileges); p (sp1–sp8: each payee,
+  the timing, F16, the liquidation, the seizure, the approval refused and a file held; four also switch on); k (the
+  name key's spellings and null rule; sk1 the holder rule); g (sg1: held on and after the end, not before, after a
+  regate, an old row and a curatelle end nothing; sg2: the forward, its reason and notification, no schedule key; a
+  ready payment not forwarded); a (sa1–sa4: the addressees, `recipient_unknown` narrowed, the curatelle's copy); n
+  (the nightly's codes); the switch's guard.
+- Worker unit: `test_name_key.py` (new, 22: the writer's spellings, the null rule, word order and titles, what NFKD
+  reveals spelled again, Hypothesis: the key is what the writer sends); `test_mandate_end_gate.py` (new, 5: the job's
+  gate on, after and before the end, first, never released); `test_mandate_end_forward.py` (new, 2: no commission
+  whatever the schedule, the statement's nature); `test_repayment_request.py` +5 (the tutor's letter, the curatelle's
+  copy, a plain client's letter unchanged, an unknown role or a copy without address refused, the golden
+  `GOLDEN_CURATELLE_PDF`).
+- Worker integration: `test_client_events_integration.py` (new, 5: a death recorded while an approval is queued —
+  the job refuses it, « Valider » refuses the blocked run, the notary's account confirmed by a second admin, the run
+  approved and paid to that IBAN; a payment after the end held, forwarded, priced 0 in the next draft although the
+  schedule prices every other forward; the window of D6; the curatelle's letter drawn by the real job; two sessions
+  releasing one seizure); `test_name_key_parity_integration.py` (new, 2: pinned literals, 400 generated names — SQL
+  and Python agree); `test_client_event_reads_integration.py` (new, 1; the db job, not a scale file: Benchmarks).
+- vitest `client-events.test.ts` (new, 31: the kinds' names — a tutelle alone, a curatelle as the servicer's rule —,
+  the mandate end's notification wording (C. civ. 2006, 2007), the roles and the payout kinds, the court-appointed
+  refusal's text, what lifts each block, the payee required, the parser and the standing seizures a release may name,
+  the unknown addressee, the representative and the declaration read from the forms (amounts as minor units in
+  text), a payment held after the end and its forward, the nightly's labels, LEX-28).
+- E2E `client-events.spec.ts` (desktop and mobile): a death with its notary recorded, a payment after it held and
+  forwarded, the notary's account proposed with its evidence and confirmed by a second admin, the run approved; a
+  seizure and its release; screenshots `m2c7-evenement-client`, `m2c7-paiement-apres-fin-mandat`,
+  `m2c7-beneficiaire-succession`, `m2c7-saisie`.
+- Seen failing first at the tests-first commit (`046a` at its first call, the worker's and vitest's at import or on
+  their assertions), each then passing on the code; D6's unit and integration tests seen failing before the twin, the
+  integration test again before `allocation_begin` admitted the outcome; the reads test seen failing (5,008 rows) before
+  the client-keyed index, and in CI's order (1,075 rows, the three earlier db-job files then it, on a fresh reset)
+  before the fence.
+
+### Mutants
+
+SQL: the function (or index, or policy) changed on the stack, `046a` (or `045b`) run, the original restored. Worker:
+the source changed, the named tests run, the file restored. Every mutant killed but one argued equivalent (last row).
+
+| Mutant (plan §6.6 for 7d-1 first, then this slice's own) | Killed by |
+|---|---|
+| a blocker lifted by any account kind | `046a` sp1, sp6 |
+| the latest event only (not the strictest) | `046a` sp5 (F16), sp6 |
+| a confirmation before the event accepted | `046a` sp1, sp4, sp5, sp6 |
+| the gate's hold off | `046a` sg1, sg2, sq2; `test_a_payment_after_the_mandate_s_end_is_held_then_forwarded_without_commission` |
+| the holder check removed | `046a` sp2, sk1 |
+| `client_addressee` returning the curator alone for a curatelle | `046a` sa1, sa3 |
+| the side tables' select policy opened to the client's members | `046a` i (si1) |
+| `epc_name_key` without the accent map; without the space collapse; on `epc_name_empty`'s one-letter map; without the null rule | `046a` k (spellings), sk1, sp3; k, sk1; k, sk1; k (null rule) — each |
+| the second `_SPELLED` pass dropped (Python) | `test_what_the_decomposition_reveals_is_spelled_again` (added: the property was vacuous when the key is null) |
+| the Python twin without the marks dropped; without its null rule | `test_the_writer_s_spellings`; `test_no_key_when_…` |
+| `client_seizures_standing` ignoring the release's date | `046a` ss1 (the day before) |
+| a release lifting every seizure (no `refers_to_event_id`) | `046a` ss1 (two seizures), sp7 |
+| the partial unique index dropped | `046a` x (a second release inserted) |
+| the index and the command's lock both dropped | `test_two_sessions_releasing_one_seizure_record_one_release` |
+| `forward_payment` without the `coalesce` | `046a` sg2 (a ready payment forwarded) |
+| `recipient_unknown` kept for a mandate end | `046a` sa4; `045b` sr4 |
+| the client-keyed seizure index dropped | `test_the_client_event_reads_stay_keyed_whatever_the_statistics` (5,013 rows) |
+| the nightly's release probe unfenced (the anti-join) | the same test in CI's order (1,075 rows; 8,302 in the suite run) |
+| the job's gate off; strictly after the end; after the closed-file gate; the job reading no end | `test_mandate_end_gate.py` and the D6 integration test; the on-the-day case; the closed file's case; the D6 integration test |
+| the letter's copy line dropped | `test_after_a_curatelle_the_client_receives_it_with_a_copy_to_its_curator` |
+| equivalent: the command's lock dropped alone | — the unique index serializes the second release (it waits on the first's insert, then is refused the same way), so the two-session test and every outcome are the same |
+
+The plan's other mutants (opening from `proceeding_opened` only, the `issue_date` criterion, the new invoice
+nettable, the debit-time re-read, advances nettable after the opening, N > 0 kept for the seizure's set-off bar, the
+guard's exceptions, the deadlines, `settlement_withheld`, `already_disposed`, the schedule candidates' column) are
+7d-2's and 7d-3's: their code is not in this slice.
+
+### Suites
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 49 files, **3,083 tests, PASS** in 623 s — `046a`'s
+  36 among them; `033` byte for byte; `034`–`045b` with the R3 changes above only.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 204 files) clean; unit pytest **1,190 passed, 5 xfailed**; the
+  non-scale integration tests in CI's order, right after that `supabase test db` without a reset: **289 passed** in
+  833 s (a first run failed on the stale-statistics test in this order, the nightly reading 8,302 planted rows: the
+  fence above, then the whole sequence again).
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic (95,997 of 100,000), **0**
+  wrong.
+- Scale, each command right after `supabase db reset` with CI's logging settings (docs/benchmarks/remittances.md
+  « M2c-7d-1 »): the scale job's nine files in one call as `ci.yml` runs them (`RECEIPT_FILES=5000`) **15 passed** in
+  1,205.1 s (the 50,000-line run prepared in 10.4 s, re-run prepared and approved in 26.7 s, its nightly checks 4.4 s,
+  `run_advance_checks` 66 ms own); CI's `scale-payouts` command **6 passed** in 1,226.5 s (20.4 min). No Paris date
+  change fell in them. The stale-statistics test's measurements are there too.
+- `database.types.ts` regenerated from the final schema: identical to the committed file.
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **31 files, 639 tests** passed (`client-events.test.ts` new,
+  31).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **63
+  passed** in 6.8 min. A first full run failed this slice's spec on two locators (a `<select>`'s label read with its
+  options, a URL read before the navigation ended): fixed, the spec alone passing on both widths, then the full run
+  again. Screenshot diffs showing only dates, ids, order or earlier slices' drift reverted (165); kept:
+  `m2c7-evenement-client`, `m2c7-paiement-apres-fin-mandat`, `m2c7-beneficiaire-succession`, `m2c7-saisie` (new) and
+  `m2c-client-iban`, `m2c-conditions`, `m2c7-reglement-client` (retaken: the client's page gains « Événements du
+  client », the payee kind, the names compared, the authority evidence and the explanation), mobile and desktop.
+- Then `supabase db reset`, the stack left running.
+
+### Size
+
+**2,967 non-test lines added (and 132 removed), 155 of them the generated `database.types.ts`: over the task's
+~2,500 by about 470, and about 1.8 times the plan's ≈ 1,640 (≈ 690 copies). Nothing was dropped.** The migration
+1,939 — of which 1,015 are the fourteen functions redefined whole from their latest definitions (`run_advance_checks`
+267, `record_client_status_event` 139, `forward_payment` 118, `propose_payout_account` 111, `gate_assignments` 90,
+`register_client_document` 53, `client_payout_account_guard` 45, `advance_repayment_payload` 43,
+`remittance_payout_blockers` 37, `client_status_event_guard` 32, `allocation_begin` 31,
+`advance_repayment_client_refusal` 21, `payout_court_appointed` 14, `can_read_client_document_object` 14), 924 the
+rest (the columns, checks and indexes, the three side tables with their guards, triggers and policies, the helpers,
+the two new commands, `client_events_view`, the grants, the header) —, the web 930 (« Événements du client » 328,
+`client-events.ts` 182, the generated types 155, the client's page 73 for 100 removed, the actions 62, the error texts
+44, the labels 29, the rest 57), the worker 98 (the letter's addressee 52, the job's gate twin 21, the name key 21, the
+forward's nature 4). Beyond the plan's estimate: the copies it did not count (`allocation_begin`, the payout-account
+guard, the document helpers, `advance_repayment_payload`'s and `run_advance_checks`' full bodies), the page's read
+(`client_events_view`) and the section that words it.
+
+### Left open (low), with its default
+
+- Founder questions (plan §10): Q8 (a), Q10 (a), Q12 (a), Q21 (a) — defaults built and open; the cancellation after
+  download (6b-3 plan Q1) stays off. OQ-41, OQ-91, OQ-93, OQ-94 with counsel.
+- **`post_allocations`' backstop** does not re-read the end: the Python gate (D6) holds such a payment first, and the
+  backstop would only catch an end recorded between the job's read of its files and its post (the job's own
+  transaction). Default: keep; 7f's hardening.
+- **An old row qualified as a curatelle still blocks the portfolio confirmation** (`portfolio_confirmation_blockers`
+  reads the old kind). Default: keep (conservative) until a slice redefines that gate. (Fixed in review round 1,
+  TUI-2.)
+- **A liquidator's account confirmed before 7d-1 without authority evidence now blocks** (D2): ops propose it again
+  with the judgment. Default: keep.
+- **The habilitation familiale and the sauvegarde de justice** are recorded as no event (OQ-94). Default: keep.
+- **`claims_declared` changes nothing yet**: its effects (set-off, `claims_to_declare`) are 7d-2's and 7d-3's.
+- Everything 7a, 7b, 7c-1 and 7c-2 leave open stays open.
+
+## M2c-7d-1 review fixes (2026-11-25)
+
+### Round 1
+
+The review of `a7489f2` raised thirteen items: two mediums and one low of the money and law lens (MONEY-LAW-1,
+MONEY-LAW-2; MONEY-LAW-3), three mediums and five lows of tests and pages (TUI-1 … TUI-3; TUI-4 … TUI-8), and four
+lows of concurrency and cost (CC-1 … CC-4). MONEY-LAW-2 and TUI-3 are one fault (a letter naming the person who acts
+for the client, read by the client's members), MONEY-LAW-3 and TUI-1 another (a seizure's texts claiming a set-off
+bar 7d-1 does not have): each fixed once. Each item was checked against the code first — read in the migration, the
+pages and the worker, then seen failing as a test (046a's new cases, the vitest texts, the two integration tests) on
+`a7489f2`'s bodies; all hold. The migration `20261126090000_client_events.sql` is unmerged and was edited in place.
+**The switch stays off**: nothing writes `private.feature_switch` and no rule here reads it; the new scenarios that
+touch payouts (`046a` sq3, sp9) also run with it on in a rolled-back subtransaction and equal their switch-off twins;
+`033` byte for byte unchanged; `034`–`045b` unchanged.
+
+- **MONEY-LAW-1 (medium; fixed at the root, the plan's rule).** An old « Tutelle ou curatelle » row not yet qualified
+  counted, in `private.client_payee_rule`, as a `guardianship` requiring a `protected_adult` account: once ops proposed
+  one in the client's name and a second admin confirmed it, `client_status:guardianship` lifted while the row was
+  still to qualify. The plan keeps « today's payout hold until ops qualify them » (§6.1) — before 7d-1 no account
+  lifted such a row's hold — and « until then the row keeps today's effect (payouts held) » (§6.2.13): if the row was a
+  tutelle the mandate ended at its date (C. civ. 2003, « la tutelle des majeurs »), and the payments booked since,
+  allocated by design (the gate ignores a row to qualify: no end stated), would have been paid out before anyone
+  qualified it. Reproduced (`046a` sq3 on `a7489f2`: `[]` after the confirmation). Fix: the row to qualify requires
+  `to_qualify`, a kind no payout account has, ranked above every other (its code `client_status:guardianship_to_qualify`,
+  shown first whatever else is in effect); qualified as a tutelle, the protected adult's account confirmed after the
+  old row lifts it; qualified as a curatelle, only an account confirmed after its curatorship event (recorded at the
+  qualification) does. The texts that said the hold — the qualification form's « les reversements restent bloqués
+  jusqu'à ce que vous précisiez » and the nightly's `protection_event_to_qualify` help — are now true; the blocker
+  says « « Tutelle ou curatelle » enregistrée avant leur distinction : précisez-la avec le jugement (« Événements du
+  client ») ; aucun compte ne lève ce blocage avant (règle du cabinet) », the page's payee line « Reversements bloqués
+  tant que la « Tutelle ou curatelle » enregistrée n'est pas précisée … ». D4 above is corrected. `046a` sq3 (switch
+  off and on), sq1's expected code.
+- **MONEY-LAW-2 / TUI-3 (medium; fixed at the root, the plan's rule).** Plan §6.1: the names and addresses of who acts
+  for the client are « never the client's users, restricted viewers or collectors »; the side table kept that rule,
+  but the repayment request's letter addressed to that person (its payload's `recipient`: role, name, address lines;
+  its PDF printing them) was the client's whole-client members' to read — the request's row over PostgREST (7c-2's
+  policy), the letter's document row and its stored object (the remittance documents' rule), and its `document_id` in
+  `client_repayment_requests`. Reproduced (`046a` si2: the client's admin read `[1, 1, 1]`). Fix:
+  `private.can_read_remittance_document` (redefined from `20261113090000:1537`, + `set enable_seqscan = off`): a
+  client's member reads no `advance_repayment_request_pdf` whose request's payload names a recipient with a role (the
+  request by its letter, new `advance_repayment_request_document_idx`); the policy `advance_repayment_request_read`
+  (recreated from `20261125090000:176`): the client's members read their requests but those; `public.client_repayment_requests`
+  (redefined from `20261125090000:740`): each row says `to_representative`, and for a caller who is not money staff
+  such a row's `document_id` is null. The client space lists the request (number, date, total: no personal data) with
+  « Lettre adressée à la personne qui agit pour le client : elle n'est pas affichée ici. » (`requestLetterNote`). A
+  curatelle's letter is addressed to the client with its curator in copy (plan §6.2.12's design): the client receives
+  it, its members read it, as a plain client's. Money staff read every letter. `046a` si2 (the tutor's letter: the
+  client's admin reads none of its row, document or PDF, the listing withholds it; staff read all; the curatelle's
+  letter read by the client's admin); the reads test bounds the rule and the listing; founder question below.
+- **MONEY-LAW-3 / TUI-1 (low and medium; texts made true, the behaviour pinned).** `runs.ts`'s `client_status:seizure`
+  label (« ni reversement ni compensation jusqu'à la mainlevée »), the nightly's `seizure_standing` help and the E2E's
+  comment said a seizure stops set-off; 7d-1 reads the blockers only for a payout (N > 0), so an N = 0 run under a
+  standing seizure is approved with its set-off (reproduced: `booked`, its `compensation` settlement 150 000). The bar
+  « whatever N » is 7d-2's (plan §6.2.9; COMPLIANCE SAISIE-01): not taken here (it redefines
+  `remittance_approval_refusal`, 7d-2's from 7c-2's body). The texts now say what 7d-1 does — « Saisie entre les mains
+  du cabinet : aucun virement de reversement jusqu'à la mainlevée (les compensations ne sont pas encore bloquées) »;
+  the nightly's help: « … Collectoo ne bloque pas encore les compensations : un reversement sans virement
+  (entièrement compensé) serait validé avec ses compensations ; ne le validez pas tant que la saisie court (l'acte de
+  saisie emporte, « à concurrence des sommes pour lesquelles elle est pratiquée, attribution immédiate au profit du
+  saisissant de la créance saisie », art. L211-2 …; « La compensation ne préjudicie pas aux droits acquis par des
+  tiers » (art. 1347-7 C. civ.)) » (both read on LibreJustice 2026-11-24, versions in force since 2012-06-01 and
+  2016-10-01); the events' section's note says the same. `046a` sp9 pins it (switch off and on), so that 7d-2 changes
+  that expectation with its bar (R3 there); vitest on the three texts.
+- **TUI-2 (medium; fixed).** The portfolio confirmation gate (`private.portfolio_confirmation_blockers`, not
+  redefined by 7d-1) read the event's kind: an old row qualified as a curatelle still gave `client_mandate_ended`,
+  which the client's page words « Mandat terminé le … : fin du mandat ou tutelle enregistrée pour ce client (art.
+  2003 C. civ.) » — a false legal statement for a curatelle, next to the hint that says a curatelle ends no mandate;
+  and the event list labelled that row « Tutelle · précisé : curatelle ». Fix: the gate redefined from
+  `20261111120000:1705` reads `private.client_event_effective` — `client_mandate_ended` for a mandate end or a
+  tutelle (recorded since 7d-1, or an old row qualified as one), nothing for a curatelle (plan §6.6: « curatorship
+  blocks payouts but not the confirmation gate »), and a row still to qualify its own reason,
+  `client_protection_to_qualify:<date>`, worded « « Tutelle ou curatelle » du JJ/MM/AAAA à préciser : pas de nouveau
+  portefeuille pour ce client avant (règle du cabinet ; une tutelle met fin au mandat, art. 2003 C. civ., une curatelle
+  non) » (it may be a tutelle: the gate keeps today's block, never stating an end). `client_event_effective` is granted
+  to `service_role`, which executes the gate (the worker's confirmation job). The event line (`eventLine`, moved to
+  `client-events.ts`) names an old row « Tutelle ou curatelle (à préciser) », then « Tutelle ou curatelle — précisé :
+  curatelle / tutelle ». `046a` sq4; vitest.
+- **TUI-4 (low; tests added).** `046a` sp10 (a tutelle then a death: the estate's account, not a protected adult's —
+  « estate > protected_adult »), sa5 (a tutelle then a death: the notary receives the letters; a death then a
+  liquidation: the liquidator), sp11 (after a mandate end the client's administrator confirms and refuses nothing:
+  `court_appointed`; a second admin confirms). The reviewer's three surviving mutants are killed (below).
+- **TUI-5 (low; Left open with its default).** The « Lier » sheet's twin of the gate (`matching.ts` `gatingOutcome`)
+  has no end of mandate: it says « Il sera imputé … » for a payment SQL will hold `client_mandate_ended`. A true
+  answer needs the client's end date in `match_queue_accounts` and `search_payment_files` (two public reads
+  redefined, the types regenerated): not a text or a one-line guard. Default: keep; the held payment is reported on
+  the queue at once with its reason and « Reverser au client » (the gate never allocates it); the slice that next
+  redefines those reads carries the date.
+- **TUI-6 (low; text fixed).** `recipient_unknown` and the empty addressees' line told ops to « indiquez qui agit pour
+  le client », impossible for an old row to qualify (it takes no representative) and silent on the heirs: now
+  « Indiquez d'abord qui agit pour le client (notaire ou héritiers, tuteur, curateur ou liquidateur ; une « Tutelle ou
+  curatelle » enregistrée avant leur distinction se précise d'abord) : la lettre lui est adressée, ou en copie au
+  curateur. » vitest.
+- **TUI-7 (low; text fixed, the articles read).** « Compte du majeur protégé, à son nom (géré par son tuteur ou
+  curateur) » stated that a curator manages the account: C. civ. 472 al. 1 (version 2009-01-01, read 2026-11-24) gives
+  the curator the person's income « sur un compte ouvert au nom de cette dernière » only when « Le juge peut
+  également, à tout moment, ordonner une curatelle renforcée »; under a curatelle the person is one who, « sans être
+  hors d'état d'agir elle-même », needs to be « assistée ou contrôlée » (440 al. 1). 427 al. 5 (version 2020-01-01)
+  requires the account in the person's name, nothing about who makes it work. Now « Compte du majeur protégé, ouvert à
+  son nom (art. 427 C. civ.) » (the payout kind, the page's payee line, the blocker labels, the client space's « mandat »
+  page); the section's note says the authority document is required « sauf après une fin de mandat » (`046a` sp4: the
+  client's own account confirmed again needs none). The plan's §6.1 label is the one replaced (deviation below).
+- **TUI-8 (low; docs and a test).** This ADR's M2c-7d-1 section named UI labels the page does not use — corrected
+  there (« Personne qui agit pour le client », « Préciser : tutelle ou curatelle », « Compte exigé : … »); DOMAIN's
+  « M2c-2M2c-7d-1 » typo, its document kind's label (now the page's « Pièce désignant qui peut recevoir ») and the
+  outdated « Événement du client » row (« effects on payouts come with the runs ») fixed; `046a`'s header claimed a
+  forward « also on a recalled file » no case tested: sg2 now forwards a payment received after the end on a file the
+  client recalled since — the end's reason, not the recall's. The `client_event_effective` reading of a row qualified
+  as a curatelle (null, not `curatorship`) is listed as a deviation below.
+- **CC-1 (low; a guard).** `private.remittance_payout_blockers` called `client_payee_rule` and
+  `client_seizures_standing` (SQL functions with SET clauses: parsed and planned at every call) for every client,
+  per payout at the file's generation, its download and « Virements ». Now each is called only after a keyed probe
+  finds an event in effect (`client_status_event_client_idx`), a seizure for the latter
+  (`client_status_event_client_seizure_idx`, its predicate stated literally): equivalent (no event, no rule; no
+  seizure, none standing). `046a` sc1 (`pg_stat_xact_user_functions`: a client with no event calls neither, one with
+  a death the rule once and no seizure read). Measured (benchmarks): 5,000 calls for a client with no event 0.24 s (7d-1 as
+  built 1.90–2.06 s; 7c-2's body 0.12 s), for a client with a death 2.24–2.38 s (as built 2.64–2.88 s); at 5,000
+  payouts « Virements » 1.53 s, « Générer le fichier » **2.89 s** (7d-1 as built 6.55 s; 7c-2 3.01 s) and the first
+  download 2.53 s. A client with events still pays the nested calls (Left open).
+- **CC-2 (low; a one-line guard).** An event's `recorded_at` was its transaction's start (`now()`): a confirmation
+  that took the `payout_accounts:` lock first, while « Enregistrer un événement » (started earlier) waited, committed
+  with a later `confirmed_at` — the account counted as confirmed after an event it never saw (for a mandate end, the
+  block lifted). Now `record_client_status_event` stamps the event with `clock_timestamp()` once it holds the lock,
+  and so does `qualify_protection_event` its curatorship event. `046a` sc2; the two-session integration test
+  `test_an_event_waiting_on_a_confirmation_s_lock_is_stamped_after_it` (the confirmation holds the lock while the
+  event waits: `started < confirmed_at < recorded_at`, the block stays).
+- **CC-3 (low; settings).** `record_client_status_event`, `qualify_protection_event` (both take the
+  `payout_accounts:` lock) and `set_client_representative` gain `set lock_timeout = '2s'`, as propose, confirm and
+  reject; the web maps « lock timeout » (55P03) of these commands to « Une décision sur les comptes de reversement ou
+  les événements des clients du cabinet est en cours : réessayez dans un instant. » (`payout_accounts_busy`). `046a` c
+  (the settings test); vitest.
+- **CC-4 (low; a grant).** The allocation job's `load_files` reads `private.client_end_event`, revoked from
+  `service_role`: granted (read-only, by keys), with `client_event_effective` (the gate above). `046a` c (the
+  privileges: service_role yes, authenticated no); `test_the_allocation_job_reads_the_mandate_s_end_as_the_worker_s_role`
+  (`load_files` under `set role service_role`: permission denied on `a7489f2`).
+
+**Deviations from the plan (round 1).**
+- Redefined beyond the plan's list: `private.portfolio_confirmation_blockers` (TUI-2),
+  `private.can_read_remittance_document`, the policy `advance_repayment_request_read` and
+  `public.client_repayment_requests` (MONEY-LAW-2), with the index `advance_repayment_request_document_idx`; the plan's
+  redefinition table gains their row. Two codes the plan does not list: `client_status:guardianship_to_qualify` (the
+  plan's « codes unchanged (`client_status:<kind>`) »: the old row's kind as `client_event_effective` names it, so the
+  page says what lifts it) and the gate's `client_protection_to_qualify`.
+- The protected adult's payout kind is « Compte du majeur protégé, ouvert à son nom (art. 427 C. civ.) », not §6.1's
+  « … (géré par son tuteur ou curateur) » (TUI-7: 472 al. 1); `recipient_unknown`'s text is not §6.4's (TUI-6); the
+  seizure's blocker label is not §6.4's « ni reversement ni compensation jusqu'à la mainlevée » until 7d-2 bars the
+  set-off (MONEY-LAW-3).
+- `client_event_effective` answers null, not `curatorship`, for an old row qualified as a curatelle (`046a` sq1,
+  `old_now`; §6.6's gap 3 says « answers `curatorship` for the old row »): §6.1 says the old row « no longer counts when
+  its qualification says `curatorship` (the curatorship event recorded then counts instead) »; counting both would
+  count the curatelle twice (its blocker and its addressee from two rows, the second recorded later). Kept, stated
+  here.
+
+### Assertions whose expected value changed (round 1, house rule R3)
+
+- `033`–`045b`: none (unchanged). `046a` (this slice's own, unmerged): sq1's `blocks` is
+  `client_status:guardianship_to_qualify` (MONEY-LAW-1: the old row's own code); sg2 gains `recalled_file` (TUI-8);
+  twelve tests added (sq3 ×2, sq4, si2, sp9 ×2, sp10, sp11, sa5, sc1, sc2, c's settings): **48**.
+- vitest `terms.test.ts` (M2c-2's: every reason the gate gives): the SQL list gains `client_protection_to_qualify`,
+  and `EVENT_BLOCKERS` its fourth code (TUI-2). `requests.test.ts`: `recipient_unknown`'s text (TUI-6; 7d-1 had
+  changed it already). `client-events.test.ts` (this slice's own): the protected adult's kind, the tutelle's and the
+  seizure's blocker labels, the payee line, the empty addressees' line (TUI-1, TUI-6, TUI-7).
+- Worker `test_debit_bookings_scale_integration.py`: also times « Virements » (with the 5,000 payouts queued) and the
+  file's first download (printed; no assertion changed).
+
+### Mutants (round 1)
+
+SQL: the function (policy, grant, setting or index) changed on the stack, `046a` (or the named integration test) run,
+the original restored and checked equal (`pg_get_functiondef`). Every mutant killed.
+
+| Mutant | Killed by |
+|---|---|
+| the old row's payee mapped back to `protected_adult` (`a7489f2`'s) | `046a` sq1, sq3 |
+| the letters' rule without the representative clause | `046a` si2 |
+| the request's policy without the role clause | `046a` si2 |
+| `client_repayment_requests` listing every letter's document | `046a` si2 |
+| the gate on the event's kind (the old body) | `046a` sq4 |
+| the blockers' guard removed | `046a` sc1 |
+| the event stamped at the transaction's start (`record_client_status_event`; `qualify_protection_event`) | `046a` sc2 (each); the two-session test (the first) |
+| (reviewer's M8) payee ranks death 2, tutelle 3 | `046a` sp10 |
+| (reviewer's M9) addressee ranks death 3, tutelle 2 | `046a` sa5 |
+| (reviewer's M10) `payout_court_appointed` without `mandate_ended` | `046a` sp11 |
+| the forward's recall reason before the end's | `046a` sg2 |
+| `client_end_event` revoked from `service_role` | `046a` c (settings); `test_the_allocation_job_reads_the_mandate_s_end_as_the_worker_s_role` |
+| `lock_timeout` dropped from `record_client_status_event` | `046a` c (settings) |
+| `advance_repayment_request_document_idx` dropped | `test_the_client_event_reads_stay_keyed_whatever_the_statistics` |
+
+### Suites (round 1)
+
+- `supabase test db` (fresh `supabase db reset`, the final files): 49 files, **3,095 tests, PASS** in 567 s — `046a`'s
+  48 among them; `033` byte for byte; `034`–`045b` unchanged. (A first run crossed Paris midnight inside `037`, which
+  refused « the day turned during the transaction, retry »: run again whole after a reset.)
+- `database.types.ts` regenerated from the final schema: identical to the committed file (no public signature
+  changed: `client_repayment_requests`' new key is inside its `jsonb`).
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 204 files) clean; unit pytest **1,190 passed, 5
+  xfailed**; the non-scale integration tests in CI's order, right after that `supabase test db` without a reset:
+  **291 passed** in 759 s.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic (95,997 of 100,000), **0**
+  wrong.
+- Scale, each command right after `supabase db reset` with CI's logging settings (docs/benchmarks/remittances.md
+  « M2c-7d-1 review fixes, round 1 »): the scale job's nine files in one call as `ci.yml` runs them
+  (`RECEIPT_FILES=5000`) **15 passed** in 1,308.9 s; CI's `scale-payouts` command **6 passed** in 1,297.4 s (21.6 min;
+  « Générer le fichier » for 5,000 payouts 2.89 s, « Virements » 1.53 s, the first download 2.53 s). No Paris date
+  change fell in either. The stale-statistics test's measurements and the blockers' 5,000 calls are there too.
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **31 files, 644 tests** passed.
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **63
+  passed** in 6.4 min. Kept: `m2c7-evenement-client` and `m2c7-saisie` (mobile and desktop: the events' note now says
+  the old row's hold, the authority evidence's exception, that set-off is not yet barred under a seizure and that the
+  client space does not show a representative's letter); every other diff showed only dates, ids or order and was
+  reverted (175 files).
+- Then `supabase db reset`, the stack left running.
+
+### Left open (low), with its default
+
+- **TUI-5**, above: the « Lier » sheet's ready text for a payment SQL will hold after the end. Default: keep (the
+  queue reports the hold at once); the slice that next redefines `match_queue_accounts` and `search_payment_files`
+  carries the client's end date.
+- **CC-1's remaining cost**: for a client with events the blockers still call two nested SQL functions per payout
+  (measured above, well under the API's 8 s at 5,000 payouts). Default: keep; 7f's hardening may inline them.
+- **The set-off under a standing seizure** (MONEY-LAW-3): 7d-2's bar « whatever N »; meanwhile the texts tell ops not
+  to approve an N = 0 run (pinned, sp9).
+- **Founder question (new; default built).** May the client's own users read a repayment request's letter addressed
+  on its behalf to the person who acts for it (the notary or the heirs, the tutor, the liquidator)? Default (a): no —
+  plan §6.1's rule for those names and addresses; the client space lists the request without its letter. (b): yes,
+  the letter in full (the plan and COMPLIANCE would then say so).
+- Everything M2c-7d-1's « Left open » lists stays open, but the confirmation gate after a curatelle (fixed, TUI-2).
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

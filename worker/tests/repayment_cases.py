@@ -188,3 +188,27 @@ def every_origin_payload() -> dict[str, Any]:
         ),
     ]
     return request_payload(rows, number="DRA-2026-000002")
+
+
+# M2c-7d-1 (plan §6.2.12; [critic] L12, [check 1] gap 7): who receives the letter, as
+# private.advance_repayment_payload takes it from private.client_addressee — after a tutelle the
+# tutor (for the client); after a curatelle the client, with a copy to its curator (synthetic)
+TUTOR_RECIPIENT = {
+    "role": "tutor",
+    "name": "UDAF du Rhône",
+    "address_lines": ["3 place du Palais", "69002 Lyon"],
+    "client_name": "Martin SAS",
+}
+CURATOR_COPY = {
+    "role": "curator",
+    "name": "Association Tutélaire de Lyon",
+    "address_lines": ["3 place du Palais", "69002 Lyon"],
+}
+
+
+def tutelle_payload() -> dict[str, Any]:
+    return request_payload(number="DRA-2026-000003") | {"recipient": TUTOR_RECIPIENT}
+
+
+def curatelle_payload() -> dict[str, Any]:
+    return request_payload(number="DRA-2026-000004") | {"copies": [CURATOR_COPY]}

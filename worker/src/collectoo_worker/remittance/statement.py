@@ -64,6 +64,10 @@ FORWARD_REASON = {
     "file_recalled": "dossier rappelé",
     "before_servicing_start": "antérieur à la reprise",
     "client_ratification": "ratification",
+    # M2c-7d-1 (plan §6.2.8; founder Q10): a payment received after the client's mandate ended,
+    # forwarded without allocation and without commission (no schedule key). A new code only: no
+    # payload drawn before carries it (no template version)
+    "mandate_ended": "reçu après la fin du mandat",
 }
 BANK_RETURN = {
     "allocation_reversal": "Paiement repris par la banque du payeur",

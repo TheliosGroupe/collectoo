@@ -433,14 +433,16 @@ insert into public.client_payout_account (id, organization_id, client_organizati
 values ('90000000-0000-0000-0000-0000000000c7', '00000000-0000-0000-0000-0000000000cc', pg_temp.c('7'), 'EUR',
         'FR7630004000031234567890143', 'CLIENT 7', 'd1000000-0000-0000-0000-0000000000c7',
         '10000000-0000-0000-0000-0000000000c1');
-update public.client_payout_account set status = 'active', confirmed_at = now(), confirmed_via = 'second_admin',
+update public.client_payout_account set status = 'active', confirmed_at = now() - interval '2 hours', confirmed_via = 'second_admin',
   confirmed_by = '10000000-0000-0000-0000-0000000000c2' where id = '90000000-0000-0000-0000-0000000000c7';
 select is(private.remittance_payout_blockers(pg_temp.c('7'), 'EUR', private.paris_today()), '{}'::text[],
   'a confirmed payee: nothing blocks');
 create function pg_temp.blockers_after(p_kind text) returns text[] language plpgsql as $$
 declare v text[];
 begin
-  -- recorded before the payee was confirmed: re-confirming the payee does not lift it either
+  -- recorded after the payee was confirmed (M2c-7d-1, ADR-0014 « M2c-7d-1 », house rule R3: the account confirmed two
+  -- hours ago — a payee of the kind each event requires, confirmed by a second admin after it was recorded, lifts the
+  -- block: 046a p)
   insert into public.client_status_event (organization_id, client_organization_id, kind, effective_date,
                                           evidence_document_id, recorded_by, recorded_at)
   values ('00000000-0000-0000-0000-0000000000cc', pg_temp.c('7'), p_kind, private.paris_today() - 1,

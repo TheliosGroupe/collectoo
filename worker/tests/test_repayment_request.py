@@ -21,7 +21,14 @@ from typing import Any
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from repayment_cases import every_origin_payload, request_payload, reversal, row
+from repayment_cases import (
+    curatelle_payload,
+    every_origin_payload,
+    request_payload,
+    reversal,
+    row,
+    tutelle_payload,
+)
 
 from collectoo_worker.remittance.pdf import RENDERER_VERSION
 from collectoo_worker.remittance.repayment_request import (
@@ -38,6 +45,8 @@ from collectoo_worker.remittance.repayment_request_pdf import pdf_sha256, render
 GOLDEN_RENDERER = "reportlab-4.4.10/dejavu-2.37/d1"
 GOLDEN_REQUEST_PDF = "5caae878afb31020f7380687911fd3cf140184b4623928b27f6ad86609970ec2"
 GOLDEN_EVERY_ORIGIN_PDF = "42574b464724fe1c6065be06df5cc0f826a2b159eac8f95df2b6045ff5ac97f1"
+# M2c-7d-1: the two addressees of a curatelle (the client, a copy to its curator)
+GOLDEN_CURATELLE_PDF = "5f5ca25c3051575e17b91dec818cff43961806dca7c16b63c39ae6c6df41cf74"
 NNBSP = "\u202f"
 NBSP = "\u00a0"
 
@@ -311,3 +320,65 @@ def test_the_pdf_depends_on_the_payload_only() -> None:
     p["rows"][0]["origin"]["reversed_on"] = "2026-11-13"
     assert render_request_pdf(_doc(p)) != a
     assert render_request_pdf(_doc(request_payload(number="DRA-2026-000009"))) != a
+
+
+# -- M2c-7d-1 (plan §6.2.12; [critic] L12, [check 1] gap 7): who receives the letter ---------------
+
+
+def test_after_a_tutelle_the_letter_is_addressed_to_the_tutor_for_the_client() -> None:
+    """C. civ. 473 al. 1 (« le tuteur la représente dans tous les actes de la vie civile »): the
+    tutor is the addressee; the sums were paid to the client, so the letter says so in the third
+    person; nothing else changes."""
+    text = request_text(_doc(tutelle_payload()))
+    lines = text.split("\n")
+    assert lines[4:8] == [
+        "UDAF du Rhône",
+        "Tuteur de Martin SAS",
+        "3 place du Palais, 69002 Lyon",
+        "",
+    ]
+    assert (
+        "La somme ci-dessous a été versée à Martin SAS au-delà de ce qui lui revenait. Elle reste "
+        "à rembourser au cabinet." in lines
+    )
+    assert "vous a été versée" not in text
+    assert "Copie" not in text
+
+
+def test_after_a_curatelle_the_client_receives_it_with_a_copy_to_its_curator() -> None:
+    """C. civ. 440 al. 1 (the curatelle assists, it does not represent); the copy is the
+    servicer's rule by analogy with 467 al. 3, which governs significations (OQ-94): the client
+    is the addressee, the curator's copy printed under its block."""
+    text = request_text(_doc(curatelle_payload()))
+    lines = text.split("\n")
+    assert lines[4:8] == [
+        "Martin SAS",
+        "12 avenue des Tilleuls, 69003 Lyon",
+        "Copie : Association Tutélaire de Lyon, curateur, 3 place du Palais, 69002 Lyon",
+        "",
+    ]
+    assert "La somme ci-dessous vous a été versée au-delà de ce qui vous revenait." in text
+
+
+def test_a_plain_client_s_letter_is_unchanged() -> None:
+    """The golden request (no representative, no copy) keeps its bytes (test_the_golden_hashes)."""
+    v = request_view(_doc(request_payload()))
+    assert v.recipient_lines == ("Martin SAS", "12 avenue des Tilleuls, 69003 Lyon")
+
+
+def test_an_unknown_role_or_a_copy_without_its_address_is_refused() -> None:
+    p = tutelle_payload()
+    p["recipient"] = p["recipient"] | {"role": "cousin"}
+    with pytest.raises(RepaymentRequestPayloadError):
+        request_view(_doc(p))
+    q = curatelle_payload()
+    q["copies"] = [{"role": "curator", "name": "X", "address_lines": []}]
+    with pytest.raises(RepaymentRequestPayloadError):
+        request_view(_doc(q))
+
+
+def test_the_golden_hash_of_a_curatelle_s_letter() -> None:
+    one = render_request_pdf(_doc(curatelle_payload()))
+    assert one == render_request_pdf(_doc(curatelle_payload()))
+    assert pdf_sha256(one) == GOLDEN_CURATELLE_PDF
+    assert pdf_sha256(render_request_pdf(_doc(tutelle_payload()))) != pdf_sha256(one)

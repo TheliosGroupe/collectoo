@@ -103,10 +103,23 @@ const BLOCKER_LABEL: Record<string, string> = {
   payout_account_missing: "Aucun IBAN de reversement confirmé",
   payout_account_unconfirmed: "IBAN de reversement en attente de confirmation",
   payout_account_returned: "Dernier virement revenu : IBAN à remplacer ou reconfirmer",
-  "client_status:liquidation": "Client en liquidation : compte du liquidateur à confirmer",
-  "client_status:death": "Décès du client enregistré",
-  "client_status:guardianship": "Client sous tutelle ou curatelle",
-  "client_status:mandate_ended": "Mandat terminé",
+  // M2c-7d-1 (plan §6.4; [critic] F16, L2, L10, L14): each block with its exit (the payee the events require,
+  // confirmed by a second admin after them; a seizure until its release). Review round 1: an account « ouvert à son
+  // nom » (C. civ. 427 al. 5), who makes it work depending on the measure (TUI-7); an old row to qualify first
+  // (MONEY-LAW-1); a seizure blocks the payouts only in 7d-1, the set-off bar is 7d-2's (MONEY-LAW-3, TUI-1)
+  "client_status:liquidation":
+    "Client en liquidation : compte du liquidateur à confirmer, avec le jugement qui le nomme (second administrateur)",
+  "client_status:death":
+    "Décès du client : confirmez le compte du notaire, ou celui que tous les héritiers désignent, avec la pièce (second administrateur)",
+  "client_status:guardianship":
+    "Client sous tutelle ou curatelle : confirmez un compte ouvert à son nom (art. 427 C. civ.), avec le jugement (second administrateur)",
+  "client_status:curatorship":
+    "Client sous tutelle ou curatelle : confirmez un compte ouvert à son nom (art. 427 C. civ.), avec le jugement (second administrateur)",
+  "client_status:guardianship_to_qualify":
+    "« Tutelle ou curatelle » enregistrée avant leur distinction : précisez-la avec le jugement (« Événements du client ») ; aucun compte ne lève ce blocage avant (règle du cabinet)",
+  "client_status:mandate_ended": "Mandat terminé : confirmez à nouveau le compte du client (second administrateur)",
+  "client_status:seizure":
+    "Saisie entre les mains du cabinet : aucun virement de reversement jusqu'à la mainlevée (les compensations ne sont pas encore bloquées)",
   negative_net: "Net négatif : les annulations dépassent les encaissements",
   servicer_identity_incomplete: "Identité de facturation du cabinet incomplète",
   client_identity_changed: "Le client n'est plus un professionnel établi en France métropolitaine",

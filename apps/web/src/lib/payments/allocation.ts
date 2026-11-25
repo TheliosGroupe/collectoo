@@ -310,7 +310,10 @@ export function paymentActions(d: Pick<PaymentDetail, "payment" | "position" | "
       left > BigInt(0) &&
       p.status === "matched" &&
       (d.file?.holds ?? []).length === 0 && // a held file's payments are refunded, or allocated on authorisation
-      (p.review_reason === "before_servicing_start" || d.file?.status === "closed_recalled"),
+      (p.review_reason === "before_servicing_start" ||
+        // M2c-7d-1 (§6.2.8): received after the end of the client's mandate — forwarded, never allocated
+        p.review_reason === "client_mandate_ended" ||
+        d.file?.status === "closed_recalled"),
     otherFile:
       left > BigInt(0) &&
       d.other_files.length > 0 &&
