@@ -186,7 +186,9 @@ export function advanceOrigin(r: Pick<AdvanceRow, "cause" | "file_ref">): string
 }
 
 /** « Récupération »: the claw-back clause and its reference, a request (no clause, or no single mandate: founder Q2), the
- *  run in flight that takes it back, or (review round 1) no claw-back for one born before the client's proceeding. */
+ *  run in flight that takes it back, or (review round 1) no claw-back for one born before the client's proceeding —
+ *  (M2c-7d-2, plan §6.2.6 [critic] L4) for any while the client's collective proceeding or liquidation stands, whatever
+ *  its birth: neither taken back nor requested, to declare. */
 export function advanceRecovery(r: Pick<AdvanceRow, "recovery" | "clause_ref" | "in_flight_run">): string {
   if (r.in_flight_run) return `Reprise par ${r.in_flight_run.number} en cours`;
   if (r.recovery === "clawback")
@@ -194,7 +196,7 @@ export function advanceRecovery(r: Pick<AdvanceRow, "recovery" | "clause_ref" | 
       ? `Reprise sur les prochains reversements (${r.clause_ref} du mandat)`
       : "Reprise sur les prochains reversements (clause de reprise du mandat)";
   if (r.recovery === "barred_proceeding")
-    return "Pas de reprise : avance née avant l'ouverture de la procédure collective du client";
+    return "Pas de reprise ni de demande : client en procédure collective ; avance à déclarer";
   if (r.recovery === "request_no_mandate") return "Demande de remboursement (avance rattachée à aucun mandat unique)";
   return "Demande de remboursement (pas de clause de reprise)";
 }
@@ -214,6 +216,9 @@ export function advanceStatus(
   r: Pick<AdvanceRow, "reversed" | "open_minor" | "amount_minor" | "recovered" | "currency" | "recovery" | "clause_ref" | "in_flight_run">,
 ): string {
   if (r.reversed) return "Annulée avec ce qu'elle couvrait";
+  // (M2c-7d-2) while the client's proceeding stands: neither taken back nor requested, to declare
+  if (big(r.open_minor) > BigInt(0) && r.recovery === "barred_proceeding" && !r.in_flight_run)
+    return "non reprise sur les reversements du client ni demandée (client en procédure collective : avance à déclarer)";
   if (big(r.open_minor) > BigInt(0)) return advanceRecovery(r);
   const lost = big(r.recovered.write_off);
   if (lost > BigInt(0) && lost === big(r.amount_minor)) return "Soldée (passée en perte)";
@@ -327,7 +332,8 @@ const CLIENT_ORIGIN: Record<AdvanceCause, string> = {
 /** What the client reads: the open total, and per advance its date (review round 2: its birth, the date the barred rule
  *  reads — never its recording, which can fall after the opening of a proceeding it predates), its origin, what is open
  *  and how it is recovered — the claw-back clause of its mandate, or a request (7c sends it: « pourra »); (review round
- *  1, M7B-MONEY-2) for one born before its collective proceeding opened, that it is not deducted (never « reprise »).
+ *  1, M7B-MONEY-2) for one born before its collective proceeding opened, that it is not deducted (never « reprise »);
+ *  (M2c-7d-2, [critic] L4, L19 (c)) for any while that proceeding stands: neither deducted nor requested.
  *  (Review round 2) The total is said « à rembourser » only when no advance it holds predates the client's proceeding (a
  *  claim the client may not pay outside it): otherwise the heading is neutral and each line says its own fact.
  *  (M2c-7c-2) An advance a request not withdrawn names says the request was sent (its number and day). */
@@ -345,7 +351,7 @@ export function clientSpaceAdvances(
       : r.recovery === "clawback"
         ? `reprise sur vos prochains reversements (${r.clause_ref ?? "clause de reprise"} du mandat)`
         : r.recovery === "barred_proceeding"
-          ? "antérieure à l'ouverture de votre procédure collective, elle n'est pas déduite de vos reversements"
+          ? "votre procédure collective étant en cours, elle n'est ni déduite de vos reversements ni réclamée"
           : "une demande de remboursement pourra vous être adressée";
     return `Avance née le ${frenchDay(r.born_on)} (${CLIENT_ORIGIN[r.cause]}) : ${money(r.open_minor, r.currency)} — ${how}.`;
   });

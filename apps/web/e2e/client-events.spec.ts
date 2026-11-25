@@ -278,7 +278,7 @@ test("a death with its notary: the payment after it held and forwarded, the nota
   expect(transfer?.payee_iban).toBe(NOTARY_IBAN);
   expect(runPage).toContain("/backoffice/reversements/");
 
-  // a seizure served on the servicer: listed as standing (no payout until it is released; the set-off bar is 7d-2's),
+  // a seizure served on the servicer: listed as standing (no payout and no set-off until it is released: M2c-7d-2),
   // then released
   await page.goto(clientPage);
   await joinDocument(page, "client_status_evidence", "Acte-de-saisie");
@@ -290,6 +290,8 @@ test("a death with its notary: the payment after it held and forwarded, the nota
   const seizure = events.getByTestId("client-event").filter({ hasText: "Saisie entre les mains du cabinet" });
   await expect(seizure).toContainText("en cours");
   await expect(events.getByTestId("client-payee-rule")).toContainText("Saisie entre les mains du cabinet");
+  // M2c-7d-2 (plan §6.2.6, §6.2.9; [critic] L14): the set-off is barred too, whatever the run's net
+  await expect(page.getByText("ni reversement ni compensation jusqu'à sa mainlevée", { exact: false })).toBeVisible();
   await reviewShot(page, testInfo, "m2c7-saisie");
   await joinDocument(page, "client_status_evidence", "Mainlevee");
   await openForm();

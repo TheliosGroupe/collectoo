@@ -90,7 +90,7 @@ describe("the new alerts (critic L10, L14)", () => {
   // M2c-7a (plan §3.7): « ce recouvrement n'est pas encore géré » goes; M2c-7b (plan §4.3) adds how it is recovered
   it("double_payout_open says the servicer advanced it after a transfer executed outside a run", () => {
     expect(checkLabel("double_payout_open").help).toBe(
-      "Avance du cabinet après un virement exécuté hors reversement. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
+      "Avance du cabinet après un virement exécuté hors reversement. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, fin du mandat ou saisie en cours), elle reste à récupérer (page « Avances ») ; client en procédure collective ou en liquidation : ni reprise ni demande, elle est à déclarer (règle du cabinet). Un administrateur peut la passer en perte.",
     );
   });
   it("every new check has a label of its own", () => {

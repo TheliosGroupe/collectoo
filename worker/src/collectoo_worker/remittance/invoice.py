@@ -210,6 +210,19 @@ def vat_by_rate(p: Mapping[str, Any], credit: bool) -> list[tuple[str, int, int]
 
 
 def _payment_line(doc: InvoiceDocument) -> str:
+    """The invoice's payment line. (M2c-7d-2, plan §6.4 [critic] L1) A run's invoice its plan could
+    not set off (the client's procedure, liquidation or a seizure, by the servicer's rule) carries
+    `payment_note`: its text alone (`pay` false: a claim the client may not pay outside its
+    procedure), or its text then the ordinary line (`pay` true). A payload without it renders as
+    before, to the byte."""
+    note = doc.payload.get("payment_note")
+    if isinstance(note, Mapping) and note.get("text"):
+        text = str(note["text"])
+        return f"{text} {_plain_payment_line(doc)}" if note.get("pay") else text
+    return _plain_payment_line(doc)
+
+
+def _plain_payment_line(doc: InvoiceDocument) -> str:
     p = doc.payload
     settlement = p.get("settlement") or {}
     clause = settlement.get("clause_ref")

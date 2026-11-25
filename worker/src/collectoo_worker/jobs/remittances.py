@@ -4,7 +4,8 @@
   from 05:00, a draft for each (client, currency) with collections waiting and no pending run when
   (a) one of the client's mandates schedules a run today (the 1st and 16th, or its weekday, moved to
   the next business day), (b) the deadline guard is due (the earliest latest execution date of its
-  positive items 5 business days away or less), or (c) a payout came back — `remittance.schedule`
+  positive items 5 business days away or less), (c) a payout came back or (d) (M2c-7d-2) a set-off
+  was withheld at a payout's debit (any day, at the next hour) — `remittance.schedule`
   decides, `private.create_remittance_run` reserves the items under the allocation lock (key
   `sched:<client>:<currency>:<date>`). It also sends back to draft an approval stuck for more than
   10 minutes and queues again a stuck prepare.
@@ -65,6 +66,7 @@ from collectoo_worker.remittance.run import (
     OpenAdvanceRow,
     OpenInvoiceRow,
     PendingLine,
+    SetOffBar,
     Terms,
     UnplannedPaid,
     prepare_run,
@@ -198,10 +200,12 @@ def run_schedule(conn: Conn, payload: dict[str, Any], now: datetime | None = Non
         _schedule_failed(conn, org, None, "candidates", f"{exc.sqlstate}: {exc}")
         return []
     created = []
-    for client, currency, terms_docs, payout_returned, latest in rows:
+    for client, currency, terms_docs, payout_returned, latest, settlement_withheld in rows:
         key = f"sched:{client}:{currency}:{today.isoformat()}"
         try:
-            trigger = _schedule_trigger(terms_docs, payout_returned, latest, today, business, cal)
+            trigger = _schedule_trigger(
+                terms_docs, payout_returned, settlement_withheld, latest, today, business, cal
+            )
             if trigger is None:
                 continue
             with conn.transaction():
@@ -229,16 +233,21 @@ def run_schedule(conn: Conn, payload: dict[str, Any], now: datetime | None = Non
 def _schedule_trigger(  # noqa: PLR0913, PLR0917 - one candidate row, the day, the calendar
     terms_docs: list[dict[str, Any]] | None,
     payout_returned: bool,
+    settlement_withheld: bool,
     latest: list[date] | None,
     today: date,
     business: bool,
     cal: Calendar,
 ) -> str | None:
-    """Why a client's draft is due today, if it is (§9.3: a payout come back, a scheduled day of
-    one of its mandates, the deadline guard)."""
+    """Why a client's draft is due today, if it is (§9.3: a payout come back, (M2c-7d-2, plan
+    §6.2.11 (a) 8b) a set-off withheld at a payout's debit — on any day, the money held to the
+    R124-6 date of the run it was withheld from —, a scheduled day of one of its mandates, the
+    deadline guard)."""
     terms = [RemittanceTerms.model_validate(t) for t in terms_docs or ()]
     if payout_returned:
         return "payout_returned"
+    if settlement_withheld:
+        return "settlement_withheld"
     if business and any(is_scheduled(t, today, cal) for t in terms):
         return "schedule"
     if guard_due(today, latest or (), cal):
@@ -436,7 +445,11 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
             return reasons.get(original)
         return None
 
-    held = _held_to(conn, run) if any(r[1] == "payout_returned" for r in raw) else {}
+    held = (
+        _held_to(conn, run)
+        if any(r[1] in ("payout_returned", "settlement_withheld") for r in raw)
+        else {}
+    )
     items = [
         Item(
             entry_id=str(r[0]),
@@ -614,13 +627,38 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         invoices[str(inv)] = EarlierInvoice(str(inv), int(ht), Decimal(rate), int(credited))
         numbers[str(inv)] = (num, issued)
     line_invoices = _line_invoices(conn, items, pending_lines)
+    # (M2c-7d-2, plan §6.2.2, §6.2.6, §6.4) the client's opening (a proceeding_opened or a
+    # liquidation in effect: client_opening_date — no longer the redressement alone) and the bars of
+    # the day per kind, read once by the client's key (private.prepare_set_off_facts)
+    bars_row = conn.execute(
+        """select opening_on, set_off_barred, invoice_bar, invoice_since, advance_bar, advance_since
+           from private.prepare_set_off_facts(%s, %s)""",
+        (client, today),
+    ).fetchone()
+    if bars_row is None:  # pragma: no cover (one row)
+        raise ValueError("no row")
+    opening = bars_row[0]
+    set_off_bars = {
+        kind: SetOffBar(code, since)
+        for kind, code, since in (
+            ("invoice", bars_row[2], bars_row[3]),
+            ("advance", bars_row[4], bars_row[5]),
+        )
+        if code is not None
+    }
+    # each open invoice's birth (private.document_born_on: the earliest collection it charges), read
+    # only when the client has an opening — the one date it is compared with
     open_docs = [
-        OpenInvoiceRow(str(i), str(m), kind, num, issued, (int(y), int(s)), int(o), int(v))
-        for i, m, kind, num, issued, y, s, o, v in conn.execute(
+        OpenInvoiceRow(
+            str(i), str(m), kind, num, issued, (int(y), int(s)), int(o), int(v), born_on=born
+        )
+        for i, m, kind, num, issued, y, s, o, v, born in conn.execute(
             """select i.id, i.mandate_id, i.kind, i.number, i.issue_date, i.year, i.seq,
-                      private.document_open(i.id), private.document_pending_vat(i.id)
+                      private.document_open(i.id), private.document_pending_vat(i.id),
+                      case when %s::date is not null and i.kind = 'invoice'
+                           then private.document_born_on(i.id) end
                from public.commission_invoice i where i.client_organization_id = %s""",
-            (client,),
+            (opening, client),
         ).fetchall()
         if int(o) > 0 or int(v) > 0
     ]
@@ -629,11 +667,8 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
                   private.remittance_commission_blockers(%s),
                   (select pa.id from public.client_payout_account pa
                    where pa.client_organization_id = %s and pa.currency = %s
-                     and pa.status = 'active'),
-                  (select min(e.effective_date) from public.client_status_event e
-                   where e.client_organization_id = %s and e.kind = 'proceeding_opened'
-                     and e.effective_date <= %s)""",
-        (client, currency, today, client, client, currency, client, today),
+                     and pa.status = 'active')""",
+        (client, currency, today, client, client, currency),
     ).fetchone()
     if blockers_row is None or seq_row is None:  # pragma: no cover (aggregates: one row)
         raise ValueError("no row")
@@ -663,80 +698,22 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         payout_blockers=list(blockers_row[0] or ()),
         commission_blockers=list(blockers_row[1] or ()),
         payout_account_id=_uuid(blockers_row[2]),
-        proceeding_opened_on=blockers_row[3],
+        proceeding_opened_on=opening,
         open_advances=advances,
         unplanned_paid=unplanned_paid,
+        set_off_bars=set_off_bars,
+        set_off_state=bars_row[1],
     )
 
 
 # The query of _held_to (review M2c-6b-2b TESTS-4: a module constant, so the integration test
-# checks it returns at most one row per item, the dict below keeping the last of several).
-HELD_TO_SQL = """select q.ledger_entry_id, rl.encaissement_date, coalesce(t.id, ti.id),
-           coalesce(t.days, ti.days, 30)
-    from private.remittance_pending q
-    cross join lateral (select le.reverses_entry_id from public.ledger_entry le
-                        where le.id = q.ledger_entry_id offset 0) e
-    cross join lateral (select re.source_id from public.ledger_entry re
-                        where re.id = e.reverses_entry_id and re.entry_type = 'remittance'
-                          and re.source_type = 'bank_transfer' offset 0) re
-    cross join lateral (select bt.run_id from public.bank_transfer bt
-                        where bt.id = case when pg_input_is_valid(re.source_id, 'uuid')
-                                           then re.source_id::uuid end
-                          and (bt.entry_id = e.reverses_entry_id
-                               or exists (select 1 from public.bank_line_booking k
-                                          where k.entry_id = e.reverses_entry_id
-                                            and k.kind = 'payout' and k.transfer_id = bt.id))
-                        offset 0) bt
-    cross join lateral (select l.encaissement_date, l.mandate_id, l.mandate_terms_id
-                        from public.remittance_line l
-                        where l.run_id = bt.run_id and l.amount_minor > 0
-                          and not l.released and l.latest_execution_date is not null
-                          and l.encaissement_date is not null
-                        order by l.latest_execution_date, l.line_no limit 1) rl
-    left join lateral (select mt.id, mt.remittance_max_days as days
-                       from public.mandate_terms mt
-                       where mt.mandate_id = rl.mandate_id
-                         and mt.valid_from <= rl.encaissement_date
-                         and (mt.valid_to is null or rl.encaissement_date < mt.valid_to)
-                       limit 1) t on true
-    left join lateral (select mt.id, mt.remittance_max_days as days
-                       from public.mandate_terms mt
-                       where rl.mandate_id is null and mt.id = rl.mandate_terms_id
-                       offset 0) ti on true
-    where q.draft_run_id = %s and q.kind = 'payout_returned' and q.amount_minor > 0
-    union all
-    select q.ledger_entry_id, rl.encaissement_date, coalesce(t.id, ti.id),
-           coalesce(t.days, ti.days, 30)
-    from private.remittance_pending q
-    cross join lateral (select le.reverses_entry_id from public.ledger_entry le
-                        where le.id = q.ledger_entry_id offset 0) e
-    cross join lateral (select re.id from public.ledger_entry re
-                        where re.id = e.reverses_entry_id and re.entry_type = 'remittance'
-                        offset 0) re
-    cross join lateral (
-      select l.encaissement_date, l.mandate_id, l.mandate_terms_id
-      from (select u.ledger_entry_id from private.unplanned_paid_item u
-            where u.booking_entry_id = re.id offset 0) u
-      cross join lateral (select x.encaissement_date, x.mandate_id, x.mandate_terms_id,
-                                 x.latest_execution_date, x.run_id, x.line_no,
-                                 x.amount_minor
-                          from public.remittance_line x
-                          where x.ledger_entry_id = u.ledger_entry_id and not x.released
-                          offset 0) l
-      where l.amount_minor > 0 and l.latest_execution_date is not null
-        and l.encaissement_date is not null
-      order by l.latest_execution_date, l.run_id, l.line_no limit 1) rl
-    left join lateral (select mt.id, mt.remittance_max_days as days
-                       from public.mandate_terms mt
-                       where mt.mandate_id = rl.mandate_id
-                         and mt.valid_from <= rl.encaissement_date
-                         and (mt.valid_to is null or rl.encaissement_date < mt.valid_to)
-                       limit 1) t on true
-    left join lateral (select mt.id, mt.remittance_max_days as days
-                       from public.mandate_terms mt
-                       where rl.mandate_id is null and mt.id = rl.mandate_terms_id
-                       offset 0) ti on true
-    where q.draft_run_id = %s and q.kind = 'payout_returned' and q.amount_minor > 0"""
+# checks it returns at most one row per item, the dict below keeping the last of several). Its one
+# parameter is the run. (Review M2c-7d-2 round 1, CC-5) its body — 6b-2b's two branches and 7d-2's
+# third, the withheld settlements' — is private.draft_held_items, whose seq scans are off: this
+# session's own statement, generic under the statistics the scale files leave, read the whole queue
+# three times and the withheld run's lines whole (test_set_off_bar_reads_integration).
+HELD_TO_SQL = """select h.ledger_entry_id, h.encaissement_date, h.terms_id, h.days
+    from private.draft_held_items(%s::uuid) h"""
 
 
 def _held_to(conn: Conn, run: str) -> dict[str, tuple[date, str | None, int]]:
@@ -755,8 +732,12 @@ def _held_to(conn: Conn, run: str) -> dict[str, tuple[date, str | None, int]]:
     froze the items its P paid, to the earliest latest execution date of those items' live lines
     (the reversed remittance → private.unplanned_paid_item → each item's live line, by key); while
     those items
-    are still pending it has no line (left out, as an advance's)."""
-    rows = conn.execute(HELD_TO_SQL, (run, run)).fetchall()
+    are still pending it has no line (left out, as an advance's).
+
+    M2c-7d-2 (plan §6.2.11 (a) 7, 8): a withheld settlement is held the same way to the run it was
+    withheld from — the reversal → the reversed barred settlement (its source the run) → that run's
+    positive, live, dated line with the earliest latest execution date."""
+    rows = conn.execute(HELD_TO_SQL, (run,)).fetchall()
     return {str(r[0]): (r[1], _uuid(r[2]), int(r[3])) for r in rows}
 
 

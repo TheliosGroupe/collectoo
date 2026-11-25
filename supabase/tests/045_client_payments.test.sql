@@ -27,7 +27,8 @@
 --         procedure as a proceeding_opened does (L641-3 al. 1): its pre-judgment invoice and advance skipped by the
 --         default order, held for the procedure when designated (own and dedicated account), marked on the page;
 --         (review round 3) its pre-judgment advance without a claw-back clause never said to be repaid
---         (barred_proceeding on every page and the nightly), a claw-back clause still 7b's rule until 7d-2; a credit
+--         (barred_proceeding on every page and the nightly) — (M2c-7d-2) a claw-back clause no longer takes it either
+--         (advance_recovery_of reads client_opening_date: barred_proceeding whatever the clause); a credit
 --         dated by the money's receipt (its entry's value or booking date), its recording day apart;
 --   k([check 1] gap 8) at most one client_credit per cause of a payment: two causes on one entry, a replay creates
 --         none, a second row of a cause refused;
@@ -2528,14 +2529,19 @@ begin
     'credits', pg_temp.ccs('a5'), 'open', jsonb_build_array(private.document_open(v_r1), private.advance_open(v_a)),
     'r1_settlements', pg_temp.sets(v_r1), 'today', pg_temp.cchecks(), 'dirty', pg_temp.dirty());
 end $$;
+-- (M2c-7d-2, house rule R3, ADR-0014 « M2c-7d-2 ») plan §6.2.4–§6.2.5, default OQ-92: an invoice is born at the
+-- earliest collection it charges, never at its issue — FC-R2, issued on d for a collection of d − 3, is a claim born
+-- before the judgment of d − 1: skipped and held for the procedure like FC-R1 (in 7c-1 it was paid, 18 000, and the
+-- procedure's credit 56 000)
 select is(pg_temp.iso('sl6'),
-  '{"page": [true, [["r1", true, false], ["r2", false, true]], [[true, false]]],
-    "before": [true, false, true, false, false], "settled": [["r2", "18000"]],
-    "credits": [["procedure", 56000, 56000]], "open": [36000, 20000], "r1_settlements": [],
-    "today": [["client_credit_owed", "alert", 56000, "procedure", true]], "dirty": []}'::jsonb,
+  '{"page": [true, [["r1", true, false], ["r2", true, false]], [[true, false]]],
+    "before": [true, false, true, true, false], "settled": null,
+    "credits": [["procedure", 74000, 74000]], "open": [36000, 20000], "r1_settlements": [],
+    "today": [["client_credit_owed", "alert", 74000, "procedure", true]], "dirty": []}'::jsonb,
   'l: a client whose liquidation is recorded alone, no designation — the claims born before the judgment (an invoice, '
-  'an advance) are skipped (L641-3 al. 1, L622-7 I al. 1), the one born after paid, the rest held for the procedure; '
-  'the page marks them « antérieure à l''ouverture »');
+  'an advance) are skipped (L641-3 al. 1, L622-7 I al. 1) — (M2c-7d-2, R3) FC-R2 too, born before the judgment by its '
+  'collection (document_born_on), so nothing is settled — and held for the procedure; the page marks them '
+  '« antérieure à l''ouverture »');
 create or replace function pg_temp.sl7() returns jsonb language plpgsql as $$
 declare m jsonb := pg_temp.roux(); v_r1 uuid := (m ->> 'r1')::uuid; v_a uuid := (m ->> 'a')::uuid; r jsonb;
         r2 jsonb; v_l uuid;
@@ -2594,8 +2600,9 @@ select is(pg_temp.iso('sl8'),
 -- claw-back clause: no run takes it, and the client may not pay it (L641-3 al. 1 → L622-7 I al. 1; the creditor
 -- declares it to the liquidator) — so no page says a request is due: barred_proceeding on the client space, the staff
 -- « Avances », « Ce que le client doit au cabinet », the run page, « Désimputer » and the nightly, before and after the
--- client pays it (held for the procedure). Born on the judgment's day, or read the day before it, it is a request. A
--- claw-back clause keeps 7b's rule (the prepare's, proceeding_opened only) until 7d-2: the runs still take it.
+-- client pays it (held for the procedure). Born on the judgment's day, or read the day before it, it is a request.
+-- (M2c-7d-2) A claw-back clause no longer takes it: the prepare and advance_recovery_of read client_opening_date (a
+-- liquidation recorded alone opens the procedure) and client_set_off_barred (nothing set off in liquidation, Q11).
 create or replace function pg_temp.sl9() returns jsonb language plpgsql as $$
 declare m jsonb; v_a uuid; d date := private.paris_today();
         c5 uuid := pg_temp.c('a5'); v_m uuid := pg_temp.mandate('a5'); v_run uuid; v_chk uuid; w jsonb; r jsonb;
@@ -2650,23 +2657,28 @@ begin
     'credits_space', (select jsonb_agg(jsonb_build_array(x ->> 'cause', x ->> 'open_minor'))
                       from jsonb_array_elements(pg_temp.read_as('01', format('select public.client_space_credits(%L)',
                                                                              c5)) -> 'rows') x));
-  -- a claw-back clause in Roux's terms: 7b's rule until 7d-2 (the prepare reads proceeding_opened only)
+  -- a claw-back clause in Roux's terms: (M2c-7d-2) the liquidation recorded alone bars it too (carried from 7c-1)
   perform pg_temp.clawback('a5', 'art. 7.4');
   return w || jsonb_build_object('clawback', jsonb_build_array(
     (select jsonb_agg(jsonb_build_array(x ->> 'recovery', x ->> 'clause_ref'))
      from jsonb_array_elements(pg_temp.read_as('01', format('select public.client_space_advances(%L)', c5)) -> 'rows') x),
     (select q.recovery from private.advance_recovery_of(v_m, c5, d - 2, d) q)));
 end $$;
+-- (M2c-7d-2, house rule R3, ADR-0014 « M2c-7d-2 ») carried from 7c-1 rounds 2–3 and plan §6.2.6 (founder Q11, Q18
+-- defaults): a liquidation recorded alone stands as a proceeding — no advance is taken back or requested, whatever its
+-- birth or mandate (« of » was request / request_no_mandate for the ones born on or after the judgment, « Désimputer »
+-- request for one), and the claw-back clause no longer applies (« clawback » was 7b's rule, read on proceeding_opened
+-- alone)
 select is(pg_temp.iso('sl9'),
   '{"space": [["barred_proceeding", null, "20000", -2]], "staff": [["barred_proceeding", null]],
     "page": [["barred_proceeding", true, false]], "run_page": [["barred_proceeding", null]],
-    "desimputer": [[["barred_proceeding", -2]], [["request", -1]]], "nightly": [[20000, "barred_proceeding"]],
-    "of": ["barred_proceeding", "request", "barred_proceeding", "request_no_mandate", "request"],
+    "desimputer": [[["barred_proceeding", -2]], [["barred_proceeding", -1]]], "nightly": [[20000, "barred_proceeding"]],
+    "of": ["barred_proceeding", "barred_proceeding", "barred_proceeding", "barred_proceeding", "request"],
     "paid": [[], "20000", 20000], "space_after": [["barred_proceeding", "20000"]],
-    "credits_space": [["procedure", "20000"]], "clawback": [[["clawback", "art. 7.4"]], "clawback"]}'::jsonb,
+    "credits_space": [["procedure", "20000"]], "clawback": [[["barred_proceeding", null]], "barred_proceeding"]}'::jsonb,
   'l: a liquidation recorded alone — a pre-judgment advance without a claw-back clause is never said to be repaid '
   '(barred_proceeding on the client space, « Avances », the client''s page, the run page, « Désimputer », the nightly), '
-  'paid or not; born on the judgment''s day it is a request; a claw-back clause keeps 7b''s rule until 7d-2');
+  'paid or not; (M2c-7d-2, R3) nor one born on or after the judgment, nor under a claw-back clause (L4, Q11)');
 -- (review round 3) a credit's date is the day the money was received — the payment's own entry (its value date on the
 -- own account, the line's booking date on the dedicated one), never its recording: Lilas, in redressement since d − 3,
 -- pays 50,00 € value-dated d − 2 and 70,00 € on the dedicated account booked d − 1, both recorded today; Moreau, with

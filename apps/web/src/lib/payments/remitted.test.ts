@@ -52,15 +52,17 @@ describe("M2c-7a checks (plan §3.7)", () => {
     });
     expect(CHECK_LABEL.advance_open).toEqual({
       label: "Avance du cabinet non récupérée depuis plus de 30 jours",
-      help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
+      help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, fin du mandat ou saisie en cours), elle reste à récupérer (page « Avances ») ; client en procédure collective ou en liquidation : ni reprise ni demande, elle est à déclarer (règle du cabinet). Un administrateur peut la passer en perte.",
     });
   });
+  // (M2c-7d-2, R3) how an advance is recovered once the client's status is read: in a proceeding or a liquidation
+  // never (to declare), after a mandate end or under a seizure by a request
   it("rewords the overrun and double payout helps (no « pas encore géré »)", () => {
     expect(checkLabel("payout_overrun").help).toBe(
-      "Un reversement débité dépassait ce qui restait dû au client : le cabinet lui a avancé la différence. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
+      "Un reversement débité dépassait ce qui restait dû au client : le cabinet lui a avancé la différence. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, fin du mandat ou saisie en cours), elle reste à récupérer (page « Avances ») ; client en procédure collective ou en liquidation : ni reprise ni demande, elle est à déclarer (règle du cabinet). Un administrateur peut la passer en perte.",
     );
     expect(checkLabel("double_payout_open").help).toBe(
-      "Avance du cabinet après un virement exécuté hors reversement. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
+      "Avance du cabinet après un virement exécuté hors reversement. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, fin du mandat ou saisie en cours), elle reste à récupérer (page « Avances ») ; client en procédure collective ou en liquidation : ni reprise ni demande, elle est à déclarer (règle du cabinet). Un administrateur peut la passer en perte.",
     );
     for (const code of ["payout_overrun", "double_payout_open", "advance_open"])
       expect(checkLabel(code).help).not.toContain("pas encore géré");

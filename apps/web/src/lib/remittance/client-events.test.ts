@@ -142,15 +142,17 @@ describe("the payee after each event (runs' blockers, with their exit)", () => {
     expect(blockerLabel("client_status:mandate_ended")).toBe(
       "Mandat terminé : confirmez à nouveau le compte du client (second administrateur)",
     );
-    // (review round 1, MONEY-LAW-3, TUI-1) what 7d-1 does: the payouts only (the set-off bar is 7d-2's)
+    // (review round 1, MONEY-LAW-3, TUI-1) what 7d-1 did: the payouts only — (M2c-7d-2, R3) the set-off barred too,
+    // whatever the run's net (plan §6.2.9 [critic] L14; the label of §6.4)
     expect(blockerLabel("client_status:seizure")).toBe(
-      "Saisie entre les mains du cabinet : aucun virement de reversement jusqu'à la mainlevée (les compensations ne sont pas encore bloquées)",
+      "Saisie entre les mains du cabinet : ni reversement ni compensation jusqu'à la mainlevée",
     );
     expect(blockerLabel("client_status:liquidation")).toBe(
       "Client en liquidation : compte du liquidateur à confirmer, avec le jugement qui le nomme (second administrateur)",
     );
+    // (M2c-7d-2, R3) as above: the approval's refusal of a run under a seizure, whatever N
     expect(failureLabel("payout_blocked:client_status:seizure")).toBe(
-      "virement bloqué — Saisie entre les mains du cabinet : aucun virement de reversement jusqu'à la mainlevée (les compensations ne sont pas encore bloquées)",
+      "virement bloqué — Saisie entre les mains du cabinet : ni reversement ni compensation jusqu'à la mainlevée",
     );
   });
   it("states the payee the events require", () => {
@@ -328,14 +330,15 @@ describe("the nightly's new checks and the repayment request's recipient", () =>
       "Indiquez d'abord qui agit pour le client (notaire ou héritiers, tuteur, curateur ou liquidateur ; une « Tutelle ou curatelle » enregistrée avant leur distinction se précise d'abord) : la lettre lui est adressée, ou en copie au curateur.",
     );
   });
-  it("say what a seizure blocks in 7d-1, and what ops do meanwhile (review round 1, MONEY-LAW-3, TUI-1)", () => {
+  // (M2c-7d-2, R3) what a seizure blocks once 7d-2 bars the set-off whatever N (plan §6.2.6, §6.2.9): the payouts and
+  // the set-off, an N = 0 run refused, a set-off approved before withheld at the debit — no longer « ne bloque pas
+  // encore » (7d-1's text, review round 1, MONEY-LAW-3, TUI-1)
+  it("say what a seizure blocks, payouts and set-off alike", () => {
     const help = CHECK_LABEL.seizure_standing.help;
-    expect(help).toContain("aucun virement de reversement tant que la mainlevée n'est pas enregistrée");
-    expect(help).toContain(
-      "Collectoo ne bloque pas encore les compensations : un reversement sans virement (entièrement compensé) serait validé avec ses compensations ; ne le validez pas tant que la saisie court",
-    );
+    expect(help).toContain("ni virement de reversement ni compensation tant que la mainlevée n'est pas enregistrée");
+    expect(help).toContain("un reversement, même entièrement compensé, est refusé à la validation");
+    expect(help).not.toContain("ne bloque pas encore");
     expect(help).toContain("« La compensation ne préjudicie pas aux droits acquis par des tiers » (art. 1347-7 C. civ.)");
-    expect(help).not.toMatch(/ni reversement ni compensation/);
     expect(CHECK_LABEL.protection_event_to_qualify.help).toContain("les reversements du client restent bloqués");
   });
 });

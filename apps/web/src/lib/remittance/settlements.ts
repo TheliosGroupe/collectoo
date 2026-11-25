@@ -358,19 +358,39 @@ export function resultEffect(r: PaymentResult, docs: OpenDocuments): string {
   );
 }
 
+/**
+ * « Ce que le client doit au cabinet »'s note on an advance the client may not pay (M2c-7d-2, [check 1] gap 11): born
+ * before its proceeding opened (7c-1), or — whatever its birth — while that proceeding stands (plan §6.2.6 [critic] L4;
+ * private.document_client_payable): what the client sends for it is held for the procedure. Null when it may pay it.
+ */
+export function owesAdvanceNote(a: { before_opening: boolean; payable: boolean }): string | null {
+  if (a.before_opening) return "Créance antérieure à l'ouverture de la procédure du client";
+  if (!a.payable) return "Client en procédure collective : avance ni reprise ni demandée, à déclarer";
+  return null;
+}
+
+/** Why an advance passed as a loss may not be repaid outside the procedure (M2c-7d-2: its birth, or the proceeding). */
+function writtenOffBar(w: WrittenOffAdvance, short = false): string {
+  if (w.before_opening)
+    return short
+      ? "créance antérieure à l'ouverture de la procédure"
+      : "créance antérieure à l'ouverture de la procédure du client";
+  return "client en procédure collective (avance à déclarer)";
+}
+
 /** « Ce que le client doit au cabinet »'s row of an advance passed as a loss (review round 1, MONEY-1). */
 export function writtenOffLine(w: WrittenOffAdvance, currency: string): string {
   const head = `Avance du ${frenchDay(w.born_on)} passée en perte le ${frenchDay(w.written_off_on)}`;
   return w.payable
     ? `${head} : ${money(w.available_minor, currency)} que le client peut encore rembourser (enregistré en recette, compte proposé 7714, OQ-88)`
-    : `${head} (reste ${money(w.available_minor, currency)}) : créance antérieure à l'ouverture de la procédure du client ; une somme reçue pour elle n'est pas encaissée en recette, elle est mise de côté pour la procédure (avis de l'avocat, OQ-98)`;
+    : `${head} (reste ${money(w.available_minor, currency)}) : ${writtenOffBar(w)} ; une somme reçue pour elle n'est pas encaissée en recette, elle est mise de côté pour la procédure (avis de l'avocat, OQ-98)`;
 }
 
 /** The sheet's choice of an advance passed as a loss the client repays (review round 1, MONEY-1). */
 export function writtenOffChoice(w: WrittenOffAdvance, currency: string): string {
   return w.payable
     ? `Avance passée en perte le ${frenchDay(w.written_off_on)} (${money(w.available_minor, currency)} à recouvrer)`
-    : `Avance passée en perte le ${frenchDay(w.written_off_on)} (${money(w.available_minor, currency)} ; créance antérieure à l'ouverture de la procédure : mise de côté pour la procédure)`;
+    : `Avance passée en perte le ${frenchDay(w.written_off_on)} (${money(w.available_minor, currency)} ; ${writtenOffBar(w, true)} : mise de côté pour la procédure)`;
 }
 
 /** (M2c-7c-2 review round 1, MONEY-2) What the dedicated line's sheet says when its label designates nothing. */

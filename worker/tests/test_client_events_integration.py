@@ -102,9 +102,13 @@ def test_a_death_then_the_notary_s_account_confirmed_and_the_run_approved() -> N
     death = _event(tenant, "death", recent_business_day() - timedelta(days=1), NOTARY)
     assert death["client_status_event_id"]
     drain()
+    # (M2c-7d-2, house rule R3, ADR-0014 « M2c-7d-2 ») the plan set off the run's own invoice
+    # under the netting clause; after the death nothing is set off (founder Q9 a): the plan no
+    # longer holds, so the approval sends it back client_status_changed (was
+    # payout_blocked:client_status:death, the blocker it shows once prepared again, below)
     assert (run_row(run)["status"], run_row(run)["last_failure"]["code"]) == (
         "draft",
-        "payout_blocked:client_status:death",
+        "client_status_changed",
     )
     # prepared again: blocked, « Valider » refuses it up front
     staff(

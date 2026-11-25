@@ -23,6 +23,7 @@ from collectoo_worker.remittance.run import (
     OpenAdvanceRow,
     OpenInvoiceRow,
     PendingLine,
+    SetOffBar,
     Terms,
     UnplannedPaid,
     percent,
@@ -525,11 +526,20 @@ def test_an_advance_of_no_mandate_is_paid_gross_and_never_taken() -> None:
 
 def test_an_advance_born_before_the_client_s_proceeding_is_not_set_off() -> None:
     """L622-7 I (the plan's nettable rule): an advance born before the opening is not taken; one
-    born on or after it is (7d changes the rule)."""
+    born on or after it passes the birth test. (M2c-7d-2, house rule R3: was N 282 000 / 82 000)
+    The run's own invoice, born at E10 (10/11) before either opening, is no longer set off
+    ([critic] L1: taken 0, the credit note still paid); and while the proceeding stands the job's
+    facts carry the advances' bar ([critic] L4), so none is taken whatever its birth."""
     before = prepare_run(_rv3(proceeding_opened_on=date(2026, 11, 13)))
-    assert (before.header["net"], before.header["advances"]) == ("282000", "0")
+    h = before.header
+    assert (h["net"], h["taken"], h["advances"]) == ("336000", "0", "0")
     same_day = prepare_run(_rv3(proceeding_opened_on=date(2026, 11, 12)))
-    assert (same_day.header["net"], same_day.header["advances"]) == ("82000", "200000")
+    h = same_day.header
+    assert (h["net"], h["taken"], h["advances"]) == ("136000", "0", "200000")
+    bar = {"advance": SetOffBar("proceeding", date(2026, 11, 12))}
+    barred = prepare_run(_rv3(proceeding_opened_on=date(2026, 11, 12), set_off_bars=bar))
+    h = barred.header
+    assert (h["net"], h["taken"], h["advances"]) == ("336000", "0", "0")
 
 
 def test_advances_are_taken_oldest_first_within_their_mandate_s_room() -> None:

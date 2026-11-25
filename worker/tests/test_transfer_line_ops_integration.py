@@ -269,7 +269,7 @@ def test_a_payout_returned_then_executed_again_then_returned_again(  # noqa: PLR
     rerun = request_run(tenant)
     with psycopg.connect(DB) as conn:
         held = _held_to(conn, rerun)
-        rows = [str(r[0]) for r in conn.execute(HELD_TO_SQL, (rerun, rerun)).fetchall()]
+        rows = [str(r[0]) for r in conn.execute(HELD_TO_SQL, (rerun,)).fetchall()]
     assert held[item][0] == frozen[0]
     # review TESTS-4: one row per item (a planned branch not keyed on the transfer's own remittance
     # would also give the re-owed item x's run's line, which the dict hides)
@@ -569,7 +569,7 @@ def test_a_returned_second_debit_s_item_has_no_deadline_in_the_worker_nor_the_sq
             ).fetchall()
         ]
         held = _held_to(conn, draft)
-        rows = [str(r[0]) for r in conn.execute(HELD_TO_SQL, (draft, draft)).fetchall()]
+        rows = [str(r[0]) for r in conn.execute(HELD_TO_SQL, (draft,)).fetchall()]
         sql = {
             str(r[0]): r[1]
             for r in conn.execute(

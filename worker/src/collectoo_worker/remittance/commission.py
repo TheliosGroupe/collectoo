@@ -152,6 +152,9 @@ class LineKind(StrEnum):
     CLIENT_ADVANCE_REVERSAL = "client_advance_reversal"  # an advance undone with its cause (M2c-7)
     PAYOUT_RETURNED = "payout_returned"
     UNPLANNED_PAYOUT = "unplanned_payout"
+    # M2c-7d-2 (plan §6.2.11 (a) 8): a set-off the debit withheld (the reversal of its barred
+    # settlement), given back
+    SETTLEMENT_WITHHELD = "settlement_withheld"
 
 
 # the reasons a schedule may list in `basis.forwards`; any other forward never earns commission
@@ -162,6 +165,7 @@ NEVER_COMMISSIONED = frozenset(
         LineKind.CLIENT_ADVANCE_REVERSAL,
         LineKind.PAYOUT_RETURNED,
         LineKind.UNPLANNED_PAYOUT,
+        LineKind.SETTLEMENT_WITHHELD,
     }
 )
 REVERSALS = frozenset({LineKind.ALLOCATION_REVERSAL, LineKind.FORWARD_REVERSAL})

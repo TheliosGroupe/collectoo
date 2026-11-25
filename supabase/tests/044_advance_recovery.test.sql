@@ -2204,14 +2204,18 @@ begin
     'nightly', (select jsonb_agg(jsonb_build_array(x.amount_minor, x.details ->> 'recovery') order by x.amount_minor)
                 from public.payment_check_result x where x.run_id = v_chk and x.code = 'advance_open'));
 end $$;
+-- (M2c-7d-2, house rule R3, ADR-0014 « M2c-7d-2 ») plan §6.2.6 [critic] L4, founder Q18's default: while the
+-- proceeding stands no advance is taken back or requested, whatever its birth — the one born since the opening no
+-- longer keeps the clause (it was « clawback », « art. 7.4 » in 7b, whose rule read the birth alone)
 select is(pg_temp.iso('sm'),
-  '{"desimputer": [["barred_proceeding", null], ["clawback", "art. 7.4"]], "born": [true, true],
-    "rows": [["100000", "barred_proceeding", null], ["30000", "clawback", "art. 7.4"]],
-    "space": [["100000", "barred_proceeding", null], ["30000", "clawback", "art. 7.4"]],
-    "run_pages": [[["barred_proceeding", null]], [["clawback", "art. 7.4"]]],
-    "nightly": [[30000, "clawback"], [100000, "barred_proceeding"]]}'::jsonb,
+  '{"desimputer": [["barred_proceeding", null], ["barred_proceeding", null]], "born": [true, true],
+    "rows": [["100000", "barred_proceeding", null], ["30000", "barred_proceeding", null]],
+    "space": [["100000", "barred_proceeding", null], ["30000", "barred_proceeding", null]],
+    "run_pages": [[["barred_proceeding", null]], [["barred_proceeding", null]]],
+    "nightly": [[30000, "barred_proceeding"], [100000, "barred_proceeding"]]}'::jsonb,
   'm: an advance born before the client''s proceeding opened is never said to be clawed back (barred_proceeding on '
-  '« Désimputer », « Avances », the client space, the run page and the nightly); one born since keeps the clause');
+  '« Désimputer », « Avances », the client space, the run page and the nightly); (M2c-7d-2, R3) nor one born since '
+  '(L4: none while the proceeding stands)');
 
 -- m (review round 2, advance-date-contradicts-barred). The same Petit: 80's cover, born d − 2 (its payout's debit) and
 -- recorded today, after the opening (d − 1). « Avances » and the client space return its birth (born_on =

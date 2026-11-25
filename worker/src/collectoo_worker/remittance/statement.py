@@ -53,6 +53,10 @@ NATURE = {
     "client_advance_reversal": "Avance du cabinet annulée",
     "payout_returned": "Virement revenu impayé — reversé à nouveau",
     "unplanned_payout": "Virement exécuté hors reversement",
+    # M2c-7d-2 (plan §6.2.11 (a) 8): a set-off withheld at a payout's debit (the client's status
+    # barred it by then), given back with this run (no file, no commission). A new code only: no
+    # payload drawn before carries it (fr-3 renders it; 7d-3's fr-4 adds the row that explains it)
+    "settlement_withheld": "Compensation retenue au débit, rendue",
 }
 # M2c-6b-2b (review LT-2; plan §5, critic L4, brought forward from 6b-2d): the item an unplanned
 # payout's return re-owes (payload nature_reason `unplanned` on a payout_returned line) — its money

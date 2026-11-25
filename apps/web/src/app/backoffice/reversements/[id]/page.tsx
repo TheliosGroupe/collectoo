@@ -23,10 +23,13 @@ import {
   frenchDate,
   percentText,
   parseRunPayout,
+  parseRunWithheld,
   refundNote,
+  refundPaid,
   runBusy,
   runPayoutNotes,
   runStatus,
+  runWithheldNotes,
 } from "@/lib/remittance/runs";
 import { runStatementState } from "@/lib/remittance/documents";
 import {
@@ -114,6 +117,8 @@ const LINE_KIND: Record<string, string> = {
   client_advance_reversal: "Avance annulée",
   payout_returned: "Virement revenu",
   unplanned_payout: "Virement non prévu",
+  // M2c-7d-2 (plan §6.2.11 (a) 8): a set-off its payout's debit withheld, given back with this run
+  settlement_withheld: "Compensation retenue au débit, rendue",
 };
 const TRANSFER_STATUS: Record<string, string> = {
   ordered: "Ordonné — à mettre dans un fichier de virements",
@@ -217,8 +222,13 @@ export default async function RemittanceRunPage({
         .maybeSingle(),
       supabase.rpc("remittance_run_payout", { p_run_id: id }),
     ]);
+  // M2c-7d-2 (plan §6.2.11 (a)): what its payout's debit withheld of its set-off (the database answers money staff only,
+  // null otherwise or when nothing was withheld)
+  const { data: withheldData } = await supabase.rpc("remittance_run_withheld", { p_run_id: id });
+  const withheld = parseRunWithheld(withheldData);
   const payout = parseRunPayout(payoutData);
-  const payoutNotes = payout ? runPayoutNotes(payout, r.currency) : [];
+  const payoutNotes = payout ? runPayoutNotes(payout, r.currency, withheld !== null) : [];
+  const withheldNotes = withheld ? runWithheldNotes(withheld, r.currency) : [];
   const transferFile = inFile?.transfer_file_id
     ? {
         id: inFile.transfer_file_id,
@@ -237,7 +247,8 @@ export default async function RemittanceRunPage({
   // a job in flight refreshes the page; a failed preparation does not (it waits for « Actualiser »)
   const busy = runBusy(r);
   const draft = r.status === "draft";
-  const refund = refundNote(r);
+  // (review M2c-7d-2 round 1, TUI-2) the refund the payout actually paid: a withheld plan's refund stays owed
+  const refund = refundNote({ ...r, refund_minor: refundPaid(r, withheld) });
   // review M2c-5 (perf#6 = tests-ui#3): only an approved run gets a statement — a draft discarded or cancelled before
   // its approval never does, so the page neither polls for it nor says « en préparation »
   const statementState = runStatementState(r, statement ?? null);
@@ -286,7 +297,8 @@ export default async function RemittanceRunPage({
                 : "—",
           },
           {
-            label: "Compensation",
+            // (M2c-7d-2) the plan's figure; when the debit withheld part of it, « Compensation retenue au débit » says
+            label: withheld ? "Compensation prévue à la validation" : "Compensation",
             value:
               r.settlement_minor !== null
                 ? money(r.settlement_minor, r.currency)
@@ -580,6 +592,16 @@ export default async function RemittanceRunPage({
               </Link>
             </p>
           ) : null}
+        </Section>
+      ) : null}
+
+      {withheldNotes.length > 0 ? (
+        <Section title="Compensation retenue au débit" testId="run-withheld">
+          <ul className="flex flex-col gap-1 text-sm" data-testid="run-withheld-notes">
+            {withheldNotes.map((n) => (
+              <li key={n}>{n}</li>
+            ))}
+          </ul>
         </Section>
       ) : null}
 

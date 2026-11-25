@@ -95,6 +95,8 @@ export const TRIGGER_LABEL: Record<string, string> = {
   deadline: "Échéance R124-6",
   payout_returned: "Virement revenu",
   manual: "Préparé à la demande",
+  // M2c-7d-2 ([check 2] gap 3, plan §6.2.11 (a) 8b): a run drafted to give back a set-off its payout's debit withheld
+  settlement_withheld: "Compensation retenue à rendre",
 };
 
 const BLOCKER_LABEL: Record<string, string> = {
@@ -106,7 +108,7 @@ const BLOCKER_LABEL: Record<string, string> = {
   // M2c-7d-1 (plan §6.4; [critic] F16, L2, L10, L14): each block with its exit (the payee the events require,
   // confirmed by a second admin after them; a seizure until its release). Review round 1: an account « ouvert à son
   // nom » (C. civ. 427 al. 5), who makes it work depending on the measure (TUI-7); an old row to qualify first
-  // (MONEY-LAW-1); a seizure blocks the payouts only in 7d-1, the set-off bar is 7d-2's (MONEY-LAW-3, TUI-1)
+  // (MONEY-LAW-1); (M2c-7d-2, plan §6.2.6, §6.2.9) a seizure bars the payouts and the set-off, whatever the run's net
   "client_status:liquidation":
     "Client en liquidation : compte du liquidateur à confirmer, avec le jugement qui le nomme (second administrateur)",
   "client_status:death":
@@ -119,7 +121,7 @@ const BLOCKER_LABEL: Record<string, string> = {
     "« Tutelle ou curatelle » enregistrée avant leur distinction : précisez-la avec le jugement (« Événements du client ») ; aucun compte ne lève ce blocage avant (règle du cabinet)",
   "client_status:mandate_ended": "Mandat terminé : confirmez à nouveau le compte du client (second administrateur)",
   "client_status:seizure":
-    "Saisie entre les mains du cabinet : aucun virement de reversement jusqu'à la mainlevée (les compensations ne sont pas encore bloquées)",
+    "Saisie entre les mains du cabinet : ni reversement ni compensation jusqu'à la mainlevée",
   negative_net: "Net négatif : les annulations dépassent les encaissements",
   servicer_identity_incomplete: "Identité de facturation du cabinet incomplète",
   client_identity_changed: "Le client n'est plus un professionnel établi en France métropolitaine",
@@ -370,9 +372,10 @@ function advanceFate(a: RunPayout["advances"][number], currency: string): string
   const rest = a.open_minor === a.amount_minor ? "" : `reste ${money(a.open_minor, currency)} `;
   if (a.recovery === "clawback")
     return `${rest}à reprendre sur les prochains reversements du client (clause de reprise, ${a.clause_ref ?? "clause"} du mandat)`;
-  // (review round 1, M7B-MONEY-2) born before the client's proceeding opened: no run takes it back
+  // (review round 1, M7B-MONEY-2; M2c-7d-2, [critic] L4) while the client's proceeding stands: no run takes it back,
+  // no request asks for it
   if (a.recovery === "barred_proceeding")
-    return `${rest}non reprise sur les reversements du client (avance née avant l'ouverture de sa procédure collective)`;
+    return `${rest}non reprise sur les reversements du client ni demandée (client en procédure collective : avance à déclarer)`;
   if (a.recovery === "request_no_mandate")
     return `${rest}à récupérer par une demande de remboursement (avance rattachée à aucun mandat unique)`;
   return `${rest}à récupérer par une demande de remboursement (pas de clause de reprise)`;
@@ -393,8 +396,10 @@ const ADVANCE_CAUSE: Record<string, string> = {
  * blocked only while it is, and the run that paid it again once booked); each unplanned booking of its transfers (a
  * second execution, or one after the cancellation), and the return of one; for a draft, what it deducts of each
  * unplanned booking (CSO-6; review 6b-2c money-4: P, the net of that booking's own rows it holds, never A).
+ * (M2c-7d-2) When its debit withheld part of the set-off (`withheld`), the plan's figures are not what was set off: the
+ * set-off is then said by runWithheldNotes, from the ledger's settlements.
  */
-export function runPayoutNotes(p: RunPayout, currency: string): string[] {
+export function runPayoutNotes(p: RunPayout, currency: string, withheld = false): string[] {
   const notes: string[] = [];
   for (const t of p.transfers) {
     // M2c-6b-3a-2 (T18): the late predecessor — its transfer cancelled, executed late by the bank; (review round 1,
@@ -410,7 +415,7 @@ export function runPayoutNotes(p: RunPayout, currency: string): string[] {
   }
   // review 6b-2c (pages-1): each part of the set-off from its own field — D also nets a credit-note refund paid with the
   // transfer (refundNote says it), so the commission set off is commission_minor, never D
-  if (p.settled_on) {
+  if (p.settled_on && !withheld) {
     const on = frenchDate(p.settled_on);
     const commission = positive(p.commission_minor);
     const advances = positive(p.advances_recovered_minor);
@@ -466,6 +471,99 @@ export function runPayoutNotes(p: RunPayout, currency: string): string[] {
       }.`,
     );
   }
+  return notes;
+}
+
+/**
+ * M2c-7d-2 (plan §6.2.11 (a)): what a run's payout debit withheld of its plan's set-off, as
+ * `remittance_run_withheld` returns it (money staff of the servicer; amounts text in minor units, dates ISO) — the
+ * client's status barred that set-off by the debit's date (the servicer's rule, its reason as the ledger records it),
+ * so it was posted and reversed at once and the next run pays it back. (Review round 1, TUI-2) its parts are the frozen
+ * plan's — the invoices and advances withheld, the credit note's refund not paid with them (W = their sum less that
+ * refund when the whole plan is withheld); (MLAW-4, TUI-3) `given_back_by` names the run that paid W back once it is
+ * booked (its payout not returned), `giving_back_by` the one approved or sent to pay it.
+ */
+export type RunWithheld = {
+  withheld_minor: string;
+  commission_minor: string;
+  advances_minor: string;
+  refund_unpaid_minor: string;
+  withheld_on: string;
+  reason: string;
+  set_off_commission_minor: string;
+  set_off_advances_minor: string;
+  given_back_by: string | null;
+  giving_back_by: string | null;
+};
+
+/** The withheld set-off's read, or null (nothing withheld, or not the read's shape — never a guess). */
+export function parseRunWithheld(x: unknown): RunWithheld | null {
+  if (!x || typeof x !== "object") return null;
+  const o = x as Record<string, unknown>;
+  for (const k of [
+    "withheld_minor",
+    "commission_minor",
+    "advances_minor",
+    "refund_unpaid_minor",
+    "set_off_commission_minor",
+    "set_off_advances_minor",
+  ])
+    if (typeof o[k] !== "string" || !MINOR.test(o[k] as string)) return null;
+  if (typeof o.withheld_on !== "string" || typeof o.reason !== "string") return null;
+  for (const k of ["given_back_by", "giving_back_by"])
+    if (o[k] !== null && o[k] !== undefined && typeof o[k] !== "string") return null;
+  return {
+    ...(o as unknown as RunWithheld),
+    given_back_by: (o.given_back_by as string | null | undefined) ?? null,
+    giving_back_by: (o.giving_back_by as string | null | undefined) ?? null,
+  };
+}
+
+/**
+ * (Review M2c-7d-2 round 1, TUI-2) The refund a run actually paid with its payout: the plan's, less what its debit's
+ * withholding left unpaid (the whole plan withheld: the credit note stays owed). What refundNote is given when a
+ * withheld read exists.
+ */
+export function refundPaid(
+  card: Pick<RunCard, "refund_minor">,
+  withheld: Pick<RunWithheld, "refund_unpaid_minor"> | null,
+): string | null {
+  if (!card.refund_minor || !MINOR.test(card.refund_minor)) return card.refund_minor;
+  if (!withheld) return card.refund_minor;
+  return (BigInt(card.refund_minor) - BigInt(withheld.refund_unpaid_minor)).toString();
+}
+
+/**
+ * The run page's sentences on a withheld set-off: what was withheld and why (the reason the ledger recorded, « règle
+ * du cabinet » in it), whether a later run gave it back; then what the debit did set off, if anything.
+ */
+export function runWithheldNotes(w: RunWithheld, currency: string): string[] {
+  const nonZero = (m: string) => MINOR.test(m) && BigInt(m) !== BigInt(0);
+  const parts = [
+    nonZero(w.commission_minor) ? `factures ${money(w.commission_minor, currency)}` : null,
+    nonZero(w.advances_minor) ? `avances du cabinet ${money(w.advances_minor, currency)}` : null,
+    // (review round 1, TUI-2) the credit note's refund the withheld plan did not pay: still owed to the client
+    nonZero(w.refund_unpaid_minor)
+      ? `moins le remboursement d'avoir non versé ${money(w.refund_unpaid_minor, currency)} qui reste dû au client`
+      : null,
+  ].filter((p): p is string => p !== null);
+  const why = w.reason.replace(/^Compensation retenue : /, "");
+  // (review round 1, MLAW-4, TUI-3) given back only once that run is booked; approved or sent, it is on its way
+  const back = w.given_back_by
+    ? `rendue au client par le reversement ${w.given_back_by}`
+    : w.giving_back_by
+      ? `à rendre au client par le reversement ${w.giving_back_by} (validé, virement en cours)`
+      : "à rendre au client par le prochain reversement";
+  const notes = [
+    `Compensation retenue au débit le ${frenchDate(w.withheld_on)} : ${money(w.withheld_minor, currency)}` +
+      (parts.length > 0 ? ` (${parts.join(", ")})` : "") +
+      ` — ${why} ; ${back}`,
+  ];
+  const setOff = [
+    nonZero(w.set_off_commission_minor) ? `commission ${money(w.set_off_commission_minor, currency)}` : null,
+    nonZero(w.set_off_advances_minor) ? `avances du cabinet ${money(w.set_off_advances_minor, currency)}` : null,
+  ].filter((p): p is string => p !== null);
+  if (setOff.length > 0) notes.push(`Réglé par compensation au débit : ${setOff.join(", ")}`);
   return notes;
 }
 
