@@ -9710,5 +9710,794 @@ statement's body gone), the web +71 / −12.
   line and 0 repricings. Default: 7f's hardening extends the test to the drafted-after-the-event case.
 - Everything M2c-7d-2's « Left open » lists stays open.
 
+## M2c-7d-3: declarations, liquidation, statement (2026-11-25)
+
+Plan: `docs/design/m2c-7-plan.md` §1.4 (7d-3 row), §6.1 (`liquidation_payout_disposition`), §6.2.8 (statement fr-4),
+§6.2.10 (`invoice_overdue`, `advance_open`), §6.3 (`claims_to_declare`, `post_opening_unpaid`,
+`payout_after_liquidation`), §6.4's refusals, §6.6's `046c` (L8, L9, L11, L13; gap 9), §6.7's 7d-3 part, with their
+[critic] / [check 1–3] marks; and the four items 7d-2 carried. Founder questions (plan §10) none answered: built as
+their defaults (Q18 a: no advance taken back in a proceeding, so every open advance is to declare; Q19 a: the withheld
+set-off). Counsel's OQ-92, OQ-93 stay open, OQ-99 is new in COMPLIANCE. Texts read on LibreJustice on 2026-11-25, the
+versions in force: C. com. L622-24 (2025-12-31 — its II's new wording applies to procedures opened from 2027-01-01; the
+sentences quoted are the same in the version of 2019-05-24), R622-24 (2014-07-02), L622-17 (2021-10-01), L641-3
+(2019-05-24), L641-9 (2022-05-15), L641-13 (2023-10-25), C. civ. 2008 (1804-03-21); only what they say is quoted
+(COMPLIANCE PROC-02, PROC-03, MAND-02, OQ-92, OQ-93, OQ-99), and the servicer's rules are named « règle du cabinet ».
+Migration `20261128090000_declarations_statement.sql` (one file, forward-only). **The switch stays off**: nothing
+writes `private.feature_switch`; the one rule that reads it (`payout_after_liquidation`'s `cancellable`) is tested with
+it on in a rolled-back subtransaction (`pg_temp.iso(…, true)`), and every `046c` scenario that touches a payout runs a
+second time with it on and equals its switch-off twin; `046c`'s last test asserts it is off; `033` byte for byte
+unchanged.
+
+What it builds:
+- **A client's procedure** (`private.client_procedure_facts`: the opening — the earliest `proceeding_opened` or
+  `liquidation` in effect —, its kind, its BODACC publication date, the liquidation's date and recording; the client's
+  events by `client_status_event_client_idx`, fenced) and **what its declarations name** (`private.client_documents_declared`:
+  7d-1's `claims_declared` events and their items).
+- **`claims_to_declare`** (alert, P0 from 15 days before the deadline; [critic] L4, L8): per document of a client with
+  a proceeding or a liquidation in effect, not named by a declaration, each open invoice born before the opening
+  (`private.document_born_on`, 7d-2's birth) and each open advance whatever its birth (Q18: none is taken back or
+  requested while the proceeding stands); its open part from the ledger (`document_open`, `advance_open`), its birth,
+  the deadline and its basis: `publication` (two months after the BODACC publication, R622-24 al. 1),
+  `publication_missing` (no publication date recorded: the deadline is unknown, never P0), `exigibility` (an advance
+  born after the opening: two months after its exigibility, L622-24 al. 6, taken as its date — règle du cabinet)
+  (`private.client_claims_to_declare`).
+- **`post_opening_unpaid`** (alert; [critic] L8): an invoice born on or after the opening, unpaid at its due date, not
+  declared (`private.client_post_opening_unpaid`); its help quotes L622-17 IV (a proceeding: no deadline computed, the
+  end of the observation period is not recorded) or L641-13 III (a liquidation), and says the commission born after
+  the judgment is treated as a claim paid at its due date by the servicer's rule (OQ-92).
+- **`payout_after_liquidation`** (alert, P0; [critic] L11, [check 1] gap 9): a payout of a client in liquidation, of its
+  runs' transfer chains, to an IBAN that is not its liquidator's account (`court_appointed`, confirmed by a second admin
+  after the liquidation's recording, with its authority evidence), `in_file` with a requested date on or after the
+  judgment (`cancellable` while its file is not downloaded, or with the switch on) or `booked` (debited on or after the
+  judgment by a payout or unplanned-payout booking, not returned) (`private.client_payouts_after_liquidation`); it stops
+  only when « Enregistrer la suite » records what became of it (`public.record_liquidation_payout_disposition`, table
+  `public.liquidation_payout_disposition`: `ratified` | `repaid_to_liquidator`, its evidence, a note; admins at aal2;
+  refusals `bad_kind`, `already_disposed`, `not_after_liquidation`, `evidence_required`, `bad_note`; idempotent).
+- **The nightly's other checks** (`private.run_advance_checks`, from 7d-2's body): the servicer's clients with a
+  proceeding or a liquidation in effect read once (`v_proc`); `advance_open` leaves their advances out (carried item 1:
+  `claims_to_declare` lists them); `set_off_after_bar` leaves out a settlement whose outcome is recorded (carried item 2).
+  `private.run_remittance_runs_checks` (from `20261121120000`'s body): `invoice_overdue` leaves out an invoice born
+  before the opening of a client in a proceeding and every invoice of a client in liquidation
+  (`private.invoice_to_declare`; [critic] L9) — never dunned, to declare.
+- **« Compensation maintenue »** (carried item 2): `public.record_set_off_outcome` (admins at aal2) records counsel's
+  answer that a set-off `set_off_after_bar` alerts is kept, with its evidence (table `public.set_off_outcome`, kind
+  `kept`); refusals `bad_kind` (giving it back is not built), `already_recorded`, `not_alerted` (not a run's
+  settlement that set off a document barred that day), `evidence_required`, `bad_note`.
+- **The statement fr-4** (§6.2.8; [critic] L12, L13, M7-MONEY-5; carried item 3's statement row):
+  `private.remittance_statement_build` (from `20261117120000`'s body) writes a payload of schema 2 when it holds what
+  fr-3 cannot word — the end of the mandate known at K (`mandate_end`: its cause, effective date, the day the servicer
+  recorded it, the payee then required; `private.statement_mandate_end`), who it is addressed to when someone acts for
+  the client (`addressees`, by role only, the curator in copy; `private.statement_addressees`), the set-offs a debit
+  withheld that this run gives back (`withheld_given_back`: the withheld run, the amount, its day, the ledger's reason),
+  an advance taken back (its `born_on`) —; otherwise fr-3's payload byte for byte. As of K throughout (events and
+  representatives recorded by `known_at`). `private.remittance_documents_record` (from `20261117120000`'s body) records a
+  statement only under the template its payload's schema requires. The worker: `statement.py` (`template_of`, fr-4's
+  checks, the addressee lines, the « Fin du mandat » section, the advance's date, the withheld row),
+  `statement_pdf.py` (the PDF's creator its template), the documents job (each statement recorded with its template).
+- **The withheld set-off's read** (carried item 4): `public.remittance_run_withheld` (from 7d-2's body) follows a giving
+  payout that came back to the run that pays it again (`private.withheld_given_back`, recursive by the returned
+  payout's line), and names the run whose payout came back (`returned_by`).
+- **The pages**: « Contrôles » labels and helps for the three checks (quoting only R622-24, L622-24 al. 6, L622-17 IV,
+  L641-13 III, L641-9 I as read), each row linked to the client's events; « Enregistrer la suite » on a booked
+  `payout_after_liquidation` row and « Compensation maintenue » on a `set_off_after_bar` row (admins; the client's status
+  evidences to choose from); the run page's withheld note with the returned payout; the `invoice_overdue` help says what
+  it leaves out.
+
+### Decisions
+- **D1 The statement is a function of the books at K.** An end of the mandate or a representative recorded after the
+  run's K changes no statement drawn later (C. civ. 2008: what the servicer did before it knew is valid; the statement
+  states the day it learned). The plan's « in effect by K » alone would have let a death recorded after K rewrite an
+  earlier run's statement.
+- **D2 Addressed by role only.** The statement names the role of whoever acts for the client (« notaire chargé de la
+  succession », « liquidateur », « tuteur », copy « curateur »), never the person's name or address: the statement is
+  also read in the client's space (OQ-99), and 7d-1 keeps those names to money staff.
+- **D3 fr-3 kept for what fr-4 does not change.** A statement with none of fr-4's facts keeps schema 1 and every byte of
+  fr-3 (`038`, `025`, `026` and the fr-3 goldens unchanged); stored statements are never redrawn.
+- **D4 The run chains, not a new index.** `payout_after_liquidation` reaches a client's payouts through its runs
+  (`remittance_run_client_idx`) and `private.transfer_chain`, each transfer and booking by key; no index on
+  `bank_transfer` by client is added.
+- **D5 The two commands' guards read their row by primary key alone, fenced** (`offset 0`), and
+  `private.remittance_statement_build` gains `set enable_seqscan = off` (whole copy: a later slice copying the latest
+  definition keeps it): the reads test found the outcome guard reading the servicer's entries whole (10,013 tuples) and
+  the statement's « not remitted » read of the client's queue items reading every servicer's queue (10,000 planted
+  items) by a sequential scan, under stale estimates.
+- **D6 Dispositions and outcomes on « Contrôles »**, beside the rows they stop, for administrators.
+
+### Deviations from the plan
+- **The set-off outcome is « kept » only.** The plan (§6.3) names « kept, or given back through a `client_credit` of
+  cause `procedure` »: giving it back needs a new ledger entry type (the barred settlement's reversal outside a run,
+  whose LG003 exception 7d-2 kept to one rule) and its accounting (OQ-98). Left open below; the form and the refusal
+  say it is not built.
+- **Statement as of K** (D1; the plan said « in effect by K ») and **addressees by role** (D2; the plan does not say
+  how the recipient is printed).
+- **« Fin du mandat » worded as the code applies it** (plan §6.2.8's draft adapted): the causes are « décès du
+  mandant », « tutelle du mandant », « révocation ou renonciation du mandat » (the draft's « fin du mandat » named no
+  cause); the payments the code sets aside are those received on the files from the end's effective date, from the day
+  the servicer recorded it (the draft said « reçues jusqu'au [jour de l'information] … traitées selon le mandat »,
+  which the code does not apply that way: `client_mandate_ended` reads the effective date); the protected adult's
+  account is « ouvert au nom du mandant, la personne protégée (C. civ. 427) », never « géré par son tuteur » (7d-1's
+  review: who makes it work depends on the measure); a guardianship still to qualify says the payouts are suspended.
+- **A post-opening invoice of a client in a proceeding appears in both `invoice_overdue` and `post_opening_unpaid`**
+  (as the plan's §6.2.10 and §6.3 define them: due at its date, and its privilege's information to give); never in
+  liquidation, where `invoice_overdue` leaves it out.
+- **A declared advance or invoice is in no alert** (the plan names the declaration as what stops `claims_to_declare`;
+  nothing then alerts the claim's admission — counsel's).
+- **D4, D5** (a read path and settings the plan does not name).
+
+### Carried items closed
+1. (7d-2) `advance_open` drops the advances of a client in a proceeding or a liquidation once `claims_to_declare` lists
+   them — `046c` dc1 (« advance_open silent »); `044` sm, `045` sl9 (R3).
+2. (7d-2) « record the outcome » for `set_off_after_bar`: `public.record_set_off_outcome` (« Compensation maintenue »);
+   giving it back left open (deviation above) — `046c` so1.
+3. (7d-2 review, TUI-8) the E2E walk of the withheld set-off: `withheld-set-off.spec.ts` (a redressement after the
+   file's download, the payout's debit, the run page's « Compensation retenue au débit », the next run's statement
+   fr-4 row, the « Virements » hold label after a liquidation, the « Contrôles » row; screenshots
+   `m2c7-compensation-retenue`, `m2c7-controles-creances-a-declarer`, mobile and desktop).
+4. (7d-2) `remittance_run_withheld` follows a returned giving payout to the run that repaid it — `046c` ww1 (withhold,
+   give back, bounce, re-pay; switch off and on).
+
+### Assertions whose expected value changed (house rule R3)
+- `044` sm: the nightly lists no `advance_open` for the client in a proceeding (was both advances, `barred_proceeding`):
+  carried item 1, they are `claims_to_declare` rows (`046c` dc1).
+- `045` sl9: the same for the client in liquidation (was `[[20000, "barred_proceeding"]]`).
+- `046b` sn2: the codes list gains `claims_to_declare` (Dupont's invoice born before its redressement is still open in
+  part), as F12 says each later slice extends it; `046c` sn3 pins the full list with 7d-3's three codes.
+- worker `test_statement_docs.py::test_the_golden_hashes`: the current template constant is fr-4 for schema 2; the
+  fixture, of schema 1, is asserted `TEMPLATE_V3` and keeps every fr-3 hash.
+- vitest: none changed (`advance_open`'s help is 7b's text, still true: « elle est à déclarer »).
+
+### Tests
+- pgTAP `046c_declarations_statement.test.sql` (19): d (dc1, dc2: the documents to declare, their deadlines and basis,
+  P0, a declaration stopping its document alone, a liquidation recorded alone, `advance_open` silent), u (du1:
+  `post_opening_unpaid`; `invoice_overdue`'s exclusions, and its alerts still raised after a death or for a
+  redressement's post-opening invoice), l (dl1: in a file and debited, never debited before nor to the liquidator's
+  account; the switch on: cancellable; dl2: the command), s (so1: the outcome), w (ww1: the withheld read followed
+  through a returned payout; switch on), f (sf1: the statement's withheld row, fr-3 kept, each template its own; switch
+  on; sf2: a death recorded by K and one after; sf3: the tutor, the curator in copy, the liquidator, nobody recorded, a
+  proceeding, an advance's date), i (si1: isolation, append-only, change log), n (sn3: the codes), c (the privileges),
+  the switch still off.
+- Worker: `test_statement_fr4.py` (the template by schema, the end of the mandate and payee for every kind, the
+  addressees, the withheld row and its cancelled wording, the refused facts, LEX-28's words never used, the goldens
+  `GOLDEN_FR4_CSV` / `GOLDEN_FR4_PDF`); `test_statement_docs.py` (R3 above).
+- Integration: `test_declarations_statement_integration.py` (a withheld set-off through the real debit job, the next
+  run's statement drawn fr-4 by the documents job; `claims_to_declare` through `run_payment_checks`; a payout in its file
+  and debited after a liquidation, then its disposition), `test_declarations_reads_integration.py` (the reads under
+  stale statistics, below).
+- vitest `declarations.test.ts` (19); E2E `withheld-set-off.spec.ts` (carried item 3).
+
+### Stale statistics (the plan class that broke main after 7a)
+`test_declarations_reads_integration.py` plants 7d-2's tables (and 7d-1's, 7c-1's) and 10,000 rows each of the bookings
+of two other transfers, the dispositions of other payouts, the outcomes of other settlements and the booked runs of two
+other servicers, each with a transfer (`remittance_run`), their keys' n_distinct pinned to 2, every plan generic, and
+bounds each call's tuples (60) from `pg_stat_xact_user_tables`: the procedure facts, the claims, the unpaid invoices,
+the payouts after the liquidation, both commands, the statement build without and with fr-4's parts, the withheld
+read; the nightly's two functions, which read the servicer's own rows whole by design (earlier slices plant the
+servicer's invoices and advances), are bounded by their 7d-2 bodies' reads in the same transaction (read from the
+migration files) plus 60, and may read none of 7d-3's planted rows. It found two reads (D5): the outcome guard's
+10,013 `ledger_entry` tuples and the statement build's 10,000 `remittance_pending` (pre-existing in the statement's
+body, measured for the first time here). Figures: docs/benchmarks/remittances.md « M2c-7d-3 ».
+
+### Mutants
+Each applied to the stack alone (`create or replace` of the one function, or `alter policy`), `046c` run, the original
+restored; the worker's and the web's in their file alone, their tests run, the file restored. `046c`'s tests by number:
+1 dc1, 2 dc2, 3 du1, 4 dl1, 5 dl1 switch on (in its file), 6 dl1 switch on (the rest), 7 dl2, 8 so1, 9 ww1, 10 ww1
+switch on, 11 sf1, 12 sf1 switch on, 13 sf2, 14 sf2 (the end), 15 sf3, 16 si1, 17 sn3 (a switch-on twin compares with
+its switch-off run: a mutant alike in both does not fail it).
+
+| Mutant (plan §6.6 or added) | Killed by |
+|---|---|
+| a claim's birth read as the invoice's issue date (`client_claims_to_declare`) | `046c` 1, 2, 17 |
+| post-opening invoices listed to declare | `046c` 1, 2 (L8: « never a post-opening invoice ») |
+| advances born after the opening left out (L4) | `046c` 1, 2 |
+| the declarations ignored | `046c` 1 (a declaration stops its document alone) |
+| the deadline counted from the opening, not the publication | `046c` 1 |
+| P0 from 30 days before the deadline | `046c` 1 |
+| `advance_open` keeping the clients in a proceeding (carried item 1) | `046c` 1 |
+| `invoice_overdue` without the exclusion (L9) | `046c` 3 |
+| `invoice_to_declare` ignoring the liquidation | `046c` 3 |
+| `post_opening_unpaid` listing pre-opening invoices too | `046c` 3 |
+| `post_opening_unpaid` ignoring the declarations | `046c` 3 |
+| the liquidator's confirmed account not excluded (`client_payouts_after_liquidation`) | `046c` 4, 5, 7 |
+| a payout debited before the judgment counted | `046c` 4, 5, 7 |
+| `cancellable` ignoring the switch | `046c` 5 (the switch-on run) |
+| `payout_after_liquidation` ignoring the disposition (L11: the alert stays until one is recorded) | `046c` 4 |
+| `already_disposed` dropped (plan §6.6: the pre-check and the unique violation's mapping) | `046c` 7 (gap 9's second call) |
+| `not_after_liquidation` dropped | `046c` 7 |
+| the disposition open to an ops manager | `046c` 7 |
+| the disposition's evidence unchecked | `046c` 7 |
+| the outcome's `not_alerted` check dropped | `046c` 8 |
+| `set_off_after_bar` ignoring the recorded outcome (carried item 2) | `046c` 8 |
+| `withheld_given_back` not following a returned payout (carried item 4) | `046c` 9 |
+| `statement_mandate_end` not as of K | `046c` 13 |
+| `statement_addressees` not as of K | **survived the first `046c`**: the late death's representative, recorded after K too, masked it; sf3 gained a curatelle's client who dies after K (addressed as at K) → `046c` 15 |
+| the statement always schema 1 | `046c` 11, 13, 15 |
+| the statement without its addressees | `046c` 13, 15 |
+| the statement without its withheld rows | `046c` 11 |
+| the record step accepting any template | `046c` 11 (« each drawn by its own template only ») |
+| the disposition's and the outcome's read policies opened (`using (true)`) | `046c` 16 (each) |
+| the two guards' reads and the statement build as first written (no primary-key fence; no `enable_seqscan = off`) | `test_declarations_reads_integration.py` (10,013 `ledger_entry` / 10,000 `remittance_pending` tuples over the bound) |
+| worker: the template always fr-3; fr-3 accepting fr-4's facts; fr-4's facts unchecked; « rendue » said of a cancelled run; the withheld row without the ledger's reason; the PDF's creator fixed to fr-3 | `test_statement_fr4.py` (the template, the refused facts, the cancelled run, the withheld row, the golden PDF) |
+| web: « payé » while in its file; `cancellable` ignored; the deadline's basis always the publication; « not allowed » not mapped; `returned_by` unread | `declarations.test.ts` (each) |
+
+### Suites
+- `supabase test db` (fresh `supabase db reset`, the final files): 51 files, **3,143 tests, PASS** in 567 s — `046c`'s
+  19 among them; `033` byte for byte; `034`–`046b` with the R3 changes above only.
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 210 files) clean; unit pytest **1,225 passed, 5
+  xfailed** (`test_statement_fr4.py` new); the non-scale integration tests in CI's order, right after that `supabase
+  test db` without a reset: **299 passed** in 852 s (`test_declarations_statement_integration.py`,
+  `test_declarations_reads_integration.py` new).
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic (95,997 of 100,000), **0**
+  wrong.
+- Scale, each command right after `supabase db reset` with CI's logging settings (docs/benchmarks/remittances.md
+  « M2c-7d-3 »): the scale job's nine files in one call as `ci.yml` runs them (`RECEIPT_FILES=5000`) **15 passed** in
+  1,477.9 s (7d-2 round 1, this branch's base: 1,498.6 s; the 50,000-line run prepared in 12.9 s, re-run prepared and
+  approved in 31.9 s, its nightly checks 5.3 s, `run_advance_checks` 120 ms own; 500 approval jobs 148.0 s); the
+  `scale-payouts` command after another fresh reset **6 passed** in 1,293.7 s (round 1: 1,333.4 s; « Générer le
+  fichier » for 5,000 payouts 3.98 s; the 5,050 approval jobs 529.9 s; the 5,000-member funds pass 26.8 s, the debit job
+  24.1 s; the held chain's nightly checks 13.38 s). The statement's build measured apart: under a millisecond more a
+  statement than 7d-2's body. No Paris date change fell in them.
+- `database.types.ts` regenerated (the two commands and the two tables added; nothing else changed).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **33 files, 681 tests** passed (`declarations.test.ts` new,
+  19).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **65
+  passed** in 7.3 min (`withheld-set-off.spec.ts` new, desktop and mobile). New screenshots (mobile and desktop):
+  `m2c7-compensation-retenue` (the run page's « Compensation retenue au débit » after the redressement) and
+  `m2c7-controles-creances-a-declarer` (the « Contrôles » row). Retaken and kept: `m2c-virement-hors-reversement`
+  (mobile and desktop): the committed shot predated 7b and still showed « ce recouvrement n'est pas encore géré dans
+  Collectoo »; the sheet's current text (7b's) is in the new one. Every other diff showed only dates, ids, data or order
+  and was reverted.
+- Then `supabase db reset`, the stack left running.
+
+### Size
+≈ 2,825 non-test lines (migration 2,248, of which 1,551 are whole copies of the five redefined functions —
+`run_remittance_runs_checks` 562, `remittance_statement_build` 488, `run_advance_checks` 348,
+`remittance_documents_record` 105, `remittance_run_withheld` 48 —; worker ≈ 170; web ≈ 400), above the plan's ≈ 1,555
+and the ~2,500 bound: the two commands, `record_set_off_outcome`'s table, the records' template check and the withheld
+read's recursion the plan did not count. Nothing of 7d-3's scope was dropped but the outcome's « given back ».
+
+### Left open (low), with its default
+- **Giving a kept-or-not set-off back** (`set_off_after_bar`, plan §6.3): only « Compensation maintenue » is recorded;
+  when counsel says to give it back, the alert stays and ops pay it outside Collectoo. Default: a later slice adds the
+  reversal entry and its `client_credit` (cause `procedure`), with the accountant (OQ-98).
+- **The admission of a declared claim** is not followed: once declared a document is in no alert (counsel's).
+- **`publication_missing`** never reaches P0: the deadline is unknown until the publication date is recorded (the help
+  asks for it). Default kept.
+- **The nightly reads every client of the servicer once** (one probe each, `v_proc`) — as 7d-2's `set_off_after_bar`.
+- **The statement build reads the client's earlier runs** by `remittance_run_client_idx` (pre-existing, 7c's « Suivi »):
+  keyed, but proportional to the client's runs.
+- **7d-2's « Virement hors reversement » sheet** (`transfer-lines.ts`, pinned by `transfer-line-pages.test.ts`) still
+  says an advance with a claw-back clause is taken back « jamais si elle est antérieure à l'ouverture d'une procédure
+  collective du client »; since 7d-2 no advance is taken back while a proceeding or a liquidation stands, whatever its
+  birth. Not 7d-3's text; default: reworded by the next slice that touches the sheet (R3 for its pins).
+
+## M2c-7d-3 review fixes (2026-11-25)
+
+### Round 1
+
+The review of `fc8acdd` raised thirteen items: one medium and three lows of the money and law lens (ML-1; ML-2, ML-3,
+ML-4), seven lows of tests and pages (TUI-1 … TUI-7) and two lows of concurrency and cost (CC-1, CC-2). ML-4 and TUI-2
+are one fault (L641-9 I cut before its qualifier), fixed once. Each item was checked against the code first (ML-1's
+reproduction re-run on this stack inside `BEGIN … ROLLBACK` with `046c`'s helpers: the statement after the
+qualification said « informé le 10/11/2026 », the old row's day, and the one whose K preceded the qualification carried
+the end too; the others read in the migration, the pages, the worker's fixture and the tests), then seen failing as a
+test on `fc8acdd`'s bodies (`046c` so2 and sf4; the vitest pins of ML-3, ML-4, TUI-1; the worker's fixture checks; the
+reads test's calls bound, the guard removed). `046c` dc3 and dl3 and the reads test's CC-2 case pin behaviour already
+right in `fc8acdd` (their mutants below). The migration `20261128090000_declarations_statement.sql` is unmerged and was edited in
+place. **The switch stays off**: nothing writes `private.feature_switch`; the new scenario that touches payouts (`046c`
+dl3) runs with it on in a rolled-back subtransaction and equals its switch-off twin; `033` byte for byte unchanged;
+`034`–`046b` unchanged.
+
+- **ML-1 (medium; fixed at the root).** The statement's « Fin du mandat » dated an old « Tutelle ou curatelle » row
+  (recorded before 7d-1) by its own recording and read its qualification as it stands now, while that row ended
+  nothing until ops qualified it (`client_event_effective`: `guardianship_to_qualify`; no end event, no set-off barred,
+  no payment set aside). After a qualification the statement told the client « le cabinet en a été informé le <old
+  day> … depuis le <old day>, les paiements reçus … sont mis de côté … il n'est plus déduit des reversements » — false
+  for the days between; and a qualification recorded after a run's K put the end on that run's statement. Fix:
+  `private.client_event_known(event, at)` — the event's kind as it stood at `at` (an old row whose qualification was
+  recorded after `at` is still to qualify; a curatelle qualified after `at` too) and the day the code applied it (for an
+  old row counting as a tutelle by its qualification, the later of its recording and the qualification's).
+  `private.statement_mandate_end` and `private.statement_addressees` read every event through it: the end is dated by
+  the qualification, no end before it, the payee as at K (`to_qualify` when an unqualified row stood then: « Les
+  reversements sont suspendus … »), the addressees as `client_addressee` would have answered at K. `046c` sf4: the
+  set-off before the qualification kept (no withheld entry), a payment matched before it allocated and one after set
+  aside (what the statement says the code does), a statement whose K precedes the qualification of schema 1, one after
+  it dated by the qualification's day (never the old row's); an old row and a death before K, the row qualified after
+  → the death's end, payee `to_qualify`; an old row and a later tutelle with its tutor, the old row qualified a
+  curatelle after K → addressed to nobody (as the letters then). `set_off_after_bar` keeps the old row's recording as
+  its knowledge date (MLAW-3, the safe side: such a set-off is alerted, counsel records the outcome) — OQ-93 asks which
+  day counts as « informé » for these rows (COMPLIANCE).
+- **ML-2 (low; fixed — one rule).** « Compensation maintenue » accepted any run settlement whose document
+  `document_nettable` refused on its day, not the alert's rule: a set-off barred by the mandate's end alone and posted
+  before the servicer recorded it (MLAW-3, C. civ. 2008: valid) was never alerted yet could be « kept ». The alert's
+  per-part test is now one function, `private.settlement_set_off_alert(entry, client, day, document, kind)` (the bar,
+  or null: nettable, or MLAW-3's valid set-off), read by `private.set_off_after_bar_rows` (redefined from
+  `20261127090000_set_off_bars.sql:2056`, its other statements unchanged; evaluated once per part, fenced) and by
+  `public.record_set_off_outcome` (the settlement also settled by today and of a run, as the alert reads it); a miss is
+  `not_alerted`. `046c` so2: Durand's set-off posted before the death was recorded — not alerted, the command refuses
+  `not_alerted` though the document was not nettable that day.
+- **ML-3 (low; text).** The `claims_to_declare` help said « à déclarer … avant le <publication + 2 mois> », a day
+  stricter than the article: the delay « expire le jour du dernier mois … qui porte le même quantième » (CPC 641 al. 2),
+  « le dernier jour à vingt-quatre heures », « prorogé jusqu'au premier jour ouvrable suivant » when that day is not
+  worked (CPC 642), the code's rules applying in book VI's matters (C. com. R662-1 1°; each read on LibreJustice today).
+  Now « au plus tard le <date> » on both bases, and « La date indiquée est le jour où expirent les deux mois (art. 641 du
+  code de procédure civile, dont les règles s'appliquent sauf disposition contraire, art. R662-1 C. com.) ; « Le délai
+  qui expirerait normalement un samedi, un dimanche ou un jour férié ou chômé est prorogé jusqu'au premier jour ouvrable
+  suivant » (art. 642 du même code) : l'alerte suit la date non prorogée, règle du cabinet. » The P0 stays on the
+  unextended day (the earlier: règle du cabinet). Vitest.
+- **ML-4 = TUI-2 (low; text).** The `payout_after_liquidation` help closed L641-9 I's quote after « ses biens », dropping
+  « composant le patrimoine engagé par l'activité professionnelle » (the 2022 version). Now quoted to that qualifier,
+  the cut marked « […] », and the second sentence whole (« Les droits et actions du débiteur concernant son patrimoine
+  sont exercés pendant toute la durée de la liquidation judiciaire par le liquidateur. »), as PROC-03; the paraphrase
+  in parentheses dropped. Vitest pins the quote.
+- **TUI-1 (low; text, the true path).** « date de publication à saisir » sent ops to « enregistrez sur la page du client
+  la date de publication »: no command adds a date to a recorded event (append-only). Now: record the same event again
+  (same date of effect) with its publication date — and, in liquidation, « le compte du liquidateur est alors à
+  confirmer à nouveau par un second administrateur (les reversements restent bloqués jusque-là) ». `046c` dc3 pins
+  what the help says (the deadline then known; `client_status:liquidation` until the account is confirmed again);
+  vitest pins the text (and its absence for a proceeding).
+- **TUI-3 (low; test fixture).** The fr-4 golden fixture rendered a statement the books cannot make (a death and
+  set-offs on the same statement; the advance and the withheld line outside the totals; « Martin SAS » deceased). Now
+  two fixtures: `fr4_statement_payload` — Jean Martin (an entrepreneur individuel) died 25/10, recorded 30/10, before
+  K; every collection before the death; nothing set off (the run's invoice due to the own account, FC-1 still owed in
+  the position), the payout the gross to the estate's account, addressed to the notary — and `fr4_withheld_payload` — a
+  seizure recorded after RV-1's download withheld its set-off at the debit, released before RV-2's K: RV-2 gives the
+  200 € back (its line « Hors dossier »), sets FC-1 off again and takes the advance back, each in the totals, natures,
+  files, position and payout. New tests check each fixture's figures hold together and that after the end nothing is
+  set off; goldens regenerated (`GOLDEN_FR4_*`, `GOLDEN_FR4_WITHHELD_*`).
+- **TUI-4 (low; test).** `046c` sf2 compared the payload's Paris date with a UTC date (failing between 23:00 and 01:00
+  UTC); now `((now() - interval '1 hour') at time zone 'Europe/Paris')::date`.
+- **TUI-5 (low; tests).** `046c` dl3 (switch off and on): a payout in a file generated but not downloaded → `in_file`,
+  cancellable, not downloaded; one in a downloaded file requested before the judgment, not debited → not listed. Both
+  mutants killed (below).
+- **TUI-6 (low; E2E).** `withheld-set-off.spec.ts`: the giving run's statement as drawn and served by its run page — the
+  PDF drawn by `releve-reversement-fr-4` (its creator), the CSV's « Compensation retenue au débit, rendue » row (the
+  PDF's row text is font-encoded: its wording is the renderer's, pinned by the worker's fr-4 goldens); and a second test,
+  its own tenant: a run approved with its set-off, a redressement recorded before its file is generated → « Virements »
+  shows 7d-2's `client_status_changed` hold (« La situation du client a changé depuis la préparation … Annulez le
+  reversement et préparez-en un nouveau »), screenshot `m2c7-virement-situation-changee` (mobile and desktop). Each test
+  now sets up its own tenant (the file's tests run in parallel). Deviation: a fresh tenant rather than the same one
+  (the withheld flow needs the file downloaded before the redressement; the hold needs it not generated).
+- **TUI-7 (low; left open, convention recorded).** On the giving run's fr-4 statement the withheld sum is counted under
+  « Sommes encaissées pour votre compte » and as an « encaissement » « Hors dossier », as M2c-6b's `payout_returned`
+  items and 7d-2's W under fr-3 already are; fr-4's own row says what it is. Default below.
+- **CC-1 (low; one-line guard).** `invoice_overdue` called `private.invoice_to_declare` for every overdue open invoice of
+  the servicer. `private.run_remittance_runs_checks` now reads the servicer's clients with a proceeding or a
+  liquidation once (`v_proc`, as `run_advance_checks`) and asks only for theirs (a `case`, the order kept). The reads
+  test counts the calls (`pg_stat_xact_user_functions`, `track_functions = 'all'`): ≤ 60 with 10,000 of the
+  servicer's other invoices overdue (the guard removed: 10,001).
+- **CC-2 (low; test).** `test_declarations_reads_integration.py` gains a second client through the real jobs: a
+  redressement recorded after the file's download, the debit withholds the set-off; the next run gives it back, its
+  payout debited then returned (a camt.053 return by its end-to-end id), the payout account confirmed again, a later
+  run pays it again. Under the plants (n_distinct 2, generic plans): `public.remittance_run_withheld` on the withheld run
+  (`given_back_by` the later run, `returned_by` the giving one) reads at most 7 rows a table (`bank_transfer` 7,
+  `bank_line_booking` 4), the giving run's statement build at most 32 (`remittance_run` 32, the client's runs,
+  `bank_transfer` 11, `ledger_entry` 10) — never the 10,000 planted bookings.
+
+### Assertions whose expected value changed (round 1, house rule R3)
+None in `033`–`046b`. In this slice's own files: `046c`'s plan 19 → 24 (dc3, dl3 and its switch-on twin, so2, sf4);
+its privileges test lists the three functions added or redefined (`client_event_known`, `settlement_set_off_alert`,
+`set_off_after_bar_rows`: internal); sf2's date compared in Paris (TUI-4). The new cases shift `046c`'s numbers: the
+« M2c-7d-3 » mutant table's numbers are those of `fc8acdd` (now: dc3 3, du1 4, dl1 5–7, dl2 8, dl3 9–10, so1 11, so2
+12, ww1 13–14, sf1 15–16, sf2 17–18, sf3 19, sf4 20, si1 21, sn3 22). `declarations.test.ts`: « avant le » →
+« au plus tard le » (ML-3), the L641-9 pins (ML-4), the publication-missing pin (TUI-1). Worker: `test_statement_fr4.py`
+reads the withheld and advance rows from `fr4_withheld_payload`, the end's dates 25/10 and 30/10, the addressee test
+compares with fr-3 for the same client, the golden hashes of both fixtures (TUI-3). E2E: the « Contrôles » row's regex
+« au plus tard le ».
+
+### Mutants (round 1)
+SQL: the one function, live, with one substitution, `046c` run whole, the original restored (`046c`'s tests by number:
+3 dc3, 9 dl3, 10 dl3 switch on, 12 so2, 20 sf4); the reads test's on the live function, restored. Every mutant killed.
+
+| Mutant | Killed by |
+|---|---|
+| `client_event_known` reading the qualification as it stands now, not as of K (ML-1) | `046c` 20 |
+| `client_event_known` dating the end by the old row's recording (ML-1) | `046c` 20 |
+| `statement_addressees` reading the kind as it stands now (ML-1) | `046c` 20 (the curatelle qualified after K) |
+| the outcome's `not_alerted` back to `document_nettable` alone (ML-2) | `046c` 12 |
+| `settlement_set_off_alert` without MLAW-3's exclusion | `046c` 12 |
+| `cancellable` = the switch alone (TUI-5) | `046c` 9, 10 |
+| an `in_file` payout listed whatever its requested date (TUI-5) | `046c` 9, 10 |
+| `invoice_overdue` asking `invoice_to_declare` for every invoice (CC-1) | `test_declarations_reads_integration.py` (10,001 calls) |
+| web: « avant le »; L641-9 cut; « enregistrez sur la page du client la date » (ML-3, ML-4, TUI-1) | `declarations.test.ts` (fc8acdd's file: 6 of 21 fail) |
+| worker: the fixtures as first written (TUI-3) | `test_each_fr4_fixture_is_a_statement_the_books_can_make`, `test_after_the_end_of_the_mandate_nothing_is_set_off` |
+
+### Suites (round 1)
+- `supabase test db` (fresh `supabase db reset`, the final migration): 51 files, **3,148 tests, PASS** in 600 s — `046c`'s
+  24 among them; `033` byte for byte; `034`–`046b` unchanged.
+- `database.types.ts` generated from the final schema: identical to the committed file (no public signature changed: the
+  two functions added are private, `set_off_after_bar_rows` keeps its signature).
+- Worker: `ruff check .`, `ruff format --check .`, `mypy` (strict, 210 files) clean; unit pytest **1,229 passed, 5
+  xfailed**; the non-scale integration tests in CI's order, right after that `supabase test db` without a reset: **300
+  passed** in 902 s (the reads test's new CC-2 test among them).
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic (95,997 of 100,000), **0** wrong.
+- Scale, each command right after `supabase db reset` with CI's logging settings (docs/benchmarks/remittances.md
+  « M2c-7d-3 review fixes, round 1 »): the scale job's nine files in one call as `ci.yml` lists
+  them (`RECEIPT_FILES=5000`) **15 passed** in 1,566.1 s (7d-3: 1,477.9 s; the re-run prepared and approved in 33.0 s,
+  its nightly checks 5.7 s, `run_remittance_runs_checks` 507 ms own); CI's `scale-payouts` command **6 passed** in
+  1,394.1 s (« Générer le fichier » for 5,000 payouts 4.13 s, the first download 3.65 s; the 5,050 approval jobs
+  577.7 s; the held chain's nightly checks 14.15 s). No Paris date change fell in them. The VM ran slower than in 7d-3's
+  runs on paths the round does not touch (the 50k boarding 128 s against 112 s, the approval jobs about 9 % slower).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **33 files, 683 tests** passed (`declarations.test.ts` 21).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset` and the reads
+  test: **67 passed** in 7.5 min (`withheld-set-off.spec.ts`' second test new, desktop and mobile). New screenshots
+  `m2c7-virement-situation-changee` (mobile and desktop: the « Virements » hold); retaken and kept
+  `m2c7-controles-creances-a-declarer` (mobile and desktop: the help's « au plus tard le » and CPC 642's sentence). Every
+  other diff showed only dates, ids or order and was reverted.
+- Then `supabase db reset`, the stack left running.
+
+### Size
+≈ 180 non-test lines: the migration +170 / −25 (`client_event_known` 25, `settlement_set_off_alert` 30, the copy of
+`set_off_after_bar_rows` 45, `v_proc` 12, the statement functions' reads, comments), the web +12 / −4; tests +615 / −63
+(`046c` +175, the reads test +195, the worker's fixtures and tests +180, vitest +34, E2E +51).
+
+### Left open (low), with its default
+- **TUI-7, the withheld sum among « Sommes encaissées »**: the giving run's statement counts it collected (and an
+  « encaissement » « Hors dossier »), as fr-3 does for M2c-6b's `payout_returned` items and 7d-2's W; fr-4's row says
+  what it is. Default: kept (fr-4's bytes and the convention); a later template reports re-queued sums (a withheld
+  set-off, a returned payout) on a row of their own, outside the collected sum and its count, with the accountant.
+- **ML-1's knowledge date for `set_off_after_bar`**: an old row qualified later keeps its own recording as the alert's
+  knowledge date (MLAW-3): a set-off posted between the old row and its qualification is alerted (the safe side: counsel
+  records « Compensation maintenue »), while the statement dates the end by the qualification (what the code applied).
+  Which day counts as « informé » for such a row is counsel's (OQ-93, extended in COMPLIANCE).
+- **ML-3, CPC 642's extension not computed**: the help states it in the article's words; the date shown and the P0 stay
+  on the unextended day (règle du cabinet, the earlier). Default: kept; computing the next working day from
+  `business_calendar` is the alternative if ops ask for it.
+- **TUI-1, option (a)** (a side row for a publication date, no new event) not built: the help now gives the true path
+  (record the event again; in liquidation, confirm the liquidator's account again). Default: kept until the re-recording
+  proves awkward in use.
+- **TUI-6**: the drawn PDF's row text is not read in the E2E (font-encoded: no PDF text extraction in the web's
+  dependencies); the E2E checks the PDF's template and the CSV's row, the worker's fr-4 goldens pin the row's wording.
+- Everything M2c-7d-3's « Left open » lists stays open.
+
+### Round 2
+
+The review of `7cc47db` raised one item, a medium (`new:post-opening-netted-invoice-unlisted`). It was checked against
+the code first: the reviewer's scenario re-run on this stack inside `BEGIN … ROLLBACK` with `046c`'s fixtures and
+helpers (Dupont: its collection d − 3, its run netting its own invoice in full — `runk`, take 18 000 —, the file handed
+out, a liquidation effective d − 5 published d − 4 recorded, the debit d − 1 withholding the set-off). The invoice was
+`netted`, with no due date, open 18 000 and born d − 3. `client_claims_to_declare` did not list it, and neither did
+`client_post_opening_unpaid` at d or at d + 200, nor `invoice_overdue`. `private.run_payment_checks` emitted
+`payout_after_liquidation` alone, and the switch on gave the same. **Confirmed.** It was then seen failing as a test on
+`7cc47db`'s bodies (`046c` du2, the reads test's new case, two vitest pins), fixed, and its mutants killed. The
+migration `20261128090000_declarations_statement.sql` is unmerged and was edited in place. **The switch stays off**:
+nothing writes `private.feature_switch`. du2 touches payouts, so it also runs with the switch on in a rolled-back
+subtransaction and equals its switch-off twin. `033` is byte for byte unchanged, and so are `034`–`046b`.
+
+- **new:post-opening-netted-invoice-unlisted (medium; fixed at the root).**
+  - *The fault.* A run's own invoice that its plan sets off in full has no due date (`commission_invoice_due`: it is
+    paid with its run's payout, its payment line naming that payout). When the debit withholds that set-off (7d-2:
+    `settle:<run>:barred`, reversed at once, no `commission_settlement` row), the invoice stays open with no date of
+    its own. Every check keyed on a due date missed it:
+    - `post_opening_unpaid`, for a client in a proceeding or a liquidation whose invoice was born after the opening: a
+      liquidation recorded after the download, alone or after a redressement (where the run's own post-opening invoice
+      may be set off).
+    - `invoice_overdue`, for a client with no opening whose set-off was withheld by a mandate's end or a seizure. This
+      second gap has the same root and was found while checking the first: after a death recorded after the download
+      the invoice stayed open and was never dunned. 7d-2's « The documents stay open (to declare, or due) » had no
+      « due » for it.
+  - *The fix: one date for such an invoice.* `private.invoice_withheld_on(invoice)` returns the day its run's debit
+    withheld its set-off. It applies to an invoice netted with no due date that has a run, when the run's barred
+    settlement exists (`ledger_entry_idempotency_uq`) and the run has none of its settlements of it
+    (`commission_settlement_document_idx`: a set-off the debit let through is no withholding). That day stands for the
+    due date (règle du cabinet; OQ-92, which gains the question of its exigibility).
+  - *`post_opening_unpaid`.* `private.client_post_opening_unpaid` lists an open post-opening invoice once
+    `coalesce(due_date, withheld_on) < p_on`. As with a due date, the debit's day itself does not count yet. The
+    function returns `withheld_on`, the nightly's row carries it in its details and takes `oldest_days` from it.
+  - *`invoice_overdue`.* `private.run_remittance_runs_checks` gains a branch for the servicer's clients with any event
+    in effect (`v_evt`, read in the same pass as `v_proc`: only their debits can withhold, and events are never
+    deleted). It reads their invoices by `commission_invoice_client_idx` (fenced), then each one's withholding (no due
+    date only) and its open part, by keys, with the same exclusions (`invoice_to_declare`: never in liquidation, never
+    a pre-opening invoice of a proceeding).
+  - *Not the reviewer's first suggestion (the issue date).* A run's own invoice whose payout is still to come would
+    have been listed the day after its issue, though that payout pays it: the in-flight case `046c` du2 pins (Petit),
+    killing mutant M2 below.
+  - *The pages.* `post_opening_unpaid`'s help, given `withheld_on`: « La facture … est née après le jugement
+    d'ouverture. Elle devait être réglée par compensation sur le reversement du client ; cette compensation a été
+    retenue au débit le JJ/MM/AAAA : la facture n'est pas réglée, et ce jour tient lieu d'échéance (règle du cabinet). ».
+    `invoice_overdue`'s help names « une facture à régler par compensation sur son reversement dont la compensation a
+    été retenue au débit (fin du mandat, saisie : impayée depuis ce débit, règle du cabinet) ». No new legal text is
+    quoted: L622-17 IV and L641-13 III stay as read on 2026-11-25, and the debit's day is named the servicer's rule.
+  - *The tests.* `046c` du2 (switch off and on):
+    - Dupont (a liquidation alone) and Lilas (a redressement d − 20, then a liquidation recorded after the download)
+      are listed `post_opening_unpaid` from d (withheld d − 1, 1 day old) and still at d + 200, after L641-13 III's six
+      months. Dupont's row stops once a declaration names it. Neither is in `claims_to_declare` (born after the
+      opening) nor in `invoice_overdue` (a client in liquidation).
+    - Durand (a death recorded after the download) is in `invoice_overdue` from d, never in `post_opening_unpaid`.
+    - Petit (a redressement, its run netting its own invoice) is not listed while its payout is to come, nor once its
+      debit set the invoice off.
+    - Nothing is listed on the debit's day itself.
+    - `invoice_withheld_on` is null for Petit's invoice, which its run set off, even once a barred settlement of that
+      run is planted.
+  - *The reads test.* `test_declarations_reads_integration.py` adds two clients through the real jobs: each run sets
+    its own invoice off in full, the file is downloaded, then a liquidation or a death is recorded and the debit
+    withholds. Under 7d-3's plants:
+    - `invoice_withheld_on` reads 1 `commission_invoice` and 1 `ledger_entry`.
+    - `client_post_opening_unpaid` reads at most 5 rows of any table.
+    - The nightly's two functions, run whole for each servicer, stay within 60 rows a table of their 7d-2 bodies on
+      the same books. The liquidation's invoice is in `post_opening_unpaid` alone; the deceased client's in
+      `invoice_overdue` alone.
+
+### Assertions whose expected value changed (round 2, house rule R3)
+- `033`–`046b`: none.
+- `046c`: its plan goes 24 → 26 (du2 and its switch-on twin), and its privileges test lists `invoice_withheld_on`
+  (internal). The new case shifts the numbers after du1. Now: du2 5–6, dl1 7–9, dl2 10, dl3 11–12, so1 13, so2 14,
+  ww1 15–16, sf1 17–18, sf2 19–20, sf3 21, sf4 22, si1 23, sn3 24, the privileges 25, the switch 26. The earlier
+  mutant tables keep the numbers of their own rounds.
+- `declarations.test.ts`: two tests added, no pin changed. `invoice_overdue`'s pinned sentence is kept, and the new
+  words come before it.
+
+### Mutants (round 2)
+SQL: one function at a time, live, with one substitution. `046c` ran whole, then the original was restored. Every
+mutant was killed.
+
+| Mutant | Killed by |
+|---|---|
+| M1 `client_post_opening_unpaid` on the due date alone (`7cc47db`'s rule) | `046c` 5 |
+| M2 `client_post_opening_unpaid` dating an invoice with no due date by its issue date (the reviewer's first suggestion) | `046c` 5 (Petit, in flight, listed at d + 200) |
+| M3 `invoice_withheld_on` without « none of the run's settlements of it » | `046c` 5 (Petit's planted barred settlement) |
+| M4 `invoice_overdue` without the withheld branch | `046c` 5 |
+| M5 the withheld branch without `invoice_to_declare` | `046c` 5 (Dupont and Lilas dunned in liquidation) |
+| M6 the withheld branch over `v_proc` instead of `v_evt` | `046c` 5 |
+| M7 `post_opening_unpaid` from the debit's day itself (`<=`) | `046c` 5 |
+| M8 `oldest_days` from the due date alone | `046c` 5 |
+| M9 `v_evt` limited to the clients with a proceeding | `046c` 5 |
+| web: the help without `withheld_on`; `invoice_overdue`'s help as in `7cc47db` | `declarations.test.ts` (`7cc47db`'s code: 2 of 23 fail) |
+
+### Suites (round 2)
+- `supabase test db` (fresh `supabase db reset`, the final migration): 51 files, **3,150 tests, PASS** in 581 s, `046c`'s
+  26 among them. `033` is byte for byte unchanged, and so are `034`–`046b`.
+- `database.types.ts` generated from the final schema is identical to the committed file: no public signature changed
+  (`invoice_withheld_on` is private, and `client_post_opening_unpaid`, private, gains its column `withheld_on`).
+- Worker:
+  - `ruff check .`, `ruff format --check .` and `mypy` (strict, 210 files) are clean.
+  - Unit pytest: **1,229 passed, 5 xfailed**.
+  - The non-scale integration tests in CI's order, right after that `supabase test db` without a reset: **301 passed**
+    in 923 s, the reads test's new case among them.
+- Evals: mapping top-1 **1.000** (167/167); payment reconciliation **96.00 %** automatic (95,997 of 100,000), **0**
+  wrong.
+- Scale (docs/benchmarks/remittances.md « M2c-7d-3 review fixes, round 2 »), each command right after
+  `supabase db reset` with CI's logging settings:
+  - The scale job's nine files in one call as `ci.yml` lists them (`RECEIPT_FILES=5000`): **15 passed** in 1,497.6 s.
+    The re-run was prepared and approved in 30.4 s; its nightly checks took 5.1 s, `run_remittance_runs_checks` 450 ms
+    own (`v_evt` empty: the servicer has no client with an event).
+  - CI's `scale-payouts` command: **6 passed** in 1,314.5 s. « Générer le fichier » for 5,000 payouts took 3.50 s; the
+    5,050 approval jobs 526.8 s; the held chain's nightly checks 15.26 s (14.15 s in round 1, 13.09 s read
+    standalone: the VM's speed on `remittance_chain_events`, which the round does not touch).
+  - No Paris date change fell in either.
+- Web: `npm run lint` and `npm run typecheck` are clean; vitest **33 files, 685 tests** passed (`declarations.test.ts`
+  23).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`: **67
+  passed** in 7.3 min. Every screenshot diff showed only dates, ids or order and was reverted. No screenshot is new or
+  retaken: no E2E flow reaches a withheld netted invoice, and no « Contrôles » screenshot shows an `invoice_overdue`
+  row.
+- Then `supabase db reset`, the stack left running.
+
+### Size
+≈ 100 non-test lines:
+- The migration, +87 / −21: `invoice_withheld_on` 25, `client_post_opening_unpaid`'s dates 12, `invoice_overdue`'s
+  branch 20, `v_evt` 8, the nightly's row 3, comments.
+- The web, +10 / −2.
+- Tests, +277 / −4: `046c` +112, the reads test +145, vitest +20.
+
+### Left open (low), with its default
+- **An earlier invoice set off in full by a later run**: such an invoice has its own due date (its own run left it to
+  the next run by a date, M2c-5 legal#4). If the later run's debit withholds that set-off, the invoice is listed from
+  its due date (≤ 45 days after issue, L441-10 I), not from the withholding. That is still within L641-13 III's six
+  months, and it is the date the invoice prints. Default: kept.
+- **`v_evt` is a superset**: every client of the servicer with any event in effect. Each of their invoices with no
+  due date is probed once by key per nightly (one `ledger_entry` probe each). Default: kept, since the clients with an
+  event are few.
+- **OQ-92's new question**: counsel's. For a commission set off on its run's payout whose set-off the debit withheld,
+  is its exigibility (L622-24 al. 6) the day of the withholding, the payout's date or its issue date? Default: the day
+  of the withholding.
+- Everything round 1 and M2c-7d-3 left open stays open.
+
+### Round 3
+
+The review of `90fbf88` raised two items: a medium (`statement-end-knowledge-day-two-ends`, round 1's verifier finding
+re-run, raised from low at assembly: a false date on a client statement) and a low
+(`netted-invoice-unlisted-while-run-blocked-after-liquidation`, round 2's verifier probe). Each was checked against the
+code first, re-run on this stack inside `BEGIN … ROLLBACK` with `046c`'s fixtures and helpers:
+
+- **The statement.** Petit (a8): an old « Tutelle ou curatelle » row (effective d − 20, recorded d − 15), a death
+  (effective d − 14) recorded d − 12 with its notary, the row qualified a tutelle today, then a run with nothing to pay.
+  The payload was `mandate_end {guardianship, effective 05/11, recorded_on 25/11, payee estate}`, addressed to the
+  notary: « le cabinet en a été informé le 25/11/2026 … depuis le 25/11/2026 … il n'est plus déduit des reversements ».
+  Yet from the death's recording the code had applied its end: a payment booked d − 13 and matched then was set aside
+  (`client_mandate_ended`, the death's end from d − 14), one booked d − 17 was allocated (before the death's effect),
+  and set-offs were barred (`client_set_off_barred` reads `client_end_event`, the earliest end then known). The death
+  was named nowhere. **Confirmed.**
+- **The invoice.** Dupont (a6): its run nets its own invoice in full (18 000, born d − 3), approved, its payout
+  `ordered` in no file; a liquidation effective d − 5 (published d − 4) recorded. The invoice is `netted`, no due date,
+  open 18 000; the client's invoice bar is `liquidation`; the payout is held (`client_status:liquidation`). At d and at
+  d + 200 it is in no alert (not `claims_to_declare`, `post_opening_unpaid` nor `invoice_overdue`); only the run is
+  flagged at d + 200 (`remittance_payout_overdue`, `remittance_payout_not_executed`). **Confirmed.**
+
+Both were then seen failing as tests on `90fbf88`'s bodies (`046c` du3 and sf5, the fr-4 unit tests, the vitest pins,
+the reads test's new case: the function missing), fixed, and their mutants killed. The migration
+`20261128090000_declarations_statement.sql` is unmerged and was edited in place. **The switch stays off**: nothing
+writes `private.feature_switch`. du3 touches payouts, so it also runs with the switch on in a rolled-back
+subtransaction and equals its switch-off twin. `033`–`046b` are byte for byte unchanged by this round.
+
+- **statement-end-knowledge-day-two-ends (medium; fixed at the root: each end with its own day).**
+  - *Why not the earliest knowledge day alone.* Dating « informé » by the first end's day (13/11) under the tutelle's
+    effective date (05/11) would have made the next sentence false: « depuis le 13/11/2026, les paiements reçus … à
+    partir du 05/11/2026 sont mis de côté » — between 13/11 and 25/11 the code set aside only the payments received
+    from the death's day (11/11); one received 08/11 and matched then was allocated. Only a sentence per end the code
+    applied can be true of every day.
+  - *The rule.* At each moment the code applies the earliest end it knows (`client_end_event`: payments booked from it
+    set aside, set-offs barred). An end known while no end the code knew was earlier in effect therefore changed what
+    it did from its own day; one known later and later in effect changed nothing. `private.statement_mandate_end` now
+    adds `earlier` [{kind, effective_date, recorded_on}]: the ends the code applied before the end at K, in the order it
+    applied them (a window over the same `ev` rows read through `client_event_known` as of K: no new read), one per
+    Paris day (the last of the day: the earliest in effect), only the days before the end at K's own. The key is there
+    only when there is one, so a statement with one end keeps its payload.
+  - *The words (fr-4, `worker/.../statement.py`).* With `earlier`: « Le mandat a pris fin le 05/11/2026 (tutelle du
+    mandant) ; le cabinet en a été informé le 25/11/2026. » « Auparavant, le cabinet avait été informé le 13/11/2026
+    d'une fin du mandat le 11/11/2026 (décès du mandant). » « Ce que le cabinet a fait avant d'être informé d'une fin du
+    mandat l'a été selon le mandat ; depuis le 13/11/2026, les paiements reçus sur vos dossiers à partir du 11/11/2026
+    sont mis de côté, et depuis le 25/11/2026, ceux reçus à partir du 05/11/2026 : … » « … depuis le 13/11/2026, il
+    n'est plus déduit des reversements. » Each is what the probe's code did on each day. Without `earlier` the four
+    sentences are byte for byte fr-4's. `check_payload` refuses an `earlier` the sentences could not word truly (a kind
+    fr-4 does not word, a missing date, an end not known before the next one or not later in effect).
+  - *OQ-93.* Its wording stays true (the statement states each end with the day it was recorded, as known at K); it
+    gains the two-end case: the same question (is the recording the right knowledge day) decides each day stated.
+- **netted-invoice-unlisted-while-run-blocked-after-liquidation (low; fixed, bounded).**
+  - *The rule.* In `private.client_post_opening_unpaid`, an invoice netted with no due date, still open and not withheld
+    (`invoice_withheld_on` null) is listed once the client's invoice bar applies on the check's day
+    (`private.client_set_off_barred(client, p_on, 'invoice')`: a liquidation, the mandate's end, a seizure), dated from
+    the day the bar was recorded (`barred_on`; `bar`, its code), as a due date (from the next day). Round 2's rule
+    assumed the payout to come would pay it; under a bar it will not (in liquidation the payout is held, and its
+    set-off would be withheld at the debit).
+  - *The bar's day.* `private.client_set_off_bar_recorded_on(client, on, code)`, new: a liquidation, the first recording
+    among those in effect; the mandate's end, the first day the code knew an end in effect (`client_event_known`: an old
+    row from its qualification — the same rule as the statement's); a seizure, the first recording among those
+    standing. `client_event_known` moved before it in the file, unchanged.
+  - *« The run's payout is not debited ».* Read from the invoice itself, not from the run's status: a debit either set
+    it off (open 0) or withheld it (round 2's `withheld_on`, which takes precedence), and a cancelled run's full credit
+    note is applied to it at once (open 0; `046c` du3 Lilas). A first version read the run's status
+    (`approved`/`sent`); no reachable state distinguished it, and it was dropped (one keyed read fewer per invoice).
+  - *The nightly.* `post_opening_unpaid`'s row carries `barred_on` and `bar`, and takes `oldest_days` from it.
+  - *The page.* Its help, given `barred_on`: « La facture … est née après le jugement d'ouverture. Elle devait être
+    réglée par compensation sur le reversement du client, qui n'est pas débité ; depuis le JJ/MM/AAAA, jour où le
+    cabinet a enregistré la liquidation judiciaire du client [la fin du mandat, une saisie], il ne compense plus (règle
+    du cabinet) : la facture n'est pas réglée, et ce jour tient lieu d'échéance (règle du cabinet). » and « l'alerte
+    s'arrête aussi quand elle est réglée, ou quand le reversement est annulé (son avoir annule la facture). » No legal
+    text is quoted beyond round 2's (L622-17 IV, L641-13 III as read on 2026-11-25): the day is named the servicer's
+    rule.
+  - *Not extended to `invoice_overdue`* (a client with no opening whose run is held after a death or under a seizure):
+    Left open, with its default.
+
+#### Tests (round 3)
+- `046c` sf5 (the statement; plan 26 → 29 with du3 and its twin): Petit as the probe — the payments matched before the
+  qualification (`ready` d − 17, `client_mandate_ended` d − 13) and after it (d − 17 set aside), the payload's end the
+  tutelle known the qualification's day, `earlier` the death (d − 14) known d − 12, the estate's account, the notary;
+  Lambert, three ends applied in turn (a mandate end, a death, the qualified row), the two earlier in their order;
+  Moreau, a mandate end, a death known after it and later in effect (never stated), then a tutelle: `earlier` the
+  mandate end alone; Cyprès, a death and a qualification on the same Paris day: one end (`earlier` only when the days
+  differ, the expectation computed from both days); Martin, two ends recorded at 10:00 and 10:01 (Paris) on d − 6: that
+  day once, with the death's end (the last of the day).
+- `046c` du3 (the invoice; switch off and on): Dupont (a liquidation recorded today) not listed on that day, listed the
+  next (one day old), still at d + 200, never `claims_to_declare` nor `invoice_overdue`, stopped by a declaration naming
+  it; Lilas (a redressement, an old row still to qualify recorded d − 10, a death recorded d − 3) listed from the death's
+  day, its run cancelled → open 0 (the credit note applied, 15 000 HT / 18 000) and no longer listed; Roux (a
+  redressement, a seizure recorded d − 14 and released, one effective d − 5 recorded d − 2) listed from the standing
+  one's recording; Moreau (a redressement, an old row recorded d − 40 qualified a tutelle now) listed from the
+  qualification's day; Petit (a redressement, no bar) never listed; Durand (no opening, a death) in neither alert. du2
+  now also pins `barred_on` null for a withheld invoice.
+- Worker (`test_statement_fr4.py`): the block's five sentences with one earlier end, the three-step wording, the
+  one-end block unchanged with an empty `earlier`; six refused payloads. The fr-4 goldens are unchanged (no fixture
+  carries `earlier`: the change is meant not to change them).
+- Vitest (`declarations.test.ts`): the barred help for each of the three bars.
+- The reads test (`test_declarations_reads_integration.py`, new case): two clients through the real jobs, each run
+  setting its own invoice off in full, approved, its payout ordered in no file; then a liquidation, or a death and a
+  seizure. Under 7d-3's plants: `client_set_off_bar_recorded_on` reads 1, 3 and 2 `client_status_event` rows (the
+  liquidation, the mandate's end, the seizure); `client_post_opening_unpaid` the next day at most 5 rows a table (the
+  invoice listed); the nightly's `run_advance_checks` whole within 60 a table of its 7d-2 body on the same books
+  (`client_advance` 20,000 both: 7c-1's plant); the statement build with an old row, a death and the row's
+  qualification before K at most 12 rows a table (`earlier` the death).
+
+#### Assertions whose expected value changed (round 3, house rule R3)
+- `033`–`046b`: none.
+- `046c`: its plan goes 26 → 29 (du3 and its switch-on twin, sf5); the privileges test lists
+  `client_set_off_bar_recorded_on` (internal); du2's `unpaid_details` gains `barred_on` (null). The new cases shift the
+  numbers: du3 7–8, dl1 9–11, dl2 12, dl3 13–14, so1 15, so2 16, ww1 17–18, sf1 19–20, sf2 21–22, sf3 23, sf4 24, sf5
+  25, si1 26, sn3 27, the privileges 28, the switch 29.
+- `declarations.test.ts`: three tests added, no pin changed. Worker: seven tests added, no golden changed.
+- E2E: `withheld-set-off.spec.ts`' `recordEvent` waits for the event's own row (Suites); no expectation changed.
+
+#### Mutants (round 3)
+SQL: one function at a time, live, with one substitution (`create or replace` from the migration's text), `046c` run
+whole, the original restored. Worker and web: one substitution in the file, its tests run, the file restored.
+
+| Mutant | Killed by |
+|---|---|
+| S1 `statement_mandate_end` without `earlier` (`90fbf88`'s payload) | `046c` 25 |
+| S2 every end known before the end at K stated (not only those the code applied) | `046c` 25 (Moreau's death) |
+| S3 no per-day collapse | `046c` 25 (Martin) |
+| S4 the first end of a day kept, not the last | `046c` 25 (Martin) |
+| S5 the end at K's own day stated as earlier (`<=`) | `046c` 25 (Cyprès) |
+| S6 `earlier` ordered by effect, not by knowledge | `046c` 25 (Lambert) |
+| S7 the steps ordered by effect | `046c` 25 |
+| P1 `client_post_opening_unpaid` without the barred branch (`90fbf88`'s rule) | `046c` 7 |
+| P2 the barred branch for a withheld invoice too | `046c` 5 (du2's `barred_on`) |
+| P4 dated by the check's eve, not the bar's recording | `046c` 7 |
+| P5 listed on the bar's day itself | `046c` 7 |
+| B1 a liquidation dated by its effect | `046c` 7 (Dupont) |
+| B2 the mandate's end dated by the event's own recording (not as the code applied it) | `046c` 7 (Moreau) |
+| B3 an old row still to qualify counted as an end | `046c` 7 (Lilas) |
+| B4 every seizure, not the standing ones | `046c` 7 (Roux) |
+| B5 a seizure dated by its effect | `046c` 7 (Roux) |
+| N1 `oldest_days` without `barred_on`; N2 the row without `bar` | `046c` 7 |
+| W1 `earlier` ignored; W2 « il n'est plus déduit » from the end at K's day; W3 the order check removed; W4 the « Auparavant » sentence dropped; W5 the payments set aside from the last day | `test_statement_fr4.py` |
+| V1 the help without `barred_on`; V2 without the cancellation's exit; V3 a bar unworded | `declarations.test.ts` |
+
+One mutant survives, equivalent: P3, the bar read for an advance instead of an invoice. The only extra code an
+advance's bar has is `proceeding` (a redressement), which has no recorded day: the invoice is never dated by it.
+
+#### Suites (round 3)
+- `supabase test db` (fresh `supabase db reset`, the final migration): 51 files, **3,153 tests, PASS** in 591 s, `046c`'s
+  29 among them. `033`–`046b` are unchanged by this round.
+- `database.types.ts` generated from the final schema is identical to the committed file: no public signature changed
+  (`client_set_off_bar_recorded_on` is private, and `client_post_opening_unpaid`, private, gains `barred_on` and `bar`).
+- Worker:
+  - `ruff check .`, `ruff format --check .` and `mypy` (strict, 210 files) are clean.
+  - Unit pytest: **1,236 passed, 5 xfailed** (the fr-4 goldens unchanged).
+  - The non-scale integration tests in CI's order, right after that `supabase test db` without a reset: **302 passed**
+    in 969 s, the reads test's new case among them.
+- Web: `npm run lint` and `npm run typecheck` are clean; vitest **33 files, 688 tests** passed (`declarations.test.ts`
+  26).
+- E2E: the full `./scripts/e2e.sh` (desktop, mobile and the switch-on projects) after `supabase db reset`. The first run
+  gave 65 passed, 1 failed, 1 not run: `withheld-set-off.spec.ts`' first test (desktop) waited 30 s for « Virement
+  bloqué — Client en liquidation … » on « Virements » and found the payout unheld. Its root: the test's
+  `recordEvent` waited for a row of « Événements du client » showing the day — and the redressement recorded earlier
+  that day already shows it (« enregistré le … »), so under the full run's load the test went to « Virements » before
+  the liquidation was committed (the page snapshot: the payout listed, no hold; the spec alone passed, 4 of 4). Fixed in
+  the test (no code involved): it now waits for one more row than before and for the row of this event's own effective
+  date. The full run after `supabase db reset`: **67 passed** in 7.3 min. Every screenshot diff showed only dates, ids,
+  order or date-dependent alerts and was reverted; no screenshot is new or retaken (no E2E flow reaches the new
+  statement wording or the new help: the liquidation in `withheld-set-off.spec.ts` is recorded the day « Contrôles » is
+  read, and is listed only from the next day).
+- Scale (docs/benchmarks/remittances.md « M2c-7d-3 review fixes, round 3 »): the round changes two timed paths (the
+  statement's build and the nightly's `post_opening_unpaid`), so both jobs ran, each command right after
+  `supabase db reset` with CI's logging settings (reset afterwards):
+  - The scale job's nine files in one call as `ci.yml` lists them (`RECEIPT_FILES=5000`): **15 passed** in 1,491.9 s
+    (round 2: 1,497.6 s). The 50,000-line statement's build took 6.61 s and 7.74 s drawn again (6.90 / 6.67 s); the
+    nightly checks with the run booked 5.15 s, `run_advance_checks` 80 ms own.
+  - CI's `scale-payouts` command: **6 passed** in 1,320.8 s (round 2: 1,314.5 s). « Générer le fichier » for 5,000
+    payouts took 4.36 s (3.50 s; round 1 4.13 s), under the API's 8 s; the held chain's nightly checks 13.57 s.
+  - No Paris date change fell in either.
+- Evals: not run (no path they time changed).
+- Then `supabase db reset`, the stack left running.
+
+#### Size
+≈ 135 non-test lines:
+- The migration, +120 / −43, of which 25 moved (`client_event_known`, before its new caller): `statement_mandate_end`'s
+  `earlier` 15, `client_set_off_bar_recorded_on` 30, `client_post_opening_unpaid`'s branch 12, the nightly's row 3,
+  comments.
+- The worker, +49 / −6 (the block's wording 25, the payload check 15). The web, +17 / −2.
+- Tests, +514 / −7: `046c` +224, the reads test +182, the fr-4 tests +81, vitest +19, E2E +7.
+
+#### Left open (low), with its default
+- **`invoice_overdue` for a held run's own invoice**: a client with no opening whose run netting its own invoice is
+  approved, then a death or a seizure recorded before its debit: the invoice is not dunned while the run waits. No
+  legal deadline runs (no opening), the run's hold and `remittance_payout_overdue` / `remittance_payout_not_executed`
+  send ops to cancel it (« Annulez le reversement et préparez-en un nouveau »), and its credit note then annuls the
+  invoice; dunning before would be premature. Default: kept (`046c` du3 Durand pins it).
+- **The bar's day for a seizure released and imposed again**: dated by the first recording among the seizures standing
+  on the check's day, not by the start of the current run of bars. Default: kept.
+- **OQ-92 and OQ-93's questions** now cover the bar's day and each end's day (COMPLIANCE).
+- **Round 3's verifier (barred-invoice-date-moves-later):** `barred_on` is the recording day of the one bar
+  `client_set_off_barred` names (liquidation > mandate end > seizure), and once the debit withholds the invoice
+  `withheld_on` takes over. So a seizure recorded 15/11 then a liquidation recorded 23/11 moves the stand-in due date
+  from 15/11 to 23/11 and resets the alert's age, and a debit on the check's day drops the invoice for that one night.
+  Each help sentence stays true of the day it names and no legal deadline is computed. Default: 7f's hardening dates a
+  barred invoice by the earliest recording among the invoice bars in effect and keeps least(`withheld_on`,
+  `barred_on`), with 046c cases (seizure then liquidation, seizure then death, debit after a liquidation).
+- **Round 1's lows kept:** on the giving run's fr-4 statement a withheld set-off given back still counts under
+  « Sommes encaissées » and as a « Hors dossier » collection (fr-3's convention for re-queued sums; a row of its own is
+  for a later template, with the accountant).
+- Everything rounds 1–2 and M2c-7d-3 left open stays open.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

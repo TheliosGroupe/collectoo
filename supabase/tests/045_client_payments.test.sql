@@ -2669,10 +2669,13 @@ end $$;
 -- birth or mandate (« of » was request / request_no_mandate for the ones born on or after the judgment, « Désimputer »
 -- request for one), and the claw-back clause no longer applies (« clawback » was 7b's rule, read on proceeding_opened
 -- alone)
+-- (M2c-7d-3, house rule R3, ADR-0014 « M2c-7d-3 ») plan §6.2.10 [critic] L4, carried item 1: the nightly's advance_open
+-- no longer lists an advance of a client in liquidation (« nightly » was [[20000, "barred_proceeding"]]):
+-- claims_to_declare lists it (046c d) — the nightly still never says it is repaid or clawed back
 select is(pg_temp.iso('sl9'),
   '{"space": [["barred_proceeding", null, "20000", -2]], "staff": [["barred_proceeding", null]],
     "page": [["barred_proceeding", true, false]], "run_page": [["barred_proceeding", null]],
-    "desimputer": [[["barred_proceeding", -2]], [["barred_proceeding", -1]]], "nightly": [[20000, "barred_proceeding"]],
+    "desimputer": [[["barred_proceeding", -2]], [["barred_proceeding", -1]]], "nightly": null,
     "of": ["barred_proceeding", "barred_proceeding", "barred_proceeding", "barred_proceeding", "request"],
     "paid": [[], "20000", 20000], "space_after": [["barred_proceeding", "20000"]],
     "credits_space": [["procedure", "20000"]], "clawback": [[["barred_proceeding", null]], "barred_proceeding"]}'::jsonb,

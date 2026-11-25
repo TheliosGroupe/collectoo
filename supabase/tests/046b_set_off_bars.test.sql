@@ -3167,13 +3167,16 @@ begin
   c := pg_temp.adv_run(private.paris_today() + 31, true);
   return (select jsonb_agg(distinct x.code order by x.code) from public.payment_check_result x where x.run_id = c);
 end $$;
+-- (M2c-7d-3, house rule R3, ADR-0014 « M2c-7d-3 ») the list extended, as F12 says each later slice does: Dupont's
+-- invoice born before its redressement is still open in part (16 000), so claims_to_declare lists it (046c n pins the
+-- full list with 7d-3's three codes)
 select is(pg_temp.iso('sn2'),
-  '["advance_ledger", "advance_open", "client_credit_ledger", "client_credit_owed", "protection_event_to_qualify",
-    "remitted_reversal_uncovered", "repayment_request_document_missing", "seizure_standing", "set_off_after_bar",
-    "written_off_recovery_ledger"]'::jsonb,
-  'n (F12): run_advance_checks emits exactly advance_ledger, advance_open, client_credit_ledger, client_credit_owed, '
-  'protection_event_to_qualify, remitted_reversal_uncovered, repayment_request_document_missing, seizure_standing, '
-  'set_off_after_bar, written_off_recovery_ledger (later slices extend this list)');
+  '["advance_ledger", "advance_open", "claims_to_declare", "client_credit_ledger", "client_credit_owed",
+    "protection_event_to_qualify", "remitted_reversal_uncovered", "repayment_request_document_missing",
+    "seizure_standing", "set_off_after_bar", "written_off_recovery_ledger"]'::jsonb,
+  'n (F12): run_advance_checks emits exactly advance_ledger, advance_open, claims_to_declare, client_credit_ledger, '
+  'client_credit_owed, protection_event_to_qualify, remitted_reversal_uncovered, repayment_request_document_missing, '
+  'seizure_standing, set_off_after_bar, written_off_recovery_ledger (later slices extend this list)');
 
 
 -- c. The privileges of the new functions --------------------------------------------------------------------------------

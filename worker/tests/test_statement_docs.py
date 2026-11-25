@@ -56,13 +56,14 @@ from collectoo_worker.remittance.pdf import RENDERER_VERSION
 from collectoo_worker.remittance.statement import (
     CSV_HEADER,
     PDF_FILE_ROWS_MAX,
-    TEMPLATE_VERSION,
+    TEMPLATE_V3,
     TEMPLATE_VERSIONS,
     StatementPayloadError,
     line_records,
     nature,
     statement_text,
     statement_view,
+    template_of,
 )
 from collectoo_worker.remittance.statement_csv import (
     TEXT_COLUMNS,
@@ -442,12 +443,15 @@ def test_an_unknown_template_is_refused() -> None:
 
 def test_the_golden_hashes() -> None:
     assert RENDERER_VERSION == GOLDEN_RENDERER
-    assert (TEMPLATE_VERSION, INVOICE_TEMPLATE) == (
+    # (M2c-7d-3, house rule R3) the current template is fr-4 for payloads of schema 2; this
+    # fixture is of schema 1 and keeps fr-3 and every one of its bytes (the hashes below
+    # unchanged) — stored statements are never re-rendered
+    assert (TEMPLATE_V3, INVOICE_TEMPLATE) == (
         "releve-reversement-fr-3",
         "facture-commission-fr-3",
     )
-    # stored statements are never re-rendered: fr-3 alone (M2c-6b-2d)
-    assert TEMPLATE_VERSIONS == ("releve-reversement-fr-3",)
+    assert TEMPLATE_VERSIONS == ("releve-reversement-fr-3", "releve-reversement-fr-4")
+    assert template_of(statement_payload()) == TEMPLATE_V3
     p = statement_payload()
     data = render_statement_csv(p)
     assert _sha(data) == GOLDEN_STATEMENT_CSV

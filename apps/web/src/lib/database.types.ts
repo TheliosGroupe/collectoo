@@ -1743,6 +1743,50 @@ isOneToOne: false
                   Relationships: [
                     
                   ]
+                },"liquidation_payout_disposition": {
+                  Row: {
+                    "client_organization_id": string,"evidence_document_id": string,"id": string,"kind": string,"note": string | null,"organization_id": string,"recorded_at": string,"recorded_by": string,"transfer_id": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "client_organization_id": string,"evidence_document_id": string,"id"?: string,"kind": string,"note"?: string | null,"organization_id": string,"recorded_at"?: string,"recorded_by": string,"transfer_id": string
+                  }
+                  Update: {
+                    "client_organization_id"?: string,"evidence_document_id"?: string,"id"?: string,"kind"?: string,"note"?: string | null,"organization_id"?: string,"recorded_at"?: string,"recorded_by"?: string,"transfer_id"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "liquidation_payout_disposition_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "liquidation_payout_disposition_evidence_document_id_fkey"
+      columns: ["evidence_document_id"]
+isOneToOne: false
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "liquidation_payout_disposition_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "liquidation_payout_disposition_recorded_by_fkey"
+      columns: ["recorded_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "liquidation_payout_disposition_transfer_id_fkey"
+      columns: ["transfer_id"]
+isOneToOne: true
+      referencedRelation: "bank_transfer"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"mandate": {
                   Row: {
                     "client_organization_id": string,"created_at": string,"id": string,"insurance_clause_ref": string | null,"mandate_type": string,"organization_id": string,"reference": string,"signed_document_id": string | null,"signed_on": string,"updated_at": string
@@ -2777,6 +2821,50 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"set_off_outcome": {
+                  Row: {
+                    "client_organization_id": string,"entry_id": string,"evidence_document_id": string,"kind": string,"note": string | null,"organization_id": string,"recorded_at": string,"recorded_by": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "client_organization_id": string,"entry_id": string,"evidence_document_id": string,"kind": string,"note"?: string | null,"organization_id": string,"recorded_at"?: string,"recorded_by": string
+                  }
+                  Update: {
+                    "client_organization_id"?: string,"entry_id"?: string,"evidence_document_id"?: string,"kind"?: string,"note"?: string | null,"organization_id"?: string,"recorded_at"?: string,"recorded_by"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "set_off_outcome_client_organization_id_fkey"
+      columns: ["client_organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "set_off_outcome_entry_id_fkey"
+      columns: ["entry_id"]
+isOneToOne: true
+      referencedRelation: "ledger_entry"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "set_off_outcome_evidence_document_id_fkey"
+      columns: ["evidence_document_id"]
+isOneToOne: false
+      referencedRelation: "document"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "set_off_outcome_organization_id_fkey"
+      columns: ["organization_id"]
+isOneToOne: false
+      referencedRelation: "organization"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "set_off_outcome_recorded_by_fkey"
+      columns: ["recorded_by"]
+isOneToOne: false
+      referencedRelation: "app_user"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"transfer_cancellation_request": {
                   Row: {
                     "attestation": string | null,"confirm_evidence": Json | null,"confirmed_at": string | null,"confirmed_by": string | null,"evidence": NonNullable<Json>,"file_id": string,"file_version": number,"id": string,"kind": string,"organization_id": string,"reason": string,"requested_at": string,"requested_by": string,"transfer_id": string | null
@@ -3219,8 +3307,14 @@ isOneToOne: false
 "record_direct_payment":
 { Args: { "p_account_id": string,"p_amount_minor": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_item_ids": (string)[],"p_paid_on": string,"p_reason": string }; Returns: Json
                            },
+"record_liquidation_payout_disposition":
+{ Args: { "p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string,"p_note"?: string,"p_transfer_id": string }; Returns: Json
+                           },
 "record_payee_name_mismatch":
 { Args: { "p_bank_name": string,"p_idempotency_key": string,"p_note": string,"p_result": string,"p_transfer_id": string }; Returns: Json
+                           },
+"record_set_off_outcome":
+{ Args: { "p_entry_id": string,"p_evidence_document_id": string,"p_idempotency_key": string,"p_kind": string,"p_note"?: string }; Returns: Json
                            },
 "refresh_remittance_run":
 { Args: { "p_expected_version": number,"p_idempotency_key": string,"p_run_id": string }; Returns: Json

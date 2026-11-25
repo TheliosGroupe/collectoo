@@ -12,6 +12,11 @@ import {
 } from "@/lib/payments/allocation";
 import { frenchDate } from "@/lib/payments/bank-accounts";
 import { type Tone, money } from "@/lib/payments/statements";
+import {
+  claimsToDeclareHelp,
+  payoutAfterLiquidationHelp,
+  postOpeningUnpaidHelp,
+} from "@/lib/remittance/declarations";
 
 /**
  * M2b-6: money leaving the client-funds account, on the back-office. Bank returns and chargebacks (the payment's
@@ -1133,7 +1138,10 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   // review M2c-4, round 2 (legal#4): the date printed on the invoice has passed (L441-10 II: penalties from the next day)
   invoice_overdue: {
     label: "Facture de commission non réglée à sa date",
-    help: "Une facture de commission reste ouverte après la date de règlement qu'elle indique : une facture à régler au compte propre, ou une facture rétablie par l'annulation d'un reversement que le reversement suivant n'a pas compensée à temps. Préparez le reversement du client ou vérifiez son règlement.",
+    // M2c-7d-3 (plan §6.2.10, §6.4 [critic] L9): what it leaves out (to declare, never dunned)
+    // M2c-7d-3 review round 2: and the invoice netted in full whose set-off the debit withheld (SQL:
+    // private.invoice_withheld_on — the debit's day stands for its due date)
+    help: "Une facture de commission reste ouverte après la date de règlement qu'elle indique : une facture à régler au compte propre, une facture rétablie par l'annulation d'un reversement que le reversement suivant n'a pas compensée à temps, ou une facture à régler par compensation sur son reversement dont la compensation a été retenue au débit (fin du mandat, saisie : impayée depuis ce débit, règle du cabinet). Préparez le reversement du client ou vérifiez son règlement (les factures d'un client en procédure collective nées avant le jugement, et celles d'un client en liquidation, ne sont pas listées ici ; tant qu'elles ne sont pas déclarées, elles le sont dans « Créance du cabinet à déclarer » ou « Facture née après le jugement, impayée à son échéance »).",
   },
   // review M2c-5 (perf#2 = tests-ui#2, K4): a statement or an invoice's PDF the documents job could not draw
   remittance_document_failed: {
@@ -1349,6 +1357,8 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   advance_open: {
     label: "Avance du cabinet non récupérée depuis plus de 30 jours",
+    // M2c-7d-3 (plan §6.2.10 [critic] L4; carried item 1): an advance of a client in a proceeding or in liquidation is
+    // listed once, in claims_to_declare (« elle est à déclarer » below; the text is 7b's, pinned)
     help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, fin du mandat ou saisie en cours), elle reste à récupérer (page « Avances ») ; client en procédure collective ou en liquidation : ni reprise ni demande, elle est à déclarer (règle du cabinet). Un administrateur peut la passer en perte.",
   },
   // M2c-7c-1 (plan §5.2.8, §5.0 (7)): what the servicer owes a client back (419) and the recoveries of advances passed
@@ -1387,7 +1397,21 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   // alone and made before it was recorded is not alerted, MLAW-3; the event recorded after the debit's read, CC-3)
   set_off_after_bar: {
     label: "Compensation passée après une procédure, une fin de mandat ou une saisie",
-    help: "Au débit d'un reversement, une facture ou une avance du cabinet a été réglée par compensation alors que la situation du client ne le permettait plus à cette date selon la règle du cabinet (créance née avant l'ouverture de la procédure collective du client, liquidation, fin du mandat, saisie en cours ; pour une avance, toute procédure en cours) : l'événement a été enregistré après la lecture que le débit en a faite, qui n'a donc pas pu retenir cette compensation. Une compensation que seule la fin du mandat empêchait, faite avant que le cabinet n'enregistre cette fin, n'est pas signalée : c'est une règle du cabinet, qui tient la date d'enregistrement pour celle où il a connu la fin (à confirmer avec l'avocat, OQ-93). Le texte vise l'ignorance du mandataire : « Si le mandataire ignore la mort du mandant ou l'une des autres causes qui font cesser le mandat, ce qu'il a fait dans cette ignorance est valide » (art. 2008 C. civ.). Le montant indiqué est la part compensée de ces documents (comptabilité). Voyez avec l'avocat s'il faut la garder ou la rendre au client. En procédure collective, le jugement d'ouverture « emporte, de plein droit, interdiction de payer toute créance née antérieurement au jugement d'ouverture, à l'exception du paiement par compensation de créances connexes » (art. L622-7 I C. com.), et « tout acte ou tout paiement passé en violation des dispositions du présent article est annulé à la demande de tout intéressé ou du ministère public, présentée dans un délai de trois ans » (art. L622-7 III) ; Collectoo ne distingue pas les créances connexes. Prioritaire.",
+    help: "Au débit d'un reversement, une facture ou une avance du cabinet a été réglée par compensation alors que la situation du client ne le permettait plus à cette date selon la règle du cabinet (créance née avant l'ouverture de la procédure collective du client, liquidation, fin du mandat, saisie en cours ; pour une avance, toute procédure en cours) : l'événement a été enregistré après la lecture que le débit en a faite, qui n'a donc pas pu retenir cette compensation. Une compensation que seule la fin du mandat empêchait, faite avant que le cabinet n'enregistre cette fin, n'est pas signalée : c'est une règle du cabinet, qui tient la date d'enregistrement pour celle où il a connu la fin (à confirmer avec l'avocat, OQ-93). Le texte vise l'ignorance du mandataire : « Si le mandataire ignore la mort du mandant ou l'une des autres causes qui font cesser le mandat, ce qu'il a fait dans cette ignorance est valide » (art. 2008 C. civ.). Le montant indiqué est la part compensée de ces documents (comptabilité). Voyez avec l'avocat s'il faut la garder ou la rendre au client : si elle est maintenue, un administrateur l'enregistre (« Compensation maintenue », avec la réponse de l'avocat en pièce) et l'alerte s'arrête ; la rendre au client ne se fait pas encore dans Collectoo (prévenez le support). En procédure collective, le jugement d'ouverture « emporte, de plein droit, interdiction de payer toute créance née antérieurement au jugement d'ouverture, à l'exception du paiement par compensation de créances connexes » (art. L622-7 I C. com.), et « tout acte ou tout paiement passé en violation des dispositions du présent article est annulé à la demande de tout intéressé ou du ministère public, présentée dans un délai de trois ans » (art. L622-7 III) ; Collectoo ne distingue pas les créances connexes. Prioritaire.",
+  },
+  // M2c-7d-3 (plan §6.3 [critic] L8, L4, L11; [check 1] gap 9): the declarations and the payouts after a liquidation —
+  // their help said from each row's details (claimsToDeclareHelp, postOpeningUnpaidHelp, payoutAfterLiquidationHelp)
+  claims_to_declare: {
+    label: "Créance du cabinet à déclarer",
+    help: "Facture ou avance à déclarer au mandataire judiciaire (au liquidateur en liquidation).",
+  },
+  post_opening_unpaid: {
+    label: "Facture née après le jugement, impayée à son échéance",
+    help: "Une facture née après le jugement d'ouverture n'est pas réglée à son échéance.",
+  },
+  payout_after_liquidation: {
+    label: "Reversement au client après sa liquidation",
+    help: "Un reversement au client après le jugement de liquidation (art. L641-9 C. com.).",
   },
   top_up_pending: {
     label: "Approvisionnement attendu",
@@ -1537,6 +1561,12 @@ export function checkLabel(
   const l = CHECK_LABEL[code] ?? { label: code, help: "" };
   // M2c-6b-3b part 2: the held rows' alert names its days and lines whichever the switch (raised only for a chain)
   if (code === "remittance_breach_held" && opts?.details) return { label: l.label, help: breachHeldHelp(opts.details) };
+  // M2c-7d-3: the declarations' alerts and the payouts after a liquidation, from their row's details (the switch read by
+  // SQL: the row's `cancellable`)
+  if (code === "claims_to_declare" && opts?.details) return { label: l.label, help: claimsToDeclareHelp(opts.details) };
+  if (code === "post_opening_unpaid" && opts?.details) return { label: l.label, help: postOpeningUnpaidHelp(opts.details) };
+  if (code === "payout_after_liquidation" && opts?.details)
+    return { label: l.label, help: payoutAfterLiquidationHelp(opts.details) };
   const on = opts?.cancellationAfterDownload ? checkHelpOn(code, opts.details) : null;
   return on ? { label: l.label, help: on } : l;
 }
@@ -1576,7 +1606,18 @@ export function checkSubjectLink(r: {
   code: string;
   subject_type: string;
   subject_id: string | null;
+  details?: Record<string, unknown> | null;
 }): string | null {
+  // M2c-7d-3: an advance to declare, a payout after a liquidation, a set-off after a bar lead to the client's events,
+  // where the declaration and the client's procedure are recorded
+  const client = typeof r.details?.client_id === "string" ? r.details.client_id : null;
+  if (
+    client &&
+    ((r.code === "claims_to_declare" && r.subject_type === "client_advance") ||
+      r.code === "payout_after_liquidation" ||
+      r.code === "set_off_after_bar")
+  )
+    return `/backoffice/clients/${client}/reversement#evenements`;
   if (r.subject_type === "payment" && r.subject_id)
     return `/backoffice/encaissements/paiements/${r.subject_id}`;
   if (r.subject_type === "bank_statement" && r.subject_id)

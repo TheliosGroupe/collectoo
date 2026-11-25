@@ -1,4 +1,5 @@
-"""The statement's PDF (design §10; template `releve-reversement-fr-3`): the header and the seven
+"""The statement's PDF (design §10; templates `releve-reversement-fr-3` and, M2c-7d-3, `-fr-4`):
+the header and the
 sections of `statement.statement_view`, with the per-file table up to 2,000 files (above that, the
 CSV's SHA-256 for the detail). Deterministic: the bytes are a function of the payload and the CSV's
 hash (`remittance.pdf`: reportlab pinned, invariant mode, DejaVu Sans, the PDF dated K, never the
@@ -19,7 +20,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import Flowable, Spacer, Table, TableStyle
 
 from collectoo_worker.remittance import pdf
-from collectoo_worker.remittance.statement import TEMPLATE_VERSION, known_at, statement_view
+from collectoo_worker.remittance.statement import known_at, statement_view, template_of
 
 
 def render_statement_pdf(payload: Mapping[str, Any], csv_sha256: str) -> bytes:
@@ -71,7 +72,7 @@ def render_statement_pdf(payload: Mapping[str, Any], csv_sha256: str) -> bytes:
         title=f"Relevé de reversement {payload['number']}",
         author=str(payload["issuer"]["name"]),
         subject=v.title,
-        creator=TEMPLATE_VERSION,
+        creator=template_of(payload),
         footer=v.footer,
     )
 

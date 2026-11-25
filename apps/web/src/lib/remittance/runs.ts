@@ -481,7 +481,9 @@ export function runPayoutNotes(p: RunPayout, currency: string, withheld = false)
  * so it was posted and reversed at once and the next run pays it back. (Review round 1, TUI-2) its parts are the frozen
  * plan's — the invoices and advances withheld, the credit note's refund not paid with them (W = their sum less that
  * refund when the whole plan is withheld); (MLAW-4, TUI-3) `given_back_by` names the run that paid W back once it is
- * booked (its payout not returned), `giving_back_by` the one approved or sent to pay it.
+ * booked (its payout not returned), `giving_back_by` the one approved or sent to pay it. (M2c-7d-3, carried item 4) The
+ * run giving it back is followed through a returned payout to the run that pays it again; `returned_by` names the last
+ * run whose payout came back on the way (null before 7d-3, or none).
  */
 export type RunWithheld = {
   withheld_minor: string;
@@ -494,6 +496,7 @@ export type RunWithheld = {
   set_off_advances_minor: string;
   given_back_by: string | null;
   giving_back_by: string | null;
+  returned_by?: string | null;
 };
 
 /** The withheld set-off's read, or null (nothing withheld, or not the read's shape — never a guess). */
@@ -510,12 +513,13 @@ export function parseRunWithheld(x: unknown): RunWithheld | null {
   ])
     if (typeof o[k] !== "string" || !MINOR.test(o[k] as string)) return null;
   if (typeof o.withheld_on !== "string" || typeof o.reason !== "string") return null;
-  for (const k of ["given_back_by", "giving_back_by"])
+  for (const k of ["given_back_by", "giving_back_by", "returned_by"])
     if (o[k] !== null && o[k] !== undefined && typeof o[k] !== "string") return null;
   return {
     ...(o as unknown as RunWithheld),
     given_back_by: (o.given_back_by as string | null | undefined) ?? null,
     giving_back_by: (o.giving_back_by as string | null | undefined) ?? null,
+    ...(o.returned_by !== undefined ? { returned_by: (o.returned_by as string | null) ?? null } : {}),
   };
 }
 
@@ -548,12 +552,18 @@ export function runWithheldNotes(w: RunWithheld, currency: string): string[] {
       : null,
   ].filter((p): p is string => p !== null);
   const why = w.reason.replace(/^Compensation retenue : /, "");
-  // (review round 1, MLAW-4, TUI-3) given back only once that run is booked; approved or sent, it is on its way
+  // (review round 1, MLAW-4, TUI-3) given back only once that run is booked; approved or sent, it is on its way;
+  // (M2c-7d-3, carried item 4) through the run whose payout came back, when one did
+  const returned = w.returned_by ?? null;
   const back = w.given_back_by
-    ? `rendue au client par le reversement ${w.given_back_by}`
+    ? `rendue au client par le reversement ${w.given_back_by}` +
+      (returned ? ` (le virement du reversement ${returned} était revenu)` : "")
     : w.giving_back_by
-      ? `à rendre au client par le reversement ${w.giving_back_by} (validé, virement en cours)`
-      : "à rendre au client par le prochain reversement";
+      ? `à rendre au client par le reversement ${w.giving_back_by} (validé, virement en cours${
+          returned ? ` ; le virement du reversement ${returned} était revenu` : ""
+        })`
+      : "à rendre au client par le prochain reversement" +
+        (returned ? ` (le virement du reversement ${returned} qui la rendait est revenu)` : "");
   const notes = [
     `Compensation retenue au débit le ${frenchDate(w.withheld_on)} : ${money(w.withheld_minor, currency)}` +
       (parts.length > 0 ? ` (${parts.join(", ")})` : "") +

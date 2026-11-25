@@ -188,6 +188,18 @@ export type ErrorCode =
   | "payout_holder_not_client"
   | "payout_authority_required"
   | "payout_bad_attestation"
+  // M2c-7d-3 (plan §6.3, §6.4): « Enregistrer la suite » of a payout after a liquidation, « Compensation maintenue »
+  | "admin_only"
+  | "disposition_already"
+  | "disposition_not_after"
+  | "disposition_bad_kind"
+  | "disposition_evidence_required"
+  | "disposition_bad_note"
+  | "outcome_bad_kind"
+  | "outcome_not_alerted"
+  | "outcome_already"
+  | "outcome_evidence_required"
+  | "outcome_bad_note"
   | "payout_accounts_busy"
   | "terms_past"
   | "terms_too_early"
@@ -558,6 +570,21 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   payout_authority_required:
     "Joignez la pièce qui désigne qui peut recevoir (attestation du notaire ou désignation par tous les héritiers, jugement nommant le tuteur, le curateur ou le liquidateur).",
   payout_bad_attestation: "L'explication tient en 500 caractères au plus.",
+  // M2c-7d-3 (plan §6.4's refusals table)
+  admin_only: "Réservé aux administrateurs du cabinet (double authentification).",
+  disposition_already: "Une suite est déjà enregistrée pour ce reversement.",
+  disposition_not_after:
+    "Ce virement n'est pas un reversement fait au client après sa liquidation : rien à enregistrer.",
+  disposition_bad_kind: "Choisissez : ratifié par le liquidateur, ou somme reversée au liquidateur.",
+  disposition_evidence_required: "Joignez la pièce justificative.",
+  disposition_bad_note: "La note dépasse 2 000 caractères.",
+  outcome_bad_kind:
+    "Seule « compensation maintenue » peut être enregistrée : rendre la somme au client ne se fait pas encore dans Collectoo (prévenez le support).",
+  outcome_not_alerted:
+    "Cette écriture n'est pas une compensation signalée après une procédure, une fin de mandat ou une saisie.",
+  outcome_already: "L'issue de cette compensation est déjà enregistrée.",
+  outcome_evidence_required: "Joignez la pièce justificative.",
+  outcome_bad_note: "La note dépasse 2 000 caractères.",
   // M2c-7d-1 review round 1 (CC-3): the event and payout-account commands wait 2 s at most for the servicer's lock
   payout_accounts_busy:
     "Une décision sur les comptes de reversement ou les événements des clients du cabinet est en cours : réessayez dans un instant.",
