@@ -47,6 +47,7 @@ from collectoo_worker.remittance.invoice import InvoiceDocument
 from collectoo_worker.remittance.invoice_pdf import pdf_sha256, render_invoice_pdf
 from collectoo_worker.remittance.pdf import RENDERER_VERSION
 from collectoo_worker.remittance.statement import TEMPLATE_VERSION as STATEMENT_TEMPLATE
+from collectoo_worker.remittance.statement import template_of
 from collectoo_worker.remittance.statement_csv import csv_sha256, render_statement_csv
 from collectoo_worker.remittance.statement_pdf import render_statement_pdf
 from collectoo_worker.runtime.storage import Storage
@@ -96,10 +97,12 @@ class _Uploads:
             f.result()  # a failed upload fails the item
 
 
-def _record(conn: Conn, org: str) -> dict[str, Any]:
+def _record(conn: Conn, org: str, statement_template: str = STATEMENT_TEMPLATE) -> dict[str, Any]:
+    """The record step; (M2c-7d-3) a statement with the template its payload was drawn by
+    (`template_of`: fr-3 for schema 1, fr-4 for schema 2), which the step checks."""
     row = conn.execute(
         "select private.remittance_documents_record(%s, %s, %s, %s)",
-        (org, STATEMENT_TEMPLATE, INVOICE_TEMPLATE, RENDERER_VERSION),
+        (org, statement_template, INVOICE_TEMPLATE, RENDERER_VERSION),
     ).fetchone()
     return dict(row[0]) if row else {}
 
@@ -157,7 +160,7 @@ def _draw_statement(  # noqa: PLR0913, PLR0917 - the statement's run and keys
         " values (%s, %s, %s)",
         (run, pdf_sha256(pdf), csv_hash),
     )
-    return int(_record(conn, org).get("statements", 0))
+    return int(_record(conn, org, template_of(body)).get("statements", 0))
 
 
 def _failed(conn: Conn, org: str, kind: str, ref: str, exc: BaseException) -> None:

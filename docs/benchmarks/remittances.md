@@ -2631,3 +2631,298 @@ No Paris date change fell in it (08:12–08:35 UTC).
   **1.24 s** (1.08 s); 5,000 RMT debits imported in 1.5 s, the debit job **23.9 s** (chunks 9.7, 9.4 and 4.5 s; 21.3 s).
 - The 2,000 held chained runs: the funds pass 20.7 s (19.1 s), the nightly checks **13.63 s** (the standalone reading
   12.36 s; 12.40 s); once the days were imported 15.03 s (12.92 s).
+
+### M2c-7d-3: declarations, liquidation, statement (2026-11-25, same VM, the main stack alone, each run right after `supabase db reset` with CI's logging settings)
+
+What 7d-3 puts on the timed paths (ADR-0014 « M2c-7d-3 »):
+- The nightly (`run_advance_checks`): the servicer's clients with a proceeding or a liquidation read once (`v_proc`: the
+  servicer's clients by `organization_servicer_idx`, one probe each of their events), then, for those clients only,
+  `claims_to_declare`, `post_opening_unpaid` and `payout_after_liquidation` (each client's invoices, advances and runs
+  by their client indexes, each document's open part and birth by key); `advance_open` leaves those clients out;
+  `set_off_after_bar` one probe of `set_off_outcome` by its key per alerted settlement.
+- The remittance runs' checks (`invoice_overdue`): one call of `private.invoice_to_declare` per overdue invoice (its
+  client's events by `client_status_event_client_idx`; the birth only for a client with an opening).
+- The statement build (the documents job): the end of the mandate and the addressees as of K (the client's events and
+  representatives by key), the withheld rows (each by its entry's key); and `enable_seqscan = off` (D5).
+- The payout's debit, the prepare, the approval and the files: unchanged.
+
+**Stale statistics** (`worker/tests/test_declarations_reads_integration.py`, the db job; not a scale file; bound 60 per
+call): 7d-2's planted tables (and 7d-1's, 7c-1's) and 10,000 rows each of the bookings of two other transfers
+(`bank_line_booking`), the dispositions of other payouts, the outcomes of other settlements and the booked runs of two
+other servicers with their transfers (`remittance_run`), each with its keys' n_distinct pinned to 2; every plan
+generic. Per call, tuples read from the watched tables: `client_procedure_facts` 1, `client_claims_to_declare` 7,
+`client_post_opening_unpaid` 5, `client_payouts_after_liquidation` 17, « Enregistrer la suite » 23, « Compensation
+maintenue » 7, the statement build 32 without an event and 35 with fr-4's parts, `remittance_run_withheld` 1. The
+nightly's two functions read the servicer's own planted rows whole by design, as their 7d-2 bodies do on the same books
+(`run_advance_checks` 20,000 `client_advance` both; `run_remittance_runs_checks` 180,025 / 180,026 `commission_invoice`),
+none of 7d-3's planted rows, and at most 14 tuples more of any table than the 7d-2 bodies. As first written: the
+outcome's guard 10,013 `ledger_entry` (its entry read through the servicer's key), the statement build 10,000
+`remittance_pending` (its « not remitted » read by a sequential scan of every servicer's queue — present in 7c's body,
+measured here for the first time); both fixed (D5).
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset` with
+CI's logging settings: **15 passed** (1,477.9 s; 7d-2 round 1, this branch's base: 1,498.6 s). No Paris date change
+fell in it (11:45–12:10 UTC). The VM ran as slowly as in 7d-2's round 1 (the untouched allocation 76.8 s, then 80.7 s;
+7d-2 itself 72.3 s): the figures in brackets are round 1's.
+- `test_transfer_line_scale_integration.py`: the 500-member lot short of one, rolled back: options 0.51 s, booking
+  **2.00 s** (2.02 s; 499 bookings), no sequential scan of a per-member table; through the API 0.58 / 2.23 s, the
+  allocation lock held 1.91 s; the saturating lots' options 2.59 / 2.57 s, the command 2.49 / 2.47 s; 501 and 5,000
+  members refused `lot_too_large` at once. The approval jobs: **148.0 s** for 500 runs and 145.4 s for 501 (150.6 /
+  148.5 s); « Virements », « Générer le fichier » and the first download at 501 payouts 0.21 / 0.45 / 0.31 s.
+- `test_remittance_scale_integration.py` (50,000 lines): reserved in 1.30 s, prepared in **12.9 s** (load 4.46 s, price
+  5.75 s, write 2.50 s; 12.1 s); the approval job and documents 16.6 s (17.7 s; the statement's build 6.72 s, 7.33 s
+  for the one drawn again); the nightly checks 4.5 s (the draft waiting 4.0 s); the cancellation 3.61 s; the re-run
+  prepared and approved in **31.9 s** (32.4 s), its payout booked in 1.0 s; the nightly checks with the run booked
+  **5.3 s** (5.3 s), `run_advance_checks` 120 ms own (78 ms: its client probe for `v_proc` and the three checks' reads,
+  for a servicer with no client in a proceeding), `run_remittance_runs_checks` 400 ms.
+- The others: 50,000 credits imported and matched in 33.1 s, allocated in 76.8 s; 1,000 returns in 29.1 s, their
+  nightly checks 4.1 s; the statement's 50,000 credits in 45.0 s (the 13,500-credit history 12.2 s); 25 receipt jobs in
+  70.8 s (14.2 ms per receipt); the 50k boarding in 112 s (commit 30.6 s, confirm job 34.5 s); the camt.053 import job
+  31.0 s; the transfer cancellation file: set-up 44.4 s, generation with the holds 3.34 s; the 5,000-transfer file:
+  generation 3.30 s (command), download 1.23 s, the debit job 12.4 s, its nightly checks 0.37 s; the 50,000-item draft
+  requeued: options 0.08 s, booking 0.19 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** (1,293.7 s, 21.6 min; round 1: 22.2
+min). No Paris date change fell in it (12:10–12:32 UTC).
+- **« Générer le fichier » for 5,000 payouts (+50 cancelled): 3.98 s** (4.04 s); « Virements » with the 5,000 queued
+  1.78 s, the file's first download 3.31 s, under the API's 8 s. At 2,000 payouts: 0.70 / 1.47 / 1.31 s; at 200: 0.12 /
+  0.20 / 0.19 s.
+- The fixture's 5,050 approval jobs **529.9 s** (536.3 s), the 2,000 held chained runs' 209.1 s (220.5 s), the 200 runs'
+  20.8 s (21.9 s).
+- The 200 members' batch line's funds pass 0.54 s, the 200 RMT debits' job 0.77 s.
+- The 5,000-member batch line's funds pass **26.8 s** (26.2 s under auto_explain; 27.9 s), 20,000 `remittance_line`
+  rows read and 0 `client_advance`, none by a sequential scan; the nightly checks **1.21 s** (1.24 s); 5,000 RMT debits
+  imported in 1.3 s, the debit job **24.1 s** (chunks 9.6, 9.8 and 4.5 s; 23.9 s). 7d-3 changes none of these
+  statements.
+- The 2,000 held chained runs: the funds pass 20.7 s (20.7 s), the nightly checks **13.38 s** (the standalone reading
+  11.93 s; 13.63 s); once the days were imported 13.79 s (15.03 s).
+
+**The statement's build, measured apart** (one session, the same 20 booked runs, 200 builds a round, three rounds):
+`private.remittance_statement_build` takes 10.0 / 10.5 / 10.8 ms with 7d-3's body, 10.1 / 9.7 / 10.0 ms with 7d-2's,
+10.7 / 10.7 / 12.2 ms with 7d-3's without `enable_seqscan = off` — under a millisecond more a statement. Every budget
+held.
+
+### M2c-7d-3 review fixes, round 1 (2026-11-25, same VM, the main stack alone, each run right after `supabase db reset` with CI's logging settings)
+
+What round 1 changes on the timed paths (ADR-0014 « M2c-7d-3 review fixes »):
+- The remittance runs' checks (`invoice_overdue`, CC-1): the servicer's clients with a proceeding or a liquidation read
+  once (`v_proc`: the servicer's clients by `organization_servicer_idx`, one probe each of their events), then
+  `private.invoice_to_declare` called for their overdue invoices only, none for the others.
+- The nightly's `set_off_after_bar` (ML-2): each settlement part of a client with a barring event tested by one call of
+  `private.settlement_set_off_alert` (the same reads as before, in one function, evaluated once per part).
+- The statement build (ML-1): each of the client's events read through `private.client_event_known` (the event and its
+  qualification by their keys) — a client with no event, none.
+- « Compensation maintenue »: the alert's test per settlement part of its run's plan.
+
+**Stale statistics** (`worker/tests/test_declarations_reads_integration.py`, the db job; not a scale file; bound 60 per
+call), same plants as 7d-3's:
+- (CC-1) `run_remittance_runs_checks` at today + 90 emits 10,000+ `invoice_overdue` rows (7c-1's plant of the servicer's
+  invoices, overdue and open, of two clients with no event: `document_open` called 10,000+ times) and calls
+  `invoice_to_declare` **0** times (the client in liquidation's invoices are settled); the guard removed: **10,001**
+  calls. The reviewer's probe on the same plant measured that body at 4.00 / 3.46 / 3.36 s against 1.91 / 1.92 / 1.83 s
+  for 7d-2's and 1.88 / 1.97 / 1.99 s with the guard: the guard gives back 7d-2's time.
+- (CC-2) a second client walked through the real jobs (a redressement after the download, the debit withholding the
+  set-off, the next run giving it back, its payout debited then returned by a camt.053 return, the account confirmed
+  again, a later run paying it again). Tuples per call, three runs: `remittance_run_withheld` (returned, repaid)
+  `bank_transfer` 7, `remittance_run` 3–6, `bank_line_booking` 4, `ledger_entry` 3, `commission_settlement` 2,
+  `remittance_line` 2; the giving run's statement build (its withheld row) `remittance_run` 23–32 (the client's earlier
+  runs, by `remittance_run_client_idx`, pre-existing), `bank_transfer` 9–11, `ledger_entry` 10, `bank_line_booking` 2,
+  `client_status_event` 2, `remittance_line` 1 — never the 10,000 planted bookings of other transfers.
+- The first test, after a fresh reset: `client_procedure_facts` 1, `client_claims_to_declare` 7,
+  `client_post_opening_unpaid` 5, `client_payouts_after_liquidation` 16, « Enregistrer la suite » 22, « Compensation
+  maintenue » 9 (the alert's test: 2 events, 3 entries, the run, the invoice, its settlement), the statement build 27
+  without an event and 35 with fr-4's parts (`client_status_event` 8: each event and its qualification by key),
+  `remittance_run_withheld` 1; the nightly's two functions as their 7d-2 bodies on the same books
+  (`run_advance_checks` 20,000 `client_advance` both; `run_remittance_runs_checks` 180,026 `commission_invoice` both,
+  plus 1 `client_status_event` for `v_proc`).
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset` with
+CI's logging settings: **15 passed** in 1,566.1 s (14:33–14:59 UTC; 7d-3: 1,477.9 s). No Paris date change fell in it.
+The VM ran slower than in 7d-3's run on paths the round does not touch (the 50k boarding 128 s against 112 s, its
+commit 36.8 s against 30.6 s; the receipts 15.8 ms against 14.2 ms a receipt; the approval jobs of 501 runs 160.3 s
+against 145.4 s): the figures in brackets are 7d-3's.
+- `test_remittance_scale_integration.py` (50,000 lines): reserved in 1.38 s, prepared in **13.3 s** (12.9 s); the
+  approval job and documents 19.0 s (16.6 s; the statement's build 7.58 s, 7.92 s for the one drawn again — 6.72 s;
+  the client has no event: `client_event_known` is not called); the nightly checks 5.2 s with the draft waiting; the
+  cancellation 4.07 s; the re-run prepared and approved in **33.0 s** (31.9 s), its payout booked in 1.0 s; the nightly
+  checks with the run booked **5.7 s** (5.3 s): `run_advance_checks` 145 ms own (120 ms), `run_remittance_runs_checks`
+  507 ms (400 ms: `v_proc`'s probe of the servicer's clients, then no `invoice_to_declare` call — the servicer has no
+  client in a proceeding).
+- `test_transfer_line_scale_integration.py`: the 500-member lot short of one, rolled back: options 0.54 s, booking
+  **1.92 s** (2.00 s; 499 bookings), no sequential scan of a per-member table; through the API 0.70 / 2.06 s, the
+  allocation lock held 1.75 s; the saturating lots' options 2.49 / 2.78 s, the command 2.53 / 2.63 s; 501 and 5,000
+  members refused `lot_too_large` at once. The approval jobs: **150.5 s** for 500 runs and 160.3 s for 501 (148.0 /
+  145.4 s); « Virements », « Générer le fichier » and the first download at 501 payouts 0.17 / 0.37 / 0.29 s.
+- The others: 50,000 credits imported and matched in 33.7 s, allocated in 77.7 s (76.8 s); 1,000 returns in 28.8 s,
+  their nightly checks 4.2 s; the statement's 50,000 credits in 44.3 s (the 13,500-credit history 12.8 s); 25 receipt
+  jobs in 79.1 s; the camt.053 import job 34.1 s; the transfer cancellation file: set-up 42.9 s, generation with the
+  holds 3.70 s, its nightly checks 0.86 s; the 5,000-transfer file: generation 2.97 s (command), download 0.69 s, the
+  debit job 11.4 s, its nightly checks 0.40 s; the 50,000-item draft requeued: options 0.08 s, booking 0.18 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** in 1,394.1 s (15:00–15:23 UTC; 7d-3:
+1,293.7 s). No Paris date change fell in it.
+- **« Générer le fichier » for 5,000 payouts (+50 cancelled): 4.13 s** (3.98 s); « Virements » with the 5,000 queued
+  2.09 s, the file's first download 3.65 s, under the API's 8 s. At 2,000 payouts: 0.83 / 1.77 / 1.33 s; at 200: 0.13 /
+  0.20 / 0.17 s.
+- The fixture's 5,050 approval jobs **577.7 s** (529.9 s), the 2,000 held chained runs' 228.7 s (209.1 s), the 200 runs'
+  21.8 s (20.8 s).
+- The 200 members' batch line's funds pass 0.52 s, the 200 RMT debits' job 0.83 s.
+- The 5,000-member batch line's funds pass **28.1 s** (30.8 s under auto_explain; 26.8 s), 20,000 `remittance_line`
+  rows read and 0 `client_advance`, none by a sequential scan; the nightly checks **1.23 s** (1.21 s); 5,000 RMT debits
+  imported in 1.6 s, the debit job **24.2 s** (chunks 10.1, 9.3 and 4.5 s; 24.1 s). Round 1 changes none of these
+  statements.
+- The 2,000 held chained runs: the funds pass 22.3 s (20.7 s), the nightly checks **14.15 s** (the standalone reading
+  12.96 s; 13.38 s); once the days were imported 14.17 s (13.79 s).
+
+Every budget held; the differences follow the VM's speed on untouched paths (the approval jobs, the funds passes).
+
+### M2c-7d-3 review fixes, round 2 (2026-11-25, same VM, the main stack alone, each run right after `supabase db reset` with CI's logging settings)
+
+What round 2 changes on the timed paths (ADR-0014 « M2c-7d-3 review fixes », round 2):
+- **The remittance runs' checks** (`private.run_remittance_runs_checks`):
+  - `v_proc` and `v_evt` are read in one pass: the servicer's clients by `organization_servicer_idx`, each one's
+    events by `client_status_event_client_idx` (one probe per client, as before).
+  - The withheld branch of `invoice_overdue` reads, for each client with an event, its invoices by
+    `commission_invoice_client_idx`, then one `private.invoice_withheld_on` per invoice with no due date (the invoice
+    by its key, its run's barred settlement by `ledger_entry_idempotency_uq`), and `document_open` only for those
+    withheld.
+  - A servicer with no client with an event reads nothing more.
+- **The nightly's `post_opening_unpaid`** (`private.client_post_opening_unpaid`, for the clients in a proceeding or a
+  liquidation only) calls `invoice_withheld_on` once for each of their invoices with no due date.
+
+**Stale statistics** (`worker/tests/test_declarations_reads_integration.py`, the db job; not a scale file; bound 60 per
+call), with 7d-3's plants. The new test walks two clients through the real jobs: each run sets its own invoice off in
+full, the file is downloaded, then a liquidation or a death is recorded and the debit withholds the set-off. Tuples
+per call:
+- `invoice_withheld_on`: `commission_invoice` 1, `ledger_entry` 1.
+- `client_post_opening_unpaid`, the client in liquidation: `commission_invoice` 5, `client_status_event` 2,
+  `remittance_line` 2, `ledger_entry` 1.
+- The nightly's two functions whole, for each servicer, against their 7d-2 bodies on the same books:
+  - `run_advance_checks`, the liquidation's servicer: `client_advance` 20,000 both (7c-1's plant), `client_status_event`
+    7 (1), `ledger_entry` 8 (6), `commission_invoice` 8 (—), `bank_transfer` 4 (—), `remittance_run` 6 (1),
+    `remittance_line` 4 (1). The figures in brackets are the 7d-2 body's.
+  - `run_remittance_runs_checks`, the liquidation's servicer: `commission_invoice` 180,013 (180,012: 7c-1's plant, read
+    whole by design), `client_status_event` 2 (—), `private.remittance_pending` 31 (17), `remittance_run` 28 (22).
+  - `run_remittance_runs_checks`, the deceased client's servicer: `commission_invoice` 11 (8), `ledger_entry` 3 (2),
+    `client_status_event` 1 (—).
+  - All within 60 a table of the 7d-2 bodies'. The liquidation's invoice is in `post_opening_unpaid` alone, the deceased
+    client's in `invoice_overdue` alone.
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset` with
+CI's logging settings: **15 passed** in 1,497.6 s (16:58–17:23 UTC; round 1: 1,566.1 s). No Paris date change fell in
+it. The VM ran a little faster than in round 1 on the paths the round does not touch: the 50k boarding took 115 s
+(128 s), its commit 31.8 s (36.8 s), and the receipts 14.3 ms a receipt (15.8 ms). The figures in brackets are round
+1's.
+- `test_remittance_scale_integration.py` (50,000 lines):
+  - Reserved in 1.27 s and prepared in **14.5 s** (13.3 s).
+  - The approval job and documents took 18.0 s (19.0 s); the statement's build took 6.90 s, and 6.67 s for the one drawn
+    again.
+  - The nightly checks took 4.7 s (4.5 s with the draft waiting), and the cancellation 3.91 s.
+  - The re-run was prepared and approved in **30.4 s** (33.0 s), and its payout booked in 0.9 s.
+  - The nightly checks with the run booked took **5.1 s** (5.7 s): `run_advance_checks` 82 ms own (145 ms) and
+    `run_remittance_runs_checks` 450 ms (507 ms). The servicer has no client with an event, so `v_evt` is empty and the
+    withheld branch reads nothing.
+- `test_transfer_line_scale_integration.py`:
+  - The 500-member lot short of one (rolled back): options 0.49 s, booking **1.75 s** (1.92 s; 499 bookings), with no
+    sequential scan of a per-member table. Through the API: 0.56 / 1.87 s, the allocation lock held 1.63 s.
+  - The saturating lots: options 2.22 / 2.44 s, the command 2.35 / 2.35 s. 501 and 5,000 members are refused
+    `lot_too_large` at once.
+  - The approval jobs: **141.8 s** for 500 runs and 146.0 s for 501 (150.5 / 160.3 s). « Virements », « Générer le
+    fichier » and the first download at 501 payouts: 0.24 / 0.46 / 0.33 s.
+- The others:
+  - Credits: 50,000 imported and matched in 33.2 s, allocated in 74.0 s (77.7 s); 1,000 returns in 28.3 s, their
+    nightly checks 3.8 s.
+  - The statement's 50,000 credits in 41.6 s (the 13,500-credit history in 10.8 s); 25 receipt jobs in 71.4 s; the
+    camt.053 import job 29.8 s.
+  - The transfer cancellation file: set-up 39.4 s, generation with the holds 3.24 s, its nightly checks 0.78 s.
+  - The 5,000-transfer file: generation 3.10 s (command), download 0.70 s, the debit job 11.0 s, its nightly checks
+    0.34 s.
+  - The 50,000-item draft requeued: options 0.07 s, booking 0.19 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** in 1,314.5 s (17:24–17:46 UTC; round
+1: 1,394.1 s). No Paris date change fell in it.
+- **« Générer le fichier » for 5,000 payouts (+50 cancelled): 3.50 s** (4.13 s). « Virements » with the 5,000 queued
+  took 2.01 s and the file's first download 3.55 s, under the API's 8 s. At 2,000 payouts: 1.25 / 2.12 / 1.57 s; at
+  200: 0.15 / 0.19 / 0.17 s.
+- The fixture's 5,050 approval jobs took **526.8 s** (577.7 s), the 2,000 held chained runs' 217.1 s (228.7 s), the 200
+  runs' 20.3 s (21.8 s).
+- The 200 members' batch line: its funds pass 0.53 s; the 200 RMT debits' job 0.71 s.
+- The 5,000-member batch line:
+  - Its funds pass took **27.6 s** (29.2 s under auto_explain; 28.1 s), reading 20,000 `remittance_line` rows and 0
+    `client_advance`, none by a sequential scan.
+  - The nightly checks took **1.24 s** (1.23 s), `run_remittance_runs_checks` 242 ms own.
+  - 5,000 RMT debits were imported in 1.4 s; the debit job took **24.1 s** (chunks 10.3, 9.6 and 4.1 s; 24.2 s).
+- The 2,000 held chained runs: the funds pass took 22.6 s (22.3 s) and the nightly checks **15.26 s** (13.09 s read
+  standalone; 14.15 s), or 14.37 s once the days were imported (14.17 s).
+
+Every budget held. The differences follow the VM's speed on paths the round does not touch: the approval jobs, the
+funds passes and the held chains' `remittance_chain_events`. None of the servicers these files build has a client with
+an event, so the withheld branch reads nothing in them.
+
+### M2c-7d-3 review fixes, round 3 (2026-11-25, same VM, the main stack alone, each run right after `supabase db reset` with CI's logging settings)
+
+What round 3 changes on the timed paths (ADR-0014 « M2c-7d-3 review fixes », round 3):
+- **The statement's build** (`private.statement_mandate_end`): the ends the code applied before the one at K
+  (`earlier`) come from a window over the same rows it already read (the client's events effective by K, each through
+  `client_event_known`): no new read. A client with no event reads nothing more.
+- **The nightly's `post_opening_unpaid`** (`private.client_post_opening_unpaid`, for the clients in a proceeding or a
+  liquidation only): the client's invoice bar once (`client_set_off_barred`) and, when one applies, the day it was
+  recorded once (`client_set_off_bar_recorded_on`: the client's events by `client_status_event_client_idx`, each end's
+  knowledge or each standing seizure by its key).
+
+**Stale statistics** (`worker/tests/test_declarations_reads_integration.py`, the db job; not a scale file; bound 60 per
+call), with 7d-3's plants. The new test walks two clients through the real jobs: each run sets its own invoice off in
+full, approved, its payout ordered in no file; then a liquidation, or a death and a seizure, is recorded. Tuples per
+call:
+- `client_set_off_bar_recorded_on`: `client_status_event` 1 (a liquidation), 3 (the mandate's end), 2 (a seizure).
+- `client_post_opening_unpaid` the next day, the client in liquidation: `commission_invoice` 5, `client_status_event` 4,
+  `remittance_run` 3, `remittance_line` 2 (its own invoice listed).
+- `run_advance_checks` whole for its servicer, against its 7d-2 body on the same books: `client_advance` 20,000 both
+  (7c-1's plant), `client_status_event` 9 (1), `commission_invoice` 8 (—), `ledger_entry` 4 (4), `remittance_line` 3
+  (—), `bank_transfer` 2 (—), `client_payout_account` 2 (—), `remittance_run` 2 (—); within 60 a table of the 7d-2
+  body's. The invoice is in `post_opening_unpaid` alone.
+- The statement build with an old « Tutelle ou curatelle » row, a death and the row's qualification before K:
+  `client_status_event` 12, `remittance_run` 8, `commission_invoice` 6, `ledger_entry` 2 (`earlier` the death).
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset` with
+CI's logging settings: **15 passed** in 1,491.9 s (20:05–20:31 UTC; round 2: 1,497.6 s). No Paris date change fell in
+it. The figures in brackets are round 2's.
+- `test_remittance_scale_integration.py` (50,000 lines):
+  - Reserved in 1.41 s and prepared in **11.7 s** (14.5 s).
+  - The approval job and documents took 16.5 s (18.0 s); the statement's build took 6.61 s, and 7.74 s for the one
+    drawn again (6.90 / 6.67 s; the client has no event: the build reads nothing more).
+  - The nightly checks took 4.5 s (4.7 s), and the cancellation 4.11 s (3.91 s).
+  - The re-run was prepared and approved in **34.0 s** (30.4 s), and its payout booked in 0.9 s.
+  - The nightly checks with the run booked took **5.15 s** (5.1 s): `run_advance_checks` 80 ms own (82 ms) and
+    `run_remittance_runs_checks` 381 ms (450 ms).
+- The 50k boarding took 111 s (115 s), its commit 29.1 s (31.8 s); the receipts 14.7 ms a receipt (14.3 ms).
+- `test_transfer_line_scale_integration.py`: the 500-member lot short of one, booking **1.76 s** (1.75 s; 499 bookings),
+  no sequential scan of a per-member table; through the API 0.52 / 1.91 s, the allocation lock held 1.73 s; the
+  saturating lots 2.35 / 2.74 s and 2.50 / 2.62 s; 501 and 5,000 members refused `lot_too_large` at once; the approval
+  jobs **150.6 s** for 500 runs and 157.1 s for 501 (141.8 / 146.0 s).
+- The others: 50,000 credits imported and matched in 32.6 s, allocated in 77.4 s; 1,000 returns in 28.8 s, their
+  nightly checks 4.3 s; the statement's 50,000 credits in 45.6 s (the 13,500-credit history in 12.0 s); 25 receipt jobs
+  in 73.7 s; the camt.053 import job 29.5 s; the transfer cancellation file: set-up 42.2 s, generation with the holds
+  3.14 s, its nightly checks 0.82 s; the 5,000-transfer file: generation 2.78 s (command), download 1.46 s, the debit job
+  11.5 s, its nightly checks 0.38 s; the 50,000-item draft requeued: options 0.11 s, booking 0.18 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** in 1,320.8 s (20:31–20:53 UTC; round
+2: 1,314.5 s). No Paris date change fell in it.
+- **« Générer le fichier » for 5,000 payouts (+50 cancelled): 4.36 s** (3.50 s; round 1: 4.13 s). « Virements » with
+  the 5,000 queued took 1.94 s and the file's first download 3.66 s, under the API's 8 s. At 2,000 payouts: 0.73 / 1.62
+  / 1.44 s; at 200: 0.14 / 0.28 / 0.21 s.
+- The fixture's 5,050 approval jobs took **547.1 s** (526.8 s), the 2,000 held chained runs' 202.6 s (217.1 s), the 200
+  runs' 21.5 s (20.3 s).
+- The 200 members' batch line: its funds pass 0.64 s; the 200 RMT debits' job 0.92 s.
+- The 5,000-member batch line: its funds pass **25.6 s** (26.8 s under auto_explain; 27.6 s); the nightly checks
+  **1.11 s** (1.24 s), `run_remittance_runs_checks` 225 ms own; 5,000 RMT debits imported in 1.4 s, the debit job
+  **24.3 s** (chunks 10.6, 9.5 and 4.1 s; 24.1 s).
+- The 2,000 held chained runs: the funds pass took 20.0 s (22.6 s) and the nightly checks **13.57 s** (15.26 s), or
+  14.35 s once the days were imported.
+- The round touches none of these paths (the payouts' clients have no event); their spread is the VM's.
+
+Every budget held.

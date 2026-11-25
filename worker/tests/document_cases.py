@@ -61,7 +61,13 @@ COLUMNS = [
 
 
 def _line(  # noqa: PLR0913, PLR0917 - a fixture row
-    no: int, file: str, debtor: str, kind: str, amount: int, commission: int, **kw: Any
+    no: int,
+    file: str | None,
+    debtor: str | None,
+    kind: str,
+    amount: int,
+    commission: int,
+    **kw: Any,
 ) -> list[Any]:
     v: dict[str, Any] = {
         "line_no": no,
@@ -784,4 +790,155 @@ def suivi_statement_payload() -> dict[str, Any]:
     golden PDF pins every sentence's bytes."""
     p = statement_payload()
     p["previous_payouts"] = {"since": dict(SINCE), "events": copy.deepcopy(SUIVI_EVENTS)}
+    return p
+
+
+# -- M2c-7d-3: the statement fr-4 (plan §6.2.8; template `releve-reversement-fr-4`) ----------------
+
+
+def fr4_statement_payload() -> dict[str, Any]:
+    """RV-2026-000002 drawn under fr-4 (schema 2), for the end of the mandate: the client, Jean
+    Martin (an entrepreneur individuel), died on 25/10/2026; the servicer recorded it on 30/10/2026
+    (C. civ. 2008: the end and the day it was known, [critic] L13), before the run's K. As the
+    code applies it (review round 1, TUI-3): the collections are all before the death (under the
+    mandate, commission charged); from the recording nothing is set off — the run's invoice is due
+    by its term to the servicer's own account, FC-2026-000001 stays owed (the position), the payout
+    is the gross, to the estate's account; the statement is addressed to the notary (the role only:
+    the name and address stay staff's, [critic] L12)."""
+    p = statement_payload()
+    p["schema"] = 2
+    p["client"] = {
+        **p["client"],
+        "name": "Jean Martin",
+        "legal_form": "EI",
+        "share_capital_minor": None,
+        "entrepreneur_individuel": True,
+    }
+    p["mandate_end"] = {
+        "kind": "death",
+        "effective_date": "2026-10-25",
+        "recorded_on": "2026-10-30",
+        "payee_kind": "estate",
+    }
+    p["addressees"] = [{"role": "notary", "copy": False}]
+    invoice = p["documents"][0]
+    invoice.update(
+        settlement="due",
+        due_date="2026-12-02",
+        payment_reference=None,
+        own_account={
+            "iban": "FR7610107001011234567890129",
+            "bic": "TESTFRPPXXX",
+            "holder": "Collectoo",
+        },
+        settles_minor="0",
+    )
+    p["earlier_settled"] = []
+    p["totals"].update(commission_taken_minor="0", settlement_minor="0", net_minor="243345")
+    p["payout"].update(
+        amount_minor="243345", iban="FR76 •••• •••• •••• 5678", holder="SCP LENOIR NOTAIRES"
+    )
+    p["position"].update(receivable_after_minor="56840")
+    return p
+
+
+def fr4_withheld_payload() -> dict[str, Any]:
+    """RV-2026-000002 drawn under fr-4 (schema 2), for what fr-3 cannot word besides the end
+    (review round 1, TUI-3: apart from the death's fixture, consistent): a seizure in the
+    servicer's hands, recorded after RV-2026-000001's file was downloaded, made its debit
+    (28/10/2026) withhold the set-off of 200,00 € of FC-2026-000001 ([critic] M7-MONEY-5); the
+    seizure released before this run's K, the run gives the 200,00 € back (a line of its own,
+    « Hors dossier ») and sets FC-2026-000001 off again with the rest, and takes back an advance,
+    dated (§1.2) — each in the totals, the position and the payout."""
+    p = statement_payload()
+    p["schema"] = 2
+    p["lines"] = [
+        *p["lines"],
+        _line(
+            10,
+            None,
+            None,
+            "settlement_withheld",
+            20_000,
+            0,
+            items=[],
+            components=[],
+            mandate=None,
+            portfolio=None,
+            rules=[],
+            rates=[],
+            basis_minor="0",
+            commission_state="none",
+            invoice=None,
+            receipt=None,
+            encaissement_date="2026-10-28",
+            effective_date="2026-10-28",
+            deadline="2026-11-27",
+        ),
+    ]
+    p["withheld_given_back"] = [
+        {
+            "run_number": "RV-2026-000001",
+            "amount_minor": "20000",
+            "withheld_on": "2026-10-28",
+            "reason": (
+                "Compensation retenue : saisie entre les mains du cabinet depuis le 27/10/2026 "
+                "(règle du cabinet)"
+            ),
+        }
+    ]
+    p["earlier_settled"] = [
+        {**p["earlier_settled"][0], "amount_minor": "30400"},
+        {
+            "kind": "advance",
+            "document_kind": "advance",
+            "amount_minor": "15000",
+            "born_on": "2026-10-09",
+        },
+    ]
+    p["totals"].update(
+        line_count=6,
+        collected_minor="283345",
+        gross_minor="263345",
+        commission_taken_minor="76840",
+        advance_recovered_minor="15000",
+        settlement_minor="91840",
+        net_minor="171505",
+    )
+    p["natures"] = [
+        *p["natures"],
+        {
+            "kind": "settlement_withheld",
+            "reason": None,
+            "count": "1",
+            "amount_minor": "20000",
+            "commission_minor": "0",
+        },
+    ]
+    p["files"] = [
+        *p["files"],
+        {
+            "file": None,
+            "debtor": None,
+            "lines": "1",
+            "amount_minor": "20000",
+            "commission_minor": "0",
+            "late": "0",
+        },
+    ]
+    p["payout"]["amount_minor"] = "171505"
+    p["previous_payouts"]["events"][0]["on"] = "2026-10-28"
+    p["position"].update(
+        owed_before_minor="263345", receivable_before_minor="34000", advances_before_minor="15000"
+    )
+    return p
+
+
+def fr4_curatorship_payload() -> dict[str, Any]:
+    """A curatelle (no end of the mandate: C. civ. 2003 names « la tutelle des majeurs » only):
+    the statement goes to the client, its curator in copy (our rule by analogy with 467 al. 3,
+    OQ-94)."""
+    p = statement_payload()
+    p["schema"] = 2
+    p["addressees"] = [{"role": "client", "copy": False}, {"role": "curator", "copy": True}]
     return p

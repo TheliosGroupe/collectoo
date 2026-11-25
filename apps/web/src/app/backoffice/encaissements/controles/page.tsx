@@ -16,7 +16,7 @@ import { checkLabel, checkOldestDays, checkSubjectLink } from "@/lib/payments/de
 import { coverPrompt } from "@/lib/payments/remitted";
 import { money } from "@/lib/payments/statements";
 import { requestChecks } from "../debits/actions";
-import { CoverReversal, FullAdvanceCheck } from "./advance-actions";
+import { CoverReversal, FullAdvanceCheck, LiquidationPayoutDisposition, SetOffOutcome } from "./advance-actions";
 
 type Result = {
   id: string;
@@ -109,6 +109,32 @@ export default async function ChecksPage() {
       ? await supabase.from("organization").select("id, legal_name").in("id", uncoveredClients)
       : { data: [] as { id: string; legal_name: string }[] };
   const clientName = new Map((clientRows ?? []).map((c) => [c.id, c.legal_name]));
+  // M2c-7d-3: the evidences an administrator joins to « Enregistrer la suite » and « Compensation maintenue » — the
+  // status evidences of the clients those rows name
+  const procedureClients = [
+    ...new Set(
+      results
+        .filter(
+          (r) =>
+            r.code === "set_off_after_bar" || (r.code === "payout_after_liquidation" && r.details?.status === "booked"),
+        )
+        .map((r) => (typeof r.details?.client_id === "string" ? r.details.client_id : null))
+        .filter((x): x is string => x !== null),
+    ),
+  ];
+  const { data: evidenceRows } =
+    isAdmin && procedureClients.length > 0
+      ? await supabase
+          .from("document")
+          .select("id, file_name, client_organization_id")
+          .eq("kind", "client_status_evidence")
+          .in("client_organization_id", procedureClients)
+          .order("created_at", { ascending: false })
+      : { data: [] as { id: string; file_name: string | null; client_organization_id: string | null }[] };
+  const evidenceOf = (client: unknown) =>
+    (evidenceRows ?? [])
+      .filter((d) => d.client_organization_id === client)
+      .map((d) => ({ id: d.id, file_name: d.file_name }));
 
   return (
     <WidePage title="Contrôles des encaissements" back={back}>
@@ -153,6 +179,7 @@ export default async function ChecksPage() {
                   ...g.rows.map((r) => {
                     const l = checkLabel(r.code, { cancellationAfterDownload, details: r.details });
                     const to = checkSubjectLink(r);
+                    const clientId = r.details?.client_id;
                     return (
                       <li key={r.id} className="flex flex-col gap-1 py-3" data-testid="check-row" data-code={r.code}>
                         <span className="flex flex-wrap items-center gap-2">
@@ -190,6 +217,23 @@ export default async function ChecksPage() {
                               clientName.get(String(r.details?.client_id)) ?? "",
                               r.details.recorded_on,
                             )}
+                            idempotencyKey={randomUUID()}
+                          />
+                        ) : null}
+                        {isAdmin &&
+                        r.code === "payout_after_liquidation" &&
+                        r.details?.status === "booked" &&
+                        r.subject_id ? (
+                          <LiquidationPayoutDisposition
+                            transferId={r.subject_id}
+                            evidence={evidenceOf(clientId)}
+                            idempotencyKey={randomUUID()}
+                          />
+                        ) : null}
+                        {isAdmin && r.code === "set_off_after_bar" && r.subject_id ? (
+                          <SetOffOutcome
+                            entryId={r.subject_id}
+                            evidence={evidenceOf(clientId)}
                             idempotencyKey={randomUUID()}
                           />
                         ) : null}

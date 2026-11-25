@@ -2207,12 +2207,15 @@ end $$;
 -- (M2c-7d-2, house rule R3, ADR-0014 « M2c-7d-2 ») plan §6.2.6 [critic] L4, founder Q18's default: while the
 -- proceeding stands no advance is taken back or requested, whatever its birth — the one born since the opening no
 -- longer keeps the clause (it was « clawback », « art. 7.4 » in 7b, whose rule read the birth alone)
+-- (M2c-7d-3, house rule R3, ADR-0014 « M2c-7d-3 ») plan §6.2.10 [critic] L4, carried item 1: the nightly's advance_open
+-- no longer lists an advance of a client in a proceeding (« nightly » was both advances, barred_proceeding):
+-- claims_to_declare lists them, each in one alert (046c d) — the nightly still never says one is clawed back
 select is(pg_temp.iso('sm'),
   '{"desimputer": [["barred_proceeding", null], ["barred_proceeding", null]], "born": [true, true],
     "rows": [["100000", "barred_proceeding", null], ["30000", "barred_proceeding", null]],
     "space": [["100000", "barred_proceeding", null], ["30000", "barred_proceeding", null]],
     "run_pages": [[["barred_proceeding", null]], [["barred_proceeding", null]]],
-    "nightly": [[30000, "barred_proceeding"], [100000, "barred_proceeding"]]}'::jsonb,
+    "nightly": null}'::jsonb,
   'm: an advance born before the client''s proceeding opened is never said to be clawed back (barred_proceeding on '
   '« Désimputer », « Avances », the client space, the run page and the nightly); (M2c-7d-2, R3) nor one born since '
   '(L4: none while the proceeding stands)');

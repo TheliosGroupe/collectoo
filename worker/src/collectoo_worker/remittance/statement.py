@@ -15,6 +15,11 @@ free text (review legal#6). Since M2c-6b-2d (template fr-3, migration 2026111712
 words the events of the client's earlier runs' payouts posted in the window from the previous
 approved run's K to this K (`previous_payouts`), each one sentence from the payload's amounts and
 dates; a payload of another template is refused (`StatementPayloadError`, `payload_version`).
+Since M2c-7d-3 (template fr-4, migration 20261128090000) a payload of schema 2 adds what fr-3 cannot
+word — the end of the mandate known at K (« Fin du mandat »: its day, the day the servicer recorded
+it, the payee it requires), who the statement is addressed to (by role only), the set-offs a debit
+withheld that this run gives back, each advance taken back with its date — and is drawn by fr-4; a
+payload of schema 1 is drawn by fr-3, its bytes unchanged (`template_of`).
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from itertools import pairwise
 from typing import Any
 
 from collectoo_worker.payments.receipts import (
@@ -39,9 +45,13 @@ from collectoo_worker.remittance.run import percent
 
 # M2c-6b-2d (plan §5): « Suivi » words the events of the earlier runs' payouts as of K
 # (`previous_payouts`); fr-2 drew M2c-5's `follow_up`. Stored statements are never re-rendered
-# (their bytes are kept), so fr-3 alone is drawn; a payload built for another template is refused.
-TEMPLATE_VERSION = "releve-reversement-fr-3"
-TEMPLATE_VERSIONS = (TEMPLATE_VERSION,)
+# (their bytes are kept); a payload built for another template is refused.
+# M2c-7d-3 (plan §6.2.8): fr-4 draws the payloads of schema 2 (« Fin du mandat », the addressee, the
+# withheld set-off given back, the advances' dates); fr-3 still draws schema 1, byte for byte.
+TEMPLATE_V3 = "releve-reversement-fr-3"
+TEMPLATE_VERSION = "releve-reversement-fr-4"
+TEMPLATE_VERSIONS = (TEMPLATE_V3, TEMPLATE_VERSION)
+SCHEMA_TEMPLATE = {1: TEMPLATE_V3, 2: TEMPLATE_VERSION}
 PDF_FILE_ROWS_MAX = 2000  # above this, the PDF names the CSV for the detail (design §10)
 
 NATURE = {
@@ -184,11 +194,89 @@ class StatementPayloadError(ValueError):
         super().__init__(f"{self.code}: {detail}")
 
 
+FR4_KEYS = ("mandate_end", "addressees", "withheld_given_back")
+# (M2c-7d-3) what fr-4 words: an end of the mandate (C. civ. 2003 names « la mort, la tutelle des
+# majeurs », the revocation and the renunciation; a curatelle ends nothing), a payee, a role
+END_CAUSE = {
+    "death": "décès du mandant",
+    "guardianship": "tutelle du mandant",
+    "mandate_ended": "révocation ou renonciation du mandat",
+}
+PAYEE_ACCOUNT = {
+    "estate": "de la succession (compte du notaire, ou compte désigné par tous les héritiers)",
+    "protected_adult": ("ouvert au nom du mandant, la personne protégée (C. civ. 427)"),
+    "client": "du mandant, confirmé à nouveau",
+    "court_appointed": "du liquidateur",
+}
+ADDRESSEE = {
+    "notary": "À l'attention du notaire chargé de la succession du mandant",
+    "heirs": "À l'attention des héritiers du mandant",
+    "tutor": "À l'attention du tuteur du mandant",
+    "liquidator": "À l'attention du liquidateur du mandant",
+    "administrator": "À l'attention de l'administrateur judiciaire du mandant",
+}
+COPY_TO = {"curator": "Copie : le curateur du mandant"}
+
+
+def template_of(payload: Mapping[str, Any]) -> str:
+    """The template a payload is drawn by (M2c-7d-3): fr-3 for schema 1, fr-4 for schema 2."""
+    template = SCHEMA_TEMPLATE.get(payload.get("schema", 1))
+    if template is None:
+        raise StatementPayloadError(f"schema {payload.get('schema')!r}")
+    return template
+
+
 def check_payload(payload: Mapping[str, Any]) -> None:
-    """The payload is the one `releve-reversement-fr-3` draws (M2c-6b-2d, migration
-    20261117120000): its « Suivi » is `previous_payouts`, never M2c-5's `follow_up`."""
+    """The payload is one `releve-reversement-fr-3` or `-fr-4` draws (M2c-6b-2d, migration
+    20261117120000): its « Suivi » is `previous_payouts`, never M2c-5's `follow_up`; (M2c-7d-3) a
+    schema-1 payload holds none of fr-4's facts, a schema-2 one only facts fr-4 words."""
+    template = template_of(payload)
     if "follow_up" in payload or not isinstance(payload.get("previous_payouts"), Mapping):
-        raise StatementPayloadError(f"not a {TEMPLATE_VERSION} payload (« Suivi »)")
+        raise StatementPayloadError(f"not a {template} payload (« Suivi »)")
+    if template == TEMPLATE_V3:
+        if any(k in payload for k in FR4_KEYS):
+            raise StatementPayloadError(f"a {TEMPLATE_V3} payload with fr-4's facts")
+        return
+    _check_fr4(payload)
+
+
+def _check_fr4(payload: Mapping[str, Any]) -> None:
+    end = payload.get("mandate_end")
+    if end is not None and (
+        end.get("kind") not in END_CAUSE
+        or not end.get("effective_date")
+        or not end.get("recorded_on")
+        or (end.get("payee_kind") not in PAYEE_ACCOUNT and end.get("payee_kind") != "to_qualify")
+    ):
+        raise StatementPayloadError(f"mandate_end {end!r}")
+    if end is not None:
+        _check_earlier_ends(end)
+    for a in payload.get("addressees") or ():
+        known = COPY_TO if a.get("copy") else ADDRESSEE
+        if a.get("role") != "client" and a.get("role") not in known:
+            raise StatementPayloadError(f"addressee {a!r}")
+    for w in payload.get("withheld_given_back") or ():
+        if not (w.get("run_number") and w.get("withheld_on") and w.get("reason")):
+            raise StatementPayloadError(f"withheld_given_back {w!r}")
+    for e in payload.get("earlier_settled") or ():
+        if e.get("kind") == "advance" and not e.get("born_on"):
+            raise StatementPayloadError("an advance taken back without its date")
+
+
+def _check_earlier_ends(end: Mapping[str, Any]) -> None:
+    """(Review round 3) the ends the code applied before the one at K (`earlier`), as the SQL
+    builds them: each an end fr-4 words, known on a day before the next one's (the end at K's
+    last) and earlier in effect than each end before it — else its sentences would not be true."""
+    chain = [*(end.get("earlier") or ()), end]
+    for e in chain[:-1]:
+        if e.get("kind") not in END_CAUSE or not (e.get("effective_date") and e.get("recorded_on")):
+            raise StatementPayloadError(f"mandate_end earlier {e!r}")
+    for a, b in pairwise(chain):
+        if not (
+            str(a["recorded_on"]) < str(b["recorded_on"])
+            and str(a["effective_date"]) > str(b["effective_date"])
+        ):
+            raise StatementPayloadError(f"mandate_end earlier {a!r} before {b!r}")
 
 
 def line_records(payload: Mapping[str, Any]) -> list[StatementLine]:
@@ -333,8 +421,8 @@ def _paris(at: datetime) -> str:
 
 
 def statement_view(payload: Mapping[str, Any], csv_sha256: str) -> StatementView:
-    """The locked French template `releve-reversement-fr-3` filled from the payload (one it draws:
-    `check_payload`)."""
+    """The locked French template — `releve-reversement-fr-3`, or (M2c-7d-3) `-fr-4` for a payload
+    of schema 2 (`template_of`) — filled from the payload (one it draws: `check_payload`)."""
     check_payload(payload)
     money = money_of(payload)
     k = known_at(payload)
@@ -351,13 +439,14 @@ def statement_view(payload: Mapping[str, Any], csv_sha256: str) -> StatementView
         issued_line=f"Établi le {format_date(payload['issue_date'])}",
         known_line=f"Encaissements connus au {_paris(k)}",
         issuer_lines=tuple(issuer_lines),
-        client_lines=_client_lines(payload["client"]),
+        client_lines=_client_lines(payload["client"]) + _addressee_lines(payload),
         mandate_lines=tuple(_mandate_line(m) for m in payload["mandates"]),
         period_line=(
             f"Période : du {format_date(period['from'])} au {format_date(period['to'])} · "
             f"devise : {str(payload['currency']).strip()}"
         ),
         sections=(
+            *_mandate_end(payload),
             _summary(payload, money),
             _collected(payload, money, csv_sha256),
             _deductions(payload, money),
@@ -379,6 +468,73 @@ def _client_lines(client: Mapping[str, Any]) -> tuple[str, ...]:
     if addr:
         out.append(address(addr))
     return tuple(out)
+
+
+def _addressee_lines(p: Mapping[str, Any]) -> tuple[str, ...]:
+    """(M2c-7d-3, [critic] L12) who the statement is addressed to, by role only (the names and
+    addresses of who acts for the client stay staff's): the notary, the heirs, the tutor, the
+    liquidator; after a curatelle the client, the curator in copy. Nothing for the client alone."""
+    out = []
+    for a in p.get("addressees") or ():
+        role = str(a.get("role"))
+        if role == "client":
+            continue
+        out.append(COPY_TO[role] if a.get("copy") else ADDRESSEE[role])
+    return tuple(out)
+
+
+def _mandate_end(p: Mapping[str, Any]) -> tuple[Section, ...]:
+    """(M2c-7d-3, plan §6.4; [critic] L13) « Fin du mandat »: the end known at K, worded around the
+    day the servicer recorded it — what it did before was done under the mandate; from that day
+    the payments received on the files since the end are set aside (forwarded without commission
+    or restored to their payers, case by case), nothing owed to the servicer is deducted from a
+    payout, and the payouts go to the account the end requires — each what the code does.
+    (Review round 3) Each end the code applied before the one at K (`earlier`) is stated with its
+    own day: informed of an end, and nothing deducted, from the first; each end's payments set
+    aside from the day it was known."""
+    end = p.get("mandate_end")
+    if not end:
+        return ()
+    eff, rec = format_date(end["effective_date"]), format_date(end["recorded_on"])
+    # (review round 3) the ends the code applied before the one at K, each from its own day (the
+    # SQL's `earlier`): informed of an end from the first day, each end's payments set aside from
+    # the day it was known, nothing deducted from the first day — one end: the sentences as before
+    earlier = [
+        (format_date(e["effective_date"]), format_date(e["recorded_on"]), END_CAUSE[str(e["kind"])])
+        for e in end.get("earlier") or ()
+    ]
+    steps = [*((e, r) for e, r, _c in earlier), (eff, rec)]
+    first_eff, first = steps[0]
+    later = [f"depuis le {r}, ceux reçus à partir du {e}" for e, r in steps[1:]]
+    if later:
+        later[-1] = "et " + later[-1]
+    aside = ", ".join(
+        [f"depuis le {first}, les paiements reçus sur vos dossiers à partir du {first_eff} sont "
+         "mis de côté", *later]
+    )  # fmt: skip
+    before = "d'être informé d'une fin du mandat" if earlier else "d'en être informé"
+    texts = [
+        f"Le mandat a pris fin le {eff} ({END_CAUSE[str(end['kind'])]}) ; le cabinet en a été "
+        f"informé le {rec}."
+    ]
+    if earlier:
+        told = ", puis ".join(f"le {r} d'une fin du mandat le {e} ({c})" for e, r, c in earlier)
+        texts.append(f"Auparavant, le cabinet avait été informé {told}.")
+    texts += [
+        "Ce relevé rend compte des sommes encaissées pour votre compte. Ce que le cabinet a fait "
+        f"avant {before} l'a été selon le mandat ; {aside} : ils sont reversés sans commission, ou "
+        "restitués à leurs payeurs, au cas par cas.",
+        "Ce que vous devez au cabinet (factures, avances) figure dans la position ci-dessous ; "
+        f"depuis le {first}, il n'est plus déduit des reversements.",
+    ]
+    payee = str(end["payee_kind"])
+    if payee == "to_qualify":
+        texts.append(
+            "Les reversements sont suspendus jusqu'à ce que la mesure de protection soit précisée."
+        )
+    else:
+        texts.append(f"Les reversements sont faits sur le compte confirmé {PAYEE_ACCOUNT[payee]}.")
+    return (Section("Fin du mandat", texts=tuple(texts)),)
 
 
 def address(a: Mapping[str, Any]) -> str:
@@ -547,6 +703,12 @@ def _deductions(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Sect
                 f"Avoir {e['number']} du {format_date(e['issue_date'])} : {how} : "
                 f"{money(e['amount_minor'])}."
             )
+        elif e["kind"] == "advance" and e.get("born_on"):
+            # (M2c-7d-3, plan §1.2) fr-4: the advance's date, as the client space prints it
+            texts.append(
+                f"Remboursement de l'avance du cabinet née le {format_date(e['born_on'])} : "
+                f"{on_run} : {money(e['amount_minor'])}."
+            )
         elif e["kind"] == "advance":
             texts.append(
                 f"Remboursement d'une avance du cabinet : {on_run} : {money(e['amount_minor'])}."
@@ -556,9 +718,32 @@ def _deductions(p: Mapping[str, Any], money: Callable[[int | str], str]) -> Sect
                 f"{what} {e['number']} du {format_date(e['issue_date'])} : {on_run} : "
                 f"{money(e['amount_minor'])}."
             )
+    texts += [_withheld_text(w, p, money) for w in p.get("withheld_given_back") or ()]
     if not texts:
         texts.append("Aucune retenue ni compensation sur ce reversement.")
     return Section("Retenues et compensations", texts=tuple(texts))
+
+
+def _withheld_text(
+    w: Mapping[str, Any], p: Mapping[str, Any], money: Callable[[int | str], str]
+) -> str:
+    """(M2c-7d-3, plan §6.2.8; [critic] M7-MONEY-5) a set-off a debit withheld (the client's
+    status barred it by then: the reason the ledger recorded, « règle du cabinet » in it) that this
+    run gives back — « rendue » only when the run is not cancelled."""
+    head = f"Compensation retenue sur {w['run_number']}"
+    why = (
+        f"Au débit de son virement le {format_date(w['withheld_on'])}, cette compensation n'a pas "
+        f"été faite (« {w['reason']} »)"
+    )
+    if _cancelled(p):
+        return (
+            f"{head} : {money(w['amount_minor'])}. {why} ; ce reversement étant annulé, la somme "
+            "figurera sur un prochain reversement."
+        )
+    return (
+        f"{head} et rendue : {money(w['amount_minor'])}. {why} ; la somme est reprise dans le "
+        "présent reversement."
+    )
 
 
 def _document_text(
