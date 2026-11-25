@@ -35,13 +35,26 @@ the run's draft; the approval freezes it.
   every mandate, with the rows of no file it pairs with (review round 1, M7B-MONEY-1).
 * **What an unplanned payout of the run already paid of a line** (its attributions; the switch on)
   counts with that payout's -U row, outside every mandate: the client has had it (review round 1).
+* **The client's status** (M2c-7d-2, plan §6.2.4 to §6.2.6, §6.4): a document is set off only
+  when `document_nettable` holds — no bar for its kind (`Facts.set_off_bars`: a liquidation, a
+  mandate end or a standing seizure for both kinds, a proceeding for advances: SQL's
+  client_set_off_barred) and
+  born on or after the opening (`Facts.proceeding_opened_on`: SQL's client_opening_date, a
+  liquidation recorded alone included) — règle du cabinet, prudence (OQ-41, OQ-92), never L622-7's
+  own rule (its connected claims are not told apart). An invoice is born at the earliest collection
+  it charges (`OpenInvoiceRow.born_on`), never at its issue; the run's own new invoice the same, at
+  the earliest collection of its mandate's lines it charges ([critic] L1): one it may not set off is
+  issued due, with a true payment line (`payment_note`), never « par compensation ».
+* **A withheld settlement** (`settlement_withheld`, §6.2.11 (a) 8): the set-off a payout's debit
+  withheld, given back like a returned payout — no file, no commission, outside every mandate's
+  gross, held to the R124-6 date of the run it was withheld from.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -90,6 +103,9 @@ from collectoo_worker.remittance.terms import CommissionSchedule
 NBSP = "\u00a0"
 ONE_MONTH_DAYS = 30  # no terms on E: R124-6's « un mois » (the delay is at most 30 days anyway)
 COLLECTIONS = frozenset({LineKind.ALLOCATION, LineKind.FORWARD})
+# (M2c-7d-2) the items held to the date of the run line they came from: a returned payout, a
+# withheld settlement
+HELD_ITEMS = frozenset({LineKind.PAYOUT_RETURNED, LineKind.SETTLEMENT_WITHHELD})
 ADVANCE_ITEMS = frozenset({LineKind.CLIENT_ADVANCE, LineKind.CLIENT_ADVANCE_REVERSAL})
 LATE = (1 << 30,)  # the run's own documents come after every earlier one
 
@@ -196,6 +212,24 @@ class OpenInvoiceRow:
     order: tuple[int, int]  # (year, seq)
     open_minor: int  # an invoice's TTC not settled; a credit note's refund still owed
     pending_vat_minor: int = 0
+    # (M2c-7d-2, plan §6.2.4; default OQ-92) when the claim was born: the earliest collection the
+    # invoice charges (private.document_born_on), read only when the client has an opening; None:
+    # its issue date stands in
+    born_on: date | None = None
+
+    @property
+    def born(self) -> date:
+        return self.born_on or self.issue_date
+
+
+@dataclass(frozen=True)
+class SetOffBar:
+    """(M2c-7d-2, plan §6.2.6) why nothing of a kind is set off on the day (SQL's
+    client_set_off_barred: liquidation, mandate_ended, seizure, proceeding) and since when
+    (client_set_off_bar_since): the run's own invoice's payment line names the day."""
+
+    code: str
+    since: date
 
 
 @dataclass(frozen=True)
@@ -225,10 +259,16 @@ class Facts:
     payout_blockers: Sequence[str]
     commission_blockers: Sequence[str]
     payout_account_id: str | None = None
-    proceeding_opened_on: date | None = None  # §9.6: documents before it are not netted
+    # §9.6: documents born before it are not netted — (M2c-7d-2, plan §6.2.2) the opening, SQL's
+    # client_opening_date: the earliest proceeding_opened or liquidation in effect (L641-3 al. 1)
+    proceeding_opened_on: date | None = None
     open_advances: Sequence[OpenAdvanceRow] = ()  # M2c-7b: the claw-back's documents (§4.2)
     # review round 1 (M7B-MONEY-1): what the run's unplanned payouts paid of its items
     unplanned_paid: Sequence[UnplannedPaid] = ()
+    # (M2c-7d-2, plan §6.2.6) the bars of the day per kind ('invoice', 'advance'), and the draft's
+    # text of them (client_set_off_bars), which the approval and the hold before download compare
+    set_off_bars: Mapping[str, SetOffBar] = field(default_factory=dict)
+    set_off_state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -342,7 +382,7 @@ def _deadline(
     if item.kind in COLLECTIONS:
         t = _terms_on(facts, mandate, e)
         return deadlines.deadline(e, t.max_days if t else ONE_MONTH_DAYS)
-    if item.kind is LineKind.PAYOUT_RETURNED and item.held_days is not None:
+    if item.kind in HELD_ITEMS and item.held_days is not None:
         return deadlines.deadline(e, item.held_days)
     return None
 
@@ -415,7 +455,7 @@ def prepare_run(facts: Facts, cal: Calendar | None = None) -> Draft:
     for n, item in enumerate(items, start=1):
         commission, state, reason, parts, mandate, terms_id = priced(item)
         dl = _deadline(facts, deadlines, item, mandate)
-        if dl is not None and item.kind is LineKind.PAYOUT_RETURNED:
+        if dl is not None and item.kind in HELD_ITEMS:
             terms_id = terms_id or item.held_terms_id  # its terms on the line, not its mandate
         lines.append(
             DraftLine(
@@ -437,7 +477,7 @@ def prepare_run(facts: Facts, cal: Calendar | None = None) -> Draft:
             lc = results[p.item.entry_id]
             repricing.append((p, lc, p.item.entry_id in invoiced))
 
-    documents = _documents(facts, docs)
+    documents = _documents(facts, docs, lines, repriced)
     the_plan = _plan(facts, lines, repriced, docs, documents)
     check(the_plan)
     _apply_plan(facts, documents, the_plan)
@@ -507,13 +547,98 @@ def _clauses(facts: Facts, mandate: str) -> tuple[Clauses, str | None, int]:
     )
 
 
-def _documents(facts: Facts, docs: Mapping[str, MandateDocuments]) -> list[dict[str, Any]]:
+def _nettable(facts: Facts, kind: str, born: date) -> bool:
+    """document_nettable's twin (plan §6.2.6): no bar for its kind, and born on or after the
+    opening."""
+    opening = facts.proceeding_opened_on
+    return kind not in facts.set_off_bars and (opening is None or born >= opening)
+
+
+def _births(
+    facts: Facts, lines: Sequence[DraftLine], repriced: Sequence[PendingLine]
+) -> dict[str, date]:
+    """([critic] L1; review round 1, MLAW-1 and CC-6) each charged entry's collection date, the
+    lines of this run and the earlier runs' lines it reprices (as private.document_born_on counts an
+    invoice's lines and its repricings): read once per prepare, and only when a birth is compared —
+    with an opening (_nettable and _payment_note read no birth without one)."""
+    if facts.proceeding_opened_on is None:
+        return {}
+    out: dict[str, date] = {}
+    for item in [ln.item for ln in lines] + [p.item for p in repriced]:
+        if item.encaissement_date is not None:
+            out[item.entry_id] = item.encaissement_date
+    return out
+
+
+def _new_invoice_born(births: Mapping[str, date], entries: Iterable[str]) -> date | None:
+    """([critic] L1) the run's own invoice is born at the earliest collection it charges — this
+    run's lines and the earlier runs' lines it reprices (review round 1, MLAW-1)."""
+    return min((births[e] for e in entries if e in births), default=None)
+
+
+def _payment_note(facts: Facts, born: date | None, netting: bool) -> dict[str, Any] | None:
+    """(plan §6.4 [critic] L1; the exact wording is counsel's, OQ-92) the payment line of the run's
+    own invoice its plan may not set off: born before the opening, a claim to declare (never paid
+    nor set off outside the procedure), whatever the mandate's clauses; in liquidation, the
+    liquidator's; under a seizure, the reason before the ordinary line (the client may pay it);
+    after a mandate end, none (due by its term to the own account). (Review round 1, TUI-9) a
+    mandate without a netting clause never sets its invoice off: no « non compensée » nor
+    « Compensation suspendue » on it."""
+    opening = facts.proceeding_opened_on
+    bar = facts.set_off_bars.get("invoice")
+    if opening is not None and born is not None and born < opening:
+        return {
+            "text": (
+                "Créance née avant l'ouverture de la procédure collective du client (jugement du "
+                f"{format_date(opening)}) : à déclarer au mandataire judiciaire (au liquidateur en "
+                "liquidation) ; ni payée ni compensée hors de la procédure."
+            ),
+            "pay": False,
+        }
+    if bar is not None and bar.code == "liquidation":
+        netted = (
+            " : facture non compensée avec les sommes encaissées pour votre compte (règle du "
+            "cabinet) ;"
+            if netting
+            else " :"
+        )
+        return {
+            "text": (
+                f"Client en liquidation judiciaire (jugement du {format_date(bar.since)}){netted} "
+                "les droits du débiteur sont exercés par le liquidateur (art. L641-9 C. com.)."
+            ),
+            "pay": False,
+        }
+    if bar is not None and bar.code == "seizure" and netting:
+        return {
+            "text": (
+                "Compensation suspendue : saisie entre les mains du cabinet du "
+                f"{format_date(bar.since)}."
+            ),
+            "pay": True,
+        }
+    return None
+
+
+def _documents(
+    facts: Facts,
+    docs: Mapping[str, MandateDocuments],
+    lines: Sequence[DraftLine] = (),
+    repriced: Sequence[PendingLine] = (),
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    births = _births(facts, lines, repriced)
     for mandate in sorted(docs, key=lambda m: (facts.mandate_refs.get(m, m), m)):
         d = docs[mandate]
         clauses, clause_ref, days = _clauses(facts, mandate)
         if d.invoice is not None:
             inv = d.invoice
+            # (M2c-7d-2, [critic] L1) the run's own invoice, set off only when document_nettable
+            # holds — born at the earliest collection it charges, its repriced lines' included
+            # (review round 1, MLAW-1)
+            born = _new_invoice_born(births, inv.entries)
+            netted = clauses.netting and _nettable(facts, "invoice", born or facts.today)
+            note = None if netted else _payment_note(facts, born, clauses.netting)
             out.append(
                 {
                     "ref": new_invoice_ref(mandate),
@@ -523,8 +648,9 @@ def _documents(facts: Facts, docs: Mapping[str, MandateDocuments]) -> list[dict[
                     "vat": str(inv.vat_minor),
                     "ttc": str(inv.ttc_minor),
                     "vat_rate": str(inv.vat_rate),
-                    "settlement": "netted" if clauses.netting else "due",
-                    "due_days": None if clauses.netting else days,
+                    "settlement": "netted" if netted else "due",
+                    "due_days": None if netted else days,
+                    **({"payment_note": note} if note is not None else {}),
                     "clause_ref": clause_ref,
                     "lines": [
                         {
@@ -622,12 +748,12 @@ def _plan(
     _unplanned_paid_out(facts, lines, gross)
     invoices: list[OpenDocument] = []
     refunds: list[OpenDocument] = []
-    opening = facts.proceeding_opened_on
     for row in facts.open_documents:
         if row.kind == "invoice":
-            # L622-7 I (OQ-41): a document dated before the client's proceeding opened is not set
-            # off; it stays due for ops to declare (a credit note still corrects it)
-            nettable = opening is None or row.issue_date >= opening
+            # (M2c-7d-2, plan §6.2.6) document_nettable: no bar for invoices and born on or after
+            # the opening — règle du cabinet, prudence (OQ-41, OQ-92): a claim born before it stays
+            # to declare, never set off (a credit note still corrects it)
+            nettable = _nettable(facts, "invoice", row.born)
             invoices.append(
                 OpenDocument(
                     row.id,
@@ -646,7 +772,15 @@ def _plan(
         if doc["kind"] == "invoice":
             vat = 0 if facts.vat_on_debits else int(doc["vat"])
             invoices.append(
-                OpenDocument(new_invoice_ref(mandate), mandate, LATE, int(doc["ttc"]), vat)
+                OpenDocument(
+                    new_invoice_ref(mandate),
+                    mandate,
+                    LATE,
+                    int(doc["ttc"]),
+                    vat,
+                    doc["settlement"]
+                    == "netted",  # ([critic] L1) the run's own, as _documents decided
+                )
             )
         else:
             for c in doc["corrections"]:
@@ -686,10 +820,10 @@ def _advances(facts: Facts) -> list[OpenDocument]:
     recorded), each on its own mandate (NO_MANDATE: never clawed back): the plan takes them after
     the invoices, under that mandate's claw-back clause only, from that mandate's money (its advance
     items count in it: `priced`); one born before the client's proceeding is not set off (L622-7 I,
-    as an invoice issued before it; 7d changes the rule); (M2c-7c-2 [critic] M7-MONEY-3) one a
-    repayment request names is never set off — the client is asked to repay it (the approval
+    as an invoice issued before it; (M2c-7d-2) document_nettable: nor any while a bar for advances
+    stands — a proceeding, a liquidation, a mandate end, a seizure); (M2c-7c-2 [critic] M7-MONEY-3)
+    one a repayment request names is never set off — the client is asked to repay it (the approval
     re-checks it: documents_changed)."""
-    opening = facts.proceeding_opened_on
     rows = sorted(facts.open_advances, key=lambda a: (a.born_on, a.created_at, a.id))
     return [
         OpenDocument(
@@ -698,7 +832,7 @@ def _advances(facts: Facts) -> list[OpenDocument]:
             (a.born_on.toordinal(), n),
             a.open_minor,
             0,
-            (opening is None or a.born_on >= opening) and not a.requested,
+            _nettable(facts, "advance", a.born_on) and not a.requested,
         )
         for n, a in enumerate(rows)
         if a.open_minor > 0
@@ -770,6 +904,21 @@ def _header(  # noqa: PLR0913, PLR0917 - the draft's totals and identity
         "keys": list(key_states),
         "vat_on_debits": facts.vat_on_debits,
         "proceeding_opened_on": str(facts.proceeding_opened_on),
+        # (M2c-7d-2) the bars and the births the plan read, only when the client has any (the hashes
+        # of the other drafts are unchanged)
+        **(
+            {
+                "set_off": {
+                    "state": facts.set_off_state,
+                    "bars": sorted(
+                        (k, b.code, str(b.since)) for k, b in facts.set_off_bars.items()
+                    ),
+                    "born": sorted((d.id, str(d.born)) for d in facts.open_documents),
+                }
+            }
+            if facts.set_off_bars or facts.set_off_state or facts.proceeding_opened_on
+            else {}
+        ),
     }
     digest = hashlib.sha256(json.dumps(hashed, sort_keys=True, default=str).encode()).hexdigest()
     return {
@@ -799,4 +948,7 @@ def _header(  # noqa: PLR0913, PLR0917 - the draft's totals and identity
         # what the plan assumed: the approval sends the draft back when either changed
         "vat_on_debits": facts.vat_on_debits,
         "proceeding_opened_on": facts.proceeding_opened_on,
+        # (M2c-7d-2, plan §6.1) what the approval and the hold before download compare
+        "opening_on": facts.proceeding_opened_on,
+        "set_off_barred": facts.set_off_state,
     }

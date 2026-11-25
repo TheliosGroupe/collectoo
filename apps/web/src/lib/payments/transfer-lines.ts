@@ -191,8 +191,13 @@ export type TransferLinePart = {
   run_number: string | null;
   status: string | null;
   client_name: string | null;
-  /** a payout's run set-off (D) */
+  /**
+   * a payout's run: what its booking on the line's date sets off — (review M2c-7d-2 round 1, MLAW-2) D − W, the plan's
+   * set-off less what the client's status bars that day
+   */
   settlement_minor?: string | null;
+  /** (review M2c-7d-2 round 1, MLAW-2) a payout's run: what its booking withholds (W), given back by the next run */
+  withheld_minor?: string | null;
   /** a payout's run: the earliest latest execution date of its positive live lines */
   latest_execution_date?: string | null;
   /** an unplanned sweep: the servicer's share on the dedicated account once it is booked */
@@ -297,6 +302,7 @@ function parsePart(raw: unknown): TransferLinePart | null {
     status: text(raw.status),
     client_name: text(raw.client_name),
     settlement_minor: text(raw.settlement_minor),
+    withheld_minor: text(raw.withheld_minor),
     latest_execution_date: text(raw.latest_execution_date),
     share_after_minor: text(raw.share_after_minor),
     payout_iban_end: text(raw.payout_iban_end),
@@ -549,6 +555,26 @@ export function latePredecessorSentences(
   return out;
 }
 
+/**
+ * What a payout's booking does to its run's set-off (review M2c-7d-2 round 1, MLAW-2): the part it sets off on the line's
+ * date (D − W) and the part the client's status bars that day (W: posted and reversed at once by the servicer's rule,
+ * given back to the client by its next run) — both the database's (private.run_settlement_split).
+ */
+export function payoutSetOff(
+  p: Pick<TransferLinePart, "settlement_minor" | "withheld_minor">,
+  m: (minor: string | null | undefined) => string,
+): string {
+  const set = p.settlement_minor && p.settlement_minor !== "0" ? p.settlement_minor : null;
+  const held = p.withheld_minor && p.withheld_minor !== "0" ? p.withheld_minor : null;
+  const out = [
+    set ? `ses factures sont réglées par compensation (${m(set)})` : null,
+    held
+      ? `${m(held)} de compensation retenus (règle du cabinet : la situation du client ne la permet plus), rendus au client par son prochain reversement`
+      : null,
+  ].filter((x): x is string => x !== null);
+  return out.length > 0 ? ` ; ${out.join(" ; ")}` : "";
+}
+
 /** One part's sentences (plan §7.3; critic L3, L13; critic2 ML-9, ML-11). */
 function partEffects(
   options: TransferLineOptions,
@@ -560,10 +586,7 @@ function partEffects(
   const referenceLess = ["N", "O", "E0"].includes(options.class);
   switch (p.kind) {
     case "payout": {
-      const setoff =
-        p.settlement_minor && p.settlement_minor !== "0"
-          ? ` ; ses factures sont réglées par compensation (${m(p.settlement_minor)})`
-          : "";
+      const setoff = payoutSetOff(p, m);
       // M2c-6b-3a-2 (E, T16, T13): the late predecessor — its transfer stays « Annulé », its replacement by case
       if (p.late_predecessor) return latePredecessorSentences(p, client, lineDate, setoff, m);
       const out = [

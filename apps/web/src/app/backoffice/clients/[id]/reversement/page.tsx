@@ -732,6 +732,19 @@ export default async function ClientRemittancePage({
             );
           })
         )}
+        {/* M2c-7d-2 (plan §6.4): what the runs set off once the client's events are read — the servicer's rule */}
+        <div className="mt-3" data-testid="set-off-rule">
+          <InfoNote>
+            Compensations et reprises d&apos;avances par les reversements (règle du cabinet) : rien n&apos;est compensé
+            après une fin de mandat (décès, tutelle, révocation ou renonciation),
+            ni en liquidation, ni pendant une saisie entre les mains du cabinet ; en procédure collective, une facture
+            née avant le jugement (au premier encaissement qu&apos;elle facture) n&apos;est pas compensée, et aucune
+            avance n&apos;est reprise ni demandée : elles sont à déclarer. Les avoirs s&apos;imputent toujours sur leurs
+            factures. Si la situation change après la validation d&apos;un reversement, son virement n&apos;entre dans
+            aucun fichier (annulez-le et préparez-en un nouveau), ou, déjà téléchargé, la compensation est retenue à
+            son débit et rendue au client par le reversement suivant. Questions ouvertes : OQ-41, OQ-91, OQ-92.
+          </InfoNote>
+        </div>
       </Section>
 
       {isMoney && eventsView ? (

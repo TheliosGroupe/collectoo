@@ -3249,6 +3249,9 @@ isOneToOne: false
 "remittance_run_payout":
 { Args: { "p_run_id": string }; Returns: Json
                            },
+"remittance_run_withheld":
+{ Args: { "p_run_id": string }; Returns: Json
+                           },
 "request_advance_repayment":
 { Args: { "p_advance_ids": (string)[],"p_client_organization_id": string,"p_currency": string,"p_expected_total_text": string,"p_idempotency_key": string }; Returns: Json
                            },

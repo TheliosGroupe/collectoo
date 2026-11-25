@@ -28,7 +28,7 @@
 --         blocks payouts, not the confirmation gate; a guardianship then a mandate end (F16); a liquidation requires
 --         the court-appointed account whatever else; a standing seizure blocks whatever the account (L14), also an
 --         approval, and the file's generation; the client's own users act on no account of such a client; (review
---         round 1) an N = 0 run under a seizure is still approved (7d-2 bars it: pinned, MONEY-LAW-3), a tutelle and a
+--         round 1; M2c-7d-2, R3) an N = 0 run under a seizure is refused whatever N (sp9, its pin changed by 7d-2), a tutelle and a
 --         death require the estate's account, a mandate end keeps the client's users from its accounts (TUI-4);
 --   k     ([check 1] gap 10, [check 2] gap 4) epc_name_key: the writer's spellings, the boundary cases, the null rule;
 --   g     (§6.2.8) a payment of a file of a client whose mandate ended by its booking date is held client_mandate_ended
@@ -2892,12 +2892,14 @@ begin
     'settled', (select jsonb_agg(jsonb_build_array(s.kind, s.amount_minor)) from public.commission_settlement s
                 where s.run_id = v));
 end $$;
+-- (M2c-7d-2, house rule R3, ADR-0014 « M2c-7d-2 ») plan §6.2.9 [critic] L14 (carried from 7d-1): a standing seizure
+-- refuses the run whatever N — this N = 0 run goes back to draft payout_blocked:client_status:seizure and sets nothing
+-- off (7d-1 shipped it booked with its 150 000 set-off: the pin 7d-2 was to change)
 select is(pg_temp.iso('sp9'),
-  '{"blockers": ["client_status:seizure"], "approval": "booked:booked", "run": ["booked", 0, 150000],
-    "settled": [["compensation", 150000]]}'::jsonb,
-  'p (review round 1, MONEY-LAW-3, TUI-1): pinned as 7d-1 ships it — an N = 0 run under a standing seizure is still '
-  'approved with its set-off (no payout: the blockers are not read); 7d-2 bars it whatever N (plan §6.2.9), and until '
-  'then the texts say a seizure blocks the payouts only');
+  '{"blockers": ["client_status:seizure"], "approval": "back_to_draft:draft", "run": ["draft", 0, 150000],
+    "settled": null}'::jsonb,
+  'p (review round 1, MONEY-LAW-3, TUI-1; M2c-7d-2, R3): an N = 0 run under a standing seizure is refused whatever N '
+  '(plan §6.2.9) — nothing set off');
 select is(pg_temp.iso('sp9', true), pg_temp.iso('sp9'), 'p (MONEY-LAW-3): the same with the switch on');
 
 -- (review round 1, TUI-4, plan §6.2.7 « estate > protected_adult ») a death and a tutelle: the estate's account, not a

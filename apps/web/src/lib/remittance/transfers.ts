@@ -243,6 +243,10 @@ const HOLD_LABEL: Record<string, string> = {
     "Retenu : un virement annulé de ce client a peut-être été débité en retard (un débit de son montant, sous sa référence, dans une ligne groupée de son lot ou sans nos références, n'est pas encore comptabilisé) ; voyez ce débit dans « Débits et retours » d'abord, après avoir annulé ce reversement s'il reprend les mêmes encaissements",
   payment_refund_debited_late:
     "Retenu : un remboursement annulé de ce paiement a peut-être été exécuté en retard (relevé) ; rattachez ce débit d'abord, ou annulez ce remboursement",
+  // M2c-7d-2 (plan §6.2.11 (b)): the run's frozen set-off no longer holds (an event recorded since its preparation);
+  // before download a run can always be cancelled, whatever the switch
+  client_status_changed:
+    "La situation du client a changé depuis la préparation (procédure collective, liquidation, fin du mandat ou saisie) : ce reversement compense ce qui ne peut plus l'être. Annulez le reversement et préparez-en un nouveau",
 };
 
 /**

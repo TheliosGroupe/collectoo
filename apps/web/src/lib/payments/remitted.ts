@@ -154,7 +154,7 @@ export function reverseRemittedEffect(entries: RemittedEntry[], currency: string
     const m = money(amount.toString(), currency);
     if (key.startsWith("clawback:")) return `dont ${m} qu'il reprendra sur ses prochains reversements (${clause(key)})`;
     if (key === "barred")
-      return `dont ${m} non déduits de ses autres encaissements (avance antérieure à l'ouverture de la procédure collective du client)`;
+      return `dont ${m} non déduits de ses autres encaissements ni demandés (client en procédure collective : avance à déclarer)`;
     return `dont ${m} non déduits de ses autres encaissements (une demande de remboursement pourra lui être adressée)`;
   });
   return `${heads} ${advance}, ${each.join(" ; ")}.`;

@@ -2130,13 +2130,14 @@ begin
 end $$;
 select is(pg_temp.iso('sr4'),
   '{"no_own_account": "no_own_account", "identity": "identity_incomplete", "death": "recipient_unknown",
-    "guardianship": "recipient_unknown", "liquidation": "recipient_unknown", "mandate_ended": "ok",
+    "guardianship": "recipient_unknown", "liquidation": "in_proceeding", "mandate_ended": "ok",
     "written": 0, "then": "ok"}'::jsonb,
   'r: no own account to repay to → no_own_account; the servicer''s billing identity incomplete → identity_incomplete; a '
   'death, a guardianship or a liquidation recorded with nobody who acts for the client → recipient_unknown; '
   '(M2c-7d-1, ADR-0014 « M2c-7d-1 », house rule R3: the refusal narrowed, plan §6.2.12) after a mandate end the '
   'letter goes to the client: made (rolled back with its event); nothing written, then the request once the client''s '
-  'status is plain');
+  'status is plain; (M2c-7d-2, R3, plan §6.2.6 [critic] L4) a liquidation refuses it in_proceeding first, whoever acts '
+  'for the client (no advance is requested while a procedure stands)');
 
 
 -- a. ([critic] M7-MONEY-3, L7) a requested advance is never also clawed back -----------------------------------------

@@ -1312,7 +1312,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Reversement au-delà du dû",
     // M2c-7a (plan §3.7)
     // M2c-7b (plan §4.3): how it is recovered
-    help: "Un reversement débité dépassait ce qui restait dû au client : le cabinet lui a avancé la différence. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
+    help: "Un reversement débité dépassait ce qui restait dû au client : le cabinet lui a avancé la différence. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, fin du mandat ou saisie en cours), elle reste à récupérer (page « Avances ») ; client en procédure collective ou en liquidation : ni reprise ni demande, elle est à déclarer (règle du cabinet). Un administrateur peut la passer en perte.",
   },
   bank_line_unbooked: {
     label: "Débits du cabinet non comptabilisés",
@@ -1336,7 +1336,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   double_payout_open: {
     label: "Avance du cabinet après un virement hors reversement",
     // M2c-7a (plan §3.7): « ce recouvrement n'est pas encore géré » goes (7b adds how it is recovered)
-    help: "Avance du cabinet après un virement exécuté hors reversement. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
+    help: "Avance du cabinet après un virement exécuté hors reversement. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, fin du mandat ou saisie en cours), elle reste à récupérer (page « Avances ») ; client en procédure collective ou en liquidation : ni reprise ni demande, elle est à déclarer (règle du cabinet). Un administrateur peut la passer en perte.",
   },
   // M2c-7a (plan §3.4, §3.7): the advances' checks (private.run_advance_checks)
   remitted_reversal_uncovered: {
@@ -1349,7 +1349,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   advance_open: {
     label: "Avance du cabinet non récupérée depuis plus de 30 jours",
-    help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.",
+    help: "Le cabinet a avancé cette somme au client (encaissement repris après reversement, reversement au-delà du dû, virement hors reversement). Elle n'est pas encore récupérée. Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, fin du mandat ou saisie en cours), elle reste à récupérer (page « Avances ») ; client en procédure collective ou en liquidation : ni reprise ni demande, elle est à déclarer (règle du cabinet). Un administrateur peut la passer en perte.",
   },
   // M2c-7c-1 (plan §5.2.8, §5.0 (7)): what the servicer owes a client back (419) and the recoveries of advances passed
   // as a loss (7714)
@@ -1371,15 +1371,23 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     help: "Une demande de remboursement d'avance a été enregistrée il y a plus d'une heure et sa lettre (PDF) n'est pas encore produite : le client ne la trouve pas dans son espace et elle ne peut pas être imprimée. Après un échec, sa production n'est réessayée que quelques fois : retirez la demande (« Retirer la demande ») et adressez-en une nouvelle ; si l'alerte revient pour la nouvelle demande, prévenez le support.",
   },
   // M2c-7d-1 (plan §6.3; [critic] L14, L17): an old « Tutelle ou curatelle » row to qualify; a seizure served on the
-  // servicer and not released (review round 1, MONEY-LAW-3, TUI-1: the payouts only — the set-off bar is 7d-2's, ops
-  // refuse an N = 0 run by hand meanwhile; texts read 2026-11-24: CPCE L211-2, C. civ. 1347-7)
+  // servicer and not released — (M2c-7d-2, plan §6.2.6, §6.2.9) payouts and set-off barred whatever the run's net
+  // (texts read 2026-11-25: CPCE L211-2 al. 1, C. civ. 1347-7)
   protection_event_to_qualify: {
     label: "Tutelle ou curatelle à préciser",
     help: "Un événement « Tutelle ou curatelle » enregistré avant la distinction des deux mesures n'est pas encore précisé : les reversements du client restent bloqués et ses courriers ne sont pas envoyés. Sur la page du client, « Préciser : tutelle ou curatelle » avec le jugement : une tutelle met fin au mandat (art. 2003 C. civ.) et le tuteur reçoit les courriers ; une curatelle bloque les reversements (règle du cabinet) et ses courriers vont au client, avec copie au curateur.",
   },
   seizure_standing: {
     label: "Saisie entre les mains du cabinet en cours",
-    help: "Une saisie des sommes que le cabinet doit à ce client est enregistrée et n'est pas levée : aucun virement de reversement tant que la mainlevée n'est pas enregistrée. Collectoo ne bloque pas encore les compensations : un reversement sans virement (entièrement compensé) serait validé avec ses compensations ; ne le validez pas tant que la saisie court (l'acte de saisie emporte, « à concurrence des sommes pour lesquelles elle est pratiquée, attribution immédiate au profit du saisissant de la créance saisie », art. L211-2 du code des procédures civiles d'exécution ; « La compensation ne préjudicie pas aux droits acquis par des tiers » (art. 1347-7 C. civ.)). La déclaration au commissaire de justice et le paiement des causes de la saisie se font hors de Collectoo, avec l'avocat (art. L211-3 et R211-4 du code des procédures civiles d'exécution : le tiers saisi déclare « sur-le-champ » l'étendue de ses obligations). Prioritaire pendant 15 jours après son enregistrement.",
+    help: "Une saisie des sommes que le cabinet doit à ce client est enregistrée et n'est pas levée : ni virement de reversement ni compensation tant que la mainlevée n'est pas enregistrée (règle du cabinet) — un reversement, même entièrement compensé, est refusé à la validation, et une compensation déjà validée est retenue au débit puis rendue au client par le reversement suivant. L'acte de saisie emporte, « à concurrence des sommes pour lesquelles elle est pratiquée, attribution immédiate au profit du saisissant de la créance saisie » (art. L211-2 du code des procédures civiles d'exécution) ; « La compensation ne préjudicie pas aux droits acquis par des tiers » (art. 1347-7 C. civ.). La déclaration au commissaire de justice et le paiement des causes de la saisie se font hors de Collectoo, avec l'avocat (art. L211-3 et R211-4 du code des procédures civiles d'exécution : le tiers saisi déclare « sur-le-champ » l'étendue de ses obligations). Prioritaire pendant 15 jours après son enregistrement.",
+  },
+  // M2c-7d-2 (plan §6.3 [critic] M7-MONEY-5): a set-off posted at a payout's debit that an event recorded afterwards
+  // shows barred (texts read 2026-11-25: C. com. L622-7 I and III, version of 2021-10-01; review round 1: C. civ. 2008,
+  // version of 1804-03-21 — the bar the claim's birth before the opening, TUI-1; a set-off barred by the mandate's end
+  // alone and made before it was recorded is not alerted, MLAW-3; the event recorded after the debit's read, CC-3)
+  set_off_after_bar: {
+    label: "Compensation passée après une procédure, une fin de mandat ou une saisie",
+    help: "Au débit d'un reversement, une facture ou une avance du cabinet a été réglée par compensation alors que la situation du client ne le permettait plus à cette date selon la règle du cabinet (créance née avant l'ouverture de la procédure collective du client, liquidation, fin du mandat, saisie en cours ; pour une avance, toute procédure en cours) : l'événement a été enregistré après la lecture que le débit en a faite, qui n'a donc pas pu retenir cette compensation. Une compensation que seule la fin du mandat empêchait, faite avant que le cabinet n'enregistre cette fin, n'est pas signalée : c'est une règle du cabinet, qui tient la date d'enregistrement pour celle où il a connu la fin (à confirmer avec l'avocat, OQ-93). Le texte vise l'ignorance du mandataire : « Si le mandataire ignore la mort du mandant ou l'une des autres causes qui font cesser le mandat, ce qu'il a fait dans cette ignorance est valide » (art. 2008 C. civ.). Le montant indiqué est la part compensée de ces documents (comptabilité). Voyez avec l'avocat s'il faut la garder ou la rendre au client. En procédure collective, le jugement d'ouverture « emporte, de plein droit, interdiction de payer toute créance née antérieurement au jugement d'ouverture, à l'exception du paiement par compensation de créances connexes » (art. L622-7 I C. com.), et « tout acte ou tout paiement passé en violation des dispositions du présent article est annulé à la demande de tout intéressé ou du ministère public, présentée dans un délai de trois ans » (art. L622-7 III) ; Collectoo ne distingue pas les créances connexes. Prioritaire.",
   },
   top_up_pending: {
     label: "Approvisionnement attendu",

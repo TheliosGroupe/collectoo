@@ -285,7 +285,7 @@ def test_a_late_predecessor_through_the_job_then_its_return_and_its_held_item(  
     draft = request_run(tenant)
     with psycopg.connect(DB) as conn:
         held = _held_to(conn, draft)
-        rows = [str(r[0]) for r in conn.execute(HELD_TO_SQL, (draft, draft)).fetchall()]
+        rows = [str(r[0]) for r in conn.execute(HELD_TO_SQL, (draft,)).fetchall()]
     assert owed in held, rows
     assert held[owed][0] == frozen[0]
     assert rows.count(owed) == 1 and len(rows) == len(set(rows)), rows

@@ -250,6 +250,9 @@ export function refusalText(code: string | null, detail?: string | null): string
       return "Aucun compte propre n'est enregistré (Paramètres › Facturation).";
     case "before_opening":
       return "Avance née avant l'ouverture de la procédure collective du client : le client ne peut pas la payer, aucune demande ne lui est adressée.";
+    case "in_proceeding":
+      // M2c-7d-2 (plan §6.2.6 [critic] L4, §6.4): while a proceeding stands, whatever the advance's birth
+      return "Client en procédure collective : l'avance n'est ni reprise ni demandée ; elle est à déclarer.";
     case "recipient_unknown":
       // M2c-7d-1 (plan §6.4, §6.2.12): who acts for the client is recorded on its page (« Événements du client »);
       // (review round 1, TUI-6) an old « Tutelle ou curatelle » row takes nobody before it is qualified

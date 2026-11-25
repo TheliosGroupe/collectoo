@@ -17,6 +17,7 @@ import {
   type OpenDocuments,
   creditLabel,
   creditOwedText,
+  owesAdvanceNote,
   staffCreditGroups,
   writtenOffLine,
 } from "@/lib/remittance/settlements";
@@ -168,8 +169,8 @@ export function ClientOwes({
                     Demandé le {frenchDay(requestOf(a.id)?.issue_date ?? null)} ({requestOf(a.id)?.number})
                   </span>
                 ) : null}
-                {a.before_opening ? (
-                  <span className="text-zinc-600 dark:text-zinc-400">Créance antérieure à l&apos;ouverture de la procédure du client</span>
+                {owesAdvanceNote(a) ? (
+                  <span className="text-zinc-600 dark:text-zinc-400">{owesAdvanceNote(a)}</span>
                 ) : null}
               </li>
             ))}

@@ -95,9 +95,10 @@ describe("« Avances » (4.1.7)", () => {
     expect(advanceRecovery({ ...row, in_flight_run: { run_id: "r3", number: "RV-2026-000003" } })).toBe(
       "Reprise par RV-2026-000003 en cours",
     );
-    // (review round 1, M7B-MONEY-2) never « reprise » for an advance the prepare will not set off
+    // (review round 1, M7B-MONEY-2) never « reprise » for an advance the prepare will not set off — (M2c-7d-2, R3)
+    // any while the client's proceeding stands, whatever its birth, nor requested ([critic] L4)
     expect(advanceRecovery({ ...row, recovery: "barred_proceeding", clause_ref: null })).toBe(
-      "Pas de reprise : avance née avant l'ouverture de la procédure collective du client",
+      "Pas de reprise ni de demande : client en procédure collective ; avance à déclarer",
     );
   });
 
@@ -202,7 +203,9 @@ describe("the client space (4.3)", () => {
     for (const line of [t.heading, ...t.lines]) expect(line).not.toMatch(/abandon|remise/i);
   });
 
-  // (review round 1, M7B-MONEY-2) never « reprise » for an advance born before the client's proceeding
+  // (review round 1, M7B-MONEY-2) never « reprise » for an advance born before the client's proceeding — (M2c-7d-2,
+  // R3) barred_proceeding is every advance while the proceeding stands ([critic] L4): « antérieure à l'ouverture »
+  // would be false of one born after it, so the line says the procedure stands (here and in the liquidation case)
   it("never promises a claw-back the prepare will not make", () => {
     const barred = {
       rows: [{ ...space.rows[0], recovery: "barred_proceeding", clause_ref: null }],
@@ -214,7 +217,7 @@ describe("the client space (4.3)", () => {
     // rembourser »: the heading neutral, each line its own fact
     expect(t.heading).toBe("Avances du cabinet : 2 000,00 €");
     expect(t.lines).toEqual([
-      "Avance née le 10/11/2026 (paiement repris après reversement) : 2 000,00 € — antérieure à l'ouverture de votre procédure collective, elle n'est pas déduite de vos reversements.",
+      "Avance née le 10/11/2026 (paiement repris après reversement) : 2 000,00 € — votre procédure collective étant en cours, elle n'est ni déduite de vos reversements ni réclamée.",
     ]);
     for (const line of [t.heading, ...t.lines]) expect(line).not.toMatch(/reprise|abandon|remise|perte|rembourser/i);
     // one barred among others: the total holds it, so the heading stays neutral too
@@ -234,7 +237,7 @@ describe("the client space (4.3)", () => {
     const t = clientSpaceAdvances(parseClientSpaceAdvances(liquidation)!);
     expect(t.heading).toBe("Avances du cabinet : 200,00 €");
     expect(t.lines).toEqual([
-      "Avance née le 22/11/2026 (paiement repris après reversement) : 200,00 € — antérieure à l'ouverture de votre procédure collective, elle n'est pas déduite de vos reversements.",
+      "Avance née le 22/11/2026 (paiement repris après reversement) : 200,00 € — votre procédure collective étant en cours, elle n'est ni déduite de vos reversements ni réclamée.",
     ]);
     for (const line of [t.heading, ...t.lines]) expect(line).not.toMatch(/rembourser|remboursement|demande/i);
   });
@@ -295,11 +298,12 @@ describe("the run page note (4.3, [critic] L19 (b))", () => {
     ).toEqual([
       "Avance du cabinet enregistrée le 12/11/2026 (encaissement de ce reversement annulé ou repris) : 2 000,00 €, soldée (dont 500,00 € passés en perte)",
     ]);
-    // (review round 1, M7B-MONEY-2) never « à reprendre » for an advance born before the client's proceeding
+    // (review round 1, M7B-MONEY-2) never « à reprendre » for an advance born before the client's proceeding —
+    // (M2c-7d-2, R3) nor for any while it stands, nor requested ([critic] L4)
     expect(
       runPayoutNotes({ ...payout, advances: [adv({ recovery: "barred_proceeding", clause_ref: null })] }, "EUR"),
     ).toEqual([
-      "Avance du cabinet enregistrée le 12/11/2026 (encaissement de ce reversement annulé ou repris) : 2 000,00 €, non reprise sur les reversements du client (avance née avant l'ouverture de sa procédure collective)",
+      "Avance du cabinet enregistrée le 12/11/2026 (encaissement de ce reversement annulé ou repris) : 2 000,00 €, non reprise sur les reversements du client ni demandée (client en procédure collective : avance à déclarer)",
     ]);
     // (review round 1, tests-ui-2) a cover released with what it covered, never « récupérée »
     expect(runPayoutNotes({ ...payout, advances: [adv({ reversed: true, open_minor: "0" })] }, "EUR")).toEqual([
@@ -367,7 +371,7 @@ describe("the texts made true (4.3)", () => {
   // (review round 1, tests-ui-8 (b); R3) the claw-back only of an advance on a single mandate with the clause, never of
   // one born before the client's proceeding
   const recovered =
-    "Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, ou avance née avant l'ouverture d'une procédure collective du client), elle reste à récupérer (page « Avances »). Un administrateur peut la passer en perte.";
+    "Avec une clause de reprise du mandat auquel elle est rattachée, elle est déduite des prochains reversements du client ; sinon (pas de clause, aucun mandat unique, fin du mandat ou saisie en cours), elle reste à récupérer (page « Avances ») ; client en procédure collective ou en liquidation : ni reprise ni demande, elle est à déclarer (règle du cabinet). Un administrateur peut la passer en perte.";
   it("the advance checks say how an advance is recovered", () => {
     for (const code of ["advance_open", "payout_overrun", "double_payout_open"])
       expect(CHECK_LABEL[code].help.endsWith(recovered)).toBe(true);

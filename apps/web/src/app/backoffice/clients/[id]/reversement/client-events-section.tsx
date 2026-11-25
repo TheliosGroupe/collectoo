@@ -189,7 +189,7 @@ export function ClientEventsSection({
           <p data-testid="client-payee-rule">
             {payeeRule(view.payee)}
             {view.seizure_standing
-              ? `${view.payee ? " " : ""}Saisie entre les mains du cabinet en cours : aucun virement de reversement jusqu'à la mainlevée enregistrée (règle du cabinet ; la saisie attribue au créancier saisissant la créance saisie, à concurrence des sommes pour lesquelles elle est pratiquée, art. L211-2 CPCE).`
+              ? `${view.payee ? " " : ""}Saisie entre les mains du cabinet en cours : ni reversement ni compensation jusqu'à sa mainlevée enregistrée, même pour un reversement sans virement (règle du cabinet ; la saisie attribue au créancier saisissant la créance saisie, à concurrence des sommes pour lesquelles elle est pratiquée, art. L211-2 CPCE ; « La compensation ne préjudicie pas aux droits acquis par des tiers », art. 1347-7 C. civ.).`
               : ""}
           </p>
         ) : null}
@@ -301,9 +301,13 @@ export function ClientEventsSection({
                 héritiers ; tutelle ou curatelle : compte ouvert au nom du client, art. 427 C. civ. ; liquidation : compte
                 du liquidateur ; fin de mandat : compte du client confirmé à nouveau), avec, sauf après une fin de mandat,
                 la pièce qui désigne qui peut recevoir ; une « Tutelle ou curatelle » enregistrée avant leur distinction
-                les bloque jusqu&apos;à ce qu&apos;elle soit précisée ; une saisie bloque les virements de reversement
-                jusqu&apos;à sa mainlevée (les compensations ne sont pas encore bloquées : ne validez pas de reversement
-                sans virement tant qu&apos;elle court). Après un décès, une
+                les bloque jusqu&apos;à ce qu&apos;elle soit précisée ; une saisie interdit tout virement de reversement
+                et toute compensation jusqu&apos;à sa mainlevée (un reversement sans virement est refusé lui aussi).
+                Après une fin de mandat, en liquidation ou pendant une saisie, rien n&apos;est compensé ; en procédure
+                collective, ni une créance née avant le jugement ni une avance ne sont compensées (elles sont à
+                déclarer) ; pour un reversement validé avant l&apos;événement, son virement n&apos;entre dans aucun fichier
+                (annulez-le et préparez-en un nouveau) ou, déjà téléchargé, la compensation est retenue à son débit et
+                rendue au client par le reversement suivant. Après un décès, une
                 tutelle ou une fin de mandat (art. 2003 C. civ.), les paiements reçus sont mis de côté : à reverser au client
                 (ou à son bénéficiaire) sans commission, ou à restituer au payeur. Les demandes de remboursement
                 d&apos;avance sont adressées à la personne qui agit pour le client, et l&apos;espace du client ne montre pas
