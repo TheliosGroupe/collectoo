@@ -66,3 +66,10 @@ supabase start          # local stack: API :54321, DB :54322, Studio :54323, Mai
 supabase db reset       # re-apply migrations + seed
 supabase test db        # pgTAP
 ```
+
+## Disk
+
+Each session's writable disk is a fixed allowance (about 18 GB free with one stack up), not what `df` reports as the machine's size.
+- **Uploads outlive resets.** `supabase db reset` empties `storage.objects`, but the storage container keeps the files under `/mnt` of the volume `supabase_storage_<project>`. A day of scale and E2E runs left 7.4 GB there (2026-11-26).
+- **Freeing them.** Files older than the last reset are orphans: no row refers to them. Run `select min(created_at) from storage.objects`, then `docker exec supabase_storage_<project> find /mnt -type f -mmin +N -delete`, with N in minutes older than that time.
+- **Two stacks at once.** The main stack and `collectoo-cifix` both running, plus one stack's scale data, fit in about 9 GB. Check `df -h /` before a volume run, and stop the second stack with `supabase stop --no-backup` once you are done with it.

@@ -96,6 +96,39 @@ OUR_ISSUED_ID_RE = re.compile(r"(RMT|SWP|RFD|TOP)[0-9A-F]{12}")
 OUR_PMT_INF_RE = re.compile(r"TF-[0-9]{4}-[0-9]{6,}-[0-9]+")
 # Bank transaction sub-families of the bank's own charges (a fee on the dedicated account).
 CHARGE_SUBFAMILIES = frozenset({"CHRG", "FEES"})
+# M2c-7e-2 (plan docs/design/m2c-7-plan.md §7.3, S24; [critic] M7-MONEY-6): a credit a CSV
+# label says is about one of our transfers — its kind when the import keeps the candidate (a
+# transfer of the statement's account), never a payment nor a return by itself, held for review
+LABEL_REFERENCE_KIND = "label_reference"
+# A whole token of our form in a label (upper-cased): RMT, SWP or TOP and 12 hexadecimal digits,
+# neither preceded nor followed by a letter or a digit (an underscore or punctuation separates)
+LABEL_REFERENCE_RE = re.compile(r"(?<![^\W_])(?:RMT|SWP|TOP)[0-9A-F]{12}(?![^\W_])")
+
+
+def label_references(label: str | None, end_to_end_id: str | None = None) -> tuple[str, ...]:
+    """The candidates a CSV label cites (S24): every whole token of our form, upper-cased, in the
+    label's order, each once, that is not the line's own end-to-end id (the parser's reading of a
+    /REF marker, kept as that id since M2b); () when there is none. Which of them names one of our
+    transfers of the statement's account is the import's word (`private.ingest_statement`, review
+    M2c-7e-2 round 1, MB-1: a look-alike or another account's reference before it never hides it):
+    of those that do, it keeps the payout of a booked run, else the first (round 3: the parser
+    cannot read a run). None is ever an end-to-end id: no rule reads it as our transfer coming
+    back."""
+    found: list[str] = []
+    for match in LABEL_REFERENCE_RE.finditer((label or "").upper()):
+        token = match.group(0)
+        if token != end_to_end_id and token not in found:
+            found.append(token)
+    return tuple(found)
+
+
+def label_reference(label: str | None, end_to_end_id: str | None = None) -> str | None:
+    """The first candidate a CSV label cites (`label_references`), None when there is none: the
+    parser's provisional reading of the line's kind (the import reads the kind again from the
+    candidate it keeps; the kind reads only whether there is one, so whichever the import keeps —
+    a booked run's payout before the first, review round 3 — the twins agree)."""
+    found = label_references(label, end_to_end_id)
+    return found[0] if found else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +181,7 @@ def refine_kind(  # noqa: PLR0911, PLR0913 - the facts of the line that decide i
     *,
     original_end_to_end_id: str | None = None,
     payment_info_id: str | None = None,
+    reference_from_label: str | None = None,
 ) -> str:
     """Our own transfers recognised (twin of SQL `private.bank_line_refined_kind`, a parity test
     compares them): a credit carrying our TOP id or from one of our own IBANs is ours
@@ -162,21 +196,32 @@ def refine_kind(  # noqa: PLR0911, PLR0913 - the facts of the line that decide i
     `return`, never a payment: the bank did not flag it (a CSV label the return words miss, no
     counterparty IBAN column, or an IBAN neither ours nor a client's). The parsers set its original
     id to its own when the file gives none, as for every return; the debit job books it as that
-    transfer's return when it matches, else leaves it to ops."""
+    transfer's return when it matches, else leaves it to ops.
+
+    M2c-7e-2 (plan §7.3, S24; the SQL twin's ninth argument): with a candidate a CSV label cites
+    (`reference_from_label`, kept by the import only for a transfer of the statement's account) a
+    credit read as a debtor's credit that is not ours, not a client's and not one of our transfers
+    coming back is `label_reference` — held for review, never a payment —, a client's credit too;
+    our own account's credits, returns, batches and debits are unchanged. A parser's
+    `label_reference` reading is read again from the facts, as our other kinds are."""
     base = {
         "own_transfer_in": "debtor_credit",
         "client_transfer_in": "debtor_credit",
+        LABEL_REFERENCE_KIND: "debtor_credit",
         "transfer_out": "other_debit",
     }.get(kind, kind)
     e2e = end_to_end_id or ""
+    held = reference_from_label is not None
     if base in ("debtor_credit", "batch_unsplit") and direction == "credit":
         if base == "debtor_credit":
             if TOP_UP_ID_RE.fullmatch(e2e) or (counterparty_iban in ibans.own):
                 return "own_transfer_in"
             if counterparty_iban in ibans.clients:
-                return "client_transfer_in"
+                return LABEL_REFERENCE_KIND if held else "client_transfer_in"
         if names_our_transfer(end_to_end_id, original_end_to_end_id, payment_info_id):
             return "return"
+        if base == "debtor_credit" and held:
+            return LABEL_REFERENCE_KIND
         return base
     if base == "other_debit" and direction == "debit":
         if TRANSFER_OUT_ID_RE.fullmatch(e2e) or (counterparty_iban in ibans.own):
@@ -196,6 +241,7 @@ def classify(  # noqa: PLR0913 - the facts of the line that decide its kind
     ibans: KnownIbans = NO_IBANS,
     original_end_to_end_id: str | None = None,
     payment_info_id: str | None = None,
+    reference_from_label: str | None = None,
 ) -> str:
     """Kind of a line (design §8.3 step 6; M2c §12).
 
@@ -203,7 +249,7 @@ def classify(  # noqa: PLR0913 - the facts of the line that decide its kind
     sub-family) is a `return`, in either direction: a credit that reverses a debit (a returned
     refund, a fee taken back) is not a debtor payment (ADR-0013, M2b-2 addendum). Then our own
     transfers are recognised (`refine_kind`; review round 4: from the line's original end-to-end id
-    and PmtInfId too).
+    and PmtInfId too; M2c-7e-2: with the candidate a CSV label cites, `reference_from_label`).
     """
     if return_reason or reversal or (sub_family in RETURN_SUBFAMILIES):
         return "return"
@@ -221,6 +267,7 @@ def classify(  # noqa: PLR0913 - the facts of the line that decide its kind
         ibans,
         original_end_to_end_id=original_end_to_end_id,
         payment_info_id=payment_info_id,
+        reference_from_label=reference_from_label,
     )
 
 
@@ -289,6 +336,12 @@ class StatementLine:
     # gives (private.ingest_statement)
     charges_read: bool | None = None
     unsplit_direction_given: tuple[bool, ...] | None = None
+    # M2c-7e-2 (S24): the references of ours a CSV label cites (`label_references`, in the label's
+    # order), on a line whose end-to-end column is empty, absent or NOTPROVIDED; never an
+    # end-to-end id. None on a camt.053 line or when the label cites none. Of those that are
+    # transfers of the statement's account the import keeps a booked run's payout, else the first
+    # (`bank_transaction.reference_from_label`; review round 3)
+    label_references: tuple[str, ...] | None = None
 
     @property
     def signed_minor(self) -> int:
@@ -329,6 +382,7 @@ STAGE_COLUMNS = (
     "charges_minor",
     "charges_read",
     "unsplit_direction_given",
+    "label_references",
 )
 
 

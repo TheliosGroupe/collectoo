@@ -325,6 +325,8 @@ describe("returns (founder #13; design §2 #3)", () => {
         "client_payout_iban",
         // M2c-7e-1 ([critic] M7-MONEY-4): a cancelled top-up executed after all
         "top_up_cancelled_credit",
+        // M2c-7e-2 (plan §7.3, S24): a credit held because its CSV label cites one of our transfers
+        "label_reference",
       ].sort(),
     );
   });

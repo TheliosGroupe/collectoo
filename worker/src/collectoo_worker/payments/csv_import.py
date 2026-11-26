@@ -24,7 +24,15 @@ and preamble included, from 1), and a CSV line's `line_no` is that same number.
 The label parser reads the markers French banks print: « /DE <payer> /MOTIF <text> /REF <ref> ».
 A line is a `return` only when the label starts with the bank's operation type saying so
 (« RETOUR VIR SEPA », « REJET DE PRLV », « PRLV SEPA REJETE », « IMPAYE CHQ »): words the payer
-wrote never turn a credit into a non-payment. A CSV export proves no balance: there is no
+wrote never turn a credit into a non-payment. An end-to-end id cell reading NOTPROVIDED (SEPA's
+« none ») is no id, as in camt.053 (review M2c-7e-2 round 1, MB-2), and a /REF marker then gives
+none either: a /REF of ours there is the payer's text, a candidate (round 2). M2c-7e-2 (S24):
+on a line with no end-to-end id column value, the references of ours the label cites (RMT, SWP
+or TOP and 12 hexadecimal digits, whole tokens, not the /REF value it reads as the line's
+end-to-end id) are the line's candidates
+(`label_references`, in the label's order): of those that are transfers of the account the import
+keeps a booked run's payout, else the first, and holds the credit for review (`label_reference`),
+never a payment, never booked by itself. A CSV export proves no balance: there is no
 opening/closing check (the page says so); re-exported lines are caught by the bank id column when
 there is one, and otherwise held as suspected duplicates by the import (SQL).
 """
@@ -53,6 +61,7 @@ from collectoo_worker.payments.statement import (
     check_dates,
     classify,
     decimal_to_minor,
+    label_references,
 )
 
 if TYPE_CHECKING:
@@ -223,6 +232,15 @@ def parse_label(label: str) -> Label:
         motif=fields.get("MOTIF") or None,
         reference=fields.get("REF") or None,
     )
+
+
+NOT_PROVIDED = "NOTPROVIDED"  # SEPA's placeholder for an end-to-end id the payer did not give
+
+
+def provided_end_to_end_id(cell: str) -> str | None:
+    """The « référence de bout en bout » cell as an id: None when empty or NOTPROVIDED (any case),
+    as the camt.053 parser reads it (review M2c-7e-2 round 1, MB-2)."""
+    return None if not cell or cell.upper() == NOT_PROVIDED else cell
 
 
 def method_of(label: str) -> str:
@@ -496,11 +514,26 @@ def _line(row: list[str], ctx: _File, line_no: int) -> StatementLine | None:
     label = parse_label(text)
     reference = label.reference
     creditor_ref = columns.get(row, "creditor_reference") or None
-    e2e = columns.get(row, "end_to_end_id") or None
+    # review M2c-7e-2 round 1 (MB-2): SEPA's NOTPROVIDED, the payer's « no end-to-end id », is
+    # none — as the camt.053 parser reads it (`camt053._provided`)
+    cell = columns.get(row, "end_to_end_id")
+    e2e_column = provided_end_to_end_id(cell)
+    # review round 2 (notprovided-ref-books-return): the bank saying there is none, a /REF marker
+    # is no end-to-end id either — a /REF of ours there can only be text the payer typed (the
+    # bank appending its own « /REF NOTPROVIDED » after it): it stays a candidate of the label,
+    # held for review, never our transfer coming back (an empty cell or no column: M2b's reading)
+    not_provided = bool(cell) and e2e_column is None
+    e2e = e2e_column
     if reference is not None and creditor_ref is None and rf_valid(rf_normalise(reference)):
         creditor_ref = reference
-    elif reference is not None and e2e is None:
+    elif reference is not None and e2e is None and not not_provided:
         e2e = reference
+    # M2c-7e-2 (plan §7.3, S24): with no « référence de bout en bout » given, the references of
+    # ours the label cites (whole tokens, not the /REF value read as the end-to-end id) are the
+    # line's candidates, in the label's order — never its end-to-end id; of those that are transfers
+    # of the account the import keeps a booked run's payout, else the first (review round 1, MB-1:
+    # every one, not only the first; round 3: the booked run's payout)
+    candidates = label_references(label.text, e2e) if e2e_column is None else ()
     name = columns.get(row, "counterparty_name") or label.name
     iban = rf_normalise(columns.get(row, "counterparty_iban")) or None
     kind = (
@@ -514,6 +547,8 @@ def _line(row: list[str], ctx: _File, line_no: int) -> StatementLine | None:
             end_to_end_id=e2e,
             counterparty_iban=iban,
             ibans=ctx.ibans,
+            # the parser's reading; the import reads the kind again from the candidate it keeps
+            reference_from_label=candidates[0] if candidates else None,
         )
     )
     bank_id = columns.get(row, "bank_id")
@@ -528,7 +563,10 @@ def _line(row: list[str], ctx: _File, line_no: int) -> StatementLine | None:
             amount_minor=amount,
             currency=currency,
             counterparty_iban=iban,
-            end_to_end_id=e2e,
+            # review round 2: a NOTPROVIDED cell's line keeps the fingerprint it had before 7e-2
+            # (the cell was then its end-to-end id): an export imported before and after is the
+            # same lines, caught by their keys
+            end_to_end_id=cell if not_provided else e2e,
             remittance_text=text,
         )
     )
@@ -550,4 +588,5 @@ def _line(row: list[str], ctx: _File, line_no: int) -> StatementLine | None:
         remittance_text=label.text,
         creditor_reference=rf_normalise(creditor_ref) if creditor_ref else None,
         original_end_to_end_id=e2e if kind == "return" else None,
+        label_references=candidates or None,
     )

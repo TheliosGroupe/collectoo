@@ -974,9 +974,11 @@ reset role;
 
 -- The import's classification joins the lines with the clients' IBANs once (plan robustness, review fix) --------------
 -- (the columns of private.bank_import_stage the classifier reads; since M2c-6b-1 review round 4 the original end-to-end
--- id and the PmtInfId too, null here as on a debtor's credit)
+-- id and the PmtInfId too, null here as on a debtor's credit; since M2c-7e-2 the label's candidate reference, null here
+-- too)
 create temp table _bi_stage (line_no integer primary key, kind text, direction text, end_to_end_id text,
-                             counterparty_iban text, original_end_to_end_id text, payment_info_id text) on commit drop;
+                             counterparty_iban text, original_end_to_end_id text, payment_info_id text,
+                             reference_from_label text) on commit drop;
 insert into _bi_stage (line_no, kind, direction, end_to_end_id, counterparty_iban)
 select g, 'debtor_credit', 'credit', 'E2E-' || g,
        case g % 4 when 0 then 'FR7642606140114176606002310'      -- a1's, retired: still the client's

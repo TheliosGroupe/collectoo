@@ -11091,5 +11091,761 @@ guard, the four file reads through items, comments), the web +11 / −2; tests +
 
 **Option not taken.** A parallel `db-integration` job with its own stack would cut the `db` leg to about 18–21 minutes, for 2–3 more billed minutes per run (about 6–9 per slice). A dispatched run's critical path is the 50k job (about 26 minutes) either way. Revisit it, or shard integration in two, if the `db` job nears 35 minutes.
 
+## M2c-7e-2: our references in CSV labels, held and reviewed (2026-11-26)
+
+Plan: `docs/design/m2c-7-plan.md` §0, §1.4 (7e-2 row), §7.3's S24 up to the review ([check 1] gap 5, [check 2] gap 1
+(3), [check 3] the other ways out and the alert), §7.4's 7e-2 texts, §7.5's `047b`, §7.6's OQ-84 (e)/(h), with their
+[critic] / [check 1–3] marks. Founder Q15 unanswered: built as its default (a: the candidate proposed to ops, who
+confirm; never booked alone) and kept open. Migration `20261130090000_label_references.sql` (one file, forward-only).
+Why 7e is three PRs (plan §1.4, [check 2]): the kind ran into guards and readers the first drafts neither redefined nor
+named (the debit job's candidates, the two link guards, the nightly; 7e-3's booking, release and payment guards), and
+with its exits it came to about 2,900 lines; 7e-2 alone is safe — such a credit is held in review with no exit, never a
+payment, never a return — and 7e-3 brings the three exits with every guard they need.
+**The switch stays off**: nothing writes `private.feature_switch`; the `047b` scenarios that import, book, link or
+alert (k1, j1, c1, x1, w1) run a second time with it on in a rolled-back subtransaction (`pg_temp.iso(…, true)`),
+`047b`'s last test asserts it is off; `033` byte for byte unchanged and green.
+
+What it builds:
+- **The candidate** (S24; [critic] M7-MONEY-6): on a CSV line whose « référence de bout en bout » column is empty or
+  absent, the parser (`payments.statement.label_reference`, read by `csv_import`) takes the label's first whole token
+  of our form — `RMT`, `SWP` or `TOP` and 12 hexadecimal digits, upper-cased, neither preceded nor followed by a
+  letter or a digit — that is not the line's own end-to-end id (a `/REF` marker's value, which stays that id as since
+  M2b: 6b-2's S24 is « outside /REF »), into `StatementLine.reference_from_label` and the stage's new column. Never
+  into `end_to_end_id` or `original_end_to_end_id`: `names_our_transfer`, `decide_line`'s return rule and the SQL's
+  `not_a_fee` never read it.
+- **The import** (`private.ingest_statement`, whole copy of `20261117100000:2749`): a candidate on a non-CSV line or of
+  another form is `line_invalid`; one that is not the end-to-end id of a transfer of the statement's account (a payout
+  or a sweep it pays, a top-up it receives; one probe per candidate by the unique `bank_transfer.end_to_end_id`) is
+  nulled (a look-alike, another account's or another servicer's id: the line a payment as before). The kept one is
+  copied to `bank_transaction.reference_from_label` (any kind: a debit or a return citing our transfer keeps its own
+  kind); the counts gain `label_references` (the worker queues the debit job for them).
+- **The kind `label_reference`** (gap 5): the nine-argument classifier `private.bank_line_refined_kind` (the
+  eight-argument form a wrapper passing null, the six-argument one calling the nine) and its twin
+  `payments.statement.refine_kind(…, reference_from_label=)` make a credit `label_reference` when it would be a
+  client's (`client_transfer_in`) or a debtor's (`debtor_credit`, not ours, not a return) and keeps a candidate;
+  debits, returns, batches and our own account's credits are unchanged (a coded bank charge citing our payout is still
+  `other_debit`, a fee). `private.stage_refined_kinds` and `private.held_line_kind` pass the column; the trigger
+  `private.bank_transaction_held_kind` records a held line read so. Held: no `payment`, no `cash_in`
+  (`n.kind in ('debtor_credit', 'batch_unsplit')` unchanged). Constraints, each named: the column's
+  `bank_transaction_reference_from_label_check` (`^(RMT|SWP|TOP)[0-9A-F]{12}$`), `bank_transaction_label_reference`
+  (the kind carries a candidate), `bank_transaction_kind_check` and `bank_transaction_kind` (a credit),
+  `bank_line_held_kind_kind_check`, `bank_duplicate_resolution_released_kind_check`, `bank_debit_review_reason_check`
+  (7e-1's list and `label_reference`); indexes `bank_transaction_own_idx` (recreated with the kind),
+  `bank_transaction_label_reference_idx` and `bank_duplicate_resolution_label_reference_idx` (new, partial: the
+  nightly's two reads).
+- **The job reaches it** ([check 2] gap 1 (3)): `private.bank_booking_candidates` (whole copy of
+  `20261117090000:882`) returns a `label_reference` line in both branches — as imported, and a held line
+  `resolve_duplicate` released so —; the worker's `decide_line` reviews it before any other rule
+  (`_funds_review(line, LABEL_REFERENCE)`, never booked); `apply_bank_bookings` writes the review as for any other.
+- **« Débits et retours »** (`public.debit_queue`, dropped and recreated: two new columns): « À classer » lists the
+  kind (as read or released so) with `reference_from_label` and `label_transfer` (its kind, status, amount, currency,
+  end-to-end id, its run's number and status — the transfer by its unique id, the run by its key) and no
+  `bookable_as`; « Doublons possibles » says a held line is one (`held_kind`).
+- **No other way out** ([check 3]): `private.link_debit_guard` refuses **every** link kind on a credit whose kind — as
+  read, or released so — is `label_reference` (`label_reference_line`, before any other rule);
+  `private.bank_debit_link_guard` refuses any `bank_debit_link` on such a line (the backstop: a raw insert →
+  `check_violation`). « Comptabiliser… » (`book_transfer_line`: `not_a_return`), « Paiement d'un débiteur »
+  (`release_own_credit`: `not_own_credit`), « Règlement du client » (`book_client_payment_line`:
+  `not_a_client_credit`) and the SQL re-check (a top-up, a fee, a return: `not_an_own_credit`, `not_a_fee`,
+  `not_a_return`) already refuse its kind: in 7e-2 such a credit waits.
+- **The alert** ([check 3]): `private.run_advance_checks` (whole copy of 7e-1's latest body, its review round 2)
+  raises **`label_reference_waiting`** (alert; subject the line; its amount; details `reference_from_label`,
+  `candidate_transfer_id`, `candidate_kind`, `run_id`, `run_number`, `run_status`, `oldest_days`, `p0` — true when the
+  candidate is the payout of a booked run) for each such line, as read or released so, unbooked, unlinked and
+  unreleased, booked before the third business day on or before today (more than two business days ago, as
+  `bank_line_unbooked`). Every pass, delta or full.
+- **The pages**: « À classer » says what the label cites — « Le libellé cite notre virement RMT… (reversement RV-…,
+  X €) : est-ce ce virement qui revient ? La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas
+  classée. » (a sweep « quote-part du cabinet »; a `TOP`: « … notre approvisionnement TOP… (X €), mais le crédit ne
+  vient pas du compte propre : sans doute un règlement du client ou le paiement d'un débiteur qui cite notre référence.
+  … ») — and offers no action; the kind « Crédit citant notre référence » (the queue, the statement's page and its
+  « Autres opérations » filter); « Libérer »'s effect; `label_reference_line`'s text (« … ce que cet écran ne permet
+  pas encore : prévenez le support. », true of 7e-2); « Contrôles » « Libellé citant notre virement, à classer » and
+  its help, leading to the line.
+
+### Decisions
+- **D1 `/REF` stays the end-to-end id.** M2b reads a `/REF` marker's value as the line's end-to-end id, and 6b-1 reads
+  our `RMT`/`SWP` there as our transfer coming back; S24 is the label outside `/REF`. The candidate is the first token
+  of our form that is not that id; with the end-to-end column given, the bank's word stands and no candidate is read.
+- **D2 Kept only for a transfer of the statement's account**, by kind: a payout or a sweep whose debtor, a top-up
+  whose creditor, is that account (the plan's rule); another account's or another servicer's id is dropped, so the line
+  is what it was before 7e-2.
+- **D3 Every link refused, both in the guard and in the trigger.** The plan's backstop names `explained`; a return, a
+  loss, a refund or a fee link on such a line would be as wrong (its money is a debtor's, the client's or our
+  transfer's, never a fee nor a debtor's return), so the trigger refuses any link kind on it, as the guard does.
+- **D4 A `TOP` candidate is said to be a client's or a debtor's payment citing it**: a top-up's credit comes from the
+  own account (`own_transfer_in`, never this kind), so « est-ce ce virement qui revient ? » would be untrue of it.
+- **D5 Reads keyed whatever the statistics** (below): the import's probe by the unique end-to-end id behind an
+  `offset 0` fence; the queue's transfer and run by their keys; the nightly from two partial indexes, then each line,
+  its transfer and its run by their keys.
+
+### Deviations from the plan
+- **Test file `047b_label_references.test.sql`** (the plan's `047_top_ups_and_bank_residues` is split across
+  7e-1/7e-2/7e-3).
+- **`private.bank_transaction_held_kind` redefined** (the plan's table does not name it; copied from
+  `20261111090000:1882`, same settings): its kind list gains `label_reference`, otherwise a held line read so would
+  not be recorded and « Libérer » would read it from its facts only.
+- **`bank_debit_link_guard` refuses every link kind** on such a line (D3; the plan adds the kind to `explained`'s list).
+- **The import's `line_invalid` for a candidate on a non-CSV line or of another form** (the plan: « on a CSV line »):
+  the stage is the worker's, the rule the database's too.
+- **The alert's details** add `candidate_kind`, `run_id`, `run_status` and `p0` to the plan's four keys (what the
+  plan's « P0 when … » means, kept in the details: the check's severities are `violation` and `alert`, and « Contrôles »
+  shows the code's label and leads to the line).
+- **`CHECK_LABEL.label_reference_waiting`'s help names « RMT, SWP ou TOP »** (the plan: « RMT/SWP »): a `TOP`
+  candidate is read too.
+- **Two new partial indexes** (`bank_transaction_label_reference_idx`, `bank_duplicate_resolution_label_reference_idx`)
+  for the nightly's two keyed reads.
+- **`resolve_duplicate` not redefined**: releasing a held line as `label_reference` books no payment and queues
+  nothing (as for a released own or client credit); « À classer » lists it at once, worded from its kind, and the debit
+  job's next pass writes its review.
+
+### Assertions whose expected value changed (house rule R3)
+- `017` test 89 (the import's counts): the object gains `"label_references": 0` (the import counts the kind).
+- `019`'s classifier fixture: its temporary `_bi_stage` gains the column `reference_from_label` (null), as M2c-6b-1
+  added the original end-to-end id and the PmtInfId (`private.stage_refined_kinds` reads it); no assertion changed.
+- `apps/web/src/lib/payments/debits.test.ts`: `DEBIT_REVIEW`'s keys gain `label_reference`.
+- `apps/web/src/lib/payments/statements.test.ts`: `lineFilterOr("autres")` gains
+  `and(direction.eq.credit,kind.in.(label_reference))`.
+- `033` unchanged; `034`–`047a` unchanged and green (`047a` r2's codes are those its scenario raises).
+
+### Tests
+- **pgTAP `047b_label_references.test.sql`** (24 tests, each a scenario's JSON compared whole; fixtures and helpers
+  from `047a`): k1 (off and on) a CSV import of eleven lines — four credits citing a real reference of the account (a
+  booked run's payout from a debtor's IBAN and from Martin's confirmed IBAN, a sweep, a top-up) held, no payment, no
+  `cash_in`; the look-alike, another servicer's sweep, a stage the parser read `label_reference` citing a look-alike
+  and a plain credit payments; a credit from our own IBAN, a coded charge and a `/REF` return keep their kinds; each
+  line's kind, candidate and payment; k2 a camt.053 stage with a candidate, an `RFD` or lower-case candidate and a debit
+  staged so refused `line_invalid`, a camt.053 remittance text citing our RMT a payment as before; k3 the table's
+  constraints by name (raw lines); r the classifier's ninth argument (every base kind, ours, returns, batches, debits) and the
+  wrappers; h1 a held duplicate read `label_reference` (recorded and from its facts), released as it, no payment; j1
+  (on) the job reaches every such line (imported, released), writes its review, books nothing, never returns a
+  debtor's payment nor a line still held, nor one linked or released; c1 (on) the re-check refuses a top-up, a fee, a
+  loss and a return on it; a coded charge citing our payout is a fee; q1 « À classer » (its review, candidate, transfer
+  and run, nothing to book) and « Doublons possibles »; x1 (on) every link kind refused `label_reference_line`, the
+  review kept, the raw explanation refused (`check_violation`), an other debit still explained; « Comptabiliser… »,
+  « Paiement d'un débiteur » and « Règlement du client » refuse it; w1 (on) `label_reference_waiting` past two business
+  days (P0 for a booked run's payout), none at two or one, the delta pass alike; r2 the nightly's full code list; i1
+  tenant isolation (another servicer, a collector); p the privileges, constraints and indexes; the switch off.
+- **Worker**: `test_label_references.py` (40: the parser's presets, `/REF` and the end-to-end column, the stage row,
+  Hypothesis over label tokens and over `refine_kind`'s inputs, `decide_line` on every fact); integration
+  `test_label_references_integration.py` (Hypothesis parity of `refine_kind` with the SQL's nine arguments; a real CSV
+  import and the debit job: two lines held and reviewed, a look-alike and another account's sweep payments, the queue
+  through the API, `link_debit` refused, the pass again; a camt.053 citing an RMT in its remittance text unchanged) and
+  `test_label_reference_reads_integration.py` (below).
+- **vitest** `label-references.test.ts` (7: the texts of each candidate kind, no action, the refusal, « Libérer », the
+  statement's filter, the check's label, help and link). **E2E** `label-references.spec.ts` (desktop + mobile): a CSV
+  whose credit cites our payout → held, no payment, reviewed by the job; the statement's page; « À classer »'s text and
+  no button; screenshot `m2c7-libelle-reference` (new).
+
+### Stale statistics (the plan class that broke main after 7a)
+`test_label_reference_reads_integration.py` plants 10,000 rows in each of `bank_transfer` (two other servicers'
+payouts, sweeps and top-ups), `bank_transaction` (their `label_reference`, own, client and held lines),
+`bank_duplicate_resolution` (released as `label_reference`), `bank_debit_review` and the three probes every reader of a
+line makes (`bank_debit_link`, `bank_line_booking`, `bank_own_credit_release`), pins their keys' `n_distinct` to 2
+(`dedup_key` excepted: unique per account, analyse stores it as scaling), forces generic plans, and bounds to 60 rows of
+the watched tables each call: `bank_booking_candidates`, the funds pass, `link_debit` refused, `resolve_duplicate`.
+Three are bounded by what they read before this slice, plus 60: the import by the same import of the same lines staged
+without a candidate (its CSV duplicate checks read the account's and the other accounts' lines in one pass since M2b-6,
+by design); « À classer » and « Doublons possibles » by the queue's body as 7e-2 found it (`20261117110000`), on the
+same books (its other branches read every kind's lines through their own keys and partial indexes, as before); the
+nightly, run ten days on so that every line is past the bound, by 7e-1's body. What it found:
+- the probe tables unplanted (a first run of the db job's sequence): a dozen links, bookings and releases left by the
+  earlier tests, read whole per line (`bank_debit_link`: 90 rows for the candidates, 162 for the pass) — a table of a
+  few rows is scanned rather than probed by design, and planned again by its size as it grows; planted, every probe is
+  keyed;
+- set apart, not this slice's: `private.apply_bank_bookings` (unchanged since M2b-6) replaces a pass's reviews by a
+  join with its temporary table, never analysed: a hash join over the whole review table (10,010 rows with the plant,
+  10,083 after the db job) at each funds pass that writes a review (Left open).
+
+### Mutants
+Each SQL mutant applied to the stack (the function's block of the migration with one change), the file run, then the
+block re-applied; each worker or web mutant edited in place, then restored from git. Plan §7.5's:
+- **`link_debit_guard` unchanged** → `047b` x1. **`bank_debit_link_guard` unchanged** → x1 (the raw insert).
+- **The alert's branch removed** → w1, r2. **Its age bound inverted** → w1, r2.
+- **`bank_booking_candidates` without the kind** in the first branch → j1, q1, x1; in the held-duplicate branch → j1,
+  q1, x1.
+- **The import's existence check removed** → k1, j1, q1, x1, w1, i1. **Its account condition removed** (any transfer
+  of the servicer) → survives `047b` (its other account's reference is another servicer's), killed by
+  `test_label_references_integration.py` (another dedicated account's sweep read `label_reference`).
+- **The label reference written to the end-to-end id** (the parser) → `test_label_references.py` (the candidate test).
+This slice's own: the classifier's debtor arm removed → k1, r, h1, j1, c1, q1, x1; its client arm → k1, r, j1, q1, x1,
+w1, i1; the stage's refinement without the column → k1, h1, j1, c1, q1, x1; `held_line_kind` without it → h1; the held
+kind trigger without the kind → h1; `decide_line`'s first rule removed → `test_label_references.py` (the job's review);
+the token rule without its look-behind, its look-ahead or the upper-casing → the token tests; the line's own
+end-to-end id not excluded → the `/REF` test; the candidate read with the end-to-end column given → its test; the
+client arm of `refine_kind` → its test; web: the review text, the `TOP` text, `explainable`, `linkGuarded`,
+`debitErrorCode`, the statement's filter → `label-references.test.ts`. Equivalent: the queue's `bookable_as` exclusion
+removed (`transfer_line_bookable_as` already returns null for the kind: no end-to-end id of ours, no lot, no unsplit
+entry, a credit that is not a return; kept as the queue's own word).
+The reads: the import's probe unkeyed (`y.end_to_end_id || ''`) → killed (20,025 `bank_transfer` against 0); the
+queue's → killed (44,192 against the body 7e-2 found: 0); the nightly's → killed (20,044 against 7e-1's 2) once the nightly ran ten days on (at today
+it read no transfer: every line too young; the test first survived it).
+
+### Suites
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-2 », `docs/benchmarks/payments.md` « Our
+references in CSV labels »):
+- The db job's sequence after a fresh reset: `supabase test db` **53 files, 3,210 tests, PASS** (641 s; `033` byte for
+  byte unchanged and green, `017` and `019` with their R3 changes, `047b` 24/24); `supabase gen types typescript` → no
+  diff (the regenerated `database.types.ts` committed: the column and the queue's two columns); then, without a
+  reset, the non-scale integration suite **311 passed** (1,094.5 s). Two earlier runs of the sequence failed: the
+  first on `017` and `019` (the R3 changes above), the second on `016`'s precondition 10 (« no page all-visible »: an
+  autovacuum of the seeded pages, as noted in 6b-1's suites; `016` reaches nothing this slice touches, and passed in
+  the next run) and on `test_label_reference_reads_integration.py` (the probe tables unplanted: Stale statistics).
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` clean; unit suite **1,287 passed**, 7 xfailed (the XSD
+  cases, as before; 189.8 s).
+- `make eval`: mapping top-1 1.000 (167/167, threshold 0.980); reconciliation 0.9600 automatic, 0 wrong.
+- The scale job's nine files in one pytest call as `ci.yml` lists them, after a fresh reset: **15 passed** (1,440.3 s).
+- The scale-payouts job's two files, after another fresh reset: **6 passed** (1,267.0 s).
+- Web: `eslint`, `tsc` (after `next typegen`) clean; vitest **725 passed** (35 files).
+- `./scripts/e2e.sh` after a fresh reset: **71 passed** (desktop, mobile and switch-on, 7.6 min;
+  `label-references.spec.ts` 3.5 s desktop, 3.6 s mobile). Screenshot `m2c7-libelle-reference` new (mobile and desktop);
+  no other page changes in this slice: the 185 other images whose diff was only dates, ids or order reverted.
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 1,980 non-test lines added (the migration 1,793, of which about 1,570 are the twelve functions copied whole from
+their latest definition, about 150 of them changed or new; worker 72; web 103; the generated types 4): within the
+~2,500 the plan aims at.
+
+### Left open (low), with its default
+- Founder Q15 (a: proposed, never booked alone) — open; the three exits are 7e-3's.
+- `private.apply_bank_bookings`' review replacement reads the whole review table when its temporary table is large in
+  the planner's eyes (never analysed; 10,010 rows in the reads test); default: a keyed delete (`= any (array(…))`) in
+  a hardening slice (7f), measured with the review table planted.
+- A held line released as `label_reference` waits for the debit job's next pass for its review row (D: « À classer »
+  lists it at once, from its kind).
+- A CSV whose « référence de bout en bout » column is given never reads a candidate in its label (the bank's word).
+
+## M2c-7e-2 review fixes (2026-11-26)
+
+### Round 1
+Eleven items (money-bank MB-1 to MB-4, tests-ui TUI-1 to TUI-6, concurrency-cost CC-1), each checked against the code
+first (the parser in the checkout, the stack's bodies equal to `26cf22f`). Every one held. Fixed in place in the
+unmerged `20261130090000_label_references.sql`; the switch stays off (no item reads it; the new `047b` scenarios that
+import run again with it on and equal their switch-off twins).
+
+- **MB-1 (medium, fixed): only the label's first token of our form was ever tried.** `label_reference` returned the
+  first `RMT`/`SWP`/`TOP` token that is not the line's end-to-end id and the import checked only that one: a
+  look-alike, another account's or another servicer's reference before our real payout turned the credit into a
+  debtor's payment with its `cash_in` — the S23 case S24 closes. Now the parser stages **every** whole token of our form
+  in the label's order, each once, the line's own end-to-end id left out (`statement.label_references`, the stage's
+  new column `label_references text[]`, which replaces the stage's `reference_from_label`), and
+  `private.ingest_statement` keeps the **first that is a transfer of the statement's account** (one keyed probe per
+  candidate by the unique `bank_transfer.end_to_end_id`, behind its `offset 0` fence), into its working table's
+  `reference_from_label` (the import's word, never the stage's to give); the stage's list is checked (`line_invalid`:
+  on a camt.053 line, empty, with a null, or with an element of another form). The parser's provisional kind reads the
+  first candidate (the import reads the kind again from the one it keeps). Tests: `test_label_references.py`
+  (`test_every_whole_token_of_ours_is_a_candidate_in_the_label_s_order`; Hypothesis
+  `test_every_token_is_read_in_order_once`; the stage row a `text[]`), the parity test's labels with a second token and
+  every candidate's form, `047b` k4 (off and on: a look-alike then the booked run's payout, another servicer's sweep
+  then the payout, another account's sweep then our sweep → `label_reference` with the real one kept, no payment;
+  the stage's three refusals), `test_label_references_integration.py::test_every_reference_the_label_cites_is_tried_and_notprovided_is_none`
+  (the real import job).
+- **MB-2, TUI-2 (medium, fixed): NOTPROVIDED in the « référence de bout en bout » column counted as an id.** SEPA's
+  placeholder for an end-to-end id the payer did not give is none, as `camt053._provided` reads it; the CSV gate read
+  it as given, so no candidate was read and a credit citing our payout became a payment. `csv_import` now reads the
+  cell through `provided_end_to_end_id` (empty or NOTPROVIDED, any case → none): the label's candidates are read and
+  no end-to-end id is stored (a `/REF` marker then gives it, as for an empty cell). Tests: the parser
+  (`test_notprovided_in_the_end_to_end_column_is_no_end_to_end_id`, three spellings), `047b` k4's line 6 (staged as
+  the parser now stages it), the integration test (`NOTPROVIDED` and `notprovided` cells through the real job).
+- **MB-3, TUI-1 (medium — a false statement on a page, fixed): « ne vient pas du compte propre » said of a `TOP`
+  candidate whatever the line said.** On a CSV export with no counterparty IBAN column, our own top-up's credit — the
+  bank printing its motif « APPROVISIONNEMENT COMPTE DEDIE TOP… » in the label — is `label_reference` (nothing on the
+  line says it comes from the own account), and « À classer » told ops the opposite of what it most likely is.
+  `labelReferenceText` now words a `TOP` from the facts: with a counterparty IBAN (never a registered own one, or the
+  line would be `own_transfer_in`), the text as before; with none and the top-up's amount, « … du même montant, et le
+  relevé ne donne pas le compte qui l'a envoyé : ce peut être cet approvisionnement, venu du compte propre, ou bien un
+  règlement du client ou le paiement d'un débiteur qui cite notre référence. La ligne reste en attente … S'il s'agit
+  de cet approvisionnement, prévenez le support : Collectoo l'attend encore et ne le comptabilise pas sur cette
+  ligne. »; with none and another amount, that it is not that top-up's amount. The exit that books such a line as
+  that top-up is not 7e-2's (no command takes the kind): recorded as an open founder question under Q15 (plan §10,
+  default a: 7e-3's fourth exit, `book_top_up_credit` on a `label_reference` line naming that `TOP`, at exactly its
+  amount), and plan §7.3's « a top-up arrives … never `label_reference` » amended. D4 is amended accordingly. Tests:
+  vitest (both cases, the IBAN case unchanged, a payout's text alike with or without an IBAN), `047b` q2 (the queue
+  gives no IBAN and the ordered top-up at the line's amount; `book_top_up_credit` `not_an_own_credit`, `link_debit`
+  `own_credit` `label_reference_line`, the top-up stays `ordered`), the integration test (its row's IBAN null).
+- **MB-4, TUI-6 (low, a text: fixed): the P0 was in the details only, and the help named a choice no screen offers.**
+  `checkLabel('label_reference_waiting', {details})` (`labelReferenceWaiting`) now labels a row whose `details.p0` is
+  true « Libellé citant notre virement, à classer (prioritaire) » and begins its help « Prioritaire : une ligne du
+  relevé cite dans son libellé RMT…, le virement du reversement RV-… (comptabilisé) : ce virement est peut-être revenu
+  sur le compte dédié. »; every row (and the static help) ends « Rien n'est comptabilisé tant que la ligne n'est pas
+  classée (retour de ce virement, règlement du client ou paiement d'un débiteur). Aucun écran ne permet encore de la
+  classer : prévenez le support. » (true of 7e-2). DOMAIN and COMPLIANCE now say what ops see. Not done: the rows'
+  order (Left open).
+- **TUI-3 (low, a test: fixed): j1 had no booked line.** j1 plants a `bank_line_booking` (its guard disabled inside
+  the scenario) on a line imported `label_reference` (the first branch) and on a held line released so (the
+  held-duplicate branch): neither is a candidate any more (`booked_still`), the others still are. The review's mutant
+  (a booked `label_reference` line kept) is killed, in each branch.
+- **TUI-4 (low, a test: fixed): the nightly's subject was not read.** `pg_temp.waiting()` returns the row's
+  `subject_id`; w1 asserts the five rows' subjects are the five lines (« Ouvrir » leads to `#ligne-<subject>`). The
+  review's mutant (the candidate's transfer as subject) is killed.
+- **TUI-5 (low, a test: fixed): `047b` never tried another account of the same servicer.** k4 adds a second dedicated
+  account of servicer aa, its sweep and a top-up it receives: each cited alone is a payment with no candidate. The
+  review's mutant (the account and kind condition dropped) is killed by `047b` now, not only by the integration test.
+- **CC-1 (low: the texts and the test fixed; the queue's reads left open).** `public.debit_queue` is the body 7e-2
+  found plus its new column: under the scale files' statistics that body reads the servicer's lines through
+  `bank_transaction_org_idx` and the review, link, release and resolution tables whole by hash joins (the review
+  measured it, the old body alike; far under 8 s). The reads test's docstring and `docs/benchmarks/remittances.md` no
+  longer say « their own keys » / « one keyed read per listed line » of the whole call; the test now bounds the new
+  column's reads absolutely (at most one `bank_transfer` row per listed line, in « À classer » and « Doublons
+  possibles ») besides the relative bound for the rest, and the import's candidates absolutely (at most one per
+  candidate: five on its three lines).
+
+### Decisions (round 1)
+- **R1 Every token staged, the first transfer of the account kept** (MB-1's fix as proposed). No cap on the list: each
+  candidate is one keyed probe, and SEPA's remittance information (140 characters) holds at most eight tokens of 15.
+  The stage's `reference_from_label` is dropped from the stage (unmerged): the stage is the parser's reading, the kept
+  candidate the import's.
+- **R2 NOTPROVIDED is none in the CSV end-to-end column only** (as camt.053 reads `EndToEndId`): a `/REF` marker
+  reading it is unchanged (stored as before; not of our form, never a candidate). Its consequence on the dedup
+  fingerprint: such a line's stored end-to-end id is now null, so an export imported before this fix and again after
+  gets another fingerprint and is held by the CSV safety net as a suspected duplicate (same day, amount, direction and
+  label), never booked twice.
+- **R3 A `TOP` candidate is worded from the facts** (D4 amended): the counterparty IBAN and the amount.
+- **R4 « prioritaire » is words, not a severity**: the check's severities stay `violation` and `alert`.
+
+### Assertions whose expected value changed (round 1, house rule R3)
+- `033` unchanged; `034`–`047a` unchanged, every assertion kept.
+- `047b` (this slice's own, unmerged): 24 → 27 tests (k4 off and on, q2); j1 gains the keys `booked_still` and
+  `still`, w1 the key `subjects`; `pg_temp.imp` stages `label_references` (from `refs`, else `[ref]`), `pg_temp.waiting`
+  returns the subject as a tenth element. No earlier key's value changed.
+- `test_label_references.py` (this slice's): `_parse` reads the first of `label_references`; the stage test reads the
+  `label_references` column (a list) and that `reference_from_label` is no stage column.
+- `label-references.test.ts` (this slice's): the `TOP` case carries the IBAN the text asserts; `CHECK_LABEL`'s help of
+  `label_reference_waiting` is the new text.
+- `test_label_references_integration.py`: `_transfers` also orders a top-up (the earlier tests' assertions unchanged).
+
+### Mutants (round 1)
+Each SQL mutant applied to the stack (the function's block of the migration with one change), the file run, the block
+re-applied; worker and web mutants edited in place, then restored from git.
+- The import tries only the first candidate → `047b` k4. Its account and kind condition dropped → k4 (TUI-5).
+- `bank_booking_candidates` keeps a booked `label_reference` line in its first branch → j1; in its held-duplicate
+  branch → j1 (TUI-3).
+- The nightly's subject the candidate's transfer → w1 (TUI-4).
+- The import's probe unkeyed (`y.end_to_end_id || ''`) → the reads test (50,162 `bank_transfer` rows against its
+  bound of five).
+- The parser keeps only the first token → `test_every_whole_token_of_ours_is_a_candidate_in_the_label_s_order`,
+  `test_every_token_is_read_in_order_once`. NOTPROVIDED not read as none → the three NOTPROVIDED cases.
+- Web: the `TOP` text without its IBAN condition → `label-references.test.ts` (the text test); `checkLabel` without
+  its details for the code → the « prioritaire » test.
+
+### Suites (round 1)
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-2 review fixes, round 1 »,
+`docs/benchmarks/payments.md` « Review round 1 »):
+- The db job's sequence after a fresh reset: `supabase test db` **53 files, 3,213 tests, PASS** (599 s; `033` byte for
+  byte unchanged and green, `047b` 27/27); `supabase gen types typescript` → no diff (no public signature changed);
+  then, without a reset, the non-scale integration suite **312 passed** (1,075 s).
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` clean; unit suite **1,292 passed**, 7 xfailed (the XSD
+  cases, as before; 177.3 s).
+- `make eval`: mapping top-1 1.000 (167/167, threshold 0.980); reconciliation 0.9600 automatic, 0 wrong.
+- The scale job's nine files in one pytest call as `ci.yml` lists them, after a fresh reset: **15 passed** (1,496.3 s;
+  the 50,000-credit CSV statement imported + matched in 42.9 s, ingest 9.2 s).
+- The scale-payouts job's two files, after another fresh reset: **6 passed** (1,252.6 s).
+- Web: `eslint`, `tsc` (after `next typegen`) clean; vitest **726 passed** (35 files).
+- `./scripts/e2e.sh` after a fresh reset: **71 passed** (desktop, mobile and switch-on, 7.7 min;
+  `label-references.spec.ts` 3.4 s desktop, 3.7 s mobile). No page a screenshot shows changed in this round (the
+  « À classer » text of `m2c7-libelle-reference` cites a payout, worded as before): the 188 images whose diff was only
+  dates, ids or order reverted.
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 215 non-test code lines added or removed (the migration 70, most of them the import's candidate step and its
+comments; the worker 83; the web 62), and about 250 of docs: within the slice's budget.
+
+### Left open (round 1, low), with its default
+- **CC-1**: `public.debit_queue` reads the servicer's lines and the review, link, release and resolution tables whole
+  under stale statistics (the body 7e-2 found; measured at 120–141 ms on 65,000–200,000 lines, far under 8 s).
+  Default: the 7f hardening slice gives it `set enable_seqscan = off`, turns the four join tables into keyed `offset
+  0` laterals by `bank_transaction_id` in each branch and in the final select, and bounds the whole queue absolutely
+  in a db-job reads test.
+- **MB-4**: « Contrôles » lists a code's rows by age, the prioritaire ones among them. Default: keep (labelled and
+  worded « prioritaire »); order them first if ops ask.
+- **MB-3**: the exit that books a `label_reference` credit as the `TOP` it cites. Default: founder Q15's added
+  question, a (7e-3's fourth exit at exactly the top-up's amount); until then support handles it.
+- **R2**: a pre-fix CSV export with NOTPROVIDED cells imported again after this fix is held as suspected duplicates.
+  Default: accept (ops release or discard them in « Doublons possibles »; nothing is booked twice).
+- Founder Q15 itself (a) — open; the three exits are 7e-3's.
+
+### Round 2
+Two items, each checked against the code first (the parser and `labelReferenceText` in the checkout, the stack's
+bodies equal to `954d81f`). Both held. No SQL body changed (the migration is as round 1 left it); the switch stays off
+(neither item reads it: the parser's reading and the page's words are the same with it on, and `047b` q3 runs nothing
+the switch decides).
+
+- **notprovided-ref-books-return (medium, fixed): a `/REF` beside a NOTPROVIDED cell became the line's end-to-end
+  id.** Round 1 (MB-2) read a « référence de bout en bout » cell reading NOTPROVIDED as no id; `_line` then fell back
+  on the label's first `/REF` (`e2e = reference`), as for an empty cell. In such a row a `/REF` of ours can only be
+  text the payer typed — a client repaying an advance, motif « REMBOURSEMENT AVANCE /REF RMT… », the bank appending its
+  own « /REF NOTPROVIDED » (`parse_label` keeps the first) —: `954d81f`'s parser read that line `return`, its
+  end-to-end and original id the `RMT` (a `/REF TOP…` line `own_transfer_in`), and the reviewer's rolled-back run booked
+  the booked run's payout `payout_returned` (a credit 50 € under it as that return plus a 50 € fee), the switch off or
+  on: money booked from a CSV label alone. Before 7e-2 the cell itself was the id, so the `/REF` was never read. Now a
+  cell reading NOTPROVIDED (any case) gives the line **no end-to-end id at all**, a `/REF` marker included: the
+  label's every token of our form, the `/REF` value among them, is a candidate (`label_references`), which the import
+  keeps only for a transfer of the statement's account — the credit is held `label_reference`, never booked. A bank's
+  return (« RETOUR VIR SEPA … ») keeps its kind with no original id (nothing matches it, as before 7e-2 when the
+  original id was « NOTPROVIDED »); a debit is no `transfer_out` by it (as before 7e-2); an RF creditor reference in
+  `/REF` is still the creditor reference. The line's dedup fingerprint is computed from the cell, as before 7e-2
+  (`end_to_end_id` « NOTPROVIDED »), so round 1's R2 consequence is gone. Tests: `test_label_references.py`
+  (`test_notprovided_in_the_end_to_end_column_is_no_end_to_end_id`, its second and third rows now candidates with no
+  id; `test_a_ref_of_ours_beside_a_notprovided_cell_is_a_candidate_never_the_end_to_end_id`: the reviewer's label, a
+  `/REF TOP`, a bank's return, a debit and an RF reference beside NOTPROVIDED, and the empty cell's reading unchanged;
+  `test_a_notprovided_line_keeps_the_fingerprint_it_had_before`),
+  `test_label_references_integration.py::test_a_ref_of_ours_beside_a_notprovided_cell_is_held_never_booked` (two runs
+  booked from their camt.053 debits, then a CSV export of the account with NOTPROVIDED cells: at the payout's amount
+  and 50 € under it, each credit `label_reference` with the payout's `RMT` its candidate and no end-to-end or original
+  id, the job's review `label_reference`, no booking, no payment, the payout still `booked`; on `954d81f`'s parser the
+  first line was a `return`).
+- **top-text-ignores-status (medium — a false statement on a page, fixed): « Collectoo l'attend encore » whatever the
+  top-up's status.** `labelReferenceText` never read `label_transfer.status`: on a line with no counterparty IBAN at
+  the top-up's amount it said « … Collectoo l'attend encore et ne le comptabilise pas sur cette ligne » of a top-up
+  cancelled (`public.cancel_top_up`, including one in a downloaded own-account file, whatever the switch) — no longer
+  awaited, `private.top_up_needed` counting only ordered and in-file top-ups — or already booked. It now words that
+  case from the status `public.debit_queue` already returns: ordered or `in_file`, as before; cancelled, « Le libellé
+  cite notre approvisionnement TOP… (47,00 €), du même montant, et le relevé ne donne pas le compte qui l'a envoyé :
+  cet approvisionnement a été annulé ; s'il a quand même été exécuté, c'est l'argent du cabinet. Ce peut aussi être un
+  règlement du client ou le paiement d'un débiteur qui cite notre référence. La ligne reste en attente … S'il s'agit
+  de cet approvisionnement exécuté malgré son annulation, prévenez le support : Collectoo ne l'attend plus et ne le
+  comptabilise pas sur cette ligne. » (as 7e-1's `top_up_cancelled_credit` says of such a credit carrying its `TOP`);
+  booked, « …, du même montant, mais cet approvisionnement est déjà comptabilisé : sauf si la banque l'a exécuté deux
+  fois, ce crédit n'est pas cet approvisionnement, sans doute un règlement du client ou le paiement d'un débiteur qui
+  cite notre référence. La ligne reste en attente … »; any other status, or none read, the « ce peut être » text
+  without « l'attend encore ». With an IBAN, or at another amount, the texts were already true whatever the status
+  (unchanged). The page's row type carries `status`. Tests: vitest (`in_file` as ordered; cancelled; booked; returned
+  and none; never « l'attend encore » but ordered or `in_file`; the IBAN and other-amount texts the same for every
+  status; `debitReviewText` the same text), `047b` q3 (the top-up cancelled by `cancel_top_up` before its credit, the
+  need it frees 4,700; q2's credit held `label_reference` all the same, its review `label_reference` as `decide_line`
+  writes it whatever the line's other facts (the job's rows emulated; never 7e-1's `top_up_cancelled_credit`),
+  « À classer » returning the top-up `cancelled` with no IBAN, `book_top_up_credit`
+  `not_an_own_credit`, `link_debit` `label_reference_line`, nothing booked, the need unchanged by the held credit, the
+  top-up still cancelled).
+
+### Decisions (round 2)
+- **R5 NOTPROVIDED gives the line no end-to-end id, `/REF` included** (round 1's R2 amended): the bank's word that
+  there is none holds for the whole line; a `/REF` of ours there is a candidate like any token of the label. The
+  dedup fingerprint keeps the cell, as before 7e-2.
+- **R6 A `TOP`'s « À classer » text follows its status**: Collectoo awaits a top-up while it is ordered or in a file
+  (`private.top_up_needed`'s own condition).
+
+### Assertions whose expected value changed (round 2, house rule R3)
+- `033` unchanged; `034`–`047a` unchanged, every assertion kept.
+- `047b` (this slice's own, unmerged): 28 tests (q3 added); no earlier assertion changed.
+- `test_label_references.py` (this slice's): `test_notprovided_in_the_end_to_end_column_is_no_end_to_end_id`'s second
+  row `(label_reference, RMT, "FACT-9")` → `(label_reference, RMT, None)` and third `("return", None, SWP)` →
+  `(label_reference, SWP, None)` — the round's fix, its docstring says so.
+- `label-references.test.ts`, `test_label_references_integration.py`: cases added, none changed.
+
+### Mutants (round 2)
+Worker and web mutants edited in place, then restored from git.
+- The parser reads the `/REF` as the end-to-end id beside NOTPROVIDED (the guard dropped) → the three NOTPROVIDED
+  cases, `…_a_candidate_never_the_end_to_end_id`, `…_keeps_the_fingerprint_it_had_before` and the integration test.
+- The fingerprint from the stored id (none) → `test_a_notprovided_line_keeps_the_fingerprint_it_had_before`.
+- Web: the cancelled branch dropped; « awaited » whatever the status; the booked branch dropped → each killed by
+  `label-references.test.ts`.
+
+### Suites (round 2)
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-2 review fixes, round 2 »,
+`docs/benchmarks/payments.md` « Review round 2 »):
+- The db job's sequence after a fresh reset: `supabase test db` **53 files, 3,214 tests, PASS** (594 s; `033` byte for
+  byte unchanged and green, `047b` 28/28); `supabase gen types typescript` → no diff (no public signature changed);
+  then, without a reset, the non-scale integration suite **313 passed** (1,075 s).
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` clean; unit suite **1,294 passed**, 7 xfailed (the XSD
+  cases, as before; 176.4 s).
+- `make eval`: mapping top-1 1.000 (167/167, threshold 0.980); reconciliation 0.9600 automatic, 0 wrong.
+- The scale job's nine files in one pytest call as `ci.yml` lists them, after a fresh reset: **15 passed** (1,706.3 s;
+  the 50,000-credit CSV statement imported + matched in 44.9 s, ingest 9.0 s).
+- The scale-payouts job's two files, after another fresh reset: **6 passed** (1,201.4 s).
+- Web: `eslint`, `tsc` (after `next typegen`) clean; vitest **726 passed** (35 files; the new cases inside the existing
+  `it` blocks).
+- `./scripts/e2e.sh` after a fresh reset: **71 passed** (desktop, mobile and switch-on, 7.4 min;
+  `label-references.spec.ts` 3.2 s desktop, 3.5 s mobile). No page a screenshot shows changed in this round (the
+  « À classer » text of `m2c7-libelle-reference` cites a payout, worded as before): the 188 images whose diff was only
+  dates, ids or order reverted.
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 60 non-test code lines added or changed (the parser 23 with its comments, the web 34, the page's type 2), no SQL;
+about 120 of docs: within the slice's budget.
+
+### Left open (round 2, low), with its default
+- **A payer's `/REF` before the bank's own, with the column empty or absent (older than 7e-2: M2b).** `parse_label`
+  keeps the label's first `/REF` as the line's end-to-end id when the cell is empty or there is no column: a payer
+  typing « /REF RMT… » before the bank's `/REF` makes the credit read as our payout's return, which the debit job books
+  (`payout_returned`) — the consequence this round removed for NOTPROVIDED, from a reading 7e-2 did not change (the
+  probe: an empty cell's « /REF RMT… » is still `return`). Default: in the 7f hardening slice, a label carrying two or
+  more `/REF` markers gives no end-to-end id (its tokens of ours then candidates, held `label_reference`); a single
+  `/REF` keeps M2b's reading. Recorded in COMPLIANCE OQ-84.
+- Round 1's R2 (a pre-fix export with NOTPROVIDED cells held as suspected duplicates): closed by R5 (the fingerprint
+  keeps the cell).
+- Round 1's other lows (CC-1, MB-4, MB-3's exit) and founder Q15 (a): unchanged, open.
+
+### Round 3
+Two items, each checked against the code first (the migration's import and link guard, `debits.ts` and `forms.ts` in
+the checkout, the stack's bodies equal to `1f6125a`). Both held: `047b` k5 run on round 2's body kept `SWP0000000047B1`
+before the booked run's payout (p0 false, « À classer » naming the sweep, as the round 1 verifier's probe found), and
+both texts listed a return of the transfer for a line citing a `TOP`. Fixed in place in the unmerged
+`20261130090000_label_references.sql` (two function bodies) and the web; the switch stays off (no rule reads it; k5
+runs again with it on and equals its switch-off twin, as x1 does).
+
+- **top-cited-line-lists-a-return-exit (medium — a false statement on « Contrôles » and in a refusal, fixed).**
+  `LABEL_REFERENCE_WAITING_TAIL` (« Contrôles »' help of `label_reference_waiting`, with or without the reference) and
+  the refusal `label_reference_line` both said « (retour de ce virement, règlement du client ou paiement d'un débiteur) »
+  of every such line; plan §7.3: a `TOP` candidate has no return exit, and the one other class it may be is that
+  top-up (founder Q15). Each text now takes the candidate's kind from what it already has:
+  - « Contrôles » (`labelReferenceWaiting`) from the row's `details.candidate_kind`, else the reference's prefix
+    (`bank_transfer_prefix` ties `TOP` to a top-up): a `TOP` row reads « Une ligne du relevé cite notre
+    approvisionnement TOP… dans son libellé. Rien n'est comptabilisé tant que la ligne n'est pas classée : cet
+    approvisionnement (question Q15), règlement du client ou paiement d'un débiteur. Aucun écran ne permet encore de
+    la classer : prévenez le support. »; an `RMT` or `SWP` row, the P0 one included, as before; the static help (no
+    row read, the kind unknown) « … : retour de ce virement (RMT ou SWP) ou cet approvisionnement (TOP, question Q15),
+    règlement du client ou paiement d'un débiteur. … », true of every kind.
+  - The refusal had no kind (`public.link_debit` raises the guard's code): `private.link_debit_guard` now returns
+    **`label_reference_top_up_line`** when the line's candidate is a `TOP` (the row it already read), else
+    `label_reference_line`; `debitErrorCode` maps it, and its text reads « Le libellé cite l'un de nos
+    approvisionnements : cette ligne ne se lie à aucun paiement et ne se classe pas sans comptabiliser. Elle attend
+    d'être classée — cet approvisionnement (question Q15), règlement du client ou paiement d'un débiteur —, ce que cet
+    écran ne permet pas encore : prévenez le support. »; the `RMT`/`SWP` text unchanged. `bank_debit_link_guard` (the
+    raw backstop, `check_violation`, no ops text) unchanged.
+  - Tests: vitest (each text by kind — `RMT`, `SWP`, `TOP` —, from `candidate_kind` and from the prefix alone; the
+    static help; the refusal's code for every link kind ops may send and its text); `047b` x1 (f1-3, citing the
+    sweep: `label_reference_line`; the released f3-1, citing the top-up: `label_reference_top_up_line`, every link
+    kind), q2 and q3 (« Comptabiliser comme approvisionnement »: `label_reference_top_up_line`).
+- **first-kept-candidate-hides-p0 (medium — « À classer » and the alert misstated what the line cites, fixed).** Of
+  the label's candidates that are transfers of the account, the import kept the first in the label's order: a label
+  citing our sweep then a booked run's payout kept the sweep — `label_reference_waiting`'s p0 false, « À classer »
+  naming only the sweep (and 7e-3's return exit would have named only it). `private.ingest_statement` now keeps **the
+  payout of a booked run** (kind `payout`, its run read by key, status `booked`: the nightly's own p0 condition) over
+  the others, else the first in the label's order. Each line's candidates are read once, in a lateral join: round 2's
+  scalar subquery was planned twice (in the update's filter and in its value), which its early stop at the first
+  match hid; reading every candidate, it read a kept line's candidates twice (the reads test's first try: seven
+  `bank_transfer` index rows for five probes, two of them an old row version its first plant had left). The twins: the parser stages every candidate as before (it cannot read a run); its provisional kind,
+  `refine_kind`'s `reference_from_label` and the SQL's ninth argument read only whether there is one, so the twins
+  agree whichever is kept — the parity test unchanged and green; the parser's docstrings say the import's rule.
+  Tests: `047b` k5 (off and on, imported three business days ago): the sweep then the booked run's payout → the
+  payout (p0 true); the payout then the sweep, our top-up then the payout, a look-alike and another servicer's sweep
+  then the payout → the payout (p0 true); the sweep then an approved run's payout → the sweep; that payout then the
+  sweep → that payout; the sweep then the top-up → the sweep (p0 false); « À classer » names the payout and its booked
+  run; `test_label_references_integration.py::test_a_booked_run_s_payout_is_kept_over_the_label_s_other_candidates`
+  (two runs booked from their camt.053 debits, then a CSV export through the real import job: the payout kept after
+  the sweep, the sweep before a payout of no run, that payout before the sweep; « À classer » through the API; the
+  nightly ten days on: P0 for the first line only); the reads test (below).
+
+### Decisions (round 3)
+- **R7 A booked run's payout first, else the label's order**: the nightly's p0 condition, read the same way (the
+  payout's run by key, `booked`); a payout of a run not booked or of no run, a sweep and a top-up keep the label's
+  order; two booked runs' payouts, the first of them. The choice is the import's, at import (Left open).
+- **R8 The refusal's kind in the guard's code** (`label_reference_top_up_line`), as `own_credit_top_up_line` and
+  `own_credit_own_transfer_line` already split one refusal by kind; « question Q15 » named in ops copy as « question
+  ouverte OQ-34 » already is.
+
+### Assertions whose expected value changed (round 3, house rule R3)
+- `033` unchanged; `034`–`047a` unchanged, every assertion kept.
+- `047b` (this slice's own, unmerged): 28 → 30 tests (k5 off and on); x1 gains `links_sweep`, and `links_released`
+  (f3-1 cites our top-up) reads `label_reference_top_up_line` for every link kind instead of `label_reference_line`;
+  q2's and q3's `own_credit` likewise — the round's fix.
+- `label-references.test.ts` (this slice's): `CHECK_LABEL.label_reference_waiting`'s help (the static form, true of
+  every kind) and the `TOP` row's help (its classes without a return) — the round's fix; cases added.
+- `test_label_reference_reads_integration.py`: the import's first staged line cites our sweep then a booked run's
+  payout (was: a look-alike then the payout of no run), and `remittance_run` is watched (below).
+
+### Stale statistics (round 3)
+The choice adds one read: per candidate that is a payout of the account, its run by the primary key, behind an
+`offset 0` fence (a one-time filter skips it for a sweep or a top-up). `test_label_reference_reads_integration.py` now
+plants 10,000 `remittance_run` rows (two other servicers' booked and cancelled runs, `n_distinct` pinned to 2) and a
+booked run of the servicer with its payout (a copy of the payout under another id, inserted with its run: an update
+would leave the old row version, which a unique probe also returns), watches the table, asserts the kept candidate,
+and bounds the import's runs absolutely (at most one per payout candidate of the account: one), besides its
+`bank_transfer` bound (five, one per candidate). Measured: the import read 3 `bank_transfer` index rows over its five
+probes and 1 `remittance_run` row (round 2's body: 3 and 0, stopping at the first match). The run probe unkeyed
+(`r.id::text = y.run_id::text`) read 10,009 `remittance_run` rows: killed.
+
+### Mutants (round 3)
+Each SQL mutant applied to the stack (the function's block of the migration with one change), the files run, the
+block re-applied; web mutants edited in place, then restored.
+- The import keeps the first in the label's order again (`order by u.n`) → `047b` k5, the integration test, the reads
+  test (the sweep kept).
+- Any payout first, its run's status not read → k5 (the approved run's payout kept over the sweep before it).
+- The run probe unkeyed → the reads test.
+- The guard without its `TOP` code → `047b` x1, q2, q3.
+- Web: `labelReferenceWaiting` without its `TOP` branch; without the prefix fallback; the static help listing a
+  return for every kind; `debitErrorCode` without `label_reference_top_up_line`; that refusal's text listing a return
+  → each killed by `label-references.test.ts`.
+
+### Suites (round 3)
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-2 review fixes, round 3 »,
+`docs/benchmarks/payments.md` « Review round 3 »):
+- The db job's sequence after a fresh reset: `supabase test db` **53 files, 3,216 tests, PASS** (555 s; `033` byte for
+  byte unchanged and green, `047b` 30/30); `supabase gen types typescript` → no diff (no public signature changed:
+  the guard is private, its code a value); then, without a reset, the non-scale integration suite **314 passed**
+  (1,076 s; `test_label_reference_reads_integration.py` 20.8 s).
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` clean; unit suite **1,294 passed**, 7 xfailed (the XSD
+  cases, as before; 168.6 s).
+- Web: `eslint`, `tsc` (after `next typegen`) clean; vitest **728 passed** (35 files).
+- `./scripts/e2e.sh` after a fresh reset: **71 passed** (desktop, mobile and switch-on, 7.3 min;
+  `label-references.spec.ts` 3.3 s desktop, 3.4 s mobile). No page a screenshot shows changed in this round (the
+  « À classer » text of `m2c7-libelle-reference` cites a payout, worded as before; only its id differed): the 189
+  images whose diff was only dates, ids or order reverted.
+- The import changed, so its two volume files ran as `ci.yml` runs them (`-m integration -s`, CI's logging settings),
+  after another fresh reset: `test_matching_scale_integration.py` and `test_statement_scale_integration.py` **2 passed**
+  (185.4 s): the 50,000-credit CSV statement imported + matched in **37.5 s** (ingest 7.8 s; round 2: 44.9 s, 9.0 s),
+  automatic 0.9687, 0 wrong; the 50,000-line camt.053's import job **26.0 s** (ingest 9.0 s; 28.0 s), the same lines
+  again 7.2 s. Neither file's lines cite a reference of ours: the candidate step reads nothing (its `exists` gate).
+  The other scale files time nothing this round changes (not run).
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 150 non-test lines added or changed (the migration 84, most of them comments and the import's candidate step
+rewritten as a lateral join; the web 38; the worker's docstrings 28), and about 130 of docs: within the slice's
+budget.
+
+### Left open (round 3, low), with its default
+- **The kept candidate is chosen at import.** A credit citing our sweep and then a payout whose run is booked only
+  after the import (its debit on a later statement) keeps the sweep: « À classer » names the sweep and the nightly's
+  row is not P0 for that line. Default: accept in 7e-2 (two of our transfers of the account on one credit, the
+  payout's debit not yet booked: rare; the line's label, shown on the page, cites both); 7e-3 decides whether its
+  return exit also takes the label's other candidates.
+- Round 2's lows (a payer's `/REF` before the bank's, 7f), round 1's (CC-1, MB-4, MB-3's exit) and founder Q15 (a):
+  unchanged, open.
+
+### Assembly (round 3's verifier low, fixed)
+- **The TOP texts named Q15's class for a line it cannot be.** Round 3's verifier found that « Contrôles »' TOP help
+  and the `label_reference_top_up_line` refusal listed « cet approvisionnement (question Q15) » for every TOP-cited
+  line. Plan §7.3 limits that exit to a credit with no sending account at exactly the top-up's amount, and a TOP-cited
+  credit from another IBAN is a client's or a debtor's payment.
+- Raised to medium at assembly, as a false statement on a page.
+- The texts now read « … : règlement du client ou paiement d'un débiteur (ou, sans compte émetteur et du même montant,
+  cet approvisionnement : question Q15) ». The help with no row read gives the same clause for a TOP. These texts are
+  true of every line.
+- vitest pins all three texts (`label-references.test.ts`; 728 passed); lint and typecheck are clean. No SQL changed.
+- Round 3's other verdicts: both items fixed and reproduced (047b k5 fails on 1f6125a's ingest and passes on 9d58e10,
+  with the switch off and on; a 972-line probe covering every order of the candidate mixes; grants and settings
+  unchanged).
+
+## M2c-7e-2 — CI round (PR #50) (2026-11-26)
+**What failed.** The run dispatched on the PR (45872245527, head `3a45376`) failed the `scale` job in
+`test_transfer_files_scale_integration.py::test_a_file_of_5000_transfers`, at `assert_checks_keyed`.
+- The nightly checks read **70,000** `bank_transaction` rows, all by index, for a servicer owning 10,000.
+- The bound is 6 × 10,000 + 2,000 = 62,000.
+- On main's push of `deab14d` (run 45804442073) the same test read 50,002. The job's 14 other tests passed.
+
+**Cause: the slice's read of the held credits, priced below its own index.** The statement is
+`label_reference_waiting` in `private.run_advance_checks` (line 1774 at `3a45376`). Its subquery
+`select q.id from public.bank_transaction q where q.organization_id = p_organization_id and q.kind =
+'label_reference' and q.booking_date < v_bd3 offset 0` took `bank_transaction_org_idx`
+(`Index Cond: organization_id`, `Filter: booking_date, kind`, `Rows Removed by Filter: 10000`). It read every line of
+the servicer instead of probing `bank_transaction_label_reference_idx`.
+- **Two conditions in the statistics trigger it.**
+  1. The analyse knew none of the servicer's lines: its most common values summed to 1, so the servicer was
+     estimated at 0 rows. That is what autovacuum leaves when it analyses just before a scale file's import.
+  2. `organization_id` follows the heap's order, because the scale files import one servicer's statement after another.
+- **Why the single-column index wins.** With an estimate of 0 rows, `cost_index` prices the heap page as
+  `4 × (1 − c²)`, where c is the index's correlation. `btcostestimate` takes c from the column for a single-column
+  index, and multiplies it by 0.75 for a multi-column one. So the servicer's single-column index beats a partial index
+  on `(organization_id, booking_date, id)` once |c| is large enough, by more than the planner's 1 % fuzz.
+- **Reproduced on the second stack** (project `collectoo-cifix`, ports 553xx).
+  - The job's files in CI's order read 10,000: the timing of autovacuum decides.
+  - Planted state: the transfer-files scenario (a servicer with 10,004 lines) and 200,000 lines of five other
+    servicers inserted in organization order, then analysed without the servicer's lines (correlation 1). Each
+    variant's nightly ran in a rolled-back transaction:
+
+    | Variant | `bank_transaction` rows read |
+    |---|---|
+    | `3a45376` | **70,002** |
+    | main's schema (7e-1's `run_advance_checks`, main's two indexes) | 60,002 |
+    | 7e-1's `run_advance_checks` body alone | 60,002 |
+    | main's `bank_transaction_own_idx` alone | 70,002 |
+    | the fix | 60,002 |
+
+  - Without the label statement, main's body reads the servicer's lines from the same five probes plus two keyed
+    reads: the 60,002.
+  - The recreated `bank_transaction_own_idx` is not the cause.
+  - On the state CI's order left here, re-analysed without the servicer's lines (correlation −0.35), head and main both
+    read 50,000. That is main's CI figure: four probes of the kind indexes of height 1 took `bank_transaction_org_idx`,
+    while `bank_transaction_own_idx` and `bank_transaction_label_reference_idx` kept their plans on startup cost,
+    7.87 against 7.83.
+
+**Fix** (`20261130090000_label_references.sql`, unmerged, edited in place as earlier CI rounds were):
+- `bank_transaction_label_reference_idx` is on `(organization_id) where kind = 'label_reference'`, the servicer's key
+  alone.
+- It is a subset of `bank_transaction_org_idx`, priced with the same correlation and a shorter descent, so it is never
+  above it. The read's booking date filters its few lines.
+- Unchanged: the function bodies, their grants and settings (`prosrc`, `proacl` and `proconfig` compared before and
+  after), and the rows. pgTAP 047b's index check still holds: the definition names the kind.
+- On the planted state the plan becomes `Index Scan using bank_transaction_label_reference_idx`, reading the label
+  lines only: 60,002 for the nightly.
+
+**Test** (`worker/tests/test_label_reference_reads_integration.py`, `db` job, about 20 s):
+`test_the_nightly_reads_the_label_lines_by_their_index_whatever_the_correlation`.
+- In its rolled-back transaction: the file's `_plant`, then `organization_id`'s statistics as CI's analyse left them
+  (the servicer's frequency 0, the others rescaled to sum 1, n_distinct their number, correlation 1, no page
+  all-visible), then `OWN` = 2,000 credits of the servicer added after the analyse.
+- Bound: the whole nightly (`private.run_payment_checks`) reads, per table, no more than with 7e-1's
+  `run_advance_checks` body on the same books, plus `PER_CALL`.
+- On `3a45376`: **12,027** `bank_transaction` rows against 10,022 + 60, so 6.0 reads per line of the servicer's 2,004
+  against 5.0. It fails. Fixed: 10,026.
+
+### Mutants
+| Mutant (the index on the stack, the test run, then restored) | Killed by |
+|---|---|
+| `3a45376`'s index on `(organization_id, booking_date, id)` | the test (12,027) |
+| an index on `(organization_id, booking_date)` | the test (12,027) |
+| no label index at all (`bank_transaction_own_idx` serves the read) | the test (12,027) |
+
+3 of 3 killed.
+
+### Suites
+On the second stack alone; the main stack was in use by 7e-3's build.
+- `supabase test db` after `supabase db reset` (the fix applied, the `db` job's settings): **Files=53, Tests=3,216,
+  PASS** (568 s); 033 unchanged and passing.
+- Then, on the same database, the four integration files: `test_label_reference_reads_integration.py` (the new test
+  and the slice's), `test_advance_reads_integration.py`, `test_top_up_reads_integration.py` and
+  `test_label_references_integration.py`: **12 passed** (108 s).
+- Worker: `ruff check .`, `ruff format --check .` and `mypy` (strict, 217 files) are clean.
+- `database.types.ts` is not regenerated: no public signature changed.
+- **The `scale` and `scale-payouts` jobs were not run: blocked by disk.**
+  - Free space on the machine fell from 4.4 to 2.8 GB while 7e-3's build held 6.1 GB of database and 7.4 GB of storage
+    on the main stack.
+  - The job's first eight files took the second stack's volume to 5.2 GB earlier in this round.
+- **Instead, the failing file alone** (`test_transfer_files_scale_integration.py`, fresh reset, CI's logging
+  settings).
+  - On the fix: the nightly read `bank_transaction` (10,000, 0) for the servicer's 10,000; 0.23 s, against CI's
+    0.24 s on main. Timings did not move, so `docs/benchmarks/remittances.md` is unchanged.
+  - The first such run failed on another table: `ledger_posting`'s sequential scans, (15,001, 30,006) against
+    2 × 10,002 + 2,000. That is a plan of a servicer alone in the database. The rerun passed, and so did the file with
+    `3a45376`'s index; the label read does not touch that table.
+- Then `supabase db reset`: the second stack is left running at this head's schema.
+
+### Left open
+- **The same class, before 7e-2.** On the planted state, main's nightly reads the servicer's lines six times
+  (60,002 for 10,000), close to the scale bound of 62,000. The five probes that take `bank_transaction_org_idx` are:
+  - `private.run_payment_checks`: `debit_unclassified`'s kind branches (debit kinds, own kinds, `other_debit`) and
+    `duplicate_unresolved`;
+  - `private.run_transfer_checks`: its `other_debit` read.
+- **Also exposed, unchanged by 7e-2:** the funds pass's `private.bank_booking_candidates` reads 60,000 on that state
+  with both bodies, and `public.debit_queue` has its own whole-table reads (« M2c-7e-2 review fixes », CC-1, for 7f).
+- **Default:** the same single-column partial indexes, or a fence per probe, in 7f, measured against the scale files.
+- **The volume runs.** `scale` and `scale-payouts` must be dispatched on the branch and be green before merging
+  (CLAUDE.md). The fix changes a read the nightly checks time in both: the 5,000-transfer file, and the 2,000 held
+  chained runs.
+
+### Verification (adversarial)
+- **The new test.** It fails on `3a45376` and passes on the fix. The verifier killed two more mutants: `(organization_id, id)` and `(organization_id)` with no predicate. Two survived:
+  - `include (booking_date, id)`, which is equivalent;
+  - `(booking_date) where kind = 'label_reference'`, which survives because every planted line has today's date. That is a nit.
+- **The volume runs at the fix, locally** (fresh reset, CI's logging settings, the nine scale files in one call in ci.yml's order):
+  - 15 passed in 1,432 s.
+  - The failing test's nightly read `bank_transaction` (60,000, 0) against the 62,000 bound. On the same frozen state, `3a45376`'s index reads 70,000 (CI's figure) and main's schema 60,000.
+  - scale-payouts: 6 passed in 1,241 s.
+- **Equivalence.**
+  - pgTAP: 53 files, 3,216 PASS.
+  - The db job's integration suite in CI's order: 315 passed.
+  - A rolled-back probe of 17 lines on two servicers (booking dates around `v_bd3`; booked, linked, released and duplicate lines; other servicers' and look-alike citations) under 5 index variants: identical rows.
+- **Settings.** Grants, settings and function bodies are unchanged. No test or bound was loosened.
+
+### Left open (the verification, low), with their defaults
+- **The test can pass vacuously.** `_servicer_unseen` stores the rescaled frequencies as `real[]`. When the float4 sum lands just below 1, the servicer gets a positive estimate and the plan does not flip; this happened in 3 of 6 random analyses. Default, in 7f's hardening: raise the largest frequency until the sum is ≥ 1, and assert that the 7e-1 arm reads about 4 or more per servicer line, so a vacuous pass fails.
+- **The two arms can differ in an aged state.** With dead index entries and autovacuum off, `bank_transfer` reads differed by thousands within one session, giving one false failure in the scale end state. In the db job's real order the arms matched (124 against 123). Default, in 7f: bound only `bank_transaction`, or run an untimed arm first.
+- **The thin margin of main's own probes** (60,000 against 62,000, above): 7f, as stated.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

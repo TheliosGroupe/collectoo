@@ -200,6 +200,9 @@ def import_statement(conn: Conn, storage: Storage, statement_id: str) -> str:
                     "transfers_out",
                     "own_transfers_in",
                     "client_transfers_in",
+                    # M2c-7e-2: the credits held because their label cites one of our
+                    # transfers — the debit job reviews them (label_reference)
+                    "label_references",
                 )
             ) or any(
                 line.kind in ("return", "refund_out")
@@ -282,6 +285,8 @@ def stage_row(statement_id: str, line: StatementLine) -> tuple[Any, ...]:
             )
         if c == "unsplit_direction_given" and value is not None:
             value = list(value)  # a bool[] (M2c-6b-2b, OQ-84 (j))
+        if c == "label_references" and value is not None:
+            value = list(value)  # a text[] (M2c-7e-2 review round 1, MB-1)
         values.append(value)
     return tuple(values)
 

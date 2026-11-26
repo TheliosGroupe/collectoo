@@ -196,7 +196,9 @@ describe("line filters (review #15: direction counts)", () => {
     expect(lineFilterOr("toutes")).toBeNull();
     expect(lineFilterOr("encaissements")).toBe("and(direction.eq.credit,kind.in.(debtor_credit,batch_unsplit))");
     expect(lineFilterOr("autres")).toBe(
-      "kind.in.(return,refund_out,other_debit,psp_payout),and(direction.eq.debit,kind.in.(batch_unsplit))",
+      // M2c-7e-2 (R3, ADR-0014 « M2c-7e-2 »): a credit held because its CSV label cites one of our transfers joins the
+      // other operations (never a payment by itself)
+      "kind.in.(return,refund_out,other_debit,psp_payout),and(direction.eq.debit,kind.in.(batch_unsplit)),and(direction.eq.credit,kind.in.(label_reference))",
     );
     expect(lineFilterOr("doublons")).toBe("kind.in.(suspected_duplicate)");
     expect(Object.keys(LINE_FILTERS)).toEqual(["toutes", "encaissements", "autres", "doublons"]);
