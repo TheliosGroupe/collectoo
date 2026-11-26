@@ -11828,5 +11828,24 @@ On the second stack alone; the main stack was in use by 7e-3's build.
   (CLAUDE.md). The fix changes a read the nightly checks time in both: the 5,000-transfer file, and the 2,000 held
   chained runs.
 
+### Verification (adversarial)
+- **The new test.** It fails on `3a45376` and passes on the fix. The verifier killed two more mutants: `(organization_id, id)` and `(organization_id)` with no predicate. Two survived:
+  - `include (booking_date, id)`, which is equivalent;
+  - `(booking_date) where kind = 'label_reference'`, which survives because every planted line has today's date. That is a nit.
+- **The volume runs at the fix, locally** (fresh reset, CI's logging settings, the nine scale files in one call in ci.yml's order):
+  - 15 passed in 1,432 s.
+  - The failing test's nightly read `bank_transaction` (60,000, 0) against the 62,000 bound. On the same frozen state, `3a45376`'s index reads 70,000 (CI's figure) and main's schema 60,000.
+  - scale-payouts: 6 passed in 1,241 s.
+- **Equivalence.**
+  - pgTAP: 53 files, 3,216 PASS.
+  - The db job's integration suite in CI's order: 315 passed.
+  - A rolled-back probe of 17 lines on two servicers (booking dates around `v_bd3`; booked, linked, released and duplicate lines; other servicers' and look-alike citations) under 5 index variants: identical rows.
+- **Settings.** Grants, settings and function bodies are unchanged. No test or bound was loosened.
+
+### Left open (the verification, low), with their defaults
+- **The test can pass vacuously.** `_servicer_unseen` stores the rescaled frequencies as `real[]`. When the float4 sum lands just below 1, the servicer gets a positive estimate and the plan does not flip; this happened in 3 of 6 random analyses. Default, in 7f's hardening: raise the largest frequency until the sum is ≥ 1, and assert that the 7e-1 arm reads about 4 or more per servicer line, so a vacuous pass fails.
+- **The two arms can differ in an aged state.** With dead index entries and autovacuum off, `bank_transfer` reads differed by thousands within one session, giving one false failure in the scale end state. In the db job's real order the arms matched (124 against 123). Default, in 7f: bound only `bank_transaction`, or run an untimed arm first.
+- **The thin margin of main's own probes** (60,000 against 62,000, above): 7f, as stated.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
