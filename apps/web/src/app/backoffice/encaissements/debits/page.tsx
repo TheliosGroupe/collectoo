@@ -11,6 +11,7 @@ import {
   decisionLabel,
   explainable,
   feeEffect,
+  holdsLabelReference,
   lossEffect,
   offersTopUp,
   ownCreditEffect,
@@ -85,6 +86,17 @@ type Row = {
   /** M2c-6b-2c (critic CSO-4): what « Comptabiliser… » may book the line as, by key (e, b, n, u; null: not offered) —
    * its options are read only when its sheet opens */
   bookable_as?: string | null;
+  /** M2c-7e-2 (plan §7.4): a credit held because its CSV label cites one of our transfers — the reference cited and that
+   * transfer, by key (labelReferenceText words them) */
+  reference_from_label?: string | null;
+  label_transfer?: {
+    kind?: string | null;
+    /** review round 2 (top-text-ignores-status): a top-up's status words whether Collectoo still awaits it */
+    status?: string | null;
+    amount_minor?: string | null;
+    currency?: string | null;
+    run_number?: string | null;
+  } | null;
 };
 
 /**
@@ -444,6 +456,10 @@ function LineActions({
   /** M2c-7a: per payment, its entries already remitted to the client */
   remitted?: Map<string, RemittedEntry[]>;
 }) {
+  // M2c-7e-2 (plan §7.4): a credit held because its label cites one of our transfers takes no command in 7e-2 — every
+  // link is refused (label_reference_line), « Comptabiliser… », the relays and « Règlement du client » refuse its kind;
+  // its review says it waits
+  if (holdsLabelReference(row)) return null;
   const cur = row.currency;
   // the job's named payments, then those debit_link_options listed (one list with the queue's text: linkPayments)
   const payments = linkPayments(row.candidates, options?.payments);

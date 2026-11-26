@@ -581,8 +581,9 @@ select is((private.ingest_statement('b0000000-0000-0000-0000-000000000001', json
   'stmt_id', 'B1', 'seq', 1, 'from_date', '2026-11-06', 'to_date', '2026-11-06', 'opening_minor', '0',
   'closing_minor', '15100')))) - 'cash_in' - 'unposted' - 'credits' - 'debits' - 'payments' - 'cash_in_entries' - 'lines'
   - 'new_lines' - 'known_lines' - 'skipped_not_booked'),
+  -- (M2c-7e-2, R3: the counts gain label_references, the credits held because their CSV label cites our transfer)
   '{"returns": 0, "refunds_out": 0, "other_debits": 2, "batch_unsplit": 0, "transfers_out": 1, "own_transfers_in": 2,
-    "client_transfers_in": 0, "suspected_duplicates": 0}'::jsonb,
+    "client_transfers_in": 0, "suspected_duplicates": 0, "label_references": 0}'::jsonb,
   'the import counts our own credits and transfers out');
 select is((select string_agg(t.line_no || '=' || t.kind, ' ' order by t.line_no) from public.bank_transaction t
            where t.statement_id = 'b0000000-0000-0000-0000-000000000001'),

@@ -286,3 +286,99 @@ counts one row whatever the table holds, and every index scan costs about the sa
   1,000 returns 22.7 s; nightly checks 1.6 s. Matching: 50k imported + matched in 32.7 s (ingest 6.8 s, the account
   estimated at 3 lines before it). Receipts: 25 jobs in 55.2 s (prepare 0.09–0.10 s per 200). Statement: 20.6 s
   (ingest 7.0 s), re-import 4.3 s. Boarding 50k: 88 s.
+
+## Our references in CSV labels (M2c-7e-2, 2026-11-26, same VM, the main stack alone, right after `supabase db reset` with CI's logging settings)
+
+What M2c-7e-2 puts on the statement import (ADR-0014 « M2c-7e-2 »):
+- **The CSV parser**: per line whose « référence de bout en bout » column is empty or absent, one regular expression
+  over the upper-cased label (the first whole token of our form, `RMT`/`SWP`/`TOP` and 12 hexadecimal digits); the
+  stage gains one column. A camt.053 import reads nothing new (its stage never holds a candidate).
+- **`private.ingest_statement`**: one pass over the stage for the candidate's form (`line_invalid`), then — only when
+  the stage holds a candidate — one probe per candidate by the unique `bank_transfer.end_to_end_id` (behind an
+  `offset 0` fence) to drop those that are not a transfer of the account; the classifier reads one more argument.
+- **The debit job** is queued for an import that holds such a line (its count `label_references`); its candidates gain
+  the kind in both branches.
+
+The scale job's command as `ci.yml` runs it (`RECEIPT_FILES=5000`), right after `supabase db reset`: **15 passed** in
+1,440.3 s (10:39–11:03 UTC). The imports it times:
+- the matching run's statement, **50,000 CSV credits imported + matched in 46.2 s** (ingest 9.6 s; the account
+  estimated at 1 line before it; 7e-1: 42.5 s), the 13,500-credit history 11.9 s (12.8 s); automatic 0.9684, 0 wrong
+  (7e-1's runs: 0.9685; the generator writes no token of our form and the tenant has no transfer to keep one);
+- the allocation run's 50,000 credits imported + matched in 32.1 s (33.0 s), allocated in 78.7 s (75.9 s);
+- the 50,000-line camt.053: the import job **29.4 s** (parse 4.8 s, ingest 9.8 s), the same lines again 7.7 s (ingest
+  1.7 s);
+- 1,000 returns imported and linked in 25.3 s (29.0 s).
+
+**Stale statistics** (`worker/tests/test_label_reference_reads_integration.py`, the db job): with `bank_transfer`,
+`bank_transaction` and the probe tables planted (10,000 rows each, keys' `n_distinct` pinned to 2, generic plans), the
+import of three credits citing a real reference, a look-alike and another account's reads no more than the same import
+of the same lines staged without a candidate, plus 60 rows of any watched table (its CSV duplicate checks read the
+account's and the other accounts' lines in one pass since M2b-6, by design); the existence probe unkeyed
+(`y.end_to_end_id || ''`) read 20,025 `bank_transfer` rows against none.
+
+### Review round 1 (M2c-7e-2 review fixes, 2026-11-26, same VM, the main stack alone, right after `supabase db reset`)
+
+What round 1 changes on the statement import (ADR-0014 « M2c-7e-2 review fixes »): the CSV parser stages every whole
+token of our form of a label (each once, in the label's order: `label_references text[]`), not only the first, and
+reads a « référence de bout en bout » cell reading NOTPROVIDED as none; `private.ingest_statement` keeps, per staged
+line with candidates, the first that is a transfer of the account — one keyed probe per candidate (by the unique
+`bank_transfer.end_to_end_id`, behind its `offset 0` fence) instead of one per line. A file with no token of ours
+(every volume run) reads nothing new.
+
+The scale job's command as `ci.yml` runs it (`RECEIPT_FILES=5000`), right after `supabase db reset`: **15 passed** in
+1,496.3 s (13:03–13:28 UTC). The imports it times:
+- the matching run's statement, **50,000 CSV credits imported + matched in 42.9 s** (ingest 9.2 s; the account
+  estimated at 1 line before it; 7e-2: 46.2 s), the 13,500-credit history 12.0 s (11.9 s); automatic 0.9684
+  (48,418), 0 wrong (7e-2: 0.9684);
+- the allocation run's 50,000 credits imported + matched in 33.5 s (32.1 s), allocated in 73.4 s (78.7 s);
+- the 50,000-line camt.053: the import job **28.4 s** (parse 4.7 s, ingest 10.1 s; 29.4 s), the same lines again 7.4 s
+  (ingest 1.8 s);
+- 1,000 returns imported and linked in 29.0 s (25.3 s).
+
+**Stale statistics** (`worker/tests/test_label_reference_reads_integration.py`, the db job): the import now stages
+five candidates on its three lines (a look-alike then a real reference of the account, a look-alike, another
+account's then a look-alike) and is bounded absolutely on `bank_transfer` — at most one row per candidate — besides
+the relative bound for the rest; the existence probe unkeyed (`y.end_to_end_id || ''`) read 50,162 `bank_transfer`
+rows against that bound of five.
+
+### Review round 2 (M2c-7e-2 review fixes, 2026-11-26, same VM, the main stack alone, right after `supabase db reset` with CI's logging settings)
+
+What round 2 changes on the statement import (ADR-0014 « M2c-7e-2 review fixes », round 2): the CSV parser no longer
+reads a `/REF` marker as the end-to-end id of a line whose « référence de bout en bout » cell reads NOTPROVIDED (one
+more boolean per line; the `/REF` token of ours is then a candidate like any other), and computes that line's
+fingerprint from the cell as before 7e-2. No SQL body changed: the import reads exactly what round 1's did.
+
+The scale job's command as `ci.yml` runs it (`RECEIPT_FILES=5000`), right after `supabase db reset`: **15 passed** in
+1,706.3 s (15:10–15:38 UTC). The imports it times:
+- the matching run's statement, **50,000 CSV credits imported + matched in 44.9 s** (ingest 9.0 s; the account
+  estimated at 1 line before it; round 1: 42.9 s), the 13,500-credit history 11.0 s (12.0 s); automatic 0.9686
+  (48,430), 0 wrong (round 1: 0.9684);
+- the allocation run's 50,000 credits imported + matched in 34.1 s (33.5 s), allocated in 78.7 s (73.4 s);
+- the 50,000-line camt.053: the import job **28.0 s** (parse 5.2 s, ingest 9.2 s; 28.4 s), the same lines again 7.0 s
+  (ingest 1.6 s);
+- 1,000 returns imported and linked in 26.9 s (29.0 s).
+
+**Stale statistics**: no read is new or changed in this round; `worker/tests/test_label_reference_reads_integration.py`
+(the db job) passed unchanged.
+
+### Review round 3 (M2c-7e-2 review fixes, 2026-11-26, same VM, the main stack alone, right after `supabase db reset` with CI's logging settings)
+
+What round 3 changes on the statement import (ADR-0014 « M2c-7e-2 review fixes », round 3): of a line's candidates
+that are transfers of the account, `private.ingest_statement` keeps the payout of a booked run, else the first in the
+label's order — every candidate is now read (round 2 stopped at the first match), each line's once (a lateral join:
+round 2's scalar subquery was planned twice, in the update's filter and its value), and a payout candidate's run is
+read by its primary key. A file with no token of ours (every volume run) reads nothing new: the step's `exists` gate.
+
+The two files that time the import, as `ci.yml` runs them (`-m integration -s`), right after `supabase db reset`:
+**2 passed** in 185.4 s (17:32–17:35 UTC).
+- The matching run's statement, **50,000 CSV credits imported + matched in 37.5 s** (ingest 7.8 s; the account
+  estimated at 1 line before it; round 2: 44.9 s, ingest 9.0 s), the 13,500-credit history 9.6 s (11.0 s); automatic
+  0.9687 (48,434), 0 wrong (round 2: 0.9686).
+- The 50,000-line camt.053: the import job **26.0 s** (parse 4.5 s, ingest 9.0 s; round 2: 28.0 s), the same lines
+  again 7.2 s (ingest 1.7 s).
+
+**Stale statistics** (`worker/tests/test_label_reference_reads_integration.py`, the db job): the import's first staged
+line now cites our sweep then a booked run's payout (planted), `remittance_run` is planted (10,000 other servicers'
+runs) and watched, and the import is bounded absolutely on it — one row per payout candidate of the account — besides
+`bank_transfer` (five probes: 3 index rows read; round 2's body, stopping at the first match: 3) and the relative
+bound for the rest. The run probe unkeyed (`r.id::text = y.run_id::text`) read 10,009 `remittance_run` rows: killed.

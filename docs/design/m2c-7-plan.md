@@ -2278,7 +2278,9 @@ merges after 7e-1 (`decide_line` and `bank_debit_review_reason_check` are redefi
     reads); `bank_transaction.reference_from_label text null check (~ '^(RMT|SWP|TOP)[0-9A-F]{12}$')` and the same
     column on `private.bank_import_stage`; `bank_debit_review_reason_check` gains `label_reference`.
   - **Both twins.** The parser (`payments/statement` CSV presets) sets the stage's `reference_from_label` from a whole
-    label token, only when the end-to-end column is empty or absent. `payments.statement.refine_kind` and
+    label token, only when the end-to-end column is empty or absent (review rounds 1–2: or NOTPROVIDED, which gives
+    no end-to-end id at all — a `/REF` of ours there is a candidate too, never the line's end-to-end id).
+    `payments.statement.refine_kind` and
     `private.bank_line_refined_kind` gain a ninth argument `p_reference_from_label` (the eight-argument form at
     `20261116090000:5384` becomes a wrapper passing null, as the six-argument one at `:5419` already is): a credit whose
     base kind is `debtor_credit` and which is not refined to `own_transfer_in`, `client_transfer_in` or `return`
@@ -2289,7 +2291,9 @@ merges after 7e-1 (`decide_line` and `bank_debit_review_reason_check` are redefi
   - **`private.ingest_statement`** redefined (whole copy from `20261117100000:2749`, 441 lines): before the
     refinement, a stage candidate is kept only when it is the `end_to_end_id` of a transfer of this account (by the
     unique `bank_transfer.end_to_end_id`: a payout or sweep whose debtor, or a top-up whose creditor, is the statement's
-    account), else nulled (a look-alike is ignored); `reference_from_label` copied to `bank_transaction`; the payment
+    account), else nulled (a look-alike is ignored) — [7e-2 review rounds 1 and 3] every token is a candidate, and of
+    those that are transfers of the account the line keeps the payout of a booked run (the alert's P0), else the first
+    in the label's order —; `reference_from_label` copied to `bank_transaction`; the payment
     step keeps `n.kind in ('debtor_credit', 'batch_unsplit')`, so a `label_reference` line gets no payment (a 047b
     case asserts no `payment` row and no `cash_in` posting for it).
   - **The job** (7e-2). `decide_line` (worker) sends a `label_reference` line to review `label_reference` and never
@@ -2348,7 +2352,12 @@ merges after 7e-1 (`decide_line` and `bank_debit_review_reason_check` are redefi
     `20261117110000:2076`, 47 lines) give such a line the class `l` whose only returnable transfer is the candidate's.
     A payout (`RMT`) or a sweep (`SWP`) only: a `TOP` candidate has no return exit (a top-up arrives from the own
     account as `own_transfer_in`, never `label_reference`; a credit citing a `TOP` from another IBAN is a client's or a
-    debtor's payment).
+    debtor's payment). [7e-2 review round 1, MB-3, TUI-1] Not always: on a CSV export with no counterparty IBAN column
+    nothing says a credit comes from the own account, so our own top-up's credit — the bank printing its motif
+    « APPROVISIONNEMENT COMPTE DEDIE TOP… » in the label — is `label_reference` too; « À classer » says the sending
+    account is not given and that it may be that top-up (same amount), and Q15's added question asks 7e-3 for a
+    « this top-up » exit on such a line (`book_top_up_credit` naming the TOP the label cites, at exactly its amount),
+    else only the client's and the debtor's payment exits would remain for it.
     [check 2] (gap 1 (1)) The booking `transfer_line_post` then inserts is refused at `1440178`:
     **`private.bank_line_booking_guard`** (latest `20261121090000_switch_on_prerequisites_4.sql:641`) admits
     `payout_returned` and `sweep_returned` (l.743-760), `unplanned_payout_returned` and `unplanned_sweep_returned`
@@ -2767,7 +2776,12 @@ listed beside them.
     jamais comptabilisée seule ; [check 1] la ligne est mise de côté (ni paiement ni retour) jusqu'au choix : retour
     de ce virement (montant exact), règlement du client, ou paiement d'un débiteur ; [check 2] un retour ainsi
     confirmé compte partout comme le retour du virement (plus de « versé » ; à verser de nouveau). b : ignorée ;
-    attendre la colonne de la banque.
+    attendre la colonne de la banque. [7e-2 review round 1, MB-3] Ouvert aussi : sur un export CSV sans colonne
+    d'IBAN, le crédit de notre propre approvisionnement (motif « APPROVISIONNEMENT COMPTE DEDIE TOP… ») est mis de côté
+    de la même façon (rien ne dit qu'il vient du compte propre). a (défaut) : 7e-3 ajoute une quatrième sortie pour un
+    tel crédit dont le libellé cite un TOP de ce compte, à son montant exact : « C'est cet approvisionnement »
+    (book_top_up_credit sur la ligne) ; d'ici là, « À classer » dit qu'il peut s'agir de cet approvisionnement et de
+    prévenir le support. b : pas de sortie ; ces exports exigent la colonne d'IBAN (le support traite à la main).
 16. **Production.** a : aucun reversement réel n'a été émis depuis la production (les paiements faits de nos virements
     revenus n'existent donc pas). b : il y en a eu : dites-le, il faut alors un chemin pour les défaire.
 17. [critic] **Reversement revenu, puis un de ses encaissements annulé.** a : avance du cabinet comme pour tout

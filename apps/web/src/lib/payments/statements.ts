@@ -71,6 +71,8 @@ const LINE_KIND: Record<string, string> = {
   other_debit: "Débit (frais, autre)",
   suspected_duplicate: "Doublon possible",
   psp_payout: "Versement du prestataire de paiement",
+  // M2c-7e-2 (plan §7.3, S24): a credit held because its CSV label cites one of our transfers — not booked, to classify
+  label_reference: "Crédit citant notre référence",
 };
 
 /** Lines of these kinds (and of this direction, when given). */
@@ -87,7 +89,12 @@ export const LINE_FILTERS: Record<string, { label: string; groups: LineGroup[] |
   encaissements: { label: "Encaissements", groups: [{ direction: "credit", kinds: ["debtor_credit", "batch_unsplit"] }] },
   autres: {
     label: "Autres opérations",
-    groups: [{ kinds: ["return", "refund_out", "other_debit", "psp_payout"] }, { direction: "debit", kinds: ["batch_unsplit"] }],
+    groups: [
+      { kinds: ["return", "refund_out", "other_debit", "psp_payout"] },
+      { direction: "debit", kinds: ["batch_unsplit"] },
+      // M2c-7e-2: a credit held because its CSV label cites one of our transfers (never a payment by itself)
+      { direction: "credit", kinds: ["label_reference"] },
+    ],
   },
   doublons: { label: "Doublons possibles", groups: [{ kinds: ["suspected_duplicate"] }] },
 };

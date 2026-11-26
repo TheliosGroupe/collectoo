@@ -45,6 +45,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from collectoo_worker.payments.statement import LABEL_REFERENCE_KIND
+
 Day = date  # (RefundCandidate has a field named `date`)
 
 # Review reasons (public.bank_debit_review.reason).
@@ -313,6 +315,11 @@ RETURN_BEFORE_DEBIT = "return_before_debit"  # its debit not booked, or booked o
 # transfer whose second or late debit is on a statement and not booked yet (that debit first)
 UNPLANNED_PAYOUT_RETURN = "unplanned_payout_return"
 RETURN_DEBIT_PENDING = "return_debit_pending"
+# M2c-7e-2 (plan docs/design/m2c-7-plan.md §7.3, S24; [critic] M7-MONEY-6, [check 2] gap 1 (3)): a
+# credit held because its CSV label cites one of our transfers of its account (kind
+# `label_reference`): never booked by the job — a reference read from a label never books alone; it
+# waits for ops (its exits are M2c-7e-3's)
+LABEL_REFERENCE = "label_reference"
 
 BOOKING_REVIEW_REASONS = frozenset(
     {
@@ -333,6 +340,7 @@ BOOKING_REVIEW_REASONS = frozenset(
         RETURN_BEFORE_DEBIT,
         UNPLANNED_PAYOUT_RETURN,
         RETURN_DEBIT_PENDING,
+        LABEL_REFERENCE,
     }
 )
 # the reviews that are a P0 (money may have left twice, or for a transfer we never handed out;
@@ -704,7 +712,11 @@ def _transfer_return(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one r
 
 def decide_line(line: FundsLine) -> list[Booking]:  # noqa: PLR0911, PLR0912 - one rule per kind
     """The job's decision for one line: its bookings (one per transfer), one review, or nothing (an
-    other debit with no charge code: ops classify it, no review)."""
+    other debit with no charge code: ops classify it, no review). M2c-7e-2: a credit held because
+    its label cites one of our transfers is reviewed `label_reference` before any other rule,
+    whatever else it carries, and never booked."""
+    if line.kind == LABEL_REFERENCE_KIND:
+        return _funds_review(line, LABEL_REFERENCE)
     if line.direction == "debit" and line.end_to_end_id and OUR_ID.match(line.end_to_end_id):
         return _own_debit(line)
     if line.batch:
