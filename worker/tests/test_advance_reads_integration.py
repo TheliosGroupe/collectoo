@@ -347,10 +347,18 @@ def test_the_advance_reads_stay_keyed_whatever_the_statistics(lot: dict[str, Any
                    a0["entry"], a0["run"])  # fmt: skip
         # the night's advance checks (the servicer's first night: the full pass)
         conn.execute("set role postgres")
-        check = one(conn, "select private.run_payment_checks(%s)", (org,))
+        one(conn, "select private.run_payment_checks(%s)", (org,))
         conn.execute("reset role")
-        reads.call("run_advance_checks", K, None, "select private.run_advance_checks(%s, %s)",
-                   check["run_id"], org)  # fmt: skip
+        # M2c-7e-1 (R3, ADR-0014 « M2c-7e-1 »): measured in a check run of its own, still
+        # open — the night's run is finished (its rows refused), and since 7e-1 this servicer's
+        # nightly writes one: it owes the dedicated account its advances and has no own account
+        # (top_up_account_missing). Review round 1 of 7e-1 (TUI-6): the full pass asked for, as
+        # before — with the night's run finished, an unasked pass would be the delta one
+        check_run = one(conn, "insert into public.payment_check_run (organization_id) "
+                              "values (%s) returning id", (org,))  # fmt: skip
+        reads.call("run_advance_checks", K, None,
+                   "select private.run_advance_checks(%s, %s, null, true)",
+                   check_run, org)  # fmt: skip
         # « Passer en perte » (an admin): the command, its settlement's guard, the checks
         doc = one(
             conn,

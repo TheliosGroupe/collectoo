@@ -28,6 +28,9 @@
 - `repayment_request {request_id}` (M2c-7c-2): the letter « Demande de remboursement d'avance »
   drawn from its frozen payload, stored and recorded once (`jobs.repayment_requests`); a failure is
   retried by the queue, and the nightly alerts a letter not drawn one hour after its request.
+- `top_ups {organization_id}` (M2c-7e-1, hourly, pg_cron `servicer-top-ups`): what one servicer
+  owes its dedicated account ordered back from its own account, in the message's own transaction
+  (`jobs.top_ups`: a held lock skips the servicer until the next hour, recorded).
 
 No model, no LLM: every amount comes from the ledger and the engines (CLAUDE.md).
 """
@@ -46,7 +49,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Jsonb
 
-from collectoo_worker.jobs import repayment_requests, transfer_files
+from collectoo_worker.jobs import repayment_requests, top_ups, transfer_files
 from collectoo_worker.jobs.remittance_documents import run_documents
 from collectoo_worker.remittance.calendar import Calendar, CalendarHorizonError, conservative
 from collectoo_worker.remittance.commission import (
@@ -135,6 +138,8 @@ def make_handler(storage: Storage | None = None) -> Any:
             if storage is None:
                 raise RuntimeError("the repayment request job needs the storage")
             repayment_requests.run_repayment_request(conn, storage, payload)
+        elif kind == "top_ups":
+            top_ups.run_top_ups(conn, payload)
         else:
             raise ValueError(f"unknown remittances job type: {kind!r}")
 
@@ -151,6 +156,9 @@ def record_dead_job(payload: dict[str, Any], error: str, conn: Conn) -> None:
         return
     if payload.get("type") == "transfer_file":
         transfer_files.record_dead_job(payload, error, conn)
+        return
+    if payload.get("type") == "top_ups":
+        top_ups.record_dead_job(payload, error, conn)
         return
     run, token = payload.get("run_id"), payload.get("token")
     if not run or not token:

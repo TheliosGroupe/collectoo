@@ -156,6 +156,10 @@ export const DEBIT_REVIEW: Record<string, string> = {
     "Crédit venant du compte propre sans approvisionnement demandé : approvisionnement du cabinet, ou paiement d'un débiteur reçu par le cabinet et relayé sur ce compte (il devient alors un paiement à affecter). Ne le classez avec une explication que s'il n'est ni l'un ni l'autre.",
   top_up_differs:
     "Crédit portant la référence d'un approvisionnement, mais d'un autre montant ou sur un autre compte : vérifiez dans la banque.",
+  // M2c-7e-1 ([critic] M7-MONEY-4): its one exit, « Comptabiliser comme approvisionnement » (no transfer)
+  // (review round 1, TUI-2: booked, it pays what the servicer owes — the hour's re-order is then beyond it)
+  top_up_cancelled_credit:
+    "Approvisionnement annulé puis exécuté par la banque : c'est l'argent du cabinet. Comptabilisez-le comme approvisionnement : il règle ce que le cabinet doit au compte dédié. Si Collectoo a recommandé cet approvisionnement entre-temps, annulez la nouvelle commande (« Virements », « Annuler ») si elle n'est pas exécutée ; sinon le surplus revient au cabinet avec la prochaine quote-part.",
   // M2c-7c-1 (plan §5.5): « Règlement d'une facture ou d'une avance du cabinet » books it
   client_credit:
     "Virement reçu du compte de reversement d'un client : règlement d'une facture ou d'une avance du cabinet (« Règlement du client »), ou paiement d'un débiteur que le client relaie (il devient alors un paiement à affecter).",
@@ -1034,7 +1038,18 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   // M2c-1 review: the servicer owes the dedicated account (fees, losses) beyond the top-ups ordered (design §15)
   servicer_shortfall: {
     label: "Approvisionnement du compte dédié à demander",
-    help: "Le cabinet doit de l'argent au compte dédié (frais bancaires, pertes) au-delà des approvisionnements demandés : approvisionnez-le depuis le compte propre (« Comptes bancaires »).",
+    help: "Le cabinet doit de l'argent au compte dédié (avances, frais bancaires, pertes) au-delà des approvisionnements demandés. Collectoo commande un approvisionnement chaque heure (référence TOP…, page Virements) : exécutez-le depuis le compte propre, à la main ou par le fichier.",
+  },
+  // M2c-7e-1 (plan §7.1, §7.4)
+  // (review round 1, TUI-1: « choisi » — an own account may exist and not be the one of « Facturation »)
+  top_up_account_missing: {
+    label: "Approvisionnement impossible : aucun compte propre",
+    help: "Le cabinet doit de l'argent au compte dédié mais aucun compte propre n'est choisi (Paramètres › Facturation) : Collectoo ne peut commander aucun approvisionnement. Choisissez le compte propre, ou approvisionnez le compte dédié à la main depuis le compte propre.",
+  },
+  // (review round 1, MONEY-BANK-4: also when the hourly job no longer runs)
+  top_up_order_failed: {
+    label: "Approvisionnement horaire non commandé",
+    help: "La commande horaire des approvisionnements ne passe plus pour ce cabinet (trois heures de suite une opération en cours, une erreur, ou aucun passage depuis plus de trois heures) : ce que le cabinet doit au compte dédié n'est pas commandé. Approvisionnez-le depuis le compte propre (« Comptes bancaires ») et prévenez le support si l'alerte reste.",
   },
   remittance_completeness: {
     label: "Encaissements à reverser incomplets",
@@ -1415,7 +1430,7 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
   },
   top_up_pending: {
     label: "Approvisionnement attendu",
-    help: "Un approvisionnement du compte dédié depuis le compte propre du cabinet a été demandé il y a plus d'un jour ouvré et son crédit n'apparaît pas encore sur les relevés importés. Vérifiez le virement depuis le compte propre : il couvre ce que le cabinet doit au compte dédié (frais bancaires, avances).",
+    help: "Un approvisionnement du compte dédié depuis le compte propre du cabinet a été demandé il y a plus d'un jour ouvré et son crédit n'apparaît pas encore sur les relevés importés. Vérifiez le virement depuis le compte propre : il couvre ce que le cabinet doit au compte dédié (frais bancaires, avances). Si son crédit est arrivé sans la référence TOP et n'est pas encore comptabilisé, rattachez-le à cet approvisionnement (« Rattacher à TOP… » sur la ligne) ; s'il a déjà été comptabilisé sans elle, annulez cet approvisionnement (« Annuler ») : sinon Collectoo croit l'approvisionnement encore attendu et commande trop peu.",
   },
 };
 
@@ -1554,11 +1569,17 @@ export function checkOldestDays(n: number): string {
   return `le plus ancien : ${n} jour${n > 1 ? "s" : ""}`;
 }
 
+/** M2c-7e-1 review round 1 (TUI-1): servicer_shortfall when no own account is chosen (the same run's
+ *  top_up_account_missing): the hourly job orders nothing then. */
+const SERVICER_SHORTFALL_NO_OWN_ACCOUNT =
+  "Le cabinet doit de l'argent au compte dédié (avances, frais bancaires, pertes) au-delà des approvisionnements demandés. Aucun compte propre n'est choisi (Paramètres › Facturation) : Collectoo ne peut pas le commander. Approvisionnez le compte dédié à la main depuis le compte propre, ou choisissez le compte propre.";
+
 export function checkLabel(
   code: string,
-  opts?: { cancellationAfterDownload?: boolean; details?: Record<string, unknown> | null },
+  opts?: { cancellationAfterDownload?: boolean; details?: Record<string, unknown> | null; noOwnAccount?: boolean },
 ): { label: string; help: string } {
   const l = CHECK_LABEL[code] ?? { label: code, help: "" };
+  if (code === "servicer_shortfall" && opts?.noOwnAccount) return { label: l.label, help: SERVICER_SHORTFALL_NO_OWN_ACCOUNT };
   // M2c-6b-3b part 2: the held rows' alert names its days and lines whichever the switch (raised only for a chain)
   if (code === "remittance_breach_held" && opts?.details) return { label: l.label, help: breachHeldHelp(opts.details) };
   // M2c-7d-3: the declarations' alerts and the payouts after a liquidation, from their row's details (the switch read by
@@ -1572,6 +1593,15 @@ export function checkLabel(
 }
 
 /** The checks of the transfers and their files (M2c-6a, design §15; its review's T3 and T6). */
+const TOP_UP_CHECKS = new Set(["servicer_shortfall", "top_up_pending", "top_up_order_failed"]);
+
+/** The words of a check's link on « Contrôles » (plan §7.4: « Réapprovisionner » on servicer_shortfall). */
+export function checkLinkLabel(code: string): string {
+  if (code === "servicer_shortfall") return "Réapprovisionner";
+  if (code === "top_up_account_missing") return "Choisir le compte propre";
+  return "Ouvrir";
+}
+
 const TRANSFER_CHECKS = new Set([
   "transfer_not_filed",
   "transfer_not_debited",
@@ -1611,6 +1641,10 @@ export function checkSubjectLink(r: {
   // M2c-7d-3: an advance to declare, a payout after a liquidation, a set-off after a bar lead to the client's events,
   // where the declaration and the client's procedure are recorded
   const client = typeof r.details?.client_id === "string" ? r.details.client_id : null;
+  // M2c-7e-1 (plan §7.4): what the servicer owes the dedicated account leads to « Approvisionnements du compte dédié »
+  // on « Virements » (the hourly orders, the own account's file); no own account chosen, to « Facturation »
+  if (TOP_UP_CHECKS.has(r.code)) return "/backoffice/reversements/virements#approvisionnements";
+  if (r.code === "top_up_account_missing") return "/backoffice/parametres/facturation";
   if (
     client &&
     ((r.code === "claims_to_declare" && r.subject_type === "client_advance") ||

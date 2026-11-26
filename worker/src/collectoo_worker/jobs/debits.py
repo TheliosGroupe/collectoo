@@ -19,7 +19,9 @@ duplicate): one transaction (the queue's, exactly once) under the servicer's deb
    refused LG009 (I23), `posting_failed` as LG008, its detail in the review.
 
 4. M2c-1 (design m2c-remittances §12): the lines booked in the funds — the bank's charges
-   (`bank_fee`) and the credits carrying the TOP id of a top-up we ordered (`servicer_top_up`);
+   (`bank_fee`) and the credits carrying the TOP id of a top-up we ordered (`servicer_top_up`;
+   M2c-7e-1: ordered, or in_file of an own-account file — `filed_top_ups` reads which — and a
+   cancelled one's credit reviewed `top_up_cancelled_credit`);
    M2c-6b-1 (plan docs/design/m2c-6b-plan.md §2.2-§2.5): our payouts' and sweeps' debits (by their
    own id, or a batch line of their PmtInf: one booking per member), their returns (the bank's
    charge on one booked as a fee), each payout's run settlement and, when a payout went beyond what
@@ -294,6 +296,7 @@ def funds_lines(rows: list[dict[str, Any]]) -> list[FundsLine]:
                 transfer_status=r["transfer_status"] if top_up else None,
                 transfer_amount_minor=int(r["transfer_amount_minor"]) if top_up else None,
                 transfer_creditor=_str(r["transfer_creditor_bank_account_id"]) if top_up else None,
+                transfer_filed_own=bool(r.get("transfer_filed_own")) if top_up else False,
                 currency=str(r["currency"]),
                 end_to_end_id=r["end_to_end_id"],
                 original_end_to_end_id=r["original_end_to_end_id"],
@@ -322,6 +325,7 @@ def _process_funds_lines(conn: Conn, org: str, after: list[str] | None) -> dict[
             (org, after[0] if after else None, after[1] if after else None, CHUNK),
         ).fetchall()
     debit_dates(conn, rows)
+    filed_top_ups(conn, rows)
     lines = funds_lines(rows)
     if len(lines) >= CHUNK:
         last = lines[-1]
@@ -371,6 +375,35 @@ def debit_dates(conn: Conn, rows: list[dict[str, Any]]) -> None:
     for r in rows:
         if r["role"] == "return" and r["transfer_id"] is not None:
             r["debit_date"] = dates.get(str(r["transfer_id"]))
+
+
+def filed_top_ups(conn: Conn, rows: list[dict[str, Any]]) -> None:
+    """M2c-7e-1 ([critic] M7-MONEY-4): for each top-up a credit names that is in_file, whether it
+    is in an own-account file of its servicer (`transfer_filed_own`: private.top_up_in_own_file,
+    the predicate the SQL re-check reads) — filing puts a top-up in_file; its credit books it. One
+    keyed call per such top-up."""
+    ids = sorted(
+        {
+            str(r["transfer_id"])
+            for r in rows
+            if r["role"] == "top_up"
+            and r["transfer_id"] is not None
+            and r["transfer_status"] == "in_file"
+        }
+    )
+    filed: dict[str, bool] = {}
+    if ids:
+        filed = {
+            str(k): bool(v)
+            for k, v in conn.execute(
+                """select u.id::text, private.top_up_in_own_file(u.id)
+                   from unnest(%s::uuid[]) u (id)""",
+                (ids,),
+            ).fetchall()
+        }
+    for r in rows:
+        if r["role"] == "top_up" and r["transfer_id"] is not None:
+            r["transfer_filed_own"] = filed.get(str(r["transfer_id"]), False)
 
 
 def apply_bookings(conn: Conn, org: str, bookings: list[Booking]) -> dict[str, Any]:

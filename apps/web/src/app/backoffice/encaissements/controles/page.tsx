@@ -12,7 +12,7 @@ import {
   orderCheckResults,
   unlistedText,
 } from "@/lib/payments/check-results";
-import { checkLabel, checkOldestDays, checkSubjectLink } from "@/lib/payments/debits";
+import { checkLabel, checkLinkLabel, checkOldestDays, checkSubjectLink } from "@/lib/payments/debits";
 import { coverPrompt } from "@/lib/payments/remitted";
 import { money } from "@/lib/payments/statements";
 import { requestChecks } from "../debits/actions";
@@ -177,7 +177,12 @@ export default async function ChecksPage() {
               <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
                 {grouped.groups.flatMap((g) => [
                   ...g.rows.map((r) => {
-                    const l = checkLabel(r.code, { cancellationAfterDownload, details: r.details });
+                    // M2c-7e-1 review round 1 (TUI-1): no own account chosen (the same run's top_up_account_missing
+                    // in that currency) — servicer_shortfall never says the hourly job orders it
+                    const noOwnAccount =
+                      r.code === "servicer_shortfall" &&
+                      results.some((x) => x.code === "top_up_account_missing" && x.currency === r.currency);
+                    const l = checkLabel(r.code, { cancellationAfterDownload, details: r.details, noOwnAccount });
                     const to = checkSubjectLink(r);
                     const clientId = r.details?.client_id;
                     return (
@@ -196,8 +201,8 @@ export default async function ChecksPage() {
                           {to ? (
                             <>
                               {" "}
-                              <Link href={to} className="underline underline-offset-4">
-                                Ouvrir
+                              <Link href={to} className="underline underline-offset-4" data-testid="check-link">
+                                {checkLinkLabel(r.code)}
                               </Link>
                             </>
                           ) : null}

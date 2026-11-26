@@ -323,6 +323,8 @@ describe("returns (founder #13; design §2 #3)", () => {
         // M2c-6b-2c: « À classer »'s reasons for a reference-less debit « Comptabiliser… » books (not stored)
         "payout_amount_match",
         "client_payout_iban",
+        // M2c-7e-1 ([critic] M7-MONEY-4): a cancelled top-up executed after all
+        "top_up_cancelled_credit",
       ].sort(),
     );
   });

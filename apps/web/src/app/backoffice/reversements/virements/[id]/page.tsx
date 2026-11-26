@@ -28,8 +28,10 @@ import {
   transferBookingText,
   transferBookingsById,
 } from "@/lib/remittance/transfers";
+import { OWN_FILE_CASH_NOTE, TOP_UP_SECTION_ANCHOR, TOP_UP_SECTION_TITLE } from "@/lib/remittance/top-ups";
 import { markSent } from "../actions";
 import { CancelFile, DownloadLink, PayeeMismatch, RegenerateFile, TwoStepCancellation } from "../file-actions";
+import { CancelTopUpFile } from "../top-up-actions";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -100,6 +102,10 @@ export default async function TransferFilePage({
   const { data: bookingRows } =
     ids.length > 0 ? await supabase.rpc("transfer_bookings", { p_transfer_ids: ids }) : { data: [] };
   const bookings = transferBookingsById(bookingRows ?? []);
+  // M2c-7e-1 (plan §7.2): a file of the own account carries the top-ups; it is generated and cancelled from
+  // « Approvisionnements du compte dédié » (before or after download, whatever the switch), with no cash check
+  const { data: debtorAccount } = await supabase.from("bank_account").select("purpose").eq("id", f.bank_account.id).maybeSingle();
+  const ownFile = debtorAccount?.purpose === "own";
   const status = fileStatus(f.status);
   const warning = downloadWarning(f);
   // a generated file dated before today can no longer go (the download would refuse and replace it); one dated today
@@ -109,8 +115,9 @@ export default async function TransferFilePage({
   const href = `/backoffice/reversements/virements/${f.id}/telecharger`;
   const executed = f.status === "downloaded" || f.status === "sent";
   // review round 5 (fail-closed): no « Demander / Confirmer l'annulation », no « Virement refusé par la banque » while off
-  const cancellable = cancellationAfterDownload(f);
+  const cancellable = cancellationAfterDownload(f) && !ownFile;
   const regenerate = stale || refusal?.code === "file_stale" || refusal?.code === "file_blocked";
+  const topUpsHref = `/backoffice/reversements/virements#${TOP_UP_SECTION_ANCHOR}`;
   const itemOf = new Map(f.items.map((t) => [t.transfer_id, t]));
   return (
     <WidePage title={`Fichier ${f.number}`} back={back}>
@@ -179,7 +186,14 @@ export default async function TransferFilePage({
         </p>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
-        {regenerate ? <RegenerateFile accountId={f.bank_account.id} effects={regenerationEffects(f)} idempotencyKey={randomUUID()} /> : null}
+        {regenerate && !ownFile ? (
+          <RegenerateFile accountId={f.bank_account.id} effects={regenerationEffects(f)} idempotencyKey={randomUUID()} />
+        ) : null}
+        {regenerate && ownFile ? (
+          <Link href={topUpsHref} className={inlineButtonClass} data-testid="top-up-regenerate">
+            Générer un nouveau fichier ({TOP_UP_SECTION_TITLE})
+          </Link>
+        ) : null}
         {downloadable && f.download_count === 0 ? <DownloadLink href={href} label="Télécharger" testId="file-download" /> : null}
         {downloadable && f.download_count > 0 ? (
           <details data-testid="file-download-again" open={refusal?.code === "already_downloaded"}>
@@ -202,7 +216,10 @@ export default async function TransferFilePage({
             <input type="hidden" name="expected_version" value={f.version} />
           </ActionForm>
         ) : null}
-        {f.status === "pending" || f.status === "generated" ? (
+        {ownFile && ["pending", "generated", "downloaded", "sent"].includes(f.status) && (f.statuses.in_file ?? 0) > 0 ? (
+          <CancelTopUpFile fileId={f.id} number={f.number} idempotencyKey={randomUUID()} />
+        ) : null}
+        {!ownFile && (f.status === "pending" || f.status === "generated") ? (
           <CancelFile
             fileId={f.id}
             version={f.version}
@@ -218,7 +235,7 @@ export default async function TransferFilePage({
           idempotencyKey={randomUUID()}
         />
       ) : null}
-      {executed && !cancellable ? <InfoNote testId="file-no-cancellation">{DOWNLOADED_FILE_NOTE}</InfoNote> : null}
+      {executed && !cancellable && !ownFile ? <InfoNote testId="file-no-cancellation">{DOWNLOADED_FILE_NOTE}</InfoNote> : null}
 
       <Section title="Téléchargements" testId="file-downloads">
         {f.downloads.length === 0 ? (
@@ -289,10 +306,17 @@ export default async function TransferFilePage({
       </Section>
 
       <Section title="Contrôle de trésorerie à la génération" testId="file-cash">
+        {ownFile ? (
+          <p className="text-sm" data-testid="own-file-cash">
+            {OWN_FILE_CASH_NOTE}
+          </p>
+        ) : null}
         <ul className="flex flex-col gap-1 text-sm">
-          {cashLines(f.cash_check, f.currency).map((l) => (
-            <li key={l}>{l}</li>
-          ))}
+          {ownFile
+            ? null
+            : cashLines(f.cash_check, f.currency).map((l) => (
+                <li key={l}>{l}</li>
+              ))}
           <li>ce fichier : {money(f.ctrl_sum_minor, f.currency)}</li>
           {f.cash_check.sweep_left_minor && f.cash_check.sweep_left_minor !== "0" ? (
             <li>quote-part du cabinet laissée pour un prochain fichier : {money(f.cash_check.sweep_left_minor, f.currency)}</li>

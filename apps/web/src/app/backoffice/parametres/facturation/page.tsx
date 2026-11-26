@@ -162,7 +162,8 @@ export default async function BillingSettingsPage() {
                   convenu ne peut être inférieur à trois fois le taux d&apos;intérêt légal)
                   <textarea name="penalty_text" rows={3} maxLength={500} defaultValue={settings?.penalty_text ?? ""} className={inputClass} />
                 </label>
-                {dedicated.map((a) => (
+                {/* M2c-7e-1 (plan §7.2): the own account's top-up file has its cut-off too */}
+                {[...dedicated, ...own].map((a) => (
                   <label key={a.id} className="flex flex-col gap-1 text-sm">
                     Heure limite de remise des virements (heure de Paris) · {a.label}
                     <input type="time" name={`cutoff_${a.id}`} defaultValue={settings?.bank_cutoff?.[a.id] ?? ""} className={inputClass} />

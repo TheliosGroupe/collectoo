@@ -10499,5 +10499,597 @@ advance's bar has is `proceeding` (a redressement), which has no recorded day: t
   for a later template, with the accountant).
 - Everything rounds 1–2 and M2c-7d-3 left open stays open.
 
+## M2c-7e-1: top-ups and the own-account file (2026-11-26)
+
+Plan: `docs/design/m2c-7-plan.md` §0, §1.3, §1.4 (7e-1 row), §2, §7.1 (the hourly job, the shortfall log), §7.2 (the
+own-account file, its guards and exemptions, the item guard, the download, filed top-ups booked by both twins,
+`book_top_up_credit`, `cancel_top_up` of a filed top-up, `top_up_cancelled_credit`), §7.3's S23 part (D10), §7.4,
+§7.5's `047a` with gaps 4 and 12, §7.6's 7e-1 part, with their [critic] / [check 1–3] marks. Founder questions (plan
+§10) Q3, Q14 and Q15 unanswered: built as their defaults (Q3 a: every hour, the exact amount, however small; Q14 a: the
+file is built; Q15's S24 rule is 7e-2/7e-3's, only its S23 part — D10 — is here) and kept open. Migration
+`20261129090000_top_ups.sql` (one file, forward-only). **The switch stays off**: nothing writes
+`private.feature_switch`; every `047a` scenario that touches a payout file or a filed transfer runs a second time with
+it on in a rolled-back subtransaction (`pg_temp.iso(…, true)`), `047a`'s last test asserts it is off; `033` byte for
+byte unchanged and green.
+
+What it builds:
+- **What the servicer must top up** (design §13 #4): `private.top_up_needed(org, currency)` = max(0, Σ 4679
+  (`private.servicer_owed_minor`) + the sweeps ordered or in a file − the top-ups ordered or in a file). While 4679 holds
+  the servicer's money awaiting its sweep (Σ < 0), an advance or a fee only lowers it; a filed top-up leaves the formula
+  when its credit is booked ([critic] M7-MONEY-4).
+- **The hourly order, one servicer per transaction** ([critic] F8): pg_cron `servicer-top-ups` (`37 * * * *`) runs
+  `private.queue_top_ups()`, one `{type: top_ups, organization_id}` message per servicer with an active dedicated
+  account on the `remittances` queue; the worker (`jobs/top_ups.py`) runs `private.order_due_top_up(org)` in a
+  savepoint of that message's transaction (`lock_timeout` 2 s: a lock held — a file generation, a « Désimputer », the
+  debit job — raises 55P03, the step is rolled back and a miss recorded; a data error is a failure; anything else fails
+  the job, whose dead letter records a failure). Per active dedicated account: the shortfall log, then — when something
+  is needed and the own account of the billing settings is active in that currency — one top-up of exactly that, built
+  as `request_top_up` builds it (debtor own, creditor dedicated, the servicer's name, a `TOP…` id, « APPROVISIONNEMENT
+  COMPTE DEDIE TOP… », requested today, `ordered_by` null, reason « Approvisionnement automatique : le cabinet doit X au
+  compte dédié (avances, frais, pertes) » with X from `private.amount_fr`). Idempotent by the formula; it never cancels
+  an order. `private.top_up_order_state` (one row per servicer: last outcome, consecutive misses, last ordered, last
+  error) feeds the nightly.
+- **The shortfall log** (OQ-38, durations logged): `private.servicer_shortfall_period` — opened at the first run that
+  finds Σ 4679 > 0, its peak kept and its last value updated, closed at the first run that finds nothing owed; one open
+  per servicer and currency; never deleted, its identity, opening and close never changed, its peak never lowered (guard
+  trigger); its `since_at` (the previous run, at most a day back; an hour back on the first run) bounds the advances,
+  fees and losses « Comptes bancaires » lists with it (`public.servicer_shortfall_periods`).
+- **The nightly** (`private.run_advance_checks`, from 7d-3's body): `top_up_account_missing` (alert: something is
+  needed and no active own account of that currency is in the billing settings; amount = the need) and
+  `top_up_order_failed` (alert: the hourly job failed, or missed three hours in a row).
+- **The own-account file** (§7.2): `public.generate_top_up_file(key, own account)` (admins and ops managers at aal2,
+  idempotent): the own account's ordered top-ups in one pain.001 (the writer unchanged: debtor the own account, creditor
+  the dedicated one, each under its `TOP…` id; golden `topup.pain.001.001.{03,09}.xml`), `cash_check = {"own_account":
+  true}` (no cash check: the own account's statements are not imported, design R12), EUR only (`not_eur`), refusals
+  `not_an_own_account`, `nothing_to_file`; a pending or generated own file not downloaded yet is superseded first (its
+  top-ups back to ordered: `private.top_up_file_close`). Lock order: the own account's row, then the servicer's command
+  locks (`private.remittance_command_locks`), then the files and transfers. `public.cancel_top_up_file(key, file,
+  reason)`: before or after download, whatever the switch (gap 4: no client is paid twice by a top-up), its top-ups in
+  the file cancelled, the file superseded with the reason; refusals `not_a_top_up_file` (checked first: a payout file is
+  cancelled by its own commands), `nothing_to_cancel`.
+- **The guards** ([check 1] gap 4): `private.transfer_file_guard` accepts a file whose debtor is an active own account
+  of the servicer; its fail-closed rule (no downloaded file closed while the switch is off) skips only a file whose
+  debtor is an own account; `private.bank_transfer_guard`'s (no transfer leaves a downloaded file) skips only a top-up
+  of such a file; the statement-level `private.transfer_file_item_guard` (enabled always) keeps top-ups out of every
+  other file and everything else out of own-account files (`transfer file item: a top-up only in an own-account file,
+  and only top-ups there`).
+- **The download** (`public.transfer_file_download`, from 7d-2's body): an own file skips the cash and sweep re-checks;
+  a top-up cancelled or booked since its generation blocks it (`transfer_cancelled`, `top_up_booked`), the file then
+  superseded through `private.top_up_file_close`; `file_executed` also when one of its top-ups is booked or a credit
+  carrying one of its `TOP…` ids is on a statement (`private.top_up_credit_seen`).
+- **Filed top-ups booked, both twins** ([critic] M7-MONEY-4): `private.bank_booking_recheck` books a `TOP…` credit when
+  its top-up is ordered, or in_file of an own-account file of its servicer (`private.top_up_in_own_file`, the one
+  predicate both twins read); a cancelled one is `top_up_cancelled_credit` (new review reason, the check constraint
+  widened; `private.apply_bank_bookings` reviews it under its own reason). The worker's `decide_line` the same
+  (`FundsLine.transfer_filed_own`, read by the loader `jobs.debits.filed_top_ups` by key); parity tested on the real
+  stack. Its exit: « Approvisionnement par le compte propre » (`public.link_debit` own_credit, no transfer).
+- **Gap 12**: `public.book_top_up_credit(key, line, transfer, reason)` (« Rattacher à TOP… », admins and ops managers
+  at aal2): an `own_transfer_in` credit with no `TOP…` id, unbooked, booked as the open top-up (ordered, or in_file of an
+  own file) of exactly its amount, currency and account — the funds pass's re-check run under the locks; refusals
+  `not_an_own_credit`, `line_booked`, `carries_top_up_id`, `top_up_not_open`, `amount_differs`; the options read on the
+  sheet's opening (`public.top_up_credit_options`). `public.cancel_top_up` cancels an ordered top-up or one in_file of
+  an own file (its credit booked without it, or never executed).
+- **S23 (D10)**: no undo path: `public.assign_payment` and `public.resolve_duplicate`'s hints, the web texts: « Collectoo
+  ne le comptabilise pas comme le retour de ce virement (un paiement enregistré ne se défait pas) : prévenez le
+  support. » / « ni libérée comme un paiement ni comptabilisée comme ce retour »; the P0 `own_transfer_payment` is the
+  tripwire.
+- **Billing settings**: `private.servicer_billing_settings_guard` accepts a cut-off for an own account (its file's
+  execution date), « Facturation » shows it.
+- **The pages**: « Virements », section « Approvisionnements du compte dédié » (`public.top_up_overview`: per own
+  account its top-ups — date, amount, `TOP…`, « commandé automatiquement » or by whom, status, « Annuler » —, « Générer
+  le fichier (compte propre) », its files with « Télécharger », « Marquer comme transmis », « Annuler le fichier » and
+  the plan's sheet text; what is still to order per currency); the file's page of an own-account file (no cash
+  section, no two-step cancellation, « Annuler le fichier »); « Contrôles » « Réapprovisionner » on
+  `servicer_shortfall` (and `top_up_order_failed`, `top_up_pending`) opening that section, « Choisir le compte propre »
+  on `top_up_account_missing`; « Comptes bancaires » « Périodes où le cabinet devait de l'argent au compte dédié »
+  (« Du 12/11/2026 14:37 au 13/11/2026 10:37 — jusqu'à 2 000,00 € », the entries); « Débits et retours »
+  « Rattacher à TOP… »; the texts of §7.4 (`servicer_shortfall`, `top_up_pending`'s exit, `top_up_account_missing`,
+  `top_up_cancelled_credit`, the refusals).
+
+### Decisions
+- **D1 One servicer per message.** The cron only queues; each servicer's order runs in its own message's transaction
+  with a 2 s lock timeout, so one servicer's held lock never holds up another's order or commands (F8); a miss is
+  retried by the next hour, never by the queue.
+- **D2 Nothing owed beyond the orders, nothing ordered.** The order is exactly `top_up_needed`, never cancelled by the
+  job (ops may have typed it at their bank); an over-covered dedicated account is evened by the next sweep.
+- **D3 The own account is the billing settings' one** (« Facturation »): the account the servicer chose for its money;
+  none, or another currency, alerts `top_up_account_missing` rather than guessing.
+- **D4 One predicate for « filed in an own file »** (`private.top_up_in_own_file`: in_file, its file is the one it is
+  in, that file's debtor its own account of the same servicer, and the file holds it): the SQL re-check,
+  `cancel_top_up`, `book_top_up_credit`, the overview and the worker's loader all read it.
+- **D5 `private.top_up_file_close` for own files** (superseded, their in_file top-ups back to ordered, by key): the
+  payout files' `transfer_file_release` re-queues payouts and touches runs, which an own file has none of.
+- **D6 Reads keyed whatever the statistics** (below).
+
+### Deviations from the plan
+- **Test file `047a_top_ups.test.sql`** (the plan's `047_top_ups_and_bank_residues` is split across 7e-1/7e-2/7e-3).
+- **Three functions redefined that the 7e-1 row does not name**, each copied from its latest definition (SECURITY
+  DEFINER, `SET`, search_path and grants restated): `public.link_debit` — its own_credit lookup of a `TOP…` credit's
+  top-up reads ordered **or in_file** (otherwise a filed top-up's credit booked by ops would book as own credit without
+  its transfer, the top-up left in_file for ever); `private.apply_bank_bookings` — `top_up_cancelled_credit` reviewed
+  under its own reason (otherwise `changed`, whose text and exit are not the cancelled top-up's); and
+  `private.servicer_billing_settings_guard` — a cut-off for an own account (the own file's execution date).
+- **`public.transfer_file_download` gains `set enable_seqscan = off`** (whole copy: a later copy keeps it) and the own
+  file's rules above (the plan names the guards and the booking, not the download's re-checks).
+- **The own file's « executed » state** (the plan: « a file the bank executed is never served again ») read for an own
+  file as: one of its top-ups booked, or a credit carrying one of its `TOP…` ids on a statement.
+- **`since_at`** of a period (the plan says « from the previous run »): bounded to a day back, an hour on the first run.
+- **`private.top_up_order_state`** (the plan says « a miss recorded » without naming where).
+- **« Approvisionnement par le compte propre » keeps its label** (the plan's sheet says « comptabilisez-la comme
+  approvisionnement »: the texts name it that way, the button is M2c-1's).
+- **The section shows only once the servicer has an own account or owes something to order** (the other « Virements »
+  screenshots unchanged for servicers without one).
+- **The E2E sends the hourly message itself** through `psql` on the local stack only (`pgmq.send`, as the cron would at
+  minute 37), as `switch-on.spec.ts` flips its switch.
+
+### Assertions whose expected value changed (house rule R3)
+- `035` test F (L10) and `036`'s S23 hint: « ne peut pas encore le comptabiliser … ; prévu avec M2c-7 » → « ne le
+  comptabilise pas … »; « ni encore comptabilisée » → « ni comptabilisée » (D10: no undo path is planned any more; the
+  assertions kept, their text the code's).
+- `worker/tests/test_funds.py`: a `TOP…` credit of a cancelled top-up → `TOP_UP_CANCELLED_CREDIT` (was
+  `TOP_UP_DIFFERS`); its property's strategy draws `in_file` and `transfer_filed_own` (a filed top-up of an own file
+  books).
+- `apps/web/src/lib/payments/transfer-line-foundations.test.ts` (S23 texts: « does not book it », no « pas encore »,
+  no « M2c-7 »); `apps/web/src/lib/payments/debits.test.ts` (`DEBIT_REVIEW`'s keys gain `top_up_cancelled_credit`).
+- `046c`'s sn3 (the nightly's codes) unchanged: `047a` r2 asserts the list with 7e-1's two codes. `033` unchanged.
+
+### Tests
+- **pgTAP `047a_top_ups.test.sql`** (25 tests, each a scenario's JSON compared whole): n1–n3 the need (a fee, an
+  advance, sweeps in flight, another currency); o1 the hourly order (built as `request_top_up`, under both locks,
+  idempotent), o2 no own account (`top_up_account_missing`); s1 the shortfall period (opened, peak, closed, its
+  entries); f1 the own file (one PmtInf, no cash check, written by the job, downloaded), f2 refusals; g1 (switch off and
+  on) the payout file's fail-closed rules kept, the own file's exempted, the item guard raw inserts; c1 (off and on)
+  « Annuler le fichier » after download, replayed, `nothing_to_cancel`, `not_a_top_up_file` on a payout file, a late
+  credit `top_up_cancelled_credit` then booked by ops; b1 (off and on) a filed top-up's credit booked by the re-check
+  and by ops (`link_debit`); k1 gap 12 (`book_top_up_credit`, every refusal, `cancel_top_up` of a filed top-up), k2 a
+  top-up cancelled before download (the download supersedes the file, the others back to ordered); r1
+  `top_up_order_failed` (three misses, a failure, cleared), r2 the nightly's full code list; the tables' RLS,
+  privileges and change log; i1 the period's guard and tenant isolation; q the cron, q1 the queue; p the grants and the
+  item trigger enabled always; the switch off.
+- **Worker**: `test_top_ups.py` (decide_line on filed, cancelled and other top-ups; Hypothesis over status × filed ×
+  amount × account), `test_pain001.py` (the own file's goldens, its debtor), `test_funds.py` (R3); integration
+  `test_top_ups_integration.py` (the hourly job, the file written byte-stable, its credit booked by the debit job, the
+  period closed, `file_executed`; a cancelled top-up's late credit → review → `link_debit`; decide_line vs the SQL
+  re-check on every status; F8: B's lock held, A ordered, B missed then ordered) and
+  `test_top_up_reads_integration.py` (below).
+- **vitest** `top-ups.test.ts` (the section, the period line in Paris time, « Rattacher à TOP… », every refusal's code
+  and text, the checks' texts and links). **E2E** `top-ups.spec.ts` (desktop + mobile): a coded bank charge booked →
+  the hourly message → the order on « Virements » → the own file generated, downloaded (its debtor and creditor IBANs,
+  the `TOP…` id) and cancelled after download → ordered again → its credit without `TOP` booked by « Rattacher à TOP… »
+  → the period closed on « Comptes bancaires ». Screenshots `m2c7-approvisionnements`, `m2c7-periodes-decouvert`
+  (new), `m2c-virements` (retaken).
+
+### Stale statistics (the plan class that broke main after 7a)
+`test_top_up_reads_integration.py` plants 10,000 rows in each of `bank_transfer` (two other servicers' top-ups and
+sweeps, in flight or booked), `transfer_file`, `transfer_file_item` (each the item of a planted transfer),
+`bank_transaction`, `ledger_entry`, `ledger_posting`, `private.servicer_shortfall_period`, pins their keys'
+`n_distinct` to 2, forces generic plans, and bounds every call of the slice (the need, the hourly step, the three
+reads, the generation, the cancellation, the download twice, the funds pass and its re-check, « Rattacher à TOP… »,
+`cancel_top_up`) to 60 rows of the watched tables; the nightly to 7d-3's body's reads plus 60. What it found, all fixed
+(each statement now reads by one key — the account's, the file's or the transfer's — with every other condition
+filtered outside an `offset 0` fence, or per row by its primary key; `set enable_seqscan = off` on every new function
+and on the redefined download):
+- `transfer_file_download`'s keyed reads planned without the seqscan setting (11,089 `bank_transfer`, 32,018 items);
+- `top_up_overview`'s per-file counts read the items of every booked transfer of the database (113 items once the
+  plant held booked transfers), and its account counts, read through the servicer's in-flight index, 5,059 rows in one
+  run of the db job;
+- `generate_top_up_file`'s update joined with its temporary table (no statistics: the whole primary key, 5,420 rows)
+  and the superseded file's close (`top_up_file_close`), whose status and kind were matched by a BitmapAnd with the new
+  in-flight index (10,420 and 60,564 rows in two runs);
+- the download's run update (verbatim: a join on `bank_transfer_run_uq`, 296–406 rows: every transfer with a run);
+  now per run by its key.
+Some of these plans depend on the sampled statistics (the same test read 36 rows in one run and 10,420 in another on
+the same bodies): the test is a bound, not a proof — the reason every statement is written keyed by construction.
+`test_advance_reads_integration.py` (7b; R3): its nightly call now runs in a check run of its own, still open — the
+night's run it reused is finished (its rows refused), and since 7e-1 this servicer's nightly writes one
+(`top_up_account_missing`: it owes the dedicated account its advances and has no own account).
+
+### Mutants
+Each SQL mutant was applied inside the test file's own transaction (rolled back by it); the read mutants committed,
+then the migration's bodies re-applied; the worker mutants edited in place, then restored. Plan §7.5's:
+- **A guard's exemption without the own-account condition** — the file guard's for any file: killed by `033` (13 tests:
+  16, 17, 19, 22, …) and `047a` g1; the transfer guard's for any transfer: `033` (9 tests: 18, 20, 22, 30, …) and `047a`
+  g1. (The transfer guard's exemption without its `kind = 'top_up'` term, the own-file term kept, is equivalent: an own
+  file holds only top-ups, the item guard.)
+- **The item guard removed** (`drop trigger`): `047a` g1 (off and on), c1, p.
+- **`book_top_up_credit` accepting a cancelled `TOP`**: `047a` k1 (`top_up_not_open` expected; the re-check's
+  `top_up_cancelled_credit` came).
+- **The sweeps term dropped** from `top_up_needed`: `047a` n1, n3. **The top-ups ordered not subtracted**: n1, o1, s1,
+  k1.
+- **The cash check kept for own files** (the download's `if not v_own` made `if true`): `047a` f1, g1, c1.
+- **« ordered » only for top-up credits, both twins**: the SQL re-check (`bank_booking_recheck`) → `047a` b1, k1; the
+  worker's `decide_line` → `test_top_ups.py` (a filed top-up's credit booked; once per pass; the Hypothesis property);
+  the loader never reading `top_up_in_own_file` → `test_top_ups_integration.py` (the hourly order … credit booked; the
+  parity test).
+- **The file kind check removed** (`cancel_top_up_file` on a payout file): `047a` c1. (Its own-account check removed
+  survives: equivalent — a file of another account holds no top-up, by the item guard, and holds at least one item, so
+  the kind check refuses it; an own account with a live file cannot be closed.)
+- **One transaction for all servicers** (each message ordering every servicer): `test_top_ups_integration.py`'s F8 test
+  (A not ordered while B's lock is held).
+(The S24 mutants — the existence check, the label reference written to `original_end_to_end_id` — are 7e-2/7e-3's.)
+
+This slice's own: `link_debit` not widened (own_credit finds only an ordered top-up) → `047a` b1; the
+`apply_bank_bookings` mapping removed (`top_up_cancelled_credit` reviewed as `changed`) → c1; `cancel_top_up` not
+widened → k1, k2; the nightly's `top_up_account_missing` removed → o2, r2; `top_up_order_failed` removed → r1, r2; its
+« three misses » made « one » → r1.
+
+The reads (`test_top_up_reads_integration.py`): `transfer_file_download` without `set enable_seqscan = off` → killed
+(11,090 `bank_transfer`, 32,024 items); `top_up_overview` without it → killed (22,961 / 10,682); the WIP overview's
+per-file counts → killed (113 items); the download's run update as the verbatim join → killed (312 `bank_transfer`);
+`top_up_file_close` and the generation's update in their WIP forms: killed in earlier runs (10,420 and 5,420 rows), survived in the last (on the same plants the planner picked the narrow plan) — the test bounds what a plan reads, it cannot force one; `servicer_owed_minor` and `order_due_top_up` without the setting survive (their `offset 0` fences and keys keep them narrow: the setting is a second fence).
+
+### Suites
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-1 »):
+- The db job's sequence after a fresh reset: `supabase test db` **52 files, 3,178 tests, PASS** (560 s; `033` byte for
+  byte unchanged and green, `035`, `036` with their S23 pins, `047a` 25/25); `supabase gen types typescript` → no diff;
+  then, without a reset, the non-scale integration suite **307 passed** (1,004 s). (A first run of the same sequence
+  failed only `test_top_up_reads_integration.py` and `test_advance_reads_integration.py`: the reads fixed above and the
+  advance test's check run, R3.)
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` clean; unit suite **1,247 passed**, 7 xfailed (the XSD cases, as before; 173 s).
+- `make eval`: mapping top-1 1.000 (167/167, threshold 0.980); reconciliation 0.9600 automatic, 0 wrong.
+- The scale job's nine files in one pytest call as `ci.yml` lists them, after a fresh reset: **15 passed** (1,520.9 s).
+- The scale-payouts job's two files, after another fresh reset: **6 passed** (1,243.9 s).
+- Web: `eslint`, `tsc` clean; vitest **713 passed**.
+- `./scripts/e2e.sh` after a fresh reset: **69 passed** (desktop + mobile, 7.4 min). Screenshots: `m2c7-approvisionnements`,
+  `m2c7-periodes-decouvert` (new), `m2c-virements` (retaken); kept because 7e-1 changed what they show:
+  `m2-bank-accounts`, `m2-bank-account-closed`, `m2c-top-up` (the periods section), `m2-payment-checks`,
+  `m2c-controles` (`top_up_account_missing`, « Réapprovisionner »), `m2c-own-credit-relay` (« Rattacher à TOP… »);
+  the 171 others whose diff was only dates, ids or order reverted.
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 3,470 non-test lines added (the migration 2,514, of which about 1,400 are the eleven functions copied from their
+latest definition; worker 136; web 822): **above the ~2,500 the plan aims at**, mainly the verbatim copies.
+
+### Left open (low), with its default
+- Founder Q3 (a: every hour, the exact amount, however small), Q14 (a: the own file built), Q15 (a: 7e-2/7e-3) — open.
+- The own file's « Régénérer » after a refused download is « Générer un nouveau fichier » on « Virements » (no
+  regeneration sheet on the file's page).
+- `top_up_pending`'s link opens the section; the line itself is on « Débits et retours ».
+
+## M2c-7e-1 review fixes (2026-11-26)
+
+### Round 1
+
+The review of `617b3af` raised seventeen items: one medium and five lows of the money and bank lens (MONEY-BANK-1;
+MONEY-BANK-2 … MONEY-BANK-6), two mediums and seven lows of tests and pages (TUI-1, TUI-2; TUI-3 … TUI-9) and two lows
+of concurrency and cost (CC-1, CC-2). MONEY-BANK-5 and TUI-7 are one fault (`neededLine`), fixed once with TUI-1. Each
+item was checked against the code first (MONEY-BANK-1's reproduction re-run on this stack inside `BEGIN … ROLLBACK`
+with `047a`'s helpers: a credit of own account c0 with no `TOP…` id was offered and booked as the top-up of own account
+c9; the others read in the migration, the pages and the tests), then seen failing as a test on `617b3af`'s bodies
+(`047a` k3, f3, f4, o3, r1 and c1; the reads test's first download, then its CC-1 and CC-2 calls on the old bodies;
+the vitest pins; the F8 test on the savepoint-per-servicer mutant). `047a` s2, b1's period and g1's SQLSTATEs pin
+behaviour already right in `617b3af` (TUI-4: only the assertions were missing). The migration
+`20261129090000_top_ups.sql` is unmerged and was edited in place. **The switch stays off**: nothing writes
+`private.feature_switch`; the new scenarios that touch a filed top-up (`047a` s2, f3) run with it on in a rolled-back
+subtransaction and equal their switch-off twins, and c1's switch-on twin is now compared whole; `033` byte for byte
+unchanged; `034`–`046c` unchanged.
+
+- **MONEY-BANK-1 (medium; fixed at the root).** « Rattacher à TOP… » never checked that the credit came from the own
+  account the top-up is ordered from: with two own accounts, a credit of A with no `TOP…` id was offered and booked as
+  B's top-up (−5122[B], B's top-up `booked` though B never paid it; 5120 and 4679 right). Fix, three places:
+  `public.book_top_up_credit` refuses `not_its_own_account` unless the line's counterparty IBAN is the IBAN of the
+  top-up's debtor account (« Ce crédit ne vient pas du compte propre dont part cet approvisionnement. »);
+  `public.top_up_credit_options` lists only those top-ups, each with its account (« depuis Compte propre ···0129 » on
+  the sheet); and the re-check `private.bank_booking_recheck` refuses `not_its_own_account` for a top-up named for a
+  credit that does not carry its `TOP…` id (defence in depth: a raw booking row is refused too). A credit carrying the
+  id stays its top-up's whatever account sent it (the job's rule; `decide_line` never names a top-up otherwise, so the
+  twins agree). `047a` k3 (two own accounts: not offered, the command's own refusal, the re-check's on a raw row, the
+  right account's top-up booked with its 5122 leg).
+- **MONEY-BANK-2 (low; fixed — a guard).** The first download of an own-account file did not read
+  `private.top_up_credit_seen`: a top-up whose credit was on a statement, not booked yet (imported before the funds
+  pass, or in review), was served and executed a second time. The download's own branch now blocks it
+  (`top_up_credited`, the file superseded by `private.top_up_file_close`), and — so that ops are not looped through the
+  same refusal — `public.generate_top_up_file` never files an ordered top-up whose credit is seen (the funds pass, or
+  ops, books it); « Virements »' count and « Générer » follow (`top_up_overview`). The hold's text: « Le crédit de cet
+  approvisionnement est déjà sur un relevé du compte dédié : la banque l'a exécuté. Le fichier est remplacé ;
+  comptabilisez ce crédit (« Débits et retours ») : aucun fichier ne le reprend d'ici là ». `047a` f3 (off and on).
+- **MONEY-BANK-3 (low; left open with its default, below).** Ops' « Approvisionner le compte dédié »
+  (`public.request_top_up`) takes no advisory lock; one committed between the hourly job's read and its insert is
+  not seen and the same debt is ordered twice (a window of milliseconds; the servicer's own money, swept back).
+- **MONEY-BANK-4 (low; fixed).** `top_up_order_failed` now also fires when the hourly job no longer runs: its last run
+  more than three hours back, or none for a servicer whose active dedicated account is older than that (pg_cron
+  disabled, the remittances queue not consumed); `details.stale` says which. The help says so (« … ou aucun passage
+  depuis plus de trois heures »). A dedicated account younger than three hours with no run yet raises nothing (every
+  fixture of `034`–`046c` and of the integration and scale suites: none of their assertions changes). `047a` r1.
+- **MONEY-BANK-5, TUI-7 (low; texts).** See TUI-1: `neededLine` says « Le cabinet ne doit rien au compte dédié en EUR. »
+  when nothing is owed, « … couvrent ce que le cabinet doit » only when something is owed and the orders cover it.
+- **MONEY-BANK-6 (low; texts).** The section note and the « Générer » sheet: « Le fichier reprend tous les
+  approvisionnements à exécuter de ce compte propre dont le crédit n'est pas encore sur un relevé : si l'un d'eux a déjà
+  été saisi à la main dans la banque, attendez son crédit avant de générer le fichier, ou il serait exécuté deux fois. »
+  Leaving a top-up out of the file is not built (Q14 stays open; below).
+- **TUI-1 (medium; texts and their condition).** Without an own account chosen in « Facturation » the hourly job orders
+  nothing (`order_due_top_up`: `continue when o.id is null`), yet two pages said it would. `neededLine`: « Encore à
+  commander : X. Aucun compte propre n'est choisi dans Paramètres › Facturation : Collectoo ne peut pas le commander ;
+  approvisionnez le compte dédié à la main depuis le compte propre, ou choisissez le compte propre. »;
+  `servicer_shortfall`'s help, when the same run holds `top_up_account_missing` in that currency (« Contrôles » reads
+  it from the run's rows): « … Aucun compte propre n'est choisi (Paramètres › Facturation) : Collectoo ne peut pas le
+  commander. Approvisionnez le compte dédié à la main depuis le compte propre, ou choisissez le compte propre. »;
+  `top_up_account_missing`: « … aucun compte propre n'est choisi (Paramètres › Facturation) : Collectoo ne peut
+  commander aucun approvisionnement. Choisissez le compte propre, ou approvisionnez le compte dédié à la main depuis le
+  compte propre. » (« choisi »: an own account may exist and not be the one of « Facturation »).
+- **TUI-2 (medium; texts, and the state made visible).** Booked as « Approvisionnement par le compte propre », a
+  cancelled top-up's late credit pays what the servicer owes (Σ4679 back to 0): nothing comes back with the next sweep,
+  and the hour's re-order then stays « À exécuter » although nothing is owed. The review text
+  (`DEBIT_REVIEW.top_up_cancelled_credit`) and the « Annuler le fichier » sheet now say what the code does: « … elle
+  règle ce que le cabinet doit. Annulez alors l'approvisionnement recommandé entre-temps s'il n'est pas exécuté
+  (« Annuler ») ; sinon le surplus revient au cabinet avec la prochaine quote-part. » And « Virements » names such an
+  order: `top_up_overview`'s per-currency `surplus_minor` (the top-ups in flight beyond what is owed once the sweeps in
+  flight are executed: design §13 #4's terms) → « Les approvisionnements encore à exécuter dépassent de 15,00 € ce
+  qu'il doit : annulez ceux qui ne sont pas exécutés (« Annuler ») ; exécutés, le surplus revient au cabinet avec la
+  prochaine quote-part. » `047a` c1 pins the state after the late credit (the re-order still ordered, need 0, surplus
+  15,00). The plan's sheet text (§7.4: « elle revient au cabinet avec la prochaine quote-part ») is true only when the
+  re-order is executed too; the page says both cases.
+- **TUI-3 (low; test).** c1's switch-on twin is compared whole (the downloaded payout file, its payout and its run
+  untouched by « Annuler le fichier » with the switch on too: plan §2.4).
+- **TUI-4 (low; tests).** b1: the next hour closes the period ([[false, 1500]]); s2 (new, off and on): a period opened at
+  an advance of 1 000,00, its top-up filed, booked from in_file by the re-check, the period closed, « Périodes » listing
+  the advance; g1: `pg_temp.try_sql` returns the SQLSTATE with the message — every guard refusal is `23514`.
+- **TUI-5 (low; test).** The F8 test now runs A's « Désimputer » (`public.reverse_allocation`, its 2 s lock timeout)
+  while B's message still waits for B's lock (A's message sent first; the wait seen in `pg_locks`), and asserts it
+  completes in under 1.5 s. The savepoint-per-servicer mutant (one message ordering every queued servicer, each in a
+  savepoint) is killed: A's command waited 2.02 s.
+- **TUI-6 (low; test).** `test_advance_reads_integration.py` asks for the full pass (`run_advance_checks(…, null,
+  true)`): with the night's run finished, an unasked pass on a fresh run is the delta one (7e-1's R3 note named only
+  the run).
+- **TUI-8 (low; text).** `top_up_pending`'s help gives two exits that can both be followed: « … et n'est pas encore
+  comptabilisé, rattachez-le à cet approvisionnement (« Rattacher à TOP… » sur la ligne) ; s'il a déjà été comptabilisé
+  sans elle, annulez cet approvisionnement (« Annuler ») … » (`book_top_up_credit` refuses a booked line).
+- **TUI-9 (low; one line).** `top_up_account_missing`'s `oldest_days` is the age of the open shortfall period (the
+  Paris date of its opening, read by `servicer_shortfall_period_open_uq`), null before the hourly job opened one (the
+  page then shows no age). `047a` o3.
+- **CC-1 (low; read).** `top_up_credit_options` read every servicer's transfers of the credit's amount (no index leads
+  with the creditor; the planner walked `bank_transfer_account_amount_idx` without its leading column). It now reads
+  the servicer's open top-ups through `bank_transfer_servicer_flight_idx` (organization, currency, kind; the constants
+  prove its predicate), the creditor, amount and account filtered outside the fence. The reads test plants a fifth of
+  its transfers at the waiting credit's amount and pins `amount_minor`'s n_distinct: the old body read 2,005
+  `bank_transfer` rows, the new 5.
+- **CC-2 (low; fixed — two whole copies).** Own-account files reached `private.transfer_file_release` by two paths:
+  `private.transfer_file_failed` (the file job failing on one) and `public.cancel_transfer_file`. Both redefined (whole
+  copies of `20261115090000:1994` and `20261116090000:4758`, settings and grants restated): the job's failure closes an
+  own file `failed` through `private.top_up_file_close` (which gains `p_status`, `superseded` or `failed`), and
+  `cancel_transfer_file` refuses one `not_a_payout_file` before any lock (« Ce fichier est un fichier
+  d'approvisionnement du compte propre : annulez-le par « Annuler le fichier » … »). The reads test covers both: the
+  old `transfer_file_failed` read 25,024 `bank_transfer` rows on an own file, the new 3. `047a` f4.
+- **The optional carried low** (« Lier »'s gatingOutcome and the client's end date): 7e-1 redefines neither
+  `match_queue_accounts` nor `search_payment_files`; left as its default says.
+
+### Decisions (round 1)
+- **D7 A pick names its own account.** A credit carrying a `TOP…` id is that top-up's (the bank carried our
+  reference); one that lost it is matched by ops only to a top-up of the own account it came from (its IBAN), in the
+  command, the options and the re-check.
+- **D8 A credit seen is the bank's execution, filed or not.** An own-account file is not served, and no file takes an
+  ordered top-up, once its `TOP…` credit is on a statement; the funds pass or ops book it.
+- **D9 « Le job ne tourne plus » is a failure.** No run for three hours (or none since a dedicated account three hours
+  old) raises `top_up_order_failed`, as three misses do.
+
+### Assertions whose expected value changed (round 1, house rule R3)
+None in `033`–`046c`. In this slice's own files: `047a`'s plan 25 → 32 (o3, s2 and its switch-on twin, f3 and its twin,
+f4, k3); g1's refusals carry their SQLSTATE (`23514: …`); r1's details gain `stale` (false for misses and failures);
+c1 gains `after` and its switch-on twin is compared whole; b1 gains `periods`. `top-ups.test.ts`: `neededLine`'s
+cases (TUI-1, TUI-7, TUI-2), the cancellation sheet's text, `top_up_account_missing`'s and `top_up_pending`'s help, the
+option's label with its account. `test_top_up_reads_integration.py`: the fixture's first download is now refused
+(`top_up_credited`: the TOP1 credit is on a statement), the served downloads measured on a new file the test records as
+the job writes it. `test_advance_reads_integration.py`: the full pass asked for (TUI-6). `test_top_ups_integration.py`:
+F8 runs A's command during B's wait (TUI-5).
+
+### Mutants (round 1)
+SQL: the function with one substitution, defined inside `047a`'s own transaction (rolled back by it), `047a` run whole;
+the reads mutants on the live function, then the migration's body re-applied; the worker's in place, then restored.
+Every mutant killed.
+
+| Mutant | Killed by |
+|---|---|
+| `book_top_up_credit` without its account check (the re-check's kept) | `047a` k3 (the re-check's refusal, not the command's) |
+| both the command's and the re-check's account checks removed | `047a` k3 |
+| the re-check's `not_its_own_account` rule removed | `047a` k3 (the raw row booked) |
+| `top_up_credit_options` without the IBAN filter | `047a` k3 |
+| the download's `top_up_credit_seen` block removed | `047a` f3 |
+| `generate_top_up_file` filing a top-up whose credit is seen | `047a` f3 |
+| `top_up_account_missing`'s age back to 0 | `047a` o3 |
+| the stale branch of `top_up_order_failed` removed | `047a` r1 |
+| its « never ran » branch removed (only a stale row) | `047a` r1 |
+| `cancel_transfer_file` accepting an own file | `047a` f4 |
+| `surplus_minor` never above 0 | `047a` c1 |
+| `top_up_credit_options` as `617b3af` read it (CC-1) | `test_top_up_reads_integration.py` (2,005 `bank_transfer`) |
+| `transfer_file_failed` as `20261115090000` (CC-2) | `test_top_up_reads_integration.py` (25,024 `bank_transfer`) |
+| one transaction for every queued servicer, each in a savepoint (TUI-5) | `test_top_ups_integration.py` F8 (2.02 s) |
+| web: `617b3af`'s texts (TUI-1, TUI-2, TUI-7, TUI-8, MONEY-BANK-1, -2, -5, -6, CC-2) | `top-ups.test.ts` (12 of 30 fail) |
+
+### Suites (round 1)
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-1 review fixes, round 1 »):
+- The db job's sequence after a fresh `supabase db reset`: `supabase test db` **52 files, 3,185 tests, PASS** (569 s;
+  `033` byte for byte unchanged and green; `034`–`046c` unchanged; `047a` 32/32); `supabase gen types typescript` → no
+  diff (no public signature changed: `top_up_file_close` is private, its new parameter has a default); then, without a
+  reset, the non-scale integration suite **307 passed** (958 s; the reads test's new calls and the F8 test among them).
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` (214 files) clean; unit suite **1,247 passed**, 7 xfailed.
+- `make eval`: mapping top-1 1.000 (167/167, threshold 0.980); reconciliation 0.9600 automatic (95,997 of 100,000), 0
+  wrong.
+- The scale job's nine files in one pytest call as `ci.yml` lists them (`RECEIPT_FILES=5000`), right after a fresh reset
+  with CI's logging settings: **15 passed** (1,497.5 s; the 50,000-line run prepared in 11.8 s, its nightly checks
+  5.0 s with `run_advance_checks` 86 ms own).
+- The scale-payouts job's two files, after another fresh reset: **6 passed** (1,322.6 s; « Générer le fichier » for
+  5,000 payouts 4.12 s, its first download 4.40 s, under the API's 8 s).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **34 files, 718 tests** passed (`top-ups.test.ts` 30).
+- `./scripts/e2e.sh` after a fresh reset: **69 passed** (desktop, mobile and the switch-on project, 7.5 min;
+  `top-ups.spec.ts` 11.4 s desktop, 11.8 s mobile, its assertions unchanged). Retaken and kept because round 1 changed
+  what they show: `m2c7-approvisionnements` (the section's note and its file warning), `m2c-controles` and
+  `m2-payment-checks` (`servicer_shortfall`'s help without an own account, `top_up_account_missing`'s text and no
+  « 0 jour »), mobile and desktop; the 180 others whose diff was only dates, ids or order reverted.
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 300 non-test lines: the migration +200 / −30 (the two whole copies 85, the nightly 30, the options, the pick,
+the re-check, the download, the generation, the overview, comments), the web +80 / −20; tests +505 / −60 (`047a` +250,
+the reads test +65, the F8 test +50, vitest +75), docs.
+
+### Left open (low), with its default
+- **MONEY-BANK-3** (ops' order and the hourly job's read-then-insert not serialized): default — kept; the window is the
+  job's own statement time, the second top-up is the servicer's own money (`top_up_needed` nets both: nothing more is
+  ordered; the excess is swept back, and « Virements » now names it: TUI-2's `surplus_minor`). 7f's hardening takes
+  `remittance_command_locks` in `request_top_up` (a whole copy, a 55P03 refusal to map on « Comptes bancaires »).
+- **MONEY-BANK-6's option** (leaving a top-up out of the own file): not built; the sheet warns. Founder Q14 stays open.
+- **An own file through the switch-on two-step cancellation** (`request_transfer_file_cancellation`,
+  `confirm_transfer_file_cancellation`): not refused (no page offers it for an own file; reachable by the API only with
+  the switch on, and it returns the top-ups to ordered: at worst the servicer's own money executed twice). Default: 7f
+  refuses own files there as `cancel_transfer_file` now does.
+- **« Contrôles »' variant of `servicer_shortfall`** reads the run's shown rows (`CHECK_RESULTS_SHOWN`): were the
+  run's `top_up_account_missing` cut from them, the shortfall's help would say the hourly job orders (its own row would
+  then say otherwise, cut too). Default: kept (both alerts sort before the cut in practice).
+- Everything M2c-7e-1's « Left open » lists stays open (Q3, Q14, Q15).
+
+### Round 2
+
+The review of `6b53073` raised three items: one medium (needed-line-sweep-in-flight, raised from low at assembly: a
+false statement on « Virements », a regression of round 1) and two lows (stale-alert-no-dedicated-account,
+own-account-history-reads). Each was checked against the code first — the first two reproduced on this stack inside
+`BEGIN … ROLLBACK` with `047a`'s fixture and helpers, the third with the reads test's plant —, then seen failing as a
+test on `6b53073`'s bodies (`047a` n4 and r1, the vitest pins, the reads test with the own account's history planted).
+The migration `20261129090000_top_ups.sql` is unmerged and was edited in place. **The switch stays off**: nothing writes
+`private.feature_switch`; no new scenario touches a downloaded file; `033`–`046c` byte for byte unchanged.
+
+- **needed-line-sweep-in-flight (medium; fixed at the root).** Reproduced: n3's books (the settled commission of 360,00
+  in the next file's sweep, in_file 36000; then an advance of 200,00), then the hour's order → tops `['ordered:20000']`,
+  need 0, and `top_up_overview` gave owed −16000, needed 0, surplus 0: round 1's `neededLine` said « Le cabinet ne doit
+  rien au compte dédié en EUR. » beside a 200,00 top-up « À exécuter depuis le compte propre », which design §13 #4's
+  formula needs (once the sweep is executed the servicer owes 200,00). Its « owed ≤ 0 » branch read Σ4679 alone. Fix:
+  `top_up_overview` returns `owed_with_sweeps_minor` per currency (Σ4679 + the sweeps ordered or in a file: the
+  formula's first two terms) and `neededLine` branches on it — « ne doit rien » only when it is ≤ 0, « Rien à
+  approvisionner en EUR : les approvisionnements commandés couvrent ce que le cabinet doit. » when it is > 0 and nothing
+  is needed. The overview now reads Σ4679 and the sweeps and top-ups in flight once per currency (a fenced lateral, the
+  in-flight ones by `bank_transfer_servicer_flight_idx`), the surplus from the same three terms. Every branch checked
+  against the formula — with W = Σ4679 + sweeps in flight, T the top-ups in flight, needed = max(0, W − T), surplus =
+  max(0, T − max(0, W)): needed > 0 ⇒ W > T ≥ 0 and no surplus (« Encore à commander », with or without an own account
+  chosen); needed = 0 and W > 0 ⇒ T ≥ W (« couvrent », and the surplus T − W when above 0); W ≤ 0 ⇒ « ne doit rien »,
+  and the surplus T when T > 0 (c1's state). The sweeps are never negative, so W ≥ Σ4679: a servicer owing on 4679 never
+  reads « ne doit rien ». `047a` n4 (n3's books → the overview's `[EUR, −16000, 20000, 0, 0]`); vitest (n4's line, a
+  sweep that takes the whole share, the same advance not ordered yet).
+- **stale-alert-no-dedicated-account (low; fixed).** Reproduced: servicer bb, no dedicated account, a state row two days
+  old → `top_up_order_failed` `stale` every night; a `failed` row likewise, both for ever (the job is never queued for
+  bb, `coalesce(s.last_run_at, a.since)` falls back to the old run). Fix: the alert requires an active dedicated account
+  (`a.since is not null`) for all its branches, not only the stale one — `private.queue_top_ups` queues only servicers
+  with one and `private.order_due_top_up` orders nothing without one, so a failure or three misses recorded before the
+  last dedicated account's closure are never cleared either (deviation from the item's « the stale branch only »: the
+  same row, the same cause). `047a` r1: a servicer whose only dedicated account is closed, its stale row, then a failure
+  — no alert.
+- **own-account-history-reads (low; fixed — bounded).** Reproduced with the reads test's plant plus 5,000 booked past
+  top-ups of the servicer's own account (its debtor key pinned with the others, n_distinct 2, every plan generic):
+  `6b53073`'s `generate_top_up_file` read 10,033 `bank_transfer` rows per call (its two fenced reads, the lock and
+  `_tuf`, each the account's whole history), `top_up_overview` 5,075 (its count). Fix: the status inside the fences —
+  `debtor_bank_account_id = b.id and status = 'ordered' offset 0`, the kind still outside (never planned with the
+  in-flight indexes): the keyed indexes it can use hold ordered transfers only (`bank_transfer_to_file_idx`,
+  `bank_transfer_debtor_idx`; `bank_transfer_account_amount_idx`, also keyed by the account, reads its whole past with
+  the status as a filter: a superset of their rows, costed above them). No new index: the reviewer's partial index would
+  duplicate `bank_transfer_to_file_idx` for an own account (its debtor of top-ups only). The overview's count is taken
+  once in a lateral and « Générer » derived from it: as an EXISTS (planned for its first row) it walked
+  `bank_transfer_org_idx` by the status alone, every servicer's ordered transfers read (seen once). The
+  bound: PER_CALL per call, plus the overview's latest 50 top-ups listed by design (`LISTED`).
+- **Found while bounding it — a file's transfers (fixed).** With the history planted the reads test failed in four of
+  about a dozen runs on one stack: each read of a file's transfers by `bank_transfer where transfer_file_id = f.id
+  offset 0` (`private.top_up_file_close`'s loop — so the generation's supersession, the refused first download and the
+  job's failure —, `cancel_top_up_file`'s lock and pick, the overview's open count, the download's runs loop) was served
+  from `bank_transfer_filed_amount_idx` (its predicate, `transfer_file_id is not null`, implied by the equality), about
+  30,000 entries per call (90,122 for `cancel_top_up_file`), once the table's indexes held the dead entries of earlier
+  rolled-back plants. Under the planted statistics the two plans cost within 5 % of each other (2,356 against 2,488):
+  the indexes' bloat decides. Now through the file's items (`transfer_file_item` by its key, each one's transfer by its
+  own, its file, status and kind checked on the row) — the download's other reads' pattern; `cancel_top_up_file` locks
+  every transfer its items name. Eight runs out of eight within the bound since. The download's runs loop runs at every
+  file's first download, payout files included (the scale-payouts job re-run).
+
+### Decisions (round 2)
+- **D10 What is owed counts the sweeps in flight wherever it is stated.** « Virements » says « ne doit rien » only when
+  Σ4679 + the sweeps ordered or in a file is ≤ 0: the quantity the hourly order nets (design §13 #4).
+- **D11 The hourly job's alert lives while the job runs.** `top_up_order_failed` only for a servicer with an active
+  dedicated account, whatever its state row says.
+- **D12 A file's transfers are read through its items**, never by `transfer_file_id` (which the planner may serve from
+  any index whose predicate the equality implies).
+
+### Assertions whose expected value changed (round 2, house rule R3)
+None in `033`–`046c`. In this slice's own files: `047a`'s plan 32 → 33 (n4); r1 gains `closed_stale` and `closed_failed`
+(both `[]`), its other keys unchanged. `top-ups.test.ts`: the `neededLine` helper takes `owed_with_sweeps_minor` (the
+six round-1 cases' inputs gain it, equal to their Σ4679: no sweep in flight; their expected texts unchanged), three
+expectations added. `test_top_up_reads_integration.py`: the plant gains the own account's 5,000 booked top-ups; the
+overview's count (1), « Générer » (true) and its 50 listed asserted; its `bank_transfer` bound PER_CALL + LISTED (its
+list by design), every other bound unchanged.
+
+### Mutants (round 2)
+SQL: the function with one substitution, defined inside `047a`'s own transaction (rolled back by it), `047a` run whole;
+the reads mutants on the live function (`6b53073`'s body), the reads test run, then the migration's body re-applied; the
+web's in place, then restored. Every mutant killed.
+
+| Mutant | Killed by |
+|---|---|
+| `owed_with_sweeps_minor` without the sweeps (round 1's « owed ») | `047a` n4 |
+| `surplus_minor` against Σ4679 alone (the sweeps in flight left out) | `047a` n4 |
+| `top_up_order_failed` without the active dedicated account guard | `047a` r1 |
+| the guard on the stale branch only (a failure still raised with no dedicated account) | `047a` r1 |
+| `generate_top_up_file` as `6b53073` (the account's whole history fenced) | the reads test (10,033 `bank_transfer` per generation) |
+| `top_up_overview` as `6b53073` (its count and « Générer » fenced by the account alone) | the reads test (5,078) |
+| web: `neededLine` on Σ4679 (`owed_minor`, round 1) | `top-ups.test.ts` (n4's line) |
+| web: « couvrent » when nothing is owed (`owed >= 0`) | `top-ups.test.ts` |
+
+The file reads' old form (by `transfer_file_id`) is not a deterministic mutant: it fails only once the indexes hold dead
+entries (four runs of about a dozen above); recorded as found, not as killed.
+
+### Suites (round 2)
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-1 review fixes, round 2 »):
+- The db job's sequence after a fresh `supabase db reset`: `supabase test db` **52 files, 3,186 tests, PASS** (560 s;
+  `033`–`046c` byte for byte unchanged and green; `047a` 33/33); `supabase gen types` → no diff (no public signature
+  changed: `top_up_overview` returns jsonb, one key more); then, without a reset, the non-scale integration suite
+  **307 passed** (1,012 s; the reads test with the own account's history among them).
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` (214 files) clean; unit suite **1,247 passed**, 7 xfailed.
+- The scale job's nine files in one pytest call as `ci.yml` lists them (`RECEIPT_FILES=5000`), right after a fresh reset
+  with CI's logging settings: **15 passed** (1,413.9 s; the 50,000-line run prepared in 12.4 s, its nightly checks
+  4.4 s with the draft waiting and 4.7 s with the run booked; the 5,000-transfer file's download 0.68 s).
+- The scale-payouts job's two files, after another fresh reset: **6 passed** (1,260.4 s; « Générer le fichier » for
+  5,000 payouts 4.20 s — round 1 4.12 s, no statement of a payout file's generation changed —, its first download
+  **3.38 s** (round 1 4.40 s), under the API's 8 s).
+- Web: `npm run lint`, `npm run typecheck` clean; vitest **34 files, 718 tests** passed (`top-ups.test.ts` 30).
+- `./scripts/e2e.sh` after a fresh reset: **69 passed** (desktop, mobile and the switch-on project, 7.4 min;
+  `top-ups.spec.ts` 11.4 s desktop, 11.8 s mobile, its assertions unchanged). Every screenshot's diff showed only dates,
+  ids or heights (the top-up section's line reads « Rien à approvisionner en EUR : … couvrent … » before and after):
+  all reverted.
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 110 non-test lines: the migration +96 / −55 (the overview's lateral and count, the two fences, the nightly's
+guard, the four file reads through items, comments), the web +11 / −2; tests +113 / −15 (`047a` +46, the reads test
++37, vitest +30), docs.
+
+### Left open (round 2, low), with its default
+- **A dedicated account reopened** after a gap of more than three hours: the old state row's `last_run_at` may raise one
+  `stale` alert at the next nightly if the job has not run since the new account (at most an hour). Default: kept (it
+  clears at the next run).
+- **Earlier slices' reads of a file's transfers by `transfer_file_id`** (payout files: `private.transfer_file_release`,
+  the payout file's cancellation, the debit job's loaders …) are not on this round's paths and were not measured with
+  dead entries in the indexes; the same plan flip may apply there. Default: 7f's hardening measures them and moves them
+  to the items (D12).
+- Everything round 1 and M2c-7e-1 left open stays open (MONEY-BANK-3, MONEY-BANK-6's option, the switch-on two-step
+  cancellation of an own file, « Contrôles »' variant of `servicer_shortfall`; Q3, Q14, Q15).
+
+## M2c-7e-1 — CI round (PR #49) (2026-11-26)
+**What failed.** On the dispatched run 45779816045 at `c7d0eda`, the `db` job was cancelled at its 30-minute `timeout-minutes`, during « Worker integration tests ». pytest was past 93 % and still progressing, and no test had failed. The PR run 45779816931 of the same head passed in 26.5 minutes. The other jobs took their usual time: worker unit 219 vs 209–229 s, E2E 419 vs 420–451 s, the 50k runs 1,563 vs 1,429 s.
+
+**Not a regression.** The cifix stack (ports 553xx) ran `fdb4f1c` (main) and `c7d0eda` in CI order on one machine: reset, `supabase test db`, then the integration command on the same database.
+- pgTAP: the 51 common files took 570.5 vs 582.2 s (+2.0 %). File ratios ran from 0.89 to 1.11.
+- Integration: the 302 common tests took 982.4 vs 1,017.7 s (+3.6 %).
+- The 10 most regressed tests, re-run with fixed seeds (head, main, head, main, each on a fresh reset), came out at 528.0 vs 536.0 s, so −8 s net.
+- 7e-1's new tests cost 79 s: `test_top_up_reads_integration` 53.7 s, `test_top_ups_integration` 12.4 s, `047a` 12.8 s. In CI that is about one minute.
+
+**Cause.** The job has outgrown its budget through slice-by-slice growth plus runner variance.
+- **Growth.** The PR runs' integration step went from 443–650 s (7c-1 to 7d-1) to 738–770 s (7d-2, 7d-3), then 982–1,133 s (7e-1). Each slice adds its pgTAP file and its stale-statistics reads test.
+- **Variance.** On the same tree (PR #48's last head has `fdb4f1c`'s tree), integration took 770 and 750 s on the PR's Azure runners and 619 s on main's AWS push. PR #49's pgTAP files that 7e-1 never touches (001–034) ran 1.3–2.0× slower in CI than on main's push, against about 1.0× locally.
+- The slowest run seen totals 30+ minutes: about 1.5 of setup, 9.5 of pgTAP and 19 of integration.
+- pg_cron (`servicer-top-ups` at minute 37, `remittances-schedule` at minute 7) did not fire inside either integration window.
+
+**Fix** (`.github/workflows/ci.yml`):
+- `db` times out at 45 minutes, not 30. The slowest run seen leaves about 14 minutes of margin, which covers 7e-2, 7e-3 and 7f's additions.
+- `scale` also times out at 45 minutes, not 30. Its 50k step took 1,563 s on main's push, about 28 minutes with setup. Each scale file keeps its own time budget; the job's limit is only the backstop.
+- The integration step logs its 25 slowest tests (`--durations=25`), so the next growth shows in the log.
+- Integration still runs after pgTAP on the same database. That order once caught a plan built on the statistics pgTAP leaves (« M2c-6b-3b part 1 — CI round (PR #38) »), and splitting it into a parallel job would give that up.
+- 0 extra billed minutes.
+
+**Option not taken.** A parallel `db-integration` job with its own stack would cut the `db` leg to about 18–21 minutes, for 2–3 more billed minutes per run (about 6–9 per slice). A dispatched run's critical path is the 50k job (about 26 minutes) either way. Revisit it, or shard integration in two, if the `db` job nears 35 minutes.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
