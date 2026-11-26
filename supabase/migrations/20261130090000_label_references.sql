@@ -75,8 +75,14 @@ alter table private.bank_import_stage add column label_references text[];
 drop index public.bank_transaction_own_idx;
 create index bank_transaction_own_idx on public.bank_transaction (organization_id, booking_date, id)
   where kind in ('transfer_out', 'own_transfer_in', 'client_transfer_in', 'label_reference');
--- the nightly's: the held credits alone (a few), and the held lines released so
-create index bank_transaction_label_reference_idx on public.bank_transaction (organization_id, booking_date, id)
+-- the nightly's: the held credits alone (a few), and the held lines released so. On the servicer's key alone (CI round,
+-- PR #50; ADR-0014 « M2c-7e-2 — CI round (PR #50) »): on (organization_id, booking_date, id), when the statistics knew
+-- none of the servicer's lines and organization_id followed the heap's order, the nightly's read took
+-- bank_transaction_org_idx instead (a single-column index gets the whole correlation discount on its heap page, a
+-- multi-column one three quarters of it) and read every line of the servicer: 10,000 more in the scale job. Keyed by
+-- the servicer alone, this index is a subset of bank_transaction_org_idx priced the same way, never above it; the
+-- read's booking date is a filter on its few lines.
+create index bank_transaction_label_reference_idx on public.bank_transaction (organization_id)
   where kind = 'label_reference';
 
 -- A held duplicate's reading and its release (constraints redefined from 20261111090000 lines 1819 and 1822)

@@ -37,7 +37,12 @@ private.run_advance_checks (the servicer's own rows whole by design) by 7e-1's b
 same transaction (read from the migration file), plus PER_CALL. The funds pass's
 candidates (private.bank_booking_candidates) are measured alone; in the whole pass the review
 table's reads of private.apply_bank_bookings (unchanged since M2b-6: its temporary table is never
-analysed) are set apart — ADR-0014 « M2c-7e-2 », Left open."""
+analysed) are set apart — ADR-0014 « M2c-7e-2 », Left open.
+
+CI round (PR #50, ADR-0014 « M2c-7e-2 — CI round (PR #50) »): a second test plants the statistics the
+scale job left when the nightly read every line of the servicer for the slice's statement (the servicer
+unseen by the analyse, organization_id in the heap's order), and bounds the whole nightly's reads by
+7e-1's run_advance_checks body's."""
 
 from __future__ import annotations
 
@@ -510,3 +515,125 @@ def test_the_label_reference_reads_stay_keyed_whatever_the_statistics(held: dict
     for table in WATCHED:
         key = table.replace("public.", "")
         assert nightly["7e-2"].get(key, 0) <= nightly["7e-1"].get(key, 0) + PER_CALL, nightly
+
+
+# CI round (PR #50, ADR-0014 « M2c-7e-2 — CI round (PR #50) »): the servicer's own lines the nightly must not read for
+# the slice's statement — planted after the analyse, so that the statistics know none of them (as autovacuum left them
+# in CI: analysed before the scale file imported its 5,000 credits and 5,000 debits)
+OWN = 2_000
+
+
+def _servicer_unseen(conn: psycopg.Connection[Any], org: str) -> None:
+    """bank_transaction's statistics as CI's scale order left them when the nightly read the label lines by the
+    servicer's single-column index (run 45872245527): organization_id's most common values cover every line the analyse
+    sampled, the servicer's frequency 0 (the others' rescaled to sum 1, n_distinct their number — an estimate of no
+    line for the servicer, whatever the database holds) and the column follows the heap's order (correlation 1: the
+    scale files import one servicer's statement after another); no page all-visible (lines just imported). Priced so,
+    a probe of the single-column bank_transaction_org_idx gets the whole correlation discount on its heap page, a
+    multi-column index three quarters of it (btcostestimate): the servicer's index then beats a multi-column partial
+    index of a kind, and reads every line of the servicer."""
+    attnum = one(
+        conn,
+        "select attnum from pg_attribute where attrelid = 'public.bank_transaction'::regclass"
+        " and attname = 'organization_id'",
+    )
+    row = conn.execute(
+        """select stakind1, stakind2, stakind3, stakind4, stakind5,
+                  stanumbers1, stanumbers2, stanumbers3, stanumbers4, stanumbers5,
+                  stavalues1::text, stavalues2::text, stavalues3::text, stavalues4::text, stavalues5::text
+           from pg_statistic
+           where starelid = 'public.bank_transaction'::regclass and staattnum = %s and not stainherit""",
+        (attnum,),
+    ).fetchone()
+    assert row is not None
+    kinds, numbers, values = row[0:5], row[5:10], row[10:15]
+    assert 1 in kinds and 3 in kinds, kinds  # a most-common-values slot and a correlation slot
+    sets: list[str] = []
+    params: list[Any] = []
+    for k, kind in enumerate(kinds, 1):
+        if kind == 1:
+            mcv = str(values[k - 1]).strip("{}").split(",")
+            freqs = [
+                0.0 if v == org else float(f) for v, f in zip(mcv, numbers[k - 1], strict=True)
+            ]
+            assert sum(freqs) > 0, (mcv, freqs)
+            sets += [f"stanumbers{k} = %s::real[]", "stadistinct = %s"]
+            params += [[f / sum(freqs) for f in freqs], float(len(mcv))]
+        elif kind == 3:
+            sets.append(f"stanumbers{k} = '{{1}}'::real[]")
+    conn.execute(
+        f"update pg_statistic set {', '.join(sets)}"  # noqa: S608 - the slots' own numbers
+        " where starelid = 'public.bank_transaction'::regclass and staattnum = %s and not stainherit",
+        (*params, attnum),
+    )
+    conn.execute(
+        "update pg_class set relallvisible = 0 where oid = 'public.bank_transaction'::regclass"
+    )
+
+
+def _own_lines(conn: psycopg.Connection[Any], line: str) -> None:
+    """OWN credits of the servicer on its account (copies of one of its lines under other keys), after the analyse."""
+    conn.execute("set local session_replication_role = replica")
+    always = [
+        r[0]
+        for r in conn.execute(
+            """select t.tgname from pg_trigger t where t.tgrelid = 'public.bank_transaction'::regclass
+                 and not t.tgisinternal and t.tgenabled = 'A'"""
+        ).fetchall()
+    ]
+    for t in always:
+        conn.execute(f"alter table public.bank_transaction disable trigger {t}")
+    conn.execute(
+        f"""insert into public.bank_transaction
+           select (jsonb_populate_record(null::public.bank_transaction, to_jsonb(x)
+                    || jsonb_build_object('id', md5('reads-own' || g)::uuid, 'line_no', 100000 + g,
+                         'dedup_key', 'h:reads-own-' || g, 'kind', 'debtor_credit',
+                         'reference_from_label', null))).*
+           from (select q.* from public.bank_transaction q where q.id = '{line}') x,
+                generate_series(1, {OWN}) g"""  # noqa: S608 - the tests' own constants
+    )
+    for t in always:
+        conn.execute(f"alter table public.bank_transaction enable always trigger {t}")
+    conn.execute("set local session_replication_role = origin")
+
+
+def test_the_nightly_reads_the_label_lines_by_their_index_whatever_the_correlation(
+    held: dict[str, Any],
+) -> None:
+    """CI round (PR #50): the nightly's bank_transaction reads per line of the servicer — the slice's statement
+    (private.run_advance_checks' label_reference_waiting) reads the servicer's label lines by their own index, never
+    every line of the servicer, when the statistics know none of them. Bound: the whole nightly
+    (private.run_payment_checks) with 7e-1's run_advance_checks body on the same books, plus PER_CALL — on 3a45376
+    (bank_transaction_label_reference_idx on three columns) the slice's read took bank_transaction_org_idx and read
+    the servicer's OWN + 4 lines once more."""
+    tenant, lines = held["tenant"], held["lines"]
+    org = str(tenant["servicer"])
+    nightly: dict[str, dict[str, int]] = {}
+    with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
+        _plant(conn, held["rmt"], lines[0])
+        _servicer_unseen(conn, org)
+        _own_lines(conn, lines[0])
+        own = one(
+            conn, "select count(*) from public.bank_transaction where organization_id = %s", (org,)
+        )
+        assert own == OWN + len(lines), own
+        for label, setup in (("7e-1", _body_before_7e2()), ("7e-2", None)):
+            with conn.transaction(force_rollback=True):
+                if setup is not None:
+                    conn.execute(setup)
+                b0 = _rows(conn)
+                conn.execute("select private.run_payment_checks(%s)", (org,))
+                b1 = _rows(conn)
+                nightly[label] = {k: b1[k] - b0[k] for k in b1 if b1[k] - b0[k]}
+    lines_read = {label: rows.get("bank_transaction", 0) for label, rows in nightly.items()}
+    print(
+        f"\nnightly, bank_transaction rows read per line of the servicer ({own}):"
+        f" { {label: round(n / own, 2) for label, n in lines_read.items()} } ({nightly})"
+    )
+    for table in WATCHED:
+        key = table.replace("public.", "")
+        assert nightly["7e-2"].get(key, 0) <= nightly["7e-1"].get(key, 0) + PER_CALL, (
+            key,
+            own,
+            nightly,
+        )

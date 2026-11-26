@@ -11721,5 +11721,112 @@ budget.
   with the switch off and on; a 972-line probe covering every order of the candidate mixes; grants and settings
   unchanged).
 
+## M2c-7e-2 — CI round (PR #50) (2026-11-26)
+**What failed.** The run dispatched on the PR (45872245527, head `3a45376`) failed the `scale` job in
+`test_transfer_files_scale_integration.py::test_a_file_of_5000_transfers`, at `assert_checks_keyed`.
+- The nightly checks read **70,000** `bank_transaction` rows, all by index, for a servicer owning 10,000.
+- The bound is 6 × 10,000 + 2,000 = 62,000.
+- On main's push of `deab14d` (run 45804442073) the same test read 50,002. The job's 14 other tests passed.
+
+**Cause: the slice's read of the held credits, priced below its own index.** The statement is
+`label_reference_waiting` in `private.run_advance_checks` (line 1774 at `3a45376`). Its subquery
+`select q.id from public.bank_transaction q where q.organization_id = p_organization_id and q.kind =
+'label_reference' and q.booking_date < v_bd3 offset 0` took `bank_transaction_org_idx`
+(`Index Cond: organization_id`, `Filter: booking_date, kind`, `Rows Removed by Filter: 10000`). It read every line of
+the servicer instead of probing `bank_transaction_label_reference_idx`.
+- **Two conditions in the statistics trigger it.**
+  1. The analyse knew none of the servicer's lines: its most common values summed to 1, so the servicer was
+     estimated at 0 rows. That is what autovacuum leaves when it analyses just before a scale file's import.
+  2. `organization_id` follows the heap's order, because the scale files import one servicer's statement after another.
+- **Why the single-column index wins.** With an estimate of 0 rows, `cost_index` prices the heap page as
+  `4 × (1 − c²)`, where c is the index's correlation. `btcostestimate` takes c from the column for a single-column
+  index, and multiplies it by 0.75 for a multi-column one. So the servicer's single-column index beats a partial index
+  on `(organization_id, booking_date, id)` once |c| is large enough, by more than the planner's 1 % fuzz.
+- **Reproduced on the second stack** (project `collectoo-cifix`, ports 553xx).
+  - The job's files in CI's order read 10,000: the timing of autovacuum decides.
+  - Planted state: the transfer-files scenario (a servicer with 10,004 lines) and 200,000 lines of five other
+    servicers inserted in organization order, then analysed without the servicer's lines (correlation 1). Each
+    variant's nightly ran in a rolled-back transaction:
+
+    | Variant | `bank_transaction` rows read |
+    |---|---|
+    | `3a45376` | **70,002** |
+    | main's schema (7e-1's `run_advance_checks`, main's two indexes) | 60,002 |
+    | 7e-1's `run_advance_checks` body alone | 60,002 |
+    | main's `bank_transaction_own_idx` alone | 70,002 |
+    | the fix | 60,002 |
+
+  - Without the label statement, main's body reads the servicer's lines from the same five probes plus two keyed
+    reads: the 60,002.
+  - The recreated `bank_transaction_own_idx` is not the cause.
+  - On the state CI's order left here, re-analysed without the servicer's lines (correlation −0.35), head and main both
+    read 50,000. That is main's CI figure: four probes of the kind indexes of height 1 took `bank_transaction_org_idx`,
+    while `bank_transaction_own_idx` and `bank_transaction_label_reference_idx` kept their plans on startup cost,
+    7.87 against 7.83.
+
+**Fix** (`20261130090000_label_references.sql`, unmerged, edited in place as earlier CI rounds were):
+- `bank_transaction_label_reference_idx` is on `(organization_id) where kind = 'label_reference'`, the servicer's key
+  alone.
+- It is a subset of `bank_transaction_org_idx`, priced with the same correlation and a shorter descent, so it is never
+  above it. The read's booking date filters its few lines.
+- Unchanged: the function bodies, their grants and settings (`prosrc`, `proacl` and `proconfig` compared before and
+  after), and the rows. pgTAP 047b's index check still holds: the definition names the kind.
+- On the planted state the plan becomes `Index Scan using bank_transaction_label_reference_idx`, reading the label
+  lines only: 60,002 for the nightly.
+
+**Test** (`worker/tests/test_label_reference_reads_integration.py`, `db` job, about 20 s):
+`test_the_nightly_reads_the_label_lines_by_their_index_whatever_the_correlation`.
+- In its rolled-back transaction: the file's `_plant`, then `organization_id`'s statistics as CI's analyse left them
+  (the servicer's frequency 0, the others rescaled to sum 1, n_distinct their number, correlation 1, no page
+  all-visible), then `OWN` = 2,000 credits of the servicer added after the analyse.
+- Bound: the whole nightly (`private.run_payment_checks`) reads, per table, no more than with 7e-1's
+  `run_advance_checks` body on the same books, plus `PER_CALL`.
+- On `3a45376`: **12,027** `bank_transaction` rows against 10,022 + 60, so 6.0 reads per line of the servicer's 2,004
+  against 5.0. It fails. Fixed: 10,026.
+
+### Mutants
+| Mutant (the index on the stack, the test run, then restored) | Killed by |
+|---|---|
+| `3a45376`'s index on `(organization_id, booking_date, id)` | the test (12,027) |
+| an index on `(organization_id, booking_date)` | the test (12,027) |
+| no label index at all (`bank_transaction_own_idx` serves the read) | the test (12,027) |
+
+3 of 3 killed.
+
+### Suites
+On the second stack alone; the main stack was in use by 7e-3's build.
+- `supabase test db` after `supabase db reset` (the fix applied, the `db` job's settings): **Files=53, Tests=3,216,
+  PASS** (568 s); 033 unchanged and passing.
+- Then, on the same database, the four integration files: `test_label_reference_reads_integration.py` (the new test
+  and the slice's), `test_advance_reads_integration.py`, `test_top_up_reads_integration.py` and
+  `test_label_references_integration.py`: **12 passed** (108 s).
+- Worker: `ruff check .`, `ruff format --check .` and `mypy` (strict, 217 files) are clean.
+- `database.types.ts` is not regenerated: no public signature changed.
+- **The `scale` and `scale-payouts` jobs were not run: blocked by disk.**
+  - Free space on the machine fell from 4.4 to 2.8 GB while 7e-3's build held 6.1 GB of database and 7.4 GB of storage
+    on the main stack.
+  - The job's first eight files took the second stack's volume to 5.2 GB earlier in this round.
+- **Instead, the failing file alone** (`test_transfer_files_scale_integration.py`, fresh reset, CI's logging
+  settings).
+  - On the fix: the nightly read `bank_transaction` (10,000, 0) for the servicer's 10,000; 0.23 s, against CI's
+    0.24 s on main. Timings did not move, so `docs/benchmarks/remittances.md` is unchanged.
+  - The first such run failed on another table: `ledger_posting`'s sequential scans, (15,001, 30,006) against
+    2 × 10,002 + 2,000. That is a plan of a servicer alone in the database. The rerun passed, and so did the file with
+    `3a45376`'s index; the label read does not touch that table.
+- Then `supabase db reset`: the second stack is left running at this head's schema.
+
+### Left open
+- **The same class, before 7e-2.** On the planted state, main's nightly reads the servicer's lines six times
+  (60,002 for 10,000), close to the scale bound of 62,000. The five probes that take `bank_transaction_org_idx` are:
+  - `private.run_payment_checks`: `debit_unclassified`'s kind branches (debit kinds, own kinds, `other_debit`) and
+    `duplicate_unresolved`;
+  - `private.run_transfer_checks`: its `other_debit` read.
+- **Also exposed, unchanged by 7e-2:** the funds pass's `private.bank_booking_candidates` reads 60,000 on that state
+  with both bodies, and `public.debit_queue` has its own whole-table reads (« M2c-7e-2 review fixes », CC-1, for 7f).
+- **Default:** the same single-column partial indexes, or a fence per probe, in 7f, measured against the scale files.
+- **The volume runs.** `scale` and `scale-payouts` must be dispatched on the branch and be green before merging
+  (CLAUDE.md). The fix changes a read the nightly checks time in both: the 5,000-transfer file, and the 2,000 held
+  chained runs.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
