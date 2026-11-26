@@ -5,6 +5,13 @@ import { staffSession } from "@/lib/auth/staff";
 import { FEED_LABEL, PURPOSE_LABEL, TOP_UP_STATUS, frenchDate } from "@/lib/payments/bank-accounts";
 import { groupsOfFour } from "@/lib/payments/iban";
 import { money } from "@/lib/payments/statements";
+import {
+  SHORTFALL_ENTRY_LABEL,
+  SHORTFALL_SECTION_NOTE,
+  SHORTFALL_SECTION_TITLE,
+  type ShortfallPeriod,
+  periodLine,
+} from "@/lib/remittance/top-ups";
 import { cancelTopUp, closeBankAccount, registerBankAccount, requestTopUp } from "./actions";
 
 type Account = {
@@ -67,6 +74,10 @@ export default async function BankAccountsPage() {
   const staff = (memberships ?? []).find((m) => m.organization?.kind === "servicer");
   const isAdmin = staff?.role === "admin";
   const canRead = isAdmin || staff?.role === "ops_manager";
+  // M2c-7e-1 (plan §7.1, §7.4; OQ-38): the periods the servicer owed the dedicated account, as the hourly job logged them
+  const { data: periodData } =
+    canRead && staff ? await supabase.rpc("servicer_shortfall_periods", { p_organization_id: staff.organization_id }) : { data: null };
+  const periods = ((periodData as { periods?: ShortfallPeriod[] } | null)?.periods ?? []) as ShortfallPeriod[];
   // Business calendar Europe/Paris, as yyyy-mm-dd.
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(new Date());
   const byId = new Map(accounts.map((a) => [a.id, a]));
@@ -234,6 +245,38 @@ export default async function BankAccountsPage() {
               </li>
             ))}
           </ul>
+        </Section>
+      ) : null}
+
+      {canRead ? (
+        <Section title={SHORTFALL_SECTION_TITLE} testId="shortfall-periods">
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">{SHORTFALL_SECTION_NOTE}</p>
+          {periods.length === 0 ? (
+            <p className="mt-2 text-sm" data-testid="shortfall-none">
+              Aucune période enregistrée.
+            </p>
+          ) : (
+            <ul className="mt-2 flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
+              {periods.map((p) => (
+                <li key={p.id} className="flex flex-col gap-1 py-3" data-testid="shortfall-period">
+                  <span className="font-medium">{periodLine(p)}</span>
+                  {p.entries.length > 0 ? (
+                    <ul className="flex flex-col gap-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+                      {p.entries.map((e) => (
+                        <li key={e.entry_id}>
+                          {SHORTFALL_ENTRY_LABEL[e.entry_type] ?? e.entry_type} du {frenchDate(e.effective_date)} :{" "}
+                          {money(e.amount_minor, p.currency)}
+                        </li>
+                      ))}
+                      {p.entry_count > p.entries.length ? (
+                        <li>… et {p.entry_count - p.entries.length} autres écritures</li>
+                      ) : null}
+                    </ul>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
         </Section>
       ) : null}
 

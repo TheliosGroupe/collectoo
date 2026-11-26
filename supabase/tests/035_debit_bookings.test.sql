@@ -2856,14 +2856,15 @@ begin
                                              pg_temp.f('7a'))))),
     'ordinary', pg_temp.assign('n1-assign-0004', p[4], pg_temp.f('7a')) = pg_temp.f('7a')::text);
 end $$;
--- M2c-6b-2a (plan §2.6, S23): the hint no longer promises a screen — Collectoo cannot book it as that return yet
+-- M2c-6b-2a (plan §2.6, S23): the hint no longer promises a screen; M2c-7e-1 (plan §7.3, D10; R3, ADR-0014 « M2c-7e-1 »):
+-- nor a later release — Collectoo does not book it as that return (a recorded payment is not undone)
 select is(pg_temp.isolated('sc_n1_assign'),
           jsonb_build_object(
             'rmt', 'payment assignment refused: own_transfer_line | Ce paiement vient d''une ligne qui porte la référence '
                    'de l''un de nos propres virements (reversement, quote-part du cabinet, lot de notre fichier) : c''est '
                    'ce virement qui revient, pas le paiement d''un débiteur. Il ne s''affecte à aucun dossier, et '
-                   'Collectoo ne peut pas encore le comptabiliser comme le retour de ce virement (un paiement '
-                   'enregistré ne se défait pas ; prévu avec M2c-7) : prévenez le support.',
+                   'Collectoo ne le comptabilise pas comme le retour de ce virement (un paiement enregistré ne se '
+                   'défait pas) : prévenez le support.',
             'others', to_jsonb(array_fill('payment assignment refused: own_transfer_line'::text, array[2])),
             'ordinary', true),
   'N1: assign_payment refuses a payment whose line carries our RMT id, returns our SWP id or names our PmtInfId '
@@ -2969,13 +2970,14 @@ begin
     'payments', (select count(*) from public.payment p
                  where p.bank_transaction_id in (pg_temp.ln('74', 1), pg_temp.ln('74', 2), pg_temp.ln('74', 3))));
 end $$;
--- M2c-6b-2a (plan §2.6, S23): the hint no longer promises a screen — the line stays in « Doublons possibles »
+-- M2c-6b-2a (plan §2.6, S23): the hint no longer promises a screen — the line stays in « Doublons possibles »;
+-- M2c-7e-1 (plan §7.3, D10; R3): « ni comptabilisée », no later booking promised
 select is(pg_temp.isolated('sc_n1_release_dup'),
           jsonb_build_object(
             'recorded', 'duplicate release refused: own_transfer_line | Cette ligne porte la référence de l''un de nos '
                         'propres virements (reversement, quote-part du cabinet, lot de notre fichier) : c''est ce '
                         'virement qui revient, jamais le paiement d''un débiteur. Lue ainsi avant la correction de '
-                        'l''import, elle ne peut être ni libérée comme un paiement ni encore comptabilisée comme ce '
+                        'l''import, elle ne peut être ni libérée comme un paiement ni comptabilisée comme ce '
                         'retour : elle reste dans « Doublons possibles ». Prévenez le support.',
             'facts', 'return payment=false', 'lot', 'return payment=false', 'funds_pass', 'return:return',
             'ordinary', 'debtor_credit payment=true', 'payments', 1),

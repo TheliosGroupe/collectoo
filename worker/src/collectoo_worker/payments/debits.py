@@ -290,6 +290,10 @@ def decide_all(
 
 TOP_UP_NOT_FOUND = "top_up_not_found"  # a credit from our own account no order matches
 TOP_UP_DIFFERS = "top_up_differs"  # it carries our TOP id, for another amount or account
+# M2c-7e-1 ([critic] M7-MONEY-4): it carries the TOP id of a top-up cancelled since (with its file,
+# or alone), executed by the bank all the same: the servicer's own money, booked by ops with no
+# transfer (« Comptabiliser comme approvisionnement »), swept back with the next file
+TOP_UP_CANCELLED_CREDIT = "top_up_cancelled_credit"
 CLIENT_CREDIT = "client_credit"  # a credit from a client's payout account
 OWN_TRANSFER_OUT = "own_transfer_out"  # a debit to our own IBAN carrying none of our references
 CANCELLED_TRANSFER_DEBITED = "cancelled_transfer_debited"  # P0: the bank paid a cancelled transfer
@@ -314,6 +318,7 @@ BOOKING_REVIEW_REASONS = frozenset(
     {
         TOP_UP_NOT_FOUND,
         TOP_UP_DIFFERS,
+        TOP_UP_CANCELLED_CREDIT,
         CLIENT_CREDIT,
         OWN_TRANSFER_OUT,
         CANCELLED_TRANSFER_DEBITED,
@@ -397,6 +402,9 @@ class FundsLine:
     transfer_status: str | None = None
     transfer_amount_minor: int | None = None
     transfer_creditor: str | None = None  # the dedicated account the top-up was ordered to
+    # M2c-7e-1 ([critic] M7-MONEY-4): the top-up is in_file of an own-account file of its servicer
+    # (private.top_up_in_own_file, read by the loader): filing puts it in_file, its credit books it
+    transfer_filed_own: bool = False
     currency: str = "EUR"
     end_to_end_id: str | None = None
     original_end_to_end_id: str | None = None
@@ -694,7 +702,7 @@ def _transfer_return(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one r
     return [Booking(line.id, f"{expected}_returned", transfer_id=f.id)]
 
 
-def decide_line(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one rule per kind of line
+def decide_line(line: FundsLine) -> list[Booking]:  # noqa: PLR0911, PLR0912 - one rule per kind
     """The job's decision for one line: its bookings (one per transfer), one review, or nothing (an
     other debit with no charge code: ops classify it, no review)."""
     if line.direction == "debit" and line.end_to_end_id and OUR_ID.match(line.end_to_end_id):
@@ -729,11 +737,17 @@ def decide_line(line: FundsLine) -> list[Booking]:  # noqa: PLR0911 - one rule p
             return _funds_review(line, TOP_UP_DIFFERS if line.transfer_id else TOP_UP_NOT_FOUND)
         if line.transfer_id is None:
             return _funds_review(line, TOP_UP_NOT_FOUND)
-        if (
-            line.transfer_status != "ordered"
-            or line.transfer_amount_minor != line.amount_minor
-            or line.transfer_creditor != line.bank_account_id
-        ):
+        # M2c-7e-1 ([critic] M7-MONEY-4), the SQL re-check's order (private.bank_booking_recheck):
+        # the account it was ordered to, then its status — a cancelled one's credit waits for ops
+        # (top_up_cancelled_credit); a top-up books from ordered, or in_file of an own-account file
+        if line.transfer_creditor != line.bank_account_id:
+            return _funds_review(line, TOP_UP_DIFFERS)
+        if line.transfer_status == "cancelled":
+            return _funds_review(line, TOP_UP_CANCELLED_CREDIT)
+        bookable = line.transfer_status == "ordered" or (
+            line.transfer_status == "in_file" and line.transfer_filed_own
+        )
+        if not bookable or line.transfer_amount_minor != line.amount_minor:
             return _funds_review(line, TOP_UP_DIFFERS)
         return [Booking(line.id, "top_up", transfer_id=line.transfer_id)]
     return []

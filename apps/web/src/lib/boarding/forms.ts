@@ -132,6 +132,19 @@ export type ErrorCode =
   | "transfers_in_flight"
   | "top_up_accounts"
   | "top_up_not_pending"
+  // M2c-7e-1 (plan §7.2, §7.4): the own account's top-up file, « Rattacher à TOP… »
+  | "top_up_file_not_own"
+  | "top_up_file_not_eur"
+  | "top_up_nothing_to_file"
+  | "top_up_nothing_to_cancel"
+  | "top_up_not_a_top_up_file"
+  | "top_up_credit_not_own"
+  | "top_up_credit_booked"
+  | "top_up_credit_carries_id"
+  | "top_up_not_open"
+  | "top_up_credit_amount"
+  | "top_up_credit_other_account"
+  | "transfer_not_a_payout_file"
   | "date_past"
   | "already_booked"
   | "not_a_fee"
@@ -481,8 +494,24 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Un virement depuis ou vers ce compte est en cours (approvisionnement non encore crédité) : annulez-le ou attendez son crédit.",
   top_up_accounts:
     "L'approvisionnement part d'un compte propre actif vers le compte de fonds de tiers actif de la même devise.",
-  top_up_not_pending:
-    "Cet approvisionnement n'est plus en attente : rechargez la page.",
+  // M2c-7e-1 (plan §7.2): an order, or a top-up in a file of the own account, can be cancelled; nothing else
+  top_up_not_pending: "Cet approvisionnement n'est plus en attente (comptabilisé ou annulé).",
+  top_up_file_not_own: "Ce compte n'est pas un compte propre actif du cabinet.",
+  top_up_file_not_eur: "Seuls les virements en euros sont pris en charge.",
+  top_up_nothing_to_file: "Aucun approvisionnement à mettre dans un fichier.",
+  top_up_nothing_to_cancel: "Ce fichier n'a plus d'approvisionnement à annuler.",
+  top_up_not_a_top_up_file:
+    "Ce fichier n'est pas un fichier d'approvisionnement : utilisez l'annulation des reversements.",
+  top_up_credit_not_own: "Ce crédit n'est pas un virement reçu du compte propre.",
+  top_up_credit_booked: "Cette ligne est déjà comptabilisée.",
+  top_up_credit_carries_id:
+    "Ce crédit porte déjà sa référence TOP… : il est comptabilisé automatiquement.",
+  top_up_not_open: "Cet approvisionnement est déjà comptabilisé ou annulé.",
+  top_up_credit_amount: "Le montant ou le compte ne correspond pas à cet approvisionnement.",
+  // M2c-7e-1 review round 1 (MONEY-BANK-1, CC-2)
+  top_up_credit_other_account: "Ce crédit ne vient pas du compte propre dont part cet approvisionnement.",
+  transfer_not_a_payout_file:
+    "Ce fichier est un fichier d'approvisionnement du compte propre : annulez-le par « Annuler le fichier » (« Virements », Approvisionnements du compte dédié).",
   date_past: "La date d'exécution demandée ne peut pas être passée.",
   already_booked: "Cette ligne est déjà comptabilisée : rechargez la page.",
   not_a_fee:
@@ -754,12 +783,13 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   own_credit_top_up_line:
     "Ce crédit porte la référence de l'un de nos approvisionnements (TOP…) : c'est l'argent du cabinet, jamais le paiement d'un débiteur. Il se comptabilise comme « Approvisionnement par le compte propre » : automatiquement quand il correspond à l'approvisionnement demandé, sinon par l'équipe.",
   // review round 4 (N1): public.assign_payment's refusal of a payment whose bank line carries one of our transfers' ids
-  // M2c-6b-2a (critic L10, founder Q13's default): Collectoo cannot book it as that return yet (M2c-7)
+  // M2c-6b-2a (critic L10, founder Q13's default); M2c-7e-1 (plan §7.3, D10): no undo path — Collectoo does not book it
+  // as that return (a recorded payment is not undone; the P0 alert own_transfer_payment is the tripwire)
   payment_own_transfer_line:
-    "Ce paiement vient d'une ligne qui porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, pas le paiement d'un débiteur. Il ne s'affecte à aucun dossier, et Collectoo ne peut pas encore le comptabiliser comme le retour de ce virement (un paiement enregistré ne se défait pas ; prévu avec M2c-7) : prévenez le support.",
+    "Ce paiement vient d'une ligne qui porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, pas le paiement d'un débiteur. Il ne s'affecte à aucun dossier, et Collectoo ne le comptabilise pas comme le retour de ce virement (un paiement enregistré ne se défait pas) : prévenez le support.",
   // review round 5 (Q4): public.resolve_duplicate's refusal (its hint, in the page's words): the line stays held
   duplicate_own_transfer_line:
-    "Cette ligne porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, jamais le paiement d'un débiteur. Lue ainsi avant la correction de l'import, elle ne peut être ni libérée comme un paiement ni encore comptabilisée comme ce retour : elle reste dans « Doublons possibles ». Prévenez le support.",
+    "Cette ligne porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, jamais le paiement d'un débiteur. Lue ainsi avant la correction de l'import, elle ne peut être ni libérée comme un paiement ni comptabilisée comme ce retour : elle reste dans « Doublons possibles ». Prévenez le support.",
   // M2c-6b-2c (plan §4.1; critic L8): public.link_debit's guards — the line is booked with « Comptabiliser… »
   // (review 6b-2c round 3: also a payout returned or cancelled the bank may have executed, never « en cours » alone)
   payout_candidate:

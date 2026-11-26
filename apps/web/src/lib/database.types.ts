@@ -3126,6 +3126,9 @@ isOneToOne: false
 "book_client_payment_line":
 { Args: { "p_bank_transaction_id": string,"p_designation_document_id": string,"p_documents": (string)[],"p_expected_open_text": string,"p_idempotency_key": string,"p_reason": string,"p_recover_written_off": (string)[] }; Returns: Json
                            },
+"book_top_up_credit":
+{ Args: { "p_bank_transaction_id": string,"p_idempotency_key": string,"p_reason": string,"p_transfer_id": string }; Returns: Json
+                           },
 "book_transfer_line":
 { Args: { "p_bank_transaction_id": string,"p_expected_text": string,"p_idempotency_key": string,"p_parts": Json,"p_reason": string }; Returns: Json
                            },
@@ -3137,6 +3140,9 @@ isOneToOne: false
                            },
 "cancel_top_up":
 { Args: { "p_idempotency_key": string,"p_reason": string,"p_transfer_id": string }; Returns: Json
+                           },
+"cancel_top_up_file":
+{ Args: { "p_file_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
                            },
 "cancel_transfer_file":
 { Args: { "p_attestation"?: string,"p_expected_version": number,"p_file_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
@@ -3246,6 +3252,9 @@ isOneToOne: false
                            },
 "forward_payment":
 { Args: { "p_client_organization_id": string,"p_evidence_document_id": string,"p_expected_minor": string,"p_idempotency_key": string,"p_payment_id": string,"p_reason": string }; Returns: Json
+                           },
+"generate_top_up_file":
+{ Args: { "p_idempotency_key": string,"p_own_bank_account_id": string }; Returns: Json
                            },
 "generate_transfer_file":
 { Args: { "p_bank_account_id": string,"p_idempotency_key": string,"p_late_reason"?: string }; Returns: Json
@@ -3390,6 +3399,9 @@ isOneToOne: false
               "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"found_by": string,"holds": (string)[],"pending_minor": string,"rf": string,"servicing_start": string,"status": string
             }[]
                            },
+"servicer_shortfall_periods":
+{ Args: { "p_limit"?: number,"p_organization_id": string }; Returns: Json
+                           },
 "set_allocation_policy":
 { Args: { "p_accessory_rank": string,"p_client_organization_id": string,"p_effective_from": string,"p_idempotency_key": string,"p_organization_id": string,"p_portfolio_id": string,"p_reason": string,"p_unclassified": string }; Returns: string
                            },
@@ -3424,6 +3436,12 @@ isOneToOne: false
                            },
 "submit_statement_import":
 { Args: { "p_idempotency_key": string,"p_statement_id": string }; Returns: string
+                           },
+"top_up_credit_options":
+{ Args: { "p_bank_transaction_id": string }; Returns: Json
+                           },
+"top_up_overview":
+{ Args: Record<PropertyKey, never>; Returns: Json
                            },
 "transfer_bookings":
 { Args: { "p_transfer_ids": (string)[] }; Returns: {

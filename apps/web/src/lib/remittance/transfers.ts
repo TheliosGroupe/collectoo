@@ -243,6 +243,14 @@ const HOLD_LABEL: Record<string, string> = {
     "Retenu : un virement annulé de ce client a peut-être été débité en retard (un débit de son montant, sous sa référence, dans une ligne groupée de son lot ou sans nos références, n'est pas encore comptabilisé) ; voyez ce débit dans « Débits et retours » d'abord, après avoir annulé ce reversement s'il reprend les mêmes encaissements",
   payment_refund_debited_late:
     "Retenu : un remboursement annulé de ce paiement a peut-être été exécuté en retard (relevé) ; rattachez ce débit d'abord, ou annulez ce remboursement",
+  // M2c-7e-1 (plan §7.2): an own-account file refused at download — one of its top-ups cancelled, or its credit booked
+  transfer_cancelled:
+    "Cet approvisionnement a été annulé depuis la génération : le fichier est remplacé ; Collectoo commande dans l'heure ce qui reste dû",
+  top_up_booked:
+    "Le crédit de cet approvisionnement est déjà comptabilisé sur le compte dédié : le fichier est remplacé, cet approvisionnement n'y revient pas",
+  // M2c-7e-1 review round 1 (MONEY-BANK-2): or its credit on a statement, not booked yet (no file takes it meanwhile)
+  top_up_credited:
+    "Le crédit de cet approvisionnement est déjà sur un relevé du compte dédié : la banque l'a exécuté. Le fichier est remplacé ; comptabilisez ce crédit (« Débits et retours ») : aucun fichier ne le reprend d'ici là",
   // M2c-7d-2 (plan §6.2.11 (b)): the run's frozen set-off no longer holds (an event recorded since its preparation);
   // before download a run can always be cancelled, whatever the switch
   client_status_changed:
@@ -510,6 +518,8 @@ const COMMAND_ERRORS: [string, ErrorCode][] = [
   ["not_in_downloaded_file", "transfer_not_in_downloaded_file"],
   ["not_live", "transfer_not_live"],
   ["late_reason_too_long", "transfer_late_reason_too_long"],
+  // M2c-7e-1 review round 1 (CC-2): an own-account file is cancelled by « Annuler le fichier » (before not_a_payout)
+  ["not_a_payout_file", "transfer_not_a_payout_file"],
   ["not_a_payout", "payee_check_not_a_payout"],
   // M2c-6a review (T2): the download re-ran the generation's checks and replaced the file
   ["file_stale", "transfer_file_stale"],

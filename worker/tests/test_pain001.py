@@ -2,8 +2,10 @@
 NbOfTxs, unique end-to-end ids ≤ 35, charset property, same bytes when downloaded twice »).
 
 Goldens: the §7 worked example's TF-2026-000001 (RMT Martin 164 000, RMT Lilas 451 136; CtrlSum
-6151.36) and a second file holding a refund with accented, long names and the sweep in its own
-PmtInf, per version. Regenerate with PAIN001_UPDATE_GOLDEN=1 (and review the diff).
+6151.36), a second file holding a refund with accented, long names and the sweep in its own
+PmtInf, and (M2c-7e-1, plan docs/design/m2c-7-plan.md §7.2) the own account's top-up file
+TF-2026-000003 (the debtor the servicer's own account, no BIC: NOTPROVIDED; two TOP top-ups to the
+dedicated account), per version. Regenerate with PAIN001_UPDATE_GOLDEN=1 (and review the diff).
 """
 
 from __future__ import annotations
@@ -141,6 +143,52 @@ def mixed_example(version: str) -> TransferFile:
     )
 
 
+def top_up_example(version: str) -> TransferFile:
+    """M2c-7e-1: the own-account file — what private.transfer_file_begin gives for a file whose
+    debtor is the servicer's own account: its ordered TOP top-ups (InstrId = EndToEndId) to the
+    dedicated account, the servicer's legal name on both sides (BtchBookg false, as every file)."""
+    return TransferFile(
+        version=version,
+        msg_id="TF-2026-000003",
+        created_at="2026-11-26T10:37:04+01:00",
+        initiating_party="Collectoo SAS",
+        payment_infos=(
+            PaymentInfo(
+                "TF-2026-000003-1",
+                date(2026, 11, 27),
+                "Collectoo SAS",
+                OWN_IBAN,
+                None,
+                (
+                    Transaction(
+                        "TOP0A1B2C3D4E5F",
+                        "TOP0A1B2C3D4E5F",
+                        150_000,
+                        "EUR",
+                        "Collectoo SAS",
+                        CF_IBAN,
+                        "TESTFRPPXXX",
+                        "APPROVISIONNEMENT COMPTE DEDIE TOP0A1B2C3D4E5F",
+                    ),
+                    Transaction(
+                        "TOP1B2C3D4E5F60",
+                        "TOP1B2C3D4E5F60",
+                        50_000,
+                        "EUR",
+                        "Collectoo SAS",
+                        CF_IBAN,
+                        "TESTFRPPXXX",
+                        "APPROVISIONNEMENT COMPTE DEDIE TOP1B2C3D4E5F60",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+EXAMPLES = {"worked": worked_example, "mixed": mixed_example, "topup": top_up_example}
+
+
 def _golden(name: str, data: bytes) -> bytes:
     path = GOLDEN / name
     if os.environ.get("PAIN001_UPDATE_GOLDEN") == "1":
@@ -156,9 +204,9 @@ def _find(doc: etree._Element, version: str, path: str) -> list[str]:
 
 
 @pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("example", ["worked", "mixed"])
+@pytest.mark.parametrize("example", ["worked", "mixed", "topup"])
 def test_golden_bytes(version: str, example: str) -> None:
-    f = worked_example(version) if example == "worked" else mixed_example(version)
+    f = EXAMPLES[example](version)
     data = render(f)
     assert data == _golden(f"{example}.{version}.xml", data)
     assert render(f) == data  # deterministic: the same inputs, the same bytes (rendered twice)
@@ -699,7 +747,23 @@ def test_without_the_vendored_xsd_validation_says_so(version: str, tmp_path: Pat
     "(docs/reference/iso20022/README.md)",
 )
 @pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("example", ["worked", "mixed"])
+@pytest.mark.parametrize("example", ["worked", "mixed", "topup"])
 def test_the_goldens_validate_against_the_iso20022_xsd(version: str, example: str) -> None:
     data = (GOLDEN / f"{example}.{version}.xml").read_bytes()
     validate_xsd(data, version)
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_the_own_account_file_carries_the_own_account_as_debtor(version: str) -> None:
+    """M2c-7e-1: the top-up file's Dbtr is the own account (no BIC: NOTPROVIDED), each transaction
+    credits the dedicated account under its TOP id, BtchBookg false (one credit per top-up on the
+    dedicated account's statement, matched by its own id); the check passes."""
+    data = render(top_up_example(version))
+    facts = check(data, version)
+    assert (facts["nb_of_txs"], facts["ctrl_sum_minor"]) == (2, 200_000)
+    doc = etree.fromstring(data)
+    assert _find(doc, version, "DbtrAcct/Id/IBAN") == [OWN_IBAN]
+    assert _find(doc, version, "CdtrAcct/Id/IBAN") == [CF_IBAN, CF_IBAN]
+    assert _find(doc, version, "EndToEndId") == ["TOP0A1B2C3D4E5F", "TOP1B2C3D4E5F60"]
+    assert _find(doc, version, "BtchBookg") == ["false"]
+    assert _find(doc, version, "DbtrAgt/FinInstnId/Othr/Id") == ["NOTPROVIDED"]

@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { staffSession } from "@/lib/auth/staff";
 import type { ActionResult } from "@/lib/boarding/forms";
 import { PAIN_VERSIONS, cancellationCall, cancellationRpc, payeeCheckErrorCode, transferErrorCode } from "@/lib/remittance/transfers";
+import { topUpErrorCode } from "@/lib/remittance/top-ups";
 
 /**
  * M2c-6a « Virements » commands (design §11, §16). Authorization (admins and ops managers at aal2; the pain.001
@@ -161,4 +162,61 @@ export async function setPainVersion(formData: FormData): Promise<ActionResult> 
     p_version: v,
   });
   return done(error);
+}
+
+// -- M2c-7e-1 (plan §7.2, §7.4): « Approvisionnements du compte dédié » --------------------------------------------
+
+function topUpDone(error: { message: string } | null): ActionResult {
+  if (error) {
+    console.error("top-up command failed", { error: error.message });
+    return { error: topUpErrorCode(error.message) };
+  }
+  revalidatePath("/backoffice/reversements/virements");
+  revalidatePath("/backoffice/parametres/comptes-bancaires");
+  return { ok: true };
+}
+
+/** « Générer le fichier (compte propre) »: the own account's ordered top-ups in one pain.001 file. */
+export async function generateTopUpFile(formData: FormData): Promise<ActionResult> {
+  const key = field(formData, "idempotency_key");
+  const account = field(formData, "own_bank_account_id");
+  if (!UUID.test(key) || !UUID.test(account)) return { error: "unknown" };
+  const { supabase } = await staffSession();
+  const { error } = await supabase.rpc("generate_top_up_file", {
+    p_idempotency_key: key,
+    p_own_bank_account_id: account,
+  });
+  return topUpDone(error);
+}
+
+/** « Annuler le fichier » of the own account: before or after download, whatever the switch (no client paid twice). */
+export async function cancelTopUpFile(formData: FormData): Promise<ActionResult> {
+  const key = field(formData, "idempotency_key");
+  const file = field(formData, "file_id");
+  const reason = field(formData, "reason");
+  if (!UUID.test(key) || !UUID.test(file)) return { error: "unknown" };
+  if (!reason) return { error: "reason_required" };
+  const { supabase } = await staffSession();
+  const { error } = await supabase.rpc("cancel_top_up_file", {
+    p_idempotency_key: key,
+    p_file_id: file,
+    p_reason: reason,
+  });
+  return topUpDone(error);
+}
+
+/** « Annuler » one top-up: ordered, or in a file of the own account (its credit booked without it, or not executed). */
+export async function cancelTopUpOrder(formData: FormData): Promise<ActionResult> {
+  const key = field(formData, "idempotency_key");
+  const transfer = field(formData, "transfer_id");
+  const reason = field(formData, "reason");
+  if (!UUID.test(key) || !UUID.test(transfer)) return { error: "unknown" };
+  if (!reason) return { error: "reason_required" };
+  const { supabase } = await staffSession();
+  const { error } = await supabase.rpc("cancel_top_up", {
+    p_idempotency_key: key,
+    p_transfer_id: transfer,
+    p_reason: reason,
+  });
+  return topUpDone(error);
 }

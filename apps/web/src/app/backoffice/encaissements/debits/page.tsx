@@ -40,6 +40,8 @@ import {
 } from "./debit-actions";
 import { ClientPaymentLine } from "./client-payment-line";
 import { BookTransferLine } from "./transfer-line-sheet";
+import { BookTopUpCredit } from "./top-up-credit";
+import { offersTopUpLink, topUpCreditEffect } from "@/lib/remittance/top-ups";
 
 const PAGE_SIZE = 20;
 const TABS: Record<string, string> = {
@@ -472,6 +474,14 @@ function LineActions({
           kind="own_credit"
           label="Approvisionnement par le compte propre"
           effect={ownCreditEffect(money(row.amount_minor, cur))}
+          idempotencyKey={randomUUID()}
+        />
+      ) : null}
+      {/* M2c-7e-1 ([check 1] gap 12): the credit of a top-up whose TOP reference the bank dropped */}
+      {offersTopUpLink(offersTopUp(row), row.end_to_end_id) ? (
+        <BookTopUpCredit
+          lineId={row.bank_transaction_id}
+          effect={topUpCreditEffect(money(row.amount_minor, cur))}
           idempotencyKey={randomUUID()}
         />
       ) : null}

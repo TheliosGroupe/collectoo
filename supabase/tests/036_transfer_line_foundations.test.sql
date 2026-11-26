@@ -1643,15 +1643,14 @@ grant execute on all functions in schema pg_temp to authenticated;
 select is(array[pg_temp.hint('select pg_temp.f_assign()'), pg_temp.hint('select pg_temp.f_release()')],
           array['Ce paiement vient d''une ligne qui porte la référence de l''un de nos propres virements (reversement, '
                 'quote-part du cabinet, lot de notre fichier) : c''est ce virement qui revient, pas le paiement d''un '
-                'débiteur. Il ne s''affecte à aucun dossier, et Collectoo ne peut pas encore le comptabiliser comme le '
-                'retour de ce virement (un paiement enregistré ne se défait pas ; prévu avec M2c-7) : prévenez le '
-                'support.',
+                'débiteur. Il ne s''affecte à aucun dossier, et Collectoo ne le comptabilise pas comme le retour de ce '
+                'virement (un paiement enregistré ne se défait pas) : prévenez le support.',
                 'Cette ligne porte la référence de l''un de nos propres virements (reversement, quote-part du cabinet, '
                 'lot de notre fichier) : c''est ce virement qui revient, jamais le paiement d''un débiteur. Lue ainsi '
-                'avant la correction de l''import, elle ne peut être ni libérée comme un paiement ni encore '
-                'comptabilisée comme ce retour : elle reste dans « Doublons possibles ». Prévenez le support.'],
-  'F (L10): « Affecter » and « Libérer » on our own transfer coming back say Collectoo cannot book it as that return yet '
-  '(prévenez le support), and promise no screen');
+                'avant la correction de l''import, elle ne peut être ni libérée comme un paiement ni comptabilisée '
+                'comme ce retour : elle reste dans « Doublons possibles ». Prévenez le support.'],
+  'F (L10): « Affecter » and « Libérer » on our own transfer coming back say Collectoo does not book it as that return '
+  '(prévenez le support), and promise no screen nor later release (M2c-7e-1, D10; R3)');
 select is(private.own_transfer_line_hint('bank_booking'),
   'Cette ligne est un débit ou un retour de nos propres virements (reversement, quote-part du cabinet, lot de notre '
   'fichier) : elle se comptabilise depuis le relevé, automatiquement à l''import ou par l''équipe dans « Débits et '

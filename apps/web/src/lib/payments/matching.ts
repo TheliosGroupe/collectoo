@@ -291,7 +291,7 @@ const SKIP_LABEL: Record<string, string> = {
  * it, and the page offers no assignment (COMPLIANCE OQ-84).
  */
 export const OUR_TRANSFER_PAYMENT_NOTE =
-  "Ce paiement vient d'une ligne qui porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, pas le paiement d'un débiteur. Ne l'affectez à aucun dossier : Collectoo ne peut pas encore le comptabiliser comme le retour de ce virement (un paiement enregistré ne se défait pas ; prévu avec M2c-7) ; prévenez le support.";
+  "Ce paiement vient d'une ligne qui porte la référence de l'un de nos propres virements (reversement, quote-part du cabinet, lot de nos fichiers) : c'est ce virement qui revient, pas le paiement d'un débiteur. Ne l'affectez à aucun dossier : Collectoo ne le comptabilise pas comme le retour de ce virement (un paiement enregistré ne se défait pas) ; prévenez le support.";
 
 /**
  * Whether « Paiements à traiter » offers to assign a payment (the suggestion, the candidates, the search): an unmatched

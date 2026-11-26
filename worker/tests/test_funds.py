@@ -15,6 +15,7 @@ from collectoo_worker.payments.csv_import import parse_csv
 from collectoo_worker.payments.debits import (
     CLIENT_CREDIT,
     OWN_TRANSFER_OUT,
+    TOP_UP_CANCELLED_CREDIT,
     TOP_UP_DIFFERS,
     TOP_UP_NOT_FOUND,
     Booking,
@@ -224,7 +225,10 @@ def test_a_top_up_is_booked_from_its_order_only() -> None:
     for line, reason in [
         (credit(transfer_id=None), TOP_UP_NOT_FOUND),
         (credit(amount=4999), TOP_UP_DIFFERS),
-        (credit(status="cancelled"), TOP_UP_DIFFERS),
+        # M2c-7e-1 ([critic] M7-MONEY-4; R3, ADR-0014 « M2c-7e-1 »): a cancelled top-up's credit has
+        # its own review (top_up_cancelled_credit: booked by ops with no transfer)
+        (credit(status="cancelled"), TOP_UP_CANCELLED_CREDIT),
+        (credit(status="in_file"), TOP_UP_DIFFERS),
         (credit(creditor="B2"), TOP_UP_DIFFERS),
         (_line("client_transfer_in", "credit"), CLIENT_CREDIT),
         (_line("transfer_out", "debit"), OWN_TRANSFER_OUT),
@@ -243,9 +247,10 @@ lines = st.builds(
     booking_date=st.just(DAY),
     bank_tx_code=st.sampled_from([None, "ACMT/MDOP/CHRG", "PMNT/MDOP/FEES", "PMNT/ICDT/ESCT"]),
     transfer_id=st.sampled_from([None, "T1", "T2"]),
-    transfer_status=st.sampled_from([None, "ordered", "booked", "cancelled"]),
+    transfer_status=st.sampled_from([None, "ordered", "in_file", "booked", "cancelled"]),
     transfer_amount_minor=st.one_of(st.none(), st.integers(1, 10**6)),
     transfer_creditor=st.sampled_from([None, "B1", "B2"]),
+    transfer_filed_own=st.booleans(),
 )
 
 
@@ -264,7 +269,11 @@ def test_bookings_book_only_what_the_bank_and_our_orders_prove(batch: list[Funds
             )
         elif b.kind == "top_up":
             assert line.direction == "credit" and line.kind == "own_transfer_in"
-            assert b.transfer_id == line.transfer_id and line.transfer_status == "ordered"
+            # M2c-7e-1 ([critic] M7-MONEY-4): ordered, or in_file of an own-account file
+            assert b.transfer_id == line.transfer_id and (
+                line.transfer_status == "ordered"
+                or (line.transfer_status == "in_file" and line.transfer_filed_own)
+            )
             assert line.transfer_amount_minor == line.amount_minor
             assert line.transfer_creditor == line.bank_account_id
             assert b.transfer_id is not None and b.transfer_id not in seen  # booked once
@@ -273,6 +282,7 @@ def test_bookings_book_only_what_the_bank_and_our_orders_prove(batch: list[Funds
             assert b.review_reason in {
                 TOP_UP_NOT_FOUND,
                 TOP_UP_DIFFERS,
+                TOP_UP_CANCELLED_CREDIT,
                 CLIENT_CREDIT,
                 OWN_TRANSFER_OUT,
             }

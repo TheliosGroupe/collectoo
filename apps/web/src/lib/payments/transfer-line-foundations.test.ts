@@ -99,14 +99,17 @@ describe("the new alerts (critic L10, L14)", () => {
   });
 });
 
-describe("the S23 texts (critic L10): no screen promised, Collectoo cannot book it yet", () => {
+// M2c-7e-1 (plan §7.3, D10; R3, ADR-0014 « M2c-7e-1 »): no undo path is planned — the texts say Collectoo does not book
+// it (« ne le comptabilise pas », « ni comptabilisée »), never « pas encore » nor « prévu avec M2c-7 »
+describe("the S23 texts (critic L10, D10): no screen promised, Collectoo does not book it", () => {
   const texts = {
     payment: errorText("payment_own_transfer_line"),
     duplicate: errorText("duplicate_own_transfer_line"),
     note: OUR_TRANSFER_PAYMENT_NOTE,
   };
-  it.each(Object.entries(texts))("%s says « ne peut pas encore » and promises no screen", (_name, text) => {
-    expect(text).toMatch(/ne (peut|peuvent) pas encore|ni encore comptabilisée/);
+  it.each(Object.entries(texts))("%s says Collectoo does not book it and promises nothing", (_name, text) => {
+    expect(text).toMatch(/ne le comptabilise pas|ni comptabilisée/);
+    expect(text).not.toMatch(/pas encore|ni encore|M2c-7|prévu avec/);
     expect(text).not.toContain("écran à venir");
     expect(text).toMatch(/prévenez le support/i);
   });

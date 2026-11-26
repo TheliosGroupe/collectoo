@@ -2926,3 +2926,202 @@ The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` th
 - The round touches none of these paths (the payouts' clients have no event); their spread is the VM's.
 
 Every budget held.
+
+### M2c-7e-1: top-ups and the own-account file (2026-11-26, same VM, the main stack alone, each run right after `supabase db reset` with CI's logging settings)
+
+What 7e-1 puts on the timed paths (ADR-0014 « M2c-7e-1 »):
+- **The hourly job** (`servicer-top-ups`, minute 37): one `top_ups` message per servicer with an active dedicated
+  account; each reads Σ 4679 by the servicer's 4679 accounts (`ledger_account` by its key, then their postings), its
+  sweeps and top-ups in flight (`bank_transfer_servicer_flight_idx`), its open period and its billing settings, and
+  writes at most one top-up per currency. Not on any scale path: the scale files run no cron.
+- **The nightly** (`run_advance_checks`): `top_up_account_missing` (the need per active dedicated currency, the
+  billing settings' own account) and `top_up_order_failed` (one row of `private.top_up_order_state` by its key):
+  `run_advance_checks` 92 ms own in the 50,000-line run's nightly (7d-3: 80 ms).
+- **The download** (`transfer_file_download`, every file): `set enable_seqscan = off`; the run update now per run by
+  its key (the file's transfers by `bank_transfer_file_idx`); an own-account file's checks (none on a payout file).
+- **The funds pass** (the debit job): a `TOP…` credit's top-up read with `private.top_up_in_own_file` when in_file (by
+  key); the worker's loader one keyed call per pass for the in_file top-ups it holds.
+- The generation of payout files, the prepare, the approval and the payouts' bookings: unchanged.
+
+**Stale statistics** (`worker/tests/test_top_up_reads_integration.py`, the db job; not a scale file; bound 60 per
+call), on 10,000 planted rows each of `bank_transfer` (in flight and booked), `transfer_file`, `transfer_file_item`,
+`bank_transaction`, `ledger_entry`, `ledger_posting`, `private.servicer_shortfall_period`, keys' n_distinct pinned to
+2, every plan generic. Rows read per call from the watched tables in the last run: the need 5 `bank_transfer`, 1
+`ledger_posting`; the hourly step 5 / 2 and 1 period; `top_up_overview` 24 `bank_transfer`, 6 files, 8 items, 2
+postings; `top_up_credit_options` 4–6 / 1 line; `servicer_shortfall_periods` 4 postings, 2 entries, 1 period;
+`generate_top_up_file` 36–38 / 24 files; the download 14 `bank_transfer`, 5 files, 8 items. Found while building and
+fixed (ADR): the download's keyed reads without the seqscan setting (11,089 / 32,018), the overview's per-file counts
+(113 items), its account counts (5,059), the generation's update with its temporary table (5,420), the superseded
+file's close (10,420; 60,564), the download's run update (296–406).
+
+The db job as `ci.yml` runs it, after a fresh reset: `supabase test db` **52 files, 3,178 tests, PASS** (560 s); the
+types unchanged after `supabase gen types`; the non-scale integration suite **307 passed** (1,004 s); `make eval`:
+mapping top-1 1.000 (167/167, threshold 0.980), reconciliation 0.9600 automatic, 0 wrong.
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset`:
+**15 passed** in 1,520.9 s (00:49–01:15 UTC; 7d-3: 1,477.9 s). No Paris date change fell in it.
+- `test_remittance_scale_integration.py` (50,000 lines): reserved in 1.32 s, prepared in **13.4 s** (load 4.46 s, price
+  5.96 s, write 2.77 s; 7d-3 12.9 s); the approval job and documents 18.7 s (the statement's build 8.39 s, 7.17 s for the
+  one drawn again); the nightly checks 5.1 s (the draft waiting 4.9 s); the cancellation 4.46 s; the re-run prepared and
+  approved in **31.9 s**, its payout filed, downloaded, debited and booked in 1.0 s; the nightly checks with the run
+  booked **5.3 s** (`run_advance_checks` 92 ms own, `run_remittance_runs_checks` 402 ms).
+- `test_transfer_line_scale_integration.py`: the 500-member lot short of one, rolled back: options 0.49 s, booking
+  **1.99 s** (499 bookings), no sequential scan of a per-member table; through the API 0.64 / 2.07 s, the allocation lock
+  held 1.84 s; the saturating lots 2.29 / 2.31 s and 2.91 / 2.97 s; 501 and 5,000 members refused `lot_too_large` at
+  once; the approval jobs **151.5 s** for 500 runs and 155.2 s for 501 (7d-3: 148.0 / 145.4 s); « Virements »,
+  « Générer le fichier » and the first download at 501 payouts 0.17 / 0.43 / 0.38 s.
+- The others: 50,000 files boarded in 94 s; 50,000 credits imported and matched in 33.0 s, allocated in 75.9 s; 1,000
+  returns in 29.0 s, their nightly checks 4.0 s; the statement's 50,000 credits in 42.5 s (the 13,500-credit history in
+  12.8 s; automatic 0.9685, 0 wrong); 5,000 receipts in 25 jobs 73.3 s (14.7 ms a receipt); the transfer cancellation
+  file: set-up 43.1 s, generation with the holds 3.03 s, its nightly checks 0.81 s; the 5,000-transfer file: generation
+  3.04 s (command), job 0.94 s, download 1.51 s (the download's run update now per run: none in a refunds' file), « 
+  Virements » 0.16 s, the debit job 11.8 s, its nightly checks 0.50 s; the 50,000-item draft requeued: options 0.10 s,
+  booking 0.22 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** in 1,243.9 s (01:15–01:36 UTC; 7d-3:
+1,320.8 s). No Paris date change fell in it.
+- **« Générer le fichier » for 5,000 payouts (+50 cancelled): 3.70 s** (7d-3: 4.36 s). « Virements » with the 5,000
+  queued took 1.78 s and the file's first download **3.69 s** (its run update now per run by its key; 7d-3: 3.66 s),
+  under the API's 8 s. At 2,000 payouts: 0.68 / 1.39 / 1.48 s; at 200: 0.12 / 0.26 / 0.31 s.
+- The fixture's 5,050 approval jobs took 513.6 s (547.1 s), the 2,000 held chained runs' 191.9 s, the 200 runs' 21.8 s.
+- The 200 members' batch line: its funds pass 0.58 s; the 200 RMT debits' job 0.88 s.
+- The 5,000-member batch line: its funds pass **24.9 s** (26.9 s under auto_explain; 25.6 s); the nightly checks
+  **1.13 s** (1.24 s warm); 5,000 RMT debits imported in 1.3 s, the debit job **22.8 s** (chunks 9.5, 9.1 and 4.1 s;
+  24.3 s).
+- The 2,000 held chained runs: the funds pass 18.4 s (20.0 s) and the nightly checks **12.33 s** (13.57 s).
+
+The E2E (`./scripts/e2e.sh`, after a fresh reset): **69 passed** in 7.4 min (`top-ups.spec.ts`: 11.4 s desktop, 11.0 s mobile).
+
+Every budget held.
+
+### M2c-7e-1 review fixes, round 1 (2026-11-26, same VM, the main stack alone, each run right after `supabase db reset` with CI's logging settings)
+
+What round 1 puts on the timed paths (ADR-0014 « M2c-7e-1 review fixes », round 1):
+- **« Rattacher à TOP… »** (`top_up_credit_options`): the servicer's open top-ups by `bank_transfer_servicer_flight_idx`
+  (CC-1; was every servicer's transfers of the credit's amount), each one's own account by its key; `book_top_up_credit`
+  and the re-check: one account read by its key (MONEY-BANK-1).
+- **The own-account file**: its first download and its generation read `private.top_up_credit_seen` per top-up of the
+  file or of the account (by the `TOP…` id's key; MONEY-BANK-2); `transfer_file_failed` closes an own file through
+  `private.top_up_file_close` (by the file's key; CC-2); none on a payout file.
+- **The nightly** (`run_advance_checks`): `top_up_account_missing`'s age (the open period by
+  `servicer_shortfall_period_open_uq`), `top_up_order_failed`'s stale rule (the servicer's active dedicated accounts by
+  their key, its state row): `run_advance_checks` 86 ms own in the 50,000-line run's nightly (7e-1: 92 ms).
+- **« Virements »** (`top_up_overview`): `surplus_minor` per currency, the same terms as `top_up_needed`.
+- The payout files, their downloads, the prepare, the approval and the payouts' bookings: unchanged.
+
+**Stale statistics** (`worker/tests/test_top_up_reads_integration.py`, the db job; bound 60 per call), the plant now
+with a fifth of its 10,000 `bank_transfer` rows at the waiting credit's amount and `amount_minor`'s n_distinct pinned
+to 2. Rows read per call from the watched tables: `top_up_credit_options` **5** `bank_transfer` and 1 line (`617b3af`'s
+body: **2,005**); the refused first download 16 `bank_transfer`, 13 files, 6 items, 1 line; the new file's generation 43
+/ 11 / 1; its first download 19 / 8 / 6 and again 37 / 15 / 12; `book_top_up_credit` 28 `bank_transfer`, 15 files, 11
+items, 28 postings, 8 entries, 8 lines; the own file's failure (`transfer_file_failed`) **3** `bank_transfer`, 11 files
+(the generic release: **25,024**); « Annuler » of the payout files on it 1 file; the overview 31 `bank_transfer`, 5
+files, 8 items, 3 postings; the nightly 16 `bank_transfer`, 3 postings beyond 7d-3's body (none).
+
+The db job as `ci.yml` runs it, after a fresh reset: `supabase test db` **52 files, 3,185 tests, PASS** (569 s; `047a`
+32); the types unchanged after `supabase gen types`; then, without a reset, the non-scale integration suite **307
+passed** (958 s); `make eval`: mapping top-1 1.000 (167/167, threshold 0.980), reconciliation 0.9600 automatic, 0 wrong.
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset`:
+**15 passed** in 1,497.5 s (03:43–04:08 UTC; 7e-1: 1,520.9 s). No Paris date change fell in it.
+- `test_remittance_scale_integration.py` (50,000 lines): reserved in 1.21 s, prepared in **11.8 s** (load 3.79 s, price
+  5.16 s, write 2.66 s; 7e-1 13.4 s); the approval job and documents 17.3 s; the nightly checks 4.5 s (the draft waiting
+  4.1 s); the cancellation 4.19 s; the re-run prepared and approved in **29.3 s**, its payout filed, downloaded, debited
+  and booked in 0.8 s; the nightly checks with the run booked **5.0 s** (`run_advance_checks` 86 ms own,
+  `run_remittance_runs_checks` 440 ms).
+- `test_transfer_line_scale_integration.py`: the 500-member lot short of one, rolled back: options 0.53 s, booking
+  **1.81 s** (499 bookings), no sequential scan of a per-member table; through the API 0.57 / 2.04 s, the allocation lock
+  held 1.79 s; the saturating lots 2.28 / 2.36 s and 2.36 / 2.25 s; 501 and 5,000 members refused `lot_too_large` at
+  once; the approval jobs **204.3 s** for 500 runs and 157.0 s for 501 (7e-1: 151.5 / 155.2 s; the round touches no
+  approval path: the first fixture of the file ran slower); « Virements », « Générer le fichier » and the first
+  download at 501 payouts 0.17 / 0.40 / 0.40 s.
+- The others: 50,000 files boarded in 92 s; 50,000 credits imported and matched in 31.2 s, allocated in 79.2 s; 1,000
+  returns in 28.2 s, their nightly checks 3.9 s; the statement's 50,000 credits in 43.5 s (the 13,500-credit history in
+  11.3 s; automatic 0.9685, 0 wrong); 5,000 receipts in 25 jobs 70.3 s (14.1 ms a receipt); the transfer cancellation
+  file: set-up 41.1 s, generation with the holds 2.53 s, its nightly checks 0.73 s; the 5,000-transfer file: generation
+  3.23 s (command), job 0.97 s, download 1.73 s, « Virements » 0.16 s, the debit job 10.9 s, its nightly checks 0.35 s;
+  the 50,000-item draft requeued: options 0.08 s, booking 0.19 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** in 1,322.6 s (04:09–04:31 UTC; 7e-1:
+1,243.9 s). No Paris date change fell in it.
+- **« Générer le fichier » for 5,000 payouts (+50 cancelled): 4.12 s** (7e-1: 3.70 s). « Virements » with the 5,000
+  queued took 1.83 s and the file's first download **4.40 s** (3.69 s), under the API's 8 s; the round changed no
+  statement of a payout file's generation or download. At 2,000 payouts: 0.88 / 2.01 / 1.52 s; at 200: 0.11 / 0.20 /
+  0.23 s.
+- The fixture's 5,050 approval jobs took 542.7 s (513.6 s), the 2,000 held chained runs' 202.7 s, the 200 runs' 19.7 s.
+- The 200 members' batch line: its funds pass 0.54 s; the 200 RMT debits' job 0.69 s.
+- The 5,000-member batch line: its funds pass **27.3 s** (29.4 s under auto_explain; 24.9 s); the nightly checks
+  **1.50 s** (1.23 s warm); 5,000 RMT debits imported in 1.8 s, the debit job **24.2 s** (chunks 10.7, 9.1 and 4.1 s;
+  22.8 s).
+- The 2,000 held chained runs: the funds pass 19.7 s (18.4 s) and the nightly checks **13.91 s** (12.33 s).
+- The VM ran slower than in 7e-1's runs on paths the round does not touch (the approval jobs about 6 % slower, the
+  batch line's funds pass, whose re-check gained one condition per top-up row — none in a payout's lines — 10 %).
+
+The E2E (`./scripts/e2e.sh`, after a fresh reset): **69 passed** in 7.5 min (`top-ups.spec.ts`: 11.4 s desktop, 11.8 s
+mobile).
+
+Every budget held.
+
+### M2c-7e-1 review fixes, round 2 (2026-11-26, same VM, the main stack alone, each run right after `supabase db reset` with CI's logging settings)
+
+What round 2 puts on the timed paths (ADR-0014 « M2c-7e-1 review fixes », round 2):
+- **The nightly** (`run_advance_checks`): `top_up_order_failed` gains one condition (an active dedicated account,
+  already read by its key): the 50,000-line run's nightly checks 4.4 s with the draft waiting, 4.7 s with the run booked
+  (round 1: 4.5 / 5.0 s).
+- **A file's first download** (every file, payout files included): the runs to mark sent read through the file's items
+  (`transfer_file_item` by its key, each transfer by its key) instead of `bank_transfer_file_idx`: the 5,000-payout
+  file's first download 3.38 s (round 1: 4.40 s), the 5,000-transfer file's 0.68 s (1.73 s).
+- **The own-account file and « Virements »' top-up section** (not timed by the volume runs): the generation's two reads
+  and the overview's count keyed by the account and the status (`bank_transfer_to_file_idx`); a superseded, cancelled or
+  failed own file closed through its items; the overview's needed line from Σ4679 and the in-flight sums read once per
+  currency.
+- The payout files' generation, the prepare, the approval and the payouts' bookings: unchanged.
+
+**Stale statistics** (`worker/tests/test_top_up_reads_integration.py`, the db job; bound 60 per call, the overview's
+`bank_transfer` 60 + its 50 listed), the plant now with 5,000 booked past top-ups of the servicer's own account. Rows
+read per call from the watched tables: `generate_top_up_file` **37** `bank_transfer`, 22 files, 2 items, 1 line
+(`6b53073`'s body: **10,033**), the kept one 43 / 14 / 1 line, the one to fail 33 / 13; the overview **74**
+`bank_transfer` (50 of them its list), 6 files, 10 items, 2 postings (`6b53073`'s body: **5,075**); `cancel_top_up_file`
+15 `bank_transfer`, 9 files, 8 items; the refused first download 16 / 11 / 10 items / 1 line; the new file's first
+download 27 / 8 / 10 and again 45 / 15 / 16; the own file's failure 4 `bank_transfer`, 9 files, 1 item;
+`book_top_up_credit` 28 `bank_transfer`, 20 files, 11 items, 28 postings, 8 entries, 8 lines; the nightly 16
+`bank_transfer`, 3 postings beyond 7d-3's body (none). Before the file reads went through the items, four runs in about
+a dozen on one stack read about 30,000 `bank_transfer` entries per file-keyed call (`bank_transfer_filed_amount_idx`,
+the dead entries of earlier rolled-back plants included); eight runs in eight within the bound since.
+
+The db job as `ci.yml` runs it, after a fresh reset: `supabase test db` **52 files, 3,186 tests, PASS** (560 s; `047a`
+33); the types unchanged after `supabase gen types`; then, without a reset, the non-scale integration suite **307
+passed** (1,012 s).
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset`:
+**15 passed** in 1,413.9 s (06:54–07:18 UTC; round 1: 1,497.5 s). No Paris date change fell in it.
+- `test_remittance_scale_integration.py` (50,000 lines): reserved in 1.30 s, prepared in **12.4 s** (load 3.71 s, price
+  6.15 s, write 2.37 s; round 1 11.8 s); the approval job and documents 16.0 s; the nightly checks 4.4 s (the draft
+  waiting 3.9 s); the cancellation 3.59 s; the re-run prepared and approved in **28.3 s**, its payout filed, downloaded,
+  debited and booked in 0.8 s; the nightly checks with the run booked **4.7 s**.
+- `test_transfer_line_scale_integration.py`: the approval jobs 139.5 s for 500 runs and 153.1 s for 501 (round 1: 204.3
+  / 157.0 s); « Virements », « Générer le fichier » and the first download at 501 payouts 0.18 / 0.48 / 0.41 s.
+- The 5,000-transfer file: generation 2.67 s (command), job 0.88 s, download **0.68 s** (round 1: 1.73 s), « Virements »
+  0.13 s, the debit job 11.1 s, its nightly checks 0.36 s; the transfer cancellation file: set-up 43.9 s, generation
+  with the holds 3.06 s, its nightly checks 0.76 s; 1,000 returns imported and linked in 25.7 s, their nightly checks
+  3.8 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** in 1,260.4 s (07:18–07:39 UTC; round
+1: 1,322.6 s). No Paris date change fell in it.
+- **« Générer le fichier » for 5,000 payouts (+50 cancelled): 4.20 s** (round 1: 4.12 s; the round changed no statement
+  of a payout file's generation). « Virements » with the 5,000 queued took 2.00 s and the file's first download **3.38
+  s** (4.40 s: the runs to mark sent read through the items), under the API's 8 s. At 2,000 payouts: 0.68 / 1.52 / 1.76
+  s; at 200: 0.11 / 0.19 / 0.19 s.
+- The fixture's 5,050 approval jobs took 511.9 s (542.7 s), the 200 runs' 20.2 s.
+- The 200 members' batch line: its funds pass 0.59 s; the 200 RMT debits' job 0.73 s.
+- The 5,000-member batch line: its funds pass **27.2 s** (27.3 s); the nightly checks **1.11 s** (1.50 s); the debit job
+  **21.5 s** (24.2 s).
+- The 2,000 held chained runs: the funds pass 20.1 s (19.7 s) and the nightly checks **13.33 s** (13.91 s).
+
+The E2E (`./scripts/e2e.sh`, after a fresh reset): **69 passed** in 7.4 min (`top-ups.spec.ts`: 11.4 s desktop, 11.8 s
+mobile).
+
+Every budget held.

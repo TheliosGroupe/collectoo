@@ -18,6 +18,7 @@ import {
   cancellationOf,
   cashLines,
   downloadWarning,
+  fileLive,
   fileStale,
   fileStatus,
   generateLabel,
@@ -28,8 +29,21 @@ import {
   requestLine,
   sweepHoldLabel,
 } from "@/lib/remittance/transfers";
+import {
+  TOP_UP_FILE_STATUS,
+  TOP_UP_SECTION_ANCHOR,
+  TOP_UP_SECTION_NOTE,
+  TOP_UP_SECTION_TITLE,
+  TOP_UP_STATUS_LABEL,
+  TOP_UP_STATUS_TONE,
+  type TopUpFile,
+  type TopUpOverview,
+  neededLine,
+  orderedBy,
+} from "@/lib/remittance/top-ups";
 import { clearPayeeMismatch, markSent, setPainVersion } from "./actions";
 import { DownloadLink, GenerateFile } from "./file-actions";
+import { CancelTopUpFile, CancelTopUpOrder, GenerateTopUpFile } from "./top-up-actions";
 
 /** One transfer waiting for a file: what, to whom, and why it would be held out today. */
 function TransferRow({
@@ -249,6 +263,148 @@ function Account({ a, overview }: { a: PayingAccount; overview: TransferOverview
 }
 
 /**
+ * M2c-7e-1 « Approvisionnements du compte dédié » (plan §7.4): per own account, the TOP orders (date, amount, reference,
+ * « commandé automatiquement » or by whom, status), « Générer le fichier (compte propre) », its files with « Télécharger »
+ * and « Annuler le fichier » (before or after download, whatever the switch), « Annuler » an order. What the servicer
+ * still owes the dedicated account beyond the orders, per currency. Admins and ops managers (the database checks it).
+ */
+function TopUpSection({ o }: { o: TopUpOverview }) {
+  return (
+    <Section title={TOP_UP_SECTION_TITLE} testId="top-up-section">
+      <div className="flex flex-col gap-4" id={TOP_UP_SECTION_ANCHOR}>
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">{TOP_UP_SECTION_NOTE}</p>
+        {o.needed.length > 0 ? (
+          <ul className="flex flex-col gap-1 rounded-md bg-zinc-50 p-3 text-sm dark:bg-zinc-900" data-testid="top-up-needed">
+            {o.needed.map((n) => (
+              <li key={n.currency}>{neededLine(n)}</li>
+            ))}
+          </ul>
+        ) : null}
+        {o.accounts.length === 0 ? (
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucun compte propre actif.</p>
+        ) : null}
+        {o.accounts.map((a) => {
+          const live = a.files.filter((f) => fileLive(f.status));
+          const past = a.files.filter((f) => !live.includes(f));
+          return (
+            <div key={a.bank_account_id} className="flex flex-col gap-3" data-testid="own-account">
+              <h3 className="font-medium">
+                {a.label} (…{a.iban_last4}) · {a.currency}
+              </h3>
+              <p className="text-xs text-zinc-600 dark:text-zinc-400">
+                Fichiers {a.pain_version}
+                {a.bic ? ` · BIC ${a.bic}` : " · BIC non renseigné (NOTPROVIDED)"} · exécution au plus tôt le{" "}
+                {frenchDate(a.earliest_execution_date)}
+              </p>
+              {a.top_ups.length === 0 ? (
+                <p className="text-sm text-zinc-600 dark:text-zinc-400">Aucun approvisionnement.</p>
+              ) : (
+                <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800" data-testid="top-ups">
+                  {a.top_ups.map((t) => (
+                    <li key={t.transfer_id} className="flex flex-col gap-1 py-3" data-testid="top-up-row">
+                      <span className="flex flex-wrap items-baseline justify-between gap-2">
+                        <span className="font-mono text-sm break-all" data-testid="top-up-ref">
+                          {t.end_to_end_id}
+                        </span>
+                        <span className="font-medium tabular-nums">{money(t.amount_minor, t.currency)}</span>
+                      </span>
+                      <span className="text-xs text-zinc-600 dark:text-zinc-400">
+                        Le {parisDateTime(t.created_at)} · {orderedBy(t)} · exécution demandée le{" "}
+                        {frenchDate(t.requested_execution_date)}
+                        {t.file_number ? ` · fichier ${t.file_number}` : ""}
+                        {t.status === "cancelled" && t.cancel_reason ? ` · annulé : ${t.cancel_reason}` : ""}
+                      </span>
+                      <span className="flex flex-wrap items-center gap-2">
+                        <Badge tone={TOP_UP_STATUS_TONE[t.status] ?? "neutral"} testId="top-up-status">
+                          {TOP_UP_STATUS_LABEL[t.status] ?? t.status}
+                        </Badge>
+                        {t.cancellable ? (
+                          <CancelTopUpOrder transferId={t.transfer_id} reference={t.end_to_end_id} idempotencyKey={randomUUID()} />
+                        ) : null}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {a.can_generate ? (
+                <GenerateTopUpFile accountId={a.bank_account_id} orderedCount={a.ordered_count} idempotencyKey={randomUUID()} />
+              ) : null}
+              {a.currency !== "EUR" ? <InfoNote>Les fichiers SEPA sont en euros : ce compte n&apos;en produit pas.</InfoNote> : null}
+              {a.files.length > 0 ? (
+                <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800" data-testid="top-up-files">
+                  {[...live, ...past].map((f) => (
+                    <TopUpFileRow key={f.id} f={f} />
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
+/** An own-account file: status, totals, « Télécharger » (the second time past the warning), « Annuler le fichier ». */
+function TopUpFileRow({ f }: { f: TopUpFile }) {
+  const href = `/backoffice/reversements/virements/${f.id}/telecharger`;
+  const downloadable = ["generated", "downloaded", "sent"].includes(f.status);
+  const warning = downloadWarning(f);
+  return (
+    <li className="flex flex-col gap-2 py-3" data-testid="top-up-file">
+      <span className="flex flex-wrap items-center justify-between gap-2">
+        <Link href={`/backoffice/reversements/virements/${f.id}`} className="font-medium underline underline-offset-4">
+          {f.number}
+        </Link>
+        <Badge tone={fileStatus(f.status).tone} testId="top-up-file-status">
+          {TOP_UP_FILE_STATUS[f.status] ?? f.status}
+        </Badge>
+      </span>
+      <span className="text-sm">
+        {f.nb_of_txs} approvisionnement{f.nb_of_txs > 1 ? "s" : ""} · {money(f.ctrl_sum_minor, f.currency)} · exécution le{" "}
+        {frenchDate(f.first_execution_date)}
+        {f.top_ups_booked > 0 ? ` · ${f.top_ups_booked} crédité${f.top_ups_booked > 1 ? "s" : ""} sur le compte dédié` : ""}
+      </span>
+      <span className="text-xs text-zinc-600 dark:text-zinc-400">
+        Créé le {parisDateTime(f.created_at)} · {f.pain_version}
+        {f.closed_at && f.close_reason ? ` · ${f.close_reason}` : ""}
+        {f.status === "failed" && f.error ? ` · ${f.error}` : ""}
+      </span>
+      {warning && downloadable ? (
+        <p className="text-sm font-medium text-red-800 dark:text-red-200" data-testid="top-up-download-warning">
+          {warning}
+        </p>
+      ) : null}
+      <span className="flex flex-wrap items-center gap-2">
+        {downloadable && f.download_count === 0 ? <DownloadLink href={href} label="Télécharger" testId="top-up-file-download" /> : null}
+        {downloadable && f.download_count > 0 ? (
+          <details data-testid="top-up-file-download-again">
+            <summary className="cursor-pointer text-sm underline underline-offset-4">Télécharger de nouveau</summary>
+            <p className="mt-2 text-sm">{warning}.</p>
+            <DownloadLink
+              href={`${href}?confirme=1`}
+              label="J'ai compris : télécharger de nouveau"
+              testId="top-up-file-download-confirm"
+              className={`${inlineButtonClass} mt-2 inline-block`}
+            />
+          </details>
+        ) : null}
+        {f.status === "downloaded" ? (
+          <ActionForm action={markSent} submitLabel="Marquer comme transmis" buttonClassName={inlineButtonClass} testId="top-up-file-mark-sent">
+            <input type="hidden" name="idempotency_key" value={randomUUID()} />
+            <input type="hidden" name="file_id" value={f.id} />
+            <input type="hidden" name="expected_version" value={f.version} />
+          </ActionForm>
+        ) : null}
+        {fileLive(f.status) && f.top_ups_open > 0 ? (
+          <CancelTopUpFile fileId={f.id} number={f.number} idempotencyKey={randomUUID()} />
+        ) : null}
+      </span>
+    </li>
+  );
+}
+
+/**
  * M2c-6a « Virements » (design §17.3): per paying account, the transfers waiting for a file (with why one would be
  * held today), the cash check, « Générer le fichier » (the sheet states every effect), the files with « Télécharger »
  * (the second time only past a warning), « Marquer comme transmis »; the payee names the bank's verification did not
@@ -269,7 +425,12 @@ export default async function TransfersPage() {
     );
   }
   const o = data as unknown as TransferOverview;
-  const busy = o.accounts.some((a) => a.files.some((f) => f.status === "pending"));
+  // M2c-7e-1 (plan §7.4): the own account's top-ups and files
+  const { data: topUpData } = await supabase.rpc("top_up_overview");
+  const topUps = (topUpData ?? null) as unknown as TopUpOverview | null;
+  const busy =
+    o.accounts.some((a) => a.files.some((f) => f.status === "pending")) ||
+    (topUps?.accounts ?? []).some((a) => a.files.some((f) => f.status === "pending"));
   // M2c-6b-2c (plan §7.4): the last nightly checks found the servicer's share waiting on the dedicated account
   const { data: lastRun } = await supabase
     .from("payment_check_run")
@@ -300,6 +461,10 @@ export default async function TransfersPage() {
       {o.accounts.map((a) => (
         <Account key={a.bank_account_id} a={a} overview={o} />
       ))}
+      {/* shown once the servicer has an own account, or owes the dedicated account something to order */}
+      {topUps && (topUps.accounts.length > 0 || topUps.needed.some((x) => x.needed_minor !== "0")) ? (
+        <TopUpSection o={topUps} />
+      ) : null}
       {o.payee_checks.length > 0 ? (
         <Section title="Noms de bénéficiaire non concordants" testId="payee-checks">
           <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">

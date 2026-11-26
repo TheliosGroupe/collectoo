@@ -5,6 +5,7 @@ import { staffSession } from "@/lib/auth/staff";
 import type { ActionResult } from "@/lib/boarding/forms";
 import type { Json } from "@/lib/database.types";
 import { debitErrorCode, guardRefusalCode, linkDebitErrorCode } from "@/lib/payments/debits";
+import { type TopUpCreditOption, parseTopUpCreditOptions, topUpErrorCode } from "@/lib/remittance/top-ups";
 import {
   parseTransferLineOptions,
   parseTransferLinePreview,
@@ -187,5 +188,42 @@ export async function bookTransferLine(formData: FormData): Promise<TransferLine
   }
   revalidatePath("/backoffice/encaissements/debits");
   revalidatePath("/backoffice/reversements", "layout");
+  return { ok: true };
+}
+
+/** « Rattacher à TOP… »: the open top-ups of the credit's amount, read when its sheet opens (public.top_up_credit_options). */
+export async function topUpCreditOptions(lineId: string): Promise<TopUpCreditOption[] | null> {
+  if (!UUID.test(lineId)) return null;
+  const { supabase } = await staffSession();
+  const { data, error } = await supabase.rpc("top_up_credit_options", { p_bank_transaction_id: lineId });
+  if (error) {
+    console.error("top-up credit options failed", { error: error.message });
+    return null;
+  }
+  return parseTopUpCreditOptions(data);
+}
+
+/** M2c-7e-1 ([check 1] gap 12) « Rattacher à TOP… »: an own credit that carries no TOP id booked as an open top-up of its
+ * amount (public.book_top_up_credit: the refusals and the re-check are in SQL). */
+export async function bookTopUpCredit(formData: FormData): Promise<ActionResult> {
+  const key = field(formData, "idempotency_key");
+  const line = field(formData, "bank_transaction_id");
+  const transfer = field(formData, "transfer_id");
+  const reason = field(formData, "reason");
+  if (!UUID.test(key) || !UUID.test(line) || !UUID.test(transfer)) return { error: "unknown" };
+  if (!reason) return { error: "reason_required" };
+  const { supabase } = await staffSession();
+  const { error } = await supabase.rpc("book_top_up_credit", {
+    p_idempotency_key: key,
+    p_bank_transaction_id: line,
+    p_transfer_id: transfer,
+    p_reason: reason,
+  });
+  if (error) {
+    console.error("top-up credit refused", { error: error.message });
+    return { error: topUpErrorCode(error.message) };
+  }
+  revalidatePath("/backoffice/encaissements/debits");
+  revalidatePath("/backoffice/reversements/virements");
   return { ok: true };
 }
