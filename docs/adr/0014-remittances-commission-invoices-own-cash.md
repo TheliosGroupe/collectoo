@@ -11067,5 +11067,29 @@ guard, the four file reads through items, comments), the web +11 / −2; tests +
 - Everything round 1 and M2c-7e-1 left open stays open (MONEY-BANK-3, MONEY-BANK-6's option, the switch-on two-step
   cancellation of an own file, « Contrôles »' variant of `servicer_shortfall`; Q3, Q14, Q15).
 
+## M2c-7e-1 — CI round (PR #49) (2026-11-26)
+**What failed.** On the dispatched run 45779816045 at `c7d0eda`, the `db` job was cancelled at its 30-minute `timeout-minutes`, during « Worker integration tests ». pytest was past 93 % and still progressing, and no test had failed. The PR run 45779816931 of the same head passed in 26.5 minutes. The other jobs took their usual time: worker unit 219 vs 209–229 s, E2E 419 vs 420–451 s, the 50k runs 1,563 vs 1,429 s.
+
+**Not a regression.** The cifix stack (ports 553xx) ran `fdb4f1c` (main) and `c7d0eda` in CI order on one machine: reset, `supabase test db`, then the integration command on the same database.
+- pgTAP: the 51 common files took 570.5 vs 582.2 s (+2.0 %). File ratios ran from 0.89 to 1.11.
+- Integration: the 302 common tests took 982.4 vs 1,017.7 s (+3.6 %).
+- The 10 most regressed tests, re-run with fixed seeds (head, main, head, main, each on a fresh reset), came out at 528.0 vs 536.0 s, so −8 s net.
+- 7e-1's new tests cost 79 s: `test_top_up_reads_integration` 53.7 s, `test_top_ups_integration` 12.4 s, `047a` 12.8 s. In CI that is about one minute.
+
+**Cause.** The job has outgrown its budget through slice-by-slice growth plus runner variance.
+- **Growth.** The PR runs' integration step went from 443–650 s (7c-1 to 7d-1) to 738–770 s (7d-2, 7d-3), then 982–1,133 s (7e-1). Each slice adds its pgTAP file and its stale-statistics reads test.
+- **Variance.** On the same tree (PR #48's last head has `fdb4f1c`'s tree), integration took 770 and 750 s on the PR's Azure runners and 619 s on main's AWS push. PR #49's pgTAP files that 7e-1 never touches (001–034) ran 1.3–2.0× slower in CI than on main's push, against about 1.0× locally.
+- The slowest run seen totals 30+ minutes: about 1.5 of setup, 9.5 of pgTAP and 19 of integration.
+- pg_cron (`servicer-top-ups` at minute 37, `remittances-schedule` at minute 7) did not fire inside either integration window.
+
+**Fix** (`.github/workflows/ci.yml`):
+- `db` times out at 45 minutes, not 30. The slowest run seen leaves about 14 minutes of margin, which covers 7e-2, 7e-3 and 7f's additions.
+- `scale` also times out at 45 minutes, not 30. Its 50k step took 1,563 s on main's push, about 28 minutes with setup. Each scale file keeps its own time budget; the job's limit is only the backstop.
+- The integration step logs its 25 slowest tests (`--durations=25`), so the next growth shows in the log.
+- Integration still runs after pgTAP on the same database. That order once caught a plan built on the statistics pgTAP leaves (« M2c-6b-3b part 1 — CI round (PR #38) »), and splitting it into a parallel job would give that up.
+- 0 extra billed minutes.
+
+**Option not taken.** A parallel `db-integration` job with its own stack would cut the `db` leg to about 18–21 minutes, for 2–3 more billed minutes per run (about 6–9 per slice). A dispatched run's critical path is the 50k job (about 26 minutes) either way. Revisit it, or shard integration in two, if the `db` job nears 35 minutes.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

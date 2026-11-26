@@ -67,7 +67,13 @@ jobs:
   db:
     name: Database (migrations, pgTAP)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 45, not 30 (M2c-7e-1 CI round, PR #49; ADR-0014): the dispatched run of c7d0eda was cancelled at 30 minutes,
+    # pytest past 93 %. No test regressed: on one machine, PR #49's common tests ran within +2 % (pgTAP) and +3.6 %
+    # (integration) of main's, the new ones adding 79 s. The job had grown from ~14 to ~26 minutes over M2c-7, and
+    # runners vary 25-50 % on the same tree (PR #48: 770 s of integration on Azure, 619 s on main's AWS push).
+    # Slowest seen: 1.5 + 9.5 (pgTAP) + 19 (integration) = 30+ minutes. Integration stays after pgTAP on the same
+    # database: that order has caught stale-statistics plans before (PR #38).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       # M2c-6b-2a (critic2 CSO2-5): production applies migrations in merge order and refuses one older than the last
@@ -102,12 +108,14 @@ jobs:
       - name: Worker integration tests (queue, storage, commit, statements, matching, allocation, receipts)
         run: |
           eval "$(./scripts/local-env.sh)"
-          cd worker && uv sync --frozen && uv run pytest -m integration --ignore-glob='*scale_integration.py'
+          cd worker && uv sync --frozen && uv run pytest -m integration --ignore-glob='*scale_integration.py' --durations=25
 
   scale:
     name: Scale runs (50k boarding, statement, matching, allocation; 5k receipts)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 45, not 30 (M2c-7e-1 CI round): the 50k step took 1,563 s on main's push of fdb4f1c, about 28 of 30 minutes
+    # with setup; each file keeps its own time budget, this is only the job's backstop
+    timeout-minutes: 45
     # the volume runs (about 30 of a run's 48 billed minutes) run on merges to main and on demand, not on pull requests:
     # founder decision 2026-11-17 (private repository, Actions minutes); a slice that changes a path they time
     # dispatches this workflow on its branch and waits for them before merging (CLAUDE.md)
