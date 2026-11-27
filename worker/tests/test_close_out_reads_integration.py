@@ -21,6 +21,11 @@ the rows read (pg_stat_xact_*: sequential reads and the index entries returned).
 - H19 (`test_an_in_flight_runs_overdue_lines_are_read_by_the_runs_key`): the remitted-cover file's plant (two
   runs holding every line, run_id's n_distinct 2) — private.inflight_overdue_lines reads each run in flight's
   lines by the run's key alone.
+- CI round, PR #52 (`test_the_servicers_flight_is_read_by_its_key_without_statistics`): bank_transfer with no
+  statistics and its flight index bloated (the db job's state at test_declarations_reads) — what is needed
+  (private.top_up_needed) reads the servicer's sweeps and top-ups in flight of the currency only, never a whole
+  partial index of the transfers in flight or of the top-ups (every servicer's) nor the servicer's other transfers
+  in flight; the nightly's advance checks and the whole nightly within their bounds.
 """
 
 from __future__ import annotations
@@ -36,7 +41,13 @@ import pytest
 from explain_helpers import ADMIN
 from integration_helpers import one, storage
 from reconciliation_helpers import pay
-from remittance_helpers import add_admin, paris_today, recent_business_day, remittance_tenant
+from remittance_helpers import (
+    add_admin,
+    own_account,
+    paris_today,
+    recent_business_day,
+    remittance_tenant,
+)
 from test_advance_reads_integration import (
     _plant_servicer_advances,
     _Reads,
@@ -1169,3 +1180,149 @@ def test_a_files_transfers_are_read_through_its_items_whatever_the_statistics() 
         for table in ("bank_transfer", "transfer_file_item"):
             assert rows.get(table, 0) <= PER_ITEM * FILED + PER_CALL, (name, table, rows)
         assert rows.get("remittance_run", 0) <= PER_CALL, (name, rows)
+
+
+# CI round, PR #52 ----------------------------------------------------------------------------------------------------
+# other servicers' transfers in flight (refunds, sweeps, top-ups of two other servicers, ordered or in a file): what a
+# whole read of bank_transfer_debtor_idx (status in flight) or bank_transfer_top_up_idx (every top-up) returns
+FLIGHT_OTHERS = 2_000
+# the servicer's own transfers in flight that no call for its sweeps and top-ups of EUR reads: refunds on other
+# accounts (ordered or in a file) and sweeps of another currency
+FLIGHT_OWN_OTHER = 500
+FLIGHT_OWN_CHF = 50
+# sweeps in flight inserted and rolled back (a subtransaction): the flight index's dead pages, as the reads tests'
+# rolled-back plants left them in the db job (bank_transfer_servicer_flight_idx: 31 pages for 10 entries)
+FLIGHT_DEAD = 5_000
+# the servicer's sweeps and top-ups in flight (EUR): what top_up_needed sums
+OWN_SWEEPS, SWEEP_MINOR = 3, 1_000
+OWN_TOP_UPS, TOP_UP_MINOR = 2, 500
+# bank_transfer and its indexes as the db job left them when test_declarations_reads ran (run 46054376194; reproduced
+# on the second stack in CI's order): (reltuples, relpages) — vacuumed back to their live rows and entries, the pages
+# of the rolled-back plants kept (M2c-7f-1's H7 file plant: 10,000 + 30,000 transfers, a third of them sweeps); the
+# new key index priced as bloated as the flight index
+DB_JOB_RELATIONS = {
+    "bank_transfer": (199, 2_703),
+    "bank_transfer_servicer_flight_idx": (10, 31),
+    "bank_transfer_servicer_flight_key_idx": (10, 31),
+    "bank_transfer_debtor_idx": (173, 52),
+    "bank_transfer_top_up_idx": (10, 8),
+    "bank_transfer_org_idx": (227, 107),
+}
+
+
+def _flight_plant(conn: psycopg.Connection[Any], tenant: dict[str, Any], own: str) -> None:
+    """FLIGHT_DEAD sweeps inserted and rolled back (the flight index's dead pages); the servicer's sweeps and top-ups
+    in flight, its other transfers in flight, other servicers' (no trigger, no foreign key); then bank_transfer's
+    statistics as the db job had them: none (the table never analysed outside the reads tests' rolled-back
+    transactions; autovacuum's analyse came after), the table and its indexes priced as it left them."""
+    org, bank, iban = str(tenant["servicer"]), str(tenant["bank"]), str(tenant["iban"])
+    prefix = "case z.kind when 'refund' then 'RFD' when 'sweep' then 'SWP' else 'TOP' end"
+
+    # (tag, rows, servicer, kinds, debtor, creditor, currency, amount, statuses), each an SQL expression but the tag,
+    # the rows, the currency and the amount; `k.k` two other keys (servicers or accounts), `g` the row
+    plants = (
+        ("sweep", OWN_SWEEPS, f"'{org}'::uuid", "array['sweep']", f"'{bank}'::uuid", f"'{own}'::uuid",
+         "EUR", SWEEP_MINOR, "array['ordered']"),
+        ("top", OWN_TOP_UPS, f"'{org}'::uuid", "array['top_up']", f"'{own}'::uuid", f"'{bank}'::uuid",
+         "EUR", TOP_UP_MINOR, "array['ordered']"),
+        ("own", FLIGHT_OWN_OTHER, f"'{org}'::uuid", "array['refund']", "k.k[1 + g % 2]", "null::uuid",
+         "EUR", 100, "array['ordered', 'in_file']"),
+        ("chf", FLIGHT_OWN_CHF, f"'{org}'::uuid", "array['sweep']", "k.k[1 + g % 2]", "gen_random_uuid()",
+         "CHF", 100, "array['ordered', 'in_file']"),
+        ("other", FLIGHT_OTHERS, "k.k[1 + g % 2]", "array['refund', 'sweep', 'top_up']", "gen_random_uuid()",
+         "gen_random_uuid()", "EUR", 100, "array['ordered', 'in_file']"),
+    )  # fmt: skip
+    for tag, n, servicer, kinds, debtor, creditor, currency, amount, statuses in (
+        ("dead", FLIGHT_DEAD, "k.k[1 + g % 2]", "array['sweep']", "gen_random_uuid()", "gen_random_uuid()",
+         "EUR", 100, "array['ordered']"),
+        *plants,
+    ):  # fmt: skip
+        with conn.transaction(force_rollback=tag == "dead"):
+            _raw(
+                conn,
+                "public.bank_transfer",
+                f"""insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id,
+                     creditor_bank_account_id, currency, amount_minor, payee_name, payee_iban, end_to_end_id,
+                     requested_execution_date, status, transfer_file_id)
+                   select {servicer}, z.kind, {debtor}, case when z.kind in ('sweep', 'top_up') then {creditor} end,
+                          '{currency}', {amount}, 'Plant', '{iban}',
+                          {prefix} || upper(substr(md5('ci52-{tag}-' || g), 1, 12)), current_date, z.status,
+                          case when z.status = 'in_file' then gen_random_uuid() end
+                   from (select array[gen_random_uuid(), gen_random_uuid()] k) k, generate_series(1, {n}) g,
+                        lateral (select ({kinds})[1 + g % cardinality({kinds})] as kind,
+                                        ({statuses})[1 + g % cardinality({statuses})] as status) z""",  # noqa: S608
+            )
+    conn.execute("delete from pg_statistic where starelid = 'public.bank_transfer'::regclass")
+    for relation, (tuples, pages) in DB_JOB_RELATIONS.items():
+        conn.execute(
+            "update pg_class set reltuples = %s, relpages = %s where oid = to_regclass(%s)",
+            (tuples, pages, f"public.{relation}"),
+        )
+    conn.execute("set local plan_cache_mode = force_generic_plan")
+
+
+def test_the_servicers_flight_is_read_by_its_key_without_statistics() -> None:
+    """(CI round, PR #52; ADR-0014 « M2c-7f-1 — CI round (PR #52) ») In run 46054376194 the nightly's advance checks
+    read 209 bank_transfer rows for a servicer with two: private.top_up_needed's two sums (the servicer's sweeps,
+    then its top-ups, in flight in a currency) read bank_transfer_debtor_idx and bank_transfer_top_up_idx whole —
+    every servicer's transfers in flight, every servicer's top-ups — their predicates proved by the sums' constants,
+    bank_transfer then without statistics and its flight index bloated by rolled-back plants. Under that state
+    (_flight_plant): what is needed reads the servicer's sweeps and top-ups in flight of EUR only (a constant per
+    call: never the other servicers' FLIGHT_OTHERS, nor the servicer's FLIGHT_OWN_OTHER refunds on other accounts and
+    FLIGHT_OWN_CHF sweeps of another currency), its value unchanged; the nightly's advance checks the same (no
+    proceeding: nothing else of bank_transfer); the whole nightly (private.run_payment_checks: run_transfer_checks'
+    sweeps, payouts and refunds in flight and top-ups pending, each sweep's check by its id, the shortfall, the
+    advance checks) within CC-1's bound, a few reads per transfer of the servicer (with the flight index's predicate
+    not bound to the servicer's key, each sweep's check read it whole: every servicer's sweeps in flight, per sweep)."""
+    tenant = remittance_tenant()
+    own, _iban = own_account(tenant)
+    org = str(tenant["servicer"])
+    measured: dict[str, dict[str, int]] = {}
+    with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
+        _flight_plant(conn, tenant, own)
+        owed = int(one(conn, "select private.servicer_owed_minor(%s, 'EUR')", (org,)))
+        transfers = int(
+            one(
+                conn, "select count(*) from public.bank_transfer where organization_id = %s", (org,)
+            )
+        )
+
+        def call(name: str, sql: str, *params: Any) -> Any:
+            before = _file_rows(conn)
+            with conn.transaction(force_rollback=True):
+                conn.execute("set local role postgres")  # the nightly's and the hourly job's role
+                value = one(conn, sql, params)
+            measured[name] = _delta(before, _file_rows(conn))
+            return value
+
+        needed = call("top_up_needed", "select private.top_up_needed(%s, 'EUR')", org)
+        check = one(
+            conn,
+            "insert into public.payment_check_run (organization_id) values (%s) returning id",
+            (org,),
+        )
+        call(
+            "run_advance_checks (whole)",
+            "select private.run_advance_checks(%s, %s, %s, true)",
+            check,
+            org,
+            paris_today(),
+        )
+        call("run_payment_checks (whole)", "select private.run_payment_checks(%s)", org)
+    print(
+        f"\nthe servicer's {OWN_SWEEPS} sweeps and {OWN_TOP_UPS} top-ups in flight beside its {FLIGHT_OWN_OTHER}"
+        f" refunds on other accounts, {FLIGHT_OWN_CHF} CHF sweeps and {FLIGHT_OTHERS} other servicers' transfers in"
+        f" flight, no statistics, generic plans — rows read: "
+        + "; ".join(f"{n} {r}" for n, r in measured.items())
+    )
+    # the same value: Σ4679 + its sweeps in flight, less its top-ups in flight, never below 0
+    assert needed == max(0, owed + OWN_SWEEPS * SWEEP_MINOR - OWN_TOP_UPS * TOP_UP_MINOR), (
+        needed,
+        owed,
+    )
+    # what is needed: the servicer's sweeps and top-ups in flight of the currency, a constant per call
+    assert measured["top_up_needed"].get("bank_transfer", 0) <= PER_CALL, measured
+    assert measured["run_advance_checks (whole)"].get("bank_transfer", 0) <= PER_CALL, measured
+    # the whole nightly: CC-1's bound (a few reads per transfer of the servicer, never every servicer's in flight)
+    nightly = measured["run_payment_checks (whole)"].get("bank_transfer", 0)
+    assert nightly <= PER_ROW * transfers + PER_CALL, (nightly, transfers, measured)

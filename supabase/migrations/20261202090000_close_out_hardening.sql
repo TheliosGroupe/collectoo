@@ -26,7 +26,11 @@
 --       no longer serves one);
 --   H20 the prepare's loader reads (the pending items by draft, the terms by mandate) by key in SQL helpers, and the
 --       prepare's begin and draft (private.remittance_prepare_begin, private.remittance_record_draft) by the draft's
---       key in a fence.
+--       key in a fence;
+--   CI round (PR #52) bank_transfer_debtor_idx, bank_transfer_top_up_idx and bank_transfer_servicer_flight_idx serve
+--       only reads that name their key (never read whole); private.top_up_needed reads the servicer's sweeps
+--       and top-ups in flight by bank_transfer_servicer_flight_key_idx (the servicer's key as text) through
+--       private.servicer_flight_minor (new).
 -- The behaviour:
 --   H2  servicer_shortfall = private.top_up_needed (the sweeps in flight);
 --   H9  public.request_top_up takes the remit lock (MONEY-BANK-3: serialised with the hourly order);
@@ -96,6 +100,86 @@ create index ledger_entry_client_payment_source_idx on public.ledger_entry (sour
 -- the client's proofs of the same file, by the client and the file's SHA-256 (two uploads of one file are two documents)
 create index document_client_payment_sha256_idx on public.document (client_organization_id, sha256)
   where kind = 'client_payment_evidence';
+
+
+------------------------------------------------------------------------------------------
+-- CI round (PR #52): the transfers in flight read by the servicer's key, never a whole partial index
+------------------------------------------------------------------------------------------
+
+-- In the db job's run 46054376194 the nightly's advance checks read 209 bank_transfer rows for a servicer with two:
+-- private.top_up_needed's sums (`organization_id = …, currency = …, kind = 'sweep' | 'top_up', status in ('ordered',
+-- 'in_file')`) took bank_transfer_debtor_idx and bank_transfer_top_up_idx whole — every servicer's transfers in flight,
+-- every servicer's top-ups —, the sums' constants proving both predicates, bank_transfer then without statistics (only
+-- ever analysed inside the reads tests' rolled-back transactions) and bank_transfer_servicer_flight_idx bloated by their
+-- rolled-back plants (31 pages for 10 entries: priced above a whole read of either). The same reads served the nightly's
+-- run_transfer_checks (its sweeps, payouts and refunds in flight, its top-ups pending): 618 rows for a servicer with 6
+-- transfers. (ADR-0014 « M2c-7f-1 — CI round (PR #52) ».)
+-- 1. The partial indexes read whole so serve only the reads that name their key: their key's `is not null` in their
+--    predicates (each column is NOT NULL: the same entries), which a condition on the key proves and nothing else
+--    does. Every reader keyed by the paying account keeps bank_transfer_debtor_idx and bank_transfer_top_up_idx, every
+--    reader keyed by the servicer bank_transfer_servicer_flight_idx; no read by another key, or by none, can read one
+--    whole (the reads test's plant also showed private.run_transfer_checks' check of each sweep, by its id, reading
+--    bank_transfer_servicer_flight_idx whole: every servicer's sweeps in flight, once per sweep).
+drop index public.bank_transfer_debtor_idx;
+create index bank_transfer_debtor_idx on public.bank_transfer (debtor_bank_account_id)
+  where status in ('ordered', 'in_file') and debtor_bank_account_id is not null;
+drop index public.bank_transfer_top_up_idx;
+create index bank_transfer_top_up_idx on public.bank_transfer (debtor_bank_account_id, created_at desc)
+  where kind = 'top_up' and debtor_bank_account_id is not null;
+drop index public.bank_transfer_servicer_flight_idx;
+create index bank_transfer_servicer_flight_idx on public.bank_transfer (organization_id, currency, kind)
+  where kind in ('sweep', 'top_up') and status in ('ordered', 'in_file') and organization_id is not null;
+-- 2. What is needed reads the servicer's sweeps and top-ups in flight of the currency through a key no other index holds
+--    and no partial index's predicate: bank_transfer_servicer_flight_key_idx, the servicer's id as text, then the kind,
+--    the currency and the status, read by private.servicer_flight_minor with the kind and the statuses as its
+--    parameters. Keyed by `organization_id` the sums could also be served from bank_transfer_org_idx by the servicer and
+--    the status (every transfer of the servicer in flight); with the kind and the statuses as constants, from
+--    bank_transfer_servicer_flight_idx read whole by the currency and the kind (every servicer's sweeps or top-ups in
+--    flight: measured, the planner alternated between it and this index under the reads test's plant). By the text key
+--    with parameters, bank_transfer_org_idx has no bound (its whole) and no partial index's predicate is proved: this
+--    index's four bounds are the only keyed path, its entries read the servicer's sweeps or top-ups in flight of the
+--    currency. Its predicate, `(organization_id::text) is not null` (every row: the column is NOT NULL), is proved by a
+--    condition on the text key only: no other read can take it whole.
+create index bank_transfer_servicer_flight_key_idx
+  on public.bank_transfer ((organization_id::text), kind, currency, status) where (organization_id::text) is not null;
+
+-- The servicer's transfers of a kind and a currency in one of the statuses, their sum (0 when none): by
+-- bank_transfer_servicer_flight_key_idx alone (above, 2.). The kind and the statuses are parameters so that no partial
+-- index's predicate is proved. Not inlined (SECURITY DEFINER, SET clauses): the caller's constants stay parameters.
+create function private.servicer_flight_minor(p_organization_id uuid, p_currency char(3), p_kind text,
+                                              p_statuses text[])
+returns bigint
+language sql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select coalesce(sum(x.amount_minor), 0)::bigint
+  from public.bank_transfer x
+  where x.organization_id::text = p_organization_id::text and x.kind = p_kind and x.currency = p_currency
+    and x.status = any (p_statuses);
+$$;
+
+-- private.top_up_needed, redefined from 20261129090000_top_ups.sql (line 181; same signature and settings, created or
+-- replaced; SECURITY DEFINER, search_path '', enable_seqscan off and its privileges restated below). CI round (PR #52):
+-- its two sums by private.servicer_flight_minor (the same rows: the servicer's sweeps, then its top-ups, of the currency,
+-- ordered or in a file; a uuid's text is its canonical form); the formula is unchanged (design §13 #4: max(0, Σ 4679 +
+-- the sweeps ordered or in a file − the top-ups ordered or in a file)).
+create or replace function private.top_up_needed(p_organization_id uuid, p_currency char(3))
+returns bigint
+language sql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select greatest(0, private.servicer_owed_minor(p_organization_id, p_currency)
+                     + private.servicer_flight_minor(p_organization_id, p_currency, 'sweep', array['ordered', 'in_file'])
+                     - private.servicer_flight_minor(p_organization_id, p_currency, 'top_up',
+                                                     array['ordered', 'in_file']))::bigint;
+$$;
+
 -- private.run_payment_checks, redefined from 20261118100000_switch_on_prerequisites_2.sql (line 3310; same signature,
 -- SECURITY DEFINER, search_path '' and its grants restated below). M2c-7f-1:
 --   H1 (ADR-0014 « M2c-6b-3b part 3 — CI round (PR #40) », Left open): `set enable_seqscan = off` — under forgotten
@@ -3915,6 +3999,10 @@ revoke execute on function private.run_transfer_checks(uuid, uuid, date), privat
   from public, anon, authenticated, service_role;
 -- (review round 1, CC-1) internal: an account's transfers in flight, as 20261115090000 left it
 revoke execute on function private.transfers_in_flight(uuid) from public, anon, authenticated;
+-- (CI round, PR #52) internal: what is needed, as 20261129090000 left it, and its sums (new)
+revoke execute on function private.top_up_needed(uuid, character),
+  private.servicer_flight_minor(uuid, character, text, text[])
+  from public, anon, authenticated, service_role;
 -- (H7) internal: the file's helpers (as 20261115090000, 20261117100000 and 20261118100000 left them)
 revoke execute on function private.transfer_file_lock_runs(uuid), private.transfer_line_locks(uuid),
   private.transfer_file_release(uuid, text, text, text, uuid), private.transfer_line_supersedes(uuid),

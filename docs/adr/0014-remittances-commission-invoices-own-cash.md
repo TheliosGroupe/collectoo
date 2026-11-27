@@ -12829,5 +12829,138 @@ unchanged. Docs are about 310 lines (this block, the benchmarks and one clause e
   advances.
 - Everything « M2c-7f-1 » left open stays open at its recorded default.
 
+## M2c-7f-1 — CI round (PR #52) (2026-11-27)
+**What failed.** The pull-request run 46054376194 (head `538572e`) failed the `db` job's integration step on one test of
+333: `test_declarations_reads_integration.py::test_the_declaration_and_liquidation_reads_stay_keyed_whatever_the_statistics`.
+- `private.run_advance_checks` read **209** `bank_transfer` rows for a servicer with two transfers. The bound is the
+  7d-2 bodies' reads (none) plus `PER_CALL` (60). Every other table matched the 7d-2 bodies.
+- In CI's order on the second stack (project `collectoo-cifix`, ports 553xx) the test passed, as in 7f-1's own build.
+
+**Cause: `private.top_up_needed` read two partial indexes whole, on a table without statistics.**
+- **The statement.** `top_up_needed` (`20261129090000_top_ups.sql` line 181; 7e-1's, not changed by 7f-1) sums the
+  servicer's sweeps, then its top-ups, `organization_id = … and currency = … and kind = 'sweep' | 'top_up' and status in
+  ('ordered', 'in_file')`. `run_advance_checks` calls it once per currency (top_up_account_missing).
+- **Its constants prove three predicates:** `bank_transfer_servicer_flight_idx` (the keyed one), but also
+  `bank_transfer_debtor_idx` (`status in ('ordered', 'in_file')`) and, for the top-ups, `bank_transfer_top_up_idx`
+  (`kind = 'top_up'`).
+- **The state CI's order leaves at that test.** `bank_transfer` had **no statistics**: since the reset it had only been
+  analysed inside the reads tests' rolled-back transactions (their `pg_statistic` rows rolled back, their `pg_class`
+  figures written in place). Autovacuum's analyse came about a minute later; locally it came first. The flight index
+  held 10 entries in 31 pages, the dead pages of rolled-back plants (7f-1's H7 file plant: 10,000 + 30,000 transfers,
+  a third of them sweeps).
+- **The plans.** Reproduced by the declarations test's fixture and plant on that state, the statistics deleted, each
+  statement read from auto_explain: **206** rows (CI: 209). The sweeps' sum was a bitmap of `bank_transfer_debtor_idx`
+  with no index condition (186 entries: every servicer's transfers in flight). The top-ups' sum read
+  `bank_transfer_top_up_idx` whole (10: every servicer's top-ups). With no statistics each keyed path is priced at one
+  row, so the index pages decide: the bloated flight index cost 20.28, the debtor bitmap 12.16, `bank_transfer_org_idx`
+  12.57.
+- **538572e against 2eddfed.** The only 20261202090000 redefinition `run_advance_checks` reaches is
+  `client_post_opening_unpaid` (H15). Its 2eddfed body, applied in the probe's rolled-back transaction, gives **208**:
+  the same plans. What 7f-1 changed is the state. Its two `test_close_out_*` files run before the declarations test and
+  leave about 120 more transfers in flight (40 and 80 refunds in downloaded files), and the H7 plant bloats the flight
+  index. Before 7f-1 the same two whole reads stayed under 60.
+- **The same cause in 7f-1's functions.** On that state the whole nightly (`private.run_payment_checks`) read **618**
+  `bank_transfer` rows for a servicer with 6 transfers:
+  - `run_transfer_checks`' sweeps, payouts and refunds in flight (each a whole debtor bitmap);
+  - its top-ups pending (the whole top-up index);
+  - `top_up_needed` twice (H2's shortfall and the advance checks).
+
+  Once the test's plant was in place, a third whole read showed: `run_transfer_checks`' check of each sweep, by its id,
+  read the flight index whole (720 entries, once per sweep).
+
+**Fix** (`20261202090000_close_out_hardening.sql`, unmerged, edited in place; the section « CI round (PR #52) »):
+1. **The partial indexes read whole now serve only the reads that name their key.** Each predicate gains its key's
+   `is not null`: `bank_transfer_debtor_idx` and `bank_transfer_top_up_idx` `debtor_bank_account_id`,
+   `bank_transfer_servicer_flight_idx` `organization_id`. The columns are NOT NULL, so the entries are the same. A
+   condition on the key proves the predicate; nothing else does.
+2. **What is needed, by a key no other index holds.** `bank_transfer_servicer_flight_key_idx` is a new index on
+   `((organization_id::text), kind, currency, status)` where `(organization_id::text) is not null`. A new
+   `private.servicer_flight_minor(servicer, currency, kind, statuses)` reads it, the kind and the statuses as
+   parameters. `top_up_needed` is redefined whole (SECURITY DEFINER, `search_path ''`, `enable_seqscan off`, privileges
+   restated) to sum through it. Its formula is unchanged.
+   - Why the text key: by `organization_id` the sums could also take `bank_transfer_org_idx` by the servicer and the
+     status (every transfer of the servicer in flight). That is what fix 1 alone gave (12 rows for 6).
+   - Why parameters: with the kind and the statuses as constants, the planner alternated, run to run, between the key
+     index and a whole read of the flight index by its currency and kind (5 against 1,339 rows).
+   - By the text key with parameters no partial index's predicate is proved and `bank_transfer_org_idx` has no bound.
+     The key index's four bounds are the only keyed path.
+- `prosrc` changed for `top_up_needed` only; `proacl`, `proconfig` and `prosecdef` of every function are unchanged. The
+  rows and the sums are the same. No public signature changed, so `database.types.ts` is not regenerated.
+
+**Test** (`worker/tests/test_close_out_reads_integration.py::test_the_servicers_flight_is_read_by_its_key_without_statistics`,
+`db` job, about 10 s).
+- **The plant**, in its rolled-back transaction:
+  - 5,000 sweeps in flight inserted and rolled back (the dead pages);
+  - the servicer's 3 sweeps and 2 top-ups in flight (EUR);
+  - 500 of its refunds in flight on other accounts and 50 of its CHF sweeps in flight;
+  - 2,000 transfers in flight of two other servicers;
+  - then `bank_transfer`'s statistics deleted, the table and its indexes priced as the db job left them, every plan
+    generic.
+- **The bounds:**
+  - `top_up_needed` gives the same value and reads at most `PER_CALL` rows;
+  - so does the advance checks' whole call;
+  - the whole nightly stays within CC-1's bound, `PER_ROW` (12) × the servicer's transfers + `PER_CALL`.
+- **On 538572e**, in CI's order on the second stack: **3,428**, 3,424 and 157,665 rows: it fails. On a fresh reset with
+  538572e's body and indexes: 1,224, 1,224 and 5,751: it fails.
+- **Fixed:** 5, 5 and 4,418 (bound 6,720), three runs in a row; on a fresh reset 5, 5 and 3,363.
+
+### Mutants
+Each on a fresh reset, the earlier SQL applied to the stack, the new test run once.
+
+| Mutant | Result |
+|---|---|
+| 538572e's `top_up_needed` and indexes | killed: `top_up_needed` 1,224 |
+| 538572e's `top_up_needed` alone | killed: 1,110 |
+| `servicer_flight_minor` keyed by the uuid | killed: 1,110 (`bank_transfer_org_idx`, the servicer's 555 in flight, twice) |
+| the three predicates without their key | killed: nightly 47,639 |
+| the flight index's predicate without its key | killed: nightly 47,525 (each sweep's check read it whole) |
+| the debtor and top-up indexes' predicates without their key | survives: nightly 4,532 |
+| the key index without its predicate | survives: 4,418 |
+
+- The debtor and top-up binding is shown by the aged state, not by the fresh one. In CI's order the nightly read 618
+  rows before it and 66 after. On a fresh database the planner does not take those two whole reads.
+- The key index's predicate is defensive: without it, only an index-only read of its columns could take it whole.
+
+### Suites
+On the second stack alone; the main stack was in use by 7f-2's build.
+- `supabase test db` after `supabase db reset` (the fix applied): **Files=55, Tests=3,263, PASS** (665 s); `033`
+  unchanged and passing.
+- Then, on the same database without a reset, the integration step as `ci.yml` runs it: **334 passed** (1,066 s:
+  333 and the new test).
+- Worker: `ruff check .`, `ruff format --check .` and `mypy` (strict, 222 files) are clean.
+- The fix changes reads that the volume jobs time (the payout files, the nightly checks), so both ran:
+  - the `scale` job's files in CI's order, after a fresh reset with CI's logging settings: **15 passed** (1,120 s;
+    round 1: 1,048 s). The transfer cancellation file's nightly checks still read 55,748 `bank_transfer` rows, as in
+    round 1.
+  - `scale-payouts` after another fresh reset: **6 passed** (1,094 s; round 1: 987 s). « Générer le fichier » for
+    5,000 payouts took 2.81 s (2.83 s); the 2,000 held chained runs' nightly checks took 11.82 s (10.77 s).
+  - Timings are within the VM's run-to-run variance, so `docs/benchmarks/remittances.md` is unchanged.
+- `database.types.ts` is not regenerated: no public signature changed.
+- Then `supabase db reset`: the second stack is left running at the fix's schema.
+
+### Left open (low), with its default
+- **Partial indexes of `bank_transfer` with the same shape, not seen whole.** These are `bank_transfer_to_file_idx`
+  (`status = 'ordered'`, keyed by the paying account), `bank_transfer_payout_iban_idx` (keyed by the client),
+  `bank_transfer_cancelled_filed_idx` and `bank_transfer_client_cancelled_idx`. A filter that proves their predicate
+  without naming their key could read one whole. No test or probe saw it. Default: the same key `is not null` when a
+  reads test shows one.
+- **The servicer's other reads of its sweeps and top-ups in flight.** Thirteen other functions read them by
+  `organization_id` and constants:
+  - in 20261202090000: `run_payment_checks`, `run_transfer_checks`, `transfer_line_supersedes`, `top_up_overview` and
+    `generate_top_up_file`;
+  - and eight earlier ones.
+
+  Under no statistics they can now fall back on `bank_transfer_org_idx`, which reads the servicer's transfers in
+  flight (a servicer-keyed read, within CC-1's bound for the nightly), never every servicer's. Default: keep. They
+  move to `servicer_flight_minor`'s key if a reads test bounds one per call.
+- **`private.transfers_in_flight`** (round 1, CC-1) still reads the servicer's transfers in a file once per paying
+  account. It is not this failure's cause: on the CI state it read the servicer's own 6. Default: keep. A fence on the
+  account would bring back round 1's whole read of `bank_transfer_org_idx` by its status under « few accounts »
+  statistics.
+- **The 7e-1 top-up reads test went over once.** In one run of four files right after a reset,
+  `top_up_overview` read 185 `transfer_file_item` rows (bound 60). It passed alone, again with the close-out reads
+  file before it, and in the CI-order run above. The table is `transfer_file_item`, which this round does not touch.
+  Default: watch.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).
