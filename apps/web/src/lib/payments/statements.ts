@@ -35,13 +35,16 @@ export function signedMoney(direction: string, minor: string, currency: string):
  * payment (its return) or to our refund is booked too, a line ops explained or a confirmed duplicate stays out of the
  * books; an unlinked other debit is not booked and is either a fee (founder #20) or a line to classify (our refund
  * debited without its RFD reference, a return the bank coded as a plain debit: review M2b-6); the rest waits to be
- * classified. */
+ * classified. M2c-7e-3 review round 1 (TUI-3): a line booked in the funds from « Débits et retours » or by the debit job
+ * (bank_line_booking: our transfers, their returns, fees, top-ups, a client's payment — a credit citing our reference
+ * after its exit too) is booked, and says as what. */
 export function lineState(line: {
   kind: string;
   direction: string;
   has_payment: boolean;
   link?: string | null; // bank_debit_link.kind
   duplicate?: string | null; // bank_duplicate_resolution.decision
+  bookings?: string[] | null; // bank_line_booking.kind, in their order
 }): {
   kind: string;
   state: string;
@@ -56,12 +59,34 @@ export function lineState(line: {
   if (line.link === "refund") return { kind, state: "Comptabilisé · remboursement exécuté", tone: "ok" };
   if (line.link === "refund_returned") return { kind, state: "Comptabilisé · remboursement revenu", tone: "ok" };
   if (line.link === "explained") return { kind, state: "Expliqué · non comptabilisé", tone: "neutral" };
+  if (line.bookings && line.bookings.length > 0)
+    return {
+      kind,
+      state: `Comptabilisé · ${line.bookings.map((b) => BOOKED_AS[b] ?? "autre écriture").join(" + ")}`,
+      tone: "ok",
+    };
   if (line.duplicate === "duplicate") return { kind, state: "Doublon confirmé · non comptabilisé", tone: "neutral" };
   if (line.kind === "suspected_duplicate" && line.duplicate !== "released")
     return { kind, state: "Retenu : doublon possible", tone: "action" };
   if (line.kind === "other_debit") return { kind, state: "Non comptabilisé · frais ou à classer", tone: "neutral" };
   return { kind, state: "Non comptabilisé · à classer", tone: "action" };
 }
+
+/** M2c-7e-3 review round 1 (TUI-3): what a line was booked as (bank_line_booking.kind), after « Comptabilisé · ». */
+const BOOKED_AS: Record<string, string> = {
+  payout: "débit d'un reversement",
+  sweep: "débit de la quote-part du cabinet",
+  top_up: "approvisionnement par le compte propre",
+  payout_returned: "retour de notre reversement",
+  sweep_returned: "retour de la quote-part du cabinet",
+  unplanned_payout: "virement hors reversement",
+  unplanned_sweep: "virement au compte propre",
+  unplanned_payout_returned: "retour d'un virement hors reversement",
+  unplanned_sweep_returned: "retour d'un virement au compte propre",
+  fee: "frais bancaires",
+  loss: "perte du cabinet",
+  client_payment: "règlement du client",
+};
 
 const LINE_KIND: Record<string, string> = {
   debtor_credit: "Encaissement",

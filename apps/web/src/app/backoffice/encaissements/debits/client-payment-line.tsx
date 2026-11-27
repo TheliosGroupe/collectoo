@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { type FormEvent, useRef, useState } from "react";
 import { ErrorNote, InfoNote, buttonClass, inlineButtonClass, inputClass } from "@/components/ui";
+import { LABEL_REFERENCE_EXIT_LABEL } from "@/lib/payments/debits";
 import { money } from "@/lib/payments/statements";
 import {
   NO_DESIGNATION,
@@ -50,9 +51,21 @@ function frenchDay(iso: string): string {
  * goes are worded from SQL's plan (a pre-opening invoice is never « imputé »; a credit held back is never « au
  * cabinet »); its refusals never offer to record without the label's designation; the note states what was posted.
  */
-export function ClientPaymentLine({ lineId }: { lineId: string }) {
+/** M2c-7e-3 (plan §7.3 exit (b), §7.4): a client of the servicer ops may name as the one repaying (« Client qui rembourse »). */
+export type ClientChoice = { id: string; name: string };
+
+/**
+ * M2c-7e-3 (plan §7.3 exit (b), §7.4 « Règlement du client »): with `clients`, on a credit held because its label cites
+ * one of our transfers — our reference ignored, the client the line's IBAN is the confirmed payout account of, else the
+ * one ops name (« Client qui rembourse », passed to both commands: client_required without one, client_unknown,
+ * client_mismatch are SQL's).
+ */
+export function ClientPaymentLine({ lineId, clients }: { lineId: string; clients?: ClientChoice[] }) {
   const router = useRouter();
   const key = useRef<string | null>(null);
+  const labelReference = clients !== undefined;
+  const [chosen, setChosen] = useState<string | null>(null);
+  const [needsClient, setNeedsClient] = useState(false);
   const [open, setOpen] = useState(false);
   const [facts, setFacts] = useState<LineFacts | null>(null);
   const [docs, setDocs] = useState<OpenDocuments | null>(null);
@@ -63,13 +76,32 @@ export function ClientPaymentLine({ lineId }: { lineId: string }) {
 
   async function onOpen() {
     setOpen(true);
+    setChosen(null);
+    setNeedsClient(false);
+    key.current = crypto.randomUUID();
+    await read(null);
+  }
+
+  // the line's facts for the client named (null: the line's own, its IBAN's client), then what its label designates
+  async function read(client: string | null) {
     setError(null);
     setDone(null);
-    key.current = crypto.randomUUID();
+    setFacts(null);
+    setDocs(null);
+    setPreview(null);
     const supabase = createClient();
-    const { data, error: e } = await supabase.rpc("client_payment_line", { p_bank_transaction_id: lineId } as never);
+    const named = labelReference && client ? { p_client_organization_id: client } : {};
+    const { data, error: e } = await supabase.rpc("client_payment_line", {
+      p_bank_transaction_id: lineId,
+      ...named,
+    } as never);
     if (e || !data) return setError(clientPaymentRefusal(e?.message ?? "", null, "line"));
     let f = data as unknown as LineFacts;
+    // M2c-7e-3 (exit (b)): no confirmed payout IBAN of a client sent it — ops name the client repaying
+    if (labelReference && client === null && f.refusal === "client_required") {
+      setNeedsClient(true);
+      return;
+    }
     if (f.refusal || !f.client_id) {
       setFacts(f);
       return setError(clientPaymentRefusal(`client payment refused: ${f.refusal ?? "not_a_client_credit"}`, null, "line"));
@@ -78,6 +110,7 @@ export function ClientPaymentLine({ lineId }: { lineId: string }) {
       const again = await supabase.rpc("client_payment_line", {
         p_bank_transaction_id: lineId,
         p_documents: f.named_documents,
+        ...named,
       } as never);
       if (again.data) f = again.data as unknown as LineFacts;
     }
@@ -107,6 +140,7 @@ export function ClientPaymentLine({ lineId }: { lineId: string }) {
       p_recover_written_off: null,
       p_expected_open_text: preview.open_minor,
       p_reason: reason,
+      ...(labelReference && chosen ? { p_client_organization_id: chosen } : {}),
     } as never);
     setBusy(false);
     if (e) return setError(clientPaymentRefusal(e.message, (e as { details?: string }).details, "line"));
@@ -124,8 +158,13 @@ export function ClientPaymentLine({ lineId }: { lineId: string }) {
 
   return (
     <>
-      <button type="button" className={secondaryClass} onClick={onOpen} data-testid="client-payment-line-open">
-        Règlement d&apos;une facture ou d&apos;une avance du cabinet
+      <button
+        type="button"
+        className={secondaryClass}
+        onClick={onOpen}
+        data-testid={labelReference ? "label-reference-client-open" : "client-payment-line-open"}
+      >
+        {labelReference ? LABEL_REFERENCE_EXIT_LABEL.client : "Règlement d'une facture ou d'une avance du cabinet"}
       </button>
       {open ? (
         <div
@@ -140,10 +179,41 @@ export function ClientPaymentLine({ lineId }: { lineId: string }) {
             data-testid="client-payment-line-sheet"
           >
             <h2 className="text-lg font-semibold">Règlement d&apos;une facture ou d&apos;une avance du cabinet</h2>
+            {labelReference ? (
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                Notre référence citée dans le libellé est ignorée : ce crédit règle ce que le client doit au cabinet.
+              </p>
+            ) : null}
+            {needsClient && clients ? (
+              <label className="flex flex-col gap-1 text-sm">
+                Client qui rembourse
+                <select
+                  className={inputClass}
+                  value={chosen ?? ""}
+                  data-testid="label-reference-client"
+                  onChange={(event) => {
+                    const id = event.currentTarget.value || null;
+                    setChosen(id);
+                    if (id) void read(id);
+                    else setFacts(null);
+                  }}
+                >
+                  <option value="">Choisir…</option>
+                  {clients.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-zinc-600 dark:text-zinc-400">
+                  {clientPaymentRefusal("client payment refused: client_required", null, "line")}
+                </span>
+              </label>
+            ) : null}
             {facts && facts.client_id ? (
               <p className="text-sm">
-                {facts.client_name} · {money(facts.amount_minor, facts.currency)} reçus le {frenchDay(facts.booking_date)} sur
-                le compte de reversement
+                {facts.client_name} · {money(facts.amount_minor, facts.currency)} reçus le {frenchDay(facts.booking_date)}
+                {chosen ? "" : " sur le compte de reversement"}
                 {facts.label ? ` · « ${facts.label} »` : ""}
               </p>
             ) : null}

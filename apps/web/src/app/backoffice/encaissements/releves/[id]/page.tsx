@@ -25,6 +25,8 @@ type LineRow = {
   payment: { id: string }[];
   bank_debit_link: { kind: string } | null;
   bank_duplicate_resolution: { decision: string } | null;
+  /** M2c-7e-3 review round 1 (TUI-3): what the line was booked as in the funds (our transfers, a client's payment…) */
+  bank_line_booking: { kind: string; seq: number }[];
 };
 
 /** M2b-2: one statement and its lines, with what became of each (booked, to classify, held). */
@@ -50,7 +52,7 @@ export default async function StatementPage({
       // amount as text: integer minor units never pass through a JS number
       "id, line_no, direction, amount:amount_minor::text, booking_date, value_date, kind, counterparty_name," +
         " counterparty_iban, remittance_text, creditor_reference, return_reason, payment(id)," +
-        " bank_debit_link(kind), bank_duplicate_resolution(decision)",
+        " bank_debit_link(kind), bank_duplicate_resolution(decision), bank_line_booking(kind, seq)",
       { count: "exact" },
     )
     .eq("statement_id", id);
@@ -114,6 +116,7 @@ export default async function StatementPage({
                   has_payment: l.payment.length > 0,
                   link: l.bank_debit_link?.kind ?? null,
                   duplicate: l.bank_duplicate_resolution?.decision ?? null,
+                  bookings: [...(l.bank_line_booking ?? [])].sort((a, b) => a.seq - b.seq).map((b) => b.kind),
                 });
                 return (
                   <li key={l.id} className="grid gap-1 py-3 sm:grid-cols-[7rem_1fr_auto] sm:gap-4">

@@ -59,7 +59,7 @@ test("an ops manager imports a statement, the same file again, then an overlappi
 
   const first = manifest(FIRST);
   await importFile(page, FIRST);
-  await expectOwnImport(page);
+  const statementId = await expectOwnImport(page);
   await expect(page.getByTestId("count-lines")).toHaveText(String(first.lines.length));
   await expect(page.getByTestId("count-known")).toHaveText("0");
   await expect(page.getByTestId("count-payments")).toContainText(`${paidCount(first)} ·`);
@@ -71,8 +71,21 @@ test("an ops manager imports a statement, the same file again, then an overlappi
   await reviewShot(page, testInfo, "m2-statement-imported");
   await page.getByRole("link", { name: "Autres opérations" }).click();
   await expect(lines).toHaveCount(first.lines.length - paidCount(first));
-  // M2b-6: a bank fee is not booked (a fee, or a line to classify); the return names no payment we hold, so it waits for ops.
-  await expect(lines.filter({ hasText: "FRAIS TENUE DE COMPTE" })).toContainText("Non comptabilisé · frais ou à classer");
+  // M2b-6: the return names no payment we hold, so it waits for ops. The bank's charge (coded PMNT/MDOP/FEES) is booked
+  // by the debit job's funds pass since M2c-1 — (M2c-7e-3 review round 1, TUI-3, R3) and the page then says so (before,
+  // it read only payments and links: « Non comptabilisé · frais ou à classer » of a booked fee)
+  const fee = async () => {
+    const { data } = await adminClient()
+      .from("bank_transaction")
+      .select("bank_line_booking(kind)")
+      .eq("statement_id", statementId)
+      .eq("direction", "debit")
+      .ilike("remittance_text", "%FRAIS TENUE DE COMPTE%");
+    return (data ?? []).flatMap((l) => (l.bank_line_booking as { kind: string }[]).map((b) => b.kind));
+  };
+  await expect.poll(fee, { timeout: 60_000 }).toEqual(["fee"]);
+  await page.reload();
+  await expect(lines.filter({ hasText: "FRAIS TENUE DE COMPTE" })).toContainText("Comptabilisé · frais bancaires");
   await expect(lines.filter({ hasText: "RETOUR MD06" })).toContainText("Non comptabilisé · à classer");
 
   // The same file again: the page opens the statement already imported, nothing is booked twice.

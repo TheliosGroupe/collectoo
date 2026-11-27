@@ -20,6 +20,51 @@ export function BookTopUpCredit({ lineId, effect, idempotencyKey }: { lineId: st
   );
 }
 
+/**
+ * M2c-7e-3 (founder Q15's added question, default a — still open): « C'est cet approvisionnement » on a credit held
+ * because its label cites our top-up, still awaited, at exactly its amount, on a statement that gives no sending
+ * account — that top-up only (the queue's `label_transfer`, by key), booked by public.book_top_up_credit, which refuses
+ * any other top-up (label_reference_transfer), a line that names its sending account, another amount or a top-up no
+ * longer awaited. The motif is required.
+ */
+export function LabelTopUp({
+  lineId,
+  transferId,
+  effect,
+  idempotencyKey,
+}: {
+  lineId: string;
+  transferId: string;
+  effect: string;
+  idempotencyKey: string;
+}) {
+  return (
+    <ConfirmSheet
+      label="C'est cet approvisionnement"
+      title="C'est cet approvisionnement"
+      buttonClassName={secondaryClass}
+      testId="label-reference-top-up"
+    >
+      {(close) => (
+        <>
+          <p className="text-sm" data-testid="sheet-effect">
+            {effect}
+          </p>
+          <ActionForm onDone={close} action={bookTopUpCredit} submitLabel="Comptabiliser l'approvisionnement" buttonClassName={buttonClass}>
+            <input type="hidden" name="idempotency_key" value={idempotencyKey} />
+            <input type="hidden" name="bank_transaction_id" value={lineId} />
+            <input type="hidden" name="transfer_id" value={transferId} />
+            <label className="flex flex-col gap-1 text-sm">
+              Motif (ce que montre le relevé ou la banque)
+              <input name="reason" required maxLength={2000} className={inputClass} />
+            </label>
+          </ActionForm>
+        </>
+      )}
+    </ConfirmSheet>
+  );
+}
+
 function Sheet({ lineId, effect, idempotencyKey, close }: { lineId: string; effect: string; idempotencyKey: string; close: () => void }) {
   const [state, setState] = useState<{ loaded: false } | { loaded: true; options: TopUpCreditOption[] | null }>({ loaded: false });
   useEffect(() => {

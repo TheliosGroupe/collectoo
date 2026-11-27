@@ -64,13 +64,14 @@ const n = (text: string) => text.replace(/ | /g, " ");
 describe("a credit citing our reference in its CSV label (label_reference)", () => {
   it("names the line and the job's review in French", () => {
     expect(lineKindLabel("label_reference", "credit")).toBe("Crédit citant notre référence");
+    // (M2c-7e-3, R3) the line is classified with its exits: nothing is booked before
     expect(DEBIT_REVIEW.label_reference).toBe(
-      "Le libellé cite l'un de nos virements : est-ce ce virement qui revient ? La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.",
+      "Le libellé cite l'un de nos virements : est-ce ce virement qui revient ? Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.",
     );
   });
   it("says what the label cites: the transfer, its run and its amount (plan §7.4)", () => {
     expect(n(labelReferenceText(row()))).toBe(
-      "Le libellé cite notre virement RMT0123456789AB (reversement RV-2026-000012, 1 000,00 €) : est-ce ce virement qui revient ? La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.",
+      "Le libellé cite notre virement RMT0123456789AB (reversement RV-2026-000012, 1 000,00 €) : est-ce ce virement qui revient ? Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.",
     );
     expect(
       n(
@@ -82,7 +83,7 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
         ),
       ),
     ).toBe(
-      "Le libellé cite notre virement SWP0123456789AC (quote-part du cabinet, 50,00 €) : est-ce ce virement qui revient ? La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.",
+      "Le libellé cite notre virement SWP0123456789AC (quote-part du cabinet, 50,00 €) : est-ce ce virement qui revient ? Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.",
     );
     expect(
       n(
@@ -96,7 +97,7 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
       ),
     ).toBe(
       // a top-up arrives from the own account (own_transfer_in): cited from another IBAN it is not its credit
-      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), mais le crédit ne vient pas du compte propre : sans doute un règlement du client ou le paiement d'un débiteur qui cite notre référence. La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.",
+      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), mais le crédit ne vient pas du compte propre : sans doute un règlement du client ou le paiement d'un débiteur qui cite notre référence. Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.",
     );
     // review round 1 (MB-3, TUI-1): with no counterparty IBAN on the line (a CSV export without the column) the page
     // never says the credit is not the own account's — of the top-up's amount, it may be that top-up (its motif
@@ -109,12 +110,12 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
         label_transfer: { kind: "top_up", status: "ordered", amount_minor: "4700", currency: "EUR", run_number: null },
       });
     expect(n(labelReferenceText(top("4700")))).toBe(
-      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), du même montant, et le relevé ne donne pas le compte qui l'a envoyé : ce peut être cet approvisionnement, venu du compte propre, ou bien un règlement du client ou le paiement d'un débiteur qui cite notre référence. La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée. S'il s'agit de cet approvisionnement, prévenez le support : Collectoo l'attend encore et ne le comptabilise pas sur cette ligne.",
+      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), du même montant, et le relevé ne donne pas le compte qui l'a envoyé : ce peut être cet approvisionnement, venu du compte propre, ou bien un règlement du client ou le paiement d'un débiteur qui cite notre référence. Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est. S'il s'agit de cet approvisionnement, choisissez « C'est cet approvisionnement » : Collectoo l'attend encore.",
     );
     expect(labelReferenceText(top("4700"))).not.toContain("ne vient pas du compte propre");
     expect(labelReferenceText(top("4700"))).toContain(LABEL_REFERENCE_TOP_UP_SUPPORT);
     expect(n(labelReferenceText(top("5000")))).toBe(
-      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), et le relevé ne donne pas le compte qui l'a envoyé ; son montant n'est pas celui de cet approvisionnement : sans doute un règlement du client ou le paiement d'un débiteur qui cite notre référence. La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.",
+      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), et le relevé ne donne pas le compte qui l'a envoyé ; son montant n'est pas celui de cet approvisionnement : sans doute un règlement du client ou le paiement d'un débiteur qui cite notre référence. Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.",
     );
     expect(debitReviewText(top("4700"))).toBe(labelReferenceText(top("4700")));
     // review round 2 (top-text-ignores-status): the top-up's status words it — in a file, still awaited as ordered;
@@ -129,10 +130,10 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
       });
     expect(labelReferenceText(topIn("in_file"))).toBe(labelReferenceText(top("4700")));
     expect(n(labelReferenceText(topIn("cancelled")))).toBe(
-      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), du même montant, et le relevé ne donne pas le compte qui l'a envoyé : cet approvisionnement a été annulé ; s'il a quand même été exécuté, c'est l'argent du cabinet. Ce peut aussi être un règlement du client ou le paiement d'un débiteur qui cite notre référence. La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée. S'il s'agit de cet approvisionnement exécuté malgré son annulation, prévenez le support : Collectoo ne l'attend plus et ne le comptabilise pas sur cette ligne.",
+      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), du même montant, et le relevé ne donne pas le compte qui l'a envoyé : cet approvisionnement a été annulé ; s'il a quand même été exécuté, c'est l'argent du cabinet. Ce peut aussi être un règlement du client ou le paiement d'un débiteur qui cite notre référence. Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est. S'il s'agit de cet approvisionnement exécuté malgré son annulation, prévenez le support : Collectoo ne l'attend plus et ne le comptabilise pas sur cette ligne.",
     );
     expect(n(labelReferenceText(topIn("booked")))).toBe(
-      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), du même montant, mais cet approvisionnement est déjà comptabilisé : sauf si la banque l'a exécuté deux fois, ce crédit n'est pas cet approvisionnement, sans doute un règlement du client ou le paiement d'un débiteur qui cite notre référence. La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.",
+      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), du même montant, mais cet approvisionnement est déjà comptabilisé : sauf si la banque l'a exécuté deux fois, ce crédit n'est pas cet approvisionnement, sans doute un règlement du client ou le paiement d'un débiteur qui cite notre référence. Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.",
     );
     // another status, or none read: never « l'attend encore »
     for (const status of ["cancelled", "booked", "returned", null]) {
@@ -140,7 +141,7 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
       expect(debitReviewText(topIn(status))).toBe(labelReferenceText(topIn(status)));
     }
     expect(n(labelReferenceText(topIn(null)))).toBe(
-      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), du même montant, et le relevé ne donne pas le compte qui l'a envoyé : ce peut être cet approvisionnement, venu du compte propre, ou bien un règlement du client ou le paiement d'un débiteur qui cite notre référence. La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée. S'il s'agit de cet approvisionnement, prévenez le support : Collectoo ne le comptabilise pas sur cette ligne.",
+      "Le libellé cite notre approvisionnement TOP0123456789AD (47,00 €), du même montant, et le relevé ne donne pas le compte qui l'a envoyé : ce peut être cet approvisionnement, venu du compte propre, ou bien un règlement du client ou le paiement d'un débiteur qui cite notre référence. Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est. S'il s'agit de cet approvisionnement, prévenez le support : Collectoo ne le comptabilise pas sur cette ligne.",
     );
     expect(labelReferenceText(topIn("returned"))).toBe(labelReferenceText(topIn(null)));
     // with an IBAN, or of another amount, the text is true whatever the status (never « l'attend encore »)
@@ -152,7 +153,7 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
     expect(labelReferenceText(row({ counterparty_iban_end: null }))).toBe(labelReferenceText(row({ counterparty_iban_end: "0143" })));
     // a payout of no run (a transfer of ours out of any run) is still named, its amount too
     expect(n(labelReferenceText(row({ label_transfer: { kind: "payout", amount_minor: "2500", currency: "EUR" } })))).toBe(
-      "Le libellé cite notre virement RMT0123456789AB (reversement, 25,00 €) : est-ce ce virement qui revient ? La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.",
+      "Le libellé cite notre virement RMT0123456789AB (reversement, 25,00 €) : est-ce ce virement qui revient ? Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.",
     );
     // the database's word is the queue's: no candidate read, the job's review alone
     expect(labelReferenceText(row({ reference_from_label: null, label_transfer: null }))).toBe(DEBIT_REVIEW.label_reference);
@@ -160,7 +161,8 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
     // read so before the job's pass (no review yet), or released from « Doublons possibles »: the same text
     expect(debitReviewText(row({ review_reason: null }))).toBe(labelReferenceText(row()));
   });
-  it("offers no action in 7e-2: no link, no relay, no top-up, no booking, no explanation", () => {
+  // (M2c-7e-3, R3) none of the page's other actions — its exits only (label-reference-exits.test.ts)
+  it("offers none of the page's other actions: no link, no relay, no top-up, no booking, no explanation", () => {
     expect(holdsLabelReference(row())).toBe(true);
     expect(holdsLabelReference(row({ kind: "debtor_credit" }))).toBe(false);
     expect(offersPaymentLinks(row())).toBe(false);
@@ -175,13 +177,13 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
     // a debtor's credit keeps its explanation (unchanged)
     expect(explainable({ direction: "credit", kind: "debtor_credit", namesPayment: false, endToEndId: null })).toBe(true);
     expect(LABEL_REFERENCE_WAITING_NOTE).toBe(
-      "La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.",
+      "Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.",
     );
   });
-  it("words link_debit's refusal (label_reference_line), true of 7e-2", () => {
+  it("words link_debit's refusal (label_reference_line), naming the exits (M2c-7e-3, R3)", () => {
     expect(debitErrorCode("debit link refused: label_reference_line")).toBe("label_reference_line");
     expect(errorText("label_reference_line")).toBe(
-      "Le libellé cite l'un de nos virements : cette ligne ne se lie à aucun paiement et ne se classe pas sans comptabiliser. Elle attend d'être classée (retour de ce virement, règlement du client ou paiement d'un débiteur), ce que cet écran ne permet pas encore : prévenez le support.",
+      "Le libellé cite l'un de nos virements : cette ligne ne se lie à aucun paiement et ne se classe pas sans comptabiliser. Classez-la avec « Oui, c'est son retour », « Règlement du client » ou « Paiement d'un débiteur ».",
     );
   });
   it("words the refusal from the candidate's kind: a return of an RMT or a SWP, never of a TOP (review round 3)", () => {
@@ -199,14 +201,17 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
         expect(guardRefusalCode(linkDebitErrorCode(message, link), true), `${kind} ${link}`).toBe(code);
     }
     expect(errorText("label_reference_top_up_line")).toBe(
-      "Le libellé cite l'un de nos approvisionnements : cette ligne ne se lie à aucun paiement et ne se classe pas sans comptabiliser. Elle attend d'être classée — règlement du client ou paiement d'un débiteur (ou, sans compte émetteur et du même montant, cet approvisionnement : question Q15) —, ce que cet écran ne permet pas encore : prévenez le support.",
+      "Le libellé cite l'un de nos approvisionnements : cette ligne ne se lie à aucun paiement et ne se classe pas sans comptabiliser. Classez-la avec « Règlement du client » ou « Paiement d'un débiteur » (ou, sans compte émetteur et du même montant, « C'est cet approvisionnement »).",
     );
     expect(errorText("label_reference_top_up_line")).not.toContain("retour");
     expect(errorText("label_reference_line")).not.toContain("approvisionnement");
   });
   it("says what « Libérer » does of a held line read so", () => {
-    expect(releaseEffect({ direction: "credit", heldKind: "label_reference", amount: "1 000,00 €" })).toBe(
-      "La ligne sera listée dans « À classer » : son libellé cite l'un de nos virements. Aucun paiement n'est créé ; elle attend d'être classée.",
+    // M2c-7e-3 review round 1 (MB-1, R3): the copy's text is worded by the transfer its label cites — a payout here
+    expect(
+      releaseEffect({ direction: "credit", heldKind: "label_reference", amount: "1 000,00 €", labelTransferKind: "payout" }),
+    ).toBe(
+      "La ligne sera listée dans « À classer » : son libellé cite l'un de nos virements. Aucun paiement n'est créé ; classez-la ensuite (retour de ce virement, règlement du client ou paiement d'un débiteur).",
     );
   });
   it("lists it on the statement's page with the other operations, to classify", () => {
@@ -220,11 +225,11 @@ describe("a credit citing our reference in its CSV label (label_reference)", () 
 
 describe("the nightly's label_reference_waiting ([check 3])", () => {
   it("has its French label and help, and leads to the line on « Débits et retours »", () => {
-    // review round 1 (TUI-6): true of 7e-2 — no screen classifies the line yet
+    // review round 1 (TUI-6); (M2c-7e-3, R3) where to classify it
     // review round 3 (top-cited-line-lists-a-return-exit): with no row read, true of every kind — a TOP has no return
     expect(CHECK_LABEL.label_reference_waiting).toEqual({
       label: "Libellé citant notre virement, à classer",
-      help: "Une ligne du relevé cite notre référence RMT, SWP ou TOP dans son libellé. Rien n'est comptabilisé tant que la ligne n'est pas classée : retour de ce virement (RMT ou SWP), règlement du client ou paiement d'un débiteur (ou, pour un TOP sans compte émetteur et du même montant, cet approvisionnement : question Q15). Aucun écran ne permet encore de la classer : prévenez le support.",
+      help: "Une ligne du relevé cite notre référence RMT, SWP ou TOP dans son libellé. Rien n'est comptabilisé tant que la ligne n'est pas classée : retour de ce virement (RMT ou SWP), règlement du client ou paiement d'un débiteur (ou, pour un TOP sans compte émetteur et du même montant, cet approvisionnement). Classez-la dans « Débits et retours », onglet « À classer ».",
     });
     expect(
       checkSubjectLink({ code: "label_reference_waiting", subject_type: "bank_transaction", subject_id: "l1" }),
@@ -235,10 +240,10 @@ describe("the nightly's label_reference_waiting ([check 3])", () => {
 describe("label_reference_waiting's classes from the candidate's kind (review round 3)", () => {
   it("lists a return for an RMT or a SWP, that top-up (Q15) for a TOP, with or without the row's kind", () => {
     expect(LABEL_REFERENCE_WAITING_TAIL).toBe(
-      "Rien n'est comptabilisé tant que la ligne n'est pas classée (retour de ce virement, règlement du client ou paiement d'un débiteur). Aucun écran ne permet encore de la classer : prévenez le support.",
+      "Rien n'est comptabilisé tant que la ligne n'est pas classée : retour de ce virement, règlement du client ou paiement d'un débiteur. Classez-la dans « Débits et retours », onglet « À classer ».",
     );
     expect(LABEL_REFERENCE_WAITING_TOP_UP_TAIL).toBe(
-      "Rien n'est comptabilisé tant que la ligne n'est pas classée : règlement du client ou paiement d'un débiteur (ou, sans compte émetteur et du même montant, cet approvisionnement : question Q15). Aucun écran ne permet encore de la classer : prévenez le support.",
+      "Rien n'est comptabilisé tant que la ligne n'est pas classée : règlement du client ou paiement d'un débiteur (ou, sans compte émetteur et du même montant, cet approvisionnement). Classez-la dans l'onglet « À classer » des débits (Encaissements).",
     );
     const help = (details: Record<string, unknown>) => n(checkLabel("label_reference_waiting", { details }).help);
     // an RMT (not P0: its run not booked) and a SWP: the current text, a return among the classes
@@ -272,7 +277,7 @@ describe("label_reference_waiting's classes from the candidate's kind (review ro
       .toContain(LABEL_REFERENCE_WAITING_TAIL);
     // the static help (no row read) is true of every kind
     expect(CHECK_LABEL.label_reference_waiting.help).toContain("retour de ce virement (RMT ou SWP)");
-    expect(CHECK_LABEL.label_reference_waiting.help).toContain("pour un TOP sans compte émetteur et du même montant, cet approvisionnement : question Q15");
+    expect(CHECK_LABEL.label_reference_waiting.help).toContain("pour un TOP sans compte émetteur et du même montant, cet approvisionnement");
   });
 });
 
@@ -284,7 +289,7 @@ describe("label_reference_waiting from its row's details (review round 1, MB-4, 
     });
     expect(p0.label).toBe("Libellé citant notre virement, à classer (prioritaire)");
     expect(n(p0.help)).toBe(
-      "Prioritaire : une ligne du relevé cite dans son libellé RMT0123456789AB, le virement du reversement RV-2026-000012 (comptabilisé) : ce virement est peut-être revenu sur le compte dédié. Rien n'est comptabilisé tant que la ligne n'est pas classée (retour de ce virement, règlement du client ou paiement d'un débiteur). Aucun écran ne permet encore de la classer : prévenez le support.",
+      "Prioritaire : une ligne du relevé cite dans son libellé RMT0123456789AB, le virement du reversement RV-2026-000012 (comptabilisé) : ce virement est peut-être revenu sur le compte dédié. Rien n'est comptabilisé tant que la ligne n'est pas classée : retour de ce virement, règlement du client ou paiement d'un débiteur. Classez-la dans « Débits et retours », onglet « À classer ».",
     );
     const other = checkLabel("label_reference_waiting", {
       details: { p0: false, candidate_kind: "top_up", reference_from_label: "TOP0123456789AD" },

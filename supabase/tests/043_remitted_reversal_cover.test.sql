@@ -2227,13 +2227,16 @@ select is(pg_temp.iso('s14e'),
 
 -- 14 (review round 1, CC-2). The delta window is a key range in every plan: six runs booked twenty days ago, the last
 -- check run's window starting forty days from now (nothing inside it); under a generic plan (as PL/pgSQL caches after
--- five calls in one backend) the delta pass fetches no booked run, the full pass every one
+-- five calls in one backend) the delta pass fetches no booked run, the full pass every one. (ADR-0014 « M2c-7e-3 review
+-- fixes » round 2) collected d − 22, not d − 25: a line's latest execution date is its collection + 27 days, and the
+-- run is approved today for the next business day, so d − 25 (latest d + 2) left the run a draft (late_reason_required)
+-- on a Friday, the business day after it being d + 3; d − 22 (latest d + 5) holds whatever today's weekday or holidays
 create or replace function pg_temp.s14f() returns jsonb language plpgsql as $$
 declare c text; i integer := 0; b bigint; w jsonb; d date := private.paris_today();
 begin
   foreach c in array array['a1', 'a2', 'a3', 'a4', 'a5', 'a6'] loop
     i := i + 1;
-    perform pg_temp.remitted(c, '9' || i, 10000 * i, 'b9' || i, d - 20, d - 25);
+    perform pg_temp.remitted(c, '9' || i, 10000 * i, 'b9' || i, d - 20, d - 22);
   end loop;
   perform pg_temp.prior_run(41);
   -- (review round 3) the planner's statistics of the runs as they stand: not what an earlier file or run of this one

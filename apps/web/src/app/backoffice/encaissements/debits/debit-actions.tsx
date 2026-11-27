@@ -3,7 +3,7 @@
 import { ActionForm } from "@/components/action-form";
 import { buttonClass, dangerButtonClass, inputClass } from "@/components/ui";
 import { ConfirmSheet, secondaryClass } from "../a-traiter/queue-actions";
-import { RELAY_LABEL } from "@/lib/payments/debits";
+import { LABEL_REFERENCE_EXIT_LABEL, RELAY_LABEL } from "@/lib/payments/debits";
 import { linkDebit, releaseOwnCredit, resolveDuplicate } from "./actions";
 
 function Reason({ label = "Motif (interne)" }: { label?: string }) {
@@ -157,15 +157,16 @@ export function ReleaseOwnCredit({
   lineId: string;
   effect: string;
   idempotencyKey: string;
-  by?: keyof typeof RELAY_LABEL;
+  /** M2c-7e-3 (plan §7.3 exit (c)): `label_reference`, « Paiement d'un débiteur » on a credit citing our reference */
+  by?: keyof typeof RELAY_LABEL | "label_reference";
 }) {
-  const label = RELAY_LABEL[by];
+  const label = by === "label_reference" ? LABEL_REFERENCE_EXIT_LABEL.debtor : RELAY_LABEL[by];
   return (
     <ConfirmSheet
       label={label}
       title={label}
       buttonClassName={secondaryClass}
-      testId={by === "client" ? "release-client-credit" : "release-own-credit"}
+      testId={by === "client" ? "release-client-credit" : by === "label_reference" ? "label-reference-debtor" : "release-own-credit"}
     >
       {(close) => (
         <>

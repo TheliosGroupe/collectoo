@@ -111,6 +111,9 @@ describe("the decision labels (§3.13)", () => {
     "unplanned_payout_returned",
     "unplanned_sweep_returned",
     "fee",
+    // M2c-7e-3 review round 1 (TUI-2, R3): « Règlement du client » (7c-1's lines, 7e-3's exit (b)), shown as its code
+    // before — this list had missed it
+    "client_payment",
   ];
   it("every booking kind ops or the job book has a label", () => {
     for (const k of KINDS) expect(DECISION_LABEL[k], k).toBeTruthy();

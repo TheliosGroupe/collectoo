@@ -3340,9 +3340,10 @@ select is(pg_temp.iso('q1'),
 -- printing our motif « APPROVISIONNEMENT COMPTE DEDIE TOP… » in its label — the statement does not say it comes from
 -- the own account, so the line is held label_reference: « À classer » returns no counterparty IBAN (the page then says
 -- the sending account is not given, never that the credit is not the own account's) and the top-up it cites, ordered,
--- at the line's amount; in 7e-2 neither of the top-up's ways in takes it (book_top_up_credit: not_an_own_credit;
--- « Comptabiliser comme approvisionnement »: label_reference_top_up_line, review round 3), the top-up stays ordered
--- (founder Q15's 7e-3 exit)
+-- at the line's amount; in 7e-2 neither of the top-up's ways in took it (book_top_up_credit: not_an_own_credit;
+-- « Comptabiliser comme approvisionnement »: label_reference_top_up_line, review round 3) and the top-up stayed ordered;
+-- (M2c-7e-3, house rule R3; ADR-0014 « M2c-7e-3 ») founder Q15's added question, default a: the fourth exit books it
+-- (book_top_up_credit naming the TOP its label cites, at exactly its amount) — the top-up booked; the link still refused
 create or replace function pg_temp.q2() returns jsonb language plpgsql as $$
 declare r jsonb := pg_temp.refs(); q jsonb; l uuid;
 begin
@@ -3369,17 +3370,19 @@ select is(pg_temp.iso('q2'),
   '{"queue": [["label_reference", null, "4700", true,
                {"kind": "top_up", "status": "ordered", "amount_minor": "4700", "currency": "EUR", "run_status": null},
                null]],
-    "top_up_credit": "not_an_own_credit", "own_credit": "label_reference_top_up_line", "top_up_status": "ordered"}'::jsonb,
+    "top_up_credit": "ok", "own_credit": "label_reference_top_up_line", "top_up_status": "booked"}'::jsonb,
   'q2 (review round 1): our top-up''s credit with no counterparty IBAN, citing it in the label, is held; « À classer » '
-  'gives no IBAN and the ordered top-up at its amount; no way in takes it in 7e-2, the top-up stays ordered');
+  'gives no IBAN and the ordered top-up at its amount; (M2c-7e-3, R3) the fourth exit books it as that top-up '
+  '(book_top_up_credit), the link stays refused');
 
 
 -- q3. Review round 2 (top-text-ignores-status): the top-up the label cites was cancelled before its credit
 -- (« Annuler », public.cancel_top_up; ordered here) — q2's credit is held label_reference all the same; « À classer »
 -- returns its candidate cancelled (the page words that case — never « Collectoo l'attend encore »: once cancelled the
 -- top-up is no longer awaited, private.top_up_needed counts it no more, and the held credit changes nothing); the job's
--- review is label_reference (never 7e-1's top_up_cancelled_credit: the line's kind decides), no way in takes it in 7e-2
--- and the top-up stays cancelled
+-- review is label_reference (never 7e-1's top_up_cancelled_credit: the line's kind decides), no way in takes it
+-- ((M2c-7e-3, R3) the fourth exit refuses a cancelled top-up: top_up_not_open, as for any credit) and the top-up stays
+-- cancelled
 create or replace function pg_temp.q3() returns jsonb language plpgsql as $$
 declare r jsonb := pg_temp.refs(); q jsonb; l uuid; v_before bigint := pg_temp.need(); v_cancel jsonb; v_after bigint;
 begin
@@ -3414,14 +3417,14 @@ select is(pg_temp.iso('q3'),
     "queue": [["label_reference", "label_reference", null, "4700", true,
                {"kind": "top_up", "status": "cancelled", "amount_minor": "4700", "currency": "EUR", "run_status": null},
                null]],
-    "top_up_credit": "not_an_own_credit", "own_credit": "label_reference_top_up_line", "booked": [], "need_unchanged": true,
+    "top_up_credit": "top_up_not_open", "own_credit": "label_reference_top_up_line", "booked": [], "need_unchanged": true,
     "top_up_status": "cancelled"}'::jsonb,
   'q3 (review round 2): a credit citing a top-up cancelled before it, no counterparty IBAN, is held; « À classer » '
   'returns that top-up cancelled (no longer awaited: top_up_needed counts it no more); the job''s review is '
   'label_reference, no way in takes it in 7e-2, nothing booked, the top-up stays cancelled');
 
 
--- x. Every command refuses it in 7e-2, and no other way out ([check 3]) ---------------------------------------------------
+-- x. Every command refuses it in 7e-2 ((M2c-7e-3, R3) but for its exits: see 047c), and no other way out ([check 3]) ----
 -- « Paiement d'un débiteur » (release_own_credit), « Comptabiliser… » (book_transfer_line's check), « Règlement du
 -- client » (book_client_payment_line, 7c-1's body); link_debit with every kind on f1-1 (citing the payout) and f1-3
 -- (citing the sweep) → label_reference_line, on the released f3-1 (citing our top-up: no return exit, review round 3,
@@ -3433,11 +3436,8 @@ declare r jsonb := pg_temp.setup(); l uuid := pg_temp.li('f1', 1);
 begin
   perform pg_temp.job_reviews();
   return jsonb_build_object(
-    'release', pg_temp.read_as('01', format('select public.release_own_credit(%L, %L, %L)', 'rel-047b-x1', l,
-                                            'Paiement relayé (test)')) ->> 'error',
     'book_line', pg_temp.bkx(l, jsonb_build_array(pg_temp.pt('payout_returned', pg_temp.v('lr_rmt'), 100007)),
                              'bk-047b-x1', '01', 'x'),
-    'client_payment', pg_temp.cline('x1', pg_temp.li('f1', 2), p_expected => '0') ->> 'error',
     'links', pg_temp.links(l, pg_temp.pay('b1')),
     'links_sweep', pg_temp.links(pg_temp.li('f1', 3), pg_temp.pay('b1')),
     'links_released', pg_temp.links(pg_temp.li('f3', 1), pg_temp.pay('b1')),
@@ -3450,12 +3450,17 @@ begin
                              ->> 'kind',
     'explained_payment_line', pg_temp.why_of(pg_temp.read_as('01', format(
                                 'select public.link_debit(%L, %L, ''explained'', null, null, null, %L)', 'lnk-047b-pl',
-                                pg_temp.li('f1', 4), 'Paiement (test)'))));
+                                pg_temp.li('f1', 4), 'Paiement (test)'))),
+    -- (M2c-7e-3, R3) 7e-3's exits, taken last (each changes the line): « Paiement d'un débiteur » books its payment,
+    -- « Règlement du client » asks for the client
+    'release', pg_temp.read_as('01', format('select public.release_own_credit(%L, %L, %L)', 'rel-047b-x1', l,
+                                            'Paiement relayé (test)')) ->> 'error',
+    'client_payment', pg_temp.cline('x1', pg_temp.li('f1', 2), p_expected => '0') ->> 'error');
 end $$;
 create temporary table x1 (v jsonb) on commit drop;
 insert into x1 select pg_temp.iso('x1');
 select is((select v from x1) - 'release' - 'client_payment' - 'explained_payment_line',
-  '{"book_line": "not_a_return",
+  '{"book_line": "label_reference_amount",
     "links": {"explained": "label_reference_line", "fee": "label_reference_line", "own_credit": "label_reference_line",
               "return": "label_reference_line", "loss": "label_reference_line", "refund": "label_reference_line",
               "refund_returned": "label_reference_line"},
@@ -3469,15 +3474,16 @@ select is((select v from x1) - 'release' - 'client_payment' - 'explained_payment
                        "refund_returned": "label_reference_top_up_line"},
     "review_stays": ["label_reference", "label_reference"], "raw_explained": "23514", "raw_explained_released": "23514",
     "raw_explained_payment_line": "23514", "explained_other_debit": "explained"}'::jsonb,
-  'x1: « Comptabiliser… » refuses it (not_a_return); every link kind is refused label_reference_line '
+  'x1: « Comptabiliser… » refuses its return at another amount than the payout''s ((M2c-7e-3, R3) '
+  'label_reference_amount; 7e-2: not_a_return); every link kind is refused label_reference_line '
   '(label_reference_top_up_line when the label cites our top-up), the review stays; a raw explanation is refused '
   '(check_violation); an other debit is still explained');
 select is(jsonb_build_array((select v ->> 'release' from x1), (select v ->> 'client_payment' from x1),
                             (select v ->> 'explained_payment_line' from x1)),
-  '["own credit release refused: not_own_credit", "client payment refused: not_a_client_credit",
-    "payment_line"]'::jsonb,
-  'x1: « Paiement d''un débiteur » and « Règlement du client » refuse it (7e-3''s exits); a debtor''s payment line '
-  'is still never explained');
+  '[null, null, "payment_line"]'::jsonb,
+  'x1: (M2c-7e-3, R3) « Paiement d''un débiteur » books it (exit (c); 7e-2: not_own_credit), « Règlement du client » '
+  'books Martin''s credit for Martin, its IBAN''s client (exit (b); 7e-2: not_a_client_credit); a debtor''s payment '
+  'line is still never explained');
 select is(pg_temp.iso('x1', true), (select v from x1), 'x1 (switch on): the same');
 
 

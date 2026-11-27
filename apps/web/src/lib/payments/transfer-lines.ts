@@ -102,6 +102,11 @@ export const TRANSFER_LINE_REFUSAL: Record<string, string> = {
   already_returned: "Ce virement est déjà revenu.",
   return_differs:
     "Ce retour ne correspond pas au virement (montant supérieur, virement sans débit comptabilisé, ou autre virement hors reversement à annuler d'abord).",
+  // M2c-7e-3 (plan §7.3 exit (a), §7.4): a credit held because its label cites one of our transfers returns only that
+  // transfer, at exactly its amount
+  label_reference_transfer: "Seul le virement cité dans le libellé peut revenir sur cette ligne.",
+  label_reference_amount:
+    "Le montant n'est pas exactement celui du virement cité : ce n'est pas son retour. Choisissez « Règlement du client » ou « Paiement d'un débiteur ».",
   // M2c-7b (plan §4.3): reachable now that runs claw advances back
   advance_settled:
     "Cette avance a déjà été en partie récupérée : ce retour ne peut pas être comptabilisé dans Collectoo ; prévenez le support.",
@@ -705,6 +710,10 @@ function partEffects(
   }
 }
 
+/** M2c-7e-3 (plan §7.3 exit (a), §7.4 « Oui, c'est son retour »): the intro of the return of a transfer a label cites. */
+export const LABEL_RETURN_INTRO =
+  "Le libellé de ce crédit cite ce virement du cabinet, à exactement son montant : vous confirmez que c'est lui qui revient. Il est comptabilisé comme revenu, comme lorsque la banque signale un retour.";
+
 /** The sentences a proposal's sheet shows, worded from its preview (plan §7.3; critic L3, L13; critic2 ML-9 to ML-11,
  * CSO2-4: the file replaced only when the preview says so). */
 export function transferLineEffects(
@@ -719,12 +728,16 @@ export function transferLineEffects(
   // (review M2c-6b-3a-2 round 1, pages-texts-3) a late predecessor's sheet: the import never books a cancelled
   // transfer's debit (it reviews it, P0) — its own intro, not the payout's
   const ours = parts.filter((p) => p.kind === "payout");
+  // M2c-7e-3 (plan §7.3 exit (a)): a credit whose label cites the transfer (class L) — ops confirm it, the bank did not
+  // flag it
   const intro =
     options.class === "U"
       ? TRANSFER_LINE_ACTION.detail.intro
-      : proposal.action === "payout" && ours.length > 0 && ours.every((p) => p.late_predecessor)
-        ? LATE_PREDECESSOR_INTRO
-        : TRANSFER_LINE_ACTION[proposal.action]?.intro;
+      : options.class === "L" && proposal.action === "returned"
+        ? LABEL_RETURN_INTRO
+        : proposal.action === "payout" && ours.length > 0 && ours.every((p) => p.late_predecessor)
+          ? LATE_PREDECESSOR_INTRO
+          : TRANSFER_LINE_ACTION[proposal.action]?.intro;
   if (intro) out.push(intro);
   for (const p of parts) out.push(...partEffects(options, p, m));
   const fee = parts.find((p) => p.kind === "fee");
