@@ -210,6 +210,8 @@ export type QueueAccount = {
   servicing_start: string | null;
   /** Active surendettement / collective proceeding holds (gating: the payment is held). */
   holds: readonly string[];
+  /** (M2c-7f-1, H22) the end of the client's mandate, if any (gating: a payment received on or after it is held). */
+  mandate_ended_on?: string | null;
 };
 
 /** « M-0042 · Martin SAS · solde 800,00 € » — what the one-tap button and the choices say. */
@@ -230,6 +232,8 @@ export function pendingText(a: QueueAccount): string | null {
  */
 export function gatingOutcome(file: QueueAccount, paid: { currency: string; booking_date: string }): string | null {
   if (file.status === "staged") return "account_not_confirmed";
+  // (M2c-7f-1, H22; TUI-5) received on or after the end of the client's mandate: held, never allocated
+  if (file.mandate_ended_on && paid.booking_date >= file.mandate_ended_on) return "client_mandate_ended";
   if (file.status.startsWith("closed")) return "account_closed";
   if (paid.currency.trim() !== file.currency.trim()) return "currency_mismatch";
   // the hold before the cut-off (M2b-4 review): a payment held for its file is reported, and its client told
@@ -254,8 +258,16 @@ const OUTCOME_TEXT: Record<string, string> = {
 };
 
 /** The sentence the confirmation sheet ends with: what happens after the assignment. */
-export function outcomeText(reason: string | null): string {
+/** « 20/11/2026 » from an ISO day. */
+function frenchDay(iso: string): string {
+  const [y, m, d] = iso.slice(0, 10).split("-");
+  return `${d}/${m}/${y}`;
+}
+
+export function outcomeText(reason: string | null, file?: Pick<QueueAccount, "mandate_ended_on">): string {
   if (reason === null) return "Il sera imputé sur ses factures à l'étape suivante, dans l'ordre légal.";
+  if (reason === "client_mandate_ended" && file?.mandate_ended_on)
+    return `Ce paiement sera retenu : le mandat du client a pris fin le ${frenchDay(file.mandate_ended_on)}. Reversez-le au client (ou à son bénéficiaire) ou rendez-le au payeur.`;
   return OUTCOME_TEXT[reason] ?? reviewReason(reason).help;
 }
 

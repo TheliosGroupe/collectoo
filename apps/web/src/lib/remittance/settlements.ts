@@ -476,6 +476,9 @@ export function clientPaymentRefusal(message: string, detail?: string | null, or
     return `Le libellé désigne un document que le reversement ${detail || "en cours"} en cours règle déjà : attendez son débit.`;
   if (origin === "line" && code === "not_open")
     return "Un document que désigne le libellé n'a plus rien à régler : rechargez la page.";
+  // M2c-7f-1 (H11: MONEY-2) the proof already recorded (the same document, or its file uploaded again), on its day
+  if (code === "evidence_already_used")
+    return `Ce justificatif a déjà servi à enregistrer ${isDay(detail) ? `le règlement du ${frenchDay(detail)}` : "un règlement"} : ce virement est déjà enregistré. Joignez la preuve d'un autre virement.`;
   switch (code) {
     case "designation_evidence_required":
       return "Joignez la pièce où le client désigne ce qu'il règle ; sinon l'ordre par défaut s'applique.";
@@ -529,6 +532,9 @@ export function clientRefundRefusal(
   if (/allocation_busy|lock timeout|could not obtain lock/.test(message)) return BUSY;
   // (review round 1, TUI-4) a sum held for the procedure is rendered to it, never « trop-perçu » nor the client's
   const held = ctx.kind === "client_credit" && ctx.cause === "procedure";
+  // M2c-7f-1 (H11: MONEY-2) this proof already refunds this document (another document may share it)
+  if (refusalCode(message) === "evidence_already_used")
+    return `Ce justificatif a déjà servi à enregistrer ${isDay(detail) ? `le remboursement du ${frenchDay(detail)}` : "un remboursement"} de ce document : ce virement est déjà enregistré.`;
   switch (refusalCode(message)) {
     case "nothing_owed":
       if (held) return "Cette somme mise de côté pour la procédure est déjà rendue.";

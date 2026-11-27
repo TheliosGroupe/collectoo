@@ -3153,6 +3153,9 @@ isOneToOne: false
 "clear_payee_name_mismatch":
 { Args: { "p_check_id": string,"p_idempotency_key": string,"p_reason": string }; Returns: Json
                            },
+"client_advance_totals":
+{ Args: { "p_organization_id": string }; Returns: Json
+                           },
 "client_advances":
 { Args: { "p_after"?: Json,"p_client"?: string,"p_limit"?: number,"p_open_only"?: boolean,"p_organization_id": string }; Returns: Json
                            },
@@ -3276,7 +3279,7 @@ isOneToOne: false
                            },
 "match_queue_accounts":
 { Args: { "p_account_ids": (string)[] }; Returns: {
-              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"holds": (string)[],"pending_minor": string,"rf": string,"servicing_start": string,"status": string
+              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"holds": (string)[],"mandate_ended_on": string,"pending_minor": string,"rf": string,"servicing_start": string,"status": string
             }[]
                            },
 "payment_detail":
@@ -3396,7 +3399,7 @@ isOneToOne: false
                            },
 "search_payment_files":
 { Args: { "p_payment_id": string,"p_query": string }; Returns: {
-              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"found_by": string,"holds": (string)[],"pending_minor": string,"rf": string,"servicing_start": string,"status": string
+              "account_id": string,"balance_minor": string,"client_name": string,"currency": string,"debtor_name": string,"external_ref": string,"found_by": string,"holds": (string)[],"mandate_ended_on": string,"pending_minor": string,"rf": string,"servicing_start": string,"status": string
             }[]
                            },
 "servicer_shortfall_periods":

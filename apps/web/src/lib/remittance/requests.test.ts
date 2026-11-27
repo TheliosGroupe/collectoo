@@ -227,7 +227,8 @@ describe("(review round 1, UI-1) « Retirer la demande » says what still asks f
         withdrawn_on: "2026-11-26",
         still_requested_by: ["DRA-2026-000001"],
       }),
-    ).toEqual({ number: "DRA-2026-000002", still_requested_by: ["DRA-2026-000001"] });
+      // M2c-7f-1 (H13, R3): and the advances, per advance (none in this older result)
+    ).toEqual({ number: "DRA-2026-000002", still_requested_by: ["DRA-2026-000001"], advances: [] });
     expect(parseWithdrawal({ number: "DRA-2026-000002", still_requested_by: "DRA-2026-000001" })).toBeNull();
     expect(parseWithdrawal({ number: "DRA-2026-000002", still_requested_by: ["not a number"] })).toBeNull();
     expect(parseWithdrawal(null)).toBeNull();

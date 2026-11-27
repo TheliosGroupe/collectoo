@@ -96,7 +96,8 @@ describe("bank balance check (I9)", () => {
     ).toBe("Solde de clôture rapproché ✓");
     expect(
       plain(bankCheckText({ ...base, unposted_minor: "-2650", unposted_lines: 2, difference_minor: "0" }, "EUR").text),
-    ).toBe("Solde de clôture rapproché ✓ — écart de -26,50 € expliqué par 2 lignes du compte à classer");
+      // M2c-7f-1 (H21, R3): the import's count
+    ).toBe("Solde de clôture rapproché ✓ — écart de -26,50 € expliqué à l'import par 2 lignes du compte à classer");
   });
   it("an unexplained gap is an error; a CSV has no balance", () => {
     expect(

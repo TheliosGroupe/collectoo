@@ -409,7 +409,11 @@ def unsplit_entries(draw: st.DrawFn) -> Entry:
     )
 
 
-@settings(max_examples=150, suppress_health_check=[HealthCheck.function_scoped_fixture])
+# (M2c-7f-1, T3) no per-example deadline: the parse of four entries took more than 200 ms twice
+# on the build VM
+@settings(
+    max_examples=150, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
 @given(st.lists(unsplit_entries(), min_size=1, max_size=4), st.sampled_from(["02", "08"]))
 def test_every_line_the_parser_returns_has_the_shape_the_import_checks(
     tmp_path: Path, entries: list[Entry], version: str

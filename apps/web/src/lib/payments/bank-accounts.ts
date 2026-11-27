@@ -3,6 +3,8 @@ import type { ErrorCode } from "@/lib/boarding/forms";
 /** Code for an error raised by register_bank_account / close_bank_account (most specific first). */
 export function bankAccountErrorCode(message: string): ErrorCode {
   if (message.includes("not allowed")) return "not_allowed";
+  // M2c-7f-1 (H9): « Approvisionner le compte dédié » waits for the hourly order (the remit lock, 55P03)
+  if (/allocation_busy|lock timeout|could not obtain lock/.test(message)) return "funds_busy";
   if (message.includes("invalid IBAN")) return "iban_invalid";
   if (message.includes("invalid BIC")) return "bic_invalid";
   if (message.includes("already registered")) return "iban_taken";

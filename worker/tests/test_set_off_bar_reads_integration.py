@@ -45,7 +45,8 @@ from test_client_payment_reads_integration import _as
 from test_client_payments_integration import _evidence
 from test_set_off_bars_integration import NO_NETTING, _due_invoice, _netting_from_now
 
-from collectoo_worker.jobs.remittances import HELD_TO_SQL
+from collectoo_worker.jobs.remittances import HELD_TO_SQL, load_facts, write_draft
+from collectoo_worker.remittance.run import prepare_run
 
 pytestmark = pytest.mark.integration
 PLANTED = 10_000
@@ -443,3 +444,72 @@ def test_the_set_off_bar_reads_stay_keyed_whatever_the_statistics(  # noqa: PLR0
     }
     print(json.dumps(measured, indent=1, sort_keys=True))
     assert {k: v for k, v in over.items() if v} == {}, measured
+
+
+def test_a_run_drafted_after_the_event_re_checks_its_plan_by_key(barred: dict[str, Any]) -> None:
+    """(M2c-7f-1, T4: ADR-0014 « M2c-7d-2 », round 1's verifier, TUI-7 docstring) the redressement
+    recorded first, then the run's draft refreshed and prepared again (« Actualiser »: the worker's
+    prepare, in this transaction), so that the approval's re-check
+    (private.remittance_approval_refusal) gets past the opening date — the draft's — and reaches
+    plan_sets_off_barred's read of the draft's own lines and repricings: by the draft's key under
+    the plant (the draft lines and repricings of two other drafts, n_distinct 2, generic plans), a
+    few rows, never the planted ones."""
+    tenant = barred["tenant"]
+    org, client, ops = str(tenant["servicer"]), str(tenant["client"]), str(tenant["staff"])
+    run = barred["run"]
+    with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
+        _plant(conn, org)
+        conn.execute("set local plan_cache_mode = force_generic_plan")
+        conn.execute(
+            """insert into public.client_status_event (organization_id, client_organization_id,
+                 kind, effective_date, evidence_document_id, recorded_by)
+               values (%s, %s, 'proceeding_opened', %s, %s, %s)""",
+            (org, client, barred["opening"], barred["evidence"], tenant["admin"]),
+        )
+        version = one(conn, "select version from public.remittance_run where id = %s", (run,))
+        _as(conn, ops)
+        one(
+            conn,
+            "select public.refresh_remittance_run(%s, %s, %s)",
+            (str(uuid.uuid4()), run, version),
+        )
+        conn.execute("reset role")
+        token = one(conn, "select job_token from public.remittance_run where id = %s", (run,))
+        conn.execute("set role postgres")  # the worker's prepare
+        facts = load_facts(conn, str(run), str(token))
+        assert facts is not None
+        assert write_draft(conn, str(run), str(token), prepare_run(facts))
+        conn.execute("reset role")
+        head = conn.execute(
+            "select inputs_hash, net_minor from public.remittance_run where id = %s", (run,)
+        ).fetchone()
+        assert head is not None
+        _as(conn, ops)
+        queued = one(conn, "select public.approve_remittance_runs(%s, %s::jsonb)",
+                     (str(uuid.uuid4()), json.dumps([{"run_id": run, "inputs_hash": head[0],
+                                                      "net_text": str(head[1])}])))  # fmt: skip
+        conn.execute("reset role")
+        assert [x["status"] for x in queued["results"]] == ["queued"], queued
+        before = _rows(conn)
+        conn.execute("set role postgres")
+        refusal = one(
+            conn,
+            """select private.remittance_approval_refusal(r, d, private.paris_today())
+               from public.remittance_run r join private.remittance_draft d on d.run_id = r.id
+               where r.id = %s""",
+            (run,),
+        )
+        conn.execute("reset role")
+        after = _rows(conn)
+        reads = {k: after[k] - before[k] for k in after if after[k] - before[k]}
+        drawn = one(
+            conn, "select count(*) from private.remittance_draft_line where run_id = %s", (run,)
+        )
+    print(
+        f"\nthe run drafted after the redressement ({drawn} draft lines): re-check {refusal},"
+        f" reads {reads}"
+    )
+    assert refusal is None, refusal  # drafted after the event: nothing changed since
+    assert drawn > 0
+    over = {t: n for t, n in reads.items() if n > PER_CALL}
+    assert over == {}, reads

@@ -227,6 +227,32 @@ export function advanceStatus(
 }
 
 /** The chip of a Reversements card (design §17 #1): only while something is open. */
+/**
+ * M2c-7f-1 (H16, CCS-2): public.client_advance_totals — per `client:currency`, what the clients owe back of their
+ * advances (4112[c]) and what is owed back to them (419[c]), minor units as text; null when malformed.
+ */
+export function parseAdvanceTotals(
+  x: unknown,
+): { advances: Record<string, string>; credits: Record<string, string> } | null {
+  if (!x || typeof x !== "object") return null;
+  const o = x as Record<string, unknown>;
+  if (!Array.isArray(o.advances) || !Array.isArray(o.credits)) return null;
+  const read = (rows: unknown[], key: "open_minor" | "owed_minor"): Record<string, string> | null => {
+    const out: Record<string, string> = {};
+    for (const v of rows) {
+      const r = (v ?? {}) as Record<string, unknown>;
+      const amount = r[key];
+      if (typeof r.client_id !== "string" || typeof r.currency !== "string" || typeof amount !== "string") return null;
+      if (!MINOR.test(amount)) return null;
+      out[`${r.client_id}:${r.currency}`] = amount;
+    }
+    return out;
+  };
+  const advances = read(o.advances, "open_minor");
+  const credits = read(o.credits, "owed_minor");
+  return advances && credits ? { advances, credits } : null;
+}
+
 export function advanceChip(openMinor: string | null | undefined, currency: string): string | null {
   if (!openMinor || !MINOR.test(openMinor) || BigInt(openMinor) <= BigInt(0)) return null;
   return `Avance à récupérer ${money(openMinor, currency)}`;

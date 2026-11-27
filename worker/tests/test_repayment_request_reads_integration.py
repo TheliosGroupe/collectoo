@@ -338,14 +338,15 @@ def test_the_repayment_request_reads_stay_keyed_whatever_the_statistics(  # noqa
             ("advance", "200000")
         ], booked
     # 7c-2's own tables: a few rows per advance in every call. The calls of 7c-2's new functions:
-    # every planted table so. The others — the approval (its earlier slices' reads),
-    # « Avances » (7b's public.client_advances: the servicer's advances for its totals, ADR-0014
-    # 7b « Left open »), the night (its statements read each of the servicer's advances once by
+    # every planted table so, and « Avances » too (public.client_advances: since 7f-1's H16 its
+    # totals are the 4112[c] balances — 7f-1 review round 1, TEST-H16-CLIENT-ADVANCES; before, the
+    # servicer's advances one by one, ADR-0014 7b « Left open »). The others — the approval (its
+    # earlier slices' reads), the night (its statements read each of the servicer's advances once by
     # design: 7b's advance_ledger, advance_open with its per-advance birth, 7a's full pass — four
     # reads at d + 31, where every planted advance is more than 30 days old) — are bounded on
     # 7c-2's tables, the night's advances at one read per statement
     seven_c_two = {"advance_repayment_request", "advance_repayment_request_item"}
-    earlier = ("approve_remittance_run", "client_advances", "run_advance_checks")
+    earlier = ("approve_remittance_run", "run_advance_checks")
 
     def over(name: str, rows: dict[str, int]) -> bool:
         if sum(v for k, v in rows.items() if k in seven_c_two) > bounds[name]:

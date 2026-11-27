@@ -224,7 +224,8 @@ describe("the nightly checks and reviews of 7e-1 (plan §7.1, §7.4)", () => {
     const none = checkLabel("servicer_shortfall", { noOwnAccount: true });
     expect(none.label).toBe(CHECK_LABEL.servicer_shortfall.label);
     expect(none.help).toBe(
-      "Le cabinet doit de l'argent au compte dédié (avances, frais bancaires, pertes) au-delà des approvisionnements demandés. Aucun compte propre n'est choisi (Paramètres › Facturation) : Collectoo ne peut pas le commander. Approvisionnez le compte dédié à la main depuis le compte propre, ou choisissez le compte propre.",
+      // M2c-7f-1 (H2, R3): the quotes-parts in flight counted, as the hourly order counts them
+      "Le cabinet doit de l'argent au compte dédié (avances, frais bancaires, pertes), en comptant ses quotes-parts en cours de virement vers le compte propre, au-delà des approvisionnements demandés. Aucun compte propre n'est choisi (Paramètres › Facturation) : Collectoo ne peut pas le commander. Approvisionnez le compte dédié à la main depuis le compte propre, ou choisissez le compte propre.",
     );
     expect(none.help).not.toContain("chaque heure");
     expect(checkLabel("servicer_shortfall", { noOwnAccount: false })).toEqual(CHECK_LABEL.servicer_shortfall);

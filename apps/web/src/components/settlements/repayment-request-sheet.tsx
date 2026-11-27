@@ -7,6 +7,7 @@ import { money } from "@/lib/payments/statements";
 import {
   type RepaymentPreview,
   parseRepaymentPreview,
+  advancesParam,
   parseWithdrawal,
   refusalText,
   repaymentRefusal,
@@ -218,9 +219,12 @@ export function WithdrawRequestSheet({ requestId, number, back }: { requestId: s
     if (e) return setError(repaymentRefusal(e.message, e.details));
     key.current = null;
     setOpen(false);
-    const still = parseWithdrawal(data)?.still_requested_by ?? [];
+    const parsed = parseWithdrawal(data);
+    const still = parsed?.still_requested_by ?? [];
     const reste = still.length > 0 ? `&reste=${encodeURIComponent(still.join(","))}` : "";
-    router.push(`${back}${back.includes("?") ? "&" : "?"}retrait=${encodeURIComponent(number)}${reste}`);
+    // (M2c-7f-1, H13) and each advance: the page words the notice per advance
+    const avances = parsed && parsed.advances.length > 0 ? `&avances=${encodeURIComponent(advancesParam(parsed.advances))}` : "";
+    router.push(`${back}${back.includes("?") ? "&" : "?"}retrait=${encodeURIComponent(number)}${reste}${avances}`);
     router.refresh();
   }
 

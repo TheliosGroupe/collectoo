@@ -79,7 +79,8 @@ export function StatementSummary({ s, match }: { s: StatementRow; match?: MatchC
               value: `${c.payments.count} · ${money(c.payments.minor, s.currency)}`,
               testId: "count-payments",
             },
-            { label: "À classer ou retenues", value: c.unposted.lines, testId: "count-unposted" },
+            // M2c-7f-1 (H21): the import's count (a line classified since stays counted)
+            { label: "À classer ou retenues à l'import", value: c.unposted.lines, testId: "count-unposted" },
           ]}
         />
       ) : null}

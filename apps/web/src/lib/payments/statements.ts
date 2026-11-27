@@ -203,7 +203,8 @@ export function bankCheckText(check: BankCheck | null, currency: string): { text
   const lines =
     check.unposted_lines === 1 ? "1 ligne du compte à classer" : `${check.unposted_lines} lignes du compte à classer`;
   return {
-    text: `Solde de clôture rapproché ✓ — écart de ${money(check.unposted_minor, currency)} expliqué par ${lines}`,
+    // M2c-7f-1 (H21): the count is the import's (a line classified since is still counted here)
+    text: `Solde de clôture rapproché ✓ — écart de ${money(check.unposted_minor, currency)} expliqué à l'import par ${lines}`,
     tone: "ok",
   };
 }

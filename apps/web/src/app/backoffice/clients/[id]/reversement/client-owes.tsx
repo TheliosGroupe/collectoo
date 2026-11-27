@@ -7,6 +7,7 @@ import { money } from "@/lib/payments/statements";
 import { type AdvanceCause, advanceOrigin } from "@/lib/remittance/advances";
 import {
   type RepaymentRequestRow,
+  type WithdrawnAdvance,
   owesRequestCandidates,
   requestLetterNote,
   spaceRequestLine,
@@ -49,6 +50,7 @@ export function ClientOwes({
   requested = null,
   withdrawn = null,
   stillRequested = [],
+  withdrawnAdvances = [],
 }: {
   docs: OpenDocuments;
   servicerId: string;
@@ -58,6 +60,8 @@ export function ClientOwes({
   requested?: string | null;
   withdrawn?: string | null;
   stillRequested?: string[];
+  /** (M2c-7f-1, H13) the withdrawn request's advances, per advance */
+  withdrawnAdvances?: WithdrawnAdvance[];
 }) {
   const cur = docs.currency;
   const back = `/backoffice/clients/${docs.client_id}/reversement`;
@@ -106,7 +110,7 @@ export function ClientOwes({
       ) : null}
       {withdrawn ? (
         <div role="status" aria-live="polite" className="mb-2" data-testid="withdraw-notice">
-          <InfoNote>{withdrawEffect(withdrawn, stillRequested)}</InfoNote>
+          <InfoNote>{withdrawEffect(withdrawn, stillRequested, withdrawnAdvances)}</InfoNote>
         </div>
       ) : null}
       {refunded ? (

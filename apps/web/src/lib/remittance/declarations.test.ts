@@ -133,6 +133,26 @@ describe("post_opening_unpaid (§6.3, [critic] L8)", () => {
     expect(l.help).not.toContain("retenue au débit");
     expect(l.help).not.toContain("n'est pas réglée à son échéance");
   });
+  // 7f-1 review round 1 (TUI-H15-BAR-DAY): a seizure recorded on 17/11, then a liquidation recorded on 25/11 — SQL dates
+  // the invoice from the first recording among the bars in effect and names that bar in `bar` (the seizure), never the
+  // strongest one with the first one's day (« … le 17/11/2026, jour où le cabinet a enregistré la liquidation … »: false)
+  it("a seizure then a liquidation: dated and named by the seizure, the first bar recorded", () => {
+    const h = checkLabel("post_opening_unpaid", {
+      details: {
+        opening_kind: "proceeding_opened",
+        liquidation_on: "2026-11-25",
+        number: "FC-2026-000012",
+        due_date: null,
+        withheld_on: null,
+        barred_on: "2026-11-17",
+        bar: "seizure",
+      },
+    }).help;
+    expect(h).toContain("depuis le 17/11/2026, jour où le cabinet a enregistré une saisie, il ne compense plus (règle du cabinet)");
+    expect(h).not.toContain("enregistré la liquidation judiciaire du client");
+    // in liquidation by then: the liquidation's text governs the alert (L641-13 III)
+    expect(h).toContain("(art. L641-13 III C. com.)");
+  });
 });
 
 describe("payout_after_liquidation and its disposition (§6.3, [critic] L11, [check 1] gap 9)", () => {

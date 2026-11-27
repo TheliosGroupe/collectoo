@@ -31,7 +31,7 @@ import {
   setInsuranceClause,
   setMandateTerms,
 } from "../../actions";
-import { parseClientRepaymentRequests, stillRequestedParam } from "@/lib/remittance/requests";
+import { parseClientRepaymentRequests, stillRequestedParam, withdrawnAdvancesParam } from "@/lib/remittance/requests";
 import { parseOpenDocuments } from "@/lib/remittance/settlements";
 import { PAYOUT_KIND, declarableDocuments, parseClientEvents } from "@/lib/remittance/client-events";
 import { ClientEventsSection } from "./client-events-section";
@@ -267,6 +267,7 @@ export default async function ClientRemittancePage({
           requested={typeof query.demande === "string" ? query.demande : null}
           withdrawn={typeof query.retrait === "string" ? query.retrait : null}
           stillRequested={stillRequestedParam(query.reste)}
+          withdrawnAdvances={withdrawnAdvancesParam(query.avances)}
         />
       ) : null}
 

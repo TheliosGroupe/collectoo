@@ -4,7 +4,7 @@ import { AutoRefresh } from "@/components/auto-refresh";
 import { Badge, InfoNote, Section, WidePage, inlineButtonClass } from "@/components/ui";
 import { staffSession } from "@/lib/auth/staff";
 import { money } from "@/lib/payments/statements";
-import { advanceChip, parseClientAdvances } from "@/lib/remittance/advances";
+import { AdvanceChip, AdvanceTotalsProvider } from "@/components/remittance/advance-totals";
 import { RUN_TABS, type RunCard, deadlineChip, frenchDate, runBusy, runStatus, runTab } from "@/lib/remittance/runs";
 import { requestRun } from "./actions";
 import { ApprovePanel } from "./approve-panel";
@@ -39,7 +39,8 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
   const { supabase, claims } = await staffSession();
   const back = { href: "/backoffice", label: "Back-office" };
   const { data, error } = await supabase.rpc("remittance_overview", { p_tab: tab });
-  // M2c-7b (design §17 #1): the chip « Avance à récupérer » per client, from the open totals of « Avances »
+  // M2c-7b (design §17 #1): the chip « Avance à récupérer » per client; M2c-7f-1 (H16): from the 4112[c] balances
+  // (public.client_advance_totals), read once by the page's client part — never again by its auto-refresh
   const { data: memberships } = await supabase
     .from("membership")
     .select("role, organization_id, organization:organization_id(kind)")
@@ -47,15 +48,6 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
   const servicer = (memberships ?? []).find(
     (m) => m.organization?.kind === "servicer" && (m.role === "admin" || m.role === "ops_manager"),
   );
-  const advanceTotals: Record<string, string> = {};
-  if (servicer) {
-    const { data: adv } = await supabase.rpc("client_advances", {
-      p_organization_id: servicer.organization_id,
-      p_open_only: true,
-      p_limit: 1,
-    });
-    for (const t of parseClientAdvances(adv)?.totals ?? []) advanceTotals[`${t.client_id}:${t.currency}`] = t.open_minor;
-  }
   if (error || !data) {
     return (
       <WidePage title="Reversements" back={back}>
@@ -67,6 +59,7 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
   // a job in flight refreshes the page; a failed preparation does not (it waits for « Actualiser »)
   const busy = o.runs.some(runBusy);
   return (
+    <AdvanceTotalsProvider organizationId={servicer?.organization_id ?? null}>
     <WidePage
       title="Reversements"
       back={back}
@@ -113,7 +106,6 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
             today={o.today}
             nextBusinessDay={o.next_business_day}
             canApprove={o.can_approve}
-            advances={advanceTotals}
           />
           <Section title="Encaissements en attente sans reversement" testId="to-prepare">
             {o.to_prepare.length === 0 ? (
@@ -134,13 +126,7 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
                             <Badge tone={chip.tone}>{chip.label}</Badge>
                           </span>
                         ) : null}
-                        {advanceChip(advanceTotals[`${c.client_id}:${c.currency}`], c.currency) ? (
-                          <span>
-                            <Badge tone="action" testId="advance-chip">
-                              {advanceChip(advanceTotals[`${c.client_id}:${c.currency}`], c.currency)}
-                            </Badge>
-                          </span>
-                        ) : null}
+                        <AdvanceChip clientId={c.client_id} currency={c.currency} wrap />
                       </span>
                       {o.can_approve ? (
                         <ActionForm action={requestRun} submitLabel="Préparer maintenant" buttonClassName={inlineButtonClass} testId="prepare-now">
@@ -181,5 +167,6 @@ export default async function RemittancesPage({ searchParams }: { searchParams: 
         </ul>
       )}
     </WidePage>
+    </AdvanceTotalsProvider>
   );
 }

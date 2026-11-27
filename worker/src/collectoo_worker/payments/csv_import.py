@@ -215,6 +215,9 @@ class Label:
     name: str | None
     motif: str | None
     reference: str | None
+    # M2c-7f-1 (H18): how many /REF markers the label carries (two or more: none of them is the
+    # end-to-end id)
+    references: int = 0
 
 
 def parse_label(label: str) -> Label:
@@ -231,6 +234,7 @@ def parse_label(label: str) -> Label:
         name=fields.get("DE") or None,
         motif=fields.get("MOTIF") or None,
         reference=fields.get("REF") or None,
+        references=sum(1 for i in range(1, len(parts) - 1, 2) if parts[i].upper() == "REF"),
     )
 
 
@@ -524,10 +528,19 @@ def _line(row: list[str], ctx: _File, line_no: int) -> StatementLine | None:
     # held for review, never our transfer coming back (an empty cell or no column: M2b's reading)
     not_provided = bool(cell) and e2e_column is None
     e2e = e2e_column
+    # M2c-7f-1 (H18; OQ-84): two or more /REF markers — one of them can be the payer's text (« /REF
+    # RMT… » of ours) before the bank's own, and which is the bank's cannot be told: none is the
+    # line's end-to-end id, the label's tokens of ours are then its candidates (held
+    # label_reference, never our transfer coming back by itself); a single /REF keeps M2b's reading.
+    # The fingerprint keeps the parser's reading before 7f-1 (the first /REF): a re-import of a file
+    # imported before is the same lines, caught by their keys
+    e2e_before = e2e
     if reference is not None and creditor_ref is None and rf_valid(rf_normalise(reference)):
         creditor_ref = reference
     elif reference is not None and e2e is None and not not_provided:
-        e2e = reference
+        e2e_before = reference
+        if label.references < 2:
+            e2e = reference
     # M2c-7e-2 (plan §7.3, S24): with no « référence de bout en bout » given, the references of
     # ours the label cites (whole tokens, not the /REF value read as the end-to-end id) are the
     # line's candidates, in the label's order — never its end-to-end id; of those that are transfers
@@ -566,7 +579,7 @@ def _line(row: list[str], ctx: _File, line_no: int) -> StatementLine | None:
             # review round 2: a NOTPROVIDED cell's line keeps the fingerprint it had before 7e-2
             # (the cell was then its end-to-end id): an export imported before and after is the
             # same lines, caught by their keys
-            end_to_end_id=cell if not_provided else e2e,
+            end_to_end_id=cell if not_provided else e2e_before,
             remittance_text=text,
         )
     )

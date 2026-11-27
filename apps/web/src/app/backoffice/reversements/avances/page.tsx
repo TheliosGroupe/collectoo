@@ -11,7 +11,7 @@ import {
   parseClientAdvances,
   requestCandidates,
 } from "@/lib/remittance/advances";
-import { requestedOn, stillRequestedParam, withdrawEffect } from "@/lib/remittance/requests";
+import { requestedOn, stillRequestedParam, withdrawEffect, withdrawnAdvancesParam } from "@/lib/remittance/requests";
 import { WriteOffSheet } from "./write-off-sheet";
 
 const PAGE = 50;
@@ -90,7 +90,7 @@ export default async function AdvancesPage({
       ) : null}
       {typeof q.retrait === "string" ? (
         <div role="status" aria-live="polite" data-testid="withdraw-notice">
-          <InfoNote>{withdrawEffect(q.retrait, stillRequestedParam(q.reste))}</InfoNote>
+          <InfoNote>{withdrawEffect(q.retrait, stillRequestedParam(q.reste), withdrawnAdvancesParam(q.avances))}</InfoNote>
         </div>
       ) : null}
       {typeof q.perte === "string" ? (

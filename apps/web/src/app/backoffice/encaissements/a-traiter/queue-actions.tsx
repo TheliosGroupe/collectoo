@@ -130,7 +130,7 @@ function Effect({ payment, file }: { payment: PaymentFacts; file: QueueAccount }
       {file.client_name}
       {file.debtor_name ? `, ${file.debtor_name}` : ""}). Solde du dossier : {money(file.balance_minor, file.currency)}
       {pending ? ` (${pending})` : ""}.{" "}
-      <span className={outcome ? "font-medium text-amber-900 dark:text-amber-200" : undefined}>{outcomeText(outcome)}</span>
+      <span className={outcome ? "font-medium text-amber-900 dark:text-amber-200" : undefined}>{outcomeText(outcome, file)}</span>
     </p>
   );
 }
