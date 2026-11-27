@@ -11847,5 +11847,559 @@ On the second stack alone; the main stack was in use by 7e-3's build.
 - **The two arms can differ in an aged state.** With dead index entries and autovacuum off, `bank_transfer` reads differed by thousands within one session, giving one false failure in the scale end state. In the db job's real order the arms matched (124 against 123). Default, in 7f: bound only `bank_transaction`, or run an untimed arm first.
 - **The thin margin of main's own probes** (60,000 against 62,000, above): 7f, as stated.
 
+## M2c-7e-3: our references in CSV labels, the three exits (2026-11-26)
+
+Plan: `docs/design/m2c-7-plan.md` §0, §1.3, §1.4 (7e-3 row), §2, §7.3's exits (a), (b) and (c), §7.4, §7.5's `047c`,
+§7.6, with their [critic] / [check 1–3] / [7e-2 review] marks and the redefinition table's rows naming 7e-3; §10 Q15
+and its added question unanswered: built as their defaults (a) and kept open. Migration
+`20261201090000_label_reference_exits.sql` (one file, forward-only; every function copied whole from its latest
+definition, its `security definer`, `set` lines and `search_path = ''` kept, its grants restated).
+**The switch stays off**: nothing writes `private.feature_switch`; every `047c` scenario but i1 (a1, a2, a3, v1, b1,
+c1, d1, g1) runs a second time with it on in a rolled-back subtransaction (`pg_temp.iso(…, true)`) and equals its
+switch-off twin; `047c`'s last test asserts it is off; `033` byte for byte unchanged and green.
+
+A credit held `label_reference` (7e-2: its CSV label cites one of our transfers of the statement's account; never a
+payment, never booked by the job, never a return by itself, every link refused) leaves review by one of its exits, each
+an existing command with its rights (admins and ops managers at aal2, an idempotency key), each re-checked under the
+command's locks, and each guarded by the statement triggers:
+- **(a) « Oui, c'est son retour »** — `public.book_transfer_line` on the line's options (`transfer_line_options`). The
+  line is of a new class **L** (`private.transfer_line_class`: a credit whose kind, as read or released so, is
+  `label_reference`, after our own ids, lots and unsplit entries); `private.transfer_line_pre` gives it one returnable
+  transfer, the one its label cites (`reference_from_label`, the import's kept candidate, by the unique end-to-end id),
+  when it is a payout or a sweep of the line's account (a top-up has none); `private.transfer_line_options_of` proposes
+  that transfer's return at exactly its amount (`payout_returned` / `sweep_returned`; `unplanned_…_returned` while an
+  unplanned booking of it is open; the debit pending refusal as for any return), or refuses `label_reference_transfer`
+  (nothing returnable); `private.transfer_line_check` admits only return parts of that transfer
+  (`label_reference_transfer` otherwise), at exactly its amount, the line's amount too, with no fee part
+  (`label_reference_amount`), then the return's own rules as for our id (its booked debit, no open unplanned booking, no
+  pending debit, once). `not_a_return` no longer refuses class L.
+- **(b) « Règlement du client »** — `public.client_payment_line` and `public.book_client_payment_line` gain a trailing
+  `p_client_organization_id uuid default null` (dropped and recreated; one form of each). `private.client_line_facts`
+  (two arguments; the one-argument form a wrapper passing null) accepts a `label_reference` line, ignores our reference
+  in its label (the client quoting it; every other `our_reference` rule unchanged), and takes as the client the one
+  whose confirmed payout IBAN sent it, else the one ops name: `client_required` without one, `client_unknown` for an
+  organisation that is not a client of the servicer, `client_mismatch` for another client than the IBAN's (and for a
+  `client_transfer_in` line named for another client). `private.bank_line_booking_guard`'s `client_payment` arm admits
+  the kind. The client named is recorded in the command's request (idempotency).
+- **(c) « Paiement d'un débiteur »** — `public.release_own_credit` accepts the kind: a `bank_own_credit_release` row and
+  a payment to assign (its `cash_in`), the payer the line's own name and IBAN, or « Versement relayé par le client » with
+  no IBAN when the line's IBAN is a client's confirmed payout account (a keyed probe); its result carries the note
+  « Paiement d'un débiteur citant notre référence (vérifié par l'équipe) » (« Traités » shows it).
+  `private.bank_own_credit_release_guard` and `private.payment_insert_guard` admit the kind (a payment only with its
+  release row).
+- **The fourth, « C'est cet approvisionnement »** (founder Q15's added question, default a, kept open) —
+  `public.book_top_up_credit` accepts a `label_reference` line whose statement gives no counterparty IBAN (with one:
+  `not_an_own_credit`), naming the top-up its label cites (another: `label_reference_transfer`), open (ordered, or in an
+  own-account file downloaded), at exactly its amount (its other rules unchanged; `not_its_own_account` is skipped: the
+  line has no IBAN to compare). The guard's `top_up` arm admits it (the cited top-up, no IBAN), and
+  `private.bank_booking_recheck`'s twin rule (method `ops` only, so the job's `decide_line` twin is unchanged).
+- **The return counts** ([check 2] gap 1 (4)): `private.remittance_chain_events`' third return branch also counts a
+  booked `payout_returned` / `unplanned_payout_returned` line whose label cites the transfer, so
+  `remittance_chain_paid`, `remittance_run_paid_on`, `run_settled_on`, `entry_remitted`, the nightly's booked branch
+  and `request_advance_repayment`'s `payout_not_received` see the payout came back; a line still in review never counts
+  (D14).
+- **The guards** (`bank_line_booking_guard`): each return arm admits a `label_reference` credit only when the booking
+  names exactly the transfer its label cites (`label_cites`, that transfer by its key); a fee, a loss, a top-up with an
+  IBAN, a return of another transfer or of none stay `check_violation`.
+- **advance_settled fenced** (7b round 2 « Left open », 7c-1 low 5): `transfer_line_check`'s `advance_settled` reads the
+  double payout's advance by its cause entry alone, then its settlements by the document alone, each kind compared
+  outside the probe.
+- **The page** (« À classer »): a `label_reference` row offers its exits and only them (`labelReferenceExits`): « Oui,
+  c'est son retour » when it cites our payout or sweep (the transfer-line sheet, its intro « Le libellé de ce crédit cite
+  ce virement du cabinet, à exactement son montant : vous confirmez que c'est lui qui revient. … »), « Règlement du
+  client » (the client sheet, with « Client qui rembourse » when no confirmed payout IBAN sent it: the servicer's clients
+  read by RLS), « Paiement d'un débiteur » (its effect: a payment to assign, our reference ignored, its payer the
+  sending account's holder), « C'est cet approvisionnement » when it cites our TOP still awaited, at exactly its amount,
+  with no sending account. 7e-2's texts that said no screen classifies the line now name the exits (item 4: the job's
+  review, « Contrôles »' help and tails, `label_reference_line`'s and `label_reference_top_up_line`'s refusals,
+  « Libérer »'s effect, the TOP note).
+
+### Decisions
+- **D1 Exit (a) returns only the kept candidate** (`reference_from_label`; the task's default): the import kept one
+  transfer per line (a booked run's payout first, else the first in the label's order), and the return is of that one;
+  another token of ours in the label is never proposed. Recorded as a default.
+- **D2 « Règlement du client » takes the client from the line's confirmed payout IBAN when there is one**, as for a
+  `client_transfer_in` line (the plan: `client_required` without the parameter): a CSV credit from Martin's confirmed
+  account citing our payout is Martin's, and naming another client is `client_mismatch`; ops name the client only when
+  no confirmed payout account sent it (« Indiquez le client qui rembourse : le compte émetteur n'est pas un compte de
+  reversement confirmé. » stays true).
+- **D3 The chain's label branch counts a booked line whatever its end-to-end id**: the plan's « carries no end-to-end
+  id » is the lot branch's own condition; a `label_reference` line may carry a `/REF` that is not ours (its end-to-end
+  id, never one of our transfers on this kind), and booked as the return it must count.
+- **D4 The fourth exit needs no counterparty IBAN on the line** (Q15's added question, default a): with one, the credit
+  is not the own account's (it would be `own_transfer_in`), so it is never that top-up.
+- **D5 The page offers « Oui, c'est son retour » from the queue's own facts** (`label_transfer.kind` payout or sweep,
+  by key), never by `bookable_as` (unchanged: null for the kind); the sheet's options and the command decide.
+- **D6 Reads keyed whatever the statistics** (below): the pre's cited transfer by its unique end-to-end id behind an
+  `offset 0` fence; the guard's cited transfer by its key; the chain's label branch from the transfer's bookings
+  (`bank_line_booking_transfer_idx`), each line by its key; the client facts' client by its key; the release's payout
+  account probe by organisation and IBAN.
+
+### Deviations from the plan
+- **Not redefined**: `private.transfer_line_bookable_as` and `public.debit_queue` (D5: the queue already returns the
+  cited transfer's kind, status and amount; the page reads exits from them), `private.run_advance_checks`
+  (`label_reference_waiting` already leaves a line booked, linked or released: each exit stops it, `047c` reads the
+  alert gone after each), `private.transfer_line_post` (class L posts as a return of our id).
+- **Redefined beyond the plan's table**: `private.client_line_facts` (exit (b) needs the client named), the
+  `public.client_payment_line` preview (the same parameter, so the sheet previews what is booked),
+  `public.book_top_up_credit` and `private.bank_booking_recheck` (the fourth exit, Q15's added question).
+- **D2** (client inferred from the confirmed payout IBAN) and **D3** (the chain's branch without the end-to-end id
+  condition).
+- **Test file `047c_label_reference_exits.test.sql`** (the plan's `047_top_ups_and_bank_residues` split across 7e-1/2/3).
+- **`test_label_reference_exit_reads_integration.py` bounds each call by the same call on the tables unplanted, plus
+  60** (7e-2's and 7e-1's tests: 60 flat): a return's booking reads its transfers by key some 56 to 75 times (the pre,
+  the check, the post, the guard, the chain, the recheck), on the planted tables as on the unplanted ones; a scan of the
+  10,000 planted rows would be far above either.
+- **The TOP tail names the tab without the page's « retours »** (« Classez-la dans l'onglet « À classer » des débits
+  (Encaissements). »): 7e-2's pin that a TOP's text never says « retour » (a top-up has none) is kept.
+
+### Assertions whose expected value changed (house rule R3)
+- `047b` q2: `book_top_up_credit` on a CSV credit with no IBAN citing the ordered top-up at its amount →
+  `"top_up_credit": "ok"`, the top-up `booked` (7e-2: `not_an_own_credit`, `ordered`) — the fourth exit; the link still
+  refused `label_reference_top_up_line`.
+- `047b` q3: the same on a cancelled top-up → `top_up_not_open` (7e-2: `not_an_own_credit`): the fourth exit refuses a
+  top-up no longer awaited, as for any credit.
+- `047b` x1: « Comptabiliser… » with a return of the payout at another amount → `label_reference_amount` (7e-2:
+  `not_a_return`); « Paiement d'un débiteur » → books it (7e-2: `not_own_credit`) and « Règlement du client » → books
+  Martin's credit for Martin, its IBAN's client (7e-2: `not_a_client_credit`) — both moved last in the scenario (each
+  changes the line); a debtor's payment line still never explained.
+- `apps/web/src/lib/payments/label-references.test.ts` (7e-2's vitest): the job's review, « Contrôles »' tails and
+  help, the refusals of `label_reference_line` / `label_reference_top_up_line`, « Libérer »'s effect and the TOP note
+  now name the exits (item 4); « offers no action » is now « offers none of the page's other actions ».
+- `apps/web/e2e/label-references.spec.ts` (7e-2's E2E): the row offers its three exits (no « C'est cet
+  approvisionnement »: it cites a payout) and none of the page's other actions, then leaves « À classer » by exit (c);
+  screenshot `m2c7-libelle-reference` retaken.
+- `033` unchanged; `034`–`047a` unchanged and green.
+
+### Tests
+- **pgTAP `047c_label_reference_exits.test.sql`** (20 tests, each a scenario's JSON compared whole, each but i1 with its
+  switch-on twin; fixtures and helpers from `047b`): a1 exit (a) of a booked run's payout cited by a CSV credit — the
+  options (class L, the payout's return at exactly its amount), refusals (another transfer `label_reference_transfer`, a
+  smaller amount and a fee part `label_reference_amount`), booked `payout_returned` (the payout and the run's payout
+  account returned, +N re-queued, 5120 up by the line), the review and the alert gone, every other exit refused, once
+  only; a2 a sweep's (SWP) return → `sweep_returned`; a3 a held duplicate released as `label_reference` (held:
+  `held_duplicate`; released: booked; the other copy then `already_returned`); v1 the return counts — before exit (a)
+  the line never counts (paid on the execution date, a repayment request accepted), booked the chain not paid and
+  returned, the run not paid, the collection « revenu, à verser de nouveau », the request refused `payout_not_received`,
+  then RV-2 pays the re-queued +N: paid on its debit date, requestable; b1 exit (b) — `client_required`, the IBAN's
+  client, `client_unknown`, `client_mismatch` (another client's IBAN; a `client_transfer_in` named for another client),
+  booked `client_payment`, the review and alert gone, every other exit refused; c1 exit (c) — the release row, the
+  payment and its `cash_in`, the payer (own name and IBAN; « Versement relayé par le client » with no IBAN from a
+  client's confirmed IBAN), the result's note; d1 the fourth exit — booked `servicer_top_up`, the TOP booked; refused
+  with an IBAN (`not_an_own_credit`), at another amount (`amount_differs`), for another TOP (`label_reference_transfer`;
+  a cancelled one: `047b` q3, `top_up_not_open`); g1 the guards (raw inserts in subtransactions, each beside the case it
+  admits); i1 tenant isolation (another servicer's staff, a collector, a client's admin, ops at aal1); p the privileges
+  and one form of each client-payment command; the switch off.
+- **Worker integration** (`make up`): `test_label_reference_exits_integration.py` (2: two runs booked from their
+  camt.053 debits by the real jobs, then a CSV through the import job citing the first run's payout — exit (a) through
+  the API, the short line `label_reference_amount`, the chain's returns, the job's next pass and the nightly; a CSV
+  citing a payout twice and our top-up with no IBAN — exits (b) with the client named, (c) and the fourth, each leaving
+  review, the nightly empty), `test_label_reference_exit_reads_integration.py` (below) and
+  `test_advance_reads_integration.py::test_an_unplanned_return_s_advance_rules_read_by_key_whatever_the_statistics`
+  (item 2: a double payout's unplanned return booked through the real `transfer_line_options` and
+  `book_transfer_line` under planted statistics, `client_advance` and `commission_settlement` bounded).
+- **vitest** `label-reference-exits.test.ts` (8: the exits by candidate kind and facts, each exit's label and effect, the
+  return's intro, the refusals, the TOP note, 7e-2's texts true once the exits exist). **E2E** `label-references.spec.ts`
+  (desktop + mobile; R3 above): exit (c) through the page; a second test — a CSV credit citing our top-up with no IBAN
+  at another amount: no return, no fourth exit; « Règlement du client » with the client named on the sheet, booked;
+  screenshots `m2c7-libelle-reference` (retaken) and `m2c7-libelle-reference-client` (new).
+
+### Stale statistics
+`test_label_reference_exit_reads_integration.py` plants 7e-2's tables the same way (`_plant`: 10,000 rows of two other
+servicers in `bank_transfer`, `bank_transaction`, `bank_duplicate_resolution`, `bank_debit_review`, `bank_debit_link`,
+`bank_line_booking`, `bank_own_credit_release`, `remittance_run`, their keys' `n_distinct` pinned at 2, every plan
+generic) and takes each exit as the API's session takes it — `transfer_line_options` and `book_transfer_line` (exit
+(a)), `remittance_chain_paid`, `client_payment_line` and `book_client_payment_line` (exit (b)), `release_own_credit`
+(exit (c)), `book_top_up_credit` (the fourth) — bounding each call's rows of every watched table by the same call on the
+tables unplanted, plus 60 — every call stayed within its bound: `book_transfer_line` read 59 `bank_transfer` rows (56
+unplanted), `transfer_line_options` 17 (30), `book_top_up_credit` 14 `bank_transfer` and 15 `remittance_run` (13, 18),
+`release_own_credit` 61 `payment` rows (61: the payment guard's own reads, as before 7e-3), every other call under 32
+rows of any watched table; the nightly's booked branch, bounded by 7e-2's events body plus 60, read 6 `bank_transfer`
+and 44 `remittance_run` rows on either body (a run of the file alone; in the db job's sequence the file passed in 20.8
+s). `test_advance_reads_integration.py`'s new test: `client_advance` 9 rows for the options and 9 for the booking,
+`commission_settlement` none (bound 72).
+
+### Mutants
+Each SQL mutant applied to the stack (the function's block of the migration with one change), `047c` run, the block
+re-applied (`047c`'s test numbers: a1 1, a2 3, a3 5, v1 7, b1 9, c1 11, d1 13, g1 15, each switch-on twin the next);
+each reads mutant the same with the db-job test run; each web mutant edited in place, vitest run, the file restored
+from git. Plan §7.5's, every one killed:
+- **The guard's return arms admitting `label_reference` without the transfer-reference match** → g1 (the return naming
+  Lilas's payout). **The arm admitting it with no transfer** → g1 (`unplanned_payout_returned` with none).
+- **The `client_payment` arm unchanged** → b1 (and its twin), g1 (its control).
+- **`bank_own_credit_release_guard` unchanged** → c1 (and its twin), g1. **`payment_insert_guard` unchanged** → c1,
+  g1. **The payment guard admitting the kind without the release row** → g1.
+- **`remittance_chain_events` without the label branch** → v1 (paid on the execution date, the request accepted).
+  **The branch counting unbooked lines** → v1 (« before exit (a) »).
+- **`release_own_credit`'s payer left « relayé par le cabinet »** → c1.
+- **The exact amount rule removed** → a1. **`book_client_payment_line` ignoring `p_client_organization_id`** → b1.
+This slice's own: `client_line_facts` without `client_mismatch` → b1; without the servicer check (`client_unknown`) →
+b1; `transfer_line_class` without L → a1, a2, a3, v1; the check admitting any transfer (`label_reference_transfer`
+removed) → a1; `book_top_up_credit` accepting a line with an IBAN → a1, a2, a3, b1, c1 (each scenario tries every exit
+after its own); accepting another TOP → d1; the guard's `top_up` arm unchanged → d1; `bank_booking_recheck`'s twin
+rule unchanged → d1. Two survived the first `047c` and were killed once it was completed: the release's note removed
+(c1 now reads the command's result whole; `test_label_reference_exits_integration.py` reads it too) and the guard's
+`top_up` arm without its no-IBAN condition (the command refuses such a line first; g1 now books the cited top-up raw on
+a line that gives an IBAN: `check_violation`, beside its control on the line with none).
+The reads: the pre's cited transfer unkeyed (`y.end_to_end_id || ''`) → `test_label_reference_exit_reads_integration.py`
+(10,076 `bank_transfer` rows for the options and 10,118 for the booking, against 17 and 59); `advance_settled` unfenced
+(7c-2's join) → `test_advance_reads_integration.py`'s new test (10,022 and 10,020 `commission_settlement` rows, bound
+72; it was seen failing so before the fence).
+Web (vitest, `label-reference-exits.test.ts` and 7e-2's `label-references.test.ts`): a return exit for a TOP; the fourth
+exit at any amount, with an IBAN, or for a top-up no longer awaited; no « Paiement d'un débiteur »; the return's intro
+not used for class L; the « Traités » note not used; `top_up_credit_not_cited` unmapped; `client_required`'s text
+removed; 7e-2's « Aucun écran ne permet encore… » tail back — each killed.
+
+### Suites
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-3 »; the import unchanged: nothing for
+`docs/benchmarks/payments.md`), 19:16–20:41 UTC:
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` clean. The unit suite (worker code and unit tests byte for
+  byte 7e-2's: this slice adds integration tests only) **1,294 passed**, 7 xfailed (162.1 s) on its third run; its
+  first two runs each failed one untouched Hypothesis test on its 200 ms deadline
+  (`test_camt053_details.py::test_every_line_the_parser_returns_has_the_shape_the_import_checks`: « Unreliable test
+  timings », 367.8 ms on the first example, 50 ms on its replay; it passes alone) — Left open.
+- `make eval`: mapping top-1 1.000 (167/167, threshold 0.980); reconciliation 0.9600 automatic, 0 wrong.
+- The db job's sequence after a fresh reset: `supabase test db` **54 files, 3,236 tests, PASS** (598 s; `033` byte for
+  byte unchanged and green, `047b` with its R3 changes, `047c` 20/20); `supabase gen types typescript` → no diff (the
+  regenerated `database.types.ts` committed: the two commands' new parameter); then, without a reset, the non-scale
+  integration suite **318 passed** (1,013.1 s). `scripts/check-migration-order.sh origin/main`: the two new migrations
+  sort after main's latest.
+- The scale job's nine files in one pytest call as `ci.yml` lists them, after a fresh reset and CI's logging settings:
+  **15 passed** (1,352.6 s).
+- The scale-payouts job's two files, after another fresh reset: **6 passed** (1,266.5 s).
+- Web: `eslint`, `tsc` (after `next typegen`) clean; vitest **736 passed** (36 files).
+- `./scripts/e2e.sh` after a fresh reset: **73 passed** (desktop, mobile and switch-on, 8.0 min;
+  `label-references.spec.ts` 9.3 / 4.3 s desktop, 9.1 / 4.1 s mobile). Screenshots `m2c7-libelle-reference` (retaken)
+  and `m2c7-libelle-reference-client` (new), mobile and desktop; the 185 other images whose diff was only dates, ids,
+  numbers or a list's length reverted.
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 3,000 non-test lines added (2,998) — **over the ~2,500 the plan aims at** (its 7e-3 row: ≈ 1,750, ≈ 1,500 copies):
+the migration's 2,681 lines are fifteen functions copied whole from their latest definitions (2,451 lines, of which
+about 220 changed or new: `transfer_line_check` alone is 850 copied for 39 changed, `bank_booking_recheck` 381 for 12)
+and about 230 lines of headers, the wrapper, the two drops and the grants; the web adds about 317 (the exits' actions,
+the client picker, the texts); the generated types 2. The plan's estimate left out the fourth exit (Q15's added
+question: `book_top_up_credit` and `bank_booking_recheck`, 458 copied lines) and `client_line_facts` (80).
+
+### Left open (low), with its default
+- Founder Q15 and its added question (a: proposed, never booked alone; the fourth exit as built) — open.
+- Exit (a) for another token of ours in the label than the kept candidate (D1): not proposed; default: support books it
+  by hand if ever needed (the import keeps the booked run's payout first).
+- The client sheet's picker lists every client of the servicer (up to 500, by name); default: a search field when a
+  servicer has more.
+- `private.apply_bank_bookings`' review replacement (7e-2's Left open) unchanged.
+- The unit suite's Hypothesis test of the camt.053 parser on its default 200 ms deadline (Suites; untouched since
+  M2c-6b-2a): it failed twice on this VM's first example (file writes per example) and passed alone and on the third
+  run; default: an explicit `deadline=None` on that test in the 7f hardening slice, if CI ever shows it.
+
+## M2c-7e-3 review fixes (2026-11-26)
+
+### Round 1
+Six items (money-bank MB-1, tests-ui TUI-1 to TUI-4, concurrency-cost CC-1), each checked against the code first (the
+web in the checkout, the stack's bodies those of `60e7f64` after a fresh reset). Every one held. A false statement on a
+page counts as medium here (the round's rule), so MB-1, TUI-2 and TUI-3, which the review rated low, are fixed as
+mediums with TUI-1; TUI-4 (a test) and CC-1 (a one-line guard) are fixed too. Fixed in place in the unmerged
+`20261201090000_label_reference_exits.sql` and the web; the switch stays off (`047c`'s new scenario runs again with it
+on and equals its switch-off twin). No money moved wrongly in any item: each was a text, a label, a test gap or a read.
+
+- **MB-1 (medium — a false statement on an ops sheet, fixed): « Libérer » offered a top-up's return.** On a held copy
+  read `label_reference`, `releaseEffect` said « classez-la ensuite (retour de ce virement, règlement du client ou
+  paiement d'un débiteur) » whatever its label cites; a top-up has no return exit (`labelReferenceExits`,
+  `label_reference_transfer`), and « C'est cet approvisionnement » was not named. `releaseEffect` now takes
+  `labelTransferKind` (the « Doublons possibles » row's `label_transfer.kind`, read by key by `public.debit_queue`):
+  a `TOP` → « La ligne sera listée dans « À classer » : son libellé cite notre approvisionnement. Aucun paiement n'est
+  créé ; classez-la ensuite (règlement du client ou paiement d'un débiteur, ou, sans compte émetteur et du même
+  montant, « C'est cet approvisionnement »). » (7e-2's pin that a `TOP`'s text never says « retour » holds of it); a
+  payout or a sweep → the text as before; none read → one true of every kind (« retour de ce virement s'il s'agit d'un
+  reversement ou d'une quote-part, …, ou, pour un approvisionnement sans compte émetteur et du même montant, « C'est
+  cet approvisionnement » »). Tests: vitest (`label-reference-exits-review.test.ts`: the three cases, the `TOP` text
+  without « retour », the exits of such a line without a return).
+- **TUI-1 (medium, fixed): « Traités » said an exited line still waits.** `debitReviewText` returned
+  `labelReferenceText` for every row of kind `label_reference`, and `debit_queue('traites')` returns an exited line with
+  that kind: beside « Reversement revenu » the page said « … est-ce ce virement qui revient ? Rien n'est comptabilisé
+  tant que la ligne n'est pas classée … », and beside the fourth exit's « Approvisionnement par le compte propre » that
+  « ce crédit n'est pas cet approvisionnement ». It now words the line only while it has no decision (`decision` null:
+  « À classer »); a decided row has no review paragraph, its badge naming what it became (R-D2). Tests: vitest (rows
+  shaped as `debit_queue('traites')` returns the four exits — `payout_returned`, `client_payment`,
+  `relayed_payment`, `top_up` — give no text; an undecided row is worded as before); E2E (after exit (c), and after
+  exit (b) in the second test, the « Traités » row has no `debit-review` paragraph and no « Rien n'est comptabilisé »).
+- **TUI-2 (medium here — a false badge, fixed).** (1) `DECISION_LABEL` had no `client_payment`: « Traités » showed the
+  code for 7c-1's client lines and for exit (b). It is now « Règlement du client (facture ou avance du cabinet) ».
+  (2) On « Traités » a released held copy keeps its kind `suspected_duplicate` (`debit_queue`'s `traites` branch), so
+  exit (c) on a copy released as `label_reference` read « Paiement d'un débiteur relayé par le cabinet » although its
+  payer is the debtor's own name and IBAN ([check 2] removed « relayé par le cabinet » for this kind). The page now
+  passes `decidedLineKind(row)` to `decisionLabel`: a held copy is the kind the queue's `held_kind` gives
+  (`private.held_line_kind`, the reading `resolve_duplicate` records as `released_kind`), any other line its own kind —
+  the note « Paiement d'un débiteur citant notre référence (vérifié par l'équipe) » for such a copy, and « … relayé par
+  le client » for a released client's credit (wrong the same way since M2c-2, fixed with it). `public.debit_queue` is
+  not redefined (R-D1). Tests: vitest (the label, the three released kinds); `transfer-lines.test.ts`'s list of the
+  booking kinds gains `client_payment` (R3).
+- **TUI-3 (medium here — a false statement on a page, fixed): the statement's page said a booked line was « à
+  classer ».** `releves/[id]` read the line's payment and link, not its `bank_line_booking`, so a line booked as
+  `payout_returned`, `client_payment` or `top_up` (and every M2c booking: the omission predated 7e-3) fell through to
+  « Non comptabilisé · à classer ». The page now selects `bank_line_booking(kind, seq)` (RLS: the money staff, as the
+  links) and `lineState` gives « Comptabilisé · <what> » for a booked line, after the payment and the links, each
+  booking kind in French (« retour de notre reversement », « règlement du client », « approvisionnement par le compte
+  propre », « débit d'un reversement », « frais bancaires », …; several joined by « + »; R-D3). Tests: vitest (each
+  kind worded, never its code; with no booking « Non comptabilisé · à classer » as 7e-2 pinned), E2E (exit (b)'s line:
+  « Comptabilisé · règlement du client »; `statements.spec.ts`'s bank charge, booked by the debit job: « Comptabilisé ·
+  frais bancaires », R3).
+- **TUI-4 (low, a test: fixed): no exit was taken on a held copy released as `label_reference` but (a).** `047c` r1
+  (and its switch-on twin): three pairs of CSV copies (same day, amount, direction and label, no bank id), the second of
+  each held — a debtor's credit citing Martin's payout, another debtor's at another amount, our top-up's credit with no
+  IBAN at its amount. Held, each exit is refused (`not_own_credit`, `not_a_client_credit`, `not_an_own_credit`);
+  released (« Libérer », its reading `label_reference`), « Paiement d'un débiteur » makes the copy a payment to assign
+  (its release row, the payment with the line's own payer DUPONT JEAN and IBAN, its `cash_in`, the result's note),
+  « Règlement du client » books it for Martin, « C'est cet approvisionnement » books the cited `TOP`; each copy's review
+  and alert gone and every other exit then refused; the first copies still in review, the first top-up copy then
+  `top_up_not_open`. The review's two surviving mutants are killed by it (Mutants below).
+- **CC-1 (low, a one-line guard: fixed): `release_own_credit`'s payer probe was not keyed under stale statistics.**
+  `public.release_own_credit` gains `set enable_seqscan = off`, as `private.client_line_facts` and
+  `book_client_payment_line`, which read client_payout_account the same way. `test_label_reference_exit_reads_integration.py`
+  now plants `client_payout_account` (10,000 retired rows, half the servicer's and half another's, over two IBANs;
+  `organization_id` and `iban` `n_distinct` 2) and watches it: before the fix `release_own_credit` read **10,002** of
+  its rows (its bound 62: 2 unplanted plus 60); after it **none**, and its other reads fell too (10 `bank_transaction`
+  rows planted, 7 unplanted; 52 unplanted before).
+
+### Decisions (round 1)
+- **R-D1 TUI-2 at the page, `debit_queue` unchanged**: the queue already returns `held_kind` for every held copy on
+  every tab (`private.held_line_kind` by the line's key), and the kind a copy is released as is that reading
+  (`resolve_duplicate` inserts it as `released_kind`; the import records every held line's reading in
+  `private.bank_line_held_kind` since `20261111090000`, so the two agree for every copy held since; an older copy is
+  read from its facts, as `resolve_duplicate` read it). Redefining `debit_queue` (some 210 lines copied)
+  to return the released kind on « Traités » would also change that tab's first badge (« Doublon possible ») for every
+  released copy; not needed for a true label.
+- **R-D2 A decided `label_reference` row has no review paragraph** (TUI-1's first option): its decision badge says what
+  it became; no « Classé : … » sentence repeating it.
+- **R-D3 « Comptabilisé · … » for every booking kind** on the statement's page, not only a `label_reference` line's
+  (TUI-3: the same omission for all of M2c's bookings).
+
+### Assertions whose expected value changed (round 1, house rule R3)
+- `033` unchanged; `034`–`047b` unchanged, every assertion kept.
+- `047c` (this slice's, unmerged): 20 → 22 tests (r1 off and on); no earlier key's value changed.
+- `label-references.test.ts` (7e-2's): « Libérer »'s pin now passes the cited transfer's kind (a payout); its text is
+  unchanged. With no kind read the sheet now says what holds of every kind (MB-1).
+- `transfer-lines.test.ts` (6b-2b's « every booking kind ops or the job book has a label »): its list gains
+  `client_payment`, which 7c-1 books and the list had missed — the gap behind TUI-2 (1).
+- `statements.spec.ts` (M2b-2's E2E): the camt.053 fixture's bank charge (coded `PMNT/MDOP/FEES`), which the debit
+  job's funds pass books as `fee` since M2c-1, was asserted « Non comptabilisé · frais ou à classer » — TUI-3's false
+  state, true only before the job's pass. It now waits for that `fee` booking (read by the admin client) and reads
+  « Comptabilisé · frais bancaires »; the return's « Non comptabilisé · à classer » unchanged.
+
+### Mutants (round 1)
+Each SQL mutant applied to the stack (the function's block of the migration with one change), `047c` run, the block
+re-applied (`047c`'s numbers: a3 5, r1 17, its switch-on twin 18); each web mutant edited in place, the payments'
+vitest run, the file restored.
+- **The review's two survivors**: `bank_own_credit_release_guard`'s released-duplicate kind list without
+  `label_reference` → r1 (17, 18); `payment_insert_guard`'s release branch reading `t.kind` for
+  `coalesce(r.released_kind, t.kind)` → r1 (17, 18). Both passed all 20 of `047c` at `60e7f64`.
+- This round's own: `client_line_facts` reading the line's kind, not its released kind → a3 (5), r1 (17);
+  `book_top_up_credit` ignoring the released kind → r1 (17).
+- **The read**: `release_own_credit` without `enable_seqscan = off` → `test_label_reference_exit_reads_integration.py`
+  (10,002 `client_payout_account` rows, bound 62; seen failing so before the fix).
+- **Web** (`label-reference-exits-review.test.ts`, `transfer-lines.test.ts`): `debitReviewText` wording a decided row;
+  `releaseEffect` without the `TOP` text; its unknown kind worded as a payout's; no `client_payment` label;
+  `decidedLineKind` returning the row's kind; `lineState` ignoring the bookings — each killed.
+
+### Suites (round 1)
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-3 review fixes, round 1 »; the import
+unchanged: nothing for `docs/benchmarks/payments.md`), 21:49–23:25 UTC:
+- The db job's sequence after a fresh reset: `supabase test db` **54 files, 3,238 tests, PASS** (577 s; `033` byte for
+  byte unchanged and green, `047c` 22/22); `supabase gen types typescript` → no diff (no public signature changed);
+  then, without a reset, the non-scale integration suite **318 passed** (1,022.9 s).
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` clean; unit suite **1,294 passed**, 7 xfailed (177.5 s;
+  the worker code untouched).
+- `make eval`: mapping top-1 1.000 (167/167, threshold 0.980); reconciliation 0.9600 automatic, 0 wrong.
+- The scale job's nine files in one pytest call as `ci.yml` lists them, after a fresh reset and CI's logging settings:
+  **15 passed** (1,296.8 s).
+- The scale-payouts job's two files, after another fresh reset: **6 passed** (1,183.8 s).
+- Web: `eslint`, `tsc` (after `next typegen`) clean; vitest **744 passed** (37 files).
+- `./scripts/e2e.sh` after a fresh reset: **73 passed** (desktop, mobile and switch-on, 7.6 min;
+  `label-references.spec.ts` 9.0 / 4.2 s desktop, 9.1 / 4.2 s mobile; `statements.spec.ts` 7.1 / 7.8 s). Screenshots
+  `m2-statement-imported` (desktop and mobile) retaken: the bank charge's line now reads « Comptabilisé · frais
+  bancaires »; `m2c7-libelle-reference` and `m2c7-libelle-reference-client` show « À classer » and the client sheet,
+  unchanged by this round; those and the 189 other images whose diff was only dates, ids or order reverted.
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 75 non-test lines added or changed (the web 66: the texts, the label, the helper, the statement's state and
+query; the migration 6), about 355 of tests (`047c` r1 92, the reads test's plant 50, vitest 176, E2E 34) and about 180
+of docs.
+
+### Left open (round 1, low), with its default
+- « Traités »'s first badge of a released copy stays « Doublon possible » (R-D1). Default: keep — the decision badge
+  beside it says what it became.
+- The statement's page shows a return beyond its payment as « Comptabilisé · retour du paiement » (the link read
+  first), not its loss booking beside it. Default: keep (the line is booked; the loss is on « Traités » and the
+  payment's page).
+- The statement's summary (« À classer ou retenues », « écart … expliqué par N lignes du compte à classer ») is the
+  import's own count, taken when the file was imported: a line the debit job or ops book later (a bank charge, a
+  label_reference line after its exit) is still counted there. Default: word it as of the import (« à l'import ») in
+  the 7f hardening slice; the line's own state, below it, is now true (TUI-3).
+- 7e-3's own Left open items, unchanged: founder Q15 and its added question (a, the fourth exit as built); exit (a) for
+  another token than the kept candidate (D1); the client picker's 500 clients; `apply_bank_bookings`' review
+  replacement; the camt.053 parser's Hypothesis deadline.
+
+### Round 2
+One item (`liberer-top-up-exit-not-open`, medium), checked against the code first (the web at `fa0a927`; the stack's
+bodies those of the unmerged migration after a fresh reset): it held, and is fixed in the web. The switch stays off
+(the item is a page text, the same with the switch off and on: neither `debit_queue`'s `label_transfer` nor
+`labelReferenceExits` nor `book_top_up_credit`'s open rule reads it). No money moved: every exit's command refused what
+the sheet named. The round's suites then found two things no item named, each fixed at the root below: two pgTAP
+fixtures that fail on a Friday, and a read of the returned payouts' accounts that the exits reads test caught in CI's
+order (fixed in place in the unmerged `20261201090000_label_reference_exits.sql`).
+
+- **liberer-top-up-exit-not-open (medium — a false statement on an ops sheet, fixed).** Round 1's MB-1 fix worded
+  « Libérer » on a held copy citing our top-up by the transfer's kind only: « … classez-la ensuite (règlement du client
+  ou paiement d'un débiteur, ou, sans compte émetteur et du même montant, « C'est cet approvisionnement ») ». The
+  typical held `TOP` copy is the second CSV copy of our no-IBAN top-up credit (overlapping exports) whose first copy
+  that exit already booked: its « Doublons possibles » row's `label_transfer` is `{kind top_up, status booked}`; the
+  copy has no IBAN and the same amount, so the stated conditions held, but once released `labelReferenceExits` gives
+  `["client", "debtor"]` and `book_top_up_credit` refuses `top_up_not_open` — the sheet named an exit that does not
+  exist (the same for a cancelled `TOP`). Lesser variant: a payout's or a sweep's copy whose transfer is not booked
+  (returned, not yet debited, cancelled) was told « retour de ce virement » unconditionally, which the sheet then
+  refuses (`already_returned`, `return_before_debit`, `transfer_cancelled`). Fix: `releaseEffect` takes
+  `labelTransferStatus` (the row's `label_transfer.status`, read by key by `public.debit_queue`), and the page's mapping
+  moves to `heldReleaseEffect(row)` in `debits.ts` (with `heldLineKind`, the page's former `heldKind`), so the text the
+  page shows is the one the tests pin. A `TOP` copy: ordered or in a file → the text as before, the fourth exit named
+  with its conditions (`labelReferenceExits` and `book_top_up_credit` admit exactly those statuses); booked → « La
+  ligne sera listée dans « À classer » : son libellé cite notre approvisionnement, mais cet approvisionnement est déjà
+  comptabilisé : sauf si la banque l'a exécuté deux fois, ce crédit n'est pas cet approvisionnement, sans doute un
+  règlement du client ou le paiement d'un débiteur qui cite notre référence. Aucun paiement n'est créé ; classez-la
+  ensuite (règlement du client ou paiement d'un débiteur). » (`LABEL_REFERENCE_TOP_UP_BOOKED`, as « À classer »'s
+  `labelReferenceText` says it); cancelled → `LABEL_REFERENCE_TOP_UP_CANCELLED`, the same two classes, then
+  `LABEL_REFERENCE_TOP_UP_CANCELLED_SUPPORT` (« … prévenez le support : Collectoo ne l'attend plus et ne le
+  comptabilise pas sur cette ligne. »); any other status or none read → the two classes and
+  `LABEL_REFERENCE_TOP_UP_SUPPORT_PLAIN`, never the fourth exit. A payout's or a sweep's copy: booked or no status read
+  → as before; returned, ordered, in a file or cancelled → « … (retour de ce virement si son débit est comptabilisé et
+  n'est pas déjà revenu, règlement du client ou paiement d'un débiteur). » — true of each case: the sheet still opens
+  (« Oui, c'est son retour » stays offered for every payout and sweep, plan §7.4) and books the return only of a booked
+  debit not yet back, a second (unplanned) debit's return included (class L's options, `transfer_unplanned_open`).
+  Tests: vitest (`label-reference-exits-review.test.ts` round 2: the booked-`TOP` « Doublons » row as
+  `debit_queue('doublons')` returns it, through `heldReleaseEffect`, and the released row's exits; the cancelled,
+  ordered, in-file, returned and unread `TOP` rows; the property that the text names « C'est cet approvisionnement »
+  exactly when `labelReferenceExits` of the released row offers `top_up`, and never « retour » for a `TOP`; the payout
+  and sweep rows by status; the other held readings' texts unchanged through the mapping) — seen failing on `fa0a927`'s
+  mapping (5 of 7 new tests), passing after.
+
+### Decisions (round 2)
+- **R2-D1 The release text follows the exits the released line will offer**, from the « Doublons » row's own facts by
+  key (`label_transfer.kind` and `.status`), not a separate read: `debit_queue('doublons')` already returns them.
+- **R2-D2 « Oui, c'est son retour » stays offered for every payout and sweep cited** (plan §7.4); the release text
+  hedges the return by its condition instead of hiding it, because a returned or cancelled payout may still have a
+  second debit open whose return class L books.
+
+### Two fixtures that failed on a Friday (round 2, found by the suites, fixed)
+The round's first `supabase test db` (23:47 UTC, Friday 27 November in Paris) failed two assertions no code of this
+round touches: `043` 34 (« 14 (review round 1, CC-2): under a generic plan the delta pass … ») and `046c` 24 (« f
+(ML-1): an old « Tutelle ou curatelle » row … »), both `23502: null value in column "amount_minor" of relation
+"bank_transaction"`. A probe (the file's own helpers, rolled back) showed the cause: each fixture collects a payment
+at d − 25 and has its run approved today; the test's prepare writes the line's latest execution date as collection + 27
+(d + 2, a Sunday that day), and `approve_remittance_runs` asks the next business day (Monday, d + 3): late without a
+reason (`late_reason_required`), the run stayed a draft, it had no transfer, and the debit helper inserted a line of a
+null amount. Round 1's run (Thursday) passed. So both tests failed every Friday (and before some holidays), in CI too —
+a fixture's calendar, not the code. Fixed at the root in the fixtures: the collection at d − 22 (latest d + 5, which no
+weekday or holiday run of the TARGET and French calendars reaches past); every assertion and expected value unchanged.
+`043`'s window test still books its six runs twenty days ago (d − 20, after the collection); `046c`'s FC still precedes
+the old row (d − 20).
+
+### The returned payouts' accounts read whole (round 2, found by the suites, fixed)
+The round's first non-scale integration run in CI's order (right after `supabase test db`, no reset) failed
+`test_label_reference_exit_reads_integration.py`: `book_transfer_line` read **95** `client_payout_account` rows
+planted, 2 unplanted (bound 62); run again alone, **323**. Round 1's run had read 7. A probe (the test's plant: 10,000
+retired rows, `organization_id` and `iban` `n_distinct` 2, generic plans) showed the statement: exit (a)'s return sets
+its run's payout account `returned` in `private.transfer_line_post` with one update over the parts' accounts,
+`where a.id = any (array(…)) and a.status = 'active'`. The status filter implies the predicate of
+`client_payout_account_current_uq` (a partial unique index, status active or returned, every servicer's accounts), and
+the plan was a **BitmapAnd of that index read whole and the primary key** — the rows read being the number of current
+payout accounts in the database (the integration suite's tenants: 95, then 323). Whether the planner takes it depends
+on that index's size against the key's estimate (it did not in round 1's run, nor once the index was bloated by
+rolled-back plants): the plan class the house rule names (a filter implying a partial index's predicate under stale
+statistics). `private.bank_booking_post_rows` holds the same update for the returns `private.post_bank_bookings`
+books, and read that index whole on every call, a payout's return among its parts or not: the fourth exit (« C'est cet
+approvisionnement », no return at all) read 303 rows so, and the debit job's funds pass takes the same path.
+- **Fix (in place, the unmerged migration):** both functions redefined, each copied whole from its latest body
+  (`private.transfer_line_post` from `20261123080000` line 304, `private.bank_booking_post_rows` from `20261122090000`
+  line 1789; SECURITY DEFINER, `search_path ''`, `enable_seqscan = off`, privileges restated: internal), the one change
+  in each: the accounts updated one by one by their key (`for v_pa in select distinct … order by 1 loop update … where
+  a.id = v_pa and a.status = 'active'`): one row estimated, the primary key whatever the statistics; the same rows set
+  `returned`, the same status re-check, the same triggers, in key order (their locks were taken before, in key order,
+  by `post_bank_bookings` and the transfer-line locks).
+- **Test made deterministic:** the reads test now also plants **300 current payout accounts** of other servicers (one
+  client each; `CURRENT_PLANTED`), so the plan's cost shows on a fresh database too. On a fresh reset with each earlier
+  body applied: `book_transfer_line` read **305** rows (bound 63) with `transfer_line_post`'s one update,
+  `book_top_up_credit` **303** (bound 63) with `bank_booking_post_rows`'; with the fix, 2 and none. Seen failing on
+  `fa0a927`'s migration (305), passing after, three runs in a row on the same database.
+- Severity: low here (no money moved, no budget exceeded: one statement per booking reading the current accounts'
+  index entries), fixed because the db job's test failed and the read is the class the house rule forbids.
+
+### Assertions whose expected value changed (round 2, house rule R3)
+- `033` unchanged; `034`–`047b` and `047c`: no assertion and no expected value changed. Two fixtures' dates changed
+  (above): `043` s14f's collection d − 25 → d − 22, `046c` sf4's FC collection d − 25 → d − 22.
+- `label-reference-exits-review.test.ts` (round 1's, this slice's): its « Libérer » pin of a `TOP` copy now passes the
+  top-up's status (« ordered », the case that text is true of); its text is unchanged; its « never « retour » » pin now
+  runs over every status. `label-references.test.ts` (7e-2's) and `label-reference-exits.test.ts` unchanged: their
+  calls pass no status, and a payout's text with none read is as before.
+- `test_label_reference_exit_reads_integration.py` (this slice's): its plant gains the 300 current accounts; its
+  bounds (`PER_CALL` 60 over the unplanted reads) unchanged.
+
+### Mutants (round 2)
+Each web mutant edited in place in `debits.ts`, `label-reference-exits-review.test.ts` run, the file restored from a
+copy:
+- the page's mapping not passing the status (the item's own defect) → 5 failed;
+- a booked `TOP` read as awaited → 2; no status read as awaited → 2; a cancelled `TOP` worded as booked → 1;
+- a payout's copy never hedged → 1; hedged also with no status read → 2. Each killed.
+Each SQL mutant on a fresh reset, the function's earlier body applied to the stack, the reads test run:
+`private.transfer_line_post`'s one update → `book_transfer_line` 305 rows (failed); `private.bank_booking_post_rows`'
+one update → `book_top_up_credit` 303 rows (failed). Both killed. On a database the test had already planted and
+rolled back several times both survived (the partial index then bloated, the planner keeps the key): the test's
+verdict on the earlier bodies holds on a fresh database, as CI's db job starts.
+
+### Suites (round 2)
+Same VM, the main stack alone (`docs/benchmarks/remittances.md` « M2c-7e-3 review fixes, round 2 »; the import
+unchanged: nothing for `docs/benchmarks/payments.md`), 23:47–02:11 UTC:
+- The db job's sequence after a fresh reset, with every fix: `supabase test db` **54 files, 3,238 tests, PASS** (594 s;
+  `033` byte for byte unchanged and green, `043` and `046c` green on a Friday); `supabase gen types typescript` → no
+  diff (no public signature changed); then, without a reset, the non-scale integration suite **318 passed**
+  (1,182.5 s). The first runs, before the fixes: `supabase test db` 2 failed (the Friday fixtures); with the fixtures
+  fixed, the integration suite 1 failed (the exits' reads test, 95 rows).
+- Worker: `ruff check`, `ruff format --check`, `mypy --strict` clean; unit suite **1,294 passed**, 7 xfailed (185.6 s).
+- `make eval`: mapping top-1 1.000 (167/167, threshold 0.980); reconciliation 0.9600 automatic, 0 wrong.
+- The scale job's nine files in one pytest call as `ci.yml` lists them, after a fresh reset and CI's logging settings:
+  **15 passed** (1,328.7 s).
+- The scale-payouts job's two files, after another fresh reset: **6 passed** (1,251.7 s).
+- Web: `eslint`, `tsc` (after `next typegen`) clean; vitest **751 passed** (37 files).
+- `./scripts/e2e.sh` after a fresh reset: **73 passed** (desktop, mobile and switch-on, 7.7 min). No screenshot shows
+  the « Libérer » sheet; the 194 images whose diff was only dates, ids or order reverted.
+- A final `supabase db reset`; the stack left running.
+
+### Size
+About 45 non-test lines added or changed in the web (`releaseEffect`'s `TOP` and payout cases, `heldLineKind`,
+`heldReleaseEffect`, the page's call); in the migration about 530 (two functions copied whole, 14 lines changed in
+them, their headers and privileges); about 190 of tests (vitest 160, the reads test's plant 14, two pgTAP fixtures'
+dates and comments 10) and about 150 of docs.
+
+### Left open (round 2, low), with its default
+- Other updates of this codebase filtering a status a partial index's predicate implies, beside a key array (for
+  instance `bank_booking_post_rows`' `remittance_run … r.status in ('approved', 'sent')`), were not audited this round:
+  no reads test watches them under such a plant and none failed. Default: audit them in the 7f hardening slice, with a
+  plant of current rows as here.
+- With no transfer read (`label_transfer` null on a `label_reference` copy — not reachable today: the import keeps
+  `reference_from_label` only for a transfer of the line's account, and `debit_queue` reads that transfer by key), the
+  sheet keeps round 1's text true of every kind, naming the return and the fourth exit conditionally, although the
+  released line would then offer neither. Default: keep (unreachable; the conditions it states are those of the
+  exits).
+- Round 1's Left open items, unchanged.
+
+### Assembly (the round verifiers' two lows, fixed)
+Both are statements on a page, so I raised them to medium at assembly. Both are web-only fixes, pinned by vitest in `label-reference-exits-review.test.ts`.
+- **A released copy lost its text in « À classer »** (round 1's verifier: the TUI-1 fix regressed). `debitReviewText` hid the label-reference text for every row with a decision. A copy released from « Doublons possibles » carries the decision `released` but nothing is booked; it still waits, and it showed nothing. Now the text is hidden only once the line has left by an exit: `o.decision && o.decision !== 'released'`.
+- **« Libérer » offered a return the copy cannot get** (round 2's verifier: liberer-payout-copy-amount-not-hedged).
+  - On a held RMT or SWP copy, the text listed « retour de ce virement » whatever the amounts. Exit (a) books exactly the transfer's amount (`label_reference_amount`).
+  - Now `heldReleaseEffect` passes both amounts. When they differ, the text says the line « ne pourra pas être comptabilisée comme son retour » and lists only the client's and the debtor's payment.
+- Web: vitest 753 passed (+2); lint and typecheck clean. No SQL changed.
+- Rebased onto main (PR #50 merged, its CI round 9392ebb): 7e-3's migration never names `bank_transaction_label_reference_idx`, so the index's new one-column shape needs no change here.
+
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

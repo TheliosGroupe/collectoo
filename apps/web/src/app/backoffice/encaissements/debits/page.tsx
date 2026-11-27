@@ -8,10 +8,15 @@ import {
   debitReviewText,
   clientRelayable,
   clientRelayedPaymentEffect,
+  decidedLineKind,
   decisionLabel,
   explainable,
   feeEffect,
+  heldReleaseEffect,
   holdsLabelReference,
+  labelReferenceDebtorEffect,
+  labelReferenceExits,
+  labelReferenceTopUpEffect,
   lossEffect,
   offersTopUp,
   ownCreditEffect,
@@ -24,7 +29,6 @@ import {
   readsLinkOptions,
   relayable,
   relayedPaymentEffect,
-  releaseEffect,
   returnEffect,
 } from "@/lib/payments/debits";
 import { parseAllocationRemitted, type RemittedEntry, returnRemittedNote } from "@/lib/payments/remitted";
@@ -39,9 +43,9 @@ import {
   ReleaseOwnCredit,
   ResolveDuplicate,
 } from "./debit-actions";
-import { ClientPaymentLine } from "./client-payment-line";
+import { type ClientChoice, ClientPaymentLine } from "./client-payment-line";
 import { BookTransferLine } from "./transfer-line-sheet";
-import { BookTopUpCredit } from "./top-up-credit";
+import { BookTopUpCredit, LabelTopUp } from "./top-up-credit";
 import { offersTopUpLink, topUpCreditEffect } from "@/lib/remittance/top-ups";
 
 const PAGE_SIZE = 20;
@@ -81,7 +85,7 @@ type Row = {
   decided_at: string | null;
   decided_payment_id: string | null;
   total: number;
-  /** « Doublons possibles »: what the import read the held line as, when the queue tells it (see heldKind) */
+  /** « Doublons possibles »: what the import read the held line as, when the queue tells it (see heldLineKind) */
   held_kind?: string | null;
   /** M2c-6b-2c (critic CSO-4): what « Comptabiliser… » may book the line as, by key (e, b, n, u; null: not offered) —
    * its options are read only when its sheet opens */
@@ -90,6 +94,8 @@ type Row = {
    * transfer, by key (labelReferenceText words them) */
   reference_from_label?: string | null;
   label_transfer?: {
+    /** M2c-7e-3: the transfer cited, by key (« C'est cet approvisionnement » books that top-up only) */
+    transfer_id?: string | null;
     kind?: string | null;
     /** review round 2 (top-text-ignores-status): a top-up's status words whether Collectoo still awaits it */
     status?: string | null;
@@ -99,15 +105,6 @@ type Row = {
   } | null;
 };
 
-/**
- * What a held line was read as: the queue's `held_kind` when it returns one, or its `kind` when the « Doublons » tab
- * returns the reading in place of `suspected_duplicate`; otherwise unknown (null), and the « Libérer » sheet says both
- * outcomes (review M2b-6).
- */
-function heldKind(r: Row): string | null {
-  if (r.held_kind) return r.held_kind;
-  return r.kind !== "suspected_duplicate" ? r.kind : null;
-}
 type Candidate = {
   payment_id?: string;
   refund_request_id?: string;
@@ -234,6 +231,18 @@ export default async function DebitsPage({
     const reads = await Promise.all(ids.map((id) => supabase.rpc("allocation_remitted", { p_payment_id: id })));
     ids.forEach((id, i) => remitted.set(id, parseAllocationRemitted(reads[i].data) ?? []));
   }
+  // M2c-7e-3 (plan §7.4 « Règlement du client »): the servicer's clients ops may name as the one repaying, read only
+  // when a line of the page cites our reference
+  let clients: ClientChoice[] = [];
+  if (tab === "a-classer" && rows.some(holdsLabelReference)) {
+    const { data: orgs } = await supabase
+      .from("organization")
+      .select("id, legal_name")
+      .eq("kind", "creditor_client")
+      .order("legal_name")
+      .limit(500);
+    clients = (orgs ?? []).map((o) => ({ id: o.id, name: o.legal_name }));
+  }
   const href = (t: string, p = 1) =>
     `/backoffice/encaissements/debits?onglet=${t}${p > 1 ? `&page=${p}` : ""}`;
 
@@ -305,7 +314,8 @@ export default async function DebitsPage({
                     ) : null}
                     {r.decision ? (
                       <Badge tone="ok">
-                        {decisionLabel(r.decision, r.kind)}
+                        {/* review M2c-7e-3 round 1 (TUI-2): a released copy by the kind it was released as */}
+                        {decisionLabel(r.decision, decidedLineKind(r))}
                       </Badge>
                     ) : null}
                   </span>
@@ -366,6 +376,7 @@ export default async function DebitsPage({
                     options={options.get(r.bank_transaction_id)}
                     cancellationAfterDownload={cancellationAfterDownload}
                     remitted={remitted}
+                    clients={clients}
                   />
                 ) : null}
                 {tab === "frais" && r.direction === "debit" ? (
@@ -388,11 +399,9 @@ export default async function DebitsPage({
                 {tab === "doublons" ? (
                   <ResolveDuplicate
                     lineId={r.bank_transaction_id}
-                    releaseEffect={releaseEffect({
-                      direction: r.direction,
-                      heldKind: heldKind(r),
-                      amount: money(r.amount_minor, r.currency),
-                    })}
+                    // review M2c-7e-3 round 1 (MB-1) and round 2 (liberer-top-up-exit-not-open): what the import read
+                    // the copy as (heldLineKind) and, citing our reference, the kind and the status of that transfer
+                    releaseEffect={heldReleaseEffect(r)}
                     idempotencyKey={randomUUID()}
                   />
                 ) : null}
@@ -443,23 +452,61 @@ export default async function DebitsPage({
   );
 }
 
+/**
+ * M2c-7e-3 (plan §7.3, §7.4): the exits of a credit held because its label cites one of our transfers, each through its
+ * command and its re-checks (labelReferenceExits): (a) « Oui, c'est son retour » (its payout or sweep, the transfer-line
+ * sheet's class L), (b) « Règlement du client », (c) « Paiement d'un débiteur », and « C'est cet approvisionnement »
+ * (founder Q15's added question, default a — still open).
+ */
+function LabelReferenceActions({ row, clients }: { row: Row; clients: ClientChoice[] }) {
+  const exits = labelReferenceExits(row);
+  const amount = money(row.amount_minor, row.currency);
+  const top = row.label_transfer;
+  return (
+    <div className="flex flex-col gap-2" data-testid="label-reference-exits">
+      {exits.includes("return") ? (
+        <BookTransferLine lineId={row.bank_transaction_id} currency={row.currency} idempotencyKey={randomUUID()} labelReference />
+      ) : null}
+      {exits.includes("client") ? <ClientPaymentLine lineId={row.bank_transaction_id} clients={clients} /> : null}
+      {exits.includes("debtor") ? (
+        <ReleaseOwnCredit
+          by="label_reference"
+          lineId={row.bank_transaction_id}
+          effect={labelReferenceDebtorEffect({ amount, dateFr: frenchDate(row.booking_date) })}
+          idempotencyKey={randomUUID()}
+        />
+      ) : null}
+      {exits.includes("top_up") && top?.transfer_id ? (
+        <LabelTopUp
+          lineId={row.bank_transaction_id}
+          transferId={top.transfer_id}
+          effect={labelReferenceTopUpEffect({ amount, reference: row.reference_from_label ?? "" })}
+          idempotencyKey={randomUUID()}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 /** One line's actions: the payments and refunds the job found, those of the same amount on the account, explain. */
 function LineActions({
   row,
   options,
   cancellationAfterDownload = false,
   remitted = new Map(),
+  clients = [],
 }: {
   row: Row;
   options: Options | undefined;
   cancellationAfterDownload?: boolean;
   /** M2c-7a: per payment, its entries already remitted to the client */
   remitted?: Map<string, RemittedEntry[]>;
+  /** M2c-7e-3: the servicer's clients (« Client qui rembourse ») */
+  clients?: ClientChoice[];
 }) {
-  // M2c-7e-2 (plan §7.4): a credit held because its label cites one of our transfers takes no command in 7e-2 — every
-  // link is refused (label_reference_line), « Comptabiliser… », the relays and « Règlement du client » refuse its kind;
-  // its review says it waits
-  if (holdsLabelReference(row)) return null;
+  // M2c-7e-2 (plan §7.4): a credit held because its label cites one of our transfers — every link is refused
+  // (label_reference_line); M2c-7e-3: it takes only its exits
+  if (holdsLabelReference(row)) return <LabelReferenceActions row={row} clients={clients} />;
   const cur = row.currency;
   // the job's named payments, then those debit_link_options listed (one list with the queue's text: linkPayments)
   const payments = linkPayments(row.candidates, options?.payments);

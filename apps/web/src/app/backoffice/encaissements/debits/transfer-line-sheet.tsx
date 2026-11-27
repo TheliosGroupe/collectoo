@@ -32,17 +32,21 @@ export function BookTransferLine({
   lineId,
   currency,
   idempotencyKey,
+  labelReference = false,
 }: {
   lineId: string;
   currency: string;
   idempotencyKey: string;
+  /** M2c-7e-3 (plan §7.3 exit (a), §7.4): « Oui, c'est son retour » on a credit whose label cites our payout or sweep —
+   * the same sheet, its options class L (the cited transfer's return at exactly its amount, or the refusal) */
+  labelReference?: boolean;
 }) {
   return (
     <ConfirmSheet
-      label="Comptabiliser…"
-      title="Comptabiliser depuis le relevé"
+      label={labelReference ? "Oui, c'est son retour" : "Comptabiliser…"}
+      title={labelReference ? "Retour du virement cité" : "Comptabiliser depuis le relevé"}
       buttonClassName={secondaryClass}
-      testId="book-transfer-line"
+      testId={labelReference ? "label-reference-return" : "book-transfer-line"}
     >
       {(close) => <Sheet lineId={lineId} currency={currency} idempotencyKey={idempotencyKey} close={close} />}
     </ConfirmSheet>

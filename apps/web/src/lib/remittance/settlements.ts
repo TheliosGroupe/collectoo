@@ -503,6 +503,13 @@ export function clientPaymentRefusal(message: string, detail?: string | null, or
       return "Cette ligne porte la référence de l'un de nos virements : c'est ce virement qui revient.";
     case "ambiguous_client":
       return "Cet IBAN est le compte de reversement de plusieurs clients : prévenez le support.";
+    // M2c-7e-3 (plan §7.4, exit (b)): « Règlement du client » on a credit whose label cites one of our transfers
+    case "client_required":
+      return "Indiquez le client qui rembourse : le compte émetteur n'est pas un compte de reversement confirmé.";
+    case "client_mismatch":
+      return "Ce crédit vient du compte de reversement confirmé d'un autre client.";
+    case "client_unknown":
+      return "Ce client n'est pas un client du cabinet.";
     default:
       return "Le règlement n'a pas pu être enregistré. Rechargez la page et réessayez.";
   }

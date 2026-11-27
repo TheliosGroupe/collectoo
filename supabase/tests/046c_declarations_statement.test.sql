@@ -3222,12 +3222,15 @@ select is(pg_temp.iso('sf3'),
 -- until the measure is said: 'to_qualify'), not the estate's. Moreau (a9): an old row (effective d − 20) and a tutelle
 -- recorded later (effective d − 5, its tutor recorded), both before K, the old row qualified a curatelle after K → as at K
 -- the old row, still to qualify, governs the letters: addressed to nobody (as private.client_addressee then), the end
--- the tutelle's, the payouts suspended
+-- the tutelle's, the payouts suspended. (ADR-0014 « M2c-7e-3 review fixes » round 2) FC's collection d − 22, not
+-- d − 25: its line's latest execution date is the collection + 27 days and its run is approved today for the next
+-- business day, so d − 25 (latest d + 2) left FC's run a draft on a Friday (late_reason_required; no payout to debit);
+-- d − 22 (latest d + 5), still before the row's d − 20, holds whatever today's weekday or holidays
 create or replace function pg_temp.sf4() returns jsonb language plpgsql as $$
 declare d date := private.paris_today(); f uuid; v uuid; o uuid; o8 uuid; o9 uuid; e9 uuid; z0 uuid; z1 uuid; z8 uuid;
         z9 uuid; e uuid; m1 text; m2 text; p0 jsonb; p1 jsonb; p8 jsonb; p9 jsonb; q date;
 begin
-  f := pg_temp.inv_on('a4', '41', 200000, '410', d - 25);
+  f := pg_temp.inv_on('a4', '41', 200000, '410', d - 22);
   perform pg_temp.pending('a4', '43', 100000);
   v := pg_temp.request('a4', 'k046c-sf4');
   perform pg_temp.prepare_set(v, jsonb_build_array(pg_temp.st(f, 'compensation', 36000, 6000)));

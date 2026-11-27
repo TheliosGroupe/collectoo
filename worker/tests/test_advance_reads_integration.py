@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -34,8 +35,12 @@ import pytest
 from explain_helpers import ADMIN
 from integration_helpers import one
 from psycopg.types.json import Jsonb
+from test_debit_bookings_integration import _run_transfer
 from test_debit_bookings_scale_integration import _file_payouts
 from test_remitted_cover_reads_integration import _plant as _plant_lines
+from test_transfer_files_integration import _two_runs
+from test_transfer_line_foundations_integration import _booked
+from test_transfer_line_ops_integration import _book, _come_back, _debit_again, _options
 from test_transfer_line_scale_integration import REASON, _insert_short_line
 
 from collectoo_worker.jobs.remittances import (
@@ -525,4 +530,56 @@ def test_the_client_space_reads_its_client_s_advances_by_its_key(lot: dict[str, 
                            tenant["staff"], "select public.client_space_advances(%s)",
                            a0["client"])  # fmt: skip
         assert [r["advance_id"] for r in space["rows"]] == [a0["advance"]], space
+    reads.check()
+
+
+def test_an_unplanned_return_s_advance_rules_read_by_key_whatever_the_statistics(
+    tmp_path: Path,
+) -> None:
+    """(M2c-7e-3; ADR-0014 7b round 2 « Left open », « M2c-7c-1 » low 5) a double payout's
+    unplanned return through the real public.transfer_line_options and public.book_transfer_line,
+    under the planted statistics: transfer_line_check's advance rules (advance_settled,
+    advance_in_flight, advance_requested) and the booking read the double payout's advance by its
+    cause entry and its settlements by the document — a few rows, never the planted ones. Before
+    7e-3's fence, advance_settled read the whole commission_settlement_document_idx: 10,000 rows on
+    the preview, 20,000 on the booking (the advance joined to its settlements)."""
+    tenant, _other, r1, _r2 = _two_runs()
+    data, _paid = _booked(tenant, tmp_path)
+    x = _run_transfer(r1)
+    e2e, a = str(x["end_to_end_id"]), int(x["amount_minor"])
+    # the payout debited again: ops book it « Virement hors reversement » (P = 0, the servicer's
+    # advance A, cause double_payout); then that copy comes back (the bank's flagged return)
+    _sid, line = _debit_again(tenant, e2e, a)
+    (twice,) = [p for p in _options(tenant, line)["proposals"] if p["action"] == "unplanned_payout"]
+    _book(tenant, line, twice)
+    _sid2, back = _come_back(tenant, data, e2e)
+    ops = str(tenant["staff"])
+    only = ("client_advance", "commission_settlement")
+    with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
+        reads = _Reads(conn)
+        _plant(conn)
+        conn.execute("set local plan_cache_mode = force_generic_plan")
+        reads.start()
+        _as(conn, ops)
+        opts = one(conn, "select public.transfer_line_options(%s)", (back,))
+        conn.execute("reset role")
+        reads.stop("transfer_line_options (an unplanned return)", 1, only)
+        (ret,) = [p for p in opts["proposals"] if p["action"] == "returned"]
+        assert [p["kind"] for p in ret["request"]] == ["unplanned_payout_returned"], ret
+        reads.start()
+        _as(conn, ops)
+        res = one(
+            conn,
+            "select public.book_transfer_line(%s, %s, %s, %s, %s)",
+            (
+                str(uuid.uuid4()),
+                back,
+                Jsonb(ret["request"]),
+                ret["preview"]["expected_text"],
+                REASON,
+            ),
+        )
+        conn.execute("reset role")
+        reads.stop("book_transfer_line (an unplanned return)", 1, only)
+        assert [b["kind"] for b in res["bookings"]] == ["unplanned_payout_returned"], res
     reads.check()

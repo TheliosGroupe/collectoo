@@ -59,6 +59,7 @@ export type ErrorCode =
   | "own_transfer_out_line"
   | "label_reference_line"
   | "label_reference_top_up_line"
+  | "top_up_credit_not_cited"
   | "not_allowed"
   | "totals_mismatch"
   | "reason_required"
@@ -804,14 +805,17 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "Ce débit va vers un compte de reversement d'un client : il se comptabilise comme « Virement hors reversement » (ou comme le débit de son reversement en cours).",
   own_transfer_out_line:
     "Un virement vers notre compte propre se comptabilise (« Virement au compte propre »), il ne se classe pas sans comptabiliser.",
-  // M2c-7e-2 (plan §7.3 [check 3]): link_debit on a credit held because its CSV label cites one of our transfers —
-  // true of 7e-2, where no screen takes it yet (7e-3 brings its exits)
+  // M2c-7e-2 (plan §7.3 [check 3]): link_debit on a credit held because its CSV label cites one of our transfers;
+  // M2c-7e-3: its exits, the actions « À classer » offers on it
   label_reference_line:
-    "Le libellé cite l'un de nos virements : cette ligne ne se lie à aucun paiement et ne se classe pas sans comptabiliser. Elle attend d'être classée (retour de ce virement, règlement du client ou paiement d'un débiteur), ce que cet écran ne permet pas encore : prévenez le support.",
+    "Le libellé cite l'un de nos virements : cette ligne ne se lie à aucun paiement et ne se classe pas sans comptabiliser. Classez-la avec « Oui, c'est son retour », « Règlement du client » ou « Paiement d'un débiteur ».",
   // review round 3 (top-cited-line-lists-a-return-exit): the same refusal when the transfer cited is our top-up
-  // (label_reference_top_up_line) — a top-up has no return exit (plan §7.3); that top-up itself is founder Q15's question
+  // (label_reference_top_up_line) — a top-up has no return exit (plan §7.3); M2c-7e-3 (founder Q15's added question,
+  // default a): that top-up itself, with no sending account and at its amount
   label_reference_top_up_line:
-    "Le libellé cite l'un de nos approvisionnements : cette ligne ne se lie à aucun paiement et ne se classe pas sans comptabiliser. Elle attend d'être classée — règlement du client ou paiement d'un débiteur (ou, sans compte émetteur et du même montant, cet approvisionnement : question Q15) —, ce que cet écran ne permet pas encore : prévenez le support.",
+    "Le libellé cite l'un de nos approvisionnements : cette ligne ne se lie à aucun paiement et ne se classe pas sans comptabiliser. Classez-la avec « Règlement du client » ou « Paiement d'un débiteur » (ou, sans compte émetteur et du même montant, « C'est cet approvisionnement »).",
+  // M2c-7e-3 (the fourth exit): book_top_up_credit naming another TOP than the one the line's label cites
+  top_up_credit_not_cited: "Seul l'approvisionnement cité dans le libellé peut être rattaché à cette ligne.",
   unknown:
     "L'action a échoué. Réessayez ; si le problème persiste, contactez le support.",
 };

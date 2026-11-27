@@ -3124,7 +3124,7 @@ isOneToOne: false
 { Args: { "p_batch_id": string }; Returns: (string)[]
                            },
 "book_client_payment_line":
-{ Args: { "p_bank_transaction_id": string,"p_designation_document_id": string,"p_documents": (string)[],"p_expected_open_text": string,"p_idempotency_key": string,"p_reason": string,"p_recover_written_off": (string)[] }; Returns: Json
+{ Args: { "p_bank_transaction_id": string,"p_client_organization_id"?: string,"p_designation_document_id": string,"p_documents": (string)[],"p_expected_open_text": string,"p_idempotency_key": string,"p_reason": string,"p_recover_written_off": (string)[] }; Returns: Json
                            },
 "book_top_up_credit":
 { Args: { "p_bank_transaction_id": string,"p_idempotency_key": string,"p_reason": string,"p_transfer_id": string }; Returns: Json
@@ -3173,7 +3173,7 @@ isOneToOne: false
             }[]
                            },
 "client_payment_line":
-{ Args: { "p_bank_transaction_id": string,"p_documents"?: (string)[],"p_recover_written_off"?: (string)[] }; Returns: Json
+{ Args: { "p_bank_transaction_id": string,"p_client_organization_id"?: string,"p_documents"?: (string)[],"p_recover_written_off"?: (string)[] }; Returns: Json
                            },
 "client_payment_preview":
 { Args: { "p_amount_text": string,"p_client_organization_id": string,"p_currency": string,"p_documents": (string)[],"p_on"?: string,"p_recover_written_off": (string)[] }; Returns: Json

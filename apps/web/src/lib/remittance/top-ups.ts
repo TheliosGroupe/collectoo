@@ -273,6 +273,8 @@ export function topUpErrorCode(message: string): ErrorCode {
   if (message.includes("top-up credit refused: carries_top_up_id")) return "top_up_credit_carries_id";
   if (message.includes("top-up credit refused: top_up_not_open")) return "top_up_not_open";
   if (message.includes("top-up credit refused: amount_differs")) return "top_up_credit_amount";
+  // M2c-7e-3 (the fourth exit): another TOP than the one the line's label cites
+  if (message.includes("top-up credit refused: label_reference_transfer")) return "top_up_credit_not_cited";
   // review round 1 (MONEY-BANK-1): a credit of another own account than the top-up's (the command, or its re-check)
   if (
     message.includes("top-up credit refused: not_its_own_account") ||

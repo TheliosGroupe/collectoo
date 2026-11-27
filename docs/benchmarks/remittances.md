@@ -3312,3 +3312,179 @@ The E2E (`./scripts/e2e.sh`, after a fresh reset): **71 passed** in 7.3 min (`la
 3.4 s mobile).
 
 Every budget held.
+
+### M2c-7e-3: our references in CSV labels, the three exits (2026-11-26, same VM, the main stack alone, each run right after `supabase db reset`, the volume jobs with CI's logging settings)
+
+What 7e-3 puts on the timed paths (ADR-0014 « M2c-7e-3 »; the import is unchanged: nothing for
+`docs/benchmarks/payments.md`):
+- **The payouts' bookings** (the scale and scale-payouts jobs' funds passes and ops' « Comptabiliser… »):
+  `private.bank_line_booking_guard` (whole copy) reads, per booking, one more value of the line already read
+  (`label_cites`: only for a `label_reference` line, the booking's transfer by its key) and its counterparty IBAN;
+  `private.transfer_line_class`, `_pre`, `_check` and `_options_of` gain the class L (a `label_reference` credit: none in
+  the volume runs), and `_check`'s `advance_settled` reads the double payout's advance by its cause entry, then its
+  settlements by the document (fenced).
+- **The chain's events** (`remittance_chain_paid` and its readers, the nightly's booked branch): the third return
+  branch, which reads the transfer's `payout_returned` bookings by `bank_line_booking_transfer_idx`, compares one more
+  column of the line already read by key — measured equal to 7e-2's body under planted statistics.
+- **The debit job's re-check** (`private.bank_booking_recheck`, whole copy): its `top_up` rule reads a line's candidate
+  by key only for an ops booking on a `label_reference` line with no IBAN; its `_bb` build unchanged (`037`'s parity).
+- `release_own_credit`, its two guards, `client_line_facts`, `book_client_payment_line` and `book_top_up_credit`: one
+  command per line, never on a volume path.
+
+**Stale statistics** (`worker/tests/test_label_reference_exit_reads_integration.py`, the db job; each call bounded by
+the same call on the tables unplanted, plus 60): with 7e-2's tables planted (10,000 rows each, keys' `n_distinct` 2,
+generic plans), every call stayed within its bound: `book_transfer_line` read 59 `bank_transfer` rows (56 unplanted),
+`transfer_line_options` 17 (30), `book_top_up_credit` 14 `bank_transfer` and 15 `remittance_run` (13, 18),
+`release_own_credit` 61 `payment` rows (61: the payment guard's own reads, as before 7e-3), every other call under 32
+rows of any watched table; the nightly's booked branch read 6 `bank_transfer` and 44 `remittance_run` rows on this
+slice's events body and on 7e-2's alike (a run of the file alone; in the db job's sequence the file passed in 20.8 s).
+`test_advance_reads_integration.py`'s new test (a double payout's unplanned return under the planted statistics):
+`client_advance` 9 rows for the options and 9 for the booking, `commission_settlement` none (bound 72). The mutants: the
+pre's cited transfer unkeyed read 10,076 / 10,118 `bank_transfer` rows; `advance_settled` unfenced 10,022 / 10,020
+`commission_settlement` rows (bound 72).
+
+The db job as `ci.yml` runs it, after a fresh reset: `supabase test db` **54 files, 3,236 tests, PASS** (598 s;
+`047c` 20); the types unchanged after `supabase gen types` (the regenerated file committed); then, without a reset, the
+non-scale integration suite **318 passed** (1,013.1 s; the exits' reads test 20.8 s).
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset`
+with CI's logging settings: **15 passed** in 1,352.6 s (19:48–20:10 UTC; 7e-2 round 2: 1,706.3 s). No Paris date
+change fell in it.
+- `test_remittance_scale_integration.py` (50,000 lines): reserved in 1.11 s, prepared in **10.6 s** (load 3.44 s, price
+  4.66 s, write 2.32 s; 7e-2 round 2: 10.7 s); the approval job and documents 15.3 s; the nightly checks 4.1 s (the
+  draft waiting 3.5 s); the cancellation 3.61 s; the re-run prepared and approved in **28.0 s** (28.7 s), its payout
+  filed, downloaded, debited and booked in 0.8 s (its funds pass 0.3 s); the nightly checks with the run booked
+  **4.7 s** (5.0 s).
+- `test_transfer_line_scale_integration.py`: the 500-member lot short of one, rolled back: options 0.50 s, booking
+  **1.83 s** (499 bookings), no sequential scan of a per-member table; through the API 0.53 / 2.05 s, the allocation
+  lock held 1.81 s; the saturating lots 2.19 / 2.32 s and 2.20 / 2.43 s; 501 and 5,000 members refused
+  `lot_too_large`; the 50,000-item draft requeued: options 0.08 s, booking 0.17 s.
+- The 5,000-transfer file: refunds asked in 15.9 s, generation 2.95 s (command), job 0.82 s; the transfer
+  cancellation file: set-up 39.7 s, generation with the holds 2.94 s, its nightly checks 0.79 s.
+- The payments volume: 50,000 credits imported and matched in 39.8 s; 5,000 receipts in 66.2 s (13.2 ms each); the
+  50,000-line camt.053's import job 27.0 s (7.2 s again); the nightly checks over 50,000 payments 4.68 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** in 1,266.5 s (20:11–20:32 UTC;
+7e-2 round 2: 1,201.4 s). No Paris date change fell in it.
+- « Générer le fichier » for 5,000 payouts (+50 cancelled): **3.59 s** (3.58 s); « Virements » 1.71 s, the file's
+  first download **3.63 s** (3.55 s), under the API's 8 s; at 2,000 payouts 0.76 / 1.51 / 1.44 s; at 200 0.11 / 0.21 /
+  0.17 s.
+- The 200 members' batch line: its funds pass 0.52 s. The 5,000-member batch line: its funds pass **23.2 s** (24.9 s;
+  24.6 s under auto_explain); the nightly checks **1.09 s** (1.10 s); 5,000 RMT debits imported in 1.2 s, the debit job
+  **21.1 s** (chunks 8.4, 8.5 and 4.0 s; 21.8 s).
+- The 2,000 held chained runs: the funds pass 19.9 s (19.9 s) and the nightly checks **13.45 s** (13.40 s).
+
+The E2E (`./scripts/e2e.sh`, after a fresh reset): **73 passed** in 8.0 min (`label-references.spec.ts`: 9.3 and 4.3 s
+desktop, 9.1 and 4.1 s mobile).
+
+Every budget held.
+
+
+### M2c-7e-3 review fixes, round 1 (2026-11-26, same VM, the main stack alone, each run right after `supabase db reset`, the volume jobs with CI's logging settings)
+
+What round 1 puts on the timed paths (ADR-0014 « M2c-7e-3 review fixes », round 1; the import unchanged: nothing for
+`docs/benchmarks/payments.md`): `public.release_own_credit` gains `set enable_seqscan = off` (one command per line,
+never on a volume path); the rest is the web (« Débits et retours »' texts and labels, the statement's page reading
+each line's `bank_line_booking` kinds by its key, an embedded select of the page's 100 lines at most) and tests.
+
+**Stale statistics** (`worker/tests/test_label_reference_exit_reads_integration.py`, the db job): the test now also
+plants `client_payout_account` (10,000 rows, the servicer's and another's, two IBANs, `organization_id` and `iban`
+`n_distinct` 2) and watches it. Before the fix `release_own_credit` read **10,002** of its rows in one sequential scan
+(bound 62); after it none, and 10 `bank_transaction` rows (7 unplanted; 52 unplanted before the fix). Every other call
+within its bound as in 7e-3 (`book_transfer_line` 35 `bank_transfer` rows planted, 56 unplanted; `transfer_line_options`
+15 / 30; `book_top_up_credit` 14 / 13; the payout-account reads of `book_transfer_line`, `book_top_up_credit` and
+`transfer_line_options` 7, 6 and 2 rows, as unplanted); the nightly's booked branch 6 `bank_transfer` rows on either
+events body and 10 `remittance_run` rows (12 on 7e-2's).
+
+The db job as `ci.yml` runs it, after a fresh reset: `supabase test db` **54 files, 3,238 tests, PASS** (577 s; `047c`
+22, `033` unchanged); the types unchanged (`supabase gen types`: no diff); then, without a reset, the non-scale
+integration suite **318 passed** (1,022.9 s; the exits' reads test 22.2 s).
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset`
+with CI's logging settings: **15 passed** in 1,296.8 s (22:24–22:46 UTC; 7e-3: 1,352.6 s). No Paris date change fell
+in it.
+- `test_remittance_scale_integration.py` (50,000 lines): reserved in 1.13 s, prepared in **10.1 s** (load 3.35 s, price
+  4.47 s, write 2.04 s; 7e-3: 10.6 s); the approval job and documents 15.0 s; the nightly checks 4.1 s (the draft
+  waiting 3.6 s); the cancellation 3.62 s; the re-run prepared and approved in **27.8 s** (28.0 s), its payout filed,
+  downloaded, debited and booked in 0.8 s (its funds pass 0.3 s); the nightly checks with the run booked **4.7 s**
+  (4.7 s).
+- `test_transfer_line_scale_integration.py`: the 500-member lot short of one, rolled back: options 0.48 s, booking
+  **1.70 s** (499 bookings), no sequential scan of a per-member table; through the API 0.48 / 1.90 s, the allocation
+  lock held 1.67 s; the saturating lots 2.00 / 2.06 s and 2.16 / 2.15 s; 501 and 5,000 members refused
+  `lot_too_large`; the 50,000-item draft requeued: options 0.10 s, booking 0.21 s.
+- The 5,000-transfer file: refunds asked in 15.8 s, generation 2.40 s (command), job 0.80 s; the transfer
+  cancellation file: set-up 37.9 s, generation with the holds 2.81 s, its nightly checks 0.68 s.
+- The payments volume: 50,000 credits imported and matched in 39.0 s; 5,000 receipts in 63.2 s (12.6 ms each); the
+  50,000-line camt.053's import job 26.2 s (7.1 s again); the nightly checks over 50,000 payments 4.71 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** in 1,183.8 s (22:46–23:06 UTC;
+7e-3: 1,266.5 s). No Paris date change fell in it.
+- « Générer le fichier » for 5,000 payouts (+50 cancelled): **3.55 s** (3.59 s); « Virements » 1.73 s, the file's
+  first download **3.79 s** (3.63 s), under the API's 8 s; at 2,000 payouts 0.84 / 1.57 / 1.37 s; at 200 0.10 / 0.25 /
+  0.18 s.
+- The 200 members' batch line: its funds pass 0.52 s. The 5,000-member batch line: its funds pass **23.9 s** (23.2 s;
+  24.4 s under auto_explain); the nightly checks **1.18 s** (1.09 s); 5,000 RMT debits imported in 1.1 s, the debit job
+  **21.1 s** (chunks 8.4, 8.6 and 3.9 s; 21.1 s).
+- The 2,000 held chained runs: the funds pass 19.3 s (19.9 s) and the nightly checks **13.38 s** (13.45 s).
+
+The E2E (`./scripts/e2e.sh`, after a fresh reset): **73 passed** in 7.6 min (`label-references.spec.ts`: 9.0 and 4.2 s
+desktop, 9.1 and 4.2 s mobile; `statements.spec.ts` 7.1 s desktop, 7.8 s mobile, now waiting for the debit job's fee
+booking).
+
+Every budget held.
+
+### M2c-7e-3 review fixes, round 2 (2026-11-27, same VM, the main stack alone, each run right after `supabase db reset`, the volume jobs with CI's logging settings)
+
+What round 2 puts on the timed paths (ADR-0014 « M2c-7e-3 review fixes », round 2; the import unchanged: nothing for
+`docs/benchmarks/payments.md`): the returned payouts' accounts are set `returned` one by one by their key in
+`private.transfer_line_post` (ops' « Comptabiliser… » and exit (a)) and `private.bank_booking_post_rows` (every
+`private.post_bank_bookings` call: the debit job's funds pass, the fourth exit), in place of one update whose status
+filter let the planner read `client_payout_account_current_uq` whole; with no payout returned among the parts the loop
+does nothing. The web's « Libérer » text and two pgTAP fixtures' dates.
+
+**Stale statistics** (`worker/tests/test_label_reference_exit_reads_integration.py`, the db job): the plant gains 300
+current payout accounts of other servicers. Round 1's bodies on a fresh reset: `book_transfer_line` read **305**
+`client_payout_account` rows (bound 63; 95 in CI's order without the new plant, 323 re-run), `book_top_up_credit`
+**303**; round 2's: 2 and none. Every other call within its bound as in round 1.
+
+The db job as `ci.yml` runs it, after a fresh reset: `supabase test db` **54 files, 3,238 tests, PASS** (594 s; `033`
+unchanged, `043` and `046c` green on a Friday with their fixtures' dates moved); the types unchanged (`supabase gen
+types`: no diff); then, without a reset, the non-scale integration suite **318 passed** (1,182.5 s; the exits' reads
+test 24.4 s). The same sequence before the read fix: 317 passed, the exits' reads test failed (95 rows).
+
+The scale job's command as `ci.yml` runs it (its nine files; `RECEIPT_FILES=5000`), right after `supabase db reset`
+with CI's logging settings: **15 passed** in 1,328.7 s (01:18–01:40 UTC; round 1: 1,296.8 s). No Paris date change fell
+in it.
+- `test_remittance_scale_integration.py` (50,000 lines): reserved in 1.16 s, prepared in **11.4 s** (load 3.43 s, price
+  5.21 s, write 2.53 s; round 1: 10.1 s); the approval job and documents 15.8 s; the nightly checks 4.3 s (the draft
+  waiting 3.7 s); the cancellation 3.64 s; the re-run prepared and approved in **30.3 s** (27.8 s), its payout filed,
+  downloaded, debited and booked in 1.0 s (its funds pass 0.4 s); the nightly checks with the run booked **5.1 s**
+  (4.7 s).
+- `test_transfer_line_scale_integration.py`: the 500-member lot short of one, rolled back: options 0.50 s, booking
+  **1.68 s** (499 bookings), no sequential scan of a per-member table; through the API 0.48 / 1.93 s, the allocation
+  lock held 1.67 s; the saturating lots 2.04 / 2.15 s and 2.25 / 2.24 s; 501 and 5,000 members refused
+  `lot_too_large`; the 50,000-item draft requeued: options 0.07 s, booking 0.16 s.
+- The 5,000-transfer file: refunds asked in 15.6 s, generation 3.06 s (command), job 0.83 s; the transfer
+  cancellation file: set-up 39.5 s, generation with the holds 2.90 s, its nightly checks 0.67 s.
+- The payments volume: 50,000 credits imported and matched in 38.4 s; 5,000 receipts in 62.0 s (12.4 ms each); the
+  50,000-line camt.053's import job 27.6 s; the nightly checks over 50,000 payments 3.6 s.
+
+The `scale-payouts` job's command (`test_debit_bookings_scale_integration.py` then
+`test_breach_held_scale_integration.py`), after another fresh reset: **6 passed** in 1,251.7 s (01:41–02:02 UTC;
+round 1: 1,183.8 s). No Paris date change fell in it.
+- « Générer le fichier » for 5,000 payouts (+50 cancelled): **4.17 s** (3.55 s); « Virements » 1.71 s, the file's
+  first download **4.24 s** (3.79 s), under the API's 8 s; at 2,000 payouts 0.82 / 1.55 / 1.72 s; at 200 0.17 / 0.21 /
+  0.19 s.
+- The 200 members' batch line: its funds pass 0.51 s. The 5,000-member batch line: its funds pass **25.9 s** (23.9 s;
+  26.7 s under auto_explain), no `client_payout_account` row read; the nightly checks **1.14 s** (1.18 s); 5,000 RMT
+  debits imported in 3.1 s, the debit job **22.4 s** (chunks 9.0, 9.2 and 4.0 s; 21.1 s).
+- The 2,000 held chained runs: the funds pass 20.7 s (19.3 s) and the nightly checks **13.37 s** (13.38 s).
+The job took 6 % longer than round 1's on the same VM (the scale job 2 % longer); the changed loop reads only the
+working table here (no payout returned among these debits' parts), so the spread is most likely the VM's.
+
+The E2E (`./scripts/e2e.sh`, after a fresh reset): **73 passed** in 7.7 min (`label-references.spec.ts` 9.0 and 4.4 s
+mobile; `statements.spec.ts` 8.2 s mobile).
+
+Every budget held.

@@ -220,42 +220,100 @@ export const DEBIT_REVIEW: Record<string, string> = {
   client_payout_iban:
     "Débit vers le compte de reversement d'un client, sans référence du cabinet : virement hors reversement (ou débit d'un reversement en cours sans sa référence).",
   // M2c-7e-2 (plan §7.3, §7.4; [critic] M7-MONEY-6): the job's review of a credit held because its CSV label cites one
-  // of our transfers (« À classer » words it with the candidate and that transfer: labelReferenceText); in 7e-2 no
-  // command takes it — the line waits (its exits are 7e-3's)
+  // of our transfers (« À classer » words it with the candidate and that transfer: labelReferenceText); M2c-7e-3: ops
+  // classify it with one of its exits (labelReferenceExits), nothing is booked before
   label_reference:
-    "Le libellé cite l'un de nos virements : est-ce ce virement qui revient ? La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.",
+    "Le libellé cite l'un de nos virements : est-ce ce virement qui revient ? Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.",
 };
 
+/** M2c-7e-3: where ops classify such a line (its exits, labelReferenceExits). */
+export const LABEL_REFERENCE_WHERE = "Classez-la dans « Débits et retours », onglet « À classer ».";
+/** The same of a line citing our top-up, which has no return: worded without the page's « retours » (7e-2's pin). */
+export const LABEL_REFERENCE_WHERE_TOP_UP = "Classez-la dans l'onglet « À classer » des débits (Encaissements).";
 /**
- * M2c-7e-2 review round 1 (TUI-6): what « Contrôles » says of such a line waiting, true of 7e-2 — nothing booked until
- * it is classified, and no screen classifies it yet (7e-3 brings its three exits). Review round 3
- * (top-cited-line-lists-a-return-exit): of a line citing our payout (RMT) or our sweep (SWP), whose return is one of
- * its classes.
+ * M2c-7e-2 review round 1 (TUI-6): what « Contrôles » says of such a line waiting — nothing booked until it is
+ * classified. Review round 3 (top-cited-line-lists-a-return-exit): of a line citing our payout (RMT) or our sweep (SWP),
+ * whose return is one of its classes. M2c-7e-3: where to classify it (7e-2 said no screen did yet).
  */
-export const LABEL_REFERENCE_WAITING_TAIL =
-  "Rien n'est comptabilisé tant que la ligne n'est pas classée (retour de ce virement, règlement du client ou paiement d'un débiteur). Aucun écran ne permet encore de la classer : prévenez le support.";
+export const LABEL_REFERENCE_WAITING_TAIL = `Rien n'est comptabilisé tant que la ligne n'est pas classée : retour de ce virement, règlement du client ou paiement d'un débiteur. ${LABEL_REFERENCE_WHERE}`;
 /**
  * Review round 3 (top-cited-line-lists-a-return-exit): the same of a line citing our top-up (TOP) — a top-up has no
- * return exit (plan §7.3); the one other class it may be is that top-up itself, founder Q15's open question (7e-3).
+ * return exit (plan §7.3); M2c-7e-3 (founder Q15's added question, default a): that top-up itself, when the statement
+ * gives no sending account and the amount is its own (« C'est cet approvisionnement »).
  */
-export const LABEL_REFERENCE_WAITING_TOP_UP_TAIL =
-  "Rien n'est comptabilisé tant que la ligne n'est pas classée : règlement du client ou paiement d'un débiteur (ou, sans compte émetteur et du même montant, cet approvisionnement : question Q15). Aucun écran ne permet encore de la classer : prévenez le support.";
+export const LABEL_REFERENCE_WAITING_TOP_UP_TAIL = `Rien n'est comptabilisé tant que la ligne n'est pas classée : règlement du client ou paiement d'un débiteur (ou, sans compte émetteur et du même montant, cet approvisionnement). ${LABEL_REFERENCE_WHERE_TOP_UP}`;
 /** Review round 3: with no row read (its kind unknown), true of every kind. */
-export const LABEL_REFERENCE_WAITING_ANY_TAIL =
-  "Rien n'est comptabilisé tant que la ligne n'est pas classée : retour de ce virement (RMT ou SWP), règlement du client ou paiement d'un débiteur (ou, pour un TOP sans compte émetteur et du même montant, cet approvisionnement : question Q15). Aucun écran ne permet encore de la classer : prévenez le support.";
+export const LABEL_REFERENCE_WAITING_ANY_TAIL = `Rien n'est comptabilisé tant que la ligne n'est pas classée : retour de ce virement (RMT ou SWP), règlement du client ou paiement d'un débiteur (ou, pour un TOP sans compte émetteur et du même montant, cet approvisionnement). ${LABEL_REFERENCE_WHERE}`;
 
-/** M2c-7e-2 (plan §7.4): true of 7e-2 — no command takes such a line yet (7e-3 brings its three exits). */
+/** M2c-7e-2 (plan §7.4); M2c-7e-3: the line waits for one of its exits, offered below it on « À classer ». */
 export const LABEL_REFERENCE_WAITING_NOTE =
-  "La ligne reste en attente : ni paiement ni retour tant qu'elle n'est pas classée.";
+  "Rien n'est comptabilisé tant que la ligne n'est pas classée : choisissez ce qu'elle est.";
 
 /**
  * M2c-7e-2 (plan §7.3, S24): a credit held because its CSV label cites one of our transfers of its account (kind
  * `label_reference`, as read or a held line released so — debit_queue returns the kind it was released as). It is never
- * a payment nor a return by itself, and nothing on « Débits et retours » takes it in 7e-2: every link is refused
- * (`label_reference_line`), « Comptabiliser… », the relays and « Règlement du client » refuse its kind.
+ * a payment nor a return by itself: every link is refused (`label_reference_line`); M2c-7e-3: it leaves « À classer »
+ * only by one of its exits (labelReferenceExits), never by the other actions of the page.
  */
 export function holdsLabelReference(o: { direction: string; kind: string }): boolean {
   return o.direction === "credit" && o.kind === "label_reference";
+}
+
+/** M2c-7e-3 (plan §7.3, §7.4): the exits of such a line, in the order « À classer » offers them. */
+export type LabelReferenceExit = "return" | "client" | "debtor" | "top_up";
+export const LABEL_REFERENCE_EXIT_LABEL: Record<LabelReferenceExit, string> = {
+  return: "Oui, c'est son retour",
+  client: "Règlement du client",
+  debtor: "Paiement d'un débiteur",
+  top_up: "C'est cet approvisionnement",
+};
+
+/**
+ * M2c-7e-3 (plan §7.3, §7.4): which exits « À classer » offers on a credit held because its label cites one of our
+ * transfers — (a) « Oui, c'est son retour » when it cites our payout or our sweep (a top-up has no return exit; the
+ * sheet's options and the command refuse any other transfer or amount: label_reference_transfer,
+ * label_reference_amount); (b) « Règlement du client » and (c) « Paiement d'un débiteur » always; the fourth (founder
+ * Q15's added question, default a) « C'est cet approvisionnement » when it cites our top-up, still awaited (ordered or in
+ * a file), at exactly its amount, on a statement that gives no sending account (the command refuses every other case:
+ * not_an_own_credit, amount_differs, top_up_not_open). From the queue's own facts (`label_transfer`, by key).
+ */
+export function labelReferenceExits(o: {
+  direction: string;
+  kind: string;
+  amount_minor?: string | null;
+  counterparty_iban_end?: string | null;
+  label_transfer?: {
+    transfer_id?: string | null;
+    kind?: string | null;
+    status?: string | null;
+    amount_minor?: string | null;
+  } | null;
+}): LabelReferenceExit[] {
+  if (!holdsLabelReference(o)) return [];
+  const t = o.label_transfer;
+  const out: LabelReferenceExit[] = [];
+  if (t?.kind === "payout" || t?.kind === "sweep") out.push("return");
+  out.push("client", "debtor");
+  if (
+    t?.kind === "top_up" &&
+    t.transfer_id &&
+    !o.counterparty_iban_end &&
+    o.amount_minor != null &&
+    o.amount_minor === t.amount_minor &&
+    (t.status === "ordered" || t.status === "in_file")
+  )
+    out.push("top_up");
+  return out;
+}
+
+/** M2c-7e-3 (plan §7.4, exit (c)): what « Paiement d'un débiteur » does of such a line. */
+export function labelReferenceDebtorEffect(o: { amount: string; dateFr: string }): string {
+  return `Le crédit de ${o.amount} devient un paiement à affecter ; notre référence citée dans le libellé est ignorée. Il est comptabilisé sur le compte de fonds de tiers au ${o.dateFr} (date de la ligne) et attend dans « Paiements à traiter » d'être affecté au dossier du débiteur ; son payeur est le titulaire du compte qui l'a envoyé (« Versement relayé par le client » s'il vient du compte de reversement confirmé d'un client). Le motif est conservé : indiquez ce qui montre que c'est le paiement d'un débiteur.`;
+}
+
+/** M2c-7e-3 (the fourth exit): what « C'est cet approvisionnement » does of such a line. */
+export function labelReferenceTopUpEffect(o: { amount: string; reference: string }): string {
+  return `Le crédit de ${o.amount} sera comptabilisé comme l'approvisionnement ${o.reference} du compte dédié par le cabinet, venu du compte propre : Collectoo ne l'attend plus. À ne choisir que si ce crédit est bien cet approvisionnement (son libellé le cite, le relevé ne donne pas le compte émetteur).`;
 }
 
 /** A transfer of ours as « À classer » names it (its kind's words; a payout with its run's number). */
@@ -266,11 +324,11 @@ function citedTransfer(t: { kind?: string | null; run_number?: string | null }):
 }
 
 /**
- * M2c-7e-2 review round 1 (MB-3, TUI-1): what ops do, in 7e-2, with a credit that may be our own top-up held because its
- * label cites it on a statement giving no sending account — no command takes it yet (founder Q15: 7e-3's exits).
+ * M2c-7e-2 review round 1 (MB-3, TUI-1): what ops do with a credit that may be our own top-up held because its label
+ * cites it on a statement giving no sending account; M2c-7e-3 (founder Q15's added question, default a): its exit.
  */
 export const LABEL_REFERENCE_TOP_UP_SUPPORT =
-  "S'il s'agit de cet approvisionnement, prévenez le support : Collectoo l'attend encore et ne le comptabilise pas sur cette ligne.";
+  "S'il s'agit de cet approvisionnement, choisissez « C'est cet approvisionnement » : Collectoo l'attend encore.";
 /**
  * Review round 2 (top-text-ignores-status): the same case when the top-up cited was cancelled (« Annuler »,
  * public.cancel_top_up — also out of a downloaded own-account file, whatever the switch): it is no longer awaited
@@ -783,6 +841,8 @@ export function debitReviewText(
     bookable_as?: string | null;
     reference_from_label?: string | null;
     label_transfer?: Parameters<typeof labelReferenceText>[0]["label_transfer"];
+    /** « Traités »: what the line became (public.debit_queue's decision; null while it waits) */
+    decision?: string | null;
   },
   linkOptions?: {
     return_guard?: string | null;
@@ -791,8 +851,11 @@ export function debitReviewText(
   } | null,
 ): string | null {
   // M2c-7e-2: a credit held because its label cites one of our transfers — what it cites and that it waits (the job's
-  // review or not: read so before the job's pass, or released from « Doublons possibles »)
-  if (holdsLabelReference(o)) return labelReferenceText(o);
+  // review or not: read so before the job's pass, or released from « Doublons possibles »). M2c-7e-3 review round 1
+  // (TUI-1): only while it waits — once it has left by one of its exits (« Traités », its decision shown beside it) it
+  // no longer waits, and the top-up it was booked as is that top-up. Assembly (round 1's verifier, TUI-1 regression): a
+  // copy released from « Doublons possibles » (decision 'released', nothing booked) still waits in « À classer »
+  if (holdsLabelReference(o)) return o.decision && o.decision !== "released" ? null : labelReferenceText(o);
   // review 6b-2c round 3: a reference-less debit whose only candidates are payouts returned, or cancelled with their run
   // ended (iii; a cancelled payout whose run is still approved or sent may be that run's payout: still « en cours »)
   const cands = o.candidates ?? [];
@@ -894,6 +957,9 @@ function reviewReasonText(direction: string, reason: string): string {
 }
 
 /** The button and sheet title of a relayed debtor payment, by who relays it. */
+/** M2c-7e-3 (plan §7.3 exit (c)): a debtor's payment citing our reference, released by ops (« Traités »). */
+export const LABEL_REFERENCE_DEBTOR_NOTE = "Paiement d'un débiteur citant notre référence (vérifié par l'équipe)";
+
 export const RELAY_LABEL = {
   servicer: "Paiement d'un débiteur relayé par le cabinet",
   client: "Paiement d'un débiteur relayé par le client",
@@ -914,15 +980,30 @@ export const DECISION_LABEL: Record<string, string> = {
   unplanned_payout_returned: "Virement hors reversement revenu",
   unplanned_sweep_returned: "Virement au compte propre revenu",
   fee: LINK_KIND.fee,
+  // M2c-7e-3 review round 1 (TUI-2): « Règlement du client » (M2c-7c-1's client_transfer_in lines and 7e-3's exit (b))
+  client_payment: "Règlement du client (facture ou avance du cabinet)",
 };
 
 /**
+ * M2c-7e-3 review round 1 (TUI-2): the kind a decided line is worded by — a held duplicate released is the kind it was
+ * released as (public.debit_queue's `held_kind`: private.held_line_kind, the reading resolve_duplicate releases it as),
+ * so a debtor's payment released from a copy citing our reference is never « relayé par le cabinet », nor a client's
+ * relayed one; any other line its own kind.
+ */
+export function decidedLineKind(o: { kind: string; held_kind?: string | null }): string {
+  return o.kind === "suspected_duplicate" && o.held_kind ? o.held_kind : o.kind;
+}
+
+/**
  * What a decided line became, in French: a relayed payment says who relayed it (review M2c-2); a line booked in
- * several parts says each (« Débit d'un reversement + Frais bancaires … », M2c-6b-2b).
+ * several parts says each (« Débit d'un reversement + Frais bancaires … », M2c-6b-2b). `kind` is the line's as decided
+ * (decidedLineKind).
  */
 export function decisionLabel(decision: string, kind: string): string {
   if (decision === "relayed_payment" && kind === "client_transfer_in")
     return RELAY_LABEL.client;
+  // M2c-7e-3 (plan §7.3 exit (c)): the payment's note, as release_own_credit returns it
+  if (decision === "relayed_payment" && kind === "label_reference") return LABEL_REFERENCE_DEBTOR_NOTE;
   return decision
     .split("+")
     .map((d) => DECISION_LABEL[d] ?? LINK_KIND[d] ?? d)
@@ -1115,6 +1196,16 @@ export function releaseEffect(o: {
   direction: string;
   heldKind: string | null;
   amount: string;
+  /** M2c-7e-3 review round 1 (MB-1): a held copy citing our reference, the kind of the transfer its label cites
+   * (public.debit_queue's `label_transfer.kind`; null: none read) */
+  labelTransferKind?: string | null;
+  /** Review round 2 (liberer-top-up-exit-not-open): that transfer's status (`label_transfer.status`; null: none read) —
+   * « C'est cet approvisionnement » exists only for a top-up still awaited (labelReferenceExits) */
+  labelTransferStatus?: string | null;
+  /** Assembly (round 2's verifier, liberer-payout-copy-amount-not-hedged): the copy's amount and that transfer's, in minor
+   * units — the return exit books exactly the transfer's amount (label_reference_amount) */
+  amountMinor?: string | null;
+  labelTransferAmountMinor?: string | null;
 }): string {
   const payment = `La ligne deviendra un paiement reçu de ${o.amount} : comptabilisé sur le compte de fonds de tiers à la date du relevé, puis rapproché d'un dossier.`;
   const debits =
@@ -1132,13 +1223,79 @@ export function releaseEffect(o: {
     case "client_transfer_in":
     case "transfer_out":
       return "La ligne sera classée dans « À classer » avec les virements du cabinet : aucun paiement n'est créé.";
-    // M2c-7e-2: a held credit whose label cites one of our transfers stays held, released or not
-    case "label_reference":
-      return "La ligne sera listée dans « À classer » : son libellé cite l'un de nos virements. Aucun paiement n'est créé ; elle attend d'être classée.";
+    // M2c-7e-2: a held credit whose label cites one of our transfers stays held, released or not; M2c-7e-3 review
+    // round 1 (MB-1): its exits by the transfer cited — a top-up has no return (labelReferenceExits), and its own
+    // credit (no sending account, its amount) is « C'est cet approvisionnement »; none read, what holds of every kind.
+    // Review round 2 (liberer-top-up-exit-not-open): by that transfer's status too, as labelReferenceExits offers the
+    // exits and labelReferenceText words them — the fourth exit only for a top-up still awaited (ordered or in a file;
+    // book_top_up_credit refuses any other: top_up_not_open); a booked or a cancelled top-up's copy says why it is not
+    // that top-up; a payout's or a sweep's copy whose transfer is not booked (not yet debited, returned, cancelled) says
+    // when its return can be booked (book_transfer_line: return_before_debit, already_returned, transfer_cancelled —
+    // unless a second debit of it is open, whose return the sheet then offers)
+    case "label_reference": {
+      const s = o.labelTransferStatus ?? null;
+      if (o.labelTransferKind === "top_up") {
+        const cites = "La ligne sera listée dans « À classer » : son libellé cite notre approvisionnement";
+        const classes = "Aucun paiement n'est créé ; classez-la ensuite (règlement du client ou paiement d'un débiteur";
+        if (s === "ordered" || s === "in_file")
+          return `${cites}. ${classes}, ou, sans compte émetteur et du même montant, « C'est cet approvisionnement »).`;
+        if (s === "booked") return `${cites}, mais ${LABEL_REFERENCE_TOP_UP_BOOKED} ${classes}).`;
+        if (s === "cancelled")
+          return `${cites}, mais ${LABEL_REFERENCE_TOP_UP_CANCELLED} ${classes}). ${LABEL_REFERENCE_TOP_UP_CANCELLED_SUPPORT}`;
+        return `${cites}. ${classes}). ${LABEL_REFERENCE_TOP_UP_SUPPORT_PLAIN}`;
+      }
+      if (
+        (o.labelTransferKind === "payout" || o.labelTransferKind === "sweep") &&
+        o.amountMinor != null &&
+        o.labelTransferAmountMinor != null &&
+        o.amountMinor !== o.labelTransferAmountMinor
+      )
+        // its amount is not that transfer's: the return exit cannot book it (label_reference_amount)
+        return "La ligne sera listée dans « À classer » : son libellé cite l'un de nos virements, mais son montant n'est pas celui de ce virement : elle ne pourra pas être comptabilisée comme son retour. Aucun paiement n'est créé ; classez-la ensuite (règlement du client ou paiement d'un débiteur).";
+      if (o.labelTransferKind === "payout" || o.labelTransferKind === "sweep")
+        return s === null || s === "booked"
+          ? "La ligne sera listée dans « À classer » : son libellé cite l'un de nos virements. Aucun paiement n'est créé ; classez-la ensuite (retour de ce virement, règlement du client ou paiement d'un débiteur)."
+          : "La ligne sera listée dans « À classer » : son libellé cite l'un de nos virements. Aucun paiement n'est créé ; classez-la ensuite (retour de ce virement si son débit est comptabilisé et n'est pas déjà revenu, règlement du client ou paiement d'un débiteur).";
+      return "La ligne sera listée dans « À classer » : son libellé cite l'un de nos virements. Aucun paiement n'est créé ; classez-la ensuite (retour de ce virement s'il s'agit d'un reversement ou d'une quote-part, règlement du client ou paiement d'un débiteur, ou, pour un approvisionnement sans compte émetteur et du même montant, « C'est cet approvisionnement »).";
+    }
   }
   return o.direction === "credit"
     ? `La ligne reprendra la lecture faite à l'import. Lue comme un paiement du débiteur, elle deviendra un paiement reçu de ${o.amount}, comptabilisé sur le compte de fonds de tiers à la date du relevé puis rapproché d'un dossier ; lue comme un retour (libellé « RETOUR … »), elle sera traitée avec les débits et retours, sans paiement.`
     : "La ligne sera classée comme un débit à traiter (retour, remboursement ou frais).";
+}
+
+/**
+ * What a held line was read as: the queue's `held_kind` when it returns one, or its `kind` when the « Doublons » tab
+ * returns the reading in place of `suspected_duplicate`; otherwise unknown (null), and the « Libérer » sheet says both
+ * outcomes (review M2b-6).
+ */
+export function heldLineKind(r: { kind: string; held_kind?: string | null }): string | null {
+  if (r.held_kind) return r.held_kind;
+  return r.kind !== "suspected_duplicate" ? r.kind : null;
+}
+
+/**
+ * « Libérer »'s text of a « Doublons » row as public.debit_queue('doublons') returns it (the page's mapping). Review
+ * M2c-7e-3 round 2 (liberer-top-up-exit-not-open): a copy citing our reference is worded by the kind and the status of
+ * the transfer its label cites (`label_transfer`), so it names only the exits the released line will offer.
+ */
+export function heldReleaseEffect(r: {
+  direction: string;
+  kind: string;
+  held_kind?: string | null;
+  amount_minor: string;
+  currency: string;
+  label_transfer?: { kind?: string | null; status?: string | null; amount_minor?: string | null } | null;
+}): string {
+  return releaseEffect({
+    direction: r.direction,
+    heldKind: heldLineKind(r),
+    amount: money(r.amount_minor, r.currency),
+    labelTransferKind: r.label_transfer?.kind ?? null,
+    labelTransferStatus: r.label_transfer?.status ?? null,
+    amountMinor: r.amount_minor,
+    labelTransferAmountMinor: r.label_transfer?.amount_minor ?? null,
+  });
 }
 
 /** Codes of the nightly checks (payment_check_result.code), in French. */
