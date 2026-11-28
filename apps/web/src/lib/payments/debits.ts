@@ -1320,10 +1320,11 @@ export const CHECK_LABEL: Record<string, { label: string; help: string }> = {
     label: "Somme due à un client en débit",
     help: "Ce qui est dû à un client serait négatif : l'argent d'un autre client ou du cabinet l'aurait couvert (I13).",
   },
-  // M2c-1 review: the servicer owes the dedicated account (fees, losses) beyond the top-ups ordered (design §15)
+  // M2c-1 review: the servicer owes the dedicated account (fees, losses) beyond the top-ups ordered (design §15);
+  // M2c-7f-1 (H2): the amount is the hourly order's (private.top_up_needed), the quotes-parts in flight counted
   servicer_shortfall: {
     label: "Approvisionnement du compte dédié à demander",
-    help: "Le cabinet doit de l'argent au compte dédié (avances, frais bancaires, pertes) au-delà des approvisionnements demandés. Collectoo commande un approvisionnement chaque heure (référence TOP…, page Virements) : exécutez-le depuis le compte propre, à la main ou par le fichier.",
+    help: "Le cabinet doit de l'argent au compte dédié (avances, frais bancaires, pertes), en comptant ses quotes-parts en cours de virement vers le compte propre, au-delà des approvisionnements demandés. Collectoo commande un approvisionnement chaque heure (référence TOP…, page Virements) : exécutez-le depuis le compte propre, à la main ou par le fichier.",
   },
   // M2c-7e-1 (plan §7.1, §7.4)
   // (review round 1, TUI-1: « choisi » — an own account may exist and not be the one of « Facturation »)
@@ -1865,7 +1866,7 @@ export function checkOldestDays(n: number): string {
 /** M2c-7e-1 review round 1 (TUI-1): servicer_shortfall when no own account is chosen (the same run's
  *  top_up_account_missing): the hourly job orders nothing then. */
 const SERVICER_SHORTFALL_NO_OWN_ACCOUNT =
-  "Le cabinet doit de l'argent au compte dédié (avances, frais bancaires, pertes) au-delà des approvisionnements demandés. Aucun compte propre n'est choisi (Paramètres › Facturation) : Collectoo ne peut pas le commander. Approvisionnez le compte dédié à la main depuis le compte propre, ou choisissez le compte propre.";
+  "Le cabinet doit de l'argent au compte dédié (avances, frais bancaires, pertes), en comptant ses quotes-parts en cours de virement vers le compte propre, au-delà des approvisionnements demandés. Aucun compte propre n'est choisi (Paramètres › Facturation) : Collectoo ne peut pas le commander. Approvisionnez le compte dédié à la main depuis le compte propre, ou choisissez le compte propre.";
 
 export function checkLabel(
   code: string,

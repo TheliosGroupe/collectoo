@@ -47,6 +47,7 @@ unseen by the analyse, organization_id in the heap's order), and bounds the whol
 from __future__ import annotations
 
 import hashlib
+import struct
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -523,6 +524,22 @@ def test_the_label_reference_reads_stay_keyed_whatever_the_statistics(held: dict
 OWN = 2_000
 
 
+def _float4(x: float) -> float:
+    return float(struct.unpack("f", struct.pack("f", x))[0])
+
+
+def _sum_to_one_in_float4(freqs: list[float]) -> list[float]:
+    """(M2c-7f-1, T1: ADR-0014 « M2c-7e-2 — CI round (PR #50) », Left open) the frequencies as pg_statistic stores
+    them (real[]), the largest raised until their sum is at least 1: summed just below 1 in float4, the servicer —
+    absent from them — got a positive estimate and the plan did not flip (3 of 6 random analyses)."""
+    out = [_float4(f) for f in freqs]
+    while sum(out) < 1.0:
+        k = out.index(max(out))
+        bits = struct.unpack("I", struct.pack("f", out[k]))[0]
+        out[k] = float(struct.unpack("f", struct.pack("I", bits + 1))[0])
+    return out
+
+
 def _servicer_unseen(conn: psycopg.Connection[Any], org: str) -> None:
     """bank_transaction's statistics as CI's scale order left them when the nightly read the label lines by the
     servicer's single-column index (run 45872245527): organization_id's most common values cover every line the analyse
@@ -558,7 +575,7 @@ def _servicer_unseen(conn: psycopg.Connection[Any], org: str) -> None:
             ]
             assert sum(freqs) > 0, (mcv, freqs)
             sets += [f"stanumbers{k} = %s::real[]", "stadistinct = %s"]
-            params += [[f / sum(freqs) for f in freqs], float(len(mcv))]
+            params += [_sum_to_one_in_float4([f / sum(freqs) for f in freqs]), float(len(mcv))]
         elif kind == 3:
             sets.append(f"stanumbers{k} = '{{1}}'::real[]")
     conn.execute(
@@ -617,10 +634,20 @@ def test_the_nightly_reads_the_label_lines_by_their_index_whatever_the_correlati
             conn, "select count(*) from public.bank_transaction where organization_id = %s", (org,)
         )
         assert own == OWN + len(lines), own
+        # (M2c-7f-1, T1) never a vacuous pass: the plant took — the planner sees no line of the servicer
+        plan = one(
+            conn,
+            f"explain (format json) select 1 from public.bank_transaction where organization_id = '{org}'",  # noqa: S608
+        )
+        assert plan[0]["Plan"]["Plan Rows"] <= 1, plan
         for label, setup in (("7e-1", _body_before_7e2()), ("7e-2", None)):
             with conn.transaction(force_rollback=True):
                 if setup is not None:
                     conn.execute(setup)
+                # (M2c-7f-1, T2: ADR-0014 « M2c-7e-2 — CI round (PR #50) », Left open) an untimed run first, so
+                # that both arms are measured on the same caches and dead entries
+                with conn.transaction(force_rollback=True):
+                    conn.execute("select private.run_payment_checks(%s)", (org,))
                 b0 = _rows(conn)
                 conn.execute("select private.run_payment_checks(%s)", (org,))
                 b1 = _rows(conn)

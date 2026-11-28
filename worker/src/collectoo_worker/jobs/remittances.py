@@ -389,21 +389,11 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
     # puts a remitted reversal's cover on that mandate, any other advance's on none (review round
     # 1). Review round 2 (SWEEP-7B-STATS): each item's advance by its entry in a fenced lateral
     # probe — as a join, a generic plan under stale statistics of the queue hashed the whole table
+    # M2c-7f-1 (H20): the same rows by key in SQL (private.draft_pending_items: the draft's items by
+    # its key, each one's entries, payment and advance in fenced laterals) — as this statement, the
+    # queue was read whole under the 7b round 2 plant
     raw = conn.execute(
-        """select q.ledger_entry_id, q.kind, q.amount_minor, q.posted_at, e.effective_date,
-                  coalesce(e.account_id, p.account_id), coalesce(e.payment_id, oe.payment_id),
-                  private.encaissement_date(p.booking_date, p.value_date), e.reverses_entry_id,
-                  ca.mandate_id, ca.cause
-           from private.remittance_pending q
-           join public.ledger_entry e on e.id = q.ledger_entry_id
-           left join public.ledger_entry oe on oe.id = e.reverses_entry_id
-           left join public.payment p on p.id = coalesce(e.payment_id, oe.payment_id)
-           left join lateral (select a.mandate_id, a.cause from public.client_advance a
-                              where a.entry_id = case q.kind
-                                when 'client_advance' then e.id
-                                when 'client_advance_reversal' then e.reverses_entry_id end
-                              offset 0) ca on true
-           where q.draft_run_id = %s""",
+        "select * from private.draft_pending_items(%s)",
         (run,),
     ).fetchall()
     # M2c-7b (plan §4.2): the client's open advances, the claw-back's documents
@@ -521,11 +511,9 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         | {a.mandate_id for a in advances if a.mandate_id}
     )
     terms: dict[str, list[Terms]] = defaultdict(list)
+    # (M2c-7f-1, H20) each mandate's terms by its key (private.mandates_terms), in their order
     for t in conn.execute(
-        """select id, mandate_id, valid_from, valid_to, remittance_max_days, commission_schedule,
-                  remittance_terms, commission_clause_ref, remittance_clause_ref
-           from public.mandate_terms where mandate_id = any(%s::uuid[]) order by valid_from""",
-        (mandates,),
+        "select * from private.mandates_terms(%s::uuid[])", (mandates,)
     ).fetchall():
         terms[str(t[1])].append(
             Terms(str(t[0]), str(t[1]), t[2], t[3], int(t[4]), t[5], t[6], t[7], t[8])

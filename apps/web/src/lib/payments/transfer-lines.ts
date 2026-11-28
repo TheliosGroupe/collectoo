@@ -512,9 +512,11 @@ export function membersMore(o: { members: unknown[] | null; member_count: number
 const STATED_CHARGES = "frais indiqués par le relevé";
 const UNSTATED_CHARGES =
   "Le relevé n'indique pas de frais pour cette ligne : l'écart n'est pas justifié par le relevé. Vérifiez dans la banque avant de comptabiliser.";
-// M2c-7b (plan §4.3): how the advance is recovered, now that it is (the claw-back; 7c the request)
-const NOT_YET_RECOVERED =
-  "reprise sur les prochains reversements du client si elle est rattachée à un seul mandat qui a une clause de reprise (jamais si elle est antérieure à l'ouverture d'une procédure collective du client), sinon à récupérer (page « Avances »)";
+// M2c-7b (plan §4.3): how the advance is recovered, now that it is (the claw-back; 7c the request); M2c-7f-1 (H23):
+// since 7d-2 none is taken back while a bar stands (a proceeding or a liquidation, the mandate's end, a seizure:
+// private.client_set_off_barred), whatever the advance's birth
+export const NOT_YET_RECOVERED =
+  "reprise sur les prochains reversements du client si elle est rattachée à un seul mandat qui a une clause de reprise (jamais tant qu'une procédure collective ou une liquidation du client est ouverte, après la fin de son mandat ou sous une saisie), sinon à récupérer (page « Avances »)";
 const REFERENCE_LESS =
   "Cette ligne ne porte pas notre référence : seul ce virement du cabinet (en cours, ou annulé que la banque a pu exécuter) a ce montant vers ce compte. Vérifiez dans la banque avant de comptabiliser.";
 

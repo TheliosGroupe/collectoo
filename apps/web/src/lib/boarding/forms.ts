@@ -135,6 +135,7 @@ export type ErrorCode =
   | "transfers_in_flight"
   | "top_up_accounts"
   | "top_up_not_pending"
+  | "funds_busy"
   // M2c-7e-1 (plan §7.2, §7.4): the own account's top-up file, « Rattacher à TOP… »
   | "top_up_file_not_own"
   | "top_up_file_not_eur"
@@ -499,6 +500,7 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
     "L'approvisionnement part d'un compte propre actif vers le compte de fonds de tiers actif de la même devise.",
   // M2c-7e-1 (plan §7.2): an order, or a top-up in a file of the own account, can be cancelled; nothing else
   top_up_not_pending: "Cet approvisionnement n'est plus en attente (comptabilisé ou annulé).",
+  funds_busy: "Une opération est en cours sur les fonds du cabinet : réessayez dans quelques secondes.",
   top_up_file_not_own: "Ce compte n'est pas un compte propre actif du cabinet.",
   top_up_file_not_eur: "Seuls les virements en euros sont pris en charge.",
   top_up_nothing_to_file: "Aucun approvisionnement à mettre dans un fichier.",

@@ -251,7 +251,7 @@ describe("the effect sentences of « Virement hors reversement », worded from P
   it("0 < P < A: the rest is the servicer's advance, and why by the bound", () => {
     const items = unplanned({ paid_minor: "120000", advance_minor: "44000", p_bound: "items" });
     expect(items).toContain(
-      `${money("120000", EUR)} déjà reçus par MARTIN SAS seront déduits de son prochain reversement (sommes du reversement RV-2026-000012 annulé, encore à reverser) ; avance du cabinet de ${money("44000", EUR)} pour le reste (le reste dépasse ce qui reste dû au client sur ces sommes), reprise sur les prochains reversements du client si elle est rattachée à un seul mandat qui a une clause de reprise (jamais si elle est antérieure à l'ouverture d'une procédure collective du client), sinon à récupérer (page « Avances »).`,
+      `${money("120000", EUR)} déjà reçus par MARTIN SAS seront déduits de son prochain reversement (sommes du reversement RV-2026-000012 annulé, encore à reverser) ; avance du cabinet de ${money("44000", EUR)} pour le reste (le reste dépasse ce qui reste dû au client sur ces sommes), reprise sur les prochains reversements du client si elle est rattachée à un seul mandat qui a une clause de reprise (jamais tant qu'une procédure collective ou une liquidation du client est ouverte, après la fin de son mandat ou sous une saisie), sinon à récupérer (page « Avances »).`,
     );
     const queue = unplanned({ paid_minor: "120000", advance_minor: "44000", p_bound: "queue" });
     expect(queue).toContain(
@@ -262,7 +262,7 @@ describe("the effect sentences of « Virement hors reversement », worded from P
   it("P = 0: nothing deducted, all of it an advance", () => {
     const text = unplanned({ paid_minor: "0", advance_minor: "164000", p_bound: "none" });
     expect(text).toContain(
-      `Rien n'est déduit du prochain reversement de MARTIN SAS ; avance du cabinet de ${money("164000", EUR)} : ce virement n'est rattaché à aucune somme en attente de ce client, reprise sur les prochains reversements du client si elle est rattachée à un seul mandat qui a une clause de reprise (jamais si elle est antérieure à l'ouverture d'une procédure collective du client), sinon à récupérer (page « Avances »).`,
+      `Rien n'est déduit du prochain reversement de MARTIN SAS ; avance du cabinet de ${money("164000", EUR)} : ce virement n'est rattaché à aucune somme en attente de ce client, reprise sur les prochains reversements du client si elle est rattachée à un seul mandat qui a une clause de reprise (jamais tant qu'une procédure collective ou une liquidation du client est ouverte, après la fin de son mandat ou sous une saisie), sinon à récupérer (page « Avances »).`,
     );
   });
   it("the intro names the client and the mechanism, never a legal qualification", () => {

@@ -1,5 +1,6 @@
 import { money } from "@/lib/payments/statements";
 import { type AdvanceCause, requestLabel } from "./advances";
+import { frenchDate } from "./runs";
 import type { OpenAdvance } from "./settlements";
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -103,12 +104,53 @@ export function requestSheetEffect(totalMinor: string, currency: string): string
   return `Une demande de remboursement de ${money(totalMinor, currency)} est adressée au client. La lettre est déposée dans l'espace du client ; imprimez-la pour un envoi postal.`;
 }
 
+/** (M2c-7f-1, H13) an advance of a withdrawn request still open, and the other requests that still name it. */
+export type WithdrawnAdvance = {
+  advance_id: string;
+  born_on: string;
+  open_minor: string;
+  currency: string;
+  still_requested_by: string[];
+};
+
+function advancesNamed(list: readonly WithdrawnAdvance[]): string {
+  const one = (a: WithdrawnAdvance) => `le ${frenchDate(a.born_on)} (${money(a.open_minor, a.currency)})`;
+  if (list.length === 1) return `l'avance née ${one(list[0])}`;
+  const all = list.map(one);
+  return `les avances nées ${all.slice(0, -1).join(", ")} et ${all[all.length - 1]}`;
+}
+
+function capital(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 /**
  * « Retirer la demande »'s effect, once done: (review round 1, UI-1) the other requests not withdrawn that still name
  * one of its advances (public.withdraw_advance_repayment_request's `still_requested_by` — a reminder withdrawn leaves
- * the first request) keep them requested.
+ * the first request) keep them requested. M2c-7f-1 (H13; round 1's verifier): worded per advance from the command's
+ * `advances` — each one still requested names its requests, the others may be taken back or requested anew; the
+ * request-level sentence only for a result without them.
  */
-export function withdrawEffect(number: string, stillRequestedBy: readonly string[] = []): string {
+export function withdrawEffect(
+  number: string,
+  stillRequestedBy: readonly string[] = [],
+  advances: readonly WithdrawnAdvance[] = [],
+): string {
+  if (advances.length > 0) {
+    const kept = advances.filter((a) => a.still_requested_by.length > 0);
+    const freed = advances.filter((a) => a.still_requested_by.length === 0);
+    const free = freed.length === 1 ? "pourra être reprise ou demandée de nouveau" : "pourront être reprises ou demandées de nouveau";
+    if (kept.length === 0) return `La demande ${number} est retirée : ${advancesNamed(freed)} ${free}.`;
+    const sentences = kept.map((a) => {
+      const by =
+        a.still_requested_by.length === 1
+          ? `la demande ${a.still_requested_by[0]}`
+          : `les demandes ${a.still_requested_by.join(", ")}`;
+      return `${capital(advancesNamed([a]))} reste demandée au client par ${by}.`;
+    });
+    if (freed.length > 0) sentences.push(`${capital(advancesNamed(freed))} ${free}.`);
+    return `La demande ${number} est retirée. ${sentences.join(" ")}`;
+  }
   if (stillRequestedBy.length === 0)
     return `La demande ${number} est retirée : l'avance pourra être reprise ou demandée de nouveau.`;
   const others =
@@ -125,14 +167,78 @@ export function withdrawSheetText(number: string): string {
 
 const DRA = /^DRA-\d{4}-\d{6,}$/;
 
-/** public.withdraw_advance_repayment_request's result (its number, the requests still naming its advances), or null. */
-export function parseWithdrawal(x: unknown): { number: string; still_requested_by: string[] } | null {
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const CUR = /^[A-Z]{3}$/;
+const DIGITS = /^\d{1,16}$/;
+
+function realDay(v: unknown): v is string {
+  if (typeof v !== "string" || !ISO_DAY.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+
+function withdrawnAdvance(x: unknown): WithdrawnAdvance | null {
+  if (!x || typeof x !== "object") return null;
+  const o = x as Record<string, unknown>;
+  const still = o.still_requested_by;
+  if (!isText(o.advance_id) || !realDay(o.born_on) || !isText(o.open_minor) || !DIGITS.test(o.open_minor)) return null;
+  if (!isText(o.currency) || !CUR.test(o.currency)) return null;
+  if (!Array.isArray(still) || !still.every((n) => isText(n) && DRA.test(n))) return null;
+  return {
+    advance_id: o.advance_id,
+    born_on: o.born_on,
+    open_minor: o.open_minor,
+    currency: o.currency,
+    still_requested_by: still as string[],
+  };
+}
+
+/**
+ * public.withdraw_advance_repayment_request's result (its number, the requests still naming its advances; M2c-7f-1,
+ * H13: per advance — none for an older result), or null.
+ */
+export function parseWithdrawal(
+  x: unknown,
+): { number: string; still_requested_by: string[]; advances: WithdrawnAdvance[] } | null {
   if (!x || typeof x !== "object") return null;
   const o = x as Record<string, unknown>;
   if (!isText(o.number) || !DRA.test(o.number)) return null;
   const still = o.still_requested_by;
   if (!Array.isArray(still) || !still.every((n) => isText(n) && DRA.test(n))) return null;
-  return { number: o.number, still_requested_by: still as string[] };
+  const advances: WithdrawnAdvance[] = [];
+  if (o.advances !== undefined) {
+    if (!Array.isArray(o.advances)) return null;
+    for (const v of o.advances) {
+      const a = withdrawnAdvance(v);
+      if (!a) return null;
+      advances.push(a);
+    }
+  }
+  return { number: o.number, still_requested_by: still as string[], advances };
+}
+
+/** (M2c-7f-1, H13) the advances of a withdrawal in the page's address: « jour_montant_devise_DRA-…+DRA-… », by commas. */
+export function advancesParam(advances: readonly WithdrawnAdvance[]): string {
+  return advances.map((a) => [a.born_on, a.open_minor, a.currency, a.still_requested_by.join("+")].join("_")).join(",");
+}
+
+/** The advances a page's « avances » parameter carries (each one checked; any other value: none). */
+export function withdrawnAdvancesParam(v: unknown): WithdrawnAdvance[] {
+  if (typeof v !== "string" || v === "") return [];
+  const out: WithdrawnAdvance[] = [];
+  for (const part of v.split(",")) {
+    const [born_on, open_minor, currency, still, ...rest] = part.split("_");
+    const a = withdrawnAdvance({
+      advance_id: "",
+      born_on,
+      open_minor,
+      currency,
+      still_requested_by: still ? still.split("+") : [],
+    });
+    if (!a || rest.length > 0) return [];
+    out.push(a);
+  }
+  return out;
 }
 
 /** The numbers a page's « reste » parameter carries (the withdrawal's still_requested_by), the others dropped. */

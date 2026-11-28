@@ -382,3 +382,20 @@ line now cites our sweep then a booked run's payout (planted), `remittance_run` 
 runs) and watched, and the import is bounded absolutely on it — one row per payout candidate of the account — besides
 `bank_transfer` (five probes: 3 index rows read; round 2's body, stopping at the first match: 3) and the relative
 bound for the rest. The run probe unkeyed (`r.id::text = y.run_id::text`) read 10,009 `remittance_run` rows: killed.
+
+### M2c-7f-1 (H18: two `/REF` markers in a CSV label; 2026-11-27, same VM, the main stack alone, right after `supabase db reset` with CI's logging settings)
+
+What 7f-1 changes on the statement import (ADR-0014 « M2c-7f-1 », H18): `parse_label` counts the label's `/REF`
+markers; two or more give the line no end-to-end id (its tokens of ours stay candidates), one keeps M2b's reading, and
+the duplicate fingerprint is computed from the first `/REF` as before, so a re-import of an earlier file gives the same
+lines. No SQL body of the import changed.
+
+The scale job's command as `ci.yml` runs it (`RECEIPT_FILES=5000`), right after `supabase db reset`: **15 passed** in
+1,219.1 s (12:58–13:18 UTC). The imports it times:
+- the matching run's statement, **50,000 CSV credits imported + matched in 38.4 s** (ingest 7.8 s; the account
+  estimated at 1 line before it; 7e-2 round 3: 37.5 s), the 13,500-credit history 9.2 s (9.6 s); automatic 0.9687
+  (48,433), 0 wrong;
+- the allocation run's 50,000 credits imported + matched in 27.9 s, allocated in 62.6 s;
+- the 50,000-line camt.053: the import job **26.1 s** (parse 4.8 s, ingest 9.5 s; 26.0 s), the same lines again 6.2 s
+  (ingest 1.4 s);
+- 1,000 returns imported and linked in 26.2 s.
