@@ -1,6 +1,6 @@
 # ADR-0014: Remittances, commission, invoices and own cash (extends ADR-0012, ADR-0013)
 
-- Status: Accepted (the funds ledger implemented in M2c-1, identities and terms in M2c-2, the engines in M2c-3, runs and invoices in M2c-4, documents in M2c-5, the manual credit note in M2c-5b, transfers and files in M2c-6a with its review fixes; the debits' bookings follow in M2c-6b and returns in M2c-7, each adding its section)
+- Status: Accepted (the funds ledger implemented in M2c-1, identities and terms in M2c-2, the engines in M2c-3, runs and invoices in M2c-4, documents in M2c-5, the manual credit note in M2c-5b, transfers and files in M2c-6a with its review fixes; the debits' bookings in M2c-6b, returns after remittance and close-out in M2c-7 (7a–7f), each adding its section)
 - Date: 2026-11-09
 - Design: `docs/design/m2c-remittances.md` (three-design panel, critiques and a judge; legal texts re-read on LibreJustice on 2026-11-09). Founder answers on 2026-11-09: all 15 defaults accepted (« All ok », design §24).
 - Supersedes ADR-0013's sentence « Only M2c `commission` will be exempt » (from I2): **no entry is exempt** from fund closure.
@@ -27,7 +27,7 @@ M2b books what debtors pay onto the account dedicated to funds collected for cre
 - The **remit lock** `remit:<org>` is taken by every writer of 4679 (`ledger_post_set`, `ledger_reverse` when the reversed entry moves 4679). Order: allocation lock → remit lock → invoice counter (M2c-4).
 
 ### Each client's 4670 never in debit, and the pending queue (design §5.4 I13, §9.1)
-- `private.client_payable_balance` keeps Σ4670 per (client, currency), all dates, upserted by an ALWAYS statement trigger on `ledger_posting` (one hash join of the statement's new postings with the few 4670 accounts, through a partial index). A deferred constraint trigger refuses a commit leaving it in debit: **new SQLSTATE `LG008`** (Python `ClientMoneyShortError`). A path that forgets to cover a shortfall (M2c-7's advance after a remitted reversal, M2c-6's booking-time cover of a payout overrun) fails at commit instead of using another client's money. `private.ledger_check_now()` runs the ledger's commit checks inside a call (the debit job then sends a refused line to ops). The deferred checks run as their owner (a command's commit runs them as the API's role).
+- `private.client_payable_balance` keeps Σ4670 per (client, currency), all dates, upserted by an ALWAYS statement trigger on `ledger_posting` (one hash join of the statement's new postings with the few 4670 accounts, through a partial index). A deferred constraint trigger refuses a commit leaving it in debit: **new SQLSTATE `LG008`** (Python `ClientMoneyShortError`). A path that forgets to cover a shortfall (M2c-7's advance after a remitted reversal, M2c-6's booking-time cover of a payout overrun — *both built: the overrun's cover in M2c-6b-1, the advance in M2c-7a with `LG009`*) fails at commit instead of using another client's money. `private.ledger_check_now()` runs the ledger's commit checks inside a call (the debit job then sends a refused line to ops). The deferred checks run as their owner (a command's commit runs them as the API's role).
 - The same trigger feeds **`private.remittance_pending`**: every entry that moves 4670 and is a remittance item — `allocation`, `forward`, their reversals, `client_advance` and its reversal, the reversal of a `remittance` (`payout_returned`); M2c-6 inserts unplanned payouts itself. Settlements and planned remittances are not items. Amount: what the entry adds to what the client is owed. A run (M2c-4) reserves its items and deletes them when it freezes its lines. Back-filled by the migration (none in production). Nightly: I13 (running balance = postings, never in debit) and, before runs exist, I14 (what each client is owed = its pending items).
 
 ### Bank accounts (design §2 #13, §5.3; founder #14)
@@ -40,10 +40,10 @@ M2b books what debtors pay onto the account dedicated to funds collected for cre
 ### Bank lines booked in the funds (design §6.1 `bank_line_booking`, §12, §13)
 - `bank_line_booking(bank_transaction_id, seq, kind, transfer_id, entry_id, amount_minor, method, reason, decided_by)`: one bank line → n entries of the funds; append-only; a guard checks the line, the entry (type, date, bank account, document) and the transfer; at commit Σ bookings + the line's M2b `cash_out` (if any) = the line's amount. `bank_unposted` (I9) counts booked lines as in the ledger.
 - **Bank fees** (`bank_fee`: +4679 / −5120 ‖ +6270 / −4689): the servicer's cost (founder #9), never a client's. The debit job books automatically a debit the bank codes as its charge (camt.053 BkTxCd sub-family `CHRG` or `FEES`) — M2b fee lines included, the migration queues the job; ops book other debits as fees (« Frais bancaires »). Only a line read as an other debit is a fee: our transfers out never are (M2c-6 books them).
-- **Top-ups** (`servicer_top_up`: +5120 / −4679 ‖ +4689 / −5122): ops order one from the own account (`request_top_up`, a `bank_transfer` of kind `top_up` with our `TOP…` id, typed in the bank; `cancel_top_up` while pending). The debit job books the credit carrying that id, of that amount, on that dedicated account; ops book a credit from a registered own IBAN that no order matches. The automatic top-up file is M2c-7.
+- **Top-ups** (`servicer_top_up`: +5120 / −4679 ‖ +4689 / −5122): ops order one from the own account (`request_top_up`, a `bank_transfer` of kind `top_up` with our `TOP…` id, typed in the bank; `cancel_top_up` while pending). The debit job books the credit carrying that id, of that amount, on that dedicated account; ops book a credit from a registered own IBAN that no order matches. The automatic top-up file is M2c-7. *(Built in M2c-7e-1: the hourly order `servicer-top-ups` and the own account's pain.001 file; « M2c-7e-1 ».)*
 - **A debtor's payment relayed by the servicer** (design §12, ledger critique #8; review fix): a debtor paid the servicer's own account and the servicer passes the money on to the dedicated account. `public.release_own_credit(key, line, reason)` (admin or ops manager at aal2, the reason required and kept) takes only an unbooked, unlinked `own_transfer_in` credit on an active `client_funds` account of the caller's servicer and books it as a debtor payment, as a released duplicate credit is: a `payment` (payer « Versement relayé par le cabinet », `unmatched`, review `no_match`, so it waits in « Paiements à traiter » for ops to assign it) and its `cash_in` at the line's booking date. Refusals: `not_own_credit`, `already_booked`, `already_linked`, `reason_required` (`23514`). Whether the earlier receipt on the own account matters for R124-2 and R124-6 is OQ-69.
 - **The servicer's loss** (`servicer_loss`: +4679 / −5120 ‖ +6780 / −4689; OQ-34, founder #8): a return larger than what is left of its payment is linked by ops as the payment's M2b return of what is left (its allocations reversed at the return date) plus a loss booking of the excess. Never charged to the client or another client; recovery from the payer is an ops matter.
-- Our transfers out and credits from a client are left to ops with why (`bank_debit_review`: `top_up_not_found`, `top_up_differs`, `client_credit`, `own_transfer_out`) until M2c-6 / M2c-7 book them; meanwhile ops may explain them (an I9 gap, visible). They are never linked as a payment's return or our refund (`not_a_return`), and « À classer » does not offer it.
+- Our transfers out and credits from a client are left to ops with why (`bank_debit_review`: `top_up_not_found`, `top_up_differs`, `client_credit`, `own_transfer_out`) until M2c-6 / M2c-7 book them; meanwhile ops may explain them (an I9 gap, visible). *(Each has its booking since: our transfers out from M2c-6b, a client's credit paying the servicer from M2c-7c-1 (« Règlement d'une facture ou d'une avance du cabinet »), a top-up's credit from M2c-7e-1 (« Rattacher à TOP… »).)* They are never linked as a payment's return or our refund (`not_a_return`), and « À classer » does not offer it.
 
 ### Read access (design §6.2; compliance critique C6)
 Every book without a portfolio is named in the policies: the two funds' books are read by admins and ops managers at aal2; a client reads only its own 4670, and of the entries without a portfolio only its own `forward`, `reversal`, `remittance`, `client_settlement` and `client_advance`. Collectors and clients no longer read 7060 (the `staff_org_ids` / `client_visible` path is closed). `bank_transfer` and `bank_line_booking`: money staff; the running balance and the queue: nobody through the API.
@@ -51,7 +51,7 @@ Every book without a portfolio is named in the policies: the two funds' books ar
 ## Consequences
 - 5120 stays equal to the bank: fees and top-ups are booked from the bank's lines, not estimated; the acceptance « 5120 = bank after fees and top-ups » is checked end to end (`worker/tests/test_funds_integration.py`).
 - Whatever the servicer owes the dedicated account (a fee, a loss, later an advance) is visible on 4679 at once and nets against the servicer's settled commission before a sweep (M2c-6) or is covered by a top-up.
-- **Until M2c-7 wires the advance into every reversal path, a reversal of a remitted entry fails closed with `LG008` only when it would leave the client's whole 4670 in debit** (the check is on the client's balance per currency, all entries). When the client has other collections pending, the reversal nets against them in the pending queue, the silent compensation design §13 #1 and founder #7 exclude. M2c-7 brings the advance (`cover_remitted_reversals`) and its nightly backstop; until it is merged there is no real remittance (design §21), and no M2c-1 command posts a `remittance`.
+- *Superseded by M2c-7a (« M2c-7a »): every reversal of an entry already remitted is covered the same day by an advance of the servicer (`client_advance`, cause `remitted_reversal`), never netted against the client's other collections; `LG009` refuses an uncovered one at commit and the nightly's `remitted_reversal_uncovered` backstops it. The interim rule, kept for the record:* **Until M2c-7 wires the advance into every reversal path, a reversal of a remitted entry fails closed with `LG008` only when it would leave the client's whole 4670 in debit** (the check is on the client's balance per currency, all entries). When the client has other collections pending, the reversal nets against them in the pending queue, the silent compensation design §13 #1 and founder #7 exclude. M2c-7 brings the advance (`cover_remitted_reversals`) and its nightly backstop; until it is merged there is no real remittance (design §21), and no M2c-1 command posts a `remittance`.
 - Cost: the 4670 trigger adds one pass over each posting statement's new rows (measured in `docs/benchmarks/remittances.md`); the per-entry commit check adds one keyed pass for I2′ / I12.
 
 ## Review fixes (M2c-1 review, 2026-11-09)
@@ -76,7 +76,7 @@ Migration `20261111120000_identities_terms.sql` (forward-only; redefines `confir
 - **Billing settings** (`servicer_billing_settings`): invoice prefix (2–6 capitals), the own account due invoices are paid to (an active own account; `close_bank_account` refuses it while named), VAT on debits (242 nonies A 11° bis), the penalty text (default: the ECB rate + 10 points, L441-10 II; a free text until invoices print it: the « ≥ 3 × the legal rate » floor of an agreed rate is checked in M2c-5 with M3's legal-rate table), the bank cut-off per dedicated account. Money staff read, admins write.
 - **Client documents**: the RIB, the signed mandate or an amendment, the evidence of an event, in the private bucket `documents` at `client/<servicer>/<client>/<uuid>.<pdf|png|jpg>`, uploaded by money staff from the browser (storage policy: that key, a new one) and registered with their SHA-256 (`register_client_document`). Read by money staff; the RIB and the mandate also by the client's administrators with access to the whole client (OQ-48 default); the evidence by money staff only. Served after the hash check.
 - **Payout accounts under dual control** (founder #10; design §2.2 #16): `client_payout_account` holds the IBAN, BIC and holder as on the client's RIB (the payee name the bank checks). Money staff propose (`propose_payout_account`; never one of the servicer's own IBANs, never another client's current or proposed IBAN, one proposal at a time per client and currency). A **second person** confirms by typing the IBAN read on the RIB (compare and set): the client's administrator with access to the whole client, at aal2, in the client space, or another admin of the servicer at aal2; never the proposer (command and CHECK constraint), never an ops manager. A court-appointed account (the liquidator's, L641-9 I) — and, once a liquidation or an event naming a court-appointed payee is recorded for the client, every account of that client — is confirmed, rejected or retired by a second admin only, never by the client's users (« payout account refused: court_appointed », 42501; OQ-41 default; M2c-2 review). A confirmed account replaces the current one (one current account per client and currency); `reject_payout_account` (money staff or the client's administrator) and `retire_payout_account` (admin) need a reason; what was proposed never changes and the status only moves forward (ALWAYS guard). The page flags an active IBAN as « Nouvel IBAN » (« premier virement à vérifier ») until a payout of that client to that exact IBAN was booked and not returned (M2c-2 review); M2c-4 shows it on the run. Client users step up to aal2 on `/mfa` (opened to them, back to the page they came from). `private.registered_client_ibans` now returns every confirmed IBAN (current, returned or retired), so a credit from one is read as `client_transfer_in` at import — by the parser and by `ingest_statement` — and never as a debtor payment; a proposal is not yet the client's.
-- **Client status events** (`client_status_event`, append-only, with evidence): proceeding opened, liquidation, death, guardianship, mandate ended (C. civ. 2003, C. com. L622-7, L641-9); for a liquidation the liquidator's court-appointed account may be named. Since the review, a mandate end or a guardianship, a death, or a liquidation keeps the client's portfolios from being confirmed (gate below), and a liquidation or a court-appointed payee leaves the client's payout accounts to a second admin (above). Their effects on runs and payouts come with M2c-4 and M2c-7 (OQ-41).
+- **Client status events** (`client_status_event`, append-only, with evidence): proceeding opened, liquidation, death, guardianship, mandate ended (C. civ. 2003, C. com. L622-7, L641-9); for a liquidation the liquidator's court-appointed account may be named. Since the review, a mandate end or a guardianship, a death, or a liquidation keeps the client's portfolios from being confirmed (gate below), and a liquidation or a court-appointed payee leaves the client's payout accounts to a second admin (above). Their effects on runs and payouts come with M2c-4 and M2c-7 (OQ-41). *(Built: the run blockers in M2c-4, the payees, the letters' addressee and the seizure in M2c-7d-1, the set-off bars in M2c-7d-2, the claims to declare and the liquidation's payouts in M2c-7d-3.)*
 - **Mandate money terms** (R124-3 2°–4°): `mandate.insurance_clause_ref` (2°, `set_mandate_insurance_clause`, compare and set); per `mandate_terms` version the commission schedule (`commission-1`) and the remittance terms (`remittance-1`), each with its clause reference **in a column** (`commission_clause_ref`, `remittance_clause_ref`: one place, not repeated inside the documents; the netting and claw-back clauses are named inside the remittance terms), the signed document and `schedule_sha256`. The delay stays `remittance_max_days` (1–30), the one source. Validators: SQL (`private.commission_schedule_error`, `private.remittance_terms_error`, also CHECK constraints) and pydantic (`collectoo_worker.remittance.terms`; the JSON Schemas in `remittance/schemas/` are generated from the models and a test keeps them in step); both give the same verdict on 5,000 generated schedules and 5,000 generated terms, valid and invalid. Amounts and rates are strings; whole-rate tiers are not a kind; the last rule matches everything; ids and tier keys are distinct; a weekly frequency names a weekday 1–5; a due invoice is payable within 45 days (L441-10 I); `holdback` must be empty until M5.
 - **Versions** (§6.1): a version in force (from ≤ Paris today) never changes — every column but its end, compared as a whole row so a later column is covered too — its end moves only to a day not yet passed, and it is never deleted; a version not yet in force may be superseded. A second version starts tomorrow (Europe/Paris) at the earliest, never today (never retroactive: versions apply by the day of the encaissement, so today's collections stay under the version in force; « mandate terms refused: starts_too_early »; M2c-2 review; a mandate's first version may start at its signature). `set_mandate_terms(key, mandate, valid_from > today, schedule, clause, terms, clause, document, max_days, expected_latest_id)` (admin at aal2): compare and set on the mandate's latest version as the page showed it; the version covering the day ends then, versions starting on or after it are superseded, the new one keeps the mandate's end and the covering version's plan envelope and settlement authority; claim types it names exist and portfolios it names are the mandate's. A mandate with versions is never deleted (`ON DELETE RESTRICT`). Back-fill: versions written before M2c-2 get one flat rule at their `commission_rate` and no clause references, so they read « incomplete » (none in production).
 - **Confirmation gate** (§9.1; ops critique #3, compliance critique B8): `private.portfolio_confirmation_blockers` / `batch_confirmation_blockers` name, in order: `no_active_mandate`, the client's recorded events with their date (`client_mandate_ended:YYYY-MM-DD` for a mandate end or a guardianship, `client_deceased:…`, `client_in_liquidation:…`; M2c-2 review), `insurance_clause_missing`, `commission_schedule_missing`, `commission_clause_missing`, `remittance_terms_missing`, `remittance_clause_missing`, `terms_document_missing`, `servicer_identity_incomplete`, `client_identity_incomplete`, `client_not_professional`, `client_not_mainland_france`, `currency_not_eur`. `confirm_boarding_batch` refuses with the list; the confirmation job checks again (an identity or terms may change in between) and sends the batch back to `committed` with the reasons, nothing posted. The batch page lists them before « Confirmer »; `/backoffice/clients` and the client page show them per portfolio (`client_readiness`).
@@ -160,11 +160,11 @@ Migration `20261112090000_remittance_runs.sql` (forward-only; redefines `private
   - **A credit note's VAT split**: v₁ = min(its VAT, the corrected invoice's pending VAT), v₂ the rest (« the pending part first », §5.2); a cent of pending VAT left on a document the credit closes moves with the client's next settlement.
   - **Nothing to settle through client money** (D = 0 with something to settle, e.g. a refund owed equal to the invoice it would compensate): no entry can carry a VAT move alone, so the run settles nothing (the takes and refunds wait for the next run).
   - **Across mandates** a mandate's commission or advance is taken only from its own money; when a mandate's reversals exceed its collections the takes are reduced (advances first, last mandate first) so N ≥ 0 whenever the client's money allows it; a run whose net stays negative is blocked (`negative_net`).
-  - **A proceeding opened** blocks no payout (§13 #9): documents dated before it are not set off and stay due; a draft prepared before the proceeding's date was known is sent back (`client_status_changed`, review: money#2). Liquidation blocks the payout until a court-appointed account is confirmed after the event. Death, guardianship and mandate end block it **for now with no way out: an interim fail-closed state, not the design's rule** (review: legal#0). §13 #9 and the OQ-41 default (« payouts held until ops record the payee », a final run and statement) need a payee confirmed after the event; until M2c-7 builds that, no payout goes to a payee nobody confirmed, and the breach alerts keep firing so the money is not forgotten. There is no real remittance before M2c-7 (§21).
+  - **A proceeding opened** blocks no payout (§13 #9): documents dated before it are not set off and stay due; a draft prepared before the proceeding's date was known is sent back (`client_status_changed`, review: money#2). Liquidation blocks the payout until a court-appointed account is confirmed after the event. Death, guardianship and mandate end block it **for now with no way out: an interim fail-closed state, not the design's rule** (review: legal#0). §13 #9 and the OQ-41 default (« payouts held until ops record the payee », a final run and statement) need a payee confirmed after the event; until M2c-7 builds that, no payout goes to a payee nobody confirmed, and the breach alerts keep firing so the money is not forgotten. There is no real remittance before M2c-7 (§21). *Superseded by M2c-7d-1 (« M2c-7d-1 »): after a death, a tutelle, a curatelle, a liquidation or a mandate end the payouts wait for the payee the strictest event in effect requires (`private.client_payee_rule`), confirmed by a second admin after the event with its authority evidence; a run then pays it. The code gate « no real remittance before M2c-7 » is lifted by M2c-7f-2's merge (« M2c-7f-2 », the go-live gate).*
   - **The payout transfer is created at approval** (`ordered`, with its run), as §9.5 says; files, downloads and bookings are M2c-6's. A payout transfer may have no run (an unplanned payout, M2c-6).
   - **A run whose collection was undone in it** (gross 0, both lines charged 0) is booked at approval with nothing posted.
 - **Pages** (French, phone-first; the database gates): `/backoffice/reversements` (« À valider »: a card per draft — the net in large type, encaissements, gross, commission TTC, the deadline chip green / orange from J-5 / red from J-1, « Nouvel IBAN · IBAN confirmé il y a n j », blockers, the back-to-draft reason — with a box; the sticky « Valider n reversements · total » opens the sheet that states the transfers, the execution date, the documents to number and the compensation; « Préparer maintenant » for clients with collections waiting; « En cours », « Terminés »); `/backoffice/reversements/[id]` (the summary, the documents — « numérotée à la validation » on a draft, numbers once approved —, the transfer, the lines paged with « Pourquoi cette commission ? », « Actualiser », « Abandonner », « Annuler »); the « Contrôles » labels of the new checks. Reads `remittance_overview`, `remittance_run_detail` (money staff at aal2). Read policies: money staff; a client's members with access to the whole client read its runs once approved, their lines, its documents (lines, corrections) and settlements (OQ-48); the per-file charges, credit allocations, the tier history, repricings and breach rows are staff's.
-- **Left for later slices:** the statement and invoice PDFs, the client space « Reversements » / « Factures » and the accounting export (M2c-5); pain.001, the payout's booking from the bank's debit (which posts the stored plan), the sweep, returned payouts, cancellation after download (M2c-6); advances for returns after remittance and their claw-back, payee confirmation after death, guardianship or mandate end (OQ-41, final run) (M2c-7). Until M2c-6 an approved run with N > 0 stays « Validé — virement ordonné », the client's next run waits (one pending run per pair), and the nightly checks flag it once its dates pass (`remittance_payout_not_executed`, `remittance_payout_overdue`; review: legal#3). M2c-6 must keep I21 over approved and sent runs not debited, and add `transfer_not_filed`, `file_not_downloaded` and `transfer_not_debited` (§15).
+- **Left for later slices:** the statement and invoice PDFs, the client space « Reversements » / « Factures » and the accounting export (M2c-5); pain.001, the payout's booking from the bank's debit (which posts the stored plan), the sweep, returned payouts, cancellation after download (M2c-6); advances for returns after remittance and their claw-back, payee confirmation after death, guardianship or mandate end (OQ-41, final run) (M2c-7). Until M2c-6 an approved run with N > 0 stays « Validé — virement ordonné », the client's next run waits (one pending run per pair), and the nightly checks flag it once its dates pass (`remittance_payout_not_executed`, `remittance_payout_overdue`; review: legal#3). M2c-6 must keep I21 over approved and sent runs not debited, and add `transfer_not_filed`, `file_not_downloaded` and `transfer_not_debited` (§15). *As built in M2c-6 and M2c-7 (their sections): pain.001 and the bookings from the bank's debits (6a, 6b), the cancellation after download behind its switch, still off (6b-3); the advances for returns after remittance (7a), their claw-back and write-off (7b), client payments and refunds (7c-1), the repayment request (7c-2), the payee confirmed after the client's events (7d-1). No run is marked « final »: the runs after the event pay the confirmed payee, and the statement states the end of the mandate (fr-4, 7d-3).*
 - **Tests:** pytest unit (the settlement plan: the worked example's RV-1…RV-3 and variants, a 1,000-example property; `prepare_run`: RV-1, RV-3, the commission kept pending, repricing, proceedings, the hash; the engine's VAT-rate property and regression), integration `test_remittance_runs_integration.py` (the worked example end to end, RV-3 after an emulated M2c-6 debit, gapless under concurrency and rollback, one stale run never blocks the others, N = 0, cancellation and re-pricing, the schedule and the guard at a frozen Paris time, a breach), pgTAP `021_remittance_runs`, `022_commission_invoices`, the review's `023_remittance_review_runs` and `024_remittance_review_checks`, integration `test_remittance_checks_integration.py` (review), vitest `lib/remittance/runs.test.ts`, E2E `remittances.spec.ts` (desktop and mobile), scale `test_remittance_scale_integration.py` (one run of 50,000 lines; `docs/benchmarks/remittances.md`).
 
 ## M2c-4 review fixes (2026-11-10)
@@ -182,7 +182,7 @@ Confirmed findings of the five-lens review (money, numbering and concurrency, te
 - **A failed preparation** (tests-ui#3, C4: status `draft`, no job, never prepared, last failure at the prepare step). The pages show « Préparation échouée — actualisez » (error) and « Préparation échouée : … — « Actualiser » la relance » instead of « Préparation en cours », and stop refreshing themselves (`prepareFailed`, `runBusy`, vitest); the nightly checks raise `draft_waiting` for such a draft at once, with `prepare_failed` and the failure's code in the details (pgTAP `024`).
 - **Every refusal in French** (tests-ui#4). `unknown_run`, `not_draft`, `preparing`, `approval_in_progress`, a bare `payout_blocked`, `busy`, `vat_option_changed`, `client_status_changed`, `late_reason_required` have French words; the result line counts the refused and is orange when some were, red when all were (`summaryTone`, vitest).
 - **The counter lock is tested without the advisory locks** (tests-ui#7, `test_the_counter_row_alone_serialises_two_issuers`: a held counter row makes a direct issuer wait, two issuers behind a barrier take consecutive numbers), and **the stale-page integration case is refused as stale** (tests-ui#8: a third client's draft with a wrong hash, no job, no `approve` message).
-- **Death, guardianship and mandate end** (legal#0): documented as an interim fail-closed state (decisions above); payee confirmation after the event and the final run are listed for M2c-7.
+- **Death, guardianship and mandate end** (legal#0): documented as an interim fail-closed state (decisions above); payee confirmation after the event and the final run are listed for M2c-7. *Superseded by M2c-7d-1 (the payee confirmed after the event) and M2c-7d-3 (the statement states the end of the mandate and the payee); no run is marked « final ».*
 - **Unmeetable short delays escalate** (legal#1, C2): such an item raises `remittance_delay_unmeetable` while its one-month dates (`remittance_deadline(E, 30)`) run (the alert carries them), then `remittance_due_soon`, `remittance_due_critical` on them and, once passed, `remittance_deadline_breached` with a breach row (no reason of its own: the nightly no longer writes an `unmeetable_delay` row at the mandate's date; nor, since round 2 below, does the approval). In-flight lines are held to the same month (pgTAP `024`).
 - **No `has_terms` exclusion** (legal#2): see the decision above; pgTAP `024`: a collection dated before the first version, past one month → breach row and violation; a portfolio under no mandate, or under one that never had terms, is not monitored.
 - **Approved runs not debited are checked** (legal#3, C2): `remittance_payout_overdue` (violation per run, and breach rows naming the run, its requested date and reason) and `remittance_payout_not_executed` (alert), read by `private.inflight_overdue_lines`; CPCE-08 no longer says an approved run's collections cannot be breaches. Death, guardianship, mandate end and liquidation each block the payout today, proceedings do not (pgTAP `024`, legal#0).
@@ -382,19 +382,19 @@ Migration `20261114090000_manual_credit_note.sql` (forward-only; it redefines, w
   - **The reversal's invoices as a chain**: `line_invoices` may give a tuple — after a cancellation, the corrective invoice that charges the reversal again first, then the original line's own invoice, where the cancellation restored what the run's credit had absorbed — so a re-run after a cancellation of the same lines at the same VAT rate issues the same documents (`manual-credit-cancelled-run`; integration; review round 2 below for another rate or new lines). Without waivers nothing changes (the corrective invoice takes everything first, as before).
   - **The reason**: three categories on the document (« rectification d'une erreur de conditions de rémunération (taux, paliers ou minimum) », « … d'assiette (encaissement non commissionnable) », « … de facturation »), in the credit note's one line after the invoice it rectifies and its date (CGI 289 I 5); the admin's free text stays in `public.manual_credit_note`, money staff only (as the late approvals' reasons, review M2c-5 legal#6). No payload key was added (the renderer prints the line; `private.issue_commission_documents` is reused as is, `p_run_id` null, reason `manual`). *Review M2c-5b (legal#1): redefined so that every credit note freezes `ht_after` / `vat_after`, below.*
   - **Refused**: a credit note on a credit note (`credit_note`); more than the invoice still charges, or than the file chosen still owes (`more_than_remaining`); a file the invoice does not charge; **an invoice a run in flight sets off** (`in_flight`: approved or sent, its payout not debited — the stored settlement plan, posted at the debit by M2c-6, would set off more than the invoice owes; cancel the run before its file or wait for its debit; OQ-78 (c)); *review M2c-5b:* **an invoice whose own run is approved or sent** (`run_in_flight`: the run can still be cancelled, which would credit the invoice in full and let the re-run bill the rectified amount again; ledger-vat#0). A cancelled run's invoices are credited in full: `nothing_left`. A corrective invoice (`run_cancelled`) can be rectified like any invoice.
-- **`public.issue_credit_note(key, invoice, amount_ht_text, reason_code, reason, expected_remaining_text, account?)`** (an admin of the invoice's servicer at aal2; another servicer's invoice is « not allowed »): idempotency key and request hash; the amount as typed in euros (`private.euros_to_minor`, two decimals at most); under the servicer's allocation and remit locks (`private.remittance_command_locks`, 55P03 « réessayez »), so with an approval's lock order — allocation, remit, then the counter, locked last by `private.issue_commission_documents` —; the plan (`private.manual_credit_plan`: the spread, VAT = R((credited + X) × rate) − R(credited × rate) at the invoice's own rate, v₁ = min(VAT, its pending VAT) on 44574 and the rest on 44571, applied = min(TTC, what the invoice owes), the rest a refund owed); compare and set on the invoice's remaining HT the page read (`invoice_changed`); the document numbered in the gapless series, dated today, its entry −4111 TTC / +7060 HT / +44574 v₁ / +44571 v₂ (design §5.2 row), applied at once (`commission_settlement` kind `credit_note`); the waiver rows and one key state per key credited (cause `credit_note`, V unchanged, waived grown), then the engine's input check per key (`private.commission_key_open`); the staff record. Its PDF is queued by the M2c-5 trigger and drawn by the documents job (`facture-commission-fr-2`: « Avoir », the invoice it rectifies with its date, VAT per rate of the invoice; `fr-3` since the review, F3). A refund owed is paid by the client's next run (the plan's refunds, M2c-4); *review M2c-5b (legal#0):* with no later run, by a transfer from the own account (`record_client_refund`, design §16, M2c-7), the alert `credit_refund_owed` naming it after 30 days.
+- **`public.issue_credit_note(key, invoice, amount_ht_text, reason_code, reason, expected_remaining_text, account?)`** (an admin of the invoice's servicer at aal2; another servicer's invoice is « not allowed »): idempotency key and request hash; the amount as typed in euros (`private.euros_to_minor`, two decimals at most); under the servicer's allocation and remit locks (`private.remittance_command_locks`, 55P03 « réessayez »), so with an approval's lock order — allocation, remit, then the counter, locked last by `private.issue_commission_documents` —; the plan (`private.manual_credit_plan`: the spread, VAT = R((credited + X) × rate) − R(credited × rate) at the invoice's own rate, v₁ = min(VAT, its pending VAT) on 44574 and the rest on 44571, applied = min(TTC, what the invoice owes), the rest a refund owed); compare and set on the invoice's remaining HT the page read (`invoice_changed`); the document numbered in the gapless series, dated today, its entry −4111 TTC / +7060 HT / +44574 v₁ / +44571 v₂ (design §5.2 row), applied at once (`commission_settlement` kind `credit_note`); the waiver rows and one key state per key credited (cause `credit_note`, V unchanged, waived grown), then the engine's input check per key (`private.commission_key_open`); the staff record. Its PDF is queued by the M2c-5 trigger and drawn by the documents job (`facture-commission-fr-2`: « Avoir », the invoice it rectifies with its date, VAT per rate of the invoice; `fr-3` since the review, F3). A refund owed is paid by the client's next run (the plan's refunds, M2c-4); *review M2c-5b (legal#0):* with no later run, by a transfer from the own account (`record_client_refund`, design §16, M2c-7; *built in M2c-7c-1*), the alert `credit_refund_owed` naming it after 30 days.
 - **Approval, cancellation, history** (redefinitions): the approval writes each key state's waiver and the `absorbed` rows its draft's key states carry (`run.prepare_run`: `key_states[].waived` and `.absorbed`); a manual credit note's key state has no run and counts in the history a draft assumed (`history_changed`: `is distinct from` where the refusal compared run ids), and changes the invoice's open part (`documents_changed`) — a draft prepared before one is sent back. Cancelling a run clears the waivers of its own invoices (they are credited in full on what they still charge: `run_cancelled`), restores what its credits absorbed (`restored`; *review math#0: as the waiver of its corrective invoice of the absorbing invoice's rate, below*), and writes each key back to its state before the run with the waiver its invoices hold now (manual credit notes issued since included); its input check covers the keys whose waivers moved.
 - **Checks** (`private.run_remittance_checks` redefined): I16 counts what a run's credits absorbed (documents' HT + absorbed = the lines' commission); **I22 `commission_key_state`** (new, violation): per (file, tier key) whose state changed since the previous check run (with a day's margin; `remittance_key_state (organization_id, created_at)` indexed), open charges + waivers = the commission charged, the waivers its state's, none below 0. I17 (numbering) and I18 (4111 = open documents, 44574 = pending VAT) hold unchanged with manual credit notes (pgTAP `027`). « Contrôles » labels I22.
 - **Statement**: `private.remittance_statement_build` adds `waived_absorbed_minor` and the invoices it was on to its totals when a run's credit was absorbed (absent otherwise: statements drawn before keep their bytes); the PDF says « Dont … de commission sur des encaissements annulés, déjà rendus par avoir manuel sur la facture … : aucun nouvel avoir pour ce montant » (the lines' commission and the documents then differ by that amount; reworded by the review, legal#4, below). Template name unchanged (no stored payload carries the key).
 - **Pages**: `/backoffice/reversements/factures/[id]` (`public.commission_invoice_detail`, money staff at aal2: HT, TTC, what it still charges and owes, its files with what each still owes and what manual credit notes rectified, its credit notes — a manual one's category and, for staff, its reason; « Émettre un avoir » for an admin when the invoice can take one, else why not): the amount, the file or the whole invoice, the category, the internal reason, « Voir l'effet » (`public.credit_note_preview`, the command's own plan: HT, VAT, TTC, what it takes off what the invoice owes, the refund owed, what the invoice still owes and charges after, where the VAT comes off), « Émettre l'avoir »; refusals in French (`credit-notes.ts`). The run page links each document to it. Client « Factures »: « rectifie la facture FC-… du … » and a manual credit note's category, never the reason.
 - **Read access**: `commission_waiver` and `manual_credit_note` are money staff's (RLS); the credit note itself is a `commission_invoice` row the client reads like any (its whole-client members; its PDF once electronic acceptance was frozen). No write policy.
-- **Left for later**: re-invoicing under corrected terms (design §20 R2: undercharging stays the servicer's loss); a manual credit note while a payout is in flight, or on an invoice whose own run can still be cancelled (refused until M2c-6 books debits, OQ-78 (c)); the refund of a credit note's amount owed when no later run comes (`record_client_refund`, M2c-7; `credit_refund_owed` makes it visible, OQ-78 (e)); the waiver per collection rather than per (invoice, file, tier key) (would need the manual credit note to name collections; OQ-78 (b)); a manual credit note issued between a cancellation and the run again on an invoice the cancelled run took from keeps its waiver there while the run again credits the reversal on the corrective invoice — the client billed less than in the run never approved, by at most that credit note, V unchanged (review round 3, there since the waiver; OQ-78 (f), CALCULATION_RULES §7).
+- **Left for later**: re-invoicing under corrected terms (design §20 R2: undercharging stays the servicer's loss); a manual credit note while a payout is in flight, or on an invoice whose own run can still be cancelled (refused until M2c-6 books debits, OQ-78 (c)); the refund of a credit note's amount owed when no later run comes (`record_client_refund`, M2c-7, *built in M2c-7c-1*; `credit_refund_owed` makes it visible, OQ-78 (e)); the waiver per collection rather than per (invoice, file, tier key) (would need the manual credit note to name collections; OQ-78 (b)); a manual credit note issued between a cancellation and the run again on an invoice the cancelled run took from keeps its waiver there while the run again credits the reversal on the corrective invoice — the client billed less than in the run never approved, by at most that credit note, V unchanged (review round 3, there since the waiver; OQ-78 (f), CALCULATION_RULES §7).
 - **Tests**: Hypothesis in `test_commission.py` — against a twin without manual credit notes, with mixed clauses, two keys, versions and small amounts: Σ open + Σ waived = V at every step, V and tier positions the twin's, invoices the twin's to the cent, each credit the twin issues absorbed first then credited on the same invoice and key, never beyond its remaining HT, and for `credit` clauses the schedule's K that of one run over the lines (partition); inside one version a run of collections charges only what it adds, keeps every waiver, issues no credit note, in any order of its lines; everything undone: every invoice credited in full with exactly its VAT, no waiver left; a cancellation with manual credit notes before and after the run restores the state before it and the re-run charges what the run charged; the spread (proportion, Σ, each within a cent, never above a key's charge, cumulative VAT); input errors. Golden cases (TO VALIDATE): `manual-credit-waiver`, `manual-credit-per-invoice`, `manual-credit-two-files`, `manual-credit-cancelled-run`. pgTAP `027_manual_credit_note` (70). Integration `test_manual_credit_note_integration` (the real prepare and approval jobs: no re-charge, absorption, FC-1 closed with its VAT, the statement's sentence, cancellation and re-run, the checks clean; SQL = Python spread). Vitest `credit-notes.test.ts` (11). E2E `credit-notes` (desktop, mobile; screenshots `m2c5b-*`).
 
 ## M2c-5b review fixes (2026-11-10)
 Confirmed findings of the five-lens review (math, ledger and VAT, legal, security and concurrency, tests and UI), fixed by two branches (database and worker; pages and docs) that follow one contract (F1–F5), then integrated. The migration `20261114090000_manual_credit_note.sql`, not yet applied in production, is edited in place: it now also redefines `private.issue_commission_documents` (its settings and revoke restated; F3), adds `public.commission_invoice_files` (F4) and `private.absorbed_credit_notes` (legal#4), the indexes `commission_waiver_entry_idx` and `commission_invoice_credit_note_idx`, and relaxes `commission_invoice_charge_charged_minor_check` to `>= 0` (math#0); the functions of merged migrations it changes are redefined in it with `CREATE OR REPLACE`, their `SET` clauses, `SECURITY DEFINER` and grants restated; no earlier migration file is edited. Texts read on LibreJustice on 2026-11-10: CIBS L212-9, L214-6, L214-9 and L214-18 in their versions from 2027-01-01 (ordonnance n° 2026-671, art. 19 I), CGI 272 and 283 (repealed from 2027-01-01 but for 272 1 al. 2 and 283 2 septies, ordonnance n° 2025-1247), BOI-TVA-DECLA-30-20-20-20 §260 (2022-01-19) and BOI-TVA-DED-40-10-20 §80 (2017-04-05).
 - **F1 No manual credit note on an invoice whose own run can still be cancelled** (ledger-vat#0). The refusal only looked at the settlement plans of runs in flight, so an invoice its own approved run did not set off (a due invoice, a netted invoice the plan deferred) took a manual credit note; cancelling that run then cleared the waiver, wrote each key back to its state before the run with no waiver, and the re-run billed the rectified amount again in full (30,00 € HT + 6,00 € VAT in the reproduction). `private.manual_credit_refusal` now returns **`run_in_flight`** when the invoice is a run's own (`reason = 'commission'`) and that run is approved or sent, checked before `in_flight` (a plan in flight sets it off); `issue_credit_note`, `credit_note_preview` and `commission_invoice_detail` all read it. A corrective invoice (`run_cancelled`, carrying the cancelled run's id) stays creditable, a booked run's invoices too, so a cancellation never meets a manual credit note on its own invoices. pgTAP `027`: Martin's r1 invoice refused `run_in_flight` (command and effect sheet), then r1 booked (standing in for M2c-6's debit) for the « creditable » fixture; Cyprès's invoice `run_in_flight`, the `in_flight` branch through `pg_temp.refusal_as_debited`; the block cancelling a run with a manual credit note on its own invoice removed. Integration: RV-2's invoice refused `run_in_flight`. The Simulator and the Hypothesis properties draw manual credit notes only on invoices of runs no longer in flight. Pages: the refusal in French on the invoice page and from the command (`credit-notes.ts`; `forms.ts` `credit_note_run_in_flight`, matched before `in_flight`); E2E `credit-notes` checks it while the run is approved, then stands in for M2c-6's debit booking (the service role sets the run `booked`) before issuing the credit note. Not chosen: carrying the waiver across the cancellation (a run cancelled to be re-run under corrected circumstances would be corrected twice).
-- **F2 A refund owed that no run settles is visible** (legal#0). A manual credit note on a paid invoice leaves a refund owed (`excess`) that only a later run's payout paid; with no later collection nothing paid it, nothing alerted, and « Préparer maintenant » refused (`nothing_pending`). The nightly alert **`credit_refund_owed`** (alert, in `private.run_remittance_checks`; design §15's `refund_owed_to_client`): a credit note that owed a refund at issue (a correction with `excess` > 0) still open more than 30 days after its issue date — an operating threshold, not a legal deadline —, its details {`number`, `client_id`, `reason`, `issue_date`, `planned_run`: a run in flight whose plan pays it}, read by `commission_invoice_credit_note_idx`. « Contrôles » labels it « Avoir à rembourser au client depuis plus de 30 jours » and opens the credit note's page (`checkSubjectLink`, `invoice_overdue` too). The refund by transfer from the own account is `record_client_refund` (design §16, M2c-7). The effect sheet reads « À rembourser au client (avec son prochain reversement, sinon par virement du cabinet) », the PDF (F3) « l'excédent éventuel vous est dû : il vous sera versé avec un prochain reversement, ou par virement s'il n'y en a pas »; nothing says « remboursé » before money moves. pgTAP `027`: Lilas's 3 600,00 € owed alerted 31 days on, not on the day; none for the notes applied in full. Vitest `debits.test.ts`. OQ-78 (e); « Left for later » above.
+- **F2 A refund owed that no run settles is visible** (legal#0). A manual credit note on a paid invoice leaves a refund owed (`excess`) that only a later run's payout paid; with no later collection nothing paid it, nothing alerted, and « Préparer maintenant » refused (`nothing_pending`). The nightly alert **`credit_refund_owed`** (alert, in `private.run_remittance_checks`; design §15's `refund_owed_to_client`): a credit note that owed a refund at issue (a correction with `excess` > 0) still open more than 30 days after its issue date — an operating threshold, not a legal deadline —, its details {`number`, `client_id`, `reason`, `issue_date`, `planned_run`: a run in flight whose plan pays it}, read by `commission_invoice_credit_note_idx`. « Contrôles » labels it « Avoir à rembourser au client depuis plus de 30 jours » and opens the credit note's page (`checkSubjectLink`, `invoice_overdue` too). The refund by transfer from the own account is `record_client_refund` (design §16, M2c-7; *built in M2c-7c-1*). The effect sheet reads « À rembourser au client (avec son prochain reversement, sinon par virement du cabinet) », the PDF (F3) « l'excédent éventuel vous est dû : il vous sera versé avec un prochain reversement, ou par virement s'il n'y en a pas »; nothing says « remboursé » before money moves. pgTAP `027`: Lilas's 3 600,00 € owed alerted 31 days on, not on the day; none for the notes applied in full. Vitest `debits.test.ts`. OQ-78 (e); « Left for later » above.
 - **F3 A credit note states the invoice's totals after it** (legal#1). BOFiP asks a credit note by which the issuer means to recover the VAT to mention « le montant du total hors taxes et de la TVA due après application de la réduction de prix »; no credit note did (run, cancellation or manual: the template's gap, not only this slice's). `private.issue_commission_documents` freezes, per correction, **`ht_after`** and **`vat_after`**: the corrected invoice's HT and VAT less every credit note on it — earlier ones, those issued before it in the same call, and this one. Template **`facture-commission-fr-3`** prints « Après cet avoir, la facture FC-… du … s'élève à X € HT, TVA Y € (taux). » and words the excess as owed, not refunded (F2); `fr-2` stays in `TEMPLATE_VERSIONS` and renders its old bytes (its golden PDF hashes unchanged), and a payload without `ht_after` prints no after-line. `test_statement_docs.test_a_credit_note_states_each_invoice_after_it` (the mentions under `fr-3`, `fr-2` and an old payload), `fr-3` hashes pinned; pgTAP `027` (`ht_after` / `vat_after` on three credit notes); integration (RV-2's credit note payload). The back-office page of a credit note does not repeat the after-line (the PDF carries it). Design §14.2, FAC-05.
 - **F4 Every file in « Sur », and a credit note's own page** (tests-ui#2, tests-ui#3). « Sur » offered only the 200 files `commission_invoice_detail` lists (by what is still open), so a file ranked past 200 could not be chosen and the pro-rata spread put the waiver on the wrong (invoice, file, tier key). **`public.commission_invoice_files(p_invoice_id, p_after text default null, p_limit int default 200)`** (money staff at aal2, 42501 otherwise) returns the invoice's open charges per (file, tier key) — `file_id`, `file_ref`, `tier_key`, `open_minor` (> 0), `page_key` — in primary-key order (`account_id`, `tier_key`) after `p_after`, at most 1 000 a page; `page_key` is `account_id/tier_key`, opaque to the page; there is no search in the database. The sheet reads it a page at a time through the typed client (« Charger les dossiers suivants », after the last row's key; a short page or a key that does not move stops), lists each file once, and « Chercher un dossier (référence) » narrows what is loaded; if the read fails, it falls back to the detail's 200 files and says the list is incomplete. A credit note's own page showed an empty « Avoirs qui rectifient cette facture » and never named what it rectifies: `commission_invoice_detail` now also returns, for a credit note, `corrects` [{`id`, `number`, `issue_date`, `ht`, `vat`}], `reason_code`, `reason_fr` and `reason_text`, and the page (`creditNoteFacts`) names each invoice it rectifies, linked, with what it took off (HT, VAT), a manual one's category and staff reason; the empty section is hidden, and with no run (a manual credit note) the back link goes to the invoice. pgTAP `027` (three pages of one row each, the last empty; another servicer refused; a credit note's detail names FC-…-000001); vitest `credit-notes.test.ts` (paging, merge, search, `creditNoteBack`, `creditNoteFacts`); E2E `credit-notes` (the credit note's page, screenshot `m2c5b-avoir-page`).
 - **F5 A draft computed from mixed snapshots is never approved** (security-concurrency#0). The prepare read the key states, then the history's high-water mark, then the charges with their waivers, each statement in its own snapshot (READ COMMITTED); a credit note committing between the first two reads gave a draft whose every line's commission was pending (`commission_input_error`) and which the approval accepted (`history_changed` compared two values read after the commit). `jobs.remittances.load_facts` reads `private.remittance_history_seq` first, right after the run head: a credit note committed after it raises the mark and the approval sends the draft back (`history_changed`); one committed before is seen by every later read. `private.remittance_approval_refusal` refuses a draft whose `commission_blockers` carry `commission_input_error` (**`engine_error`**, « la commission de certains encaissements n'a pas pu être calculée : actualisez le brouillon »), and « À valider » leaves it unselectable (`commissionNotComputed`). REPEATABLE READ is not used: the queue's transaction has already run statements when the prepare starts. Integration `test_a_credit_note_committing_mid_prepare_never_gives_an_approvable_draft` (a second connection commits a manual credit note mid-prepare: after the history read → `history_changed`; after the key states → `engine_error`, approved before the fix); pgTAP `027` (`pg_temp.refusal_with_input_error` → `engine_error`); vitest `runs.test.ts`. Design §9.4. *Round 2 below: `engine_error`, its label and the draft hiding removed; the history read first is the fix.*
@@ -410,7 +410,7 @@ Confirmed findings of the five-lens review (math, ledger and VAT, legal, securit
 
 ## M2c-6a: transfers and files (M2-14 cash-out, first half; design §6.1, §9.7–§9.9, §11, §15–§17, §21)
 Migration `20261115090000_transfers_files.sql` (forward-only; redefines `private.bank_transfer_guard`, `private.remittance_run_guard`, `private.remittance_payout_blockers`, `public.request_refund` and `public.cancel_remittance_run` — the last two gain a defaulted last argument, so their old signatures are dropped — with their settings and grants restated; renames `private.run_remittance_checks` to `private.run_remittance_runs_checks`, its body unchanged, and a new `private.run_remittance_checks` calls it then the transfers' checks; a later slice redefines the runs' part under the new name); worker `remittance.pain001`, job `remittances.transfer_file` (`jobs.transfer_files`, on the existing `remittances` queue: no new queue); bucket `transfer-files` (`supabase/config.toml`; hosted: `supabase config push`). **No ledger entry is posted**: §0 and §5.2 date the remittance, the settlement and the sweep at the bank's debit; generating, downloading or uploading a file is no bank fact (M2c-6b books the debits).
-- **Files** (`transfer_file`, `transfer_file_item`, `transfer_file_download`): `public.generate_transfer_file(key, bank_account, late_reason?)` (admins and ops managers at aal2, idempotency key and request hash) builds **one live file per paying account**: it supersedes the account's files not downloaded yet (their transfers come in the new one, new MsgId) and takes every `ordered` payout and file-mode refund of the account that passes the checks, plus the sweep. Only an active `client_funds` account in EUR pays a file; the own account's top-up files are M2c-7's (design §21). File number `TF-AAAA-NNNNNN` (a sequence: unique, not gapless, §3.2 #4) is the MsgId; one PmtInf per (group, execution date), `<number>-<n>`, the sweep in its own; `CreDtTm` frozen at generation (Paris time with its offset); the debtor (servicer's legal name, IBAN, BIC or `NOTPROVIDED`) frozen on the file. States `pending → generated → downloaded → sent`, or `superseded | rejected | failed` (the design's list plus `pending`, while the job writes it, and `failed`).
+- **Files** (`transfer_file`, `transfer_file_item`, `transfer_file_download`): `public.generate_transfer_file(key, bank_account, late_reason?)` (admins and ops managers at aal2, idempotency key and request hash) builds **one live file per paying account**: it supersedes the account's files not downloaded yet (their transfers come in the new one, new MsgId) and takes every `ordered` payout and file-mode refund of the account that passes the checks, plus the sweep. Only an active `client_funds` account in EUR pays a file; the own account's top-up files are M2c-7's (design §21; *built in M2c-7e-1*). File number `TF-AAAA-NNNNNN` (a sequence: unique, not gapless, §3.2 #4) is the MsgId; one PmtInf per (group, execution date), `<number>-<n>`, the sweep in its own; `CreDtTm` frozen at generation (Paris time with its offset); the debtor (servicer's legal name, IBAN, BIC or `NOTPROVIDED`) frozen on the file. States `pending → generated → downloaded → sent`, or `superseded | rejected | failed` (the design's list plus `pending`, while the job writes it, and `failed`).
 - **Transfers** (`bank_transfer`): `in_file` names its file (`transfer_file_id`); a transfer goes back from `in_file` to `ordered` only when its file is superseded, rejected or failed (the guard checks it), so it goes in the next file; a sweep is cancelled instead and recomputed (ledger critique #16). The file's items keep which file held each transfer (and the PmtInfId M2c-6b matches batch debits with).
 - **The sweep** (§11, §13 #8; founder #9): S = max(0, −Σ4679 − Σ sweeps ordered or in a file), read under the remit lock, to the servicer's active own account named in « Facturation » (none: no sweep, the page says so). Until M2c-6b books sweeps, a sweep stays `in_file` and S nets it.
 - **Checks at generation** (§11), under the allocation then remit locks: **cash** — the closing balance of the account's last imported statement that has one, less the debits on statements for later days (credits left aside), less the transfers in a downloaded or sent file whose debit no statement shows yet (by our end-to-end id, or by PmtInfId for a batch), less the refunds ops execute by hand still pending, ≥ CtrlSum; when short the sweep is left out first (clients are paid first), then the file is refused (`cash_not_covered`; none imported: `no_closing_balance`). **Per transfer** (`private.transfer_hold_reason`): a payout's run still approved or sent; today's payout blockers (M2c-4's, plus `payee_name_mismatch`); the payout account unchanged since approval froze it (`payout_account_changed`); the per-client cap N + D ≤ −4670[c] − c's other runs in flight (`payout_not_covered`: a collection reversed since approval, ledger critique #1); its execution date — the later of its requested date and the account's next execution day (today only before its cut-off, as at approval) — after the run's earliest latest execution date only with a late reason (the run's, or one given with the file: kept on the file, the item marked `late`). A transfer that fails is **held out** with its reason (`transfer_file.held`) and stays `ordered`.
@@ -1181,7 +1181,11 @@ after download stays **off**; `033` and `034` keep their assertions and TODO mar
   id only in its label outside `/REF` is still read `debtor_credit`: no parser rule reads an id anywhere in a label
   without misreading a debtor's own reference of the same shape. COMPLIANCE OQ-84 records it with its default (ops
   recognise it, neither assign nor refund it, tell support; left to M2c-7 since M2c-6b-2a — a recorded payment is never
-  undone, plan Q13's default). No parser change, so the evals are
+  undone, plan Q13's default). *(M2c-7e-2 and 7e-3: a CSV credit imported since then whose label cites one of our
+  references is held as `label_reference`, never a payment by itself and never booked by the debit job, ops classifying
+  it by one of its four exits (its transfer's return, a client's payment, a debtor's payment, our top-up); a payment
+  recorded before stays
+  recorded — S23, no undo path, the P0 `own_transfer_payment` its tripwire.)* No parser change, so the evals are
   unchanged (below).
 
 Mutants, each killed: SQL 9 of 9 (each redefining one function after `035`'s `begin`, run through `psql` in one
@@ -1269,7 +1273,8 @@ stays **off**; `033` and `034` keep their assertions and TODO markers.
 - **R3 (verdict new:csv-top-label-only-unrecorded) — recorded.** A TOP id only in a CSV label outside `/REF`, or in a
   detail of a camt.053 credit batch kept unsplit beside a debtor's credit, is read as a debtor's payment: COMPLIANCE
   OQ-84 (e) records it with its default (ops recognise it in « Paiements à traiter », neither assign nor refund it, tell
-  support; the CSV label case left to M2c-7 since M2c-6b-2a, plan Q13's default — the camt.053 case is a `return` since
+  support; the CSV label case left to M2c-7 since M2c-6b-2a, plan Q13's default (*held as `label_reference` with its
+  four exits since M2c-7e-2 and 7e-3*) — the camt.053 case is a `return` since
   round 8, T2, waiting for ops' booking from the statement's details). No parser change: a label rule would misread a
   debtor's own reference of that shape, and the import's classifier reads only the line's own end-to-end id, which an unsplit batch's line does
   not have (giving it one detail's TOP id would read the whole batch, the debtor's credit in it, as our top-up). Evals
@@ -1601,7 +1606,8 @@ default below is built and each question stays open. Decisions:
   `own_transfer_line` (OQ-84 (i)). The worker's `P0_REVIEWS` include `transfer_unknown`.
 - **Texts** (plan §2.6; S23, Q13's default). `public.assign_payment`'s and `public.resolve_duplicate`'s hints and their
   page twins (`payment_own_transfer_line`, `duplicate_own_transfer_line`, `OUR_TRANSFER_PAYMENT_NOTE`) no longer promise
-  a screen: Collectoo cannot book such a payment as that return yet (a recorded payment is never undone; M2c-7) — tell
+  a screen: Collectoo cannot book such a payment as that return yet (a recorded payment is never undone; M2c-7; *M2c-7e-1's
+  S23: no undo path is built, the P0 `own_transfer_payment` is the tripwire*) — tell
   support; a held line stays in « Doublons possibles » (build check: « Libérer » cannot release it as a return —
   `resolve_duplicate` takes no such kind). The funds pass's own-line hint comes from one place,
   `private.own_transfer_line_hint('bank_booking')`, unchanged in wording (6b-2c rewords it with the screen). The review
@@ -13149,6 +13155,636 @@ M11's margin is narrow: the second call costs a constant per currency, not a who
   and its neighbours: keyed by `organization_id`, predicates on `kind`). A read by kind alone could take one whole.
   This round touches `bank_transfer` only, and no test or probe saw it. Default: the same `is not null` binding when a
   reads test shows one.
+
+## M2c-7f-2 (2026-11-28): the property machine, the close-out volume file, the docs close-out and the go-live gate
+
+Plan: `docs/design/m2c-7f-plan.md` §3 (M1–M6, V1–V4, D1–D2, X1); the parent plan `docs/design/m2c-7-plan.md` §8.2–§8.6.
+Branch `m2c7f-2` on `538572e` (main through PR #51, plus 7f-1 as PR #52 stood when 7f-2 began). No migration was
+planned; the volume run required one, `20261203090000_close_out_fixes.sql` (below), and the long machine run one fix
+in the worker (the plan's clauses for a mandate with no line in the run, below). **The switch stays off**: nothing
+writes `private.feature_switch` in a committed transaction; the machine's switch-on class runs each example in one
+transaction rolled back at its end and asserts the switch off before and after. `033` is unchanged; `034`–`048a` keep
+every assertion (no R3 change in this slice).
+
+### The property machine (M1–M6)
+
+`worker/tests/test_close_out_machine_integration.py` (its own CI job, `machine`, since review round 1: VC-2),
+`worker/tests/close_out_world.py` (the world and the product paths it drives) and the oracle
+`worker/tests/ledger_machine.py`, which gains a funds model (`FundsModel`: runs, lines, payouts, advances,
+settlements, credits, top-ups) whose expectations come from its own state, never from a SQL helper it checks
+(M7-MONEY-1).
+- **World**: one servicer (dedicated and own accounts), Martin under two mandates (MARTIN-1 netting and claw-back,
+  MARTIN-2 netting only at a 25 % commission so that one run prices two mandates differently), Lilas (netting), Durand
+  (no netting).
+- **Two classes.** Switch off: every step commits through aal2 API sessions and the queues' jobs. Switch on
+  (`downloaded_file_cancellation`): each example in one transaction (the commands as `authenticated` with the claims
+  set locally, as pgTAP's `read_as` does; the jobs through their Python functions on that connection; the nightly with
+  `p_today` advanced), rolled back at its end. One rule picks among 43 actions (49 switch on), each a no-op when it does
+  not apply, and macros chain product steps into the states the mutants are about (a collection remitted end to end, a
+  reversal in flight, a same-run pair, a claw-back cycle, a sweep in flight, one run over two mandates, a client paying
+  part of an invoice — also while its run is in flight —, a set-off barred at the debit, 038's f_partial, and switch on a
+  late cycle).
+- **Checks**: 18 keyed checks after every step (each client's 4670 against its pending items and runs in flight — I14
+  — and never in debit — I13 —, its queue item by item, 4111 and 4112 — I18 —, each reversal's covers, 4679, 5122,
+  44574 and 44571 — MONEY-11 —, 4710, 5120 against the bank, M6), each approval's plan compared with the model's, and at
+  each example's end the quiescence (every file executed and booked, every top-up credited, the last sweep debited): the
+  nightly checks clean, 5120 = the bank's closing balance, Σ4679 = 0, each client's payouts received = its items
+  remitted less what was set off plus the refunds paid with them (MONEY-1), every open advance alerted 30 days on
+  (MONEY-10, `advance_open`), 5122 = what the model moved through the own account.
+- **Every check can fail**: `test_every_check_can_fail` plants, one at a time, a state that breaks each of the 32
+  checks (a raw posting or reversal in a savepoint, or one figure of the model moved and put back) and sees it fail with
+  its own message. It found one vacuous check in the machine itself (M6 read a request payload key that does not
+  exist; it now reads `advance_repayment_request_item`).
+- **M2** (7a's part): the `reverse` rule may mark an entry remitted; an advance is expected after every covering
+  reversal, none for a same-run pair, the at-booking cover when the run is booked, and `LG009` for a raw reversal.
+- **M3** (7b's claw-back): advances taken back in the plan oldest first, on their own mandate's money, under its clause
+  only; a request is refused `clawback_applies` where the clause applies; `payout_not_received` modelled.
+- **M4** (038's planted scenarios): `f_partial`'s reachable form (a run approved between a payout's debit and its
+  return, over two statements) reached 15 + 11 times at 25 × 40 with every check holding. The `d_queue` / `d_twice`
+  shape (an uncovered negative item beside a cancellation after download, a queue bound): *(review round 1, MACH-5)
+  the event counted before the round — once at 8 × 20, 33 times in the 200 × 40 switch-on run — was a looser state, any
+  queue in debit of a client that ever had a payout cancelled after download; it now records only an uncovered
+  reversal in the queue of a client whose payout cancelled after download was executed late or is still to execute
+  (its re-issue not out yet), the queue in debit — its count in « M2c-7f-2 review fixes » below.* 038 is unchanged
+  (§4 R2).
+- **M5** (a cover's release re-queued in a later run, switch on): **not built** *(review round 1, MACH-3: the state
+  recorded under M5's name — a late predecessor's return re-queued in a later run, 14 times at 25 × 40 through the late
+  cycle — is not M5's: the machine has no unplanned payout, never « désimpute » the collection E between a late or
+  unplanned payout and its return, so `private.remitted_cover_release` never runs; the event is renamed, its plan still
+  compared with the model's. M5 is in « Left open »).*
+- **M6**: after every step, no request that is not withdrawn names an advance whose entry is reversed (no nightly alert:
+  §4 R4). *(Review round 1, MACH-3) No machine rule reaches the product paths that reverse an advance's entry (the
+  cover's release, `transfer_line_check`'s double payout): the invariant fails on its plant (`test_every_check_can_fail`)
+  but walks no state where a refusal is at stake (« Left open »).*
+- **Oracle gaps the long runs found, fixed in the oracle (not the product)**: the 25 × 40 run (seed 2540) failed twice
+  first: a run whose takes equal the refunds it owes settles nothing (D = 0, `settlement.py`'s deferral), and a
+  returned payout blocks the client's account only while it is still the account it was paid to. Each was replayed by a
+  script that failed without the oracle's fix; the product's behaviour is the design's (§9.6, M2c-6b).
+- **Budget (F15)**: 2 classes × 8 examples × 20 steps, the whole file 148–211 s locally (seeds 7–10; × 1.5 = 5.3 min ≤
+  6 min); `ci.yml`'s step `timeout-minutes: 8` (125 % of 6 min, rounded up). **25 × 40** per class: 999 s, seed 2540,
+  green (job `machine-long`, manual dispatch only). **200 × 60** (founder question 1's default (a), once locally): **200 ×
+  60 switch off and 200 × 40 switch on**, 8 chunks of 25 examples per class, 11,103 s with the three re-runs (« What the
+  200 × 60 run found »): *(review round 1, DOCS-4) chunks 1–6 ran on the code before one or more of its fixes; on the
+  part-3 code, 100 × 60 switch off (chunks 7, 8 and the re-runs of 3 and 6) and 75 × 40 switch on (chunks 7, 8 and the
+  re-run of 2), every example green. Neither ran on review round 1's machine (its checks and the summed charges).*
+
+### What the 200 × 60 run found (founder question 1's default (a), once locally)
+
+Eight chunks of 25 examples per class, each with its own seed (71301–71308) and its own Hypothesis database, one
+after the other on one fresh reset, a hard cap of 3 h 30 in all; the switch-off class at 60 steps per example, the
+switch-on class at 40 (below). Four failures, each replayed from its blob, each reproduced, each fixed at its root:
+- **The product: a mandate with no line in the run lost its clauses** (seed 71302, switch on). `run._plan` read the
+  clauses only for the mandates with lines; one whose only money in the run was a refund owed to the client (a credit
+  note beyond what it corrected) counted as having neither clause, so under a claw-back clause its open advance was
+  not taken back from that refund (the refund paid, the advance left open), and under a netting clause its open
+  invoice not set off. Design §9.6 is per mandate of the client (avail_m = gross_m + excess_m), and so is the plan
+  engine's own docstring. Fixed in the worker (no SQL): the clauses of every mandate the plan weighs (its lines', its
+  refunds' and its credit notes' mandates), and the loader reads the terms of a mandate whose documents are open
+  (`jobs/remittances.py`, `_load_terms`). Tests first, seen failing: `test_remittance_run.py`
+  `test_a_mandate_with_no_line_in_the_run_takes_its_advance_from_its_refund` and `…_nets_its_invoice_against_its_refund`
+  (and `…_with_no_line_and_no_clause_pays_its_refund`, which held before and after). It moves no money wrongly in
+  either reading (the client was paid what it was owed), but it set off less than the mandate's clauses provide.
+- **The oracle: a proceeding held every ordered payout** (seed 71303, switch off). The product holds a payout on a
+  client's event only when the event changes what its run sets off (`private.transfer_hold_reason`:
+  `client_status_changed` for a run with a compensation or an advance taken; a liquidation through the payee rule) —
+  a proceeding blocks no payout (design §13 #9). The model now holds on a proceeding only a payout whose run takes
+  something.
+- **The oracle: one hold reason per payout** (seed 71306, switch off). A payout the model holds for an event may also
+  be one its client's queue no longer covers; the file names the first reason that applies (`payout_not_covered`
+  after the status checks), and the oracle now accepts it whenever the model's cap says so.
+- **The harness: the switch-on class's one transaction ran out of locks at 60 steps** (seeds 71301, 71302: the first
+  example, every step a collection, at about step 51: « out of shared memory », `max_locks_per_transaction` 64 × 100
+  connections). Each call of the ledger's posting core creates its working tables anew; a dropped table's lock is
+  held to the transaction's end (sampled: 20,710 locks held by one switch-on transaction 22 s in, 11,921 of them on
+  relations already dropped). The switch-on class runs at 40 steps in the long run (25 × 40 fits, as the
+  `machine-long` job); the PR's 20 steps are far within. No product transaction holds a posting call per step: the
+  product's jobs post set-based, one transaction per message.
+The three failed chunks were re-run on the final code with their own seeds and passed (71302 switch on, 413 s; 71303
+and 71306 switch off, 960 s and 816 s), and each failing example's blob was replayed on the final code (each ran the original example's 33, 40 and 30 steps, the failing one included, with every check holding, then ran out
+of the blob: Hypothesis's `DidNotReproduce`).
+The other chunks ran on the code before the fixes, each of which changes only the state it was found on.
+
+### The close-out volume file (V1–V4)
+
+`worker/tests/test_close_out_scale_integration.py` (§8.3's eight rows at 50k, V3's measures; job `scale-closeout`, on
+pushes to `main` and manual dispatch only) and its numbers in `docs/benchmarks/remittances.md` « M2c-7f-2, part 2 ».
+Two bounds broke; both fixed in one migration, `20261203090000_close_out_fixes.sql`, each with its db-job reads test
+(`worker/tests/test_close_out_fixes_reads_integration.py`, seen failing on the earlier bodies).
+
+- **Row 6, « Règlement du client » (< 200 ms): up to 529 ms (median 185 ms) at 1,000 open advances.** `private.client_payment_docs` asked,
+  for each open document, the client's opening (twice) and whether its proceeding stands — the same answers for every
+  document of the client —, and `private.client_open_advances`' flattened lateral computed each advance's open part
+  again in its filter. Both redefined from their latest bodies: the client's facts read once per call (a fenced
+  subquery), the lateral fenced; each document's « before the opening » and « payable » the helpers' own comparisons.
+  Same documents and fields (the old and new bodies side by side: no event, an opening after half the advances, a
+  liquidation alone). After: max 137 ms (run 3: 113 ms, median 45 ms).
+- **Row 8, the 5,000-payout funds pass (≤ 24 s × 1.1): 28.2 s.** 7a's part was small: the per-row run check 0.37 s for
+  its 5,000 checks, the at-booking cover 0.03 s. 14 s were `private.ledger_post_set`'s pooled-dimension lookup (« Left
+  open » of M2c-7a above: « make it an index-equality lookup in a later slice »; plan m2c-7f V3): each pooled account was
+  found by the first three columns of `ledger_account_pooled_uq`, « is not distinct from » being no index condition,
+  so each client's dimension read every account of the servicer's book (100 clients' entries among 400 clients:
+  81,404 rows read). Redefined from its latest body (`20261124090000:113`): each dimension by its own key whatever the
+  statistics — a client's outside a portfolio (4670, 4111, 4112, 7060, 419) by `ledger_account_client_idx` (client,
+  book), the servicer and the currency then mere filters; a client's in a portfolio (3100, the owner's claim) by the unique index's first
+  four columns; one without a client by the unique index, its client « is null ». A first version that only added the
+  client's column to the unique index's prefix passed on the volume world and failed in the db job's state (82,454
+  rows): with the servicer an index condition, stale statistics priced `ledger_account_org_book_idx` (servicer, book)
+  the cheaper. The receivable lines' accounts, joined, were hashed from the whole table at each call under the same
+  statistics (5,223 rows in that state): now one probe of `ledger_account_receivable_uq` per line. The same accounts
+  found; LG006's check of a line without its account unchanged. After: 1,604 rows in both states (the posting core's
+  ~16 per entry); the pass 14.4 s on run 3's world (`ledger_post_set` 7.8 s of it in 4 calls, against 20.8 s). **V2 is
+  not built**: its trigger (the run check made statement-level) was R-a's fallback for a per-row check that would cost
+  the pass its bound; measured, it costs 0.37 s.
+- **The other rows** hold their bounds on the final body (run 3, fresh reset, CI's logging settings): the covers at the
+  reversal 3.4–4.4 s per 1,000-return chunk (< 60 s), the cover statement 0.56–0.65 s (< 2 s), 2.0 rows of the cover's
+  facts and 20.0 of its posting per reversal; the deferred LG009 check 0.25–0.26 s (< 0.5 s); `cover_booked_run_reversals`
+  0.60 s (< 3 s); the nightly's delta pass 0.078 s / 0.071 s with its rows read 16,009 vs 16,013 for 1 and 10 booked
+  runs, `p_full` 0.12 s / 0.57 s, the whole nightly's increase over the body without 7a's checks +0.00 s / −0.94 s
+  (≤ 2 s); the claw-back's approval 5.85 s (≤ 6.71 s), its settlement at the debit 0.055 s, « Avances » 105–144 ms; the
+  hourly top-ups over 100 servicers 1.11 s of job time, a held servicer skipped and its miss recorded. **Row 5's prepare
+  broke its bound** (15.58 s; 12.93 s after review round 1; **8.38 s** after review round 2, within it: « M2c-7f-2 review
+  fixes (round 2) », VC-3). V3: the payout blockers for a client with a death 1.94–2.11 s for 5,000 calls (budget
+  8 s); `test_transfer_files_scale_integration` reads 5,000 `bank_transfer` rows of its 32,000 bound.
+
+### Mutants (X1)
+
+Each mutant applied to the live stack (a function's latest body with one change, a trigger disabled) or to the worker's
+code, the class or file run, then restored (bodies re-applied from the migrations and checked). The machine at 8 × 20,
+seed 7, both classes; the volume rows on run 2's world (row 6 on run 3's).
+
+| Mutant (§8.5 and this plan) | Killed by |
+|---|---|
+| cover off (`cover_remitted_reversals`: where false) | machine: the product's LG009 refusal at « Désimputer »; the machine's « covered at Désimputer » check |
+| cover off and LG009 off | machine: LG008 (4670 in debit); « covered at Désimputer » |
+| at-booking cover off | machine: « the bank's debit booked » (the booking refused, the payout stays in file) |
+| at-booking cover off and LG009 off | machine: I14 from the model |
+| claw-back off (`settlement.py`) | machine: the run's plan (`take_advance`) |
+| VAT pro rata off, the plan's path (`settlement.py`) | **not reachable by the machine** (argument below); `test_settlement.py::test_a_take_in_part_moves_its_vat_pro_rata` |
+| VAT pro rata off, SQL `vat_part` and the plan | machine: rule 12 (a client payment's VAT moved), the client-pays-part macro |
+| payee kind ignored (`remittance_payout_blockers`: the account's kind not compared) | **not reachable by the machine** (no rule records a mandate end with its payee); killed on the final code by pgTAP `046a` (q, p: tests 10, 16, 23, 30 of 48) |
+| the top-up's sweeps term off (`top_up_needed`) | machine: `servicer_shortfall` against the model; « the hourly top-up orders » |
+| the LG009 triggers dropped | machine: LG008 where the run expected an LG009 refusal (the raw-reversal probe) |
+| the same-run exclusion dropped | machine: I14 from the model |
+| the in-flight refusal dropped (`client_payment_free`) | machine: the in-flight client payment refused by `record_client_payment` (its compare-and-set) |
+| the advance item's mandate dropped (`run.py`) | machine: the approval's `data_error:23514` (the draft-refusal assertion) |
+| the requested flag ignored (`jobs/remittances.py`) | **not reachable by the machine** (argument below); `test_repayment_requests_integration.py::test_a_requested_advance_is_never_also_taken_by_the_real_prepare` |
+| the surplus refused (`client_payment_plan`) | machine: the surplus client payment refused |
+| the debit-time re-read removed (`post_run_settlements`) | machine: « a barred set-off withheld at the debit » |
+| LG003's exception widened to any `return:barred:%` key | machine: « LG003: a run's settlement reversed » (the probe after each remit) |
+| the 4670 trigger's `settlement_withheld` branch removed | machine: « a barred set-off withheld at the debit » |
+| the shapes' 419 term dropped | machine: the shape check refuses `client_payment_own` |
+| the import's `label_reference` override removed | **not reachable by the machine** (no rule imports a CSV label); killed on the final code by pgTAP `047b` (k1, k4, k5, r: tests 1, 2, 6, 8, 10) |
+| `paid_on` read from `remittance_run_paid_on` alone | machine: check 2 (`run_settled_on`) |
+| the chain events' label branch removed (`remittance_chain_events`) | **not reachable by the machine**; killed on the final code by pgTAP `047c` (v1: test 7) |
+| rule 3 of `run_settled_on` read from `bank_transfer.return_entry_id` | machine, switch on: check 2 via the late cycle |
+| H2's sweeps term off in `servicer_shortfall` | machine: `servicer_shortfall` (the nightly runs before the hourly order) |
+| H11's SHA-256 comparison removed | machine: MONEY-2, one proof recorded twice |
+| F9: the delta pass reads every booked run | row 4 (559,335 `remittance_line` rows) |
+| the cover's facts unkeyed (`remitted_cover_held`) | rows 1, 2, 4 (`client_advance` 3.12 M rows, LG009 1.58 s) |
+| the deferred LG009 check unkeyed per row | row 2 (past the 120 s statement timeout) |
+| `cover_booked_run_reversals` unkeyed | survives row 3 (0.63 s of 3 s); `test_remitted_cover_reads_integration.py` |
+| the claw-back's `advance_open` unkeyed: prepare / approval | prepare: not a valid kill (the baseline already breaks the bound); approval: survives (5.5 → 6.1 s of 6.71 s) |
+| the settlement's advance guard unkeyed | survives (0.07 → 0.70 s of 2 s) |
+| `advance_born_on` unkeyed (a client payment's documents) | row 6 (169 → 659 ms) |
+| F8: the hourly job waits for a held servicer's lock / the step without its savepoint | row 7 (the held servicer done, not missed / its miss not recorded) |
+| F17: the per-row run check unkeyed | row 8 (past the 120 s statement timeout) |
+
+The three §8.5 mutants no machine rule reaches (a mandate end with its payee; a CSV label citing our reference) were
+applied in part 3 to the final code, each with its slice's pgTAP file run, then the body restored and checked by its
+`prosrc` digest: each killed (table). The machine does not kill them; giving it those rules is Left open.
+Arguments for the two machine survivors:
+- **VAT pro rata in a run's plan.** In the machine every remitted reversal is covered in full on its own mandate (the
+  cover's target is the remitted line's amount), a returned payout re-queues a positive item, and a D = 0 deferral keeps
+  an invoice and the refund it offsets together; so each mandate's room is at least its open invoices and every take
+  closes its invoice. A partial take needs a mandate's money below what it owes (an unplanned payout, a payout overrun,
+  a terms change), which the machine does not model. The unit case kills it.
+- **The requested flag in the prepare job.** Requests are refused for advances a claw-back clause covers, and each
+  machine mandate keeps one terms version, so a requested advance is never one a run could take. The integration test
+  (a terms change after the request) kills it.
+The time-bound survivors at volume ((4), (5b), (5c)) are 10× slower unkeyed reads still under their bounds at 50k; (4)
+is held by the db job's reads test, (5b) and (5c) by none (founder question 5 of part 2, default: keep the time bounds).
+
+### CI wiring (V4)
+
+- `db` job: the integration step ignores the machine file; a new step runs it after (2 × 8 × 20, the seed printed,
+  `timeout-minutes: 8`).
+- `machine-long`: 2 × 25 × 40, manual dispatch only, 45 minutes.
+- `scale`: its step excludes the close-out file. `scale-closeout`: pushes to `main` and manual dispatch only, in
+  parallel with the other volume jobs, 60 minutes (the file takes 40.1 min locally).
+- No job runs the volume files or the long machine on pull requests (founder « 1b »).
+
+### Deviations, with why
+
+- **The switch-on harness** replaces `psycopg.connect` with one shared connection (each `with` block a savepoint;
+  role, claims, actor and timeouts reset on exit), not a fixture. Inside one transaction `now()` is frozen, so each
+  statement's period is shifted by a day to keep statements in order.
+- **The machine's job drains** run the funds, remittance and top-up messages; they skip the cron, document and receipt
+  messages (none moves money).
+- **Not modelled, their holds only accepted**: client payments by barred clients are skipped; the payee rule's
+  `payout_blocked:client_status:*` holds are accepted for clients with a status event. Late execution is exercised
+  only as a late predecessor booked through the review screen (no double execution).
+- **Document prices** (TTC, VAT) are read from the engine as the model's input; what each run owes in refunds is the
+  model's own.
+- **A unit case outside the machine** (`test_settlement.py`) because the plan's VAT pro rata mutant cannot be reached
+  by it (above).
+- **Row 1's « ≤ 20 reads per reversal »** is asserted separately for the cover's facts and for its posting (the
+  posting core reads 20 rows of `ledger_account` and of `ledger_posting` per four-line entry by itself), each ≤ 20 ×
+  1,000 + 100; the « < 2 s » is the whole call's time.
+- **Row 4's « within 10 % »** holds for the rows read in all (16,501 with 1 booked run, 16,011 with 10 in run 2; 16,009
+  and 16,013 in run 3). Per table it is one-sided — no table read more with 10 runs than with 1 beyond 10 % —, as
+  `ledger_account` and `ledger_posting` are not among the tables whose statistics the file pins: in run 2 their
+  statistics moved the plans by about 250 rows each between the two nights, the night with one run reading more. The
+  window plant: a completed check run dated a day after the measuring transaction's start, less 1 ms (rolled back with
+  it), so the history lies before the delta window as days-old history would (asserted: no booked run's line read).
+- **Row 7's « < 2 s in all »** is the job's: its 100 messages' handler time summed (1.11–1.20 s). The wall time,
+  2.92–3.25 s, adds the queue consumer's own cost (a new connection per poll and per message), the same for every
+  queue.
+- **Plants**: row 5's 200 `payout_overrun` advances on the history's 50k-line runs are posted as the funds pass posts one
+  (its entry by `ledger_post_set`, then its row); row 7's debts are bank charges posted the same way. No product path
+  makes either at that size in a test's time.
+- **The reads test** for `ledger_post_set` switches off `ledger_posting_guard` and `ledger_posting_client_payable` for
+  the measured lot only, inside its rolled-back transaction (both unchanged; their whole-table reads would hide the
+  lookup's) and checks the accounts itself.
+- **No pgTAP `048b`**: the fixes change no behaviour; equivalence is held by the db-job tests (the old and new bodies
+  side by side), pgTAP's 3,263 tests and the db job's integration suite on the final bodies.
+- **The 200 × 60 run** ran as 8 chunks of 25 examples × 60 steps per class, each with its own seed and its own
+  Hypothesis database (so a failure in one chunk is never replayed first by the next), the plants' test left out (it
+  does not depend on the size).
+
+### Left open, with its default
+
+- **Row 5's prepare (≤ 10.6 s × 1.1): 14.9 s (run 2) and 16.9 s (run 3) with ten booked 50k-line runs behind it** —
+  *review round 1 (VC-3, « M2c-7f-2 review fixes »): the earlier charges summed per key, whole only where the run
+  credits a key: 12.93 s, still above the bound (« M2c-7f-2 review fixes », Left open, founder question). Review round 2
+  (VC-3): **8.38 s**, within the bound, which is unchanged (the cyclic garbage collector paused during the prepare, the
+  load's conversions; « M2c-7f-2 review fixes (round 2) »).*
+- **The volume file takes 40.1 min locally** (run 3; run 2 40.6: the world 20.4 min, row 8's 5,000-payout fixture 14.5
+  min), beyond the ~28 min the plan aimed at: `scale-closeout`'s timeout is 60 min. Founder question: row 8 could run in
+  `scale-payouts`, on the fixture that job already builds.
+- **A receivable line's account is now one probe of its key per line** (`ledger_post_set`, above): the `scale` job's
+  50k allocation posts its 10,000-payment chunks in 8.5–9.4 s (8.1–8.6 s before, when the planner hashed the table).
+  Default: keep (a probe per line is bounded whatever the statistics; the hash read every servicer's accounts).
+- **`ledger_posting_guard`'s plan flips to a sequential scan of all of `ledger_account`** when its statement's rows are
+  many (176,939 rows for one 400-line statement on the volume world); once per posting statement, pre-existing.
+  Default: keep; measured in the benchmarks.
+- **Rules the machine does not model** (each covered by its slice's pgTAP and integration files): CSV label references
+  and their exits; a mandate end and its payee; a seizure and its release; a filed top-up booked without its `TOP`, then
+  cancelled, and the own account's top-up file; client payments on the dedicated account; manual credit notes and their
+  refunds; partial payment returns; unplanned payouts, double execution and payout overrun; a terms version changing
+  mid-example; *(review round 1, MACH-9)* the forward rule; a withheld settlement's next run at the next hourly
+  schedule; the expected cover's date (the covers check compares amounts); an invoice born before a proceeding's
+  opening (every document and bar is dated today); a cover's release (M5) and the double payout's advance reversal
+  (M6's product paths). Hence the five §8.5 mutants it does not reach (table), each killed by its slice's own tests on the final
+  code. Default: a later machine gains those rules when one of those paths changes (founder question).
+- **038's planted `d_queue` / `d_twice` branch** stays (brief R3; §4 R2). *(Review round 1, MACH-5: the « 33 times »
+  first written here counted a looser state, any negative queue after a cancellation after download; 038's own shape —
+  an uncovered reversal beside a payout executed after its cancellation, the queue its bound — is counted in « M2c-7f-2
+  review fixes ».)* Part 1's founder question, default keep.
+- **The 7f-1 CI rounds merged on `main` after this branch's base** (`5a5ab3f`, `7581b1e`: `top_up_needed`,
+  `top_up_credit_options`, `servicer_flight*` in `20261202090000`) touch none of the three functions
+  `20261203090000` redefines. `main`'s PROGRESS lists three items for 7f-2 from that round (MB-1's gate read stamped;
+  five reads of the servicer's whole in-flight set keyed under the no-statistics plant; the nightly's runs-in-flight
+  reads measured in a many-servicers state): **not taken here**, as this branch's base predates them (founder question).
+- ~~**The db job's margin**~~ — *fixed in review round 1 (VC-2): the machine runs in its own parallel job,
+  `machine`.*
+- **The switch-on class's examples are bounded by Postgres's lock table** (one transaction holds every step's locks:
+  about 45 steps at the default `max_locks_per_transaction`): the long local run took it at 40 steps per example, not
+  the plan's 60. Default: keep 40 for that class (founder question: or raise the setting on the stack of the long
+  runs).
+
+### Suites (part 3, the final code; `docs/benchmarks/remittances.md` « M2c-7f-2, part 3 »)
+
+- The db job in CI's order on a fresh reset: `supabase test db` 3,263 passed (642 s); the types unchanged; the
+  integration step 336 passed, 1 skipped (1,036 s); the machine step 3 passed (190 s, seed 12191405): 1,868 s of steps,
+  31.1 min locally against the job's 45-minute timeout (« M2c-7e-1 — CI round »: revisit near 35 min; Left open).
+- `make eval` green; worker lint, types and unit tests green; web lint, typecheck and vitest (763) green, no web change.
+- Each on a fresh reset with CI's logging settings: the `scale` command 15 passed (1,097 s); `scale-payouts` 6 passed
+  (1,033 s); `scale-closeout` 8 passed, 1 failed (2,326 s, 38.8 min): row 5's prepare, 15.58 s against 11.66 s (Left
+  open, as in part 2), every other row within its bound (row 8 13.5 s; row 6 max 121 ms).
+- X1's three mutants the machine does not reach: killed by `046a`, `047b`, `047c` (table above).
+
+### The go-live gate (D2; plan §8.6), drafted for PROGRESS
+
+**The code gate is lifted by merging M2c-7f-2**: the design's « no real remittance before M2c-7 » (design §21; this
+ADR's interim passages, marked superseded) held until the advances, their recovery, the payees after the client's
+events, the set-off bars, the declarations, the top-ups, the label references and the close-out's machine and volume
+file were merged. **What remains before a first real remittance, none of it code:**
+1. **R124-2 declaration to the procureur de la République and the dedicated account opened** (CPCE-01, CPCE-02; Ops).
+   R124-7 1° makes a breach of R124-2's obligations a 5th-class contravention.
+2. **Counsel's answers to OQ-45** (CMF L314-1: whether receiving debtors' payments and remitting them to creditors under
+   an R124 mandate is a payment service needing an authorisation) **and OQ-35** (R124-2 « exclusivement affecté »:
+   whether the servicer's own money — a settled commission, a top-up, an advance's cover — may sit on the dedicated
+   account until its sweep; R124-7 1° makes a breach of R124-2 a contravention; review round 1, DOCS-6).
+3. **The bank's guide and a real statement carrying our debits** (founder #15; OQ-79, OQ-80, OQ-81, OQ-83, OQ-84): the
+   classifier, the batch bookings and the label references are built on synthetic files.
+4. **The founder's answer on the switch** (cancellation after a file's download, 6b-3 Q1): until then it stays off, as
+   pgTAP `033` pins.
+5. **M3's re-runs before go-live** (design R7; M3 plan §10 #9) and **M3c-2's restatement cover** (m2c-7 plan §1.2).
+6. **Two invoice obligations that start with the first real invoice**: **FAC-06**'s written procedure under CGI 289
+   VII 1° (who controls what, when and how, from the triggering event to the invoice, the credit notes and the
+   settlements; BOFiP BOI-TVA-DECLA-30-20-30-20 §190: written « au moment de la mise en place de la piste d'audit »), by
+   Ops with the accountant, with **OQ-96** (the procedure's treatment of the settlements); and **OQ-44**'s answer (the
+   servicer's category for e-invoicing), accountant.
+7. **The founder's answers to Q17–Q21** of the M2c-7 plan (each built as its default): a returned payout then one of its
+   collections undone (Q17), a client's advances in a collective proceeding (Q18), a judgment, a death or a seizure
+   between the approval and the debit (Q19), a repayment request left unanswered (Q20), a protected adult's RIB not
+   exactly in the client's name (Q21).
+8. **Counsel's answers to OQ-92, OQ-93, OQ-94 and OQ-97**, which 7d's defaults wait on.
+
+### Docs close-out (D1; plan §8.4)
+
+COMPLIANCE (CPCE-02, -03, -07, -08 final; MAND-01, MAND-03, FAC-06 added; MAND-02, PROC-01, SAISIE-01 checked;
+OQ-96 added; OQ-25, -34 to -38, -41, -45, -82, -84, -85, -88 to -95, -97 to -99 brought up to date; TVA-01, FAC-01 to
+FAC-04, SEPA-01, OQ-39 to OQ-50 re-read), this ADR (the status line, the interim passages marked superseded, this
+section), ARCHITECTURE §8–§9 (the two funds, the M2c entries and their shapes, the debit job's bookings and covers, the
+nightly checks), DOMAIN (« Créances à déclarer » added; the others re-read), CALCULATION_RULES §7 (the claw-back's
+place in the plan), the design (`m2c-remittances.md` §3.2 #12, §13 and §21 « As built (M2c-7) »), ROADMAP (the M2c rows
+closed, the gate) and the benchmarks. Each statement was checked against the migrations as merged on this branch; the
+legal texts newly quoted were read on LibreJustice on 2026-11-28 (C. civ. 1993, 1999, 2000, 2001; CGI 289 V and VII;
+BOI-TVA-DECLA-30-20-30-20 §90, §180, §190; CIBS L216-36 in its version from 2027-01-01).
+
+## M2c-7f-2 review fixes (round 1, 2026-11-28)
+
+Review round 1 of the 7f-2 PR (three lenses: the machine, the volume run and CI, the docs and the law; 22 items). Branch
+`m2c7f-2-fix1` on `61d8791`. **The switch stays off** (nothing commits it on; the switch-on class's rolled-back
+transaction, as before). `033` is unchanged; `034`–`048a` keep every assertion (no pgTAP file changed). The unmerged
+migration `20261203090000_close_out_fixes.sql` is edited in place: one function and one index for VC-1, two keyed reads
+for VC-3; nothing else of it changes.
+
+### Fixed (medium)
+
+- **VC-1 — `ledger_post_set`'s pooled lookup was keyed only while the statistics favoured it.** 7f-2's body found a
+  client's dimension by `ledger_account_client_idx`; its predicate `portfolio_id is null` is a condition of
+  `ledger_account_portfolio_idx` and its `book =` one of `ledger_account_org_book_idx`, so a forgotten or near-empty
+  analyse priced those alike (the tie broken by the indexes' sizes): after a reset the lot test read **81,004** rows
+  (« analysed while empty » and « analysed before the servicer's accounts »), **1,081,004** beside another servicer's
+  10,000 pooled accounts. Now each dimension's eight columns are one text key (`private.ledger_pooled_key`, immutable,
+  each null spelt apart: one-to-one with `ledger_account_pooled_uq`'s columns), compared with the expression of a
+  unique index of its own, `ledger_account_pooled_key_uq` (every account but the receivables: `book <>
+  'debtor_receivable'`, no btree condition), and nothing else of the account: no other index has a condition to work
+  with. The test (`test_close_out_fixes_reads_integration.py`) now plants its own states — forgotten (the table and its
+  indexes never analysed), analysed while empty (no row, the files' pages), analysed before the servicer's accounts —
+  alone and beside a background of 10,000 pooled accounts: **1,604 rows in four states, 2,004 in the two « analysed
+  while empty »** (bound 2,060), against 81,004 / 1,081,004 on 7f-2's body. The migration's and the ADR's « whatever
+  the statistics » / « 1,604 rows in both states » were not true of 7f-2's body; they are of this one. *The same plant,
+  in the db job's order (after its first integration files), found a pre-existing read of the same class*: the entry
+  check's receivable / owner-claim mirror (`private.ledger_entry_verify`, every entry) read each line's account by its
+  primary key **and** `book in (…)`, which an analyse of a near-empty table priced `ledger_account_org_book_idx` alike:
+  every receivable and owner-claim account of the table per line (36,804 rows for the lot; 2,045,604 beside a
+  background of 5,000 owner-claim accounts, now planted with the pooled ones). Redefined in the same migration from its
+  latest body (20261124090000, line 442) with that one change — the account by its primary key alone, its book compared
+  on the row read: **1,604 rows in all six states**.
+- **VC-3 — row 5's claw-back prepare (≤ 11.66 s): 15.58 s; 12.93 s after the round, still above its bound (Left
+  open below; round 2: 8.38 s, within).** The prepare loaded every earlier charge of every file of
+  the run — one row per earlier invoice and key, 550,000 behind ten 50k-line runs — built, validated and hashed each.
+  The engine needs them one by one only to allocate a credit (its original's invoice first, then LIFO, the waivers
+  absorbing it); everything else it reads of a key's earlier invoices — the validations' sums, the rounding reserve's
+  n and the rates its invoices bear (`_reserved`, `open_after`) — is a sum per VAT rate. So:
+  - the engine (`remittance/commission.py`) takes a key's earlier charges either one by one or summed
+    (`ChargeTotals`: per VAT rate the invoices with a capacity above 0 and that capacity; the open charges' and the
+    waivers' sums), reads the same numbers from either, and raises `ChargesNeeded` where it would allocate a credit on
+    a summed key (`key_side`, `open_after`); the inputs hash names the totals it was given;
+  - the prepare (`jobs/remittances.py`) reads the charges whole only for the files the run reverses a line of
+    (`private.remittance_earlier_charges`, keyed per file, its credits and waivers per charge), every other key summed
+    (`private.remittance_charge_totals`: the client's invoices by its key, each one's charges of the files by the
+    primary key, credits and waivers probed only on an invoice that has some — as a scalar probe: an `exists` was hashed
+    and read the whole tables, 21,342 rows in the reads test); a key with a negative charge or waiver is read whole (the
+    engine refuses it, as before);
+  - `prepare_run` prices the run again with every key whole when the engine asks (`Facts.whole_charges`): exactness
+    never rests on the guess of which files need them.
+  Tests: `test_charge_totals.py` (Hypothesis over the engine's own scenarios — versions, two files, collections,
+  reversals, manual credit notes — and over invoices at mixed VAT rates under a TTC cap: every run priced on summed
+  charges gives the same lines, parts, key states and documents as on them one by one, or asks for them; and RV-3's
+  reversal priced again whole through `whole_charges`, the draft identical); on real data, the 10k-file world's
+  claw-back facts (pickled) gave the same draft summed and whole (the inputs hash apart). The reads test
+  `test_the_prepares_earlier_charges_are_read_by_the_clients_keys_whatever_the_statistics` (planted and forgotten
+  statistics beside 10,000 rows per table of two other clients): 340 and 299 rows read for 240 charges (bound 1,020).
+  Measured on the 10k-file world (ten runs): the charges' read and build 0.9–1.0 s → 0.2 s, the engine 1.11 → 0.93 s.
+  At 50k (`scale-closeout`, a fresh reset, CI's logging settings): the totals' read over 549,935 charges **0.77 s**;
+  the history's prepare and approval 14.4 → 17.7 s over its ten runs (before: 13.8 → 20.0 s); row 5's prepare
+  **12.93 s** (before 15.58 s), its approval 6.20 s (≤ 6.71 s). A draft prepared before this change and approved after
+  keeps its own inputs hash (the approval compares the page's hash with the draft's, never recomputes it).
+- **VC-2 — the db job's margin.** The property machine leaves the db job for its own parallel job, `machine`, on its own
+  stack after a reset (about +5 billed minutes per run); the db job's comment quotes main's push run of `c5b357a`
+  (32.4 min) instead of « 30+ ». Measured below.
+- **MACH-1 — quiescence could not see a transfer that never left the bank.** `_quiesce` now asserts that no transfer is
+  still ordered, in a file or handed out after its rounds; the file's `nothing_to_file` refusal must list, as held,
+  every payout or refund the model has to file (ordered, neither held nor short); `remit` asserts the new collection
+  remitted unless the model says why not (the client's run in flight, refused as the model refuses it, its payout held,
+  not covered, or the account short of the file). The reviewer's mutant (refunds never filed) is killed (« nothing to
+  file, the model's to file »).
+- **MACH-2 — the model never judged an approval's refusal.** A run left in draft is now refused `negative_net` exactly
+  when the model's N is below 0, or for a liquidation's payee to confirm; nothing else is accepted (`in_flight_reversal`,
+  accepted before, is no code the product has). The `< 0 → <= 0` mutant is killed (« refused negative_net, the model's
+  N », 0).
+- **MACH-3 — M5 stated as reached, not built.** The event recorded under M5's name (a late predecessor's return
+  re-queued in a later run) is not M5's state — the machine has no unplanned payout and never « désimpute » E between a
+  late or unplanned payout and its return, so `private.remitted_cover_release` never runs (the reviewer's probe: it
+  survives). The event is renamed, the « M2c-7f-2 » bullets and the benchmarks corrected; M5, and M6's product paths
+  (the release, `transfer_line_check`), are in « Left open » below.
+- **MACH-4 — H2's state reached by chance.** `sweep_in_flight` first pays in what the servicer owes the account (the
+  hourly top-up, credited), so that the run's commission leaves 4679 in credit and the next file sweeps it, and records
+  its state only with a sweep in flight at the « Désimputer »; `test_a_sweep_in_flight_then_an_advance` runs it from a
+  fresh world in every db run. H2's mutant is killed by the switch-on class at seed 7 (« servicer_shortfall »,
+  [41147] vs 50179) and by that test ([82000] vs 100000).
+- **DOCS-1 — DOMAIN and the design said an advance is never requested under a mandate end or a seizure.** As built,
+  after a mandate end or while a seizure stands the claw-back clause lapses and a repayment request is the recovery
+  (`private.advance_recovery_of`; founder Q9 a, Q12 a; `046b` sr1); requests are refused `in_proceeding` (a
+  proceeding or a liquidation, whatever the advance's birth) and `before_opening`. DOMAIN (« Avance au mandant »,
+  « Demande de remboursement d'avance ») and design §21 #5 now say so.
+
+### Fixed (low)
+
+- **MACH-5**: the `d_queue` / `d_twice` event records 038's shape only — an uncovered reversal in the queue of a client
+  whose payout cancelled after download was executed late or is still to execute, the queue in debit; the reviewer's
+  scenario (a re-issue debited, a later collection « désimputée ») no longer records it. The « 33 times » of part 3
+  counted the looser state (corrected in « M2c-7f-2 » and the benchmarks).
+- **MACH-6**: the switch-on harness runs, at the exit of each outermost block without an error, the checks its commit
+  would fire (`set constraints all immediate`, then deferred again): a step production refuses at commit fails at that
+  step, its savepoint rolled back (the reviewer's raw reversal now raises LG009 at its block).
+- **MACH-7**: a rule or invariant that raises sets a flag; `teardown` then skips the quiescence (the failing check is
+  the headline), still rolls back and checks the switch off.
+- **MACH-8**: the PR's machine runs at a fixed seed (7; `machine_seed` on dispatch, `machine-long` keeps a random one);
+  its examples' database is uploaded on failure; the suppressed health checks are the three a database machine trips,
+  with the reason; the picks of proofs, requests and files follow the model's order; the booked day is the bank line's
+  (or the approval's Paris day for N = 0), never a later `today()`.
+- **VC-4**: the volume file's docstring and the benchmarks state the statistics each row runs on (rows 1, 2, 4, 5 with
+  7a's tables forgotten; rows 6, 7, V3 on the history's; row 8 on scale-payouts' plant).
+- **VC-6**: `scale-closeout`'s comment: about 45 % of headroom, not 50 %.
+- **DOCS-2**: a CSV credit citing our reference in its label is « never a payment by itself », with its four exits
+  (COMPLIANCE CPCE-02, this ADR, ARCHITECTURE §9). **DOCS-3**: ARCHITECTURE §9 names « Débits et retours » (« Nos
+  virements » does not exist) and marks M2b-6's « never fees » as superseded by the `bank_fee` booking. **DOCS-4**: the
+  200 × 60 bullet says which chunks ran on which code. **DOCS-5**: CPCE-03 and OQ-93 name MB-1's exception (an old
+  « Tutelle ou curatelle » row qualified after the match). **DOCS-6**: the go-live gate names OQ-96 beside FAC-06 and
+  OQ-35 beside OQ-45 (ADR, ROADMAP); ROADMAP's « M2c — closed » names the items carried to the follow-up. **DOCS-7**:
+  « twelve slices, thirteen PRs ».
+
+### Mutants (round 1)
+
+| Mutant | Verdict |
+|---|---|
+| refunds never filed nor held (`generate_transfer_file`'s candidates) | killed: « nothing to file, the model's to file » (switch on, seed 7) |
+| an N = 0 run refused `negative_net` (`< 0 → <= 0`) | killed: « refused negative_net, the model's N » |
+| H2, `servicer_shortfall` without the sweeps in flight | killed: the switch-on class at seed 7 and `test_a_sweep_in_flight_then_an_advance` |
+| `private.remitted_cover_release` raising when called | survives: the release is never reached (M5 not built, Left open) |
+| 7f-2's `ledger_post_set` body (the client's own index) | killed: 81,004 / 1,081,004 rows in « analysed while empty », 81,004 in « analysed before » alone |
+| the totals' credits and waivers by `exists` (hashed) | killed: 21,342 rows read, bound 1,020 |
+| `ChargeTotals` counted one invoice per VAT rate (`_reserved`) | killed by both property tests of `test_charge_totals.py` |
+| `ledger_entry_verify`'s mirror read as before (primary key and `book in (…)`) | killed: 45,604 / 2,045,604 rows in « analysed while empty » (bound 2,060) |
+
+### Left open (round 1), with its default
+
+- **Row 5's prepare: 12.93 s against ≤ 10.6 s × 1.1 = 11.66 s** (medium: `scale-closeout` stays red on `main` and on
+  dispatch until it is decided; CLAUDE.md merges a slice that changes a timed path only once its dispatched volume run is
+  green). Profiled at 50k (cProfile, the same world): the claw-back prepare costs what a 50k-line prepare with ten runs
+  of history costs (17.4 s profiled against 17.2 s for the tenth history run's: its 1,000 advances add little), and
+  that history's own cost is now constant per key, not per earlier invoice: the 50,000 key states read and decoded (one
+  JSON basis each) and the charges' totals (0.77 s), about 2–3 s over the history-free 50k prepare of the `scale` job
+  (10.1 s: load 3.28, price 4.81, write 1.86 s). The plan's bound is M2c-4's history-free measure. Founder question:
+  (a) re-base row 5's bound on the 50k prepare with a ten-run history (about 13 s × 1.1), the plan's « 10.6 s » being a
+  history-free run's; (b) keep the bound and take the prepare's base cost down in a follow-up (the 50k-element array
+  parameters dumped one by one, about 0.5 s; the key states' JSON decoded per key; the load's fourteen statements, 2.4 s
+  of database time at 50k). Default (b), the job red until then; this round does not change the bound (a weakened test).
+  *(Round 2, VC-3: done by (b) — 8.38 s, the bound unchanged: « M2c-7f-2 review fixes (round 2) ».)*
+- **M5 not built; M6's product paths not reached** (MACH-3): no unplanned payout, no « Désimputer » between a late or
+  unplanned payout and its return, so the cover's release (its −A in the cover's mandate, +A outside) and
+  `transfer_line_check`'s double payout are walked by their slices' pgTAP and integration files only. Default: a later
+  machine slice adds the unplanned payout and the release (founder question).
+- **§8.2 items not modelled** (MACH-9), added to « Rules the machine does not model »: (a) the forward rule; (b) a
+  withheld settlement's next run at the next hourly schedule (`schedule` messages are skipped); (c) the expected
+  cover's date (the covers check compares amounts); (d) MONEY-5's invoice born before a proceeding's opening (every
+  document and bar is dated today). Default: the same later slice.
+- **Rows 6, 7 and V3 under forgotten statistics; row 8 without ledger_account's** (VC-4): not measured at volume;
+  the db job's reads tests plant them (client payments; the pooled lookup in three states). Default: keep.
+- **Row 7's bound is the job's own time** (VC-5): `sum(handler times) < 2 s` (1.11–1.15 s), not the plan's « < 2 s in
+  all »: the wall time (2.92–3.25 s) adds the consumer's connection per poll and per message. A plan deviation; default:
+  keep until the consumer reuses its connection (part 2's founder question 3, option b). **Rows 3 and 5** have time
+  bounds only, which the unkeyed mutants (4), (5b) and (5c) stay under at 50k; (4) is held by the db job's
+  `test_remitted_cover_reads_integration.py`. Default: keep; row-count bounds when a later slice touches those reads.
+- **Row 8 inside `scale-payouts`** (VC-6: about 14 minutes of `scale-closeout`'s rebuilt fixture per run): part 2's
+  founder question, default (a) kept.
+
+### Suites (round 1)
+
+On the round's final code, each group on a fresh reset (`docs/benchmarks/remittances.md` « M2c-7f-2, review round
+1 »):
+- `supabase test db` **3,263 passed** (668 s; `033` unchanged); the generated types unchanged; the db job's integration
+  step exactly as `ci.yml` runs it **342 passed, 1 skipped** (1,038 s): the db job's steps 1,734 s (28.9 min) locally,
+  the machine no longer among them. Its first run in that order failed the pooled-lookup test's two « analysed while
+  empty » states (36,804 rows: the entry check above), fixed and re-run.
+- The `machine` job's step (a reset, then 2 × 8 × 20 and the two fixed scenarios, seed 7): **4 passed** in 191 s. Seed
+  7 reached the sweep in flight in both classes (1 and 2), a late predecessor's return re-queued once, 038's f_partial 3
+  + 3, and not 038's `d_queue` / `d_twice` shape (as now recorded). The reviewer's mutants: the table above.
+- `make eval`: mapping top-1 1.000 (167/167); reconciliation 96.0 % automatic, 0 wrong. The worker: ruff, ruff format,
+  mypy (227 files) clean, unit tests **1,307 passed, 7 xfailed**. The web: lint and typecheck clean, vitest **763
+  passed**; no web file and no public signature changed (the types identical), so no E2E.
+- `scale` (its command as `ci.yml` lists it, CI's logging settings): **15 passed** (1,093 s); the 50k run prepared in
+  10.1 s (load 3.28, price 4.81, write 1.86 s), the allocation's 10,000-payment posts 9.0–9.6 s.
+- `scale-payouts`: **6 passed** (1,021 s); the 5,000-member batch line's funds pass 12.7 s.
+- `scale-closeout`: **8 passed, 1 failed** (2,446 s, 40.8 min): row 5's prepare **12.93 s** against 11.66 s (Left open
+  above), its approval 6.20 s; row 1's debit chunk 3.6 / 4.1 s and cover statement 0.57 / 0.62 s (1 / 10 booked runs);
+  row 4's whole nightly 2.12 / 14.54 s, 2.05 / 13.76 s without 7a's checks (+0.78 s at ten runs, ≤ 2 s); row 6 median
+  52, p99 86, max 119 ms; row 7 the messages' own 1.58 s (wall 4.06 s); row 8 the funds pass **14.0 s** (≤ 26.4 s); V3
+  the blockers with a death 2.20 s for 5,000 calls. Then row 5 alone under cProfile on another fresh world (27 min):
+  the claw-back prepare 17.4 s profiled, the tenth history run's 17.2 s.
+- Then `supabase db reset`, the stack left running.
+
+## M2c-7f-2 review fixes (round 2, 2026-11-28)
+
+Review round 2 of the 7f-2 PR (three items, all medium: MACH-1, MACH-3, VC-3). Branch `m2c7f-2-fix2` on `b97b9ef`.
+**The switch stays off** (nothing commits it on; the switch-on class's rolled-back transaction, as before). `033` is
+unchanged; `034`–`048a` keep every assertion (no pgTAP file changed). No SQL changed: the unmerged migration
+`20261203090000_close_out_fixes.sql` stays as round 1 left it; the fixes are in the worker and its tests.
+
+### Fixed (medium)
+
+- **MACH-1 — the quiescence applied the hold rule after its cancellations.** `_quiesce` cancelled the payouts held or
+  short at its start; a payout ordered to an account that came back since (its client not run again: the account in
+  `returned_accounts`) was neither until the first `file_and_download()` of its rounds marked it held. From then on it
+  was never filed and never cancelled, and round 1's assertion (« transfers that never left the bank ») failed on
+  unmutated code (the reviewer: seed 12 of seeds 7–12 at 8 × 20, twice, one ordered payout of a client with
+  `returned_accounts`, held=False at the start; the oracle's fault, not the product's). The hold rule is now one helper
+  (`_hold_returned`) that `file_and_download` and the top of `_quiesce` both apply, before the cancellation loop, so
+  those payouts are cancelled with the others. Seeds 7 to 12 at 8 × 20 (the whole file, both classes): **4 passed**
+  each; `machine-long`'s 25 × 40 at a random seed (240252426): **4 passed** in 1,013 s. The reviewer's mutant (refunds
+  never filed) stays killed on the new quiescence (switch on, seed 7: « nothing to file, the model's to file »),
+  the unmutated class green on the same run.
+- **MACH-3 — the benchmarks' part 1 still stated M5 reached.** `docs/benchmarks/remittances.md` « M2c-7f-2, part 1 »
+  now reads, as part 3 does since round 1: « a late predecessor's return re-queued in a later run (then recorded as
+  « M5 », which it is not: review round 1, MACH-3) 14 times », and the `d_queue` / `d_twice` « once » is marked as the
+  looser state the event then counted (MACH-5).
+- **VC-3 — row 5's claw-back prepare (≤ 10.6 s × 1.1 = 11.66 s): 12.93 s after round 1, 8.38 s after this one.**
+  The bound is unchanged (founder question « row 5 » of round 1 no longer needed: its option (b), the base cost down).
+  Profiled on
+  the claw-back run itself (53,748 items, ten booked 50k-line runs behind it, 7a's tables' statistics forgotten as the
+  file leaves them), each step timed in rolled-back transactions on the same world, the code before the round against
+  the round's: load 4.1–4.6 s, price 4.8–5.3 s, write 1.7–2.1 s (10.7–11.4 s in a lean process; 12.93 s in the scale
+  file's, which holds the 50k world) → 2.3–2.7 / 2.6–3.1 / 1.7–2.5 s (7.1–8.2 s). Two causes, both fixed at the root:
+  - **Python's cyclic garbage collector** walked the job's few hundred thousand live objects (the facts, the engine's
+    keys and parts, the draft) at each automatic full collection — and whatever else the process held, the scale
+    file's world included: about 2 s of the pricing (4.8–5.3 → 2.8–3.0 s with nothing else changed) and 0.8 s of the
+    load. `run_prepare` now loads, prices and writes under `jobs.remittances.gc_paused()` (the collector off, on again
+    on leaving, even on an error; a collector already off left off). The pricing leaves no reference cycle (none to
+    collect after it, the same run's facts priced offline) and its peak memory moves by a few MB (356 → 363 MB); the
+    worker polls its queues one message at a time: nothing else runs in the process meanwhile.
+  - **The load's conversions**: every uuid of its big reads (the draft's items, their bases, the files, the key states,
+    the earlier charges) is read `::text` (no UUID object built, no `str()` of it: about a million of each at 50k), the
+    five 50,000-element `uuid[]` / `text[]` parameters pass as one text literal each (`_uuids`, `_texts`: 0.03 s
+    instead of 0.10 s per array), and the items are built once with their portfolio (no `replace` copy): about 1.0 s of
+    the load (4.1–4.6 → 3.05–3.27 s with the collector on). The statements, their order (the history's position first,
+    the key states before the charges: review security-concurrency#0) and their plans are unchanged; the facts
+    compared field by field on the 50k world are identical (31 fields, 53,748 items, 49,949 keys).
+  Tests (`test_prepare_job.py`, unit): the load, the pricing and the write run with the collector off, which is on
+  again after a prepare that succeeds, fails on a data error or raises; a collector off already stays off; the array
+  literals; a line kind from its text (an unknown one raises `ValueError`, recorded as the prepare's failure, as
+  `LineKind(value)`). `test_remittance_runs_integration.py`: the literals reach the server as given (quotes,
+  backslashes, commas, braces, blanks, « NULL », « é »). The load's reads keep their db-job tests under planted
+  statistics (`test_close_out_reads_integration.py`, `test_advance_reads_integration.py`: `load_facts` bounded by rows
+  read), run in this round's db job.
+
+### Mutants (round 2)
+
+| Mutant | Verdict |
+|---|---|
+| `run_prepare` without `gc_paused()` | killed: `test_prepare_job.py` (the pricing saw the collector on) |
+| `gc_paused` re-enabling only on a normal exit (no `finally`) | killed: the collector off after a prepare that raised |
+| `gc_paused` re-enabling a collector that was off before it | killed: « a collector paused already stays paused » |
+| `_texts` without quoting | killed: the unit test and the round trip (« NULL » read back as null, the quote breaks the literal) |
+| `_texts` without escaping backslashes | killed: both |
+| `_kind` by `_KINDS[value]` (a `KeyError`) | killed: « a line kind from its text » |
+| refunds never filed nor held (round 1's, on the new quiescence) | killed: « nothing to file, the model's to file » (switch on, seed 7) |
+
+### Left open (round 2)
+
+Round 1's other items stand as recorded (« Left open (round 1) »): M5 not built and M6's product paths not reached
+(MACH-3), the §8.2 items not modelled (MACH-9), rows 6, 7 and V3 under forgotten statistics (VC-4), row 7's bound the
+job's own time (VC-5), row 8 inside `scale-payouts` (VC-6). Row 5's bound holds (above).
+
+### Suites (round 2)
+
+On the round's final code, each group on a fresh reset (`docs/benchmarks/remittances.md` « M2c-7f-2, review round
+2 »):
+- `supabase test db` **3,263 passed** (55 files, 685 s; `033` unchanged); the generated types unchanged; the db job's
+  integration step exactly as `ci.yml` runs it **343 passed, 1 skipped** (1,105 s): the db job's steps 1,820 s
+  (30.3 min) locally (reset 30 s, pgTAP 685 s, integration 1,105 s), inside its 45 minutes with about 1.7 minutes of
+  setup.
+- The `machine` job's step (a reset, then 2 × 8 × 20 and the two fixed scenarios, seed 7): **4 passed** in 217 s; the
+  same states as in round 1 (the sweep in flight 1 and 2, a late predecessor's return re-queued once, f_partial 3 + 3).
+- `make eval`: mapping top-1 1.000 (167/167); reconciliation 96.0 % automatic, 0 wrong. The worker: ruff, ruff format,
+  mypy (228 files) clean, unit tests **1,312 passed, 7 xfailed**. The web: lint and typecheck clean, vitest **763
+  passed**; no web file, no SQL and no public signature changed (the types identical), so no E2E.
+- `scale` (its command as `ci.yml` lists it, CI's logging settings): **15 passed** (1,173 s); the 50k run prepared in
+  **6.1 s** (load 1.53, price 2.36, write 2.09 s; round 1: 10.1 s), allocated in 61.6 s (posts 8.8–9.9 s per 10,000),
+  receipts 13.0 ms each.
+- `scale-payouts`: **6 passed** (1,171 s; round 1 1,021 s, every phase about 15 % slower on the VM that hour, the
+  approvals' untouched code included); the 5,000-member batch line's funds pass 13.6 s.
+- `scale-closeout`: **9 passed** (2,444 s, 40.7 min): **row 5's prepare 8.38 s** (≤ 11.66 s), its approval 6.05 s
+  (≤ 6.71 s); the history's ten prepares and approvals 10.7 → 12.6 s (round 1: 14.4 → 17.7 s); row 1's debit chunk
+  4.1 / 3.7 s and cover statement 0.63 / 0.60 s (1 / 10 booked runs); row 4's whole nightly 2.03 / 14.22 s, 2.00 /
+  14.37 s without 7a's checks; row 6 median 49, p99 77, max 106 ms; row 7 the messages' own 1.63 s (wall 4.12 s); row 8
+  the funds pass 14.2 s (≤ 26.4 s); V3 the blockers with a death 1.93 s for 5,000 calls. The world 1,214 s, row 8's
+  fixture 898 s, the claw-back fixture 285 s.
+- Then `supabase db reset`, the stack left running.
 
 ## Founder decisions (2026-11-09, all defaults; design §24)
 Twice-monthly runs with a deadline guard (#1); the shorter of the mandate's delay and one calendar month (#2); netting only under a clause (#3); commission on allocations only (#4); the supported grids (#5); credit notes for undone collections (#6); advances, claw-back only by clause, no hold-back (#7); **the servicer bears a return beyond its payment (#8)**; **the commission swept the day payouts are debited, bank fees on the dedicated account the servicer's cost (#9)**; IBAN changes confirmed by a second person (#10); one approver (#11); one yearly invoice series (#12); mainland-France professional clients in EUR (#13); **one dedicated account per currency (#14)**; pain.001 files uploaded by ops, the payee check kept (#15).

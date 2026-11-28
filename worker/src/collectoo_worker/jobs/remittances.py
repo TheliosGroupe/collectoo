@@ -37,10 +37,12 @@ No model, no LLM: every amount comes from the ledger and the engines (CLAUDE.md)
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
 from collections import defaultdict
-from dataclasses import replace
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -53,7 +55,9 @@ from collectoo_worker.jobs import repayment_requests, top_ups, transfer_files
 from collectoo_worker.jobs.remittance_documents import run_documents
 from collectoo_worker.remittance.calendar import Calendar, CalendarHorizonError, conservative
 from collectoo_worker.remittance.commission import (
+    REVERSALS,
     ChainLink,
+    ChargeTotals,
     FileFacts,
     KeyState,
     LineKind,
@@ -273,11 +277,33 @@ def _schedule_failed(conn: Conn, org: str, client: str | None, code: str, error:
 # -- prepare --------------------------------------------------------------------------------------
 
 
+@contextmanager
+def gc_paused() -> Iterator[None]:
+    """(M2c-7f-2 review round 2, VC-3) Python's cyclic garbage collector paused while a prepare
+    loads, prices and writes its draft. At 50k lines the job builds a few hundred thousand objects
+    that live until it ends (the facts, the engine's keys and parts, the draft); each automatic
+    full collection walks them all again (and whatever else the process holds): the close-out
+    volume file's claw-back run (53,748 items, ten runs of history) priced in 4.7 to 5.3 s with it,
+    2.8 to 3.0 s without, its facts loaded 0.8 s faster. The pricing leaves no reference cycle (none
+    to collect after it, the same run's facts priced offline) and its peak memory moves by a few
+    MB; reference counting frees everything as before, and the collector runs again on leaving,
+    even on an error.
+    The worker polls its queues one message at a time (`runtime.queue.run_all`): nothing else runs
+    in the process meanwhile."""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+
+
 def run_prepare(conn: Conn, payload: dict[str, Any]) -> str:
     run, token = str(payload["run_id"]), str(payload["token"])
     started = time.monotonic()
     try:
-        with conn.transaction():
+        with conn.transaction(), gc_paused():
             facts = load_facts(conn, run, token)
             if facts is None:
                 return "skipped"
@@ -314,6 +340,31 @@ def _prepare_failed(conn: Conn, run: str, token: str, code: str, detail: str) ->
 
 def _uuid(v: Any) -> str | None:
     return None if v is None else str(v)
+
+
+def _uuids(values: Iterable[str]) -> str:
+    """(M2c-7f-2 review round 2, VC-3) A `uuid[]` parameter as its text literal: psycopg dumps a
+    list element by element (0.10 s for 50,000 uuids, 0.03 s as one literal; the prepare passes
+    five such arrays at 50k lines), the server parses one string. Each value is a uuid's canonical
+    text (read `::text`): nothing to quote."""
+    return "{" + ",".join(values) + "}"
+
+
+def _texts(values: Iterable[str]) -> str:
+    """A `text[]` parameter as its text literal, each element quoted (as `_uuids`)."""
+    return (
+        "{"
+        + ",".join('"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"' for v in values)
+        + "}"
+    )
+
+
+_KINDS = {k.value: k for k in LineKind}
+
+
+def _kind(value: str) -> LineKind:
+    """A line kind from its text (an unknown one raises ValueError, as `LineKind(value)`)."""
+    return _KINDS.get(value) or LineKind(value)
 
 
 def _open_advances(conn: Conn, client: str, currency: str) -> list[OpenAdvanceRow]:
@@ -356,6 +407,18 @@ def _unplanned_paid(conn: Conn, bookings: list[str]) -> list[UnplannedPaid]:
     ]
 
 
+def _load_terms(conn: Conn, mandates: list[str], terms: dict[str, list[Terms]]) -> None:
+    """(M2c-7f-1, H20) each mandate's terms by its key (private.mandates_terms), in their order."""
+    if not mandates:
+        return
+    for t in conn.execute(
+        "select * from private.mandates_terms(%s::uuid[])", (mandates,)
+    ).fetchall():
+        terms[str(t[1])].append(
+            Terms(str(t[0]), str(t[1]), t[2], t[3], int(t[4]), t[5], t[6], t[7], t[8])
+        )
+
+
 def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR0915
     """Everything the run's draft depends on, read in the job's transaction."""
     head = conn.execute(
@@ -392,16 +455,21 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
     # M2c-7f-1 (H20): the same rows by key in SQL (private.draft_pending_items: the draft's items by
     # its key, each one's entries, payment and advance in fenced laterals) — as this statement, the
     # queue was read whole under the 7b round 2 plant
+    # (M2c-7f-2 review round 2, VC-3) every uuid read as its text (psycopg builds no UUID object
+    # for it, the job no str of it: about a million of each at 50k lines)
     raw = conn.execute(
-        "select * from private.draft_pending_items(%s)",
+        """select ledger_entry_id::text, kind, amount_minor, posted_at, effective_date,
+                  account_id::text, payment_id::text, encaissement_date, reverses_entry_id::text,
+                  mandate_id::text, cause
+           from private.draft_pending_items(%s)""",
         (run,),
     ).fetchall()
     # M2c-7b (plan §4.2): the client's open advances, the claw-back's documents
     advances = _open_advances(conn, str(client), str(currency))
     pending_raw = conn.execute(
-        """select l.run_id, l.line_no, l.ledger_entry_id, l.kind, l.amount_minor, l.posted_at,
-                  l.effective_date, l.account_id, l.payment_id, l.encaissement_date, l.basis,
-                  l.original_entry_id
+        """select l.run_id::text, l.line_no, l.ledger_entry_id::text, l.kind, l.amount_minor,
+                  l.posted_at, l.effective_date, l.account_id::text, l.payment_id::text,
+                  l.encaissement_date, l.basis, l.original_entry_id::text
            from public.remittance_line l
            where l.client_organization_id = %s and l.currency = %s
              and l.commission_state = 'pending' and not l.released
@@ -411,19 +479,19 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
                              where rp.run_id = l.run_id and rp.line_no = l.line_no)""",
         (client, currency),
     ).fetchall()
-    with_basis = [str(r[0]) for r in raw if r[1] in ("allocation", "allocation_reversal")]
+    with_basis = [r[0] for r in raw if r[1] in ("allocation", "allocation_reversal")]
     basis: dict[str, dict[str, int]] = defaultdict(dict)
     for entry, family, amount in conn.execute(
-        """select p.entry_id, c.family, -sum(p.amount_minor)
+        """select p.entry_id::text, c.family, -sum(p.amount_minor)
            from public.ledger_posting p
            join public.ledger_account la on la.id = p.ledger_account_id
              and la.book = 'debtor_receivable'
            join public.ledger_component c on c.code = la.component
            where p.entry_id = any(%s::uuid[])
            group by p.entry_id, c.family""",
-        (with_basis,),
+        (_uuids(with_basis),),
     ).fetchall():
-        basis[str(entry)][family] = int(amount)
+        basis[entry][family] = int(amount)
     forwards = [str(r[0]) for r in raw if r[1] == "forward"]
     forwards += [str(r[8]) for r in raw if r[1] == "forward_reversal" and r[8]]
     forwards += [str(r[2]) for r in pending_raw if r[3] == "forward"]
@@ -448,76 +516,50 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         if any(r[1] in ("payout_returned", "settlement_withheld") for r in raw)
         else {}
     )
-    items = [
-        Item(
-            entry_id=str(r[0]),
-            kind=LineKind(r[1]),
-            amount_minor=int(r[2]),
-            posted_at=r[3],
-            effective_date=r[4],
-            account_id=_uuid(r[5]),
-            payment_id=_uuid(r[6]),
-            encaissement_date=r[7] if str(r[0]) not in held else held[str(r[0])][0],
-            basis=basis.get(str(r[0]), {}),
-            forward_reason=reason_of(r[1], str(r[0]), _uuid(r[8])),
-            original_entry_id=_uuid(r[8]),
-            held_terms_id=held[str(r[0])][1] if str(r[0]) in held else None,
-            held_days=held[str(r[0])][2] if str(r[0]) in held else None,
-            advance_mandate_id=_uuid(r[9]),
-            advance_cause=r[10],
-        )
-        for r in raw
-    ]
     # review round 1 (M7B-MONEY-1): what the run's unplanned payouts paid of its items — their
     # attributions whose booking is not reversed (private.unplanned_paid_item by its primary key's
     # booking_entry_id; each booking's reversal by ledger_entry_reversed_once_uq)
-    unplanned = [str(r[0]) for r in raw if r[1] == "unplanned_payout"]
+    unplanned = [r[0] for r in raw if r[1] == "unplanned_payout"]
     unplanned_paid = _unplanned_paid(conn, unplanned) if unplanned else []
     pending_lines = [
         PendingLine(
-            str(r[0]),
+            r[0],
             int(r[1]),
             Item(
-                entry_id=str(r[2]),
-                kind=LineKind(r[3]),
+                entry_id=r[2],
+                kind=_kind(r[3]),
                 amount_minor=int(r[4]),
                 posted_at=r[5],
                 effective_date=r[6],
-                account_id=_uuid(r[7]),
-                payment_id=_uuid(r[8]),
+                account_id=r[7],
+                payment_id=r[8],
                 encaissement_date=r[9],
                 basis={k: int(v) for k, v in (r[10] or {}).items()},
-                forward_reason=reason_of(r[3], str(r[2]), _uuid(r[11])),
-                original_entry_id=_uuid(r[11]),
+                forward_reason=reason_of(r[3], r[2], r[11]),
+                original_entry_id=r[11],
             ),
         )
         for r in pending_raw
     ]
     accounts = sorted(
-        {i.account_id for i in items if i.account_id}
+        {r[5] for r in raw if r[5]}
         | {p.item.account_id for p in pending_lines if p.item.account_id}
     )
     file_rows = conn.execute(
-        """select a.id, a.claim_type_code, a.portfolio_id, pf.mandate_id
+        """select a.id::text, a.claim_type_code, a.portfolio_id::text, pf.mandate_id::text
            from public.account a join public.portfolio pf on pf.id = a.portfolio_id
            where a.id = any(%s::uuid[])""",
-        (accounts,),
+        (_uuids(accounts),),
     ).fetchall()
     # (M2c-7b) and the mandates of the advance items and of the open advances: their terms hold the
     # claw-back clause
     mandates = sorted(
-        {str(r[3]) for r in file_rows if r[3]}
-        | {i.advance_mandate_id for i in items if i.advance_mandate_id}
+        {r[3] for r in file_rows if r[3]}
+        | {r[9] for r in raw if r[9]}
         | {a.mandate_id for a in advances if a.mandate_id}
     )
     terms: dict[str, list[Terms]] = defaultdict(list)
-    # (M2c-7f-1, H20) each mandate's terms by its key (private.mandates_terms), in their order
-    for t in conn.execute(
-        "select * from private.mandates_terms(%s::uuid[])", (mandates,)
-    ).fetchall():
-        terms[str(t[1])].append(
-            Terms(str(t[0]), str(t[1]), t[2], t[3], int(t[4]), t[5], t[6], t[7], t[8])
-        )
+    _load_terms(conn, mandates, terms)
     brackets = any(
         (rule.get("rate") or {}).get("kind") == "bracket"
         for rows in terms.values()
@@ -537,23 +579,25 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
                        where o.account_id = a.id)
                       - (select min(i.due_date) from public.claim_item i where i.account_id = a.id)
                from public.account a where a.id = any(%s::uuid[])""",
-            (accounts,),
+            (_uuids(accounts),),
         ).fetchall():
             attrs[str(a)] = (None if boarded is None else int(boarded), age)
     files = {
-        str(r[0]): FileFacts(
-            account_id=str(r[0]),
-            mandate_id=str(r[3]),
+        r[0]: FileFacts(
+            account_id=r[0],
+            mandate_id=r[3],
             claim_type=r[1],
-            portfolio_id=str(r[2]),
-            boarded_amount_minor=attrs.get(str(r[0]), (None, None))[0],
-            age_days_at_boarding=attrs.get(str(r[0]), (None, None))[1],
+            portfolio_id=r[2],
+            boarded_amount_minor=attrs.get(r[0], (None, None))[0],
+            age_days_at_boarding=attrs.get(r[0], (None, None))[1],
         )
         for r in file_rows
         if r[3]
     }
-    portfolio = {str(r[0]): str(r[2]) for r in file_rows}
-    items = [replace(i, portfolio_id=portfolio.get(i.account_id or "")) for i in items]
+    portfolio = {r[0]: r[2] for r in file_rows}
+    # the run's items, each with its file's portfolio (review round 2, VC-3: built once, its text
+    # ids as read, not built then copied with `replace`)
+    items = [_item(r, held.get(r[0]), basis, portfolio, reason_of) for r in raw]
     refs = dict(
         conn.execute(
             "select id::text, reference from public.mandate where id = any(%s::uuid[])", (mandates,)
@@ -572,10 +616,12 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
     )
     history: dict[tuple[str, str], KeyState] = {}
     for a, tier, b, kept_basis, kept, commission, waived in conn.execute(
-        "select * from private.remittance_key_states(%s::uuid[], %s::text[])",
-        ([a for a, _ in keys], [t for _, t in keys]),
+        """select account_id::text, tier_key, basis, kept_basis_minor, kept_minor,
+                  commission_minor, waived_minor
+           from private.remittance_key_states(%s::uuid[], %s::text[])""",
+        (_uuids(a for a, _ in keys), _texts(t for _, t in keys)),
     ).fetchall():
-        history[(str(a), tier)] = KeyState(
+        history[(a, tier)] = KeyState(
             basis=tuple(sorted((str(v), int(x)) for v, x in b if int(x))),
             kept_basis_minor=int(kept_basis),
             kept_minor=int(kept),
@@ -584,44 +630,47 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         )
     # what each earlier invoice still charges each key (every credit note's allocations off, a
     # manual one's included) and what manual credit notes left waived on it (M2c-5b): the engine's
-    # capacity is their sum
-    charges: dict[tuple[str, str], list[EarlierCharge]] = defaultdict(list)
-    for a, tier, inv, year, seq, charged, credited, rate, waived in conn.execute(
-        """select ch.account_id, ch.tier_key, ch.invoice_id, i.year, i.seq, ch.charged_minor,
-                  coalesce((select -sum(x.ht_minor) from public.commission_credit_alloc x
-                            where x.original_invoice_id = ch.invoice_id
-                              and x.account_id = ch.account_id and x.tier_key = ch.tier_key), 0),
-                  i.vat_rate,
-                  coalesce((select sum(w.amount_minor) from public.commission_waiver w
-                            where w.invoice_id = ch.invoice_id
-                              and w.account_id = ch.account_id and w.tier_key = ch.tier_key), 0)
-           from public.commission_invoice_charge ch
-           join public.commission_invoice i on i.id = ch.invoice_id
-           where ch.account_id = any(%s::uuid[])""",
-        (accounts,),
+    # capacity is their sum. (M2c-7f-2 review round 1, VC-3) Whole — one row per invoice and key —
+    # only for the files the run reverses a line of (its credits are allocated invoice by invoice);
+    # every other key summed per VAT rate (`ChargeTotals`: all the engine reads of them while the
+    # run gives the key no credit). The engine asks for the rest (`ChargesNeeded`): the run is then
+    # priced again with every key whole (`whole_charges`).
+    reversed_files = sorted(
+        {i.account_id for i in items if i.kind in REVERSALS and i.account_id}
+        | {
+            p.item.account_id
+            for p in pending_lines
+            if p.item.kind in REVERSALS and p.item.account_id
+        }
+    )
+    charges, invoices, numbers = _whole_charges(conn, reversed_files)
+    whole = set(reversed_files)
+    groups: dict[tuple[str, str], list[tuple[Decimal, int, int]]] = defaultdict(list)
+    sums: dict[tuple[str, str], tuple[int, int]] = {}
+    refused: set[str] = set()  # a key with a charge or a waiver below 0: whole (the engine refuses)
+    for a, tier, rate, n, capacity, opens, waived, negative in conn.execute(
+        """select account_id::text, tier_key, vat_rate, open_invoices, open_capacity_minor,
+                  open_minor, waived_minor, negative
+           from private.remittance_charge_totals(%s, %s::uuid[])""",
+        (client, _uuids(a for a in accounts if a not in whole)),
     ).fetchall():
-        charges[(str(a), tier)].append(
-            EarlierCharge(
-                str(inv),
-                (int(year), int(seq)),
-                int(charged),
-                int(credited),
-                Decimal(rate),
-                waived_minor=int(waived),
-            )
-        )
-    invoice_ids = sorted({c.invoice_id for cs in charges.values() for c in cs})
-    invoices: dict[str, EarlierInvoice] = {}
-    numbers: dict[str, tuple[str, date]] = {}
-    for inv, ht, rate, credited, num, issued in conn.execute(
-        """select i.id, i.ht_minor, i.vat_rate,
-                  coalesce((select -sum(c.ht_minor) from public.commission_credit_correction c
-                            where c.original_invoice_id = i.id), 0), i.number, i.issue_date
-           from public.commission_invoice i where i.id = any(%s::uuid[])""",
-        (invoice_ids,),
-    ).fetchall():
-        invoices[str(inv)] = EarlierInvoice(str(inv), int(ht), Decimal(rate), int(credited))
-        numbers[str(inv)] = (num, issued)
+        key = (a, tier)
+        if negative:
+            refused.add(a)
+        if n:
+            groups[key].append((rate, n, capacity))
+        o, w = sums.get(key, (0, 0))
+        sums[key] = (o + opens, w + waived)
+    if refused:
+        more, more_invoices, more_numbers = _whole_charges(conn, sorted(refused))
+        charges.update(more)
+        invoices.update(more_invoices)
+        numbers.update(more_numbers)
+    summed = {
+        key: ChargeTotals(key, o, w, tuple(sorted(groups.get(key, ()))))
+        for key, (o, w) in sums.items()
+        if key[0] not in refused
+    }
     line_invoices = _line_invoices(conn, items, pending_lines)
     # (M2c-7d-2, plan §6.2.2, §6.2.6, §6.4) the client's opening (a proceeding_opened or a
     # liquidation in effect: client_opening_date — no longer the redressement alone) and the bars of
@@ -658,6 +707,9 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         ).fetchall()
         if int(o) > 0 or int(v) > 0
     ]
+    # (M2c-7f-2) and the terms of a mandate with no line in the run whose documents are still open:
+    # the plan weighs its refunds owed under its clauses (run._plan)
+    _load_terms(conn, sorted({d.mandate_id for d in open_docs} - set(terms)), terms)
     blockers_row = conn.execute(
         """select private.remittance_payout_blockers(%s, %s, %s),
                   private.remittance_commission_blockers(%s),
@@ -686,7 +738,7 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         terms=terms,
         history=history,
         history_seq=int(seq_row[0]),
-        charges=charges,
+        charges={**summed, **charges},
         invoices=invoices,
         invoice_numbers=numbers,
         line_invoices=line_invoices,
@@ -699,7 +751,93 @@ def load_facts(conn: Conn, run: str, token: str) -> Facts | None:  # noqa: PLR09
         unplanned_paid=unplanned_paid,
         set_off_bars=set_off_bars,
         set_off_state=bars_row[1],
+        whole_charges=lambda: _whole_facts(conn, accounts),
     )
+
+
+def _item(
+    r: Any,
+    held: tuple[date, str | None, int] | None,
+    basis: dict[str, dict[str, int]],
+    portfolio: dict[str, str],
+    reason_of: Any,
+) -> Item:
+    """One of the draft's items from its row of private.draft_pending_items (its ids as text), the
+    R124-6 basis it is held to (a payout that came back, a withheld settlement), its basis per
+    family, its file's portfolio and a forward's reason."""
+    entry = r[0]
+    return Item(
+        entry_id=entry,
+        kind=_kind(r[1]),
+        amount_minor=int(r[2]),
+        posted_at=r[3],
+        effective_date=r[4],
+        account_id=r[5],
+        portfolio_id=portfolio.get(r[5] or ""),
+        payment_id=r[6],
+        encaissement_date=r[7] if held is None else held[0],
+        basis=basis.get(entry, {}),
+        forward_reason=reason_of(r[1], entry, r[8]),
+        original_entry_id=r[8],
+        held_terms_id=None if held is None else held[1],
+        held_days=None if held is None else held[2],
+        advance_mandate_id=r[9],
+        advance_cause=r[10],
+    )
+
+
+def _whole_facts(conn: Conn, accounts: list[str]) -> dict[str, Any]:
+    """(M2c-7f-2 review round 1, VC-3) Every key's earlier charges whole, for `Facts.whole_charges`:
+    the fields of the facts they replace."""
+    charges, invoices, numbers = _whole_charges(conn, accounts)
+    return {"charges": charges, "invoices": invoices, "invoice_numbers": numbers}
+
+
+def _whole_charges(
+    conn: Conn, accounts: list[str]
+) -> tuple[
+    dict[tuple[str, str], list[EarlierCharge]],
+    dict[str, EarlierInvoice],
+    dict[str, tuple[str, date]],
+]:
+    """What each earlier invoice still charges each key of the files, one by one
+    (private.remittance_earlier_charges, by each file's key), and those invoices (their HT, rate,
+    credits, number and date, by their key)."""
+    if not accounts:
+        return {}, {}, {}
+    rows = conn.execute(
+        """select account_id::text, tier_key, invoice_id::text, charged_minor, credited_minor,
+                  waived_minor
+           from private.remittance_earlier_charges(%s::uuid[])""",
+        (_uuids(accounts),),
+    ).fetchall()
+    invoices: dict[str, EarlierInvoice] = {}
+    numbers: dict[str, tuple[str, date]] = {}
+    order: dict[str, tuple[int, int]] = {}
+    for inv, ht, rate, credited, num, issued, year, seq in conn.execute(
+        """select i.id::text, i.ht_minor, i.vat_rate,
+                  coalesce((select -sum(c.ht_minor) from public.commission_credit_correction c
+                            where c.original_invoice_id = i.id), 0), i.number, i.issue_date, i.year,
+                  i.seq
+           from public.commission_invoice i where i.id = any(%s::uuid[])""",
+        (sorted({str(r[2]) for r in rows}),),
+    ).fetchall():
+        invoices[inv] = EarlierInvoice(inv, int(ht), Decimal(rate), int(credited))
+        numbers[inv] = (num, issued)
+        order[inv] = (int(year), int(seq))
+    charges: dict[tuple[str, str], list[EarlierCharge]] = defaultdict(list)
+    for a, tier, inv, charged, credited, waived in rows:
+        charges[(a, tier)].append(
+            EarlierCharge(
+                inv,
+                order[inv],
+                int(charged),
+                int(credited),
+                invoices[inv].vat_rate,
+                waived_minor=int(waived),
+            )
+        )
+    return dict(charges), invoices, numbers
 
 
 # The query of _held_to (review M2c-6b-2b TESTS-4: a module constant, so the integration test

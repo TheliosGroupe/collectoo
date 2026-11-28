@@ -25,7 +25,7 @@ _Phase 0 draft, 2026-11-07. Each task fits in under one day. 🔒 = blocked on f
 | PR-8 | M1d Staging, commit/rollback, scale tests (+ documents zip) | M1-17 … M1-22 (split: M1d = M1-17, 18, 20, 21, 22; M1e = M1-19 review UI) |
 | PR-9 | M2a Ledger | M2-01 … M2-05 (split: M2a-1 = M2-01…04 ledger core; M2a-2 = M2-05 opening balances at confirmation; M2a-3 = batch commit as a background job, needed above ~20k loans for the 8 s API limit) |
 | PR-10 | M2b Payments, reconciliation, allocation, receipts | M2-06 … M2-11 |
-| PR-11 | M2c Remittances, client statements, commission | M2-12 … M2-15 |
+| PR-11 | M2c Remittances, client statements, commission | M2-12 … M2-15 (built as M2c-1 … M2c-7f-2, closed at M2c-7f-2: see « M2c — closed » below) |
 | PR-12 | M3a Rate tables, rule-pack format, engine core | M3-01 … M3-06 |
 | PR-13 | M3b Rule packs (4 claim types) and golden tests | M3-07 … M3-12 |
 | PR-14 | M3c Statement of account (*décompte*) | M3-13 … M3-15 |
@@ -118,6 +118,18 @@ _Phase 0 draft, 2026-11-07. Each task fits in under one day. 🔒 = blocked on f
 - **M2c-6b-3a-2, built and tested with the switch on** (`040`; ADR-0014 « M2c-6b-3a-2 »): the late predecessor booked as its run's payout (E), the readers of « booked » (F), its return (G), the release's defence (H), the R124-6 rows of a re-issue and of a run whose payout was cancelled alone (I), P across two transfers (J, OQ-82's default), the switch-on E2E project and the cancelled-and-re-issued scale file. Its review's round 4 left one blocker (a chained run's R124-6 rows written at the booking without the nightly check's two holds).
 - **M2c-6b-3b part 1, built and tested with the switch on** (`041`; ADR-0014 « M2c-6b-3b part 1 »): that blocker closed (the booking, its sheet and the nightly booked branch apply the holds: the statements cover [least(e0, L), L], no uncounted possible debit of another transfer of the chain), round 4's three surviving mutants killed, the late predecessor's worker integration file (`test_switch_on_late_predecessor_integration.py`). Its review round 1 (ADR-0014 « M2c-6b-3b part 1 review fixes »): the nightly check judges a chain that paid nothing while its payout stands at that line's date, and every reader writing an R124-6 row from the holds or the in-flight suppression judges on facts read in one snapshot and read again after the options (a race reaching the in-flight branch of every run, the switch off included, closed); a held booked run's own alert is left to 6b-3b (low). **Every prerequisite is met; only the switch remains** — **6b-3b**: the one-line migration switching it on once the founder answers Q1 (OQ-81 (a)), `033` turned into the switch-on test.
 
+
+**M2c — closed (M2c-7f-2, 2026-11-28; ADR-0014 « M2c-1 » to « M2c-7f-2 », design `docs/design/m2c-remittances.md` §21).** M2-12 to M2-15 are built: the two funds and client-money segregation (M2c-1), identities and terms (M2c-2), the engines (M2c-3), runs and invoices (M2c-4), documents (M2c-5, M2c-5b), transfers, pain.001 files and the bookings from the bank's debits (M2c-6a, M2c-6b), returns after remittance and close-out (M2c-7a to M2c-7f-2: covers, claw-back and write-off, client payments and refunds, repayment requests, client events and payees, set-off bars, declarations and the liquidation's payouts, automatic top-ups, label references, hardening, the property machine and the 50k close-out file). Two acceptance criteria read as built: the statement's totals are the gross less what was set off **only under a netting clause** (founder #3; without one the client is paid its gross and invoiced); the cancellation after a file's download is built behind its switch, still off (6b-3 Q1). Carried to the follow-up (7f-3; ADR-0014 « M2c-7f-2 », Left open): MB-1's gate read stamped (an old « Tutelle ou curatelle » row qualified after a payment's match), five reads of the servicer's whole in-flight set keyed under the no-statistics plant, the nightly's runs-in-flight reads measured in a many-servicers state; and the machine's M5 (a cover's release re-queued) and the §8.2 rules it does not model (ADR-0014 « M2c-7f-2 review fixes »). The claw-back run's prepare at ten booked 50k-line runs, 8.38 s against its 11.66 s bound (15.6 s before review round 1 summed the earlier charges, 12.9 s before review round 2 paused the cyclic garbage collector during the prepare; ADR-0014 « M2c-7f-2 review fixes », rounds 1 and 2).
+
+**The go-live gate after M2c-7** (plan `docs/design/m2c-7-plan.md` §8.6; ADR-0014 « M2c-7f-2 »). Merging M2c-7f-2 lifts the code gate « no real remittance before M2c-7 ». What remains before a first real remittance, none of it code:
+1. the R124-2 declaration to the procureur de la République and the dedicated account opened (CPCE-01, CPCE-02; Ops; R124-7 1°);
+2. counsel's answers to OQ-45 (CMF L314-1) and OQ-35 (the servicer's own money on the dedicated account until its sweep, R124-2 « exclusivement affecté »; R124-7 1°);
+3. the bank's guide and a real statement carrying our debits (founder #15; OQ-79, OQ-80, OQ-81, OQ-83, OQ-84);
+4. the founder's answer on the switch (6b-3 Q1);
+5. M3's re-runs before go-live and M3c-2's restatement cover;
+6. before the first real invoice: FAC-06's written procedure under CGI 289 VII 1° (Ops with the accountant, with OQ-96) and OQ-44's answer (accountant);
+7. the founder's answers to the M2c-7 plan's Q17–Q21 (built as their defaults);
+8. counsel's answers to OQ-92, OQ-93, OQ-94 and OQ-97.
 ---
 
 ## M3 — Calculation engine

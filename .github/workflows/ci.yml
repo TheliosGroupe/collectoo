@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:  # run every job, the volume runs included, on any branch (Actions → CI → Run workflow)
+    inputs:
+      machine_seed:
+        description: "The property machine's seed (empty: the machine job's fixed seed, machine-long's random one)"
+        required: false
+        default: ""
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -71,8 +76,10 @@ jobs:
     # pytest past 93 %. No test regressed: on one machine, PR #49's common tests ran within +2 % (pgTAP) and +3.6 %
     # (integration) of main's, the new ones adding 79 s. The job had grown from ~14 to ~26 minutes over M2c-7, and
     # runners vary 25-50 % on the same tree (PR #48: 770 s of integration on Azure, 619 s on main's AWS push).
-    # Slowest seen: 1.5 + 9.5 (pgTAP) + 19 (integration) = 30+ minutes. Integration stays after pgTAP on the same
-    # database: that order has caught stale-statistics plans before (PR #38).
+    # Main's push of c5b357a (7f-1, run 46103462268): 1.7 (setup) + 9.5 (pgTAP) + 21.1 (integration) = 32.4 minutes;
+    # M2c-7f-2's property machine runs in its own job (machine, below: review round 1, VC-2), so this job keeps its
+    # margin. Integration stays after pgTAP on the same database: that order has caught stale-statistics plans before
+    # (PR #38).
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -108,7 +115,57 @@ jobs:
       - name: Worker integration tests (queue, storage, commit, statements, matching, allocation, receipts)
         run: |
           eval "$(./scripts/local-env.sh)"
-          cd worker && uv sync --frozen && uv run pytest -m integration --ignore-glob='*scale_integration.py' --durations=25
+          cd worker && uv sync --frozen && uv run pytest -m integration --ignore-glob='*scale_integration.py' \
+            --ignore=tests/test_close_out_machine_integration.py --durations=25
+
+  machine:
+    name: Property machine (2 classes x 8 examples x 20 steps; switch off, then on in rolled-back transactions)
+    runs-on: ubuntu-latest
+    # M2c-7f-2 (plan docs/design/m2c-7f-plan.md M1, V4): the property machine, on its own stack after a reset, in
+    # parallel with the db job (review round 1, VC-2: as the db job's last step it took it past 36 of its 45 minutes;
+    # about 5 billed minutes more per run). Budget 6 minutes (measured locally and written in
+    # docs/benchmarks/remittances.md); the step's timeout is about 125 % of it, rounded up: the PR fails above.
+    # A fixed seed (review round 1, MACH-8): the same examples on every run of the same tree, so the PR's gate turns
+    # neither red nor green by its draw; dispatch with machine_seed to draw others (machine-long draws its own).
+    # A failing example prints its blob (`@reproduce_failure`); the example database is uploaded on failure.
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: supabase/setup-cli@v1
+        id: supabase_cli
+        continue-on-error: true  # GitHub release downloads sometimes 504: fallback below
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Install the Supabase CLI (fallback with longer retries)
+        if: steps.supabase_cli.outcome == 'failure'
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 -o "$RUNNER_TEMP/supabase.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
+          supabase --version
+      - run: bash scripts/ci-supabase-start.sh
+      - run: supabase db reset
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: worker/uv.lock
+      - name: Property machine, 8 x 20 per class
+        timeout-minutes: 8
+        env:
+          MACHINE_SEED: ${{ inputs.machine_seed }}
+        run: |
+          eval "$(./scripts/local-env.sh)"
+          SEED="${MACHINE_SEED:-7}"; echo "machine seed: $SEED"
+          cd worker && uv sync --frozen && uv run pytest -m integration -s \
+            tests/test_close_out_machine_integration.py --hypothesis-seed="$SEED"
+      - name: The examples' database (replays a failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: machine-hypothesis
+          path: worker/.hypothesis
+          include-hidden-files: true
+          if-no-files-found: ignore
 
   scale:
     name: Scale runs (50k boarding, statement, matching, allocation; 5k receipts)
@@ -154,10 +211,12 @@ jobs:
         run: |
           eval "$(./scripts/local-env.sh)"
           # (the 5,000 payouts' bookings run in their own job, scale-payouts: ~15 min on their own; so do the 2,000
-          # held chained runs of M2c-6b-3b part 3, ~6 min: this job took 27.6 of its 30 minutes on main, 2026-11-21)
+          # held chained runs of M2c-6b-3b part 3, ~6 min: this job took 27.6 of its 30 minutes on main, 2026-11-21;
+          # and M2c-7f-2's close-out volume file, in scale-closeout)
           cd worker && uv sync --frozen && uv run pytest -m integration -s \
             $(ls tests/*scale_integration.py | grep -v -e test_debit_bookings_scale_integration.py \
-                                                      -e test_breach_held_scale_integration.py)
+                                                      -e test_breach_held_scale_integration.py \
+                                                      -e test_close_out_scale_integration.py)
       - name: Slowest statements and the plans of those over 60 s
         if: failure()
         run: |
@@ -216,6 +275,107 @@ jobs:
                     left(regexp_replace(query, '\s+', ' ', 'g'), 400) as query
              from pg_stat_statements order by max_exec_time desc limit 40"
           docker logs supabase_db_collectoo 2>&1 | grep -A 120 "duration: .* plan:" | head -3000 || true
+
+  scale-closeout:
+    name: Scale run (the M2c-7 close-out, 50k lines; M2c-7f-2)
+    runs-on: ubuntu-latest
+    # founder question 2, default (a) (plan docs/design/m2c-7f-plan.md §6): the close-out volume file in its own job,
+    # in parallel with the other volume jobs. 60 minutes: the file's local time (40.1 min on a fresh reset with this
+    # job's logging settings: the 50k world 20.4 min, row 8's 5,000-payout fixture 14.5 min) and about 1.7 min of
+    # setup leave about 45 % for runner variance (review round 1, VC-6: not the 50 % first written;
+    # docs/benchmarks/remittances.md « M2c-7f-2 »); the file keeps its own per-row bounds.
+    timeout-minutes: 60
+    # the volume runs run on merges to main and on demand, not on pull requests: founder decision 2026-11-17
+    # (private repository, Actions minutes; « 1b »); a slice that changes a path it times dispatches this workflow on
+    # its branch and waits for it before merging (CLAUDE.md)
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: supabase/setup-cli@v1
+        id: supabase_cli
+        continue-on-error: true  # GitHub release downloads sometimes 504: fallback below
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Install the Supabase CLI (fallback with longer retries)
+        if: steps.supabase_cli.outcome == 'failure'
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 -o "$RUNNER_TEMP/supabase.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
+          supabase --version
+      - run: bash scripts/ci-supabase-start.sh
+      - run: supabase db reset
+      - name: Log the plan of any statement slower than 60 s (read when the job fails)
+        run: |
+          psql "postgresql://supabase_admin:postgres@127.0.0.1:54322/postgres" -v ON_ERROR_STOP=1 -q \
+            -c "alter system set pg_stat_statements.track = 'all'" \
+            -c "alter system set session_preload_libraries = 'auto_explain'" \
+            -c "alter system set auto_explain.log_min_duration = '60s'" \
+            -c "alter system set auto_explain.log_nested_statements = on" \
+            -c "select pg_reload_conf()"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: worker/uv.lock
+      - name: The close-out at volume (10 booked 50k-line runs, 1,000 reversals and covers, the claw-back run, 100 servicers' top-ups, the 5,000-payout funds pass; docs/benchmarks/remittances.md)
+        run: |
+          eval "$(./scripts/local-env.sh)"
+          cd worker && uv sync --frozen && uv run pytest -m integration -s tests/test_close_out_scale_integration.py \
+            --durations=0
+      - name: Slowest statements and the plans of those over 60 s
+        if: failure()
+        run: |
+          psql "postgresql://supabase_admin:postgres@127.0.0.1:54322/postgres" -P pager=off -c \
+            "select round(max_exec_time) as max_ms, calls, round(total_exec_time) as total_ms,
+                    left(regexp_replace(query, '\s+', ' ', 'g'), 400) as query
+             from pg_stat_statements order by max_exec_time desc limit 40"
+          docker logs supabase_db_collectoo 2>&1 | grep -A 120 "duration: .* plan:" | head -3000 || true
+
+  machine-long:
+    name: Property machine, long run (2 classes x 25 examples x 40 steps; on demand)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # founder question 1, default (a) (plan docs/design/m2c-7f-plan.md §6): on manual dispatch only — never on pull
+    # requests nor on pushes to main (Actions minutes of the private repository)
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: supabase/setup-cli@v1
+        id: supabase_cli
+        continue-on-error: true  # GitHub release downloads sometimes 504: fallback below
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Install the Supabase CLI (fallback with longer retries)
+        if: steps.supabase_cli.outcome == 'failure'
+        run: |
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 -o "$RUNNER_TEMP/supabase.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          sudo tar -xzf "$RUNNER_TEMP/supabase.tar.gz" -C /usr/local/bin supabase
+          supabase --version
+      - run: bash scripts/ci-supabase-start.sh
+      - run: supabase db reset
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: worker/uv.lock
+      - name: Property machine, 25 x 40 per class
+        env:
+          MACHINE_EXAMPLES: "25"
+          MACHINE_STEPS: "40"
+          MACHINE_SEED: ${{ inputs.machine_seed }}
+        run: |
+          eval "$(./scripts/local-env.sh)"
+          SEED="${MACHINE_SEED:-$(( (RANDOM << 15) | RANDOM ))}"; echo "machine seed: $SEED"
+          cd worker && uv sync --frozen && uv run pytest -m integration -s \
+            tests/test_close_out_machine_integration.py --hypothesis-seed="$SEED"
+      - name: The examples' database (replays a failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: machine-long-hypothesis
+          path: worker/.hypothesis
+          include-hidden-files: true
+          if-no-files-found: ignore
 
   catalogue:
     name: EU template catalogue is reproducible

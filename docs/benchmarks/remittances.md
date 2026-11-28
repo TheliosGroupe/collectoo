@@ -3630,3 +3630,276 @@ The E2E (`./scripts/e2e.sh`, after a fresh reset): **73 passed** in 7.2 min (the
 dates, ids, hashes or order.
 
 Every budget held.
+
+### M2c-7f-2, part 1: the property machine (2026-11-27, same VM, the main stack alone; a second stack ran another session's volume files during part of the runs)
+
+`worker/tests/test_close_out_machine_integration.py` (plan `docs/design/m2c-7f-plan.md` M1–M6, V4, X1's machine half),
+the db job's own step after the integration suite (`ci.yml`, `timeout-minutes: 8`: the 6-minute budget plus 25 %,
+rounded up). Each figure is the whole file — the switch-off class, the switch-on class (each example in one transaction
+rolled back), and `test_every_check_can_fail` (15 s) — at the PR's size, 2 classes × 8 examples × 20 steps:
+
+| Seed | Wall time | × 1.5 |
+|---|---|---|
+| 7 | 190 s (the second stack's volume files running) | 285 s |
+| 8 | 148 s | 222 s |
+| 9 | 196 s for the two classes, + 15 s the plants' test | 317 s |
+| 10 | 161 s for the two classes, + 15 s the plants' test | 264 s |
+
+The budget holds: the slowest seed × 1.5 is 5.3 min ≤ 6 min (seed 8 again on the final commit: 164 s). The
+`machine-long` job (workflow_dispatch only, 45 min) runs 25 × 40 per class: locally **999 s** (16.6 min) with seed
+2540, the whole file, green. Its first run (same seed) failed twice, both the oracle's gaps, now closed: a run whose
+takes equal the refunds it owes settles nothing (D = 0, `settlement.py`'s deferral) — the oracle now computes the
+refunds owed from its own credit notes and defers as the plan does; and a returned payout blocks the client's account
+only while it is still the account it was paid to (one replaced since stays active). What the examples reached at
+25 × 40: a late predecessor's return re-queued in a later run (then recorded as « M5 », which it is not: review round 1,
+MACH-3) 14 times, 038's f_partial form 15 + 11, a D = 0 run 4, a set-off withheld at the debit 9 + 19, LG003 refused
+43 + 47, LG009 3 + 16; « 038's d_queue / d_twice shape » as the event then counted it (any queue in debit after a
+cancelled file: not 038's shape, review round 1, MACH-5) once, at 8 × 20 (seed 8, switch on, on the commit before the
+late cycle), not at 25 × 40.
+
+The mutants (X1, the machine half): each applied to the live stack (an SQL body swapped, a trigger disabled) or to the
+worker's code, both classes run at 8 × 20 (seed 7), then restored. 22 runs — the 17 of §8.5's mutants on paths the
+machine walks (not the payee kind, the import's `label_reference` override, the chain events' label branch), H2 and
+H11, and three variants (each cover off with LG009 off too; VAT pro rata off in the SQL twin as well) — 20 killed by
+the machine. The two it cannot reach (the plan's VAT pro rata in a run's settlement; the requested flag read by the
+prepare job) are killed by `test_settlement.py::test_a_take_in_part_moves_its_vat_pro_rata` (added) and
+`test_repayment_requests_integration.py::test_a_requested_advance_is_never_also_taken_by_the_real_prepare`. Each check
+of the machine is shown failing on a planted state by `test_every_check_can_fail` (32 checks).
+
+### M2c-7f-2, part 2: the close-out volume file (2026-11-28, same VM, the main stack alone)
+
+`worker/tests/test_close_out_scale_integration.py` (plan `docs/design/m2c-7-plan.md` §8.3, `docs/design/m2c-7f-plan.md`
+V1–V4 and X1's volume half), its own job `scale-closeout` (pushes to `main` and manual dispatch only; the `scale`
+step excludes it). The world: one servicer, one client, 50,000 files from the synthetic tape; ten collections of every
+file, each remitted in a 50k-line run through the jobs, filed, downloaded, debited and booked (the history); the day:
+1,000 full returns (2 %) of the first run's payments, covered at the reversal. Statistics: a reset, then the imports;
+before the measured steps of rows 1, 2, 4 and 5 the eight tables 7a's reads use are forgotten and kept so *(review
+round 1, VC-4: not before rows 6, 7 and V3, which run on the statistics the history left, nor row 8, on scale-payouts'
+own plant of five tables — ledger_account not among them)*. Each run below on a fresh reset
+with `scale-closeout`'s logging settings (auto_explain at 60 s, pg_stat_statements on every statement). Run 2 had row
+6's fix (`client_payment_docs`, `client_open_advances`) but not row 8's; run 3 had both (migration
+`20261203090000_close_out_fixes.sql`, ADR-0014 « M2c-7f-2 »).
+
+| §8.3 row | Bound | Run 2 | Run 3 |
+|---|---|---|---|
+| 1. Covers at the reversal: the debit chunk / the cover statement | < 60 s / < 2 s | 3.7 s / 0.55 s (1 booked run), 3.7 s / 0.62 s (10) | 3.4 s / 0.56 s (1), 4.4 s / 0.65 s (10) |
+| 1. Rows read per reversal: the cover's facts / its posting | ≤ 20 each | 2.2 / 20.0 (`ledger_account` 2,246 and 20,008 for 1,000) | 2.0 / 20.0 (2,000 and 20,026) |
+| 2. The deferred LG009 check (1,000 calls) | < 0.5 s | 0.24 s / 0.26 s | 0.25 s / 0.26 s |
+| 3. `cover_booked_run_reversals` (1,000 lines reversed in flight) | < 3 s | 0.56 s | 0.60 s |
+| 4. Delta pass / its rows read in all, 1 vs 10 booked runs | < 0.5 s / within 10 % | 0.073 s, 0.068 s / 16,501 vs 16,011 (−3 %) | 0.078 s, 0.071 s / 16,009 vs 16,013 |
+| 4. `p_full` / the whole nightly's increase over the body without 7a's checks | < 8 s / ≤ 2 s | 0.12 s, 0.55 s / +0.08 s (1.85 → 1.93 s), +0.70 s (12.90 → 13.60 s) | 0.12 s, 0.57 s / +0.00 s (2.17 → 2.17 s), −0.94 s (15.07 → 14.13 s) |
+| 5. Claw-back prepare / approval (1,000 open advances, 200 overruns) | ≤ 11.66 s / ≤ 6.71 s | **14.90 s** / 5.46 s | **16.93 s** / 5.85 s |
+| 5. Its settlement at the debit (1,000 rows) / « Avances » (servicer, client) | < 2 s / < 300 ms | 0.054 s / 108 ms, 114 ms | 0.055 s / 144 ms, 105 ms |
+| 6. `record_client_payment` × 1,000 (median, p99, max) | each < 200 ms | 48, 83, 137 ms (run 1, before the fix: 185, 352, **529**) | 45, 76, 113 ms |
+| 7. `top_ups` over 100 servicers: the job's own (wall) / a held lock | < 2 s / skipped | 1.20 s (3.25 s) / skipped, miss recorded | 1.11 s (2.92 s) / skipped, miss recorded |
+| 8. The 5,000-payout funds pass | ≤ 26.4 s | **28.2 s** | **14.4 s** |
+
+- Row 4's per-table comparison is one-sided (ADR « M2c-7f-2 », Deviations): in run 2 `ledger_account` 2,248 rows with
+  one booked run against 2,002 with ten, `ledger_posting` 4,247 against 4,003 — the night with one run reading more; in
+  run 3 the same on both nights (2,002 and 4,001 / 4,004).
+- Row 5's prepare is the one bound still broken (ADR, Left open; review round 2: 8.38 s, within: « M2c-7f-2, review
+  round 2 » below): the earlier charges of every file loaded whole (550,000
+  `commission_invoice_charge` rows, 2.1 s for the query alone), the history's prepare and approval growing from
+  13.0 s (run 1) to 19.4 s (run 9) of run 2's history.
+- Row 7's wall time adds the queue consumer's connection per poll and per message (about 2 s for 100 messages).
+- Row 8, run 2 (track_functions): `bank_booking_post_rows` 27.4 s, `ledger_post_set` 20.8 s in 4 calls (of which the
+  pooled lookup 14.0 s: 4.4, 4.0, 3.8 and 1.8 s, pg_stat_statements), `post_run_settlements` 13.2 s,
+  `run_booked_cover_check` 5,000 calls in 0.37 s, `cover_booked_run_reversals` 0.03 s. On the same world with the
+  lookup fixed: 13.1 s. Run 3: 14.4 s (again with track_functions 14.6 s: `bank_booking_post_rows` 13.0 s,
+  `ledger_post_set` 7.8 s in 4 calls, `post_run_settlements` 4.2 s, `run_booked_cover_check` 5,000 calls in 0.38 s,
+  `cover_booked_run_reversals` 0.03 s). V2 (the run check made statement-level) is not built: it would save at most
+  the 0.38 s.
+
+V3, measured: the payout blockers' nested calls, 5,000 calls for the world's client: no event 0.23 s, a death recorded
+**1.94 s** (run 3: 0.14 s and 2.11 s; budget 8 s; 7d-1: 2.2–2.4 s on a small world). `ledger_post_set`'s pooled lookup: row 8 above (fixed).
+`bank_transfer_file_idx` and `test_transfer_files_scale_integration`'s headroom: the `scale` job's command below.
+
+Time: run 2 **2,434 s (40.6 min)** — the world 1,212 s (its ten 50k-line runs 95–112 s each, collection included),
+row 8's 5,000-payout fixture 867 s, the claw-back fixture 276 s, row 8's two passes 64 s, row 7 12 s. Run 3
+**2,408 s (40.1 min)**: **1 failed** (row 5's prepare), 8 passed; the world 1,223 s, row 8's fixture 870 s, the
+claw-back fixture 270 s, row 8's two passes 30 s, row 7 12 s. `scale-closeout`'s timeout: 60 minutes (the local
+time with about 50 %). Beyond the ~28 minutes the plan aimed at (ADR « M2c-7f-2 », Left open; founder question): row 8
+on `scale-payouts`' own 5,000-payout fixture would take about 15 minutes off this job.
+
+The mutants (X1, the volume half; plan m2c-7f §3 X1, part 1 left them): each applied to the live stack on run 2's world
+(a function's latest body with one change, then restored from the migrations and checked), the row measured again
+(rows 1, 2 and 4 on a fresh day of returns in a rolled-back transaction; row 3 and 5 on a new collection's run; rows 7
+and 8 as the file runs them):
+
+| Mutant | Row | Verdict |
+|---|---|---|
+| (1) F9: the delta pass reads every booked run (`run_advance_checks`' window off) | 4 | killed: 0.79 s, `remittance_line` 559,335 rows, reads 21,025 → 611,160 |
+| (2) the cover's facts unkeyed (`remitted_cover_held`: a reversal's covers by a scan) | 1, 2, 4 | killed: `client_advance` 3,120,000 rows, LG009 1.58 s, the delta pass 0.76 s |
+| (3) the deferred LG009 check unkeyed per row (the reversed line by a scan) | 2 | killed: past the 120 s statement timeout |
+| (4) `cover_booked_run_reversals` unkeyed (the client's every line, the run by a filter) | 3 | survives the row (0.63 s of its 3 s; `remittance_line` 208,432 → 767,169 rows); killed by the db job's `test_remitted_cover_reads_integration.py` |
+| (5a) the claw-back's open advances unkeyed (`advance_open`: the reversal by a scan): prepare | 5 | the prepare 15.8 → 18.0 s; not a kill by the bound, which the baseline already breaks (Left open) |
+| (5b) the same: the approval | 5 | survives (5.5 → 6.1 s of 6.71 s), and the db job's `test_advance_reads_integration.py` |
+| (5c) the settlement's advance guard unkeyed (the advance's reversal by a scan) | 5 | survives (`post_run_settlements` 0.07 → 0.70 s of 2 s), and the db job's advance, client-payment and set-off reads tests |
+| (6) a client payment's documents unkeyed (`advance_born_on`: the entry by a scan) | 6 | killed: 169 → 659 ms (on run 3's world) |
+| (7) F8: the hourly job waits for a held servicer's lock (`order_due_top_up` without its lock timeout) | 7 | killed: the held servicer done, not missed |
+| (7b) F8: the step without its savepoint (the lock timeout aborts the message's transaction) | 7 | killed: its miss not recorded |
+| (8) F17: the per-row run check unkeyed (the run's lines by a scan) | 8 | killed: past the 120 s statement timeout |
+
+The survivors are time bounds a 10× slower unkeyed read stays under at this volume (5b, 5c: no db-job reads test
+bounds them either); (4) is held by the db job. Top-ups « in one transaction » has no product mutant short of the
+queue itself (one message per servicer, `private.queue_top_ups`); (7b) is the closest: one transaction for the step and
+its record.
+
+The `scale` job's command as `ci.yml` runs it (its files but the three of their own jobs; `RECEIPT_FILES=5000`), right
+after `supabase db reset` with CI's logging settings, with `20261203090000` applied (its `ledger_post_set` posts every
+allocation): **15 passed** in 1,077.8 s (17.96 min; part 1's last: 1,047.6 s).
+- The payments volume: 50,000 credits imported and matched in 23.8 s, allocated in 57.4 s (five chunks of 10,000, post
+  8.5 to 9.4 s each; before: 53.2 s, 8.1 to 8.6 s — each receivable line's account now one probe of its key instead of
+  one hash of the table); 5,000 receipts in 55.3 s (11.1 ms each); the nightly checks over 50,000 payments 3.2 s.
+- `test_remittance_scale_integration.py` (50,000 lines): prepared in 9.1 s (load 2.67 s, price 3.88 s, write 1.71 s).
+- V3, `test_transfer_files_scale_integration.py`: the nightly checks 0.33 s reading **5,000** `bank_transfer` rows,
+  once the servicer's own (its bound 32,000; M2c-6b-3b part 3 read 25,083), `bank_transfer_file_idx`'s three
+  once-per-check reads within them; the cancellation file's nightly checks 0.56 s reading 55,748 (as before).
+
+The suites on the final body (`ledger_post_set`'s three lookups): `supabase test db` after a reset **3,263 passed**
+(621 s); the db job's integration step in CI's order **all passed** (1,034 s), then the property machine (seed 8,
+2 classes × 8 × 20) **passed** in 163 s; the worker's ruff, format, mypy and unit tests clean. The first version of the
+lookup (the client added to the unique index's prefix) passed the same suites but for its own reads test in the db
+job's state (82,454 rows: the plant's statistics priced `ledger_account_org_book_idx` the cheaper), which the final one
+holds (1,604).
+
+### M2c-7f-2, part 3: the long machine run and the final suites (2026-11-28, same VM, the main stack alone)
+
+**The property machine at 200 examples per class** (founder question 1's default (a), once locally; ADR-0014
+« M2c-7f-2 », « What the 200 × 60 run found»). One fresh reset, then 8 chunks of 25 examples per class, each chunk its
+own seed (71301–71308) and its own Hypothesis database, one after the other, a hard cap of 3 h 30 in all (05:26:06 →
+08:56:06 UTC). The main run ended at 07:54:33 (**8,907 s**); the three chunks that had failed were re-run on the final
+code within the cap, the last ending at 08:31:09 (**11,103 s** in all, 3 h 05).
+
+| Chunk (seed) | Switch off, 25 × 60 | Switch on, 25 × 40 |
+|---|---|---|
+| 1 (71301) | passed (both classes in 996 s; the switch-on class at 60 steps ran out of locks, below) | passed, 357 s |
+| 2 (71302) | passed (both classes in 986 s; the same) | failed in 102 s (the plan's clauses, fixed) — re-run: passed, 413 s |
+| 3 (71303) | failed in 169 s (the oracle's proceeding hold, fixed) — re-run: passed, 960 s | passed, 394 s |
+| 4 (71304) | passed, 915 s | passed, 307 s |
+| 5 (71305) | passed, 942 s | passed, 420 s |
+| 6 (71306) | failed in 285 s (one hold reason per payout, the oracle fixed) — re-run: passed, 816 s | passed, 457 s |
+| 7 (71307) | passed, 908 s | passed, 429 s |
+| 8 (71308) | passed, 870 s | passed, 364 s |
+
+So **200 × 60 switch off (12,000 steps) and 200 × 40 switch on (8,000 steps), every example green** — chunks 7 and 8
+and the three re-runs on the final code, the earlier ones on the code before the fixes (each fix only changes the
+state it was found on). A step costs about 0.6 s switch off (25 × 60 in 870–960 s) and 0.3–0.45 s switch on. What the
+examples reached over the run (the `event` counts, both classes): « 038's `d_queue` / `d_twice` shape » as the event then
+counted it (any queue in debit after a cancelled file: not 038's shape, review round 1, MACH-5) **33 times**, switch on;
+a late predecessor's return re-queued in a later run (then recorded as « M5 », which it is not: review round 1, MACH-3)
+68; 038's
+f_partial form 130 + 124; a D = 0 run 17 + 6; a set-off withheld at the debit 133 + 129; LG003 refused 557 + 289;
+LG009 refused 118 + 93; runs approved 1,794 + 1,485.
+
+**The switch-on class at 60 steps.** Its first example (every step a collection, the all-zeros draw Hypothesis tries
+first) ran out of Postgres's lock table at about step 51 in chunks 1 and 2 (« out of shared memory »,
+`max_locks_per_transaction` 64 × 100 connections): the one transaction keeps the lock of every working table the
+ledger's posting core creates and drops (sampled: 20,710 locks held by one switch-on transaction 22 s in, 11,921 on
+relations already dropped, 46 advisory). It runs at 40 steps from chunk 1's re-run on (the `machine-long` job's size).
+
+**The final suites** (the final code: `20261203090000` and the worker's plan fix; each group on a fresh reset):
+- The db job in CI's order: `supabase test db` **3,263 passed** in 642 s (55 files; `033` unchanged); the generated
+  types unchanged; the integration step exactly as `ci.yml` runs it **336 passed, 1 skipped** in 1,036 s; the machine
+  step exactly as `ci.yml` runs it (2 × 8 × 20 and the plants' test, seed 12191405) **3 passed** in 190 s. The three
+  steps take 1,868 s (31.1 min) locally, against the job's 45-minute timeout (part 2: 621 + 1,034 + 163 = 1,818 s).
+- `make eval`: mapping top-1 1.000 (167/167, threshold 0.980); reconciliation 96.0 % automatic, 0 wrong.
+- The worker on the final code: ruff, ruff format and mypy (226 files) clean; the unit tests **1,304 passed, 7
+  xfailed** (2 min 21 s; 1,301 before the plan fix's three tests). The web: lint and typecheck clean, vitest **763
+  passed** (38 files); no web file and no public signature changed (the generated types identical), so no E2E.
+- The `scale` job's command exactly as `ci.yml` lists it (`RECEIPT_FILES=5000`), after a reset with CI's logging
+  settings: **15 passed** in 1,097 s (18.3 min; part 2: 1,077.8 s): 50,000 credits imported and matched in 23.8 s,
+  allocated in 56.7 s (post 8.6–9.1 s per 10,000), 5,000 receipts at 11.5 ms each, the 50k run prepared in 10.5 s
+  (part 2: 9.1 s), the nightly checks over 50,000 payments 3.3 s.
+- The `scale-payouts` command, after another reset with CI's logging settings: **6 passed** in 1,033 s (17.2 min):
+  the 5,000-payout batch line's funds pass 12.7 s, the 5,000 RMT debits' job 11.1 s.
+- The `scale-closeout` command, after a third reset with CI's logging settings: **8 passed, 1 failed** in 2,326 s
+  (38.8 min; part 2's run 3: 2,408 s): the failure is row 5's prepare, **15.58 s** against 11.66 s (Left open since
+  part 2: the earlier charges loaded whole); its approval 5.48 s (≤ 6.71 s), « Avances » 110 ms. Row 1: the debit
+  chunk 3.7 s and the cover statement 0.61–0.64 s for 1,000 covers; row 4: the delta pass 0.073 s and 0.066 s with 1 and
+  10 booked runs, the whole nightly 2.07 s (2.09 s without 7a's checks) and 13.46 s (13.15 s): +0.31 s at ten runs
+  (≤ 2 s); row 6: median 46, p99 74, max 121 ms (< 200); row 7: the messages' own 1.15 s (wall 2.98 s); row 8: the
+  5,000-member batch line's funds pass **13.5 s** (≤ 26.4 s); V3: the blockers with a death recorded 1.88 s for 5,000
+  calls (budget 8 s). The world 1,184 s, row 8's fixture 831 s.
+- Then `supabase db reset`, the stack left running.
+
+### M2c-7f-2, review round 1 (2026-11-28, same VM, the main stack alone)
+
+ADR-0014 « M2c-7f-2 review fixes ». What the round measured:
+- **The pooled lookup and the entry check** (`test_close_out_fixes_reads_integration.py`, the lot of 100 entries over
+  400 clients, statistics planted in three states, alone and beside 5,000 other clients' pooled and owner-claim
+  accounts): **1,604** `ledger_account` rows read in all six states (bound 2,060); 7f-2's lookup read 81,004 and
+  1,081,004 in « analysed while empty » (fresh reset), the earlier entry check 45,604 and 2,045,604 there (after the db
+  job's first files).
+- **The earlier charges** (the 10k-file world of the volume file, ten booked runs: 109,991 charges over 10,000 keys):
+  the old statement and its build 0.9–1.0 s, the totals (`private.remittance_charge_totals`, 10,000 rows) and their
+  build **0.18–0.20 s**; the engine on the claw-back run's facts (10,754 lines) 1.11 s whole, **0.93 s** summed, the
+  same draft (the inputs hash apart). The reads test: 340 rows (whole) and 299 (summed) for 240 charges beside 10,000
+  planted rows per table, planted or forgotten statistics.
+- **The machine** (seed 7, 2 × 8 × 20 and the two fixed scenarios): **4 passed** in 191 s after a reset (the `machine` job's step); before it, the reviewer's mutants each killed in 2 × 8 × 20 runs (refunds never filed, an N = 0 run refused, H2), the release probe surviving (M5 not built).
+
+The final suites on the round's code (each group on a fresh reset):
+- `supabase test db` **3,263 passed** in 668 s; the types unchanged; the db job's integration step **342 passed, 1
+  skipped** in 1,038 s: the db job's steps 1,734 s (28.9 min) locally, the machine now in its own job (191 s after a
+  reset).
+- `make eval` green (mapping 1.000, reconciliation 96.0 %, 0 wrong); the worker's lint, types and unit tests (1,307
+  passed, 7 xfailed) green; the web's lint, typecheck and vitest (763) green, no web change, no E2E.
+- `scale` **15 passed** in 1,093 s (part 3: 1,097 s): the 50k run prepared in 10.1 s (load 3.28, price 4.81, write
+  1.86 s); allocated in 59.9 s, its posts 9.0–9.6 s per 10,000 (part 3: 8.6–9.1 s); receipts 11.2 ms each; the
+  nightly over 50,000 payments 3.3 s.
+- `scale-payouts` **6 passed** in 1,021 s (part 3: 1,033 s): the batch line's funds pass 12.7 s.
+- `scale-closeout` **8 passed, 1 failed** in 2,446 s (part 3: 2,326 s): the history's ten prepares and approvals 14.4 →
+  17.7 s (part 3: 13.8 → 20.0 s); **row 5's prepare 12.93 s** (part 3: 15.58 s; bound 11.66 s: ADR « M2c-7f-2 review
+  fixes », Left open; round 2: 8.38 s, below), its approval 6.20 s, the totals' read over 549,935 charges 0.77 s; row 1 3.6 / 4.1 s and 0.57 /
+  0.62 s; row 4 +0.78 s at ten runs; row 6 52 / 86 / 119 ms; row 7 1.58 s (wall 4.06 s); row 8 14.0 s; V3 2.20 s. The
+  world 1,211 s, row 8's fixture 902 s, the claw-back fixture 284 s.
+- Row 5 alone under cProfile on another fresh world (27 min): the claw-back prepare 17.4 s profiled (load 6.8 s), the
+  first history run's 12.4 s (load 3.6 s), the tenth's 17.2 s (load 6.8 s): the 1,000 advances add little; what ten
+  runs of history add is now per key (50,000 key states read and decoded, the charges' totals), the load's fourteen
+  statements 2.4 s of database time.
+- Then `supabase db reset`, the stack left running.
+
+### M2c-7f-2, review round 2 (2026-11-28, same VM, the main stack alone)
+
+ADR-0014 « M2c-7f-2 review fixes (round 2) ». What the round measured:
+- **The machine's quiescence** (MACH-1): seeds 7 to 12 at 8 × 20, the whole file each (both classes, the plants'
+  test, the fixed scenario): **4 passed** each, 167–211 s (seed 7 338 s, a volume build running beside it); seed 12
+  failed before the fix. `machine-long`'s 25 × 40 at a random seed (240252426): **4 passed** in 1,013 s; it reached
+  038's f_partial form 15 + 7, a late predecessor's return re-queued in a later run 7 (switch on), a D = 0 run 1, a
+  set-off withheld at the debit 17 + 18, LG003 refused 45 + 46, LG009 26 + 10, runs approved 255 + 136.
+- **Row 5's prepare** (VC-3), on the volume file's own world (50k files, ten booked 50k-line runs, the 1,000 open
+  advances and the claw-back run's 53,748 items; 7a's tables' statistics forgotten as the file leaves them), each step
+  timed three times in rolled-back transactions, in a process holding nothing else (the scale file's process holds the
+  world too: 12.93 s there before the round):
+
+| Code | load | price | write | total |
+|---|---|---|---|---|
+| before the round | 4.08–4.64 s | 4.76–5.32 s | 1.71–2.11 s | 10.72–11.39 s |
+| the reads' conversions only (ids as text, array literals, no copy) | 3.05–3.27 s | 4.66–4.97 s | 1.76–2.14 s | 9.47–10.17 s |
+| the collector paused only | 3.39–3.61 s | 2.82–2.97 s | 1.62–2.15 s | 7.85–8.58 s |
+| the round (both) | 2.33–2.70 s | 2.58–3.12 s | 1.69–2.49 s | 7.06–8.24 s |
+
+  Offline, the same run's facts (pickled in round 1) priced in 5.0–5.8 s with the collector on and 2.9–3.5 s with it
+  off; with it off the peak memory moved from 356 to 363 MB, and no cyclic garbage was left to collect after it. The
+  facts loaded by the old and the new code are equal field by field (31 fields, 53,748 items, 49,949 keys). A
+  50,000-uuid array parameter: 0.10 s dumped as a list, 0.03 s as one literal; four uuid columns of 50,000 rows and
+  their 250,000 `str()`: 0.22 s as uuids, 0.10 s as text.
+
+The final suites on the round's code (each group on a fresh reset):
+- `supabase test db` **3,263 passed** in 685 s; the types unchanged; the db job's integration step **343 passed, 1
+  skipped** in 1,105 s: the db job's steps 1,820 s (30.3 min) locally; the `machine` job's step (after a reset, seed 7)
+  **4 passed** in 217 s.
+- `make eval` green (mapping 1.000, reconciliation 96.0 %, 0 wrong); the worker's lint, types and unit tests (1,312
+  passed, 7 xfailed) green; the web's lint, typecheck and vitest (763) green, no web change, no E2E.
+- `scale` **15 passed** in 1,173 s (round 1: 1,093 s): **the 50k run prepared in 6.1 s** (load 1.53, price 2.36,
+  write 2.09 s; round 1: 10.1 s); allocated in 61.6 s, its posts 8.8–9.9 s per 10,000; receipts 13.0 ms each; the
+  nightly over 50,000 payments 3.5 s.
+- `scale-payouts` **6 passed** in 1,171 s (round 1: 1,021 s): the batch line's funds pass 13.6 s. Every phase ran about
+  15 % slower than in round 1, the code this round did not touch included (the 5,050 approvals 427.8 → 490.5 s, the
+  clients 38.3 → 43.1 s): the VM that hour; its 5,050 prepares 89.6 → 107.0 s.
+- `scale-closeout` **9 passed** in 2,444 s (round 1: 8 passed, 1 failed, 2,446 s): **row 5's prepare 8.38 s** (bound
+  11.66 s; round 1: 12.93 s), its approval 6.05 s; the history's ten prepares and approvals 10.7 → 12.6 s (round 1:
+  14.4 → 17.7 s); row 1 4.1 / 3.7 s and 0.63 / 0.60 s; row 4's whole nightly 2.03 / 14.22 s (2.00 / 14.37 s without
+  7a's checks); row 6 49 / 77 / 106 ms; row 7 1.63 s (wall 4.12 s); row 8 14.2 s; V3 1.93 s. The world 1,214 s, row
+  8's fixture 898 s, the claw-back fixture 285 s.
+- Then `supabase db reset`, the stack left running.
