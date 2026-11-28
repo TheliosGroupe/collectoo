@@ -25,7 +25,13 @@ the rows read (pg_stat_xact_*: sequential reads and the index entries returned).
   statistics and its flight index bloated (the db job's state at test_declarations_reads) — what is needed
   (private.top_up_needed) reads the servicer's sweeps and top-ups in flight of the currency only, never a whole
   partial index of the transfers in flight or of the top-ups (every servicer's) nor the servicer's other transfers
-  in flight; the nightly's advance checks and the whole nightly within their bounds.
+  in flight; the nightly's advance checks and the whole nightly within their bounds (round 2: again beside the
+  servicer's booked sweeps and top-ups).
+- CI round, PR #52, round 2 (`test_the_servicers_top_up_reads_are_keyed_per_call_without_statistics`,
+  `test_no_partial_index_of_the_transfers_is_read_without_its_key`): the same state, with and without the servicer's
+  booked past and a run's payouts in flight — « Approvisionnements », « Générer le fichier (compte propre) »,
+  « Rattacher à TOP… », a line's « remplace le fichier » check and each account's transfers in flight read their own
+  key's rows per call, their results the same; no partial index of bank_transfer is read without its key.
 """
 
 from __future__ import annotations
@@ -70,6 +76,8 @@ from test_label_reference_reads_integration import (
 )
 from test_remitted_cover_reads_integration import _lines_read
 from test_remitted_cover_reads_integration import _plant as _plant_lines
+from test_top_up_reads_integration import LISTED
+from test_top_up_reads_integration import owing as topped  # noqa: F401 - 7e-1's fixture, shared
 from test_transfer_cancellation_scale_integration import (
     PARIS,
     _backdate,
@@ -1208,13 +1216,26 @@ DB_JOB_RELATIONS = {
     "bank_transfer_top_up_idx": (10, 8),
     "bank_transfer_org_idx": (227, 107),
 }
+# (CI round, PR #52, round 2) the « big » plant's servicer past and present, as 7e-1's OWN_HISTORY plants an account's:
+# FLIGHT_HISTORY booked sweeps and top-ups (half each, between its dedicated and its own account, long executed) —
+# what a key without the status reads (round 1's key index without its status column: 5,008 rows per sum) — and
+# FLIGHT_PAYOUTS payouts in flight on its dedicated account (a big run's, half ordered, half in a file)
+FLIGHT_HISTORY = 5_000
+FLIGHT_PAYOUTS = 5_000
 
 
-def _flight_plant(conn: psycopg.Connection[Any], tenant: dict[str, Any], own: str) -> None:
+def _flight_plant(
+    conn: psycopg.Connection[Any],
+    tenant: dict[str, Any],
+    own: str,
+    history: int = 0,
+    payouts: int = 0,
+) -> None:
     """FLIGHT_DEAD sweeps inserted and rolled back (the flight index's dead pages); the servicer's sweeps and top-ups
-    in flight, its other transfers in flight, other servicers' (no trigger, no foreign key); then bank_transfer's
-    statistics as the db job had them: none (the table never analysed outside the reads tests' rolled-back
-    transactions; autovacuum's analyse came after), the table and its indexes priced as it left them."""
+    in flight, its other transfers in flight, other servicers' (no trigger, no foreign key); (round 2) `history`
+    booked sweeps and top-ups of the servicer and `payouts` payouts of its in flight on its dedicated account; then
+    bank_transfer's statistics as the db job had them: none (the table never analysed outside the reads tests'
+    rolled-back transactions; autovacuum's analyse came after), the table and its indexes priced as it left them."""
     org, bank, iban = str(tenant["servicer"]), str(tenant["bank"]), str(tenant["iban"])
     prefix = "case z.kind when 'refund' then 'RFD' when 'sweep' then 'SWP' else 'TOP' end"
 
@@ -1252,6 +1273,42 @@ def _flight_plant(conn: psycopg.Connection[Any], tenant: dict[str, Any], own: st
                         lateral (select ({kinds})[1 + g % cardinality({kinds})] as kind,
                                         ({statuses})[1 + g % cardinality({statuses})] as status) z""",  # noqa: S608
             )
+    if history:
+        # the servicer's past: booked sweeps (dedicated → own) and top-ups (own → dedicated), each with its entry
+        _raw(
+            conn,
+            "public.bank_transfer",
+            f"""insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id,
+                 creditor_bank_account_id, currency, amount_minor, payee_name, payee_iban, end_to_end_id,
+                 requested_execution_date, status, transfer_file_id, entry_id, created_at)
+               select '{org}'::uuid, z.kind, case z.kind when 'sweep' then '{bank}'::uuid else '{own}'::uuid end,
+                      case z.kind when 'sweep' then '{own}'::uuid else '{bank}'::uuid end, 'EUR', 100, 'Plant',
+                      '{iban}', case z.kind when 'sweep' then 'SWP' else 'TOP' end
+                        || upper(substr(md5('ci52-hist-' || g), 1, 12)), current_date - 30, 'booked',
+                      gen_random_uuid(), gen_random_uuid(), now() - make_interval(days => 30, secs => g)
+               from generate_series(1, {history}) g,
+                    lateral (select case when g % 2 = 0 then 'sweep' else 'top_up' end as kind) z""",  # noqa: S608
+        )
+    if payouts:
+        # the servicer's payouts in flight on its dedicated account (half ordered, half in a file)
+        _raw(
+            conn,
+            "public.bank_transfer",
+            f"""insert into public.bank_transfer (organization_id, kind, debtor_bank_account_id,
+                 client_organization_id, currency, amount_minor, payee_name, payee_iban, end_to_end_id,
+                 requested_execution_date, status, transfer_file_id)
+               select '{org}'::uuid, 'payout', '{bank}'::uuid, '{tenant["client"]}'::uuid, 'EUR', 100, 'Plant',
+                      '{iban}', 'RMT' || upper(substr(md5('ci52-pay-' || g), 1, 12)), current_date,
+                      case when g % 2 = 0 then 'ordered' else 'in_file' end,
+                      case when g % 2 = 1 then gen_random_uuid() end
+               from generate_series(1, {payouts}) g""",  # noqa: S608
+        )
+    # (round 2) bank_transfer_org_idx rebuilt on the plant's rows (in this transaction: rolled back with it). The planner
+    # prices a whole index by its file's pages, which the earlier tests' rolled-back plants leave at any size: after a
+    # few, the servicer's whole read through it priced above the bloated flight index and the old bodies' reads stayed
+    # keyed by chance (43 rows for top_up_overview in the module's order, 1,702 on a fresh database); rebuilt, it is
+    # the plant's size whatever ran before, as the db job's was its rows' (107 pages)
+    conn.execute("reindex index public.bank_transfer_org_idx")
     conn.execute("delete from pg_statistic where starelid = 'public.bank_transfer'::regclass")
     for relation, (tuples, pages) in DB_JOB_RELATIONS.items():
         conn.execute(
@@ -1261,7 +1318,10 @@ def _flight_plant(conn: psycopg.Connection[Any], tenant: dict[str, Any], own: st
     conn.execute("set local plan_cache_mode = force_generic_plan")
 
 
-def test_the_servicers_flight_is_read_by_its_key_without_statistics() -> None:
+@pytest.mark.parametrize(
+    "history", (0, FLIGHT_HISTORY), ids=("flight", "flight and booked history")
+)
+def test_the_servicers_flight_is_read_by_its_key_without_statistics(history: int) -> None:
     """(CI round, PR #52; ADR-0014 « M2c-7f-1 — CI round (PR #52) ») In run 46054376194 the nightly's advance checks
     read 209 bank_transfer rows for a servicer with two: private.top_up_needed's two sums (the servicer's sweeps,
     then its top-ups, in flight in a currency) read bank_transfer_debtor_idx and bank_transfer_top_up_idx whole —
@@ -1273,13 +1333,16 @@ def test_the_servicers_flight_is_read_by_its_key_without_statistics() -> None:
     proceeding: nothing else of bank_transfer); the whole nightly (private.run_payment_checks: run_transfer_checks'
     sweeps, payouts and refunds in flight and top-ups pending, each sweep's check by its id, the shortfall, the
     advance checks) within CC-1's bound, a few reads per transfer of the servicer (with the flight index's predicate
-    not bound to the servicer's key, each sweep's check read it whole: every servicer's sweeps in flight, per sweep)."""
+    not bound to the servicer's key, each sweep's check read it whole: every servicer's sweeps in flight, per sweep).
+    (Round 2, item 5) Again beside FLIGHT_HISTORY booked sweeps and top-ups of the servicer: what is needed still
+    reads its sweeps and top-ups in flight only (the key index without its status column read the booked ones too:
+    5,008 rows per call)."""
     tenant = remittance_tenant()
     own, _iban = own_account(tenant)
     org = str(tenant["servicer"])
     measured: dict[str, dict[str, int]] = {}
     with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
-        _flight_plant(conn, tenant, own)
+        _flight_plant(conn, tenant, own, history=history)
         owed = int(one(conn, "select private.servicer_owed_minor(%s, 'EUR')", (org,)))
         transfers = int(
             one(
@@ -1311,8 +1374,8 @@ def test_the_servicers_flight_is_read_by_its_key_without_statistics() -> None:
         call("run_payment_checks (whole)", "select private.run_payment_checks(%s)", org)
     print(
         f"\nthe servicer's {OWN_SWEEPS} sweeps and {OWN_TOP_UPS} top-ups in flight beside its {FLIGHT_OWN_OTHER}"
-        f" refunds on other accounts, {FLIGHT_OWN_CHF} CHF sweeps and {FLIGHT_OTHERS} other servicers' transfers in"
-        f" flight, no statistics, generic plans — rows read: "
+        f" refunds on other accounts, {FLIGHT_OWN_CHF} CHF sweeps, {history} booked sweeps and top-ups and"
+        f" {FLIGHT_OTHERS} other servicers' transfers in flight, no statistics, generic plans — rows read: "
         + "; ".join(f"{n} {r}" for n, r in measured.items())
     )
     # the same value: Σ4679 + its sweeps in flight, less its top-ups in flight, never below 0
@@ -1326,3 +1389,370 @@ def test_the_servicers_flight_is_read_by_its_key_without_statistics() -> None:
     # the whole nightly: CC-1's bound (a few reads per transfer of the servicer, never every servicer's in flight)
     nightly = measured["run_payment_checks (whole)"].get("bank_transfer", 0)
     assert nightly <= PER_ROW * transfers + PER_CALL, (nightly, transfers, measured)
+
+
+# CI round, PR #52, round 2 -------------------------------------------------------------------------------------------
+# the sweep of a generated payout file of the dedicated account that a line's « remplace le fichier » check weighs
+SUPERSEDING_FEE = (
+    100  # the line's part to book (a bank charge): what the check takes from the servicer's share
+)
+# what the servicer's share leaves once the fee and its other sweeps in flight are taken (a credit planted on its 4679
+# account so that the threshold is this, whatever the fixture's books): a sweep of more supersedes the file
+SUPERSEDING_ROOM = 1_000
+
+
+def _in_file(conn: psycopg.Connection[Any], account: str) -> int:
+    return int(
+        one(
+            conn,
+            "select count(*) from public.bank_transfer where debtor_bank_account_id = %s and status = 'in_file'",
+            (account,),
+        )
+    )
+
+
+def _flight_sum(conn: psycopg.Connection[Any], org: str, kind: str) -> int:
+    return int(
+        one(
+            conn,
+            """select coalesce(sum(amount_minor), 0) from public.bank_transfer where organization_id = %s
+                 and currency = 'EUR' and kind = %s and status in ('ordered', 'in_file')""",
+            (org, kind),
+        )
+    )
+
+
+def _superseding_sweep(
+    conn: psycopg.Connection[Any], tenant: dict[str, Any], own: str, model: str, amount: int
+) -> tuple[str, str]:
+    """A payout file of the dedicated account, generated (a copy of `model`'s row under new keys), holding one sweep
+    of `amount` in a file to the own account (no trigger, no foreign key): its id and number."""
+    file_id, number = str(uuid.uuid4()), f"TF-2099-{uuid.uuid4().int % 10**9:09d}"
+    sweep = str(uuid.uuid4())
+    org, bank = str(tenant["servicer"]), str(tenant["bank"])
+    _raw(
+        conn,
+        "public.transfer_file",
+        f"""insert into public.transfer_file
+           select (jsonb_populate_record(null::public.transfer_file, to_jsonb(f)
+                    || jsonb_build_object('id', '{file_id}', 'debtor_bank_account_id', '{bank}',
+                         'number', '{number}', 'msg_id', '{number}', 'status', 'generated',
+                         'storage_path', f.storage_path || '-{file_id}',
+                         'nb_of_txs', 1, 'ctrl_sum_minor', {amount}, 'download_count', 0,
+                         'first_downloaded_at', null, 'first_downloaded_by', null))).*
+           from public.transfer_file f where f.id = '{model}'""",  # noqa: S608 - the tests' own constants
+    )
+    _raw(
+        conn,
+        "public.bank_transfer",
+        f"""insert into public.bank_transfer (id, organization_id, kind, debtor_bank_account_id,
+             creditor_bank_account_id, currency, amount_minor, payee_name, payee_iban, end_to_end_id,
+             requested_execution_date, status, transfer_file_id)
+           values ('{sweep}', '{org}', 'sweep', '{bank}', '{own}', 'EUR', {amount}, 'Plant', '{tenant["iban"]}',
+                   'SWP' || upper(substr(md5('{sweep}'), 1, 12)), current_date, 'in_file', '{file_id}')""",  # noqa: S608
+    )
+    _raw(
+        conn,
+        "public.transfer_file_item",
+        f"""insert into public.transfer_file_item (file_id, seq, transfer_id, organization_id, pmt_inf_id,
+             execution_date) values ('{file_id}', 1, '{sweep}', '{org}', '{number}-1', current_date)""",  # noqa: S608
+    )
+    return file_id, number
+
+
+@pytest.mark.parametrize(
+    "big", (False, True), ids=("flight", "flight, booked history and payouts in flight")
+)
+def test_the_servicers_top_up_reads_are_keyed_per_call_without_statistics(  # noqa: PLR0915
+    topped: dict[str, Any],  # noqa: F811 - the shared fixture
+    big: bool,
+) -> None:
+    """(CI round, PR #52, round 2; ADR-0014 « M2c-7f-1 — CI round (PR #52) », round 2) Under round 1's state
+    (_flight_plant: no bank_transfer statistics, the flight index bloated, every plan generic) and again (`big`)
+    beside FLIGHT_HISTORY booked sweeps and top-ups of the servicer and FLIGHT_PAYOUTS of its payouts in flight on its
+    dedicated account, on 7e-1's top-up servicer (`topped`: its fee owed, TOP1 and TOP2 in its own-account file
+    generated, TOP3 ordered, the TOP1 credit and a credit without a TOP id on a statement): each read is bounded per
+    call by a constant (PER_CALL) plus the rows the call lists, never the servicer's whole set nor every servicer's,
+    its result the same —
+    - « Approvisionnements » (public.top_up_overview): its sums of the sweeps and top-ups in flight once, by
+      private.servicer_flight_minor, its count of the own account's ordered top-ups by the servicer's key, its
+      latest LISTED top-ups listed (round 1: 1,705 rows; 16,746 big);
+    - « Rattacher à TOP… » (public.top_up_credit_options): the servicer's top-ups in flight by its key (558; 5,558);
+    - « Générer le fichier (compte propre) » (public.generate_top_up_file): its locks and its items (1,153; 11,153);
+    - a line's « remplace le fichier » check (private.transfer_line_supersedes) per generated file's sweep: the
+      servicer's other sweeps in flight by its key, the result on both sides of the threshold;
+    - an account's transfers in a file (private.transfers_in_flight, through private.transfer_cash_position and
+      directly): by its paying account and the status, one read per transfer of the account in a file, never its
+      ordered ones nor the servicer's other accounts' (round 1: the servicer's transfers in a file once per account,
+      281 and 277; 2,781 big);
+    - what is needed (private.top_up_needed), round 1's: still PER_CALL beside the booked history."""
+    tenant, own = topped["tenant"], topped["own"]
+    org, user, bank = str(tenant["servicer"]), str(tenant["staff"]), str(tenant["bank"])
+    measured: dict[str, dict[str, int]] = {}
+    with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
+        _flight_plant(
+            conn,
+            tenant,
+            own,
+            history=FLIGHT_HISTORY if big else 0,
+            payouts=FLIGHT_PAYOUTS if big else 0,
+        )
+        owed = int(one(conn, "select private.servicer_owed_minor(%s, 'EUR')", (org,)))
+        sweeps, tops = _flight_sum(conn, org, "sweep"), _flight_sum(conn, org, "top_up")
+        ordered = int(
+            one(
+                conn,
+                """select count(*) from public.bank_transfer t where t.debtor_bank_account_id = %s
+                     and t.kind = 'top_up' and t.status = 'ordered' and not private.top_up_credit_seen(t.id)""",
+                (own,),
+            )
+        )
+        own_top_ups = int(
+            one(
+                conn,
+                "select count(*) from public.bank_transfer where debtor_bank_account_id = %s and kind = 'top_up'",
+                (own,),
+            )
+        )
+        # the own account's top-ups a new file takes: the ordered ones and those of its generated file (superseded),
+        # never one whose credit is on a statement
+        filed = one(
+            conn,
+            """select jsonb_build_object('n', count(*), 'sum', coalesce(sum(t.amount_minor), 0))
+               from public.bank_transfer t
+               where t.debtor_bank_account_id = %s and t.kind = 'top_up' and not private.top_up_credit_seen(t.id)
+                 and (t.status = 'ordered'
+                      or (t.status = 'in_file' and exists (select 1 from public.transfer_file f
+                                                           where f.id = t.transfer_file_id
+                                                             and f.status in ('pending', 'generated'))))""",
+            (own,),
+        )
+        in_file = {"own": _in_file(conn, own), "bank": _in_file(conn, bank)}
+        share = -int(
+            one(
+                conn,
+                """select coalesce(sum(lp.amount_minor), 0) from public.ledger_account la
+                   join public.ledger_posting lp on lp.ledger_account_id = la.id
+                   where la.organization_id = %s and la.book = 'due_to_servicer' and la.currency = 'EUR'""",
+                (org,),
+            )
+        )
+        due = one(
+            conn,
+            """select id from public.ledger_account
+               where organization_id = %s and book = 'due_to_servicer' and currency = 'EUR'""",
+            (org,),
+        )
+
+        def call(name: str, who: str | None, sql: str, *params: Any) -> Any:
+            before = _file_rows(conn)
+            with conn.transaction(force_rollback=True):
+                if who is None:
+                    conn.execute("set local role postgres")  # the jobs' role
+                else:
+                    _as(conn, who)
+                value = one(conn, sql, params)
+            measured[name] = _delta(before, _file_rows(conn))
+            return value
+
+        needed = call("top_up_needed", None, "select private.top_up_needed(%s, 'EUR')", org)
+        overview = call("top_up_overview", user, "select public.top_up_overview()")
+        options = call(
+            "top_up_credit_options",
+            user,
+            "select public.top_up_credit_options(%s)",
+            topped["line3"],
+        )
+        made = call(
+            "generate_top_up_file",
+            user,
+            "select public.generate_top_up_file(%s, %s)",
+            str(uuid.uuid4()),
+            own,
+        )
+        position = call(
+            "transfer_cash_position (dedicated)",
+            None,
+            "select private.transfer_cash_position(%s)",
+            bank,
+        )
+        flight = {
+            account: call(
+                f"transfers_in_flight ({account})",
+                None,
+                "select count(*) from private.transfers_in_flight(%s)",
+                key,
+            )
+            for account, key in (("own", own), ("bank", bank))
+        }
+        # the line's check on both sides of its threshold: the sweep filed beyond what the servicer's share leaves
+        # once its other sweeps in flight are executed supersedes the file. The share is raised by a credit on its 4679
+        # account (no trigger) so that the threshold is SUPERSEDING_ROOM: at it, the sweep's own amount counted among
+        # the others would supersede the file wrongly
+        threshold = SUPERSEDING_ROOM
+        credit = threshold + SUPERSEDING_FEE + sweeps - share
+        supersedes: dict[int, Any] = {}
+        for amount in (threshold, threshold + 1):
+            with conn.transaction(force_rollback=True):
+                _raw(
+                    conn,
+                    "public.ledger_posting",
+                    f"""insert into public.ledger_posting (entry_id, line_no, ledger_account_id, amount_minor, currency,
+                         effective_date)
+                       values (gen_random_uuid(), 1, '{due}', {-credit}, 'EUR', current_date)""",  # noqa: S608
+                )
+                file_id, number = _superseding_sweep(conn, tenant, own, topped["file"], amount)
+                conn.execute(
+                    """create temp table _tl (kind text, amount bigint, adv bigint, tr_client uuid, tr_run uuid)
+                       on commit drop"""
+                )
+                conn.execute(
+                    "insert into pg_temp._tl values ('fee', %s, 0, null, null)", (SUPERSEDING_FEE,)
+                )
+                conn.execute(
+                    "set local enable_seqscan = off"
+                )  # as public.transfer_line_preview runs it
+                before = _file_rows(conn)
+                supersedes[amount] = (
+                    one(conn, "select private.transfer_line_supersedes(%s)", (topped["line3"],)),
+                    {"file_id": file_id, "number": number} if amount > threshold else None,
+                )
+                measured[f"transfer_line_supersedes ({amount})"] = _delta(before, _file_rows(conn))
+    print(
+        f"\n7e-1's top-up servicer under round 1's plant{' with its booked past and payouts in flight' if big else ''}"
+        f" ({own_top_ups} top-ups of its own account, {in_file} in a file) — rows read: "
+        + "; ".join(f"{n} {r}" for n, r in measured.items())
+    )
+    # the same results
+    assert needed == max(0, owed + sweeps - tops), (needed, owed, sweeps, tops)
+    assert overview["needed"] == [
+        {
+            "currency": "EUR",
+            "owed_minor": str(owed),
+            "owed_with_sweeps_minor": str(owed + sweeps),
+            "needed_minor": str(needed),
+            "surplus_minor": str(max(0, tops - max(0, owed + sweeps))),
+            "own_account": overview["needed"][0]["own_account"],
+        }
+    ], overview["needed"]
+    assert overview["needed"][0]["own_account"]["id"] == own, overview["needed"]
+    [account] = overview["accounts"]
+    assert (account["bank_account_id"], account["ordered_count"], account["can_generate"]) == (
+        own,
+        ordered,
+        ordered > 0,
+    ), account
+    assert len(account["top_ups"]) == min(LISTED, own_top_ups), account
+    assert [o["transfer_id"] for o in options["top_ups"]] == [topped["top3"]], options
+    assert (made["nb_of_txs"], int(made["ctrl_sum_minor"])) == (filed["n"], filed["sum"]), (
+        made,
+        filed,
+    )
+    # no transfer of either account in a downloaded or sent file (the planted ones' files are not stored)
+    assert (position["in_flight_count"], position["in_flight_minor"]) == (0, "0"), position
+    assert flight == {"own": 0, "bank": 0}, flight
+    for amount, (got, expected) in supersedes.items():
+        assert got == expected, (amount, threshold, got, expected)
+    # each read per call: a constant, plus the rows it lists (the overview's latest LISTED top-ups, the file's
+    # top-ups), plus (per account) the account's transfers in a file, each read once by its key (never its ordered
+    # ones, nor another account's)
+    bounds = {
+        "top_up_needed": PER_CALL,
+        "top_up_overview": PER_CALL + LISTED,
+        "top_up_credit_options": PER_CALL + PER_ROW * len(options["top_ups"]),
+        "generate_top_up_file": PER_CALL + PER_ROW * int(made["nb_of_txs"]),
+        "transfer_cash_position (dedicated)": PER_CALL + in_file["bank"],
+        "transfers_in_flight (own)": PER_CALL + in_file["own"],
+        "transfers_in_flight (bank)": PER_CALL + in_file["bank"],
+        **{f"transfer_line_supersedes ({amount})": PER_CALL for amount in supersedes},
+    }
+    over = {
+        name: (measured[name].get("bank_transfer", 0), bound)
+        for name, bound in bounds.items()
+        if measured[name].get("bank_transfer", 0) > bound
+    }
+    assert not over, (over, in_file, measured)
+
+
+# (round 2, item 6) reads that name a partial index's predicate terms but not its key (each a whole read of it if
+# taken): the index, the read's condition (`$1` a parameter: planned generic)
+KEYLESS = (
+    ("bank_transfer_to_file_idx", "x.status = 'ordered'"),
+    ("bank_transfer_payout_iban_idx", "x.kind = 'payout' and x.status = 'booked'"),
+    (
+        "bank_transfer_payout_iban_idx",
+        "x.kind = 'payout' and x.status = 'booked' and x.payee_iban = $1::text",
+    ),
+    (
+        "bank_transfer_cancelled_filed_idx",
+        "x.status = 'cancelled' and x.transfer_file_id is not null",
+    ),
+    (
+        "bank_transfer_client_cancelled_idx",
+        "x.kind = 'payout' and x.status = 'cancelled' and x.transfer_file_id is not null",
+    ),
+    (
+        "bank_transfer_client_cancelled_idx",
+        "x.kind = 'payout' and x.status = 'cancelled' and x.transfer_file_id = $1::uuid",
+    ),
+    ("bank_transfer_filed_amount_idx", "x.transfer_file_id = $1::uuid"),
+    (
+        "bank_transfer_filed_amount_idx",
+        "x.transfer_file_id is not null and x.amount_minor = $1::bigint",
+    ),
+    ("bank_transfer_debtor_idx", "x.status in ('ordered', 'in_file')"),
+    ("bank_transfer_debtor_idx", "x.status = 'in_file' and x.organization_id = $1::uuid"),
+    ("bank_transfer_top_up_idx", "x.kind = 'top_up'"),
+    (
+        "bank_transfer_servicer_flight_idx",
+        "x.kind = 'sweep' and x.status in ('ordered', 'in_file')",
+    ),
+    ("bank_transfer_creditor_idx", "x.status = 'ordered' and x.amount_minor = $1::bigint"),
+)
+
+
+def _index_names(node: dict[str, Any]) -> set[str]:
+    names = {str(node["Index Name"])} if "Index Name" in node else set()
+    for child in node.get("Plans", []):
+        names |= _index_names(child)
+    return names
+
+
+def test_no_partial_index_of_the_transfers_is_read_without_its_key() -> None:
+    """(CI round, PR #52, round 2, item 6; ADR-0014 « M2c-7f-1 — CI round (PR #52) », round 2) Every partial index of
+    bank_transfer serves only the reads that name its key: its predicate holds its key's `is not null` (a NOT NULL
+    column, or `payout ⇔ client_organization_id is not null`: the same entries), which only a condition on the key
+    proves. Under round 1's state (_flight_plant: no statistics, the flight index bloated) and its functions' setting
+    (enable_seqscan off), a generic plan of each KEYLESS read — its predicate's other terms, a non-key column — takes
+    no partial index it names whole (before: bank_transfer_to_file_idx, bank_transfer_payout_iban_idx,
+    bank_transfer_cancelled_filed_idx and bank_transfer_client_cancelled_idx could be, and
+    bank_transfer_filed_amount_idx by the file's key, as 7f-1's H7 saw)."""
+    tenant = remittance_tenant()
+    own, _iban = own_account(tenant)
+    with psycopg.connect(ADMIN) as conn, conn.transaction(force_rollback=True):
+        rows = conn.execute(
+            """select c.relname, pg_get_indexdef(i.indexrelid, 1, true), pg_get_expr(i.indpred, i.indrelid, true)
+               from pg_index i join pg_class c on c.oid = i.indexrelid
+               where i.indrelid = 'public.bank_transfer'::regclass and i.indpred is not null order by 1"""
+        ).fetchall()
+        # its leading key (a column, or an expression: printed in parentheses, its `is not null` too or without them)
+        unbound = [
+            (name, key, pred)
+            for name, key, pred in rows
+            if f"{key} IS NOT NULL" not in str(pred)
+            and f"{str(key).removeprefix('(').removesuffix(')')} IS NOT NULL" not in str(pred)
+        ]
+        _flight_plant(conn, tenant, own)
+        conn.execute("set local enable_seqscan = off")
+        taken = {}
+        for index, condition in KEYLESS:
+            plan = one(
+                conn,
+                f"explain (generic_plan, format json) select x.id from public.bank_transfer x where {condition}",  # noqa: S608
+            )
+            names = _index_names(plan[0]["Plan"])
+            print(f"\n{condition}: {sorted(names)}")
+            if index in names:
+                taken[condition] = index
+    assert len(rows) >= 12, rows
+    assert not unbound and not taken, (unbound, taken)

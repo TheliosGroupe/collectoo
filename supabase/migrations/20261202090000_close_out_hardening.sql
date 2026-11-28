@@ -30,7 +30,14 @@
 --   CI round (PR #52) bank_transfer_debtor_idx, bank_transfer_top_up_idx and bank_transfer_servicer_flight_idx serve
 --       only reads that name their key (never read whole); private.top_up_needed reads the servicer's sweeps
 --       and top-ups in flight by bank_transfer_servicer_flight_key_idx (the servicer's key as text) through
---       private.servicer_flight_minor (new).
+--       private.servicer_flight_minor (new);
+--   CI round (PR #52), round 2: every other partial index of bank_transfer bound to its key the same way
+--       (bank_transfer_to_file_idx, bank_transfer_payout_iban_idx, bank_transfer_cancelled_filed_idx,
+--       bank_transfer_client_cancelled_idx, bank_transfer_filed_amount_idx), bank_transfer_debtor_idx keyed by the
+--       paying account and the status; public.top_up_overview, public.generate_top_up_file,
+--       public.top_up_credit_options (redefined) and private.transfer_line_supersedes read the servicer's sweeps and
+--       top-ups in flight by the servicer's text key (private.servicer_flight_minor, private.servicer_flight: new),
+--       private.transfers_in_flight an account's transfers in a file by the account's key.
 -- The behaviour:
 --   H2  servicer_shortfall = private.top_up_needed (the sweeps in flight);
 --   H9  public.request_top_up takes the remit lock (MONEY-BANK-3: serialised with the hourly order);
@@ -120,8 +127,13 @@ create index document_client_payment_sha256_idx on public.document (client_organ
 --    reader keyed by the servicer bank_transfer_servicer_flight_idx; no read by another key, or by none, can read one
 --    whole (the reads test's plant also showed private.run_transfer_checks' check of each sweep, by its id, reading
 --    bank_transfer_servicer_flight_idx whole: every servicer's sweeps in flight, once per sweep).
+--    (Round 2) bank_transfer_debtor_idx is keyed by the paying account and then the status (the same entries): an
+--    account's transfers in a file (private.transfers_in_flight, below) are read by both bounds, never with its
+--    ordered ones. A read naming the account and a status in flight is then bounded by both of its conditions, where
+--    bank_transfer_org_idx's status column alone (7f-1 review round 1, CC-1) returns every account's entries of that
+--    status: never fewer entries, nor fewer rows to fetch.
 drop index public.bank_transfer_debtor_idx;
-create index bank_transfer_debtor_idx on public.bank_transfer (debtor_bank_account_id)
+create index bank_transfer_debtor_idx on public.bank_transfer (debtor_bank_account_id, status)
   where status in ('ordered', 'in_file') and debtor_bank_account_id is not null;
 drop index public.bank_transfer_top_up_idx;
 create index bank_transfer_top_up_idx on public.bank_transfer (debtor_bank_account_id, created_at desc)
@@ -129,6 +141,30 @@ create index bank_transfer_top_up_idx on public.bank_transfer (debtor_bank_accou
 drop index public.bank_transfer_servicer_flight_idx;
 create index bank_transfer_servicer_flight_idx on public.bank_transfer (organization_id, currency, kind)
   where kind in ('sweep', 'top_up') and status in ('ordered', 'in_file') and organization_id is not null;
+-- 1b. (Round 2; round 1's Left open) The other partial indexes of bank_transfer with the same shape, a predicate a read
+--    can prove without naming the key, bound to their key the same way (each key column NOT NULL, or, for a payout,
+--    `bank_transfer_payout_client`: the same entries): the ordered transfers of a paying account
+--    (bank_transfer_to_file_idx: `status = 'ordered'` alone took it whole), a client's booked payouts by IBAN
+--    (bank_transfer_payout_iban_idx), the servicer's cancelled filed transfers (bank_transfer_cancelled_filed_idx), a
+--    client's cancelled filed payouts (bank_transfer_client_cancelled_idx) and a paying account's filed transfers by
+--    amount (bank_transfer_filed_amount_idx: a read by `transfer_file_id` proves its predicate — 7e-1 round 2 and
+--    7f-1's H7 saw it taken whole). Every partial index of the table now holds its key's `is not null`
+--    (test_close_out_reads_integration.py::test_no_partial_index_of_the_transfers_is_read_without_its_key).
+drop index public.bank_transfer_to_file_idx;
+create index bank_transfer_to_file_idx on public.bank_transfer (debtor_bank_account_id, created_at, id)
+  where status = 'ordered' and debtor_bank_account_id is not null;
+drop index public.bank_transfer_payout_iban_idx;
+create index bank_transfer_payout_iban_idx on public.bank_transfer (client_organization_id, payee_iban)
+  where kind = 'payout' and status = 'booked' and client_organization_id is not null;
+drop index public.bank_transfer_cancelled_filed_idx;
+create index bank_transfer_cancelled_filed_idx on public.bank_transfer (organization_id, debtor_bank_account_id)
+  where status = 'cancelled' and transfer_file_id is not null and organization_id is not null;
+drop index public.bank_transfer_client_cancelled_idx;
+create index bank_transfer_client_cancelled_idx on public.bank_transfer (client_organization_id, currency)
+  where kind = 'payout' and status = 'cancelled' and transfer_file_id is not null and client_organization_id is not null;
+drop index public.bank_transfer_filed_amount_idx;
+create index bank_transfer_filed_amount_idx on public.bank_transfer (debtor_bank_account_id, amount_minor)
+  where transfer_file_id is not null and debtor_bank_account_id is not null;
 -- 2. What is needed reads the servicer's sweeps and top-ups in flight of the currency through a key no other index holds
 --    and no partial index's predicate: bank_transfer_servicer_flight_key_idx, the servicer's id as text, then the kind,
 --    the currency and the status, read by private.servicer_flight_minor with the kind and the statuses as its
@@ -140,12 +176,22 @@ create index bank_transfer_servicer_flight_idx on public.bank_transfer (organiza
 --    index's four bounds are the only keyed path, its entries read the servicer's sweeps or top-ups in flight of the
 --    currency. Its predicate, `(organization_id::text) is not null` (every row: the column is NOT NULL), is proved by a
 --    condition on the text key only: no other read can take it whole.
+--    (Round 2) The four in one text key, `servicer/kind/currency/status`, read by its values (one per status): with the
+--    status a column of its own the read could still be served by bank_transfer_org_idx's status column alone, a
+--    whole read of it (every servicer's transfers of those statuses: 5,140 rows under the reads test's plant once that
+--    index is the plant's size, beside this one's dead pages). No column of the table is named bare in the read, so
+--    no other index has a condition to serve: this index's key is the only path, its entries the servicer's
+--    transfers of the kind and currency in those statuses (the booked past never read). The separators and the fixed
+--    lengths (a uuid's text, a currency's three letters; no kind or status holds a « / ») keep each key one transfer
+--    set's. Its predicate, the key's `is not null` (every row), is proved by a condition on the key only.
 create index bank_transfer_servicer_flight_key_idx
-  on public.bank_transfer ((organization_id::text), kind, currency, status) where (organization_id::text) is not null;
+  on public.bank_transfer ((organization_id::text || '/' || kind || '/' || currency || '/' || status))
+  where (organization_id::text || '/' || kind || '/' || currency || '/' || status) is not null;
 
 -- The servicer's transfers of a kind and a currency in one of the statuses, their sum (0 when none): by
 -- bank_transfer_servicer_flight_key_idx alone (above, 2.). The kind and the statuses are parameters so that no partial
 -- index's predicate is proved. Not inlined (SECURITY DEFINER, SET clauses): the caller's constants stay parameters.
+-- (Round 2) By the index's text key, one value per status (the same rows).
 create function private.servicer_flight_minor(p_organization_id uuid, p_currency char(3), p_kind text,
                                               p_statuses text[])
 returns bigint
@@ -157,8 +203,33 @@ set enable_seqscan = off
 as $$
   select coalesce(sum(x.amount_minor), 0)::bigint
   from public.bank_transfer x
-  where x.organization_id::text = p_organization_id::text and x.kind = p_kind and x.currency = p_currency
-    and x.status = any (p_statuses);
+  where (x.organization_id::text || '/' || x.kind || '/' || x.currency || '/' || x.status)
+        = any (array(select p_organization_id::text || '/' || p_kind || '/' || p_currency || '/' || s.status
+                     from unnest(p_statuses) s(status)));
+$$;
+
+-- (Round 2) The same transfers, each whole (the servicer's of a kind and a currency in one of the statuses), by
+-- bank_transfer_servicer_flight_key_idx alone as private.servicer_flight_minor reads them: for the reads that list or
+-- check them (« Approvisionnements »' ordered count, « Générer le fichier (compte propre) »'s locks and items,
+-- « Rattacher à TOP… »'s options). In-line, with the kind and the statuses as constants, those reads proved
+-- bank_transfer_servicer_flight_idx's predicate and, keyed by `organization_id`, could also be served by
+-- bank_transfer_org_idx by the servicer and the status: under the reads test's plant (no statistics, the flight index
+-- bloated) each read every transfer of the servicer in flight (its refunds, its payouts and its other currencies' too:
+-- 558 rows for 5 top-ups, 5,558 beside a run's 5,000 payouts). Not inlined (SECURITY DEFINER, SET clauses): each
+-- plan of it generic, the caller's constants parameters.
+create function private.servicer_flight(p_organization_id uuid, p_currency char(3), p_kind text, p_statuses text[])
+returns setof public.bank_transfer
+language sql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+  select x.*
+  from public.bank_transfer x
+  where (x.organization_id::text || '/' || x.kind || '/' || x.currency || '/' || x.status)
+        = any (array(select p_organization_id::text || '/' || p_kind || '/' || p_currency || '/' || s.status
+                     from unnest(p_statuses) s(status)));
 $$;
 
 -- private.top_up_needed, redefined from 20261129090000_top_ups.sql (line 181; same signature and settings, created or
@@ -1203,10 +1274,15 @@ $$;
 -- round 1 (CC-1): the nightly's `flight` (private.run_transfer_checks, once per paying account) and
 -- private.transfer_cash_position read an account's transfers in a file by debtor_bank_account_id and status 'in_file',
 -- a filter that implies bank_transfer_debtor_idx's predicate: under statistics that see few paying accounts the planner
--- read bank_transfer_org_idx by its status column alone (every servicer's transfers in a file, once per account). Now
--- the account's servicer's transfers in a file by its key (bank_transfer_org_idx's two first columns, fenced), the
--- account checked on the row (bank_transfer_debtor_fk: a transfer's debtor account is of its servicer). The rows are the
--- same.
+-- read bank_transfer_org_idx by its status column alone (every servicer's transfers in a file, once per account). Then
+-- (round 1) the account's servicer's transfers in a file by its key (bank_transfer_org_idx's two first columns, fenced),
+-- the account checked on the row. CI round (PR #52), round 2: that read the servicer's every transfer in a file once
+-- per paying account (« Virements »' cash position, « Générer le fichier », « Télécharger » and the nightly's `flight`
+-- each per account: 281 rows for an account with none in a file, 2,781 beside a run's 2,500 payouts in a file of
+-- another account). Now the account's own transfers in a file by both bounds of bank_transfer_debtor_idx (the paying
+-- account, then the status: above), fenced — never its ordered ones, never another account's (CC-1's kinds test and
+-- the round's reads test bound both). The rows are the same (bank_transfer_debtor_fk: a transfer's debtor account is
+-- of its servicer).
 create or replace function private.transfers_in_flight(p_bank_account_id uuid)
 returns table (transfer_id uuid, amount_minor bigint, execution_date date)
 language sql
@@ -1216,14 +1292,13 @@ set enable_seqscan = off
 as $$
   with tr as materialized (
     select t.id, t.amount_minor, t.end_to_end_id, t.transfer_file_id, i.pmt_inf_id, i.execution_date
-    from (select b.organization_id from public.bank_account b where b.id = p_bank_account_id) a
-    cross join lateral (select q.id, q.amount_minor, q.end_to_end_id, q.transfer_file_id, q.debtor_bank_account_id
-                        from public.bank_transfer q
-                        where q.organization_id = a.organization_id and q.status = 'in_file' offset 0) t
+    from (select q.id, q.amount_minor, q.end_to_end_id, q.transfer_file_id
+          from public.bank_transfer q
+          where q.debtor_bank_account_id = p_bank_account_id and q.status = 'in_file' offset 0) t
     cross join lateral (select f.status from public.transfer_file f where f.id = t.transfer_file_id offset 0) f
     cross join lateral (select x.pmt_inf_id, x.execution_date from public.transfer_file_item x
                         where x.file_id = t.transfer_file_id and x.transfer_id = t.id offset 0) i
-    where t.debtor_bank_account_id = p_bank_account_id and f.status in ('downloaded', 'sent')),
+    where f.status in ('downloaded', 'sent')),
   batch as materialized (
     select p.transfer_file_id, p.pmt_inf_id
     from (select distinct tr.transfer_file_id, tr.pmt_inf_id from tr) p
@@ -2238,7 +2313,12 @@ $$;
 
 -- private.transfer_line_supersedes, redefined from 20261117100000_transfer_line_ops.sql (line 1708; same signature,
 -- STABLE, SECURITY DEFINER, search_path '' and its grants restated below). M2c-7f-1 (H7): a generated file's sweep
--- through its items; enable_seqscan off (public.transfer_line_preview, its caller, runs with it already).
+-- through its items; enable_seqscan off (public.transfer_line_preview, its caller, runs with it already). CI round
+-- (PR #52), round 2: the servicer's other sweeps in flight of the currency, which each generated file's sweep is weighed
+-- against, summed once by private.servicer_flight_minor (the servicer's text key), less that sweep's own amount when it
+-- is one of them (by its key) — by `organization_id` and constants, once per sweep, the sum read every transfer of the
+-- servicer in flight by bank_transfer_org_idx under the reads test's plant (567 rows for 4 sweeps; 5,567 beside a run's
+-- 5,000 payouts). The same sum: the function is STABLE, every statement of it sees the same rows.
 create or replace function private.transfer_line_supersedes(p_line_id uuid)
 returns jsonb
 language plpgsql
@@ -2252,6 +2332,7 @@ declare
   v_lower bigint;
   v_raise bigint;
   v_share bigint;
+  v_flight bigint;
   v_file record;
 begin
   select * into l from public.bank_transaction where id = p_line_id;
@@ -2273,6 +2354,8 @@ begin
   from public.ledger_account la join public.ledger_posting lp on lp.ledger_account_id = la.id
   where la.organization_id = l.organization_id and la.book = 'due_to_servicer' and la.currency = l.currency;
   v_share := v_share + v_raise - v_lower;
+  -- the servicer's sweeps in flight of the currency, once (CI round, PR #52, round 2)
+  v_flight := private.servicer_flight_minor(l.organization_id, l.currency, 'sweep', array['ordered', 'in_file']);
   for v_file in
     select f.id, f.number, s.id as sweep_id, s.amount_minor
     from public.transfer_file f
@@ -2286,10 +2369,16 @@ begin
     where f.organization_id = l.organization_id and f.status = 'generated' and f.currency = l.currency
     order by f.created_at, f.id
   loop
-    if v_file.amount_minor > v_share - (select coalesce(sum(x.amount_minor), 0) from public.bank_transfer x
-                                        where x.organization_id = l.organization_id and x.kind = 'sweep'
-                                          and x.currency = l.currency and x.status in ('ordered', 'in_file')
-                                          and x.id <> v_file.sweep_id) then
+    -- the others: all of them less this one when it is one of them (read by its key alone, fenced; checked on the row)
+    if v_file.amount_minor > v_share - (v_flight
+                                        - coalesce((select x.amount_minor
+                                                    from (select q.amount_minor, q.organization_id, q.kind, q.currency,
+                                                                 q.status
+                                                          from public.bank_transfer q where q.id = v_file.sweep_id
+                                                          offset 0) x
+                                                    where x.organization_id = l.organization_id and x.kind = 'sweep'
+                                                      and x.currency = l.currency
+                                                      and x.status in ('ordered', 'in_file')), 0)) then
       return jsonb_build_object('file_id', v_file.id, 'number', v_file.number);
     end if;
   end loop;
@@ -3734,6 +3823,11 @@ select cron.schedule('repayment-letters-requeue', '41 * * * *', 'select private.
 -- servicer's ordered transfers): the own account's ordered top-ups read through the servicer's top-ups in flight by its
 -- key. Nothing else changes; the rows are the same (a top-up's debtor is the servicer's own account of its currency:
 -- bank_transfer_debtor_fk, private.bank_transfer_guard).
+-- CI round (PR #52), round 2 (ADR-0014 « M2c-7f-1 — CI round (PR #52) », round 2): the sums of the sweeps and top-ups in
+-- flight by private.servicer_flight_minor and the ordered count by private.servicer_flight (the servicer's text key:
+-- bank_transfer_servicer_flight_key_idx), what is needed from those sums (private.top_up_needed read them again): 1,705
+-- rows under the reads test's plant, 16,746 beside the servicer's booked past and a run's payouts in flight; the same
+-- values.
 create or replace function public.top_up_overview()
 returns jsonb
 language plpgsql
@@ -3756,10 +3850,12 @@ begin
            -- executed (design §13 #4's Σ4679 + sweeps ordered or in a file): « Virements » says « ne doit rien » only
            -- when it is ≤ 0 — Σ4679 alone may be < 0 while a sweep in a file takes that share and more away
            'owed_with_sweeps_minor', (v.owed + v.sweeps)::text,
-           'needed_minor', private.top_up_needed(v_org, c.currency)::text,
+           -- (CI round, PR #52, round 2) private.top_up_needed's formula (design §13 #4) on the terms read once
+           -- below: the function read the same sums a second time
+           'needed_minor', greatest(0, v.owed + v.sweeps - v.tops)::text,
            -- (review round 1, TUI-2) the top-ups in flight beyond what the servicer owes once its sweeps in flight are
            -- executed (a cancelled top-up's late credit booked while its re-order waits): executed, they come back
-           -- with the next sweep. design §13 #4's terms, by bank_transfer_servicer_flight_idx
+           -- with the next sweep. design §13 #4's terms (v, below)
            'surplus_minor', greatest(0, v.tops - greatest(0, v.owed + v.sweeps))::text,
            'own_account', (select jsonb_build_object('id', a.id, 'label', a.label, 'iban_last4', right(a.iban, 4))
                            from public.servicer_billing_settings s join public.bank_account a on a.id = s.own_bank_account_id
@@ -3770,15 +3866,13 @@ begin
   from (select distinct b.currency from public.bank_account b
         where b.organization_id = v_org and b.purpose = 'client_funds' and b.status = 'active') c
   -- (review round 2) Σ4679 and the sweeps and top-ups in flight read once per currency (fenced: never inlined into
-  -- each use), the in-flight ones by bank_transfer_servicer_flight_idx (its constants prove the index's predicate)
+  -- each use); (CI round, PR #52, round 2) the in-flight ones by private.servicer_flight_minor (the servicer's text key,
+  -- as private.top_up_needed sums them): by `organization_id` and constants they could be served by
+  -- bank_transfer_org_idx, every transfer of the servicer in flight read twice
   cross join lateral (
     select private.servicer_owed_minor(v_org, c.currency) as owed,
-           coalesce((select sum(x.amount_minor) from public.bank_transfer x
-                     where x.organization_id = v_org and x.currency = c.currency
-                       and x.kind = 'sweep' and x.status in ('ordered', 'in_file')), 0)::bigint as sweeps,
-           coalesce((select sum(x.amount_minor) from public.bank_transfer x
-                     where x.organization_id = v_org and x.currency = c.currency
-                       and x.kind = 'top_up' and x.status in ('ordered', 'in_file')), 0)::bigint as tops
+           private.servicer_flight_minor(v_org, c.currency, 'sweep', array['ordered', 'in_file']) as sweeps,
+           private.servicer_flight_minor(v_org, c.currency, 'top_up', array['ordered', 'in_file']) as tops
     offset 0) v;
   select coalesce(jsonb_agg(jsonb_build_object(
            'bank_account_id', a.id, 'label', a.label, 'iban_last4', right(a.iban, 4), 'bic', a.bic,
@@ -3840,18 +3934,16 @@ begin
   into v_accounts
   from public.bank_account a
   -- the account's ordered top-ups (review round 1, MONEY-BANK-2: not those whose credit is already on a statement),
-  -- counted once, never as an EXISTS. (M2c-7f-1 review round 1) read as the servicer's top-ups in flight by its key
-  -- (bank_transfer_servicer_flight_idx: its constants prove the index's predicate, keyed by the servicer and the
-  -- currency, as public.top_up_credit_options reads them), the account and the status checked outside the fence: by the
-  -- account's key and the status, a generic plan ANDed bank_transfer_debtor_idx with bank_transfer_org_idx's status
-  -- column, every servicer's ordered transfers read (test_top_up_reads_integration.py in the db job's order: 2,905
-  -- index entries for one ordered top-up); no index keyed by the account is usable here, so never its booked past
+  -- counted once, never as an EXISTS. (M2c-7f-1 review round 1) read as the servicer's top-ups by its key, the account
+  -- checked on the row: by the account's key and the status, a generic plan ANDed bank_transfer_debtor_idx with
+  -- bank_transfer_org_idx's status column, every servicer's ordered transfers read (test_top_up_reads_integration.py in
+  -- the db job's order: 2,905 index entries for one ordered top-up); never the account's booked past. (CI round, PR #52,
+  -- round 2) the servicer's ordered top-ups of the currency by private.servicer_flight (its text key): by
+  -- `organization_id` and constants the fence could be served by bank_transfer_org_idx, every transfer of the servicer
+  -- in flight read (558 rows for its 5 top-ups under the reads test's plant)
   cross join lateral (select count(*)::integer as n
-                      from (select q.id, q.status, q.debtor_bank_account_id from public.bank_transfer q
-                            where q.organization_id = v_org and q.currency = a.currency and q.kind = 'top_up'
-                              and q.status in ('ordered', 'in_file') offset 0) t
-                      where t.debtor_bank_account_id = a.id and t.status = 'ordered'
-                        and not private.top_up_credit_seen(t.id)) o
+                      from private.servicer_flight(v_org, a.currency, 'top_up', array['ordered']) t
+                      where t.debtor_bank_account_id = a.id and not private.top_up_credit_seen(t.id)) o
   where a.organization_id = v_org and a.purpose = 'own' and a.status = 'active';
   return jsonb_build_object('today', private.paris_today(), 'needed', v_needed, 'accounts', v_accounts,
                             'can_admin', private.has_role(v_org, array['admin']));
@@ -3865,6 +3957,9 @@ $$;
 -- read through the servicer's top-ups in flight by its key, as public.top_up_overview's count above. The rows are the
 -- same (a top-up's debtor is the servicer's own account of its currency: bank_transfer_debtor_fk); nothing else
 -- changes.
+-- CI round (PR #52), round 2: both by private.servicer_flight (the servicer's ordered top-ups of the currency, by its
+-- text key), as the overview's count: 1,153 rows under the reads test's plant, 11,153 beside the servicer's booked past
+-- and a run's payouts in flight; the same rows.
 create or replace function public.generate_top_up_file(p_idempotency_key text, p_own_bank_account_id uuid)
 returns jsonb
 language plpgsql
@@ -3913,30 +4008,27 @@ begin
   where f.debtor_bank_account_id = b.id and f.status in ('pending', 'generated');
   perform private.top_up_file_close(x, 'Remplacé par un nouveau fichier', v_file) from unnest(v_superseded) x;
 
-  -- the account's ordered top-ups. (M2c-7f-1 review round 1) read as the servicer's top-ups in flight by its key
-  -- (bank_transfer_servicer_flight_idx: its constants prove the index's predicate, keyed by the servicer and the
-  -- currency), the account and the status checked outside the fence: by the account's key and the status (7e-1 round
-  -- 2's form), a generic plan ANDed bank_transfer_debtor_idx with bank_transfer_org_idx's status column, every
-  -- servicer's ordered transfers read (test_top_up_reads_integration.py in the db job's order: about 5,300 rows per
-  -- file); no index keyed by the account is usable here, so never its booked past either
+  -- the account's ordered top-ups. (M2c-7f-1 review round 1) read as the servicer's top-ups by its key, the account
+  -- checked on the row: by the account's key and the status (7e-1 round 2's form), a generic plan ANDed
+  -- bank_transfer_debtor_idx with bank_transfer_org_idx's status column, every servicer's ordered transfers read
+  -- (test_top_up_reads_integration.py in the db job's order: about 5,300 rows per file); never the account's booked
+  -- past either. (CI round, PR #52, round 2) the servicer's ordered top-ups of the currency by private.servicer_flight
+  -- (its text key): by `organization_id` and constants the fence could be served by bank_transfer_org_idx, every
+  -- transfer of the servicer in flight read, here and for the items below (1,153 rows under the reads test's plant)
   perform 1 from public.bank_transfer t
   where t.id = any (array(select q.id
-                          from (select x.id, x.status, x.debtor_bank_account_id from public.bank_transfer x
-                                where x.organization_id = b.organization_id and x.currency = b.currency
-                                  and x.kind = 'top_up' and x.status in ('ordered', 'in_file') offset 0) q
-                          where q.debtor_bank_account_id = b.id and q.status = 'ordered'))
+                          from private.servicer_flight(b.organization_id, b.currency, 'top_up', array['ordered']) q
+                          where q.debtor_bank_account_id = b.id))
   order by t.id for update;
   drop table if exists pg_temp._tuf;
   -- (review round 1, MONEY-BANK-2) never one whose credit (its TOP id) is already on a statement of the dedicated
   -- account: the bank executed it, the funds pass (or ops) books it — filed again, it would be executed twice
   create temp table _tuf on commit drop as
   select t.id, t.amount_minor, t.created_at, greatest(t.requested_execution_date, v_earliest) as execution_date
-  -- (M2c-7f-1 review round 1) as the locks above: the servicer's top-ups in flight by its key, the account and the
-  -- status on the row
-  from (select q.* from public.bank_transfer q
-        where q.organization_id = b.organization_id and q.currency = b.currency and q.kind = 'top_up'
-          and q.status in ('ordered', 'in_file') offset 0) t
-  where t.debtor_bank_account_id = b.id and t.status = 'ordered' and not private.top_up_credit_seen(t.id);
+  -- (M2c-7f-1 review round 1; CI round, PR #52, round 2) as the locks above: the servicer's ordered top-ups of the
+  -- currency by its text key, the account on the row (read again once locked)
+  from private.servicer_flight(b.organization_id, b.currency, 'top_up', array['ordered']) t
+  where t.debtor_bank_account_id = b.id and not private.top_up_credit_seen(t.id);
   select coalesce(sum(x.amount_minor), 0), count(*) into v_sum, v_n from pg_temp._tuf x;
   if v_n = 0 then
     raise exception 'top-up file refused: nothing_to_file' using errcode = 'check_violation';
@@ -3976,6 +4068,48 @@ end;
 $$;
 
 
+-- public.top_up_credit_options, redefined from 20261129090000_top_ups.sql (line 1151; same signature and settings,
+-- SECURITY DEFINER, search_path '', enable_seqscan off and its grants restated below). CI round (PR #52), round 2
+-- (ADR-0014 « M2c-7f-1 — CI round (PR #52) », round 2): the servicer's top-ups in flight of the credit's currency by
+-- private.servicer_flight (its text key: bank_transfer_servicer_flight_key_idx), the credit's account, amount and
+-- counterparty checked on the row as before. By `organization_id` and constants (7e-1 round 1's fence, its constants
+-- proving bank_transfer_servicer_flight_idx's predicate) the read could be served by bank_transfer_org_idx by the
+-- servicer and the status: under the reads test's plant (no statistics, the flight index bloated) every transfer of the
+-- servicer in flight was read (558 rows for its 5 top-ups; 5,558 beside a run's 5,000 payouts in flight — 672 and
+-- 3,172 with the predicates as 538572e left them). Nothing else changes; the rows are the same.
+create or replace function public.top_up_credit_options(p_bank_transaction_id uuid)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+set enable_seqscan = off
+as $$
+declare
+  t public.bank_transaction;
+begin
+  select * into t from public.bank_transaction where id = p_bank_transaction_id;
+  if not found or not private.has_role(t.organization_id, array['admin', 'ops_manager']) then
+    raise exception 'not allowed' using errcode = 'insufficient_privilege';
+  end if;
+  return jsonb_build_object('bank_transaction_id', t.id, 'top_ups', coalesce((
+    select jsonb_agg(jsonb_build_object('transfer_id', x.id, 'end_to_end_id', x.end_to_end_id,
+                                        'amount_minor', x.amount_minor::text, 'currency', x.currency,
+                                        'status', x.status, 'created_at', x.created_at,
+                                        'automatic', x.ordered_by is null,
+                                        'file_number', (select f.number from public.transfer_file f
+                                                        where f.id = x.transfer_file_id),
+                                        'debtor_label', a.label, 'debtor_iban_last4', right(a.iban, 4))
+                     order by x.created_at, x.id)
+    from private.servicer_flight(t.organization_id, t.currency, 'top_up', array['ordered', 'in_file']) x
+    cross join lateral (select o.label, o.iban from public.bank_account o where o.id = x.debtor_bank_account_id
+                        offset 0) a
+    where x.creditor_bank_account_id = t.bank_account_id and x.amount_minor = t.amount_minor
+      and a.iban = t.counterparty_iban
+      and (x.status = 'ordered' or (x.status = 'in_file' and private.top_up_in_own_file(x.id)))), '[]'));
+end;
+$$;
+
 ------------------------------------------------------------------------------------------
 -- Privileges (restated for every function redefined here; the new ones)
 ------------------------------------------------------------------------------------------
@@ -3999,9 +4133,10 @@ revoke execute on function private.run_transfer_checks(uuid, uuid, date), privat
   from public, anon, authenticated, service_role;
 -- (review round 1, CC-1) internal: an account's transfers in flight, as 20261115090000 left it
 revoke execute on function private.transfers_in_flight(uuid) from public, anon, authenticated;
--- (CI round, PR #52) internal: what is needed, as 20261129090000 left it, and its sums (new)
+-- (CI round, PR #52) internal: what is needed, as 20261129090000 left it, and its sums (new); (round 2) the same
+-- transfers listed (new)
 revoke execute on function private.top_up_needed(uuid, character),
-  private.servicer_flight_minor(uuid, character, text, text[])
+  private.servicer_flight_minor(uuid, character, text, text[]), private.servicer_flight(uuid, character, text, text[])
   from public, anon, authenticated, service_role;
 -- (H7) internal: the file's helpers (as 20261115090000, 20261117100000 and 20261118100000 left them)
 revoke execute on function private.transfer_file_lock_runs(uuid), private.transfer_line_locks(uuid),
@@ -4020,7 +4155,7 @@ revoke execute on function public.debit_queue(text, integer, integer),
   public.withdraw_advance_repayment_request(text, uuid, text),
   public.match_queue_accounts(uuid[]), public.search_payment_files(uuid, text), public.client_advance_totals(uuid),
   public.client_advances(uuid, uuid, boolean, jsonb, integer), public.top_up_overview(),
-  public.generate_top_up_file(text, uuid)
+  public.generate_top_up_file(text, uuid), public.top_up_credit_options(uuid)
   from public, anon;
 grant execute on function public.debit_queue(text, integer, integer),
   public.request_top_up(text, uuid, uuid, text, text, date), public.mark_transfer_file_sent(text, uuid, integer),
@@ -4031,6 +4166,6 @@ grant execute on function public.debit_queue(text, integer, integer),
   public.withdraw_advance_repayment_request(text, uuid, text),
   public.match_queue_accounts(uuid[]), public.search_payment_files(uuid, text), public.client_advance_totals(uuid),
   public.client_advances(uuid, uuid, boolean, jsonb, integer), public.top_up_overview(),
-  public.generate_top_up_file(text, uuid)
+  public.generate_top_up_file(text, uuid), public.top_up_credit_options(uuid)
   to authenticated, service_role;
 

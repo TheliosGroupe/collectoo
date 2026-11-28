@@ -3550,7 +3550,9 @@ select is((select jsonb_object_agg(format('%s.%s(%s)', n.nspname, p.proname, oid
                                             ('private', 'transfer_file_executed'),
                                             ('private', 'transfers_in_flight'), ('public', 'client_advances'),
                                             ('private', 'run_transfer_checks'), ('public', 'top_up_overview'),
-                                            ('public', 'generate_top_up_file'))),
+                                            ('public', 'generate_top_up_file'), ('private', 'top_up_needed'),
+                                            ('private', 'servicer_flight_minor'), ('private', 'servicer_flight'),
+                                            ('public', 'top_up_credit_options'))),
   '{"private.run_payment_checks(uuid)": [true, true, true, false, false, true],
     "public.debit_queue(text, integer, integer)": [true, true, true, false, true, true],
     "private.inflight_overdue_lines(uuid, date)": [true, true, true, false, false, false],
@@ -3579,9 +3581,14 @@ select is((select jsonb_object_agg(format('%s.%s(%s)', n.nspname, p.proname, oid
     "public.client_advances(uuid, uuid, boolean, jsonb, integer)": [true, true, true, false, true, true],
     "private.run_transfer_checks(uuid, uuid, date)": [true, true, true, false, false, false],
     "public.top_up_overview()": [true, true, true, false, true, true],
-    "public.generate_top_up_file(text, uuid)": [true, true, true, false, true, true]}'::jsonb,
+    "public.generate_top_up_file(text, uuid)": [true, true, true, false, true, true],
+    "private.top_up_needed(uuid, character)": [true, true, true, false, false, false],
+    "private.servicer_flight_minor(uuid, character, text, text[])": [true, true, true, false, false, false],
+    "private.servicer_flight(uuid, character, text, text[])": [true, true, true, false, false, false],
+    "public.top_up_credit_options(uuid)": [true, true, true, false, true, true]}'::jsonb,
   'the redefined and new functions: SECURITY DEFINER, search_path '''', enable_seqscan off where 7f sets it, and their '
-  'grants (the back office''s commands and reads to authenticated, the internal ones to none)');
+  'grants (the back office''s commands and reads to authenticated, the internal ones to none; the CI round''s, PR #52, '
+  'rounds 1 and 2, included)');
 select is((select count(*)::integer from cron.job where jobname = 'repayment-letters-requeue'
                                                     and command = 'select private.requeue_repayment_letters()'), 1,
   'H17: the re-queue of the repayment letters is scheduled (hourly)');
