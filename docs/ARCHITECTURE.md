@@ -249,29 +249,37 @@ Double-entry, append-only, integer minor units (ADR-0006).
 - `recovery_fee` lines on a debtor receivable require `account.enforceable_title_id` (CPCE-09, M3). Consumer-credit accounts only accept whitelisted components (INT-05, M3).
 - Debtor cash can only land on a `client_funds` bank ledger account (CPCE-02, M2b).
 - **Since M2b (ADR-0013):** client-money books (5120, 4710, 4670) closed in every entry (`LG001`); entry shapes per payment type; what is left of a payment never negative at any date, and an allocated or netted receivable never overdrawn from its date on (`LG007`); payment entry types (`cash_in`, `allocation`, `forward`, `cash_out`, `netting`) posted only through the set-based `private.ledger_post_set`; a `cash_in` is never reversed; every writer that lowers a payment or a receivable takes the servicer's allocation lock.
+- **Since M2c (ADR-0014; rewritten at M2c-7's close-out, checked against the migrations):** two funds, each closed per currency in every entry (I2′, `LG001`), crossed only through the 4679 / 4689 mirror (I12); the M2c entry types have fixed books and shapes (I3′, `private.ledger_entry_verify`) and are posted only by `private.ledger_post_set`; no M2c type touches 1100, 3100 or 4710, and 7060 only through the two commission types against the same client's 4111; `commission_invoice`, `commission_credit_note`, `client_settlement` and `advance_write_off` are never reversed (`LG003`; one exception: a settlement withheld at the debit, below); each client's 4670 is never in debit at commit (I13, `LG008`); a reversal of an entry already remitted to its client commits only with its cover (I23, `LG009`, M2c-7a).
 
-**Chart of accounts (minimal):**
+**Chart of accounts** (`public.ledger_book`; the numbers are Collectoo's labels, which the accountant maps):
 
-| Code | Account | Dimension | Side |
+| Code | Book | Dimension | Fund |
 |---|---|---|---|
-| `1100` | Debtor receivable | account × component (principal, contractual_interest, late_interest, indemnity, insurance, fees, costs) | Asset of the claim owner, serviced by us |
-| `3100` | Claim counterpart (owner's claim) | account × component | Mirror of 1100: opening balances, accruals, write-offs |
-| `5120` | Client funds bank (R124-2 dedicated account) | bank account | Asset held for clients |
-| `5121` | PSP clearing (Stripe balance) | PSP account | Transit |
-| `4710` | Unallocated receipts (suspense) | — | Liability |
-| `4670` | Client payable (money owed to the creditor) | client org | Liability |
-| `5121-own` / `5122` | Own operating bank | — | Collectoo's own money |
-| `7060` | Commission revenue | client org | Collectoo P&L |
-| `6270` | PSP fees | — | Collectoo P&L (see open question) |
+| `1100` | Debtor receivable (`debtor_receivable`) | claim item × component | the claim (serviced for its owner) |
+| `3100` | Owner's claim (`owner_claim`) | owner × portfolio × component | mirror of 1100 |
+| `5120` | Dedicated account, R124-2 (`client_money_cash`) | per `client_funds` bank account | **dedicated-account fund** |
+| `4710` | Receipts to allocate (`unallocated_payment`) | pooled per servicer and currency | dedicated-account fund |
+| `4670` | Owed to the client (`client_payable`) | per client | dedicated-account fund |
+| `4679` | Due to the servicer on the dedicated account (`due_to_servicer`) | pooled | dedicated-account fund |
+| `5122` | Own account, movements recorded (`own_cash`) | per `own` bank account | **servicer's fund** |
+| `4111` | Commission invoices and credit notes (`commission_receivable`) | per client | servicer's fund |
+| `4112` | Advances to recover (`client_advance_receivable`) | per client | servicer's fund |
+| `419` | Sums owed back to the client (`client_credit_owed`, M2c-7c-1) | per client | servicer's fund |
+| `44571` / `44574` | VAT collected due / on commission not yet settled | pooled | servicer's fund |
+| `4689` | Due from the dedicated account (`due_from_client_funds`) | pooled | servicer's fund |
+| `7060` | Commission (`servicer_revenue`) | per client | servicer's fund |
+| `6270` | Bank fees on the dedicated account (`bank_fees`) | pooled | servicer's fund |
+| `6780` | Losses borne by the servicer (`servicer_losses`) | pooled | servicer's fund |
+| `7714` | Recoveries of advances passed as a loss (`written_off_recovered`, M2c-7c-1) | pooled | servicer's fund |
 
-**Posting rules (examples):**
+A PSP clearing book (5121) and PSP fees come with Stripe (M5): not books yet.
+
+**Posting rules** (+ debit / − credit; ‖ separates the two funds):
 
 | Event | Lines |
 |---|---|
 | Boarding, per component | Dr 1100 / Cr 3100 |
 | Interest accrual (engine) | Dr 1100:late_interest / Cr 3100:late_interest |
-| Payment arrives on PSP | Dr 5121 / Cr 4710 |
-| PSP payout to client-funds account | Dr 5120 / Cr 5121 |
 | Bank transfer received (CAMT.053), per statement day (M2b-2) | Dr 5120 / Cr 4710 (pool) |
 | Allocation of a payment (M2b-4) | cash side: Dr 4710 / Cr 4670 (client) · claim side: Dr 3100:X / Cr 1100:X per component (engine allocation) |
 | Forward to the client without allocation (M2b-4) | Dr 4710 / Cr 4670 |
@@ -279,14 +287,33 @@ Double-entry, append-only, integer minor units (ADR-0006).
 | Bank return or chargeback (M2b-6) | reversal of each live allocation and forward **at the return date**, then Dr 4710 / Cr 5120 (`cash_out`) at the return date |
 | Refund to the payer (M2b-6) | Dr 4710 / Cr 5120 (`cash_out`) at the date of its debit on the statement; a refund that bounces: its reversal |
 | Debtor paid the client directly (M2b-6) | Dr 3100:X / Cr 1100:X (`adjustment`, legal order; no client money) |
-| Bank fees on the client-funds account (M2b) | not booked: an explained gap (M2c books them on own cash) |
-| Remittance run | Dr 4670 (gross) / Cr 5120 (net paid to client) / Cr 7060 (commission, if the mandate allows netting) |
-| Commission cash moved to own bank | Dr 5122 / Cr 5120 |
-| Write-off / recall | Dr 3100:X / Cr 1100:X |
+| Commission invoice, issued at a run's approval (`commission_invoice`) | +4111 TTC / −7060 HT / −44574 VAT (−44571 when the servicer opted for débits) |
+| Commission credit note (`commission_credit_note`) | −4111 TTC / +7060 HT / +44574 v₁ / +44571 v₂ |
+| The run's set-off, posted at its payout's debit (or at approval when N = 0) (`client_settlement`), only under a netting clause | +4670 D / −4679 D ‖ +4689 D / −4111 Dc / −4112 Da, D = Dc + Da, and one VAT pair +44574 v / −44571 v |
+| The payout, at the bank's debit (`remittance`) | +4670 N / −5120 N |
+| The sweep of the servicer's share to its own account (`servicer_sweep`) | +4679 S / −5120 S ‖ +5122 S / −4689 S |
+| A top-up from the own account, at its credit (`servicer_top_up`) | +5120 T / −4679 T ‖ +4689 T / −5122 T |
+| A bank fee on the dedicated account (`bank_fee`) | +4679 F / −5120 F ‖ +6270 F / −4689 F |
+| An advance of the servicer to the client (`client_advance`: a remitted reversal, a payout overrun, a double payout) | +4679 A / −4670 A ‖ +4112 A / −4689 A |
+| The excess of a return over what is left of its payment (`servicer_loss`) | +4679 X / −5120 X ‖ +6780 X / −4689 X |
+| A client's payment to the own account (`client_payment_own`, M2c-7c-1) | +5122 P / −4111 / −4112 / −419 (a surplus owed back) / −7714 (a recovery), and the VAT pair of what it settles |
+| A client's payment on the dedicated account (`client_payment_dedicated`, M2c-7c-1) | +5120 P / −4679 P ‖ +4689 P / −4111 / −4112 / −419 / −7714, and the VAT pair |
+| A refund to the client from the own account (`client_refund_own`, M2c-7c-1) | +4111 R (a credit note's excess) or +419 R (a credit owed back) / −5122 R |
+| An advance passed as a loss (`advance_write_off`, M2c-7b) | +6780 W / −4112 W |
+| Write-off / recall of a claim | Dr 3100:X / Cr 1100:X |
 
-**Balances** are `SUM(amount_minor)` over lines (views per account/component and per client). A rebuildable snapshot table may be added for speed; it is always verifiable against the lines. Property test: Σ5120 = Σ collected − Σ remitted − Σ commission moved (CPCE-02).
+Each M2c entry names its document (C. com. R123-174): the invoice, the run, the bank transfer or bank line, the advance, the proof. **Netting happens only under a clause** (founder #3): a client whose mandate has no netting clause is paid its gross and invoiced, and pays the invoice itself; advances are taken back in the plan only under a claw-back clause (M2c-7b; CALCULATION_RULES §7). When a set-off is barred at the debit (a proceeding, a liquidation, a death or a seizure recorded after the approval, M2c-7d-2) the settlement is posted and reversed in the same transaction under `LG003`'s one exception (its key `return:barred:<run>`), the run's next draft giving it back.
 
-**Nightly checks (M2b-6):** pg_cron queues `payments.invariants` per servicer; `private.run_payment_checks` writes a `payment_check_run` and its `payment_check_result` rows (violations: I8 client money closed per currency, each bank account's cash = its payments less what went back out, I11 cash_in = payments per statement day, each payment's position against its status, no negative per-file allocation, I6 no allocated receivable below zero, owner-claim mirror, one current receipt per identified payment, one notification per entry; alerts: statement continuity, bank balance at the last statement (I9), ageing of unmatched and unallocated money, pending refunds, debits to classify, duplicates, direct payments). Read on « Contrôles » (admins, ops managers).
+**The property formula and the funds' identities** (checked at commit where they can be, every night over all postings):
+- I8′: 5120 + 4710 + 4670 + 4679 = 0 per servicer and currency (`client_money_identity`); the servicer's fund closed (`own_fund_identity`); 4679 + 4689 = 0 (`fund_mirror`).
+- I19: each dedicated account's 5120 = what its bank lines moved — its payments in, its returns and refunds out, and what its lines booked in the funds (`bank_line_booking`: top-ups and returned payouts in; fees, losses, payouts and sweeps out) — (`bank_cash_identity`); with I9 (the bank balance at the last statement) 5120 is the bank.
+- I13: each client's 4670 never in debit (`client_payable_debit`); I14 and I15: what each client is owed = its pending items and its runs in flight (`remittance_completeness`), each item in one live run at most (`remittance_item_twice`).
+- I18: per client 4111 = its open invoices less the refunds owed, and 44574 = the documents' pending VAT (`settlement_ledger`); 4112 = the open part of its advances (`advance_ledger`); 419 = its open credits (`client_credit_ledger`); 7714 = the recoveries of advances passed as a loss (`written_off_recovery_ledger`).
+- I23: every reversal of a remitted entry covered by what was remitted of it (`LG009` at commit; `remitted_reversal_uncovered` at night).
+
+**Balances** are `SUM(amount_minor)` over lines (views per account/component and per client); `private.client_payable_balance` keeps each client's 4670 for the commit check, verified against the lines every night. A rebuildable snapshot table may be added for speed; it is always verifiable against the lines.
+
+**Nightly checks (M2b-6, extended in M2c):** pg_cron queues `payments.invariants` per servicer; `private.run_payment_checks` writes a `payment_check_run` and its `payment_check_result` rows (violations: I8 client money closed per currency, each bank account's cash = its payments less what went back out, I11 cash_in = payments per statement day, each payment's position against its status, no negative per-file allocation, I6 no allocated receivable below zero, owner-claim mirror, one current receipt per identified payment, one notification per entry; alerts: statement continuity, bank balance at the last statement (I9), ageing of unmatched and unallocated money, pending refunds, debits to classify, duplicates, direct payments), then the funds' checks above, the runs', transfers' and files' checks (M2c-4 to M2c-6) and the advances' (`private.run_advance_checks`, M2c-7: `remitted_reversal_uncovered`, `advance_ledger`, `advance_open` after 30 days, `client_credit_owed`, `client_credit_ledger`, `written_off_recovery_ledger`, `repayment_request_document_missing`, `protection_event_to_qualify`, `seizure_standing`, `set_off_after_bar`, `claims_to_declare`, `post_opening_unpaid`, `payout_after_liquidation`, `top_up_account_missing`, `top_up_order_failed`, `label_reference_waiting`; and `servicer_shortfall`, the servicer's debt to the dedicated account beyond the top-ups ordered). The advances' delta pass reads only what changed since the last run; the whole history is read on the 1st of the month or when an admin asks « Vérification complète des avances ». Read on « Contrôles » (admins, ops managers).
 
 ## 9. Payments and reconciliation
 
@@ -301,7 +328,9 @@ Double-entry, append-only, integer minor units (ADR-0006).
   - `payments.invariants` (M2b-6, nightly): the checks above.
   Ops commands (admins and ops managers at aal2, idempotency key + request hash, compare and set, ≤ 2 s lock wait): assign / accept / unassign, reverse / allocate again / release a hold / forward / apply a credit note, request / cancel a refund, link a debit, resolve a duplicate, record a direct payment. Lock order for every writer: files (`FOR KEY SHARE`), payments (`FOR UPDATE`), refund requests, bank accounts, then the servicer's allocation lock.
 - **Surendettement / collective proceeding hold:** payments are not auto-allocated; they are held (the client told) until ops refund them or allocate them on the judge's authorisation (HOLD-01, HOLD-02).
-- **Money leaving the client-funds account (M2b-6):** returns and chargebacks (allocations undone at the return date, the receipt voided, the client told), refunds (booked when the bank's debit shows them), never fees (founder #20). The ledger cash follows the bank: nothing leaves 5120 without a bank line.
+- **Money leaving the client-funds account (M2b-6):** returns and chargebacks (allocations undone at the return date, the receipt voided, the client told), refunds (booked when the bank's debit shows them), never fees (founder #20: M2b-6's rule, superseded since M2c-6b by the `bank_fee` booking of the bank's coded charges on the dedicated account, +4679 / −5120 ‖ +6270 / −4689, the next bullet and §8). The ledger cash follows the bank: nothing leaves 5120 without a bank line.
+- **The debit job's bookings and covers (M2c-6b, M2c-7; ADR-0014):** `payments.process_debits` and the funds pass (`private.apply_bank_bookings`) book each line of the dedicated account's statement that is ours: a payout's debit posts the run's stored plan (its `client_settlement` and the `remittance` of N), a sweep's debit the `servicer_sweep`, a top-up's credit carrying our `TOP…` id the `servicer_top_up`, the bank's coded charges a `bank_fee`, a returned payout the reversal of its `remittance` (re-queued for the client as `payout_returned`); ops book the rest from « Débits et retours » (« Comptabiliser… » and its sheets; the transfers themselves are listed on « Virements ») (a batch line, a line without our reference, a client's credit paying the servicer, a debtor's credit relayed from the own account, a credit citing our reference in its label: `label_reference`, held, never a payment by itself, with its four exits: its transfer's return, a client's payment, a debtor's payment, our top-up). **Covers:** a reversal of a collection already remitted to its client (« Désimputer », a return in either mode) is covered the same day by a `client_advance` of what was remitted of it (`cover_remitted_reversals`, M2c-7a); a line reversed while its run was in flight is covered at that run's booking (`cover_booked_run_reversals`), before any `payout_overrun` cover; a reversal without its cover is refused at commit (`LG009`). A set-off barred at the debit (an event recorded after the approval) is withheld: posted and reversed at once, given back by the next run (M2c-7d-2). Each booking takes the locks its lines need (the allocation lock for 4670, then the remit lock for 4679); a line the ledger's checks refuse goes to ops with its reason (`private.ledger_check_now`), never half booked.
+- **Own money and recovery (M2c-7):** each hour (`servicer-top-ups`) the servicer is ordered to top up the dedicated account by what it owes there beyond the top-ups already ordered (`private.top_up_needed`: Σ4679 in debit plus its shares still on their way to the own account, less the top-ups ordered or in a file), typed in the bank with its `TOP…` id or sent in the own account's pain.001 file; each file sweeps the servicer's settled share to its own account (S = −Σ4679 − the sweeps in flight). Advances are recovered by the claw-back under its clause (in the plan, M2c-7b), by the client's payment (« Règlement du client », to the own account or the dedicated account, M2c-7c-1) or after a repayment request (its letter, M2c-7c-2), or passed as a loss (`advance_write_off`); client money above what is open is a credit owed back (419), refunded from the own account.
 
 ```mermaid
 sequenceDiagram
@@ -319,7 +348,7 @@ sequenceDiagram
   W->>DB: receipt (quittance) artifact + payment.receipt_id (CPCE-07)
   W->>C: send receipt on preferred channel + portal
   W->>DB: client_notification (CPCE-06)
-  Note over W,DB: Remittance run (daily job): per client, collected and allocated cash<br/>→ remittance + statement net of commission, alert at D-5 of the R124-6 limit (CPCE-08)
+  Note over W,DB: Remittance run (hourly schedule, twice monthly per client): per client the pending items<br/>→ payout of N, commission set off only under a netting clause (else invoiced and paid by the client),<br/>advances taken back only under a claw-back clause; statement and invoice; R124-6 deadline guard and alerts (CPCE-08)
 ```
 
 ## 10. Flow engine

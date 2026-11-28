@@ -271,6 +271,41 @@ def capacity(charge: OpenCharge) -> int:
 
 
 @dataclass(frozen=True, slots=True)
+class ChargeTotals:
+    """What a key's earlier invoices still charge it, summed (M2c-7f-2 review round 1, VC-3): all
+    the engine reads of them while the run gives the key no credit — the validations' sums, the
+    rounding reserve's n and the rates its invoices bear (`_reserved`, `open_after`) — so that the
+    prepare reads one row per key and VAT rate, not one per earlier invoice and key (550,000 rows
+    behind ten 50k-line runs). Per VAT rate (None: the run's), the invoices whose capacity is
+    above 0 and that capacity; the open charges' and the waivers' sums over every invoice, none of
+    them below 0 (a key with one is read whole: the engine refuses it). A credit on the key is
+    allocated invoice by invoice (its original's first, then LIFO, the waivers absorbing it): the
+    engine raises `ChargesNeeded` instead, and the prepare reads the key's charges whole."""
+
+    key: Key
+    open_minor: int  # Σ open charges
+    waived_minor: int  # Σ waivers
+    groups: tuple[tuple[Decimal | None, int, int], ...]  # (rate, invoices with capacity > 0, Σ it)
+
+    @property
+    def open_invoices(self) -> int:
+        return sum(n for _, n, _ in self.groups)
+
+
+class ChargesNeeded(Exception):  # noqa: N818 - a request for more input, not an error
+    """The run credits a key whose earlier charges were given summed (`ChargeTotals`): the engine
+    needs them invoice by invoice (the prepare reads them whole and prices the run again)."""
+
+    def __init__(self, key: Key) -> None:
+        super().__init__(f"the earlier charges of {key} are needed one by one")
+        self.key = key
+
+
+# what the engine is given of a key's earlier invoices: each one, or their totals
+Earlier = Sequence[OpenCharge] | ChargeTotals
+
+
+@dataclass(frozen=True, slots=True)
 class Retake:
     """After a cancelled run (M2c-4 C7; M2c-5b review math#0): an invoice that holds again what the
     cancelled run took for one reversal — its corrective invoice at the VAT rate of the invoices
@@ -649,7 +684,7 @@ def _components(p: Part, commission: int) -> tuple[int, int]:
     return own, commission - own
 
 
-def key_side(parts: Sequence[SidePart], earlier: Sequence[OpenCharge]) -> KeySide:
+def key_side(parts: Sequence[SidePart], earlier: Earlier) -> KeySide:
     """Per (file, tier key), in the engine's order (founder #6; CGI 289 I 5, 272 1; design §8.4
     amended): what raises the commission goes to the invoice, what lowers it to the credit note —
     never netted across documents. A credit is allocated first to the invoice that charged the
@@ -672,6 +707,8 @@ def key_side(parts: Sequence[SidePart], earlier: Sequence[OpenCharge]) -> KeySid
             )
     side, credits = _place(parts)
     if credits:
+        if isinstance(earlier, ChargeTotals):
+            raise ChargesNeeded(earlier.key)  # each invoice is needed (VC-3)
         rest = _allocate(side, credits, earlier)
         _absorb(side, earlier)
         if rest:
@@ -786,10 +823,14 @@ def _absorb(side: KeySide, earlier: Sequence[OpenCharge]) -> None:
     side.allocations = credited
 
 
-def open_after(side: KeySide, earlier: Sequence[OpenCharge]) -> int:
+def open_after(side: KeySide, earlier: Earlier) -> int:
     """How many invoices still charge the key once the side is issued (the reserve's n), by
     capacity: a manual credit note's waiver changes nothing the engine charges."""
     taken = side.taken()
+    if isinstance(earlier, ChargeTotals):  # (VC-3) nothing taken from them: their own count
+        if taken:
+            raise ChargesNeeded(earlier.key)
+        return earlier.open_invoices + (1 if side.invoiced_minor > 0 else 0)
     n = sum(1 for c in earlier if capacity(c) - taken.get(c.invoice_id, 0) > 0)
     return n + (1 if side.invoiced_minor > 0 else 0)
 
@@ -858,7 +899,7 @@ class _Key:
     kept_basis: int
     kept: int
     charged_before: int
-    earlier: Sequence[OpenCharge]
+    earlier: Earlier
     waived: int = 0  # W before the run: Σ of its earlier invoices' waivers
     sched_before: int = 0  # the schedule's K of the history's state, at this run's τ
     sched: int = 0  # the schedule's K of the current state
@@ -917,7 +958,7 @@ def _key_of(
     file: FileFacts,
     tier_key: str,
     pricer: _Pricer,
-    earlier: Sequence[OpenCharge],
+    earlier: Earlier,
 ) -> _Key:
     seq = pricer.seq(file.mandate_id, tier_key)
     known = {vid for vid, _ in seq}
@@ -931,16 +972,25 @@ def _key_of(
             raise CommissionInputError(f"file {file.account_id}: a negative cumulative basis ({b})")
     if state.kept_basis_minor < 0 or state.kept_minor < 0 or state.commission_minor < 0:
         raise CommissionInputError(f"file {file.account_id}: a negative kept basis or fee")
-    if state.waived_minor < 0 or any(c.waived_minor < 0 for c in earlier):
+    if isinstance(earlier, ChargeTotals):  # (review round 1, VC-3) the same checks on the sums
+        waivers, negative_waiver = earlier.waived_minor, earlier.waived_minor < 0
+        opens, negative_open = earlier.open_minor, earlier.open_minor < 0
+    else:
+        waivers = opens = 0
+        negative_waiver = negative_open = False
+        for c in earlier:
+            waivers += c.waived_minor
+            opens += c.open_minor
+            negative_waiver = negative_waiver or c.waived_minor < 0
+            negative_open = negative_open or c.open_minor < 0
+    if state.waived_minor < 0 or negative_waiver:
         raise CommissionInputError(f"file {file.account_id}, {tier_key}: a negative waiver")
-    if sum(c.waived_minor for c in earlier) != state.waived_minor:
+    if waivers != state.waived_minor:
         raise CommissionInputError(
             f"file {file.account_id}, {tier_key}: its invoices' waivers do not add up to the"
             f" key's ({state.waived_minor})"
         )
-    if any(c.open_minor < 0 for c in earlier) or (
-        sum(capacity(c) for c in earlier) != state.commission_minor
-    ):
+    if negative_open or opens + waivers != state.commission_minor:
         raise CommissionInputError(
             f"file {file.account_id}, {tier_key}: its invoices' open charges and waivers do not add"
             f" up to the commission charged ({state.commission_minor})"
@@ -996,7 +1046,7 @@ def compute(  # noqa: PLR0913 - the run's lines, its world and its documents' hi
     history: Mapping[tuple[str, str], KeyState],
     vat_rate: Decimal,
     *,
-    charges: Mapping[Key, Sequence[OpenCharge]] | None = None,
+    charges: Mapping[Key, Earlier] | None = None,
     line_invoices: LineInvoices | None = None,
 ) -> RunCommission:
     """Commission of one run's lines. `versions` per mandate (every version the history names);
@@ -1229,9 +1279,23 @@ def _reserved(  # noqa: PLR0913, PLR0917 - the key, its run, its bounds, its par
     base, collection = spread
     cb, where = key.charged_before, key.where
     c = sum(key.net.values()) + key.kept_basis
-    open_before = sum(1 for ch in key.earlier if capacity(ch) > 0)
-    rates = {ch.invoice_id: _rate_scaled(ch, pricer.tau) for ch in key.earlier if capacity(ch)}
-    top = max(pricer.tau, *rates.values()) if rates else pricer.tau
+    # each earlier invoice still charging the key: (invoice, its capacity, its rate x RATE_SCALE,
+    # how many invoices) — one per invoice, or (VC-3) one per VAT rate when given summed
+    if isinstance(key.earlier, ChargeTotals):
+        open_charges = [
+            ("", amount, pricer.tau if rate is None else scaled(rate), n)
+            for rate, n, amount in key.earlier.groups
+            if n
+        ]
+    else:
+        open_charges = [
+            (ch.invoice_id, capacity(ch), _rate_scaled(ch, pricer.tau), 1)
+            for ch in key.earlier
+            if capacity(ch)
+        ]
+    open_before = sum(n for *_, n in open_charges)
+    rates = [r for _, _, r, _ in open_charges]
+    top = max(pricer.tau, *rates) if rates else pricer.tau
     mixed = top > pricer.tau
     # V within it holds whatever the rates of the key's invoices: at most one more invoice
     low = (c - open_before - 1) * RATE_SCALE // (RATE_SCALE + top) if c > open_before + 1 else 0
@@ -1252,11 +1316,10 @@ def _reserved(  # noqa: PLR0913, PLR0917 - the key, its run, its bounds, its par
         n = open_after(side, key.earlier)
         if not mixed:
             return v <= (c - n) * RATE_SCALE // pricer.cap_den if c > n else v <= 0
-        credited = side.taken()
+        credited = side.taken()  # (VC-3: nothing, when given summed — key_side needs them else)
         ttc = side.invoiced_minor * pricer.cap_den + sum(
-            (capacity(ch) - credited.get(ch.invoice_id, 0)) * (RATE_SCALE + rates[ch.invoice_id])
-            for ch in key.earlier
-            if capacity(ch)
+            (amount - credited.get(inv, 0)) * (RATE_SCALE + rate)
+            for inv, amount, rate, _ in open_charges
         )
         return ttc + n * RATE_SCALE <= c * RATE_SCALE
 
@@ -1304,7 +1367,7 @@ def _line(  # noqa: PLR0913, PLR0917 - a line and the run it is priced in
     history: Mapping[tuple[str, str], KeyState],
     keys: dict[tuple[str, str], _Key],
     pricer: _Pricer,
-    charges: Mapping[Key, Sequence[OpenCharge]],
+    charges: Mapping[Key, Earlier],
     mark: tuple[int, bool, bool, str | tuple[ChainLink, ...] | None],
     transient: Transient,
 ) -> tuple[Head, list[Part]]:
@@ -1519,7 +1582,7 @@ def inputs_hash(  # noqa: PLR0913, PLR0917 - every input of `compute`
     versions: Mapping[str, Sequence[TermsVersion]],
     history: Mapping[tuple[str, str], KeyState],
     vat_rate: Decimal,
-    charges: Mapping[Key, Sequence[OpenCharge]] | None = None,
+    charges: Mapping[Key, Earlier] | None = None,
     line_invoices: LineInvoices | None = None,
 ) -> str:
     """SHA-256 of everything the result depends on (§9.4 `inputs_hash`): the same inputs, in any
@@ -1577,6 +1640,13 @@ def inputs_hash(  # noqa: PLR0913, PLR0917 - every input of `compute`
             *waiver,
         )
     for (account, tier), earlier in sorted((charges or {}).items()):
+        if isinstance(earlier, ChargeTotals):  # (VC-3) what the engine reads of them: their sums
+            groups = sorted(
+                ("" if r is None else str(scaled(r)), n, amount) for r, n, amount in earlier.groups
+            )
+            _put(h, "charge totals", account, tier, earlier.open_minor, earlier.waived_minor,
+                 repr(groups))  # fmt: skip
+            continue
         for ch in sorted(earlier, key=lambda c: c.invoice_id):
             rate = None if ch.vat_rate is None else scaled(ch.vat_rate)
             waiver = ("waived", ch.waived_minor) if ch.waived_minor else ()

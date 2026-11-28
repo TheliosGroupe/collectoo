@@ -524,6 +524,90 @@ def test_an_advance_of_no_mandate_is_paid_gross_and_never_taken() -> None:
     assert d.header["net"] == "282000"
 
 
+def _two_mandates(open_documents: list[OpenInvoiceRow], terms_m: Terms, **kw: Any) -> Facts:
+    """M2c-7f-2: a run of the client whose only line is on M2 (netting); M has no line in it but
+    documents of its own still open."""
+    e = _alloc("E", 28_848, date(2026, 11, 10), account="F2")
+    terms_m2 = Terms("T2", "M2", date(2026, 1, 1), None, 30, SCHEDULE, NETTING, "art. 6", "art. 7")
+    return _facts(
+        [e],
+        today=date(2026, 11, 16),
+        files={"F2": FileFacts("F2", "M2", "b2b_invoice", "PF")},
+        mandate_refs={"M": "MAND-MARTIN-2026", "M2": "MAND-MARTIN-2026-2"},
+        terms={"M": [terms_m], "M2": [terms_m2]},
+        open_documents=open_documents,
+        **kw,
+    )
+
+
+REFUND_ON_M = OpenInvoiceRow(
+    "CN1", "M", "credit_note", "FC-2026-000009", date(2026, 11, 5), (2026, 9), 27_900
+)
+
+
+def test_a_mandate_with_no_line_in_the_run_takes_its_advance_from_its_refund() -> None:
+    """(M2c-7f-2: the property machine's 200 x 60 run, seed 71302, switch on) design §9.6 is per
+    mandate of the client, its money avail_m = gross_m + excess_m: M has no line in the run but owes
+    the client a refund (27 900, a credit note beyond what it corrected) and holds an open advance
+    under its claw-back clause, so the advance is taken from that refund (Da 27 900, N_M 0) and the
+    refund is settled, as it would be with lines of M. Before, the clauses were read only for the
+    mandates with lines: M counted as having neither clause, the refund was paid and the advance
+    left open."""
+    d = prepare_run(
+        _two_mandates(
+            [REFUND_ON_M],
+            TERMS_CLAW,
+            open_advances=[_open("A1", "M", date(2026, 11, 12), 155_000)],
+        )
+    )
+    by = {m.mandate_id: m for m in d.plan.mandates}
+    m = by["M"]
+    assert (m.gross_minor, m.excess_minor, m.take_minor, m.take_advance_minor, m.net_minor) == (
+        0,
+        27_900,
+        0,
+        27_900,
+        0,
+    )
+    assert [(s.ref, s.kind, s.amount_minor) for s in d.plan.settles if s.mandate_id == "M"] == [
+        ("A1", "advance", 27_900),
+        ("CN1", "refund", 27_900),
+    ]
+    assert by["M2"].gross_minor == 28_848
+
+
+def test_a_mandate_with_no_line_in_the_run_nets_its_invoice_against_its_refund() -> None:
+    """(M2c-7f-2) the same for the netting clause: M's open invoice (10 000) is set off against
+    the refund M owes the client (27 900); the rest of the refund is paid (N_M 17 900)."""
+    invoice = OpenInvoiceRow(
+        "FC1", "M", "invoice", "FC-2026-000001", date(2026, 11, 2), (2026, 1), 10_000, 1_667
+    )
+    d = prepare_run(_two_mandates([invoice, REFUND_ON_M], TERMS))
+    m = {p.mandate_id: p for p in d.plan.mandates}["M"]
+    assert (m.gross_minor, m.excess_minor, m.take_minor, m.take_advance_minor, m.net_minor) == (
+        0,
+        27_900,
+        10_000,
+        0,
+        17_900,
+    )
+
+
+def test_a_mandate_with_no_line_and_no_clause_pays_its_refund() -> None:
+    """(M2c-7f-2) without a netting or a claw-back clause nothing of M is set off: its refund is
+    paid with the payout, its advance left open (founder #3, #7)."""
+    no_clause = Terms("T1", "M", date(2026, 1, 1), None, 30, SCHEDULE, {}, "art. 6", "art. 7")
+    d = prepare_run(
+        _two_mandates(
+            [REFUND_ON_M],
+            no_clause,
+            open_advances=[_open("A1", "M", date(2026, 11, 12), 155_000)],
+        )
+    )
+    m = {p.mandate_id: p for p in d.plan.mandates}["M"]
+    assert (m.take_minor, m.take_advance_minor, m.net_minor) == (0, 0, 27_900)
+
+
 def test_an_advance_born_before_the_client_s_proceeding_is_not_set_off() -> None:
     """L622-7 I (the plan's nettable rule): an advance born before the opening is not taken; one
     born on or after it passes the birth test. (M2c-7d-2, house rule R3: was N 282 000 / 82 000)

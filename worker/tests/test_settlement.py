@@ -120,6 +120,19 @@ def test_a_credit_on_an_open_invoice_takes_its_pending_vat() -> None:
     assert (p.net_minor, p.settlement_minor) == (82_000, 18_000)
 
 
+def test_a_take_in_part_moves_its_vat_pro_rata() -> None:
+    """(M2c-7f-2, X1's « VAT pro rata off ») An earlier invoice, 36 000 TTC with 6 000 VAT pending,
+    met by a gross of 10 000: 10 000 is taken and R(6 000 x 10 000 / 36 000) = 1 667 of its VAT
+    moves to due — not the 6 000, which moves only with the part that closes it."""
+    fc1 = OpenDocument("FC-1", "M", (2026, 1), 36_000, 6_000)
+    p = plan({"M": 10_000}, [fc1], [], [], [], {"M": NET_ONLY})
+    check(p)
+    assert [(s.ref, s.amount_minor, s.vat_moved_minor) for s in p.settles] == [
+        ("FC-1", 10_000, 1_667)
+    ]
+    assert (p.net_minor, p.settlement_minor, p.vat_moved_minor) == (0, 10_000, 1_667)
+
+
 def test_nothing_to_settle_through_client_money_is_deferred() -> None:
     """A refund owed equal to the invoice it would compensate: D = 0 and no entry could move the
     VAT, so nothing is settled this run (N = gross); the credit note still applies."""

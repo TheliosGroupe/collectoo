@@ -49,6 +49,7 @@ from collectoo_worker.remittance.commission import (
     REGULARISATION_LABEL_FR,
     REVERSALS,
     CommissionInputError,
+    Earlier,
     FileFacts,
     KeySide,
     KeyState,
@@ -175,7 +176,7 @@ class MandateDocuments:
 def run_documents(  # noqa: PLR0913, PLR0917 - the run's lines and the history
     results: Sequence[LineCommission],
     files: Mapping[str, FileFacts],
-    charges: Mapping[Key, Sequence[EarlierCharge]],
+    charges: Mapping[Key, Earlier],
     invoices: Mapping[str, EarlierInvoice],
     vat_rate: Decimal,
     line_invoices: LineInvoices | None = None,

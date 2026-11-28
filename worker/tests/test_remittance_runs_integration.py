@@ -60,7 +60,7 @@ from remittance_helpers import (
     vat_rate_from_today,
 )
 
-from collectoo_worker.jobs.remittances import run_schedule
+from collectoo_worker.jobs.remittances import _texts, _uuids, run_schedule
 from collectoo_worker.remittance.calendar import conservative
 from collectoo_worker.remittance.schedule import guard_due, is_scheduled
 from collectoo_worker.remittance.terms import RemittanceTerms
@@ -979,3 +979,16 @@ def test_a_command_waiting_too_long_on_the_allocation_lock_says_so() -> None:
             )
     assert "remittance run refused: allocation_busy" in str(refused.value)
     assert run_row(run)["status"] == "draft"
+
+
+def test_the_prepares_array_literals_reach_the_server_as_given() -> None:
+    """(M2c-7f-2 review round 2, VC-3) The prepare passes its big uuid[] and text[] parameters as
+    one text literal each: the server reads back exactly the values given, in their order —
+    quotes, backslashes, commas, braces, blanks and the word NULL included."""
+    texts = ["file", 'a "b", {c}\\d', "", "NULL", " x ", "é"]
+    ids = [str(uuid.uuid4()) for _ in range(3)]
+    with psycopg.connect(DB) as conn:
+        assert one(conn, "select %s::text[]", (_texts(texts),)) == texts
+        assert one(conn, "select %s::text[]", (_texts([]),)) == []
+        assert [str(x) for x in one(conn, "select %s::uuid[]", (_uuids(ids),))] == ids
+        assert one(conn, "select cardinality(%s::uuid[])", (_uuids([]),)) == 0

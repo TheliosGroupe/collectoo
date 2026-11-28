@@ -54,8 +54,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -66,6 +66,8 @@ from collectoo_worker.remittance.commission import (
     ENGINE_VERSION,
     NEVER_COMMISSIONED,
     REGULARISATION_LABEL_FR,
+    ChargesNeeded,
+    ChargeTotals,
     CommissionInputError,
     FileFacts,
     KeyState,
@@ -74,6 +76,7 @@ from collectoo_worker.remittance.commission import (
     LineInvoices,
     LineKind,
     Part,
+    RunCommission,
     TermsVersion,
     compute,
 )
@@ -251,7 +254,8 @@ class Facts:
     terms: Mapping[str, Sequence[Terms]]  # per mandate
     history: Mapping[tuple[str, str], KeyState]
     history_seq: int
-    charges: Mapping[tuple[str, str], Sequence[EarlierCharge]]
+    # each key's earlier charges, one by one or (M2c-7f-2 review round 1, VC-3) summed
+    charges: Mapping[tuple[str, str], Sequence[EarlierCharge] | ChargeTotals]
     invoices: Mapping[str, EarlierInvoice]
     invoice_numbers: Mapping[str, tuple[str, date]]  # earlier invoice → (number, issue date)
     line_invoices: LineInvoices  # an earlier line → the invoice(s) charging it (corrective first)
@@ -269,6 +273,12 @@ class Facts:
     # text of them (client_set_off_bars), which the approval and the hold before download compare
     set_off_bars: Mapping[str, SetOffBar] = field(default_factory=dict)
     set_off_state: str | None = None
+    # (M2c-7f-2 review round 1, VC-3) every key's earlier charges one by one — `charges`,
+    # `invoices` and `invoice_numbers` — read when the engine needs a summed key's
+    # (`ChargesNeeded`); None: `charges` are whole already
+    whole_charges: Callable[[], Mapping[str, Any]] | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
 @dataclass(frozen=True)
@@ -387,6 +397,44 @@ def _deadline(
     return None
 
 
+def _priced(
+    facts: Facts, all_items: Sequence[Item], versions: Mapping[str, Sequence[TermsVersion]]
+) -> tuple[Facts, RunCommission, dict[str, MandateDocuments]]:
+    """The engine on the run's lines, then its documents, and the facts they were priced on:
+    (M2c-7f-2 review round 1, VC-3) when the run credits a key given summed (`ChargesNeeded`),
+    priced again with every key's charges one by one (`Facts.whole_charges`)."""
+    try:
+        return facts, *_engine(facts, all_items, versions)
+    except ChargesNeeded:
+        if facts.whole_charges is None:
+            raise
+        facts = replace(facts, **facts.whole_charges(), whole_charges=None)
+        return facts, *_engine(facts, all_items, versions)
+
+
+def _engine(
+    facts: Facts, all_items: Sequence[Item], versions: Mapping[str, Sequence[TermsVersion]]
+) -> tuple[RunCommission, dict[str, MandateDocuments]]:
+    result = compute(
+        [_line(i, facts.files) for i in all_items],
+        facts.files,
+        versions,
+        facts.history,
+        facts.vat_rate,
+        charges=facts.charges,
+        line_invoices=facts.line_invoices,
+    )
+    docs = run_documents(
+        result.lines,
+        facts.files,
+        facts.charges,
+        facts.invoices,
+        facts.vat_rate,
+        facts.line_invoices,
+    )
+    return result, docs
+
+
 def prepare_run(facts: Facts, cal: Calendar | None = None) -> Draft:
     """The draft of a run from its facts (see the module's docstring)."""
     deadlines = _Calendar(cal or conservative())
@@ -401,23 +449,7 @@ def prepare_run(facts: Facts, cal: Calendar | None = None) -> Draft:
     engine_hash = ""
     if not reasons:
         try:
-            result = compute(
-                [_line(i, facts.files) for i in all_items],
-                facts.files,
-                versions,
-                facts.history,
-                facts.vat_rate,
-                charges=facts.charges,
-                line_invoices=facts.line_invoices,
-            )
-            docs = run_documents(
-                result.lines,
-                facts.files,
-                facts.charges,
-                facts.invoices,
-                facts.vat_rate,
-                facts.line_invoices,
-            )
+            facts, result, docs = _priced(facts, all_items, versions)
             results = {lc.entry_id: lc for lc in result.lines}
             history_after = result.history
             engine_hash = result.inputs_hash
@@ -794,7 +826,12 @@ def _plan(
                     )
                 )
     del docs, repriced
-    clauses = {m: _clauses(facts, m)[0] for m in gross if m != NO_MANDATE}
+    # (M2c-7f-2: the property machine's 200 x 60 run) every mandate the plan weighs has its clauses:
+    # one with no line in the run but a refund owed (design §9.6: avail_m = gross_m + excess_m) sets
+    # off its invoices and takes back its advances from that money under its clauses, as one with
+    # lines does — before, only the mandates with lines had theirs, the others none
+    weighed = {*gross, *(r.mandate_id for r in refunds), *(c.mandate_id for c in credits)}
+    clauses = {m: _clauses(facts, m)[0] for m in weighed if m != NO_MANDATE}
     return plan(gross, invoices, refunds, _advances(facts), credits, clauses)
 
 
